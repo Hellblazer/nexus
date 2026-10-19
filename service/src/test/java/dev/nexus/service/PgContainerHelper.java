@@ -475,6 +475,33 @@ public final class PgContainerHelper {
     }
 
     /**
+     * ServiceIntegrationTest's skeleton harness (nexus-cbo4a): the {@code svc_test} role, the
+     * FORCE-RLS {@code nexus_test.rls_probe} table and a minimal {@code nexus.service_tokens}
+     * seeded with {@code tokenHash}, from {@code db.changelog-test-rls-probe-harness.xml}. Runs
+     * WITHOUT the product master changelog; see that file's header. Leaves {@code su} with
+     * {@code autoCommit(true)} restored, as {@link #bootstrapServiceRole} does.
+     *
+     * <p>The Liquibase journal goes to {@code nexus_test}, not {@code public}: the harness pins
+     * that {@code /version} reports a {@code schema_error} when there is no
+     * {@code public.databasechangelog}, and a journal in {@code public} would turn that missing-table
+     * error into a permission error and the test would pass for the wrong reason.
+     *
+     * @param su        superuser connection on a {@link #startDedicated()} container
+     * @param tokenHash sha256 hex of the harness bearer token
+     */
+    public static void installRlsProbeHarness(Connection su, String tokenHash) throws Exception {
+        su.setAutoCommit(true);
+        DSL.using(su, SQLDialect.POSTGRES).createSchemaIfNotExists("nexus_test").execute();
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        db.setLiquibaseSchemaName("nexus_test");
+        Liquibase liquibase = new Liquibase(
+            "db/changelog-test/db.changelog-test-rls-probe-harness.xml", new ClassLoaderResourceAccessor(), db);
+        liquibase.setChangeLogParameter("tokenHash", tokenHash);
+        liquibase.update(new Contexts());
+        su.setAutoCommit(true);
+    }
+
+    /**
      * The DBA-side provisioning a NON-SUPERUSER schema owner needs before the product changelog can be
      * walked as that owner (nexus-wbfpw.48): the owner role, {@code nexus_svc}, the database/public
      * grants, both extensions, the {@code nexus} schema owned by {@code adminRole} and the extension
@@ -1281,6 +1308,33 @@ public final class PgContainerHelper {
         DSL.using(conn, SQLDialect.POSTGRES)
             .select(DSL.function("set_config", SQLDataType.VARCHAR,
                 DSL.val(gucName), DSL.val(tenant, SQLDataType.VARCHAR), DSL.val(isLocal)))
+            .fetch();
+    }
+
+    /** The planner settings plan-shape tests pin, the only names {@link #setPlannerGuc} accepts. */
+    private static final Set<String> PLANNER_GUC_ALLOWLIST = Set.of(
+        "enable_seqscan", "enable_indexscan", "enable_bitmapscan", "enable_sort",
+        "enable_hashjoin", "enable_mergejoin", "enable_nestloop", "hnsw.ef_search");
+
+    /**
+     * {@code SET [LOCAL] guc = value} for a planner setting, through {@code set_config} with bound
+     * arguments instead of a statement string (nexus-cbo4a). {@code isLocal=false} is the
+     * session-level {@code SET}; {@code isLocal=true} is {@code SET LOCAL} and ends with the
+     * transaction.
+     *
+     * @param conn    connection whose session the setting applies to
+     * @param guc     a name from {@link #PLANNER_GUC_ALLOWLIST}
+     * @param value   the setting's text value, e.g. {@code "off"} or {@code "40"}
+     * @param isLocal whether the setting is transaction-scoped
+     */
+    public static void setPlannerGuc(Connection conn, String guc, String value, boolean isLocal) {
+        if (!PLANNER_GUC_ALLOWLIST.contains(guc)) {
+            throw new IllegalArgumentException(
+                "planner guc not permitted: " + guc + " (allowed: " + PLANNER_GUC_ALLOWLIST + ")");
+        }
+        DSL.using(conn, SQLDialect.POSTGRES)
+            .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(guc), DSL.val(value, SQLDataType.VARCHAR), DSL.val(isLocal)))
             .fetch();
     }
 

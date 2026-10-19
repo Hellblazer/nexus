@@ -1244,7 +1244,7 @@ class CombinedQueryParityTest {
             // plan this test asserts.
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
-                su.createStatement().execute("SET " + guc + " = off");
+                PgContainerHelper.setPlannerGuc(su, guc, "off", false);
             }
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();

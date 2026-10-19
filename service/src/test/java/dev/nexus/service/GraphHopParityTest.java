@@ -654,7 +654,7 @@ class GraphHopParityTest {
             su.setAutoCommit(true);
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
-                su.createStatement().execute("SET " + guc + " = off");
+                PgContainerHelper.setPlannerGuc(su, guc, "off", false);
             }
             ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner);
             StringBuilder sb = new StringBuilder();

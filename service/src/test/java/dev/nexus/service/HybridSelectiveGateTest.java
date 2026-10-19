@@ -243,7 +243,7 @@ class HybridSelectiveGateTest {
     private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            su.createStatement().execute("SET LOCAL enable_seqscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", true);
             // nexus-cbo4a batch 3 critic follow-up: TEXT_GATE_PROBE_1024's own gate
             // predicate now also carries the SAME live-chunks (tombstone dead-set)
             // anti-join every sibling combined-query function does (vectors-011's own
@@ -256,7 +256,7 @@ class HybridSelectiveGateTest {
             // CatalogFtsFilenameSearchTest's own established technique for the same
             // "prove the GIN index, not a btree, serves the text gate" claim -- or the
             // gate assertion below stops being a meaningful proof at this scale.
-            su.createStatement().execute("SET LOCAL enable_indexscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_indexscan", "off", true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             String plan = ctx.explain(ctx.selectFrom(fn)).plan();
             su.rollback();

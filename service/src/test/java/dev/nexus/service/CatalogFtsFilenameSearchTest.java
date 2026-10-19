@@ -242,8 +242,8 @@ class CatalogFtsFilenameSearchTest {
             // under-estimates the bulk-loaded table to rows=1 (default-selectivity
             // guesswork, no ANALYZE ever run).
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
-            su.createStatement().execute("SET enable_seqscan = off");
-            su.createStatement().execute("SET enable_indexscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
+            PgContainerHelper.setPlannerGuc(su, "enable_indexscan", "off", false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Same idiom CatalogRepository#searchDocuments uses: fts_vector's
             // tsvector type has no jOOQ-recognized mapping, so codegen types the

@@ -9,7 +9,9 @@ import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -20,7 +22,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -425,33 +426,32 @@ class TaxonomyAssignCrossLateralHnswTest {
         return NAMED_COLLECTION_SIZES.length + FILLER_COLLECTION_COUNT + 1;
     }
 
-    /** Exact nearest FOREIGN topic per test chunk, via a plain SQL query with
-     *  BOTH index scan types disabled for this session -- guaranteed exact
+    /** Exact nearest FOREIGN topic per test chunk, via a typed query (nexus.cosine_distance, the
+     *  function behind OPERATOR(nexus.<=>)) with BOTH index scan types disabled for this session -- guaranteed exact
      *  (Seq Scan + Sort), independent of the real function's HNSW path. */
     private void computeExactReferences() throws Exception {
         exactNearestForeign = new LinkedHashMap<>();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET enable_indexscan = off");
-            su.createStatement().execute("SET enable_bitmapscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_indexscan", "off", false);
+            PgContainerHelper.setPlannerGuc(su, "enable_bitmapscan", "off", false);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var c = CHUNKS.as("c");
+            var ct = TAXONOMY_CENTROIDS.as("ct");
+            Field<Double> dist = Routines.cosineDistance1(c.EMBEDDING_1024, ct.EMBEDDING_1024);
             for (String chash : chunkChashes) {
-                try (PreparedStatement ps = su.prepareStatement(
-                        "SELECT ct.topic_id, (c.embedding_1024 OPERATOR(nexus.<=>) ct.embedding_1024) AS dist"
-                        + "  FROM nexus.chunks c"
-                        + "  JOIN nexus.taxonomy_centroids ct"
-                        + "    ON ct.collection <> c.collection AND ct.embedding_1024 IS NOT NULL"
-                        + " WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex')"
-                        + "   AND c.embedding_1024 IS NOT NULL"
-                        + " ORDER BY (c.embedding_1024 OPERATOR(nexus.<=>) ct.embedding_1024) ASC, ct.topic_id ASC"
-                        + " LIMIT 1")) {
-                    ps.setString(1, TENANT);
-                    ps.setString(2, COL_DENSE);
-                    ps.setString(3, chash);
-                    try (var rs = ps.executeQuery()) {
-                        assertThat(rs.next()).as("exact reference must find SOME foreign centroid for " + chash).isTrue();
-                        exactNearestForeign.put(chash, new ExactRef(rs.getLong(1), rs.getDouble(2)));
-                    }
-                }
+                var row = ctx.select(ct.TOPIC_ID, dist)
+                    .from(c)
+                    .join(ct).on(ct.COLLECTION.ne(c.COLLECTION).and(ct.EMBEDDING_1024.isNotNull()))
+                    .where(c.TENANT_ID.eq(TENANT))
+                    .and(c.COLLECTION.eq(COL_DENSE))
+                    .and(c.CHASH.eq(HexFormat.of().parseHex(chash)))
+                    .and(c.EMBEDDING_1024.isNotNull())
+                    .orderBy(dist.asc(), ct.TOPIC_ID.asc())
+                    .limit(1)
+                    .fetchOne();
+                assertThat(row).as("exact reference must find SOME foreign centroid for " + chash).isNotNull();
+                exactNearestForeign.put(chash, new ExactRef(row.value1(), row.value2()));
             }
         }
     }
@@ -529,19 +529,11 @@ class TaxonomyAssignCrossLateralHnswTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (int dim : new int[] {384, 768, 1024}) {
-                String[] proconfig;
-                String prosrc;
-                try (PreparedStatement ps = su.prepareStatement(
-                        "SELECT proconfig, prosrc FROM pg_catalog.pg_proc"
-                        + " WHERE proname = ? AND pronamespace = 'nexus'::regnamespace")) {
-                    ps.setString(1, "assign_from_chashes_" + dim);
-                    try (var rs = ps.executeQuery()) {
-                        assertThat(rs.next()).as("assign_from_chashes_" + dim + " must exist").isTrue();
-                        java.sql.Array arr = rs.getArray(1);
-                        proconfig = arr == null ? new String[0] : (String[]) arr.getArray();
-                        prosrc = rs.getString(2);
-                    }
-                }
+                PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_" + dim);
+                assertThat(fn).as("assign_from_chashes_" + dim + " must exist").isNotNull();
+                String[] proconfig = fn.proconfig();
+                String prosrc = fn.prosrc();
                 assertThat(proconfig)
                     .as("assign_from_chashes_" + dim + " must carry NO hnsw.* function-level"
                         + " SET clause: CREATE FUNCTION ... SET hnsw.* is refused for a"
@@ -602,29 +594,12 @@ class TaxonomyAssignCrossLateralHnswTest {
     void withoutTheSets_theSameLateralShapeMissesRowsOnTheDenseSource() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET enable_seqscan = off");
-            su.createStatement().execute("SET enable_sort = off");
-            su.createStatement().execute("SET hnsw.ef_search = 40");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
+            PgContainerHelper.setPlannerGuc(su, "enable_sort", "off", false);
+            PgContainerHelper.setPlannerGuc(su, "hnsw.ef_search", "40", false);
             // No hnsw.iterative_scan set -- Postgres's own default is 'off'.
-            int rows = 0;
-            try (PreparedStatement ps = su.prepareStatement(
-                    "SELECT n.t FROM ("
-                    + "  SELECT c.chash AS h, c.embedding_1024 AS e FROM nexus.chunks c"
-                    + "   WHERE c.tenant_id = ? AND c.collection = ? AND c.embedding_1024 IS NOT NULL"
-                    + ") b CROSS JOIN LATERAL ("
-                    + "  SELECT ct.topic_id t FROM nexus.taxonomy_centroids ct"
-                    + "   WHERE ct.collection <> ? AND ct.embedding_1024 IS NOT NULL"
-                    + "   ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.e, ct.topic_id LIMIT 1"
-                    + ") n")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, COL_DENSE);
-                ps.setString(3, COL_DENSE);
-                try (var rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        rows++;
-                    }
-                }
-            }
+            int rows = (int) (long) dev.nexus.service.jooq.test.Routines.lateralCrossRows_1024(
+                DSL.using(su, SQLDialect.POSTGRES).configuration(), TENANT, COL_DENSE);
             assertThat(rows)
                 .as("without hnsw.iterative_scan, the SAME LATERAL shape at ef_search=40"
                     + " must return FEWER rows than test chunks (%d) on this >= %d-own-"
@@ -852,14 +827,10 @@ class TaxonomyAssignCrossLateralHnswTest {
         String prosrc;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "SELECT prosrc FROM pg_catalog.pg_proc"
-                    + " WHERE proname = 'assign_from_chashes_1024' AND pronamespace = 'nexus'::regnamespace")) {
-                try (var rs = ps.executeQuery()) {
-                    assertThat(rs.next()).as("assign_from_chashes_1024 must exist").isTrue();
-                    prosrc = rs.getString(1);
-                }
-            }
+            PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_1024");
+            assertThat(fn).as("assign_from_chashes_1024 must exist").isNotNull();
+            prosrc = fn.prosrc();
         }
         assertThat(normalizeWhitespace(prosrc))
             .as("this test's hand-copied cross-branch statement text (parameters"

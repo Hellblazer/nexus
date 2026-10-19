@@ -225,7 +225,7 @@ class VectorsChashIndexLiquibaseTest {
         // SAME single index serves every embedding column — the contract is
         // dim-agnostic now.
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SET enable_seqscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
             String indexName = "idx_chunks_tenant_chash";
             for (int dim : DIMS) {
                 Condition cond = CHUNKS.field("tenant_id", String.class).eq(TENANT)

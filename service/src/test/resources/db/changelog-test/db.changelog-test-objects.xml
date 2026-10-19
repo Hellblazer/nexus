@@ -462,4 +462,38 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_explain_knn(text, text, int)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-lateral-cross-rows-1024" author="nexus-cbo4a">
+        <comment>nexus_test.lateral_cross_rows_1024(text, text): the row count of the bare CROSS JOIN LATERAL
+        nearest-foreign-centroid shape over p_collection's 1024-dim chunks, with no hnsw.* or access-path
+        settings of its own, so it runs under whatever the caller's session set
+        (TaxonomyAssignCrossLateralHnswTest's no-row-hazard reproduction). The ORDER BY needs
+        OPERATOR(nexus.&lt;=&gt;) for the HNSW index to serve it, which the jOOQ DSL has no operator for. EXECUTE
+        with literal values plans the statement once with the values in hand, as the single pgjdbc execution it
+        replaces did. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.lateral_cross_rows_1024(p_tenant text, p_collection text) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n bigint;
+BEGIN
+    EXECUTE format(
+        'SELECT count(*) FROM ('
+        '  SELECT c.chash AS h, c.embedding_1024 AS e FROM nexus.chunks c'
+        '   WHERE c.tenant_id = %L AND c.collection = %L AND c.embedding_1024 IS NOT NULL'
+        ') b CROSS JOIN LATERAL ('
+        '  SELECT ct.topic_id t FROM nexus.taxonomy_centroids ct'
+        '   WHERE ct.collection &lt;&gt; %L AND ct.embedding_1024 IS NOT NULL'
+        '   ORDER BY ct.embedding_1024 OPERATOR(nexus.&lt;=&gt;) b.e, ct.topic_id LIMIT 1'
+        ') n',
+        p_tenant, p_collection, p_collection)
+    INTO v_n;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.lateral_cross_rows_1024(text, text)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

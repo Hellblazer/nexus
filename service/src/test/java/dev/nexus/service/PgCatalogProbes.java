@@ -497,6 +497,29 @@ public final class PgCatalogProbes {
             .fetchOne(prosecdef);
     }
 
+    /** {@code proconfig} (empty when the routine has no SET clause) and {@code prosrc} of one routine. */
+    public record RoutineConfigAndSource(String[] proconfig, String prosrc) {
+    }
+
+    /**
+     * {@code pg_proc.proconfig} and {@code prosrc} of a single-overload routine, or null when no such
+     * routine exists. Same single-overload caveat as {@link #routineSecurityDefiner}.
+     */
+    public static RoutineConfigAndSource routineConfigAndSource(DSLContext ctx, String schema, String name) {
+        Field<String[]> proconfig = DSL.field(DSL.name("p", "proconfig"), String[].class);
+        Field<String> prosrc = DSL.field(DSL.name("p", "prosrc"), String.class);
+        Record r = ctx.select(proconfig, prosrc)
+            .from(pgProcJoined())
+            .where(routineIn(schema))
+            .and(DSL.field(DSL.name("p", "proname"), String.class).eq(name))
+            .fetchOne();
+        if (r == null) {
+            return null;
+        }
+        String[] config = r.get(proconfig);
+        return new RoutineConfigAndSource(config == null ? new String[0] : config, r.get(prosrc));
+    }
+
     /** {@code (pg_get_function_arguments, pg_get_function_result)} of one routine. */
     public record RoutineSignature(String arguments, String result) {
     }
