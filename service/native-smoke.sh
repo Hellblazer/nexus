@@ -759,7 +759,12 @@ if [ "$OWN_PG" != "1" ]; then
 else
   docker exec lp2qo-smoke-pg psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
   DEADPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+  # RDR-210 P2.1: a keyed engine that finds the bge model files boots `dual`, so this
+  # cloud-shape boot points the model directory at an EMPTY one: it is the Voyage-only
+  # shape on a box that has the real models in ~/.cache too.
+  mkdir -p "$SMOKE_TMP/no-onnx-models"
   NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/voyagesmoke" \
+    NX_ONNX_MODEL_DIR="$SMOKE_TMP/no-onnx-models" \
     NX_VOYAGE_API_KEY=dummy-smoke-key HTTPS_PROXY="http://127.0.0.1:${DEADPORT}" \
     "$BIN" > "$SMOKE_TMP/voyage.log" 2>&1 &
 SVCPID=$!
