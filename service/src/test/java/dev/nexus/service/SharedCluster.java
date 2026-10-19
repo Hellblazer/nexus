@@ -134,7 +134,7 @@ final class SharedCluster {
      *  A future class that needs both must re-issue its {@code ALTER ROLE} after its
      *  final acquire. */
     static SharedDatabaseHandle acquireDatabase() throws SQLException {
-        return createDatabase("TEMPLATE \"" + TEMPLATE_DB + "\"");
+        return createDatabase("TEMPLATE \"" + TEMPLATE_DB + "\"", false);
     }
 
     /** Allocate a fresh, EMPTY per-class database on this fork's shared cluster
@@ -156,7 +156,7 @@ final class SharedCluster {
      *  role the template migration made, which a virgin container would not, so a class
      *  whose assertion is "this role does not exist yet" stays dedicated. */
     static SharedDatabaseHandle acquireEmptyDatabase(String... exclusiveRoles) throws SQLException {
-        return createDatabase("TEMPLATE template0", exclusiveRoles);
+        return createDatabase("TEMPLATE template0", true, exclusiveRoles);
     }
 
     /** The shared cluster's container (booting and migrating the template on first use). */
@@ -164,7 +164,7 @@ final class SharedCluster {
         return ensureBootstrapped();
     }
 
-    private static SharedDatabaseHandle createDatabase(String templateClause, String... exclusiveRoles)
+    private static SharedDatabaseHandle createDatabase(String templateClause, boolean empty, String... exclusiveRoles)
             throws SQLException {
         for (String role : exclusiveRoles) {
             if (!role.matches("[a-z_][a-z0-9_]*")) {
@@ -196,10 +196,31 @@ final class SharedCluster {
                 st.execute("CREATE DATABASE \"" + dbName + "\" " + templateClause);
             }
         }
+        if (empty) {
+            // A template0 database carries no event trigger, so its nested DDL (a function's EXECUTE)
+            // would go uncounted. nexus-sz651.
+            installDdlProbe(c, dbName);
+        }
+        DdlCounts.noteDatabase(dbName, DdlCounts.callerClass(), empty);
         for (String role : exclusiveRoles) {
             EXCLUSIVE_HOLDERS.put(role, holder);
         }
         return new SharedDatabaseHandle(c, dbName, java.util.List.of(exclusiveRoles), holder);
+    }
+
+    /**
+     * Install the DDL probe (the event trigger {@code DdlLogParser} counts nested DDL from) into one
+     * empty database. Run inside a {@code DO} block so the install is neither a logged top-level
+     * statement nor seen by the trigger it creates: the probe must not count itself. nexus-sz651.
+     */
+    private static void installDdlProbe(PostgreSQLContainer<?> c, String dbName) throws SQLException {
+        String sqlInstall = DdlCounts.probeInstallBlock();
+        try (Connection db = rawConnect(c, dbName)) {
+            db.setAutoCommit(true);
+            try (var st = db.createStatement()) {
+                st.execute(sqlInstall);
+            }
+        }
     }
 
     /** Forget {@code holder} as the holder of {@code roles}, once its teardown dropped them. */
@@ -335,6 +356,7 @@ final class SharedCluster {
             }
             long start = System.nanoTime();
             PostgreSQLContainer<?> fresh = PgContainerHelper.newContainer();
+            ((FailFastPostgreSQLContainer) fresh).ddlSharedCluster();
             fresh.start();
 
             // Everything after start() runs under a catch-all: if template creation or
@@ -378,6 +400,9 @@ final class SharedCluster {
                         DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
                             new JdbcConnection(tsu)));
                     lb.update(new Contexts());
+                    // nexus-sz651: DDL logged before this line is the template's boot and
+                    // migration; after it, the clones and the tests' own DDL.
+                    DdlCounts.markReady(tsu);
                 } catch (Exception e) {
                     throw new SQLException("nexus-yhmav shared-cluster template migration failed", e);
                 }

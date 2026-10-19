@@ -23,6 +23,7 @@ import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.utility.MountableFile;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -168,6 +169,7 @@ public final class PgContainerHelper {
             throw new IllegalArgumentException("memory limit " + memoryBytes + " must exceed tmpfs " + tmpfsSize);
         }
         return new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
+            .ddlOwner(DdlCounts.callerClass())
             .withDatabaseName(DATABASE)
             .withUsername(USERNAME)
             .withPassword(PASSWORD)
@@ -186,7 +188,16 @@ public final class PgContainerHelper {
                 "-c", "wal_keep_size=0",
                 // The smaller max_wal_size checkpoints every ~25 MB of WAL; do not log each one.
                 "-c", "log_checkpoints=off",
-                "-c", "checkpoint_warning=0")
+                "-c", "checkpoint_warning=0",
+                // nexus-sz651: count DDL per run (DdlLogParser). log_statement=ddl logs the
+                // top-level statements; the event trigger the init script installs logs every
+                // DDL command, including the ones a function runs through EXECUTE.
+                "-c", "log_statement=ddl",
+                "-c", "log_line_prefix=%m [%p] db=%d ",
+                "-c", "log_timezone=UTC")
+            .withCopyFileToContainer(
+                MountableFile.forClasspathResource("ddl/nx-ddl-probe.sql"),
+                "/docker-entrypoint-initdb.d/00-nx-ddl-probe.sql")
             .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
                 .withMemory(memoryBytes)
                 .withMemorySwap(memoryBytes))

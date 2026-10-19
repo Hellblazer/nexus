@@ -91,6 +91,41 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
         super(dockerImageName);
     }
 
+    // nexus-sz651: DDL-per-run counting. The log is read once, at stop() or JVM exit.
+    private volatile boolean ddlShared;
+    private volatile String ddlOwner = "unknown";
+
+    /** This container is the per-fork shared cluster (its logs split at the template's ready mark). */
+    FailFastPostgreSQLContainer ddlSharedCluster() {
+        this.ddlShared = true;
+        return this;
+    }
+
+    FailFastPostgreSQLContainer ddlOwner(String owner) {
+        this.ddlOwner = owner;
+        return this;
+    }
+
+    boolean ddlShared() {
+        return ddlShared;
+    }
+
+    String ddlOwner() {
+        return ddlOwner;
+    }
+
+    @Override
+    public void start() {
+        super.start();
+        DdlCounts.register(this);
+    }
+
+    @Override
+    public void stop() {
+        DdlCounts.record(this);
+        super.stop();
+    }
+
     /**
      * Classify a connect-attempt failure as deterministic (will never succeed against
      * this server, so retrying is pointless) or presumed-transient (container may still
