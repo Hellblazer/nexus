@@ -44,6 +44,29 @@ class MainEmbedProfileWiringTest {
     }
 
     /**
+     * The plan is decided from the probe's presence and the RESOLVED profile, once. A swap to a constant profile (or
+     * to a re-parse of the environment) would leave every by-value test green, because they hand the plan its
+     * inputs themselves; only this text proves Main hands it the right ones. Main's call ORDER stays text-pinned
+     * here and in {@code MainBgePartialInstallWiringTest}; the plan's decisions are asserted by value in
+     * {@code BootPlanTest}.
+     */
+    @Test
+    void mainDecidesThePlanFromTheProbeAndTheResolvedProfile_exactlyOnce() throws Exception {
+        String src = main();
+        String call = "BootPlan.decide(presence, embedProfile)";
+        int decide = src.indexOf(call);
+        assertThat(decide).as("the exact call").isPositive();
+        assertThat(src.indexOf("BootPlan.decide(")).as("no other decide call comes first").isEqualTo(decide);
+        assertThat(src.indexOf("BootPlan.decide(", decide + 1)).as("once").isNegative();
+        int probe = src.indexOf("var presence = dev.nexus.service.vectors.LocalModelProbe.probe(voyageKey);");
+        int resolve = src.indexOf("embedProfile = dev.nexus.service.vectors.EmbeddingProfile.resolve(");
+        assertThat(probe).as("`presence` is the probe's answer").isPositive().isLessThan(decide);
+        assertThat(resolve).as("`embedProfile` is the resolved profile").isPositive().isLessThan(decide);
+        assertThat(src.indexOf("embedProfile = ", resolve + "embedProfile = ".length())).as("assigned only by resolve").isNegative();
+        assertThat(src.indexOf("presence = ", probe + "var presence = ".length())).as("never reassigned").isNegative();
+    }
+
+    /**
      * RDR-210 Phase 2 Step 4 (bead nexus-un7vj). The decisions are asserted by value in {@code BootPlanTest}
      * and {@code RerankStageBootPlanTest}; this proves Main builds the reranker through the plan, after the routers
      * and the admission gate, and reports the posture.

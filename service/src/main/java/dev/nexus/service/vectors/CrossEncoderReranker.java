@@ -140,8 +140,7 @@ public final class CrossEncoderReranker implements Reranker {
                     throw new RerankUpstreamException(
                             "local cross-encoder unavailable: " + req[1] + " not found at " + req[0]
                             + ". Provision the ms-marco-MiniLM-L-6-v2 artifacts via `"
-                            + BootPlan.PROVISION_COMMAND + "` (RDR-188 P1.3), or set -Dnexus.crossencoder.modelPath"
-                            + " / -Dnexus.crossencoder.tokenizerPath.");
+                            + BootPlan.PROVISION_COMMAND + "` (RDR-188 P1.3), then restart the engine.");
                 }
             }
             // nexus-o5xyx.1: this init runs on a request thread, so a SIGTERM can land in

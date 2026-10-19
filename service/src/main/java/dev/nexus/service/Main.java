@@ -307,7 +307,7 @@ public final class Main {
             log.warn("event=bge_partial_install_degraded missing={} bge=\"{}\" serving=voyage_only "
                     + "local_collections=REFUSED_422 hint=\"the local bge install is incomplete; "
                     + "run `" + dev.nexus.service.vectors.BootPlan.PROVISION_COMMAND
-                    + "` to repair it, then restart the service\"",
+                    + "` to repair it, then restart the engine\"",
                     presence.bgeMissing(), presence.bgeDetail());
         }
         if (plan.bge() == dev.nexus.service.vectors.BootPlan.Bge.FAIL_NO_EMBEDDER) {
@@ -326,9 +326,9 @@ public final class Main {
         // round 1): the profile is still seeded with the chosen family's tokens, the other
         // family serves, and only the chosen family's collections get the 422.
         plan.degradation().ifPresent(d -> log.warn(
-                "event=embed_profile_degraded profile={} missing=\"{}\" serving={} "
+                "event=embed_profile_degraded profile={} missing=\"{}\" detail=\"{}\" serving={} "
                 + "{}_collections=REFUSED_422 hint=\"{}\"",
-                d.chosen().value(), d.missingPiece(), d.serving().value(),
+                d.chosen().value(), d.missingPiece(), d.detail(), d.serving().value(),
                 d.refusedCollections(), d.remedy()));
 
         // ONNX Runtime is touched ONLY when a local ONNX model file is on disk: the cloud shape (key, no
@@ -415,7 +415,7 @@ public final class Main {
                 localOnnxAdmission);
         if (plan.crossEncoderFilesMissing()) {
             log.warn("event=cross_encoder_files_absent rerank=SKIPPED_PER_REQUEST voyage_rerank_calls=NONE "
-                    + "cross_encoder=\"{}\" hint=\"run `{}` to provision the reranker\"",
+                    + "cross_encoder=\"{}\" hint=\"run `{}` to provision the reranker, then restart the engine\"",
                     presence.crossEncoderDetail(), dev.nexus.service.vectors.BootPlan.PROVISION_COMMAND);
         }
         // nexus-pebfx.2: LOUD one-line embedding-mode banner. The 2026-06-10 migration ran for hours against

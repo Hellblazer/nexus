@@ -125,6 +125,8 @@ class MainBgePartialInstallWiringTest {
     void theDecisionRunsBeforeTheNoEmbedderCheck_soAPartialKeylessBoxGetsItsOwnMessage() throws Exception {
         String src = main();
         int decide = src.indexOf("BootPlan.decide(");
+        assertThat(src.indexOf("BootPlan.decide(presence, embedProfile)")).as("fed the probe and the resolved profile")
+                .isEqualTo(decide);
         int partialFail = src.indexOf(FAIL_PARTIAL, decide);
         int partialDegraded = src.indexOf(DEGRADED_PARTIAL, decide);
         int none = src.indexOf(FAIL_NONE, decide);

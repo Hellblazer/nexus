@@ -183,8 +183,11 @@ class EmbeddingProfileTest {
     void degraded_bgeProfile_noFiles_namesTheFiles_andNxInit_andServesVoyage() {
         var d = EmbeddingProfile.BGE.degradation(presence(false, false, true)).orElseThrow();
         assertThat(d.chosen()).isEqualTo(EmbeddingProfile.BGE);
-        assertThat(d.missingPiece()).contains("/models/model.onnx").contains("/models/tokenizer.json");
-        assertThat(d.remedy()).contains("nx init");
+        assertThat(d.missingPiece()).as("named by role, for the wire")
+            .isEqualTo("the bge-768 model and tokenizer files are missing");
+        assertThat(d.detail()).as("the log line keeps the paths")
+            .contains("/models/model.onnx").contains("/models/tokenizer.json");
+        assertThat(d.remedy()).contains("nx init").contains("restart the engine");
         assertThat(d.serving()).isEqualTo(EmbeddingProfile.VOYAGE);
         assertThat(d.refusedCollections()).isEqualTo("bge");
     }
@@ -192,8 +195,26 @@ class EmbeddingProfileTest {
     @Test
     void degraded_bgeProfile_partialInstall_namesTheOneMissingFile() {
         var d = EmbeddingProfile.BGE.degradation(presence(false, true, true)).orElseThrow();
-        assertThat(d.missingPiece()).contains("/models/tokenizer.json").doesNotContain("model.onnx");
+        assertThat(d.missingPiece()).isEqualTo("the bge-768 tokenizer file is missing");
+        assertThat(d.detail()).contains("/models/tokenizer.json").doesNotContain("model.onnx");
         assertThat(d.remedy()).contains("nx init");
+    }
+
+    /** Wire exposure (nexus-un7vj review): the missing text names roles, never an absolute path or probe text. */
+    @Test
+    void degraded_bgeProfile_wireTextCarriesNoPathAndNoProbeError() {
+        var probeError = new LocalModelProbe.Presence(false, false, true,
+            "probe_error=InvalidPathException: /home/someone/secret/models", List.of());
+        var shapes = List.of(presence(false, false, true), presence(false, true, true), probeError);
+        for (var p : shapes) {
+            var d = EmbeddingProfile.BGE.degradation(p).orElseThrow();
+            assertThat(d.missingPiece()).as("presence %s", p).startsWith("the bge-768 ")
+                .doesNotContain("/").doesNotContain("probe_error").doesNotContain(".onnx").doesNotContain(".json");
+            assertThat(d.remedy()).doesNotContain("/");
+        }
+        var d = EmbeddingProfile.BGE.degradation(probeError).orElseThrow();
+        assertThat(d.missingPiece()).isEqualTo("the bge-768 model files could not be checked");
+        assertThat(d.detail()).as("the probe text stays in the log").contains("probe_error=InvalidPathException");
     }
 
     /** RDR-210 Phase 2 Step 4 (nexus-un7vj): one provisioning command in every remedy, the no-embedder text included. */

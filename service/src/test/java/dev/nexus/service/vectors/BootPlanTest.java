@@ -2,9 +2,15 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static dev.nexus.service.vectors.BootPlan.Bge;
@@ -223,6 +229,12 @@ class BootPlanTest {
         var noCrossEncoder = BootPlan.decide(presence(true, false, true, false), EmbeddingProfile.BGE);
         assertThat(noCrossEncoder.bannerHint()).contains("`nx init --service`");
 
+        // The ONNX runtime directory is set at boot, so every remedy that provisions files says to restart.
+        assertThat(bgeDegraded.degradation().get().remedy()).contains("restart the engine");
+        assertThat(partial.bannerHint()).contains("restart the engine");
+        assertThat(noCrossEncoder.bannerHint()).as("a missing cross-encoder is only usable after a restart")
+                .contains("restart the engine");
+
         for (var plan : List.of(bgeDegraded, partial, noCrossEncoder)) {
             // No plain "nx init" without the --service flag anywhere in a hint.
             assertThat(plan.bannerHint().replace("nx init --service", "")).doesNotContain("nx init");
@@ -291,5 +303,84 @@ class BootPlanTest {
         assertThatThrownBy(() -> plan.buildReranker(() -> new CountingReranker("v"),
                 () -> new CountingReranker("c"), null))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("admission gate");
+    }
+
+    // ── the plan, acted on the way Main acts on it, over the whole table ────────────────────────
+
+    private static final String BGE_TOKEN = EmbeddingProfile.BGE_TOKEN;
+    private static final String TENANT = "boot-plan-router-table";
+
+    private static final class FakeBge implements Embedder {
+        @Override public List<float[]> embed(List<String> texts) { return texts.stream().map(t -> new float[768]).toList(); }
+        @Override public String modelToken() { return BGE_TOKEN; }
+    }
+
+    /**
+     * For every bge state x key x profile: build the {@link EmbedderRouter} exactly as {@code Main} does from the
+     * plan (local embedder iff {@code plan.buildsBge()}, the key iff present, the resolved profile), and assert the
+     * seeded tokens follow the profile and that {@code resolveEmbedderStrict} refuses exactly the families the plan
+     * says {@code refusedFamilies()} does. This is the by-value half; Main's call ORDER and its passing of these
+     * three values stay text-pinned in {@code MainEmbedProfileWiringTest} and {@code MainBgePartialInstallWiringTest}.
+     */
+    @Test
+    void theRouterBuiltFromThePlan_seedsTheProfileAndRefusesExactlyTheRefusedFamilies() {
+        String bgeColl = "docs__" + TENANT + "__" + BGE_TOKEN + "__v1";
+        String codeColl = "code__" + TENANT + "__voyage-code-3__v1";
+        String ctxColl = "docs__" + TENANT + "__voyage-context-3__v1";
+        CollectionRegistry.markKnown(TENANT, bgeColl, new CollectionRow("docs", TENANT, BGE_TOKEN, 768, "live"));
+        CollectionRegistry.markKnown(TENANT, codeColl, new CollectionRow("code", TENANT, "voyage-code-3", 1024, "live"));
+        CollectionRegistry.markKnown(TENANT, ctxColl, new CollectionRow("docs", TENANT, "voyage-context-3", 1024, "live"));
+
+        int served = 0;
+        int failed = 0;
+        // bge state: [present, partial, absent]
+        for (boolean[] state : new boolean[][] {{true, false}, {false, true}, {false, false}}) {
+            for (boolean key : new boolean[] {true, false}) {
+                for (EmbeddingProfile profile : EmbeddingProfile.values()) {
+                    String shape = "bge=" + state[0] + " partial=" + state[1] + " key=" + key + " profile=" + profile;
+                    var plan = BootPlan.decide(presence(state[0], state[1], key, true), profile);
+                    Embedder local = plan.buildsBge() ? new FakeBge() : null;
+                    String routerKey = key ? "dummy-key" : null;
+                    if (plan.fails()) {
+                        failed++;
+                        assertThatThrownBy(() -> new EmbedderRouter(local, routerKey, "document", profile))
+                                .as("a failing plan has no embedder to build: %s", shape)
+                                .isInstanceOf(IllegalArgumentException.class);
+                        continue;
+                    }
+                    served++;
+                    EmbedderRouter router = new EmbedderRouter(local, routerKey, "document", plan.profile());
+                    try {
+                        Map<String, String> expected = profile == EmbeddingProfile.VOYAGE
+                                ? Map.of("code", "voyage-code-3", "docs", "voyage-context-3", "rdr", "voyage-context-3",
+                                         "knowledge", "voyage-context-3", "unknown", "voyage-context-3")
+                                : Map.of("code", BGE_TOKEN, "docs", BGE_TOKEN, "rdr", BGE_TOKEN,
+                                         "knowledge", BGE_TOKEN, "unknown", BGE_TOKEN);
+                        assertThat(router.contentTypeModelTokens()).as("seeded tokens: %s", shape).isEqualTo(expected);
+
+                        Set<String> refused = new HashSet<>();
+                        if (refuses(router, bgeColl)) refused.add("bge");
+                        boolean codeRefused = refuses(router, codeColl);
+                        assertThat(refuses(router, ctxColl)).as("both Voyage models agree: %s", shape).isEqualTo(codeRefused);
+                        if (codeRefused) refused.add("voyage");
+                        assertThat(refused).as("refused by the router vs. the plan: %s", shape)
+                                .containsExactlyInAnyOrderElementsOf(new ArrayList<>(plan.refusedFamilies()));
+                    } finally {
+                        router.close();
+                    }
+                }
+            }
+        }
+        assertThat(served).as("non-vacuity: the shapes that boot").isEqualTo(8);
+        assertThat(failed).as("non-vacuity: the shapes that fail the boot").isEqualTo(4);
+    }
+
+    private static boolean refuses(EmbedderRouter router, String collection) {
+        try {
+            router.resolveEmbedderStrict(null, TENANT, collection);
+            return false;
+        } catch (EmbeddingModelUnavailableException e) {
+            return true;
+        }
     }
 }

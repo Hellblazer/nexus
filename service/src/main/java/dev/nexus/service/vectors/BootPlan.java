@@ -201,12 +201,13 @@ public final class BootPlan {
             }
             if (bge == Bge.PARTIAL_DEGRADED) {
                 parts.add("the local bge install is incomplete; run `" + PROVISION_COMMAND
-                        + "` to repair it, then restart the service");
+                        + "` to repair it, then restart the engine");
             }
         }
         if (crossEncoderFilesMissing()) {
             parts.add("the cross-encoder reranker's model files are absent, so rerank is skipped per request "
-                    + "(and nothing is sent to Voyage in its place); run `" + PROVISION_COMMAND + "` to provision them");
+                    + "(and nothing is sent to Voyage in its place); run `" + PROVISION_COMMAND
+                    + "` to provision them, then restart the engine (the ONNX runtime is set up at boot)");
         }
         return String.join("; ", parts);
     }

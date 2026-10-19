@@ -323,7 +323,7 @@ class RerankStageTest {
                 .apply("q", new ArrayList<>(List.of(row("a", "ta", 0.1))), null);
 
         assertThat(env.get("rerank_degraded")).isEqualTo(true);
-        assertThat((String) env.get("rerank_error")).contains("no reranker configured");
+        assertThat((String) env.get("rerank_error")).isEqualTo("no reranker configured");
         assertThat(results(env)).hasSize(1);
     }
 

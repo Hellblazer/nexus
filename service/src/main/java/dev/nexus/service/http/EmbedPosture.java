@@ -21,8 +21,10 @@ import dev.nexus.service.vectors.Reranker;
  * "embedding_degraded":null</pre>
  * or, for a choice the boot cannot serve:
  * <pre>"embedding_degraded":{"chosen":"bge","serving":"voyage",
- *   "missing":"the bge model files are missing: ...","remedy":"run `nx init --service` ..."}</pre>
+ *   "missing":"the bge-768 model and tokenizer files are missing","remedy":"run `nx init --service` ..."}</pre>
  * where only {@code chosen}'s collections get the 422 and {@code serving}'s are served.
+ * {@code missing} names the missing piece by role (the key, the model and tokenizer files), never an absolute
+ * path or probe text; {@link EmbeddingProfile.Degradation#detail()} carries those and goes to the boot log only.
  *
  * @param profile     the wire value of the resolved profile ({@code voyage} or {@code bge})
  * @param reranker    the reranker's model token, or null when none is configured

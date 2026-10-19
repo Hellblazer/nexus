@@ -132,7 +132,8 @@ class EmbedPostureHandlersTest {
         JsonNode degraded = body.get("embedding_degraded");
         assertThat(degraded.get("chosen").asText()).isEqualTo("bge");
         assertThat(degraded.get("serving").asText()).isEqualTo("voyage");
-        assertThat(degraded.get("missing").asText()).contains("/models/bge/model.onnx");
+        assertThat(degraded.get("missing").asText()).as("by role, no absolute path on the wire")
+                .isEqualTo("the bge-768 model file is missing");
         assertThat(degraded.get("remedy").asText()).contains("`nx init --service`");
         assertThat(body.get("local_embed_activity").isNull()).isTrue();
     }

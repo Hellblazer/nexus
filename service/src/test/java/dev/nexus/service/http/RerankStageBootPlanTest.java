@@ -165,7 +165,9 @@ class RerankStageBootPlanTest {
         var envelope = rerankThrough(plan, voyage, missing);
 
         assertThat(envelope.get("rerank_degraded")).as("loud, structured, never silent").isEqualTo(true);
-        assertThat((String) envelope.get("rerank_error")).contains("cross-encoder").contains("not found");
+        assertThat((String) envelope.get("rerank_error")).contains("cross-encoder").contains("not found")
+                .as("the remedy is the provision command and a restart; no system property is read")
+                .contains("`nx init --service`").contains("restart the engine").doesNotContain("-Dnexus");
         assertThat(ids(envelope)).as("the rows still serve, in distance order").containsExactly("a", "b", "c");
         assertThat(envelope).doesNotContainKey("rerank_model");
         assertThat(voyage.calls).as("the skip does not fall back to Voyage").hasValue(0);

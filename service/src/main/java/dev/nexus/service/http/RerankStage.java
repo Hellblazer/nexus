@@ -101,8 +101,7 @@ final class RerankStage {
             return envelope(rows, false, null, null);
         }
         if (reranker == null) {
-            return degrade(rows, topK, "no reranker configured: the engine has neither Voyage"
-                    + " credentials nor a local cross-encoder for this deployment");
+            return degrade(rows, topK, "no reranker configured");
         }
 
         // Exclude textless rows (reference-only chunks): docIndexToRowIndex maps

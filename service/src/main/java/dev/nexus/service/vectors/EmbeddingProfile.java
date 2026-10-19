@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -105,12 +107,14 @@ public enum EmbeddingProfile {
      * What an unservable choice leaves unserved.
      *
      * @param chosen             the profile that cannot be served
-     * @param missingPiece       what is absent, naming the key or the files
+     * @param missingPiece       what is absent, named by role (the key, "the bge-768 model and tokenizer
+     *                           files"), never a path or a probe error: this text goes on the wire
+     * @param detail             the same, with the absolute paths or the probe error, for the boot log only
      * @param remedy             the command or setting that supplies it
      * @param serving            the family the engine still serves
      * @param refusedCollections which family's collections get the 422
      */
-    public record Degradation(EmbeddingProfile chosen, String missingPiece, String remedy,
+    public record Degradation(EmbeddingProfile chosen, String missingPiece, String detail, String remedy,
                               EmbeddingProfile serving, String refusedCollections) {}
 
     /**
@@ -124,20 +128,34 @@ public enum EmbeddingProfile {
             if (presence.voyageKeyPresent()) {
                 return Optional.empty();
             }
-            return Optional.of(new Degradation(VOYAGE,
-                "the Voyage key is not set (NX_VOYAGE_API_KEY)",
+            String missing = "the Voyage key is not set (NX_VOYAGE_API_KEY)";
+            return Optional.of(new Degradation(VOYAGE, missing, missing,
                 "persist the key with `nx config set voyage_api_key --stdin` (or set NX_VOYAGE_API_KEY) "
-                    + "and restart the service",
+                    + "and restart the engine",
                 BGE, VOYAGE.label));
         }
         if (presence.bgePresent()) {
             return Optional.empty();
         }
-        String missing = presence.bgeMissing().isEmpty()
-            ? "the bge model files are not usable (" + presence.bgeDetail() + ")"
-            : "the bge model files are missing: " + String.join(", ", presence.bgeMissing());
-        return Optional.of(new Degradation(BGE, missing,
-            "run `" + BootPlan.PROVISION_COMMAND + "` to provision the bge model, then restart the service",
+        String missing;
+        String detail;
+        if (presence.bgeMissing().isEmpty()) {
+            missing = "the bge-768 model files could not be checked";
+            detail = "the bge model files are not usable (" + presence.bgeDetail() + ")";
+        } else {
+            List<String> roles = presence.bgeMissing().stream().map(EmbeddingProfile::fileRole).distinct().toList();
+            missing = "the bge-768 " + String.join(" and ", roles)
+                + (presence.bgeMissing().size() == 1 ? " file is missing" : " files are missing");
+            detail = "the bge model files are missing: " + String.join(", ", presence.bgeMissing());
+        }
+        return Optional.of(new Degradation(BGE, missing, detail,
+            "run `" + BootPlan.PROVISION_COMMAND + "` to provision the bge model, then restart the engine "
+                + "(the ONNX runtime is set up at boot)",
             VOYAGE, BGE.label));
+    }
+
+    /** {@code tokenizer} or {@code model}: the role of a model artifact, from its file name. */
+    private static String fileRole(String path) {
+        return Path.of(path).getFileName().toString().contains("tokenizer") ? "tokenizer" : "model";
     }
 }
