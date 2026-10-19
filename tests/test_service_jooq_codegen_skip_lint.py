@@ -316,7 +316,7 @@ def test_a_restore_touches_the_entry_first_then_drops_the_stamp_then_the_tree_th
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_restore_is_verified_and_a_failed_one_leaves_neither_tree_nor_entry(kind: str) -> None:
+def test_a_restore_is_verified_a_failed_one_leaves_no_tree_and_condemns_only_an_entry_its_own_digest_proves_torn(kind: str) -> None:
     text = _live(_target_text(_hash_execution(_pom())))
     gen = "jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"
     restored = re.search(rf'<condition property="nexus\.jooq\.{kind}\.restored".*?</condition>', text, re.DOTALL).group()
@@ -326,13 +326,36 @@ def test_a_restore_is_verified_and_a_failed_one_leaves_neither_tree_nor_entry(ki
     # the digest is of what is on disk after the copy, in a stable order
     digest = re.search(rf'<checksum[^>]*totalproperty="nexus\.jooq\.{kind}\.restore\.treehash".*?</checksum>', text, re.DOTALL)
     assert digest and "<sort>" in digest.group() and f'<fileset dir="${{{gen}}}"/>' in digest.group()
-    # failure path: the half tree and the torn entry are both removed, after the verdict, only when a restore was tried
-    for target in (f'<delete dir="${{{gen}}}" quiet="true"', f'<delete dir="${{nexus.jooq.{kind}.entry}}" quiet="true"'):
-        tag = next((t for t in _open_tags(text, "delete")
-                    if t.startswith(target) and f'unless:true="${{nexus.jooq.{kind}.restored}}"' in t), None)
-        assert tag, f"{kind}: nothing removes {target} after a failed restore"
-        assert f'if:true="${{nexus.jooq.{kind}.restore.try}}"' in tag
-        assert text.index(tag) > text.index(restored)
+    # failure path: the half tree is removed, after the verdict, only when a restore was tried
+    target = f'<delete dir="${{{gen}}}" quiet="true"'
+    tag = next((t for t in _open_tags(text, "delete")
+                if t.startswith(target) and f'unless:true="${{nexus.jooq.{kind}.restored}}"' in t), None)
+    assert tag, f"{kind}: nothing removes {target} after a failed restore"
+    assert f'if:true="${{nexus.jooq.{kind}.restore.try}}"' in tag
+    assert text.index(tag) > text.index(restored)
+    # nexus-wchbg: the SHARED entry is never deleted in place (a reader-local failure, a full disk, would empty an
+    # entry other readers are copying). It is judged by its own digest, read only, and only a mismatch moves it
+    # aside by a rename to a name nobody else uses; the delete runs on that name.
+    entry = f"${{nexus.jooq.{kind}.entry}}"
+    discard = f"${{nexus.jooq.{kind}.discard}}"
+    assert not [t for t in _open_tags(text, "delete") if f'dir="{entry}"' in t], (
+        f"{kind}: <delete dir=entry> empties a live shared entry file by file; rename it aside instead")
+    judged = re.search(rf'<checksum[^>]*totalproperty="nexus\.jooq\.{kind}\.entry\.digest".*?</checksum>', text, re.DOTALL)
+    assert judged and f'<fileset dir="{entry}/generated"/>' in judged.group() and "<sort>" in judged.group(), (
+        f"{kind}: the entry is not digested in a stable order before it is condemned")
+    assert f'if:true="${{nexus.jooq.{kind}.entry.judge}}"' in judged.group()
+    torn = re.search(rf'<condition property="nexus\.jooq\.{kind}\.entry\.torn".*?</condition>', text, re.DOTALL).group()
+    assert (f'<not><equals arg1="${{nexus.jooq.{kind}.entry.digest}}" arg2="${{nexus.jooq.{kind}.entry.treehash}}"/></not>'
+            in torn), f"{kind}: an entry is condemned on something other than its own digest against its marker"
+    assert f'<isfalse value="${{nexus.jooq.{kind}.restored}}"/>' in text[text.index(f'property="nexus.jooq.{kind}.entry.judge"'):]
+    aside = next((t for t in _open_tags(text, "move") if f'file="{entry}"' in t), None)
+    assert aside and f'tofile="{discard}"' in aside and 'failonerror="false"' in aside, (
+        f"{kind}: the torn entry is not renamed aside to its own unique name")
+    assert f'if:true="${{nexus.jooq.{kind}.entry.torn}}"' in aside
+    assert re.search(rf'<property name="nexus\.jooq\.{kind}\.discard"\s+value="\$\{{nexus\.jooq\.cache\.dir\}}/\.discard\.[^"]*\.old"', text), (
+        f"{kind}: the aside name must be hidden, unique and *.old so the prune's leftover sweep finds a killed one")
+    assert next((t for t in _open_tags(text, "delete") if f'dir="{discard}"' in t and f'if:true="${{nexus.jooq.{kind}.entry.torn}}"' in t), None), (
+        f"{kind}: nothing deletes the renamed-aside entry")
     # every cache-touching step of the restore tolerates its own failure
     for copy in _open_tags(text, "copy"):
         if "entry" in copy:

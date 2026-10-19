@@ -723,7 +723,9 @@
                          swaps the tree and never writes one, so THE INVARIANT holds at every instant; the stamp step
                          then vouches for the restored tree as for a generated one. The `complete` marker carries the
                          digest of the tree it closes: a restore digests what it copied and, on any mismatch (a torn
-                         entry, a prune racing the copy), drops the copy and the entry and regenerates. The cache is
+                         entry, a prune racing the copy, a copy this reader could not finish), drops the copy and
+                         regenerates; the entry itself is renamed aside only when its own digest proves it torn
+                         (nexus-wchbg), and is left alone when the failure was this reader's. The cache is
                          best-effort end to end: an unwritable or full cache directory costs a warning and no publish,
                          an unreadable or unusable entry costs a regeneration, neither fails the build.
                          -Dnexus.jooq.regenerate=true skips the restore and replaces the entry. Publication copies
@@ -830,8 +832,9 @@
                                      a `mvn clean`, a branch switch back to inputs generated before). The entry is trusted
                                      only as far as it checks out: its `complete` marker carries the digest of the tree it
                                      closes, the copy is digested again, and a mismatch (a file missing, cut short or added,
-                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy and the
-                                     entry away and falls through to the regeneration, with no stamp. The entry is touched
+                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy away and
+                                     falls through to the regeneration, with no stamp (the entry too, but only when its own
+                                     digest proves it torn, renamed aside, see below). The entry is touched
                                      FIRST, so a prune ordering by use does not pick the entry being read. The stamp is
                                      deleted BEFORE the tree is swapped, and only the jooq-stamp-main step writes one, so the
                                      invariant above holds at every instant; a restore killed mid-copy leaves no stamp. -->
@@ -900,12 +903,50 @@
                                         <equals arg1="${nexus.jooq.main.restore.treehash}" arg2="${nexus.jooq.main.entry.treehash}"/>
                                     </and>
                                 </condition>
-                                <!-- A restore that did not deliver the whole tree leaves nothing behind: no half tree for the
-                                     codegen to build over, no torn entry for the next worktree (the stamp step republishes). -->
+                                <!-- A restore that did not deliver the whole tree leaves no half tree for the codegen to build over.
+                                     What happens to the ENTRY depends on whose fault the failure was (nexus-wchbg). The failure may be
+                                     this reader's own (a full disk, a destination it cannot write): the entry is then whole and other
+                                     readers may be copying from it right now, so nothing here may touch it. The entry is judged on its
+                                     own: its generated tree is digested (read only) against the digest its `complete` marker carries.
+                                     Only a mismatch proves the entry torn, and then it is taken out of service by a RENAME to a name
+                                     nobody else uses (the way scripts/lib/gate-jar-cache.sh does for a jar), then deleted there, so a
+                                     reader never sees an entry emptied file by file under it; the stamp step republishes. An entry
+                                     that is whole, or that a prune renamed away mid-copy, is left as it is and the codegen runs. -->
                                 <delete dir="${jooq.generated.dir}" quiet="true"
                                         if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"/>
-                                <delete dir="${nexus.jooq.main.entry}" quiet="true"
-                                        if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"/>
+                                <condition property="nexus.jooq.main.entry.judge" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.restore.try}"/>
+                                        <isfalse value="${nexus.jooq.main.restored}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.main.entry}/generated" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.entry.digest"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-entry-sums"
+                                          if:true="${nexus.jooq.main.entry.judge}">
+                                    <sort>
+                                        <fileset dir="${nexus.jooq.main.entry}/generated"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.main.entry.torn" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.entry.judge}"/>
+                                        <not><equals arg1="${nexus.jooq.main.entry.digest}" arg2="${nexus.jooq.main.entry.treehash}"/></not>
+                                    </and>
+                                </condition>
+                                <tstamp if:true="${nexus.jooq.main.entry.torn}">
+                                    <format property="nexus.jooq.main.discard.ts" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <dirname property="nexus.jooq.main.discard.wtdir" file="${project.basedir}"/>
+                                <basename property="nexus.jooq.main.discard.wt" file="${nexus.jooq.main.discard.wtdir}"/>
+                                <property name="nexus.jooq.main.discard"
+                                          value="${nexus.jooq.cache.dir}/.discard.main.${nexus.jooq.main.hash}.${nexus.jooq.main.discard.wt}.${nexus.jooq.main.discard.ts}.old"/>
+                                <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.discard}" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.main.entry.torn}"/>
+                                <delete dir="${nexus.jooq.main.discard}" quiet="true" if:true="${nexus.jooq.main.entry.torn}"/>
                                 <echo level="warning"
                                       if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"
                                       message="jOOQ cache: the main entry ${nexus.jooq.main.entry} could not be restored whole; regenerating"/>
@@ -960,8 +1001,9 @@
                                      a `mvn clean`, a branch switch back to inputs generated before). The entry is trusted
                                      only as far as it checks out: its `complete` marker carries the digest of the tree it
                                      closes, the copy is digested again, and a mismatch (a file missing, cut short or added,
-                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy and the
-                                     entry away and falls through to the regeneration, with no stamp. The entry is touched
+                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy away and
+                                     falls through to the regeneration, with no stamp (the entry too, but only when its own
+                                     digest proves it torn, renamed aside, see below). The entry is touched
                                      FIRST, so a prune ordering by use does not pick the entry being read. The stamp is
                                      deleted BEFORE the tree is swapped, and only the jooq-stamp-test step writes one, so the
                                      invariant above holds at every instant; a restore killed mid-copy leaves no stamp. -->
@@ -1030,12 +1072,50 @@
                                         <equals arg1="${nexus.jooq.test.restore.treehash}" arg2="${nexus.jooq.test.entry.treehash}"/>
                                     </and>
                                 </condition>
-                                <!-- A restore that did not deliver the whole tree leaves nothing behind: no half tree for the
-                                     codegen to build over, no torn entry for the next worktree (the stamp step republishes). -->
+                                <!-- A restore that did not deliver the whole tree leaves no half tree for the codegen to build over.
+                                     What happens to the ENTRY depends on whose fault the failure was (nexus-wchbg). The failure may be
+                                     this reader's own (a full disk, a destination it cannot write): the entry is then whole and other
+                                     readers may be copying from it right now, so nothing here may touch it. The entry is judged on its
+                                     own: its generated tree is digested (read only) against the digest its `complete` marker carries.
+                                     Only a mismatch proves the entry torn, and then it is taken out of service by a RENAME to a name
+                                     nobody else uses (the way scripts/lib/gate-jar-cache.sh does for a jar), then deleted there, so a
+                                     reader never sees an entry emptied file by file under it; the stamp step republishes. An entry
+                                     that is whole, or that a prune renamed away mid-copy, is left as it is and the codegen runs. -->
                                 <delete dir="${jooq.generated.test.dir}" quiet="true"
                                         if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"/>
-                                <delete dir="${nexus.jooq.test.entry}" quiet="true"
-                                        if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"/>
+                                <condition property="nexus.jooq.test.entry.judge" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.restore.try}"/>
+                                        <isfalse value="${nexus.jooq.test.restored}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.test.entry}/generated" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.entry.digest"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-entry-sums"
+                                          if:true="${nexus.jooq.test.entry.judge}">
+                                    <sort>
+                                        <fileset dir="${nexus.jooq.test.entry}/generated"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.test.entry.torn" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.entry.judge}"/>
+                                        <not><equals arg1="${nexus.jooq.test.entry.digest}" arg2="${nexus.jooq.test.entry.treehash}"/></not>
+                                    </and>
+                                </condition>
+                                <tstamp if:true="${nexus.jooq.test.entry.torn}">
+                                    <format property="nexus.jooq.test.discard.ts" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <dirname property="nexus.jooq.test.discard.wtdir" file="${project.basedir}"/>
+                                <basename property="nexus.jooq.test.discard.wt" file="${nexus.jooq.test.discard.wtdir}"/>
+                                <property name="nexus.jooq.test.discard"
+                                          value="${nexus.jooq.cache.dir}/.discard.test.${nexus.jooq.test.hash}.${nexus.jooq.test.discard.wt}.${nexus.jooq.test.discard.ts}.old"/>
+                                <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.discard}" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.test.entry.torn}"/>
+                                <delete dir="${nexus.jooq.test.discard}" quiet="true" if:true="${nexus.jooq.test.entry.torn}"/>
                                 <echo level="warning"
                                       if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"
                                       message="jOOQ cache: the test entry ${nexus.jooq.test.entry} could not be restored whole; regenerating"/>

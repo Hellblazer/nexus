@@ -859,6 +859,53 @@ def test_a_torn_entry_is_neither_restored_nor_stamped_and_is_repaired(cached: Pr
     assert _sources(_entry(cached, kind, a.hash[kind]) / "generated") == _sources(regen.gen_dir[kind])
 
 
+def _entry_snapshot(entry: Path) -> dict[str, bytes]:
+    return {f.relative_to(entry).as_posix(): f.read_bytes() for f in sorted(entry.rglob("*")) if f.is_file()}
+
+
+def _unwritable_destinations(p: Project) -> dict[str, str]:
+    """-D overrides that put both generated dirs under a regular file: a copy into them fails for THIS reader
+    only (the shape of a full disk or a destination it cannot write), for root as well as for anyone else."""
+    blocker = p.root / "blocker"
+    blocker.write_text("a file where a directory would have to be", encoding="utf-8")
+    return {"jooq.generated.dir": str(blocker / "main"), "jooq.generated.test.dir": str(blocker / "test")}
+
+
+def test_a_restore_that_fails_on_the_readers_side_leaves_the_shared_entry_whole_for_the_next_reader(cached: Project) -> None:
+    """nexus-wchbg: a failed restore used to delete the entry whatever the cause, emptying one that other
+    readers were copying from. A reader whose own destination cannot take the copy must leave the entry alone."""
+    a = cached.build()
+    before = {k: _entry_snapshot(_entry(cached, k, a.hash[k])) for k in ("main", "test")}
+    assert all(any(n.endswith(".java") for n in snap) and "complete" in snap for snap in before.values())
+    reader = _other_worktree(cached, "wt-failing")
+    d = reader.decide(props=_unwritable_destinations(reader))
+    assert d.restored == {"main": False, "test": False}, "the copy into an unwritable destination cannot have restored"
+    assert any("could not be restored whole" in line for line in reader.log), "the failed restore must say so"
+    for kind in ("main", "test"):
+        assert _entry_snapshot(_entry(cached, kind, a.hash[kind])) == before[kind], (
+            f"{kind}: a failure that was the reader's own damaged the shared entry")
+    leftovers = sorted(f.name for f in Path(cached.cache).iterdir() if f.name.startswith("."))
+    assert leftovers == [], f"a reader-local failure left cache debris: {leftovers}"
+    other = _other_worktree(cached, "wt-next")
+    n = other.build()
+    assert n.restored == {"main": True, "test": True} and other.generations == [], (
+        "the next reader could not restore from the entry the failing reader left behind")
+
+
+@pytest.mark.parametrize("kind", ["main", "test"])
+def test_an_entry_proven_torn_by_its_own_digest_is_renamed_aside_and_deleted_not_emptied_in_place(
+        cached: Project, kind: str) -> None:
+    a = cached.build()
+    entry = _entry(cached, kind, a.hash[kind])
+    (entry / "generated" / "B.java").write_text("class B {", encoding="utf-8")  # marker present, tree wrong
+    reader = _other_worktree(cached, "wt-judge")
+    d = reader.decide()
+    assert d.restored[kind] is False
+    assert not entry.exists(), "an entry its own digest proves torn must be taken out of service"
+    assert sorted(f.name for f in Path(cached.cache).iterdir() if f.name.startswith(".")) == [], (
+        "the renamed-aside entry must be deleted, not left behind")
+
+
 def test_a_different_producer_never_serves_or_replaces_another_producers_tree(cached: Project) -> None:
     a = cached.build()
     other = "nexus-v0ts5-migrated-template"
