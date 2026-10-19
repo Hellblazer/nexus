@@ -74,7 +74,9 @@ class ChashProbePlanShapeTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // 255k chunks across three embedding widths outgrow the default 1 GB tmpfs
+        // (ENOSPC on pg_wal, nexus-xynce), so this class takes its own larger container.
+        pg = PgContainerHelper.startDedicated("3g", 4L * 1024 * 1024 * 1024);
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);

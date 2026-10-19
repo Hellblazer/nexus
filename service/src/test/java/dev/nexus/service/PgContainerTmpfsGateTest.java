@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -12,8 +14,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -184,13 +184,12 @@ class PgContainerTmpfsGateTest {
                 .containsExactly("tmpfs");
             ExecResult pgdata = c.execInContainer("sh", "-c", "echo $PGDATA");
             assertThat(pgdata.getStdout().strip()).isEqualTo(PgContainerHelper.PGDATA);
-            try (Connection conn = c.createConnection("");
-                 Statement st = conn.createStatement()) {
-                assertThat(show(st, "synchronous_commit")).isEqualTo("off");
-                assertThat(show(st, "full_page_writes")).isEqualTo("off");
-                assertThat(show(st, "max_wal_size")).isEqualTo("64MB");
-                assertThat(show(st, "min_wal_size")).isEqualTo("32MB");
-                assertThat(show(st, "wal_keep_size")).isEqualTo("0");
+            try (Connection conn = c.createConnection("")) {
+                assertThat(show(conn, "synchronous_commit")).isEqualTo("off");
+                assertThat(show(conn, "full_page_writes")).isEqualTo("off");
+                assertThat(show(conn, "max_wal_size")).isEqualTo("64MB");
+                assertThat(show(conn, "min_wal_size")).isEqualTo("32MB");
+                assertThat(show(conn, "wal_keep_size")).isEqualTo("0");
             }
             var inspect = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec();
             assertThat(inspect.getHostConfig().getMemory()).isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
@@ -202,10 +201,10 @@ class PgContainerTmpfsGateTest {
         }
     }
 
-    private static String show(Statement st, String setting) throws Exception {
-        try (ResultSet rs = st.executeQuery("SHOW " + setting)) {
-            rs.next();
-            return rs.getString(1);
-        }
+    /** A server setting as SHOW renders it, read through typed jOOQ (RawSqlGateTest forbids raw SQL here). */
+    private static String show(Connection conn, String setting) {
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(DSL.function("current_setting", String.class, DSL.val(setting)))
+            .fetchOne(0, String.class);
     }
 }
