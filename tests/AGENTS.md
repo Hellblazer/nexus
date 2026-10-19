@@ -248,22 +248,47 @@ deselects them, so no census has said which of them touch storage.
   and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
   environment fails with a `KeyError` the guard cannot see).
 
-## DDL statements per run (nexus-sz651)
+## Bytes written and DDL per run (nexus-sz651)
 
-Every run with the engine substrate prints `ddl: migration=<n> tests=<n> per_test=<x>` in the
-terminal summary and writes `nx-ddl-report.json` (under `NX_DDL_REPORT_DIR`, else the
-controller's basetemp). `tests/_ddl_counter.py` explains the two signals (`log_statement=ddl`
-for client statements, an event trigger for the DDL a function runs through `EXECUTE`, which
-is every tenant mint and drop) and the counting rule. The Java twin is
-`DdlLogParser`/`DdlCounts` (per-fork files in `service/target/ddl-counts/`). The ceilings
-live in `tests/ddl_ceiling.toml`; `scripts/ddl_ratchet.py check --suite <name> --report <path>`
-compares a run with its ceiling. Clusters other than the substrate's are not counted.
+The target is **bytes written** (disk thrashing); the DDL count is the secondary diagnostic that
+explains them. Every run with the engine substrate prints
+`ddl: migration=<n> tests=<n> per_test=<x> wal: migration=<size> tests=<size> per_test=<size>
+[io_wbytes=<size>] | <n> uncounted clusters` in the terminal summary and writes `nx-ddl-report.json`
+(under `NX_DDL_REPORT_DIR`, else the controller's basetemp; a worker's own file is under
+`<basetemp>/popen-gwN`). WAL bytes are `pg_current_wal_lsn()` differences between the probe's
+`start`, `ready` and `end` marks, so `migration` is the engine's boot and `tests` is everything the
+tests caused. Every cluster here sits on tmpfs, so WAL measures churn (what a disk-backed cluster
+would write), not disk; `io_wbytes` is the job cgroup's `io.stat` `wbytes` where readable (Linux,
+cgroup v2) and means something only when the run owns its cgroup. There is no per-test WAL figure
+in Python (an LSN read at every test boundary is a round trip per test); the per-test number is the
+tests' bytes over the test count. `tests/_ddl_counter.py` explains the DDL signals
+(`log_statement=ddl` for client statements, an event trigger for the DDL a function runs through
+`EXECUTE`, which is every tenant mint and drop) and the counting rule. The probe's own install is
+the `boot` bucket and is never counted. The Java twin is `DdlLogParser`/`DdlCounts` (per-fork files
+in `service/target/ddl-counts/`, named by suite and run; per class bytes where the class is known).
 
-The Java report has four buckets: `shared_migration` (the per-fork template), `shared_tests`
-(clones and the tests' own DDL), `shared_empty` (everything logged against a database from
-`startEmptyDatabase`, the migration-process classes' own walks; nexus-7xfh7) and `dedicated`
-(a container of its own). A `template0` database has no event trigger, so `acquireEmptyDatabase`
-installs the probe into each one inside a `DO` block, which the count does not see.
+The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so a shard's width or test
+count does not move them: bytes and DDL per test, and the migration's bytes and DDL per worker
+(Python); the migration's bytes and DDL per fork plus the totals of everything else (Java).
+`scripts/ddl_ratchet.py check --suite <name> --report <path>` compares one shard or one Java run
+with them; `fan-in --shards N` sums N shard reports for the full-run total. Bytes carry a
+tolerance band (`bytes_tolerance`), WAL varying a little; ceilings stay `"measure"` (the check exits
+11 and prints the numbers) until a full run sets them. Java runs are told apart by
+`-Dnexus.ddl.suite=main|integration` (the pom sets it; CI passes it) and `-Dnexus.ddl.run`
+(the Maven build timestamp); the ratchet reads one suite of one run. Exit codes: 0 ok, 10 above a
+ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
+
+Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists every
+`pg_ctl_start` / `initdb` site in the test tree the counter cannot see (the terminal line prints their
+number); `tests/test_ddl_uncounted_clusters_lint.py` keeps it equal to the tree, so a new cluster
+start must be read through the counter or listed on purpose.
+
+The Java report has five buckets: `boot` (before the container's `start` mark; the probe's install),
+`shared_migration` (the per-fork template), `shared_tests` (clones and the tests' own DDL),
+`shared_empty` (everything logged against a database from `startEmptyDatabase`, the
+migration-process classes' own walks; nexus-7xfh7) and `dedicated` (a container of its own). A
+`template0` database has no event trigger, so `acquireEmptyDatabase` installs the probe into each one
+inside a `DO` block, which the count does not see.
 
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
