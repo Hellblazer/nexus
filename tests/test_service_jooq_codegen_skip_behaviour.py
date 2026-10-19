@@ -108,7 +108,8 @@ def _build_xml() -> str:
         'message="main_skip=${nexus.jooq.main.skip}&#10;test_skip=${nexus.jooq.test.skip}&#10;'
         'main_hash=${nexus.jooq.main.hash}&#10;test_hash=${nexus.jooq.test.hash}&#10;'
         'main_restored=${nexus.jooq.main.restored}&#10;test_restored=${nexus.jooq.test.restored}&#10;'
-        'cache_dir=${nexus.jooq.cache.dir}&#10;producer=${nexus.jooq.producer}"/></target>\n</project>\n'
+        'cache_dir=${nexus.jooq.cache.dir}&#10;producer=${nexus.jooq.producer}&#10;'
+        'main_torn=${nexus.jooq.main.entry.torn}&#10;test_torn=${nexus.jooq.test.entry.torn}"/></target>\n</project>\n'
     )
 
 
@@ -906,6 +907,108 @@ def test_an_entry_proven_torn_by_its_own_digest_is_renamed_aside_and_deleted_not
         "the renamed-aside entry must be deleted, not left behind")
 
 
+def _report(p: Project) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in (p.root / "out" / "report.txt").read_text().splitlines())
+
+
+def _with_step_before(p: Project, anchor: str, step: str) -> None:
+    """Splice *step* into the scratch build.xml right before the FIRST occurrence of *anchor* (the main kind comes first): the way a
+    peer's action between two steps of the pom's restore is replayed deterministically."""
+    build = p.root / "build.xml"
+    text = build.read_text(encoding="utf-8")
+    assert text.count(anchor) in (1, 2), f"the anchor is not in the pom's inputs step: {anchor}"
+    build.write_text(text.replace(anchor, step + anchor, 1), encoding="utf-8")
+
+
+def _cache_debris(cached: Project) -> list[str]:
+    return sorted(f.name for f in Path(cached.cache).iterdir() if f.name.startswith("."))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through modes")
+def test_one_unreadable_file_in_an_entry_never_fails_the_build_and_the_entry_is_left_alone(cached: Project) -> None:
+    """nexus-wchbg critique: the judge digests the shared entry, and Ant's <checksum> throws on a file the reader
+    cannot open (BUILD FAILED, AccessDeniedException). The header's promise is that an unusable entry costs a
+    regeneration, never the build."""
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    before = _entry_snapshot(entry)
+    victim = entry / "generated" / "B.java"
+    victim.chmod(0o000)
+    try:
+        assert not os.access(victim, os.R_OK), "the fixture must really be unreadable"
+        reader = _other_worktree(cached, "wt-blind")
+        d = reader.build()  # every Ant step must exit 0
+        assert d.restored == {"main": False, "test": True}, "the entry this reader cannot read whole cannot have restored"
+        assert "main" in reader.generations, "the codegen must run over the failed restore"
+        assert any("is left as it is" in line for line in reader.log), "the reader must say it left the entry alone"
+        assert _report(reader)["main_torn"] == "false", "an entry this reader cannot read is not proven torn"
+    finally:
+        victim.chmod(0o644)
+    assert _entry_snapshot(entry) == before, "an entry the reader could not judge was changed"
+    assert _cache_debris(cached) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through modes")
+def test_a_file_that_becomes_unreadable_just_before_the_digest_cannot_fail_the_build_either(cached: Project) -> None:
+    """A file can go unreadable (or an entry vanish) after the judge decided to digest. The digest is guarded: a nested
+    build that dies inside it leaves no verdict, which is "cannot judge", not a failed build and not a torn entry."""
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    before = _entry_snapshot(entry)
+    victim = entry / "generated" / "B.java"
+    reader = _other_worktree(cached, "wt-late")
+    _with_step_before(reader, "<subant antfile=", f'<exec executable="chmod"><arg value="000"/><arg file="{victim}"/></exec>')
+    try:
+        d = reader.decide(props=_unwritable_destinations(reader))  # asserts the Ant run exited 0
+        assert not os.access(victim, os.R_OK), "the injected chmod never ran: the check is vacuous"
+        assert d.restored["main"] is False
+        assert _report(reader)["main_torn"] == "false"
+        assert not (reader.target / "jooq-stamps" / "main-entry-digest.txt").exists(), "a digest that died left a verdict"
+    finally:
+        victim.chmod(0o644)
+    assert _entry_snapshot(entry) == before
+    assert _cache_debris(cached) == []
+
+
+@pytest.mark.parametrize("how", ["removed-between-the-restore-and-the-judge", "never-published"])
+def test_an_entry_that_is_not_there_when_it_is_judged_is_never_condemned_and_the_build_succeeds(
+        cached: Project, how: str) -> None:
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    reader = _other_worktree(cached, "wt-vanish")
+    if how == "never-published":
+        shutil.rmtree(entry)
+    else:  # a prune (or a peer's repair) renames the entry away after this reader decided to try it
+        _with_step_before(reader, '<condition property="nexus.jooq.main.entry.judge"',
+                          f'<delete dir="{entry}" quiet="true"/>')
+    d = reader.decide(props=_unwritable_destinations(reader))
+    assert d.restored["main"] is False and d.skip["main"] is False, "the codegen must run"
+    assert not entry.exists()
+    assert _report(reader)["main_torn"] == "false", "an entry that is gone cannot be proven torn"
+    assert _cache_debris(cached) == [], "nothing was renamed aside: there was nothing to condemn"
+
+
+def test_the_marker_is_read_again_before_the_judge_so_a_peers_repair_is_not_condemned_against_a_stale_one(
+        cached: Project) -> None:
+    """The entry's marker is wrong when this reader starts (so its restore fails and the entry is judged), and a peer
+    repairs it during this reader's copy. The judge must compare the entry with the marker as it is NOW: against the
+    value read at the start of the step, a whole entry would be renamed aside under every other reader."""
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    good = (entry / "complete").read_text(encoding="utf-8").strip()
+    before = {n: b for n, b in _entry_snapshot(entry).items() if n != "complete"}
+    (entry / "complete").write_text("stale-marker-of-a-torn-publication", encoding="utf-8")
+    reader = _other_worktree(cached, "wt-repaired")
+    _with_step_before(reader, '<loadfile property="nexus.jooq.main.entry.marker"',
+                      f'<echo file="{entry}/complete" message="{good}"/>')
+    d = reader.decide(props=_unwritable_destinations(reader))
+    assert d.restored["main"] is False
+    assert (entry / "complete").read_text(encoding="utf-8").strip() == good, "the injected repair never ran: vacuous"
+    assert _report(reader)["main_torn"] == "false", "a whole entry was condemned against a marker that was already replaced"
+    assert {n: b for n, b in _entry_snapshot(entry).items() if n != "complete"} == before
+    assert _cache_debris(cached) == []
+
+
 def test_a_different_producer_never_serves_or_replaces_another_producers_tree(cached: Project) -> None:
     a = cached.build()
     other = "nexus-v0ts5-migrated-template"
@@ -924,15 +1027,17 @@ def test_a_different_producer_never_serves_or_replaces_another_producers_tree(ca
     assert again.build(props={"nexus.jooq.producer": other}).restored == {"main": True, "test": True}
 
 
-# The three cases above that rely on file modes cannot run as root (root reads and writes through any mode),
+# The five cases above that rely on file modes cannot run as root (root reads and writes through any mode),
 # so they skip there; the regular-file cases cover the same publish and restore paths for every user. The budget
 # below is the whole of what may skip, and the census proves each skip is conditioned on root and nothing else, so
 # a non-root run (a laptop, chas as nxtest) executes all of them.
-MODE_CASES_MAX_SKIP = 3
+MODE_CASES_MAX_SKIP = 5
 _MODE_CASES = (
     test_a_read_only_cache_dir_never_fails_the_build_and_still_serves_restores,
     test_an_unreadable_entry_falls_through_to_a_regeneration,
     test_an_unreadable_generated_dir_in_an_entry_falls_through_to_a_regeneration,
+    test_one_unreadable_file_in_an_entry_never_fails_the_build_and_the_entry_is_left_alone,
+    test_a_file_that_becomes_unreadable_just_before_the_digest_cannot_fail_the_build_either,
 )
 
 

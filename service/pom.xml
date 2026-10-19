@@ -725,7 +725,8 @@
                          digest of the tree it closes: a restore digests what it copied and, on any mismatch (a torn
                          entry, a prune racing the copy, a copy this reader could not finish), drops the copy and
                          regenerates; the entry itself is renamed aside only when its own digest proves it torn
-                         (nexus-wchbg), and is left alone when the failure was this reader's. The cache is
+                         (nexus-wchbg; the digest runs guarded, and an entry this reader cannot digest is left alone),
+                         and is left alone when the failure was this reader's. The cache is
                          best-effort end to end: an unwritable or full cache directory costs a warning and no publish,
                          an unreadable or unusable entry costs a regeneration, neither fails the build.
                          -Dnexus.jooq.regenerate=true skips the restore and replaces the entry. Publication copies
@@ -923,20 +924,46 @@
                                         </resourcecount>
                                     </and>
                                 </condition>
-                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.entry.digest"
-                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-entry-sums"
+                                <!-- The judge reads the shared entry, and nothing it reads may fail the build (nexus-wchbg): a file this reader
+                                     cannot open (Ant lists an unreadable directory as a file too) or an entry a peer renames away
+                                     mid-digest. Ant's <checksum> has no failonerror, so the digest runs in a nested Ant project
+                                     with failonerror=false: a digest that dies leaves no result, which means "cannot judge", and
+                                     the entry is left alone. -->
+                                <!-- The marker is read again HERE, right before the digest, not taken from the start of the step: a peer
+                                     that repaired the entry while this reader copied would otherwise be judged against the old marker
+                                     and a whole entry condemned. -->
+                                <loadfile property="nexus.jooq.main.entry.marker"
+                                          srcFile="${nexus.jooq.main.entry}/complete" failonerror="false" quiet="true"
                                           if:true="${nexus.jooq.main.entry.judge}">
-                                    <sort>
-                                        <fileset dir="${nexus.jooq.main.entry}/generated"/>
-                                        <name/>
-                                    </sort>
-                                </checksum>
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <delete file="${nexus.jooq.stamp.dir}/main-entry-digest.txt" quiet="true"
+                                        if:true="${nexus.jooq.main.entry.judge}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/JooqEntryDigest.xml" if:true="${nexus.jooq.main.entry.judge}"
+                                      message="&lt;project name='jooq-entry-digest' default='digest'&gt;&lt;target name='digest'&gt;&lt;checksum algorithm='SHA-256' totalproperty='tree' forceoverwrite='yes' todir='$${sums}'&gt;&lt;sort&gt;&lt;fileset dir='$${entry}/generated'/&gt;&lt;name/&gt;&lt;/sort&gt;&lt;/checksum&gt;&lt;echo file='$${out}' message='$${tree}'/&gt;&lt;/target&gt;&lt;/project&gt;"/>
+                                <subant antfile="JooqEntryDigest.xml" buildpath="${nexus.jooq.stamp.dir}"
+                                     inheritall="false" inheritrefs="false" failonerror="false"
+                                     if:true="${nexus.jooq.main.entry.judge}">
+                                    <property name="entry" value="${nexus.jooq.main.entry}"/>
+                                    <property name="sums" value="${nexus.jooq.stamp.dir}/main-entry-sums"/>
+                                    <property name="out" value="${nexus.jooq.stamp.dir}/main-entry-digest.txt"/>
+                                </subant>
+                                <loadfile property="nexus.jooq.main.entry.digest"
+                                          srcFile="${nexus.jooq.stamp.dir}/main-entry-digest.txt" failonerror="false" quiet="true"
+                                          if:true="${nexus.jooq.main.entry.judge}">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
                                 <condition property="nexus.jooq.main.entry.torn" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.main.entry.judge}"/>
-                                        <not><equals arg1="${nexus.jooq.main.entry.digest}" arg2="${nexus.jooq.main.entry.treehash}"/></not>
+                                        <isset property="nexus.jooq.main.entry.marker"/>
+                                        <isset property="nexus.jooq.main.entry.digest"/>
+                                        <not><equals arg1="${nexus.jooq.main.entry.digest}" arg2="${nexus.jooq.main.entry.marker}"/></not>
                                     </and>
                                 </condition>
+                                <echo level="warning"
+                                      if:true="${nexus.jooq.main.entry.judge}" unless:true="${nexus.jooq.main.entry.torn}"
+                                      message="jOOQ cache: the main entry ${nexus.jooq.main.entry} is left as it is (whole, or this build cannot read all of it)"/>
                                 <tstamp if:true="${nexus.jooq.main.entry.torn}">
                                     <format property="nexus.jooq.main.discard.ts" pattern="yyyyMMddHHmmssSSS"/>
                                 </tstamp>
@@ -1092,20 +1119,46 @@
                                         </resourcecount>
                                     </and>
                                 </condition>
-                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.entry.digest"
-                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-entry-sums"
+                                <!-- The judge reads the shared entry, and nothing it reads may fail the build (nexus-wchbg): a file this reader
+                                     cannot open (Ant lists an unreadable directory as a file too) or an entry a peer renames away
+                                     mid-digest. Ant's <checksum> has no failonerror, so the digest runs in a nested Ant project
+                                     with failonerror=false: a digest that dies leaves no result, which means "cannot judge", and
+                                     the entry is left alone. -->
+                                <!-- The marker is read again HERE, right before the digest, not taken from the start of the step: a peer
+                                     that repaired the entry while this reader copied would otherwise be judged against the old marker
+                                     and a whole entry condemned. -->
+                                <loadfile property="nexus.jooq.test.entry.marker"
+                                          srcFile="${nexus.jooq.test.entry}/complete" failonerror="false" quiet="true"
                                           if:true="${nexus.jooq.test.entry.judge}">
-                                    <sort>
-                                        <fileset dir="${nexus.jooq.test.entry}/generated"/>
-                                        <name/>
-                                    </sort>
-                                </checksum>
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <delete file="${nexus.jooq.stamp.dir}/test-entry-digest.txt" quiet="true"
+                                        if:true="${nexus.jooq.test.entry.judge}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/JooqEntryDigest.xml" if:true="${nexus.jooq.test.entry.judge}"
+                                      message="&lt;project name='jooq-entry-digest' default='digest'&gt;&lt;target name='digest'&gt;&lt;checksum algorithm='SHA-256' totalproperty='tree' forceoverwrite='yes' todir='$${sums}'&gt;&lt;sort&gt;&lt;fileset dir='$${entry}/generated'/&gt;&lt;name/&gt;&lt;/sort&gt;&lt;/checksum&gt;&lt;echo file='$${out}' message='$${tree}'/&gt;&lt;/target&gt;&lt;/project&gt;"/>
+                                <subant antfile="JooqEntryDigest.xml" buildpath="${nexus.jooq.stamp.dir}"
+                                     inheritall="false" inheritrefs="false" failonerror="false"
+                                     if:true="${nexus.jooq.test.entry.judge}">
+                                    <property name="entry" value="${nexus.jooq.test.entry}"/>
+                                    <property name="sums" value="${nexus.jooq.stamp.dir}/test-entry-sums"/>
+                                    <property name="out" value="${nexus.jooq.stamp.dir}/test-entry-digest.txt"/>
+                                </subant>
+                                <loadfile property="nexus.jooq.test.entry.digest"
+                                          srcFile="${nexus.jooq.stamp.dir}/test-entry-digest.txt" failonerror="false" quiet="true"
+                                          if:true="${nexus.jooq.test.entry.judge}">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
                                 <condition property="nexus.jooq.test.entry.torn" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.test.entry.judge}"/>
-                                        <not><equals arg1="${nexus.jooq.test.entry.digest}" arg2="${nexus.jooq.test.entry.treehash}"/></not>
+                                        <isset property="nexus.jooq.test.entry.marker"/>
+                                        <isset property="nexus.jooq.test.entry.digest"/>
+                                        <not><equals arg1="${nexus.jooq.test.entry.digest}" arg2="${nexus.jooq.test.entry.marker}"/></not>
                                     </and>
                                 </condition>
+                                <echo level="warning"
+                                      if:true="${nexus.jooq.test.entry.judge}" unless:true="${nexus.jooq.test.entry.torn}"
+                                      message="jOOQ cache: the test entry ${nexus.jooq.test.entry} is left as it is (whole, or this build cannot read all of it)"/>
                                 <tstamp if:true="${nexus.jooq.test.entry.torn}">
                                     <format property="nexus.jooq.test.discard.ts" pattern="yyyyMMddHHmmssSSS"/>
                                 </tstamp>

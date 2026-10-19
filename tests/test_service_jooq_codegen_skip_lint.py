@@ -340,14 +340,27 @@ def test_a_restore_is_verified_a_failed_one_leaves_no_tree_and_condemns_only_an_
     discard = f"${{nexus.jooq.{kind}.discard}}"
     assert not [t for t in _open_tags(text, "delete") if f'dir="{entry}"' in t], (
         f"{kind}: <delete dir=entry> empties a live shared entry file by file; rename it aside instead")
-    judged = re.search(rf'<checksum[^>]*totalproperty="nexus\.jooq\.{kind}\.entry\.digest".*?</checksum>', text, re.DOTALL)
-    assert judged and f'<fileset dir="{entry}/generated"/>' in judged.group() and "<sort>" in judged.group(), (
-        f"{kind}: the entry is not digested in a stable order before it is condemned")
-    assert f'if:true="${{nexus.jooq.{kind}.entry.judge}}"' in judged.group()
+    # The judge reads the shared entry and nothing it reads may fail the build (nexus-wchbg): Ant's <checksum> has no
+    # failonerror, so a file this reader cannot open (or an entry renamed away mid-digest) throws. No <checksum> in
+    # the inputs step reads the entry directly; the digest runs in a nested Ant project with failonerror=false.
+    assert not [c for c in re.findall(r"<checksum\b.*?</checksum>", text, re.DOTALL) if f'dir="{entry}' in c], (
+        f"{kind}: the entry is digested by an unguarded <checksum>, which fails the build on an unreadable file")
+    guarded = next((t for t in _open_tags(text, "subant") if f'if:true="${{nexus.jooq.{kind}.entry.judge}}"' in t), None)
+    assert guarded and 'failonerror="false"' in guarded, f"{kind}: the entry digest is not run guarded (<subant failonerror=false>)"
+    assert f'<property name="entry" value="{entry}"/>' in text
+    assert re.search(r"&lt;checksum algorithm='SHA-256' totalproperty='tree'.*?&lt;sort&gt;&lt;fileset dir='\$\$\{entry\}/generated'/&gt;&lt;name/&gt;&lt;/sort&gt;", text, re.DOTALL), (
+        f"{kind}: the nested digest is not the sorted SHA-256 total the marker carries")
+    # the marker is read again right before the digest, not taken from the start of the step
+    reload = next((t for t in _open_tags(text, "loadfile") if f'property="nexus.jooq.{kind}.entry.marker"' in t), None)
+    assert reload and f'srcFile="{entry}/complete"' in reload and f'if:true="${{nexus.jooq.{kind}.entry.judge}}"' in reload
+    assert (text.index(f'property="nexus.jooq.{kind}.restored"') < text.index(reload)
+            < text.index("<subant antfile=", text.index(reload))), f"{kind}: the marker is not re-read after the restore verdict and before the digest"
     torn = re.search(rf'<condition property="nexus\.jooq\.{kind}\.entry\.torn".*?</condition>', text, re.DOTALL).group()
-    assert (f'<not><equals arg1="${{nexus.jooq.{kind}.entry.digest}}" arg2="${{nexus.jooq.{kind}.entry.treehash}}"/></not>'
-            in torn), f"{kind}: an entry is condemned on something other than its own digest against its marker"
-    assert f'<isfalse value="${{nexus.jooq.{kind}.restored}}"/>' in text[text.index(f'property="nexus.jooq.{kind}.entry.judge"'):]
+    assert (f'<not><equals arg1="${{nexus.jooq.{kind}.entry.digest}}" arg2="${{nexus.jooq.{kind}.entry.marker}}"/></not>'
+            in torn), f"{kind}: an entry is condemned on something other than its own digest against its re-read marker"
+    for needed in ("entry.judge", "entry.marker", "entry.digest"):
+        assert f'<isset property="nexus.jooq.{kind}.{needed}"/>' in torn or needed == "entry.judge", (
+            f"{kind}: a digest or marker that could not be had must mean leave-alone, not torn")
     aside = next((t for t in _open_tags(text, "move") if f'file="{entry}"' in t), None)
     assert aside and f'tofile="{discard}"' in aside and 'failonerror="false"' in aside, (
         f"{kind}: the torn entry is not renamed aside to its own unique name")
