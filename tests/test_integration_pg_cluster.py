@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -58,6 +60,8 @@ def _isolated_owner_state(monkeypatch):
     real once-per-process sweep (which would look at the box's real roots)."""
     monkeypatch.setattr(sub, "_owner_records", {})
     monkeypatch.setattr(sub, "_integration_swept", True)
+    # pytest's tmp_path is deep on macOS; the real limit is pinned where it is tested.
+    monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 10_000)
 
 
 class TestClusterConf:
@@ -377,12 +381,11 @@ class TestSweepReapsKilledIntegrationClusters:
 
     def test_the_record_glob_is_found_under_every_swept_root(self, tmp_path, monkeypatch) -> None:
         shm = tmp_path / "shm"
-        cand = shm / "nexus-test-pg-1000"
+        cand = shm / f"nexus-test-pg-{sub._current_uid()}"  # the record's file is ours
         cand.mkdir(parents=True)
         rec = _write_record(cand, owner=_dead_pid())
         monkeypatch.setenv("NX_TEST_PG_SHM_DIR", str(shm))
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "_current_uid", lambda: "1000")
         setattr_in(monkeypatch, "tests._engine_substrate", "platform.system", lambda: "Linux")
         setattr_in(
             monkeypatch, "tests._engine_substrate", "tempfile.gettempdir",
@@ -395,13 +398,12 @@ class TestSweepReapsKilledIntegrationClusters:
         self, tmp_path, monkeypatch, recwarn,
     ) -> None:
         shm = tmp_path / "shm"
-        cand = shm / "nexus-test-pg-1000"
+        cand = shm / f"nexus-test-pg-{sub._current_uid()}"  # the record's file is ours
         legacy = cand / "nexus_t2_substrate_pg_legacy01"
         legacy.mkdir(parents=True)
         rec = _write_record(cand, owner=_dead_pid())
         monkeypatch.setenv("NX_TEST_PG_SHM_DIR", str(shm))
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "_current_uid", lambda: "1000")
         setattr_in(monkeypatch, "tests._engine_substrate", "platform.system", lambda: "Linux")
         setattr_in(
             monkeypatch, "tests._engine_substrate", "tempfile.gettempdir",
@@ -413,7 +415,216 @@ class TestSweepReapsKilledIntegrationClusters:
         assert not [w for w in recwarn if "legacy" in str(w.message)]
 
 
+class TestSweepOwnerRecordTrust:
+    """The record is a JSON file in a directory other uids may be able to write to
+    (a shared NX_TEST_PG_ROOT); the sweep rmtree's what it names and signals the
+    pids it names, so both the file and every named dir are checked first
+    (nexus-942h9 review)."""
+
+    @staticmethod
+    def _no_kills(monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_kill_engine_leg", lambda *a, **k: pytest.fail("killed engine"))
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed pm"))
+
+    def test_a_record_naming_the_roots_parent_deletes_nothing(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._no_kills(monkeypatch)
+        parent = tmp_path / "shared"
+        root = parent / "nexus-test-pg-1000"
+        root.mkdir(parents=True)
+        (parent / "keep").write_text("x")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[str(root) + "/.."])
+        with pytest.warns(UserWarning, match="outside"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert (parent / "keep").exists() and root.exists() and rec.exists()
+        assert result.errors == [str(rec)] and result.reaped == []
+
+    def test_a_dot_and_an_empty_name_are_refused_too(self, tmp_path, monkeypatch) -> None:
+        self._no_kills(monkeypatch)
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        (tmp_path / "keep").write_text("x")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[str(root) + "/", str(root) + "/."])
+        with pytest.warns(UserWarning):
+            sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert (tmp_path / "keep").exists() and root.exists() and rec.exists()
+
+    def test_a_symlinked_pgdata_is_never_followed_or_removed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._no_kills(monkeypatch)
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        precious = tmp_path / "precious"
+        precious.mkdir()
+        (precious / "keep").write_text("x")
+        link = root / "nexus_inttest_pg_link"
+        link.symlink_to(precious, target_is_directory=True)
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[link])
+        with pytest.warns(UserWarning, match="symlink"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert (precious / "keep").exists() and link.is_symlink() and rec.exists()
+        assert result.errors == [str(rec)] and result.reaped == []
+
+    def test_a_record_owned_by_another_uid_is_ignored_and_signals_nothing(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        self._no_kills(monkeypatch)
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        engine = _sleeper(owned_children)
+        rec = _write_record(
+            root, owner=_dead_pid(), pgdatas=[pgdata],
+            children=[{"pid": engine.pid, "cmdline": process_command(engine.pid)}],
+        )
+        # The service identity the module compares the file's owner with.
+        monkeypatch.setattr(sub, "_current_uid", lambda: str(os.stat(rec).st_uid + 1))
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.untrusted == [str(rec)]
+        assert result.reaped == [] and pgdata.exists() and rec.exists()
+        assert pid_alive(engine.pid)
+
+    def test_a_record_owned_by_us_passes_the_owner_check(self, tmp_path) -> None:
+        """The control for the test above: without it, 'ignored' could be a sweep
+        that ignores every record."""
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[pgdata])
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.untrusted == [] and result.reaped == [str(pgdata)]
+        assert not rec.exists()
+
+    def test_a_symlinked_record_file_is_ignored(self, tmp_path, monkeypatch) -> None:
+        self._no_kills(monkeypatch)
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        real = _write_record(tmp_path / "elsewhere", owner=_dead_pid(), pgdatas=[pgdata], name="real.json")
+        link = root / f"{sub._OWNER_RECORD_PREFIX}1.json"
+        link.symlink_to(real)
+        with pytest.warns(UserWarning, match="regular file"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.untrusted == [str(link)]
+        assert pgdata.exists() and link.is_symlink() and real.exists()
+
+    def test_a_record_that_vanished_between_glob_and_read_is_not_an_error(
+        self, tmp_path,
+    ) -> None:
+        import warnings as _w
+
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        result = sub.SweepResult()
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            sub._sweep_owner_record(root / f"{sub._OWNER_RECORD_PREFIX}9.json", root, result)
+        assert result.errors == [] and result.untrusted == [] and result.reaped == []
+
+
+class TestSocketPathReserve:
+    """The reserve covers the longest cluster prefix in use, and the actual path is
+    checked when the dir is made (nexus-942h9 review)."""
+
+    @pytest.fixture(autouse=True)
+    def _real_limit(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 107)
+
+    def test_the_reserve_covers_the_longest_prefix_the_suite_uses(self) -> None:
+        longest = max(
+            len(m)
+            for p in _TESTS.rglob("*.py")
+            if p.name != "test_integration_pg_cluster.py"
+            for m in re.findall(r'pg_data_tempdir\(\s*(?:prefix=)?"([^"]*)"', p.read_text())
+        )
+        assert longest >= 26, "scan is vacuous"
+        needed = 1 + longest + 8 + len("/.s.PGSQL.65535")
+        assert sub._SOCKET_SUFFIX_RESERVE >= needed
+
+    def test_a_60_byte_root_is_refused_at_choice_time(self) -> None:
+        root = "/" + "a" * 59
+        assert len(root) == 60
+        with pytest.raises(ValueError, match="too long"):
+            sub.choose_pg_root(env={"NX_TEST_PG_ROOT": root})
+
+    def test_a_root_at_the_new_limit_is_accepted(self) -> None:
+        room = sub._SOCKET_PATH_MAX - sub._SOCKET_SUFFIX_RESERVE
+        root = "/" + "a" * (room - 1)
+        assert sub.choose_pg_root(env={"NX_TEST_PG_ROOT": root}) == Path(root)
+
+    def test_the_actual_path_is_checked_when_the_dir_is_made(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        monkeypatch.setattr(sub, "pg_cluster_parent", lambda: str(root))
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", len(str(root)) + 40)
+        with pytest.raises(ValueError, match="socket"):
+            sub.integration_cluster_dir("nexus_recovery_inttest_pg_")
+        assert list(root.iterdir()) == [], "a refused dir must not be left behind"
+        ok = sub.integration_cluster_dir("p_")
+        assert Path(ok).parent == root
+
+
+class TestThrowawayClusterDefaultRoot:
+    """throwaway_pg_cluster with no parent_dir takes the substrate's root, its conf
+    and an owner record; an explicit parent_dir takes none of them."""
+
+    def _fakes(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pg_ctl = bin_dir / "pg_ctl"
+        pg_ctl.write_text("#!/bin/sh\nexit 0\n")
+        pg_ctl.chmod(0o755)
+        made: list[str] = []
+
+        def _initdb(bin_d, *, prefix, parent_dir=None, username=None):
+            path = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+            made.append(path)
+            return path
+
+        monkeypatch.setattr(sub, "_pg_bin", lambda: bin_dir)
+        monkeypatch.setattr(sub, "_initdb_cluster", _initdb)
+        monkeypatch.setattr(
+            sub, "pg_ctl_start",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
+        )
+        return made
+
+    def test_no_parent_dir_uses_the_chosen_root_conf_and_record(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        made = self._fakes(tmp_path, monkeypatch)
+        monkeypatch.setattr(sub, "pg_cluster_parent", lambda: str(root))
+        monkeypatch.setattr(sub, "throwaway_cluster_conf", lambda parent: "# CHOSEN\n")
+        with sub.throwaway_pg_cluster(lock_dir=tmp_path / "locks") as pgdata:
+            assert pgdata.parent == root and str(pgdata) == made[0]
+            assert "# CHOSEN" in (pgdata / "postgresql.conf").read_text()
+            rec = json.loads((root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").read_text())
+            assert rec["pgdatas"] == [str(pgdata)]
+
+    def test_an_explicit_parent_dir_is_neither_recorded_nor_asked_for_a_root(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        self._fakes(tmp_path, monkeypatch)
+        monkeypatch.setattr(sub, "pg_cluster_parent", lambda: pytest.fail("asked for a root"))
+        with sub.throwaway_pg_cluster(lock_dir=tmp_path / "locks", parent_dir=str(mine)) as pgdata:
+            assert pgdata.parent == mine
+        assert sub._owner_records == {}
+
+
 _TESTS = Path(__file__).resolve().parent
+
+
+def _code_only(text: str) -> str:
+    """*text* with ``#`` comments removed, so a call named in a comment is not a call."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
 
 
 @pytest.mark.lint
@@ -421,19 +632,26 @@ class TestEveryIntegrationClusterGetsTheConf:
     """A file that makes a cluster with ``pg_data_tempdir`` and forgets
     ``integration_pg_conf`` quietly goes back to default fsync and a 1 GB WAL on
     whatever root it landed in. Census, with a non-vacuity floor: a scan that
-    found no callers proves nothing."""
+    found no callers proves nothing. Comments are stripped, and a file needs at
+    least as many conf calls as cluster-making calls (one conf call cannot cover
+    two clusters)."""
 
     #: This file exercises the helper with fakes; _child_process defines it.
     _NOT_FIXTURES = {"_child_process.py", "test_integration_pg_cluster.py"}
 
     def test_every_caller_appends_the_conf(self) -> None:
-        callers = [
-            p for p in sorted(_TESTS.rglob("*.py"))
-            if p.name not in self._NOT_FIXTURES and "pg_data_tempdir(" in p.read_text()
-        ]
-        assert len(callers) >= 20, f"census saw only {len(callers)} callers: scan is vacuous"
-        missing = [
-            str(p.relative_to(_TESTS)) for p in callers
-            if "integration_pg_conf(" not in p.read_text()
-        ]
-        assert missing == []
+        counts: dict[str, tuple[int, int]] = {}
+        for p in sorted(_TESTS.rglob("*.py")):
+            if p.name in self._NOT_FIXTURES:
+                continue
+            code = _code_only(p.read_text())
+            makes = code.count("pg_data_tempdir(")
+            if makes:
+                counts[str(p.relative_to(_TESTS))] = (makes, code.count("integration_pg_conf("))
+        assert len(counts) >= 20, f"census saw only {len(counts)} callers: scan is vacuous"
+        short = {f: c for f, c in counts.items() if c[1] < c[0]}
+        assert short == {}, f"(clusters made, conf calls) per file: {short}"
+
+    def test_the_comment_stripper_ignores_a_call_named_in_a_comment(self) -> None:
+        assert "integration_pg_conf(" not in _code_only("x = 1  # integration_pg_conf(p)\n")
+        assert "integration_pg_conf(" in _code_only("c = integration_pg_conf(p)\n")

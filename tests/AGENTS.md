@@ -42,6 +42,14 @@ integration cluster. A new fixture must append the conf
 (`tests/test_integration_pg_cluster.py` has a census). A fixture that needs
 durability semantics passes `parent_dir=` to stay on disk; none does today.
 
+Out of scope of that routing (still write PG to disk; census and fix tracked in
+nexus-szyun): the `tmp_path_factory` initdb creators `tests/db/test_svc_monitor_role_live.py`,
+`tests/db/test_nexus_diag_role.py` and `tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py`,
+and the two `docker run postgres` tests `tests/db/test_write_seam_gate_integration.py` and
+`tests/db/test_http_combined_query_integration.py`. The cluster prefix may reach 26 chars
+(`nexus_recovery_inttest_pg_`); `integration_cluster_dir` refuses a path whose
+socket would pass `sun_path`.
+
 **The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
 `_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
 A missing or stale service jar, or a PG bundle for the pinned engine tag that is

@@ -178,11 +178,15 @@ _TMPFS_MIN_FREE_BYTES = 3 * 1024**3
 _SWEEP_BARE_TMPFS_MIN_AGE_S = 600.0
 
 #: ``sun_path`` is 108 bytes on Linux including the NUL, so a socket path may use
-#: 107. A cluster dir is
-#: ``<root>/nexus_t2_substrate_pg_<8 random>`` and the socket ``/.s.PGSQL.<port>``
-#: inside it, so the root may use ``107 - this`` bytes.
+#: 107. A cluster dir is ``<root>/<prefix><8 random>`` and the socket
+#: ``/.s.PGSQL.<port>`` inside it, so the root may use ``107 - reserve`` bytes. The
+#: reserve is sized for the LONGEST prefix any cluster maker uses (the integration
+#: fixtures reach 26 chars, e.g. ``nexus_recovery_inttest_pg_``; the substrate's own
+#: is 22); :func:`integration_cluster_dir` also checks the actual path, so a new
+#: longer prefix fails loud there instead of overrunning ``sun_path``.
 _SOCKET_PATH_MAX = 107
-_SOCKET_SUFFIX_RESERVE = len("/nexus_t2_substrate_pg_") + 8 + len("/.s.PGSQL.65535")
+_LONGEST_CLUSTER_PREFIX = len("nexus_recovery_inttest_pg_")
+_SOCKET_SUFFIX_RESERVE = 1 + _LONGEST_CLUSTER_PREFIX + 8 + len("/.s.PGSQL.65535")
 
 #: Appended to the substrate's ``postgresql.conf`` (nexus-me3gm). Caps pg_wal at
 #: about 64 MB instead of the 1 GB default. ``wal_level = minimal`` requires
@@ -659,6 +663,16 @@ def integration_cluster_dir(prefix: str) -> str:
     _sweep_once_per_process()
     parent = pg_cluster_parent()
     path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    if parent is not None:
+        # The reserve is a guess about prefixes; this is the real path. Only a
+        # chosen root: the tempdir fallback keeps the callers' older behaviour.
+        if len(path) + len("/.s.PGSQL.65535") > _SOCKET_PATH_MAX:
+            shutil.rmtree(path, ignore_errors=True)
+            raise ValueError(
+                f"cluster dir {path} is too long: its unix socket path would pass "
+                f"the {_SOCKET_PATH_MAX}-byte sun_path limit; use a shorter "
+                f"{_PG_ROOT_ENV} or cluster prefix"
+            )
     grant_user_tree_access(path)
     if parent is not None:
         register_owned_cluster(Path(parent), path)
@@ -1901,6 +1915,8 @@ class SweepResult:
     reaped: list[str] = field(default_factory=list)
     live_untouched: list[str] = field(default_factory=list)
     mismatch_refused: list[str] = field(default_factory=list)
+    #: Owner records the sweep would not trust (not ours, or not a plain file).
+    untrusted: list[str] = field(default_factory=list)
     legacy_reported: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -1973,10 +1989,51 @@ def _identify_postmaster(pid: int, pgdata: Path) -> str:
     return "ok" if str(pgdata) in actual else "mismatch"
 
 
+def _owner_record_untrusted(rec: Path, result: SweepResult) -> bool | None:
+    """Is *rec* a plain file owned by the service identity? ``None``: it vanished
+    (another worker reaped it), which is not an error. Anything else untrusted is
+    recorded in ``result.untrusted`` and left alone. A symlink or special file is
+    warned about; a file of another uid is routine in a shared root and silent."""
+    try:
+        st = rec.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        result.untrusted.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: owner record {rec} is not a regular file "
+            f"(symlink or special) -- ignoring it",
+            stacklevel=3,
+        )
+        return True
+    if os.name != "nt" and st.st_uid != int(_current_uid()):
+        result.untrusted.append(str(rec))
+        return True
+    return False
+
+
+def _owner_pgdata_refusal(d: Path, root: Path) -> str | None:
+    """Why *d* (a path read from a record) must not be removed, or ``None``.
+    ``rmtree`` follows nothing here: the name must be a real child of *root*
+    (resolved on both sides, so ``<root>/..`` and symlinked dirs fail)."""
+    if d.name in ("", ".", "..") or d.parent != root:
+        return f"outside {root}"
+    if d.is_symlink():
+        return "a symlink"
+    if d.exists() and d.resolve().parent != root.resolve():
+        return f"outside {root}"
+    return None
+
+
 def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
+    untrusted = _owner_record_untrusted(rec, result)
+    if untrusted is None or untrusted:
+        return
     try:
         info = json.loads(rec.read_text())
         owner_pid = info.get("owner_pytest_pid")
+    except FileNotFoundError:
+        return
     except (OSError, ValueError, AttributeError) as exc:
         result.errors.append(str(rec))
         warnings.warn(
@@ -2000,13 +2057,14 @@ def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
     dirs: list[Path] = []
     for raw in info.get("pgdatas") or []:
         d = Path(str(raw))
-        if d.parent != root:
-            # rmtree on a path read from JSON: only ever inside the root the
-            # record sits in.
+        refusal = _owner_pgdata_refusal(d, root)
+        if refusal is not None:
+            # rmtree on a path read from JSON: only ever a real child of the
+            # root the record sits in. Nothing is signalled either.
             result.errors.append(str(rec))
             warnings.warn(
                 f"nexus test substrate sweep: owner record {rec} names {d}, "
-                f"outside {root} -- leaving it untouched",
+                f"{refusal} -- leaving it untouched",
                 stacklevel=2,
             )
             return
