@@ -2043,6 +2043,25 @@ def _sandbox_env(box: pathlib.Path) -> dict[str, str]:
     }
 
 
+def _env_is_uutils() -> bool:
+    """True when ``env`` is uutils coreutils (Ubuntu 26.04's /usr/bin/env, chas).
+
+    Its ``env -S`` does not split a separate ``-S 'git config'`` string and does not
+    read ``\\_`` as a blank, so some spellings that write config under GNU or BSD
+    ``env`` cannot run there at all. The hook denies them either way."""
+    out = subprocess.run(["env", "--version"], capture_output=True, text=True, check=False)
+    return "uutils" in out.stdout
+
+
+def _env_s_could_not_run(cmd: str, stderr: str) -> bool:
+    """The command is an ``env -S`` spelling and this box's uutils ``env`` refused to
+    execute the unsplit string (``env: '<string>': No such file or directory``)."""
+    return (
+        "env -S" in cmd and _env_is_uutils()
+        and stderr.lstrip().startswith("env: ") and "No such file or directory" in stderr
+    )
+
+
 def test_the_real_git_sandbox_keeps_global_and_system_writes_in_the_box(tmp_path):
     """The deny tables in this file hold --global/--system commands as DATA, and
     test_no_git_config_global_writes_lint exempts this file on that condition: any
@@ -2097,6 +2116,7 @@ def test_every_config_deny_family_command_really_writes_config(tmp_path):
     names), and the hook denies it. The ones git itself turns into no write are
     listed with a reason and still must deny."""
     ran = 0
+    unsplit = 0
     for family in _REAL_WRITE_FAMILIES:
         for template in _DENY_FAMILIES[family]:
             box = tmp_path / f"box{ran}"
@@ -2111,18 +2131,21 @@ def test_every_config_deny_family_command_really_writes_config(tmp_path):
                 watched.append(main / name / ".git" / "config")
             cmd = template.replace("{repo}", str(main))
             before = _config_snapshot(watched)
-            subprocess.run(
+            run = subprocess.run(
                 ["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True,
                 check=False, timeout=20,
             )
             wrote = _config_snapshot(watched) != before
             if template in _NOT_REAL_WRITES:
                 assert not wrote, f"{template!r} was listed as not a write but wrote"
+            elif not wrote and _env_s_could_not_run(cmd, run.stderr):
+                unsplit += 1  # uutils env: this spelling cannot run here; the denial below still holds
             else:
                 assert wrote, f"[{family}] {template!r} did not change any config file"
             assert _denied(cmd, main), f"[{family}] {template!r} was not denied"
             ran += 1
     assert ran >= 40, f"only {ran} commands were run; the families shrank"
+    assert ran - unsplit >= 30, f"only {ran - unsplit} of {ran} commands were checked for a real write"
 
 
 def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
@@ -2358,14 +2381,19 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         'docker exec h sh -c "gi' + BS + BS + 't config user.name via-docker"',
         'echo x | xargs sh -c "gi' + BS + BS + 't config user.name via-xargs"',
     ]
+    unsplit = 0
     for cmd in writes:
         before = _config_snapshot([common])
         run = subprocess.run(
             ["bash", "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
-        assert _config_snapshot([common]) != before, f"{cmd!r} did not write: {run.stderr}"
+        if _config_snapshot([common]) == before and _env_s_could_not_run(cmd, run.stderr):
+            unsplit += 1  # uutils env: this spelling cannot run here; the denial below still holds
+        else:
+            assert _config_snapshot([common]) != before, f"{cmd!r} did not write: {run.stderr}"
         assert _denied(cmd, wt), f"{cmd!r} was not denied in a linked worktree"
+    assert len(writes) - unsplit >= 15, f"only {len(writes) - unsplit} writes were checked for real"
     controls = [
         "env -S'git config' --get user.name",
         "env -S'git log' --oneline",
