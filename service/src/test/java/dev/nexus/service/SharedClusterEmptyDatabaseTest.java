@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -274,6 +275,7 @@ class SharedClusterEmptyDatabaseTest {
      */
     @Test
     void theEmptyDatabaseCountsNestedDdlAndTheProbeInstallCountsNothing() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector, probe or marks");
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         String name = pg.getDatabaseName();
         try (Connection su = pg.createConnection("")) {
@@ -305,6 +307,7 @@ class SharedClusterEmptyDatabaseTest {
      */
     @Test
     void theSharedClusterLogsWalPositionsAtItsStartReadyAndEndMarks() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector, probe or marks");
         PgContainerHelper.start().stop();
         FailFastPostgreSQLContainer cluster = (FailFastPostgreSQLContainer) clusterOf();
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();

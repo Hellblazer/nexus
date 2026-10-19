@@ -345,10 +345,51 @@ The counter turns fully off for a same-sha A/B (nexus-3cwsw): `-Dnexus.ddl.count
 settings to a container or cluster (no `log_statement`, collector, probe, event trigger, marks, WAL
 reads), uses the library's default ready wait, and writes no count file or report; on Java the server
 log is then Docker's log again, so `PgContainerHelper.serverLog` falls back to `getLogs()`.
-`DdlCountSwitchTest` and `test_ddl_counter.py` pin each piece. A ratchet run has nothing to read from
-an off run, by design.
-`scripts/diag/container_io_sampler.sh -- <command>` (no root) reads each docker container's cgroup `wbytes`
-plus dockerd's, containerd's and journald's while the command runs, to see who writes to the host disk.
+`DdlCountSwitchTest` pins the off recipe (command line, probe copy, ready wait), an off container's boot,
+the empty-database probe, and that an off run leaves `DdlCounts`' live set and totals exactly as they were
+after `register`, `noteDatabase`, `noteRelease`, `record` and `flush` (`stateForTest` reads them back; each
+guard was removed once and the test failed). Two things carry no guard of their own and are not pinned
+separately: `markEnd` (only `record` reaches it) and `FailFastPostgreSQLContainer.start()` (its `register`
+call checks the switch). `test_ddl_counter.py` pins the Python half (an AST check that every probe use in
+the substrate sits under `ddl_count_enabled()`). A ratchet run has nothing to read from an off run, by design.
+A Java test that asserts on a counter-only surface (the collector file, the probe, marks, WAL reads, the
+parser on a live log) starts with `assumeTrue(DdlCounts.enabled(), ...)` so an off run is green with those
+skipped; `tests/test_java_counter_tests_assume_lint.py` (lint) fails when such a `@Test` lacks it. The scan is
+textual and keyed on a list of surface names in that file, so a test that reaches the counter through a name
+not on the list is not caught: extend the list when a new counter-only surface appears.
+
+**Same-sha A/B (nexus-3cwsw).** Is the counter what writes to the host disk? Measure it with the sampler,
+`scripts/diag/container_io_sampler.sh` (no root; its header states what the numbers are not). Run on chas
+when the pool is quiet: the daemon and device deltas are host-wide, so a CI job running beside the arm
+lands in them. Take an idle window first (`scripts/diag/container_io_sampler.sh -i 5 -- sleep 600`), then
+the arms in the order on, off, off, on (two off runs give the noise floor). Each arm gets its own run id,
+exported, because the container filter is the run-id label and an unset id would match every nexus test
+container with an empty id (the sampler refuses an empty filter value):
+
+```bash
+# arm "on"; for "off" use a different id and -Dnexus.ddl.count=false
+export NX_TEST_RUN_ID=3cwsw-on-$(date +%s)
+scripts/diag/container_io_sampler.sh -i 1 -f "label=dev.nexus.test.run=$NX_TEST_RUN_ID" -- \
+  scripts/mvnw-leased.sh --lab-run lab-xl -Dnexus.ddl.count=true test
+# the second suite, same arm and id scheme: add -Dgroups=integration
+```
+
+The sampler exits 3 (and warns) when `-f` matched no container, so a wrong id cannot pass as a measurement.
+An off run writes no count files, so do not run the ratchet on it; an on run's files in
+`service/target/ddl-counts/` persist into the next arm unless the directory is cleared or the ratchet gets
+`--run`. What to read in the report: `containers seen` (a lower bound; `docker events --filter
+label=dev.nexus.test.run=$NX_TEST_RUN_ID --filter event=start` counts every start); the daemon rows
+(dockerd, containerd, systemd-journal) and the json-log total, each on minus off, against the idle window
+and the off/off spread; the device row and `unattributed = device - attributed`, because cgroup `wbytes`
+omit the filesystem's journal and metadata and writeback charged to no sampled cgroup, so the sampled sum
+can sit far below the device; the `docker (driver, logging driver, debug, cgroup version)` line, which must
+match across arms. Measured on chas (2026-10-19, Java main, two arms each): the counter costs nothing
+measurable. Per-container sum 64-72 KiB in every arm, 17-18 containers a run. containerd 49/47 MiB on vs
+45/46 off; dockerd 18/16 on vs 27/27 off (on is lower: Docker's json log shrinks from 4.2 MB to 30 KB);
+systemd-journald 662/436 on vs 690/407 off, host noise that does not follow the counter, written against
+about 2 MB of journal entries (ssh login and veth/network churn, present at idle), so journald's own write
+amplification dominates. Diagnosing a stall: `BOUNDS THAT EXPIRED` in the report lists the docker calls and the loop that
+were cut off.
 
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
 `pg_ctl_start` / `initdb` sites a static scan of `tests/` and `scripts/` finds (plus the jOOQ code

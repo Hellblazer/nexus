@@ -16,16 +16,35 @@
 # the daemon cgroups stay host-wide) at the start and the end, and the command's own cgroup, and sizes each
 # container's json log (docker's `LogPath`) where the file is readable.
 #
-# At the end it prints: the sum of the per-container maxima; each daemon cgroup's wbytes delta;
-# the json-log bytes total; the top 10 containers by wbytes with their dev.nexus.test.caller
-# label, and the same summed by caller. The exit status is COMMAND's.
+# At the end it prints: the docker driver line; the sum of the per-container maxima; each daemon
+# cgroup's wbytes delta; the json-log bytes total; the top 10 containers by wbytes with their
+# dev.nexus.test.caller label, and the same summed by caller; the block device's own write delta
+# (/proc/diskstats, for the devices that appeared in a sampled io.stat) and what no sampled cgroup
+# accounts for ("unattributed = device - attributed"). The exit status is COMMAND's, except that it is 3
+# when -f was given, COMMAND succeeded and zero containers were seen (a wrong filter measures nothing).
 #
 # Needs no root. What it cannot read it skips and says so in the report: a cgroup whose io.stat is
 # unreadable, a json log under /var/lib/docker/containers (root-only on most hosts; the log is then
 # sized by `docker logs | wc -c`, its payload without the json wrapper, so a lower bound).
-# NOT SEEN: a container that starts and dies between two ticks, and the last SECS seconds of each
-# container's life, so the container sum is a LOWER bound; lower -i to tighten it. Block-device
-# writes only: tmpfs (the test clusters' data directory) is not one.
+#
+# WHAT THE NUMBERS ARE NOT (attribution limits). cgroup wbytes count the bios a cgroup issues to a block
+# device. They omit the filesystem's own journal and metadata writes and any kernel writeback charged to
+# no sampled cgroup, so the sampled cgroups can sum to far less than the device saw: that is why the
+# device delta and the "unattributed" line are printed. They assume the sampled cgroups are disjoint
+# (do not name an -x process that shares a cgroup with another). NOT SEEN: a container that starts and
+# dies between two ticks, and the last SECS seconds of each container's life, so the container sum is a
+# LOWER bound; lower -i to tighten it. Block-device writes only: tmpfs (the test clusters' data
+# directory) is not one. The daemon deltas and the device delta are HOST-WIDE: run when the pool is
+# quiet, or they include other jobs. On chas (2026-10-19) journald's own write cost dominated the
+# daemons, about 300x the size of the entries it holds, present at idle, and fed by ssh/login and
+# veth/network churn: compare an A/B arm against an idle window, not against zero.
+#
+# Every docker call is bounded (NX_IO_SAMPLER_DOCKER_TIMEOUT seconds, default 20); after COMMAND ends the
+# sampler loop gets NX_IO_SAMPLER_GRACE seconds (default 10), then is killed, and the final sample gets
+# NX_IO_SAMPLER_FINAL seconds (default 30). A bound that expires is counted in the report, so a stalled
+# daemon yields a report that says what is missing, not a hang. The sampler loop also ends by itself if
+# this script is killed (SIGKILL). The state directory is on /dev/shm when that is writable
+# (NX_IO_SAMPLER_STATE_BASE overrides), so sampling does not write to the disk it measures.
 #
 # The functions below are sourceable (tests/scripts/test_container_io_sampler.py); main runs only
 # when the file is executed.
@@ -34,6 +53,11 @@ set -uo pipefail
 
 # Where /proc is (tests point this at a fixture tree).
 PROC_ROOT=${NX_IO_SAMPLER_PROC:-/proc}
+# Bounds, in seconds (see the header).
+DOCKER_TIMEOUT=${NX_IO_SAMPLER_DOCKER_TIMEOUT:-20}
+SAMPLER_GRACE=${NX_IO_SAMPLER_GRACE:-10}
+FINAL_SAMPLE_SECS=${NX_IO_SAMPLER_FINAL:-30}
+STATE=""
 
 # ---- parsing helpers (pure; unit-tested with fixture files) ---------------------------------
 
@@ -81,6 +105,114 @@ fmt_bytes() {
     }'
 }
 
+# A positive number (integer or decimal), for -i.
+positive_number() {
+    [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v v="$1" 'BEGIN { exit !(v > 0) }'
+}
+
+# A positive integer, for the bounds.
+positive_int() {
+    [[ $1 =~ ^[1-9][0-9]*$ ]]
+}
+
+# A name as one path component: anything but letters, digits, dot, underscore and dash becomes "_", and a
+# leading dot gets a "_" before it.
+safe_key() {
+    local key=${1//[^A-Za-z0-9._-]/_}
+    [[ $key == .* ]] && key=_$key # a dotfile would hide from the report's globs
+    printf '%s\n' "$key"
+}
+
+# Where the state directory goes: NX_IO_SAMPLER_STATE_BASE, else /dev/shm (NX_IO_SAMPLER_SHM names another)
+# when writable, so sampling does not write to the disk it measures, else TMPDIR, else /tmp.
+pick_state_base() {
+    local shm=${NX_IO_SAMPLER_SHM:-/dev/shm}
+    if [[ -n ${NX_IO_SAMPLER_STATE_BASE:-} ]]; then
+        printf '%s\n' "$NX_IO_SAMPLER_STATE_BASE"
+    elif [[ -d $shm && -w $shm ]]; then
+        printf '%s\n' "$shm"
+    else
+        printf '%s\n' "${TMPDIR:-/tmp}"
+    fi
+}
+
+# Every process below PID, from the process table (the deep ones too: a bounded docker call sits under
+# a command substitution under the loop).
+descendants() {
+    ps -A -o pid=,ppid= 2>/dev/null | awk -v root="$1" '
+        { parent[$1] = $2; pids[n++] = $1 }
+        END {
+            for (i = 0; i < n; i++) {
+                p = pids[i]
+                while ((p in parent) && p != root && p != 0) p = parent[p]
+                if (p == root && pids[i] != root) print pids[i]
+            }
+        }'
+}
+
+# Stop PID and everything below it (the descendants are listed first: once PID is gone they are orphans).
+kill_tree() {
+    local pid=$1 all p
+    all=$(descendants "$pid")
+    for p in $all "$pid"; do
+        kill -TERM "$p" 2>/dev/null
+    done
+    sleep 0.3
+    for p in $all "$pid"; do
+        if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null; fi
+    done
+    return 0
+}
+
+# Run a command (or a function of this script) for at most SECS to SECS+1 seconds; killed after that, and
+# the status is 124 (as timeout(1) gives). Otherwise the command's own status. Output passes through.
+# Plain bash (no timeout(1), absent on macOS) and no watchdog process to leak.
+bounded() {
+    local secs=$1 pid deadline
+    shift
+    "$@" &
+    pid=$!
+    deadline=$((SECONDS + secs + 1))
+    while kill -0 "$pid" 2>/dev/null; do
+        if ((SECONDS >= deadline)); then
+            kill_tree "$pid"
+            wait "$pid" 2>/dev/null
+            return 124
+        fi
+        sleep 0.1
+    done
+    wait "$pid"
+}
+
+# A docker call, bounded; one that expires is noted in STATE/timeouts for the report.
+dock() {
+    bounded "$DOCKER_TIMEOUT" docker "$@"
+    local rc=$?
+    if ((rc == 124)) && [[ -n $STATE ]]; then
+        echo "docker $1 did not answer in ${DOCKER_TIMEOUT}s" >>"$STATE/timeouts" 2>/dev/null
+    fi
+    return "$rc"
+}
+
+# The device ids (major:minor) in an io.stat file, appended to STATE/devices.
+note_devices() {
+    local state=$1 file=$2
+    [[ -r $file ]] || return 0
+    awk 'NF { print $1 }' "$file" >>"$state/devices" 2>/dev/null
+    return 0
+}
+
+# Lines "<name> <maj:min> <bytes written>" between two /proc/diskstats copies, for the ids in DEVFILE.
+# Field 10 of a diskstats row is sectors written; a sector is 512 bytes there whatever the device's own.
+diskstats_delta() {
+    local base=$1 end=$2 devfile=$3
+    awk '
+        FILENAME == ARGV[1] { want[$1] = 1; next }
+        FILENAME == ARGV[2] { k = $1 ":" $2; if (k in want) b[k] = $10; next }
+        { k = $1 ":" $2; if ((k in want) && (k in b)) printf "%s %s %.0f\n", $3, k, ($10 - b[k]) * 512 }
+    ' "$devfile" "$base" "$end"
+}
+
 # Lines "<wbytes> <id12> <caller>" for every container directory under STATE/c, biggest first.
 container_rows() {
     local state=$1 dir id caller w
@@ -97,6 +229,34 @@ container_rows() {
 # Lines "<wbytes> <containers> <caller>", summed per caller, biggest first.
 caller_rows() {
     container_rows "$1" | awk '{ w[$3] += $1; n[$3]++ } END { for (c in w) printf "%d %d %s\n", w[c], n[c], c }' | sort -k1,1nr
+}
+
+# How many containers have a directory in STATE/c.
+count_containers() {
+    local dir n=0
+    for dir in "$1"/c/*/; do
+        [[ -d $dir ]] && n=$((n + 1))
+    done
+    echo "$n"
+}
+
+# The block device's own write delta and what the sampled cgroups leave unaccounted for.
+report_device() {
+    local state=$1 attributed=$2 rows device=0 name dev bytes
+    if [[ -r $state/diskstats.base && -r $state/diskstats.end && -s $state/devices ]]; then
+        sort -u "$state/devices" >"$state/devices.u"
+        rows=$(diskstats_delta "$state/diskstats.base" "$state/diskstats.end" "$state/devices.u")
+    fi
+    if [[ -z ${rows:-} ]]; then
+        echo "device writes (/proc/diskstats): none to reconcile (no block device appeared in a sampled io.stat, or /proc/diskstats was unreadable)"
+        return 0
+    fi
+    while read -r name dev bytes; do
+        echo "device wbytes (/proc/diskstats), $name ($dev): $(fmt_bytes "$bytes")"
+        device=$((device + bytes))
+    done <<<"$rows"
+    echo "attributed to sampled cgroups (containers + daemons + the command's cgroup): $(fmt_bytes "$attributed")"
+    echo "unattributed = device - attributed: $(fmt_bytes $((device - attributed)))  (filesystem journal and metadata, writeback charged to no sampled cgroup, other jobs: the device delta is host-wide)"
 }
 
 # Print the end-of-run report. STATE has c/<id>/{caller,wmax,logmax,logmode}, d/<name>.{cg,base,end},
@@ -129,10 +289,15 @@ report() {
         samples=${meta_samples:-?}
     fi
     echo "== container io sampler =="
+    echo "docker (driver, logging driver, debug, cgroup version): $(cat "$state/docker-info" 2>/dev/null || echo unavailable)"
     echo "command exit: $exit_code   duration: ${secs}s   samples: $samples   containers seen: $n"
+    if [[ -s $state/timeouts ]]; then
+        echo "BOUNDS THAT EXPIRED (those samples are missing; the numbers below are lower bounds): $(wc -l <"$state/timeouts" | tr -d ' ')"
+        sort "$state/timeouts" | uniq -c | sed 's/^/    /'
+    fi
     echo "containers whose cgroup io.stat was unreadable or never resolved: $unreadable"
     echo "sum of per-container wbytes (max per container, lower bound): $(fmt_bytes "$total")"
-    local f name cg base end
+    local f name cg base end attributed=$total
     for f in "$state"/d/*.cg; do
         [[ -e $f ]] || continue
         name=$(basename "$f" .cg)
@@ -140,6 +305,7 @@ report() {
         if [[ -r $state/d/$name.base && -r $state/d/$name.end ]]; then
             base=$(<"$state/d/$name.base")
             end=$(<"$state/d/$name.end")
+            attributed=$((attributed + end - base))
             echo "cgroup wbytes delta, $name (/${cg}): $(fmt_bytes $((end - base)))"
         else
             echo "cgroup wbytes delta, $name (/${cg}): unreadable (io.stat not readable as this user)"
@@ -150,31 +316,36 @@ report() {
         name=$(basename "$f" .skip)
         echo "cgroup wbytes delta, $name: skipped ($(<"$f"))"
     done
+    report_device "$state" "$attributed"
     echo "json-log bytes total: $(fmt_bytes "$logtotal")  (${logstat} sized by stat of docker's LogPath, ${logdocker} by 'docker logs | wc -c' payload because the file was unreadable)"
     echo "top 10 containers by wbytes:"
-    container_rows "$state" | head -10 | awk '{ printf "  %14d  %s  %s\n", $1, $2, $3 }'
+    container_rows "$state" | awk 'NR <= 10 { printf "  %14d  %s  %s\n", $1, $2, $3 }'
     echo "top 10 callers (dev.nexus.test.caller) by summed wbytes:"
-    caller_rows "$state" | head -10 | awk '{ printf "  %14d  %4d containers  %s\n", $1, $2, $3 }'
+    caller_rows "$state" | awk 'NR <= 10 { printf "  %14d  %4d containers  %s\n", $1, $2, $3 }'
 }
 
 # ---- sampling ----------------------------------------------------------------------------
 
-# Resolve one daemon (process name) to its cgroup and record the baseline.
+# Resolve one daemon (process name) to its cgroup and record the baseline. Files are named by the
+# name as a safe path component, whatever -x was given.
 daemon_baseline() {
-    local state=$1 root=$2 name=$3 pid cg w
+    local state=$1 root=$2 name=$3 key pids pid cg w
+    key=$(safe_key "$name")
     mkdir -p "$state/d"
-    pid=$(pgrep -x "$name" 2>/dev/null | head -1)
+    pids=$(pgrep -x "$name" 2>/dev/null || true)
+    pid=${pids%%$'\n'*}
     if [[ -z $pid ]]; then
-        echo "no process named $name" >"$state/d/$name.skip"
+        echo "no process named $name" >"$state/d/$key.skip"
         return 0
     fi
     if ! cg=$(cgroup_path_from_proc "$PROC_ROOT/$pid/cgroup"); then
-        echo "no cgroup v2 path for pid $pid" >"$state/d/$name.skip"
+        echo "no cgroup v2 path for pid $pid" >"$state/d/$key.skip"
         return 0
     fi
-    printf '%s\n' "$cg" >"$state/d/$name.cg"
+    printf '%s\n' "$cg" >"$state/d/$key.cg"
     if w=$(sum_wbytes "$root/$cg/io.stat"); then
-        printf '%s\n' "$w" >"$state/d/$name.base"
+        printf '%s\n' "$w" >"$state/d/$key.base"
+        note_devices "$state" "$root/$cg/io.stat"
     fi
 }
 
@@ -186,6 +357,7 @@ daemon_end() {
         cg=$(<"$f")
         if [[ -r $state/d/$name.base ]] && w=$(sum_wbytes "$root/$cg/io.stat"); then
             printf '%s\n' "$w" >"$state/d/$name.end"
+            note_devices "$state" "$root/$cg/io.stat"
         fi
     done
 }
@@ -197,7 +369,7 @@ sample_once() {
         [[ -n $id ]] || continue
         dir=$state/c/$id
         if [[ ! -d $dir ]]; then
-            info=$(docker inspect -f '{{.State.Pid}}|{{.LogPath}}|{{index .Config.Labels "dev.nexus.test.caller"}}' "$id" 2>/dev/null) || continue
+            info=$(dock inspect -f '{{.State.Pid}}|{{.LogPath}}|{{index .Config.Labels "dev.nexus.test.caller"}}' "$id" 2>/dev/null) || continue
             mkdir -p "$dir"
             IFS='|' read -r pid logpath caller <<<"$info"
             printf '%s\n' "${caller:--}" >"$dir/caller"
@@ -210,25 +382,26 @@ sample_once() {
             cg=$(<"$dir/cg")
             if w=$(sum_wbytes "$root/$cg/io.stat"); then
                 record_max "$dir/wmax" "$w"
+                if ((w > 0)); then note_devices "$state" "$root/$cg/io.stat"; fi
             fi
         fi
         logpath=$(<"$dir/logpath")
         if [[ -n $logpath ]] && size=$(stat -c %s "$logpath" 2>/dev/null || stat -f %z "$logpath" 2>/dev/null) && [[ $size =~ ^[0-9]+$ ]]; then
             record_max "$dir/logmax" "$size"
             echo stat >"$dir/logmode"
-        else
-            size=$(docker logs "$id" 2>&1 | wc -c | tr -d ' ')
-            if [[ $size =~ ^[0-9]+$ ]]; then
-                record_max "$dir/logmax" "$size"
-                [[ -e $dir/logmode ]] || echo docker >"$dir/logmode"
-            fi
+        # A container that died between the listing and now makes docker print an error and fail: that
+        # text is not log. Pipefail carries docker's status through the pipe, so the size is skipped.
+        elif size=$(dock logs "$id" 2>&1 | wc -c | tr -d ' ') && [[ $size =~ ^[0-9]+$ ]]; then
+            record_max "$dir/logmax" "$size"
+            [[ -e $dir/logmode ]] || echo docker >"$dir/logmode"
         fi
-    done < <(docker ps -q --no-trunc ${PS_FILTER[@]+"${PS_FILTER[@]}"} 2>/dev/null)
+    done < <(dock ps -q --no-trunc ${PS_FILTER[@]+"${PS_FILTER[@]}"} 2>/dev/null)
 }
 
+# Ticks until the stop file appears or PARENT (the script) is gone, so a SIGKILLed script leaves nothing running.
 sampler_loop() {
-    local state=$1 root=$2 interval=$3 n=0
-    while [[ ! -e $state/stop ]]; do
+    local state=$1 root=$2 interval=$3 parent=$4 n=0
+    while [[ ! -e $state/stop ]] && kill -0 "$parent" 2>/dev/null; do
         sample_once "$state" "$root"
         n=$((n + 1))
         echo "$n" >"$state/samples"
@@ -236,9 +409,25 @@ sampler_loop() {
     done
 }
 
-STATE=""
+# After the command: tell the loop to stop, give it GRACE seconds, then kill it and say so in the report.
+stop_sampler() {
+    local state=$1 pid=$2 deadline
+    touch "$state/stop"
+    deadline=$((SECONDS + SAMPLER_GRACE + 1))
+    while kill -0 "$pid" 2>/dev/null; do
+        if ((SECONDS >= deadline)); then
+            echo "sampler loop still running ${SAMPLER_GRACE}s after the command ended; killed" >>"$state/timeouts"
+            kill_tree "$pid"
+            break
+        fi
+        sleep 0.1
+    done
+    wait "$pid" 2>/dev/null
+    return 0
+}
+
 SAMPLER_PID=""
-PS_FILTER=() # extra `docker ps` arguments: --filter <expr> per -f
+PS_FILTER=() # extra docker listing arguments: --filter <expr> per -f
 
 # A signal to this script stops the sampler; the command, in the same process group, gets it too.
 on_signal() {
@@ -250,14 +439,32 @@ usage() {
     sed -n '5,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
+die() {
+    echo "container_io_sampler: $*" >&2
+}
+
 main() {
     local interval=2 root=/sys/fs/cgroup state names=(dockerd containerd systemd-journal)
     while (($#)); do
         case $1 in
-            -i) interval=${2:?-i needs seconds}; shift 2 ;;
-            -x) names+=("${2:?-x needs a process name}"); shift 2 ;;
-            -f) PS_FILTER+=(--filter "${2:?-f needs a docker ps filter}"); shift 2 ;;
-            -r) root=${2:?-r needs a directory}; shift 2 ;;
+            -i | -x | -f | -r)
+                (($# >= 2)) || { die "$1 needs an argument"; return 2; } ;;
+        esac
+        case $1 in
+            -i)
+                interval=$2
+                positive_number "$interval" || { die "-i must be a positive number of seconds, got '$interval'"; return 2; }
+                shift 2 ;;
+            -x)
+                [[ $2 == -* ]] && { die "-x name must not start with '-', got '$2'"; return 2; }
+                names+=("$2"); shift 2 ;;
+            -f)
+                [[ $2 == *= ]] && {
+                    die "filter '$2' has an empty value (is NX_TEST_RUN_ID exported?): it would match every container with an empty value"
+                    return 2
+                }
+                PS_FILTER+=(--filter "$2"); shift 2 ;;
+            -r) root=$2; shift 2 ;;
             -h | --help) usage; return 0 ;;
             --) shift; break ;;
             *) break ;;
@@ -267,12 +474,19 @@ main() {
         usage
         return 2
     fi
-    if ! command -v docker >/dev/null 2>&1 || ! docker ps -q >/dev/null 2>&1; then
-        echo "container_io_sampler: docker is not usable as this user (docker ps failed); not running the command" >&2
+    local bound
+    for bound in "$DOCKER_TIMEOUT" "$SAMPLER_GRACE" "$FINAL_SAMPLE_SECS"; do
+        positive_int "$bound" || { die "the NX_IO_SAMPLER_DOCKER_TIMEOUT/GRACE/FINAL bounds must be positive whole seconds, got '$bound'"; return 2; }
+    done
+    if ! command -v docker >/dev/null 2>&1 || ! bounded "$DOCKER_TIMEOUT" docker ps -q >/dev/null 2>&1; then
+        die "docker is not usable as this user (the listing failed or did not answer in ${DOCKER_TIMEOUT}s); not running the command"
         return 2
     fi
-    state=$(mktemp -d "${TMPDIR:-/tmp}/nx-io-sampler.XXXXXX") || return 2
+    state=$(mktemp -d "$(pick_state_base)/nx-io-sampler.XXXXXX") || return 2
     mkdir -p "$state/c" "$state/d"
+    STATE=$state
+    dock info --format '{{.Driver}} {{.LoggingDriver}} {{.Debug}} {{.CgroupVersion}}' >"$state/docker-info" 2>/dev/null || rm -f "$state/docker-info"
+    cp "$PROC_ROOT/diskstats" "$state/diskstats.base" 2>/dev/null
     local name own_cg own_base="" own_end=""
     for name in "${names[@]}"; do
         daemon_baseline "$state" "$root" "$name"
@@ -281,29 +495,34 @@ main() {
         own_base=$(sum_wbytes "$root/$own_cg/io.stat" || true)
     fi
 
-    STATE=$state
-    sampler_loop "$state" "$root" "$interval" &
+    sampler_loop "$state" "$root" "$interval" "$$" &
     SAMPLER_PID=$!
     local start=$SECONDS rc
     trap on_signal INT TERM
     "$@"
     rc=$?
     trap - INT TERM
-    touch "$state/stop"
-    wait "$SAMPLER_PID" 2>/dev/null
-    sample_once "$state" "$root" # one more look at what is still running
+    stop_sampler "$state" "$SAMPLER_PID"
+    # one more look at what is still running
+    bounded "$FINAL_SAMPLE_SECS" sample_once "$state" "$root" || echo "final sample did not finish in ${FINAL_SAMPLE_SECS}s" >>"$state/timeouts"
     daemon_end "$state" "$root"
+    cp "$PROC_ROOT/diskstats" "$state/diskstats.end" 2>/dev/null
     if [[ -n $own_cg && -n $own_base ]]; then
         own_end=$(sum_wbytes "$root/$own_cg/io.stat" || true)
         if [[ -n $own_end ]]; then
             printf '%s\n' "$own_cg" >"$state/d/command-own-cgroup.cg"
             printf '%s\n' "$own_base" >"$state/d/command-own-cgroup.base"
             printf '%s\n' "$own_end" >"$state/d/command-own-cgroup.end"
+            note_devices "$state" "$root/$own_cg/io.stat"
         fi
     fi
     printf 'meta_exit=%s\nmeta_secs=%s\nmeta_samples=%s\n' "$rc" "$((SECONDS - start))" "$(cat "$state/samples" 2>/dev/null || echo 0)" >"$state/meta"
     report "$state" >&2
     echo "(raw samples kept in $state)" >&2
+    if ((${#PS_FILTER[@]} > 0)) && (($(count_containers "$state") == 0)); then
+        echo "WARNING: -f was given and NO container was seen. The filter matched nothing (wrong NX_TEST_RUN_ID or label? the containers started and ended between two ticks? docker stalled?): the container figures above measure nothing. Exit status 3 unless the command itself failed." >&2
+        if ((rc == 0)); then rc=3; fi
+    fi
     return "$rc"
 }
 

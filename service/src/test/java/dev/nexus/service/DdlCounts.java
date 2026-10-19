@@ -83,8 +83,9 @@ final class DdlCounts {
     static final String DEFAULT_DIR = "target/ddl-counts";
     private static final int TOP_CLASSES = 40;
 
-    private static final Set<FailFastPostgreSQLContainer> LIVE = ConcurrentHashMap.newKeySet();
-    private static final Totals GLOBAL = new Totals();
+    // Not final only so DdlCountSwitchTest can give itself private state (isolateForTest).
+    private static volatile Set<FailFastPostgreSQLContainer> LIVE = ConcurrentHashMap.newKeySet();
+    private static volatile Totals GLOBAL = new Totals();
     private static final String SUITE = System.getProperty(SUITE_PROPERTY, "unset");
     private static final String RUN = sanitize(System.getProperty(RUN_PROPERTY, "none"));
     private static final String FILE_STEM = "ddl-" + sanitize(SUITE) + "-" + RUN + "-"
@@ -164,11 +165,11 @@ final class DdlCounts {
         return mark(template, DdlLogParser.READY_LABEL);
     }
 
-    /** Log the {@code end} mark on a live container, on its own short-lived connection. */
+    /**
+     * Log the {@code end} mark on a live container, on its own short-lived connection. Reached through
+     * {@link #record}, which is off with the counter; {@link #mark} is off as well.
+     */
     static boolean markEnd(FailFastPostgreSQLContainer c) {
-        if (!enabled()) {
-            return false;
-        }
         Properties props = new Properties();
         props.setProperty("user", c.getUsername());
         props.setProperty("password", c.getPassword());
@@ -295,6 +296,26 @@ final class DdlCounts {
             GLOBAL.logError();
         }
         flush();
+    }
+
+    /**
+     * Test hook (DdlCountSwitchTest): swap in empty live/global state, so a test can drive the notes and
+     * records on and off without touching the fork's real counts; closing puts the fork's back.
+     */
+    static AutoCloseable isolateForTest() {
+        Set<FailFastPostgreSQLContainer> savedLive = LIVE;
+        Totals savedGlobal = GLOBAL;
+        LIVE = ConcurrentHashMap.newKeySet();
+        GLOBAL = new Totals();
+        return () -> {
+            LIVE = savedLive;
+            GLOBAL = savedGlobal;
+        };
+    }
+
+    /** Test hook: the current totals plus the live-container count, as the count file would carry them. */
+    static Map<String, Object> stateForTest() {
+        return GLOBAL.snapshot(LIVE.size());
     }
 
     /** One fork's running totals. An instance, so a unit test folds into its own, not the fork's. */

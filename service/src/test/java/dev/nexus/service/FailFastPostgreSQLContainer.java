@@ -53,10 +53,12 @@ import java.util.concurrent.TimeUnit;
  * {@code nexus/nexus-soqa8-critique-2026-08-06} [21531]): failing fast on the FIRST
  * classified attempt is safe only because {@link PostgreSQLContainer#waitUntilContainerStarted()}
  * OVERRIDES {@code JdbcDatabaseContainer}'s connect-loop wait entirely, gating on the wait
- * strategy {@link PgContainerHelper#newContainer} sets instead (since nexus-sz651 a {@code pg_isready}
- * probe on TCP, which the init's unix-socket-only temp server never passes; the server log is a file now
- * and no longer carries the "ready to accept connections" line on Docker's log, where the earlier
- * {@code LogMessageWaitStrategy} read it). Postgres's {@code initdb} finalizes the superuser role and
+ * strategy {@link PgContainerHelper#newContainer} sets instead. With the DDL counter on (the default;
+ * nexus-sz651) that is a {@code pg_isready} probe on TCP, which the init's unix-socket-only temp server
+ * never passes: the server log is a file then and no longer carries the "ready to accept connections"
+ * line on Docker's log, where the earlier {@code LogMessageWaitStrategy} read it. With the counter off
+ * ({@code -Dnexus.ddl.count=false}, nexus-3cwsw) there is no collector, the ready line is on Docker's log
+ * again, and the library's default {@code LogMessageWaitStrategy} stays. Postgres's {@code initdb} finalizes the superuser role and
  * credentials synchronously, before either ready line — so by the time {@code start()}
  * returns and ANY application code makes its first {@code createConnection} call, the
  * server side of the auth handshake is already fixed; a classified failure at attempt 1
@@ -97,7 +99,8 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
     private volatile boolean ddlShared;
     private volatile String ddlOwner = "unknown";
     // False when the counter was switched off (-Dnexus.ddl.count=false) as this container was built:
-    // it then carries none of the counter's settings, so it is neither registered nor read.
+    // it then carries none of the counter's settings, so its server log is Docker's log (PgContainerHelper.serverLog).
+    // Whether it is registered is DdlCounts.register's own check of the switch.
     private volatile boolean ddlCounted = true;
 
     /** Whether this container was built with the counter's settings (see {@link DdlCounts#enabled()}). */
@@ -137,9 +140,7 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
     @Override
     public void start() {
         super.start();
-        if (ddlCounted) {
-            DdlCounts.register(this);
-        }
+        DdlCounts.register(this);
     }
 
     @Override

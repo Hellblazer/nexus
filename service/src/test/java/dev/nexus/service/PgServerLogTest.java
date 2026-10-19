@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -65,6 +66,7 @@ class PgServerLogTest {
 
     @Test
     void ddl_statement_lines_reach_the_server_log_file_and_never_the_docker_log() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector, probe or marks");
         PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
         try (Connection conn = c.createConnection("")) {
             runDdl(conn, "nx_sz651_log", DDL_STATEMENTS);
@@ -90,6 +92,7 @@ class PgServerLogTest {
 
     @Test
     void the_server_log_file_sits_on_the_tmpfs_data_directory_and_is_not_rotated_away() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector, probe or marks");
         assertThat(PgContainerHelper.SERVER_LOG_FILE).startsWith(PgContainerHelper.PGDATA + "/");
         PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
         try {
@@ -118,6 +121,7 @@ class PgServerLogTest {
      */
     @Test
     void stopping_a_container_counts_its_ddl_from_the_server_log() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector, probe or marks");
         Path dir = Files.createTempDirectory("nx-sz651-counts");
         String previous = System.getProperty(DdlCounts.DIR_PROPERTY);
         System.setProperty(DdlCounts.DIR_PROPERTY, dir.toString());

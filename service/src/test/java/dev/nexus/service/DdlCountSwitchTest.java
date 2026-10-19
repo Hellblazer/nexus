@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -110,41 +111,77 @@ class DdlCountSwitchTest {
             });
     }
 
+    @SuppressWarnings("unchecked")
+    private static long perClassWal(Map<String, Object> state, String owner) {
+        Map<String, Object> row = (Map<String, Object>) ((Map<String, Object>) state.get("per_class")).get(owner);
+        return row == null ? 0L : ((Number) row.get("wal_bytes")).longValue();
+    }
+
     @Test
-    void an_off_counter_touches_no_connection_container_or_file_and_an_on_counter_does() throws Exception {
+    void an_off_counter_touches_no_connection_container_state_or_file_and_an_on_counter_does() throws Exception {
         Path root = Files.createTempDirectory("nx-3cwsw-counts");
         Path dir = root.resolve("never-created");
         String previousDir = System.getProperty(DdlCounts.DIR_PROPERTY);
         System.setProperty(DdlCounts.DIR_PROPERTY, dir.toString());
-        try {
+        // The fork's real live set and totals are put aside: this test registers unstarted containers and
+        // records read failures, which the ratchet would read as a killed fork and unreadable logs.
+        try (AutoCloseable isolated = DdlCounts.isolateForTest()) {
             AtomicInteger calls = new AtomicInteger();
             FailFastPostgreSQLContainer offContainer = (FailFastPostgreSQLContainer) withCount("false", PgContainerHelper::newContainer);
+            FailFastPostgreSQLContainer onContainer = (FailFastPostgreSQLContainer) withCount(null, PgContainerHelper::newContainer);
+            // Set up WITH the counter on: one live container (never started: reading its log fails) and one
+            // database with a start LSN. Each off call below must leave all of it exactly as it is.
+            withCount(null, () -> {
+                DdlCounts.register(onContainer);
+                DdlCounts.noteDatabase("nexus_test_on", "SwitchOwner", true, 0);
+                return null;
+            });
+            Path file;
+            try (Stream<Path> files = Files.list(dir)) {
+                file = files.filter(p -> p.toString().endsWith(".json")).findFirst().orElseThrow();
+            }
+            Files.delete(file);
+            Map<String, Object> before = DdlCounts.stateForTest();
+            assertThat(before).containsEntry("containers_unread", 1).containsEntry("log_errors", 0);
+            assertThat(perClassWal(before, "SwitchOwner")).isZero();
+
             withCount("false", () -> {
                 assertThat(DdlCounts.mark(deadConnection(calls), "start")).isFalse();
                 assertThat(DdlCounts.markReady(deadConnection(calls))).isFalse();
                 assertThat(DdlCounts.walBytes(deadConnection(calls))).isEqualTo(-1);
-                assertThat(DdlCounts.markEnd(offContainer)).isFalse();
                 DdlCounts.register(offContainer);
-                DdlCounts.noteDatabase("nexus_test_off", "SomeTest", true, 0);
-                DdlCounts.noteRelease("nexus_test_off", 10);
+                assertThat(DdlCounts.stateForTest()).as("off: register adds nothing to the live set")
+                    .containsEntry("containers_unread", 1);
+                DdlCounts.noteDatabase("nexus_test_off", "OffOwner", true, 0);
+                DdlCounts.noteRelease("nexus_test_on", 10); // would add 10 WAL bytes to SwitchOwner
                 DdlCounts.record(offContainer);
+                DdlCounts.record(onContainer); // would read the unstarted container's log and count a log error
                 DdlCounts.flush();
                 return null;
             });
             assertThat(calls.get()).as("off: no call reached a connection").isZero();
-            assertThat(dir).as("off: no count directory, no count file").doesNotExist();
+            assertThat(DdlCounts.stateForTest()).as("off: the live set and the totals are untouched").isEqualTo(before);
+            assertThat(dir.resolve(file.getFileName())).as("off: no count file written").doesNotExist();
 
-            // Positive control: the same calls with the counter on reach the connection and write the file.
+            // Positive controls: the same calls with the counter on reach the connection, move the state
+            // and write the file, so the assertions above are not looking at state nothing could change.
             withCount(null, () -> {
                 assertThat(DdlCounts.mark(deadConnection(calls), "start")).as("a dead connection fails the mark").isFalse();
                 assertThat(DdlCounts.walBytes(deadConnection(calls))).isEqualTo(-1);
+                DdlCounts.register(offContainer);
+                assertThat(DdlCounts.stateForTest()).containsEntry("containers_unread", 2);
+                DdlCounts.noteDatabase("nexus_test_on2", "OnOwner", true, 0);
+                DdlCounts.noteRelease("nexus_test_on", 10);
+                DdlCounts.record(onContainer);
                 DdlCounts.flush();
                 return null;
             });
             assertThat(calls.get()).as("on: the calls reached the connection").isPositive();
-            try (Stream<Path> files = Files.list(dir)) {
-                assertThat(files.filter(p -> p.toString().endsWith(".json")).count()).as("on: a count file").isEqualTo(1);
-            }
+            Map<String, Object> after = DdlCounts.stateForTest();
+            assertThat(after).as("on: record takes the container out of the live set and counts its unreadable log").containsEntry("containers_unread", 1).containsEntry("log_errors", 1);
+            assertThat(perClassWal(after, "SwitchOwner")).as("on: noteRelease adds the WAL bytes").isEqualTo(10);
+            assertThat(after.get("classes_seen")).as("on: noteDatabase records the owner").isEqualTo(2);
+            assertThat(dir.resolve(file.getFileName())).as("on: the count file is written").exists();
         } finally {
             if (previousDir == null) {
                 System.clearProperty(DdlCounts.DIR_PROPERTY);

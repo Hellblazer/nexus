@@ -84,6 +84,8 @@ public final class PgContainerHelper {
      * about 462k lines in a main run). Left on stderr, Docker stores them as json-file logs under
      * /var/lib/docker on the host's disk: 1.63 GB written against 0.48 GB without the counter (chas
      * NVMe sampler). {@code logging_collector} takes them off stderr into this directory, which is RAM.
+     * Only with the counter on: with {@code -Dnexus.ddl.count=false} (nexus-3cwsw) a container has no
+     * collector and no such file, and {@link #serverLog} reads Docker's log instead.
      */
     public static final String SERVER_LOG_DIR = PGDATA + "/nx-log";
 
@@ -261,9 +263,10 @@ public final class PgContainerHelper {
     });
 
     /**
-     * The container's whole server log, read from {@link #SERVER_LOG_FILE} in the container (nexus-sz651).
-     * Not {@code container.getLogs()}: that is Docker's log, which carries only the postmaster's first
-     * lines now. The file only grows, so a length taken from one read is a valid offset for the next.
+     * The container's whole server log. Counter on: read from {@link #SERVER_LOG_FILE} in the container
+     * (nexus-sz651), not {@code container.getLogs()}, which is Docker's log and carries only the
+     * postmaster's first lines then. Counter off (the container was built with it off, nexus-3cwsw): there
+     * is no file and the log is Docker's, {@code getLogs()}. The file only grows, so a length taken from one read is a valid offset for the next.
      * Throws when the file cannot be read. One {@code docker exec} that never returns (seen once, in a
      * 10-class run on colima: the exec's stream never closed) is abandoned after
      * {@link #SERVER_LOG_READ_TIMEOUT} and the read is tried again, so a stuck exec cannot hang a suite.
@@ -738,7 +741,8 @@ public final class PgContainerHelper {
      * Make {@link #SVC_USERNAME}'s NEW sessions log every statement's plan, statements nested in a
      * function included, to the server log (see {@code db.changelog-test-auto-explain.xml}). Open a fresh
      * pool after this; existing pooled connections keep their old settings. Read the plans back with
-     * {@link #serverLog}: the server log is a file in the container (nexus-sz651), not Docker's log.
+     * {@link #serverLog}: with the counter on the server log is a file in the container (nexus-sz651), not
+     * Docker's log; with it off it is Docker's log.
      */
     public static void enableAutoExplainForService(Connection su) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-auto-explain.xml",
