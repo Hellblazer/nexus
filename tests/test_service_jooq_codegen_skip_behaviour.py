@@ -108,7 +108,7 @@ def _build_xml() -> str:
         'message="main_skip=${nexus.jooq.main.skip}&#10;test_skip=${nexus.jooq.test.skip}&#10;'
         'main_hash=${nexus.jooq.main.hash}&#10;test_hash=${nexus.jooq.test.hash}&#10;'
         'main_restored=${nexus.jooq.main.restored}&#10;test_restored=${nexus.jooq.test.restored}&#10;'
-        'cache_dir=${nexus.jooq.cache.dir}"/></target>\n</project>\n'
+        'cache_dir=${nexus.jooq.cache.dir}&#10;producer=${nexus.jooq.producer}"/></target>\n</project>\n'
     )
 
 
@@ -123,6 +123,8 @@ class Decision:
     restored: dict[str, bool]
     #: the cache directory the jooq-inputs step resolved (Maven exports it to the stamp steps)
     cache_dir: str = "off"
+    #: what the jooq-inputs step says produced (and so may be served from) the cache entries
+    producer: str = ""
 
 
 @dataclass
@@ -136,6 +138,8 @@ class Project:
     #: so the pom's own resolution (NX_JOOQ_CACHE, then the git common dir) is what runs
     cache: str | None = "off"
     env: dict[str, str] = field(default_factory=dict)
+    #: stdout+stderr of every Ant run, in order (the cache's warnings are asserted on)
+    log: list[str] = field(default_factory=list)
 
     # layout ---------------------------------------------------------------
     @property
@@ -174,8 +178,10 @@ class Project:
                "-q", "-f", str(self.root / "build.xml"), *[f"-D{k}={v}" for k, v in defines.items()], *targets]
         env = {k: v for k, v in os.environ.items() if k != "NX_JOOQ_CACHE"} | self.env
         # cwd is the scratch parent: a buggy relative cache path lands here, never in the repo
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False,
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False,
                               cwd=self.root.parent, env=env)
+        self.log.append(done.stdout + done.stderr)
+        return done
 
     def decide(self, props: dict[str, str] | None = None) -> Decision:
         done = self.ant("inputs", "report", props=props)
@@ -184,7 +190,7 @@ class Project:
         d = Decision(skip={k: kv[f"{k}_skip"] == "true" for k in ("main", "test")},
                      hash={k: kv[f"{k}_hash"] for k in ("main", "test")},
                      restored={k: kv[f"{k}_restored"] == "true" for k in ("main", "test")},
-                     cache_dir=kv["cache_dir"])
+                     cache_dir=kv["cache_dir"], producer=kv["producer"])
         for kind in ("main", "test"):
             if d.restored[kind]:  # the tree on disk is now the cache entry's: read what it really is
                 self.tree_hash[kind] = self.disk_tree_hash(kind)
@@ -244,7 +250,8 @@ class Project:
                 # Maven carries the inputs step's exported properties (hash, skip) into the stamp step.
                 done = self.ant(f"stamp-{kind}", props={**(props or {}), f"nexus.jooq.{kind}.hash": d.hash[kind],
                                                         f"nexus.jooq.{kind}.skip": str(d.skip[kind]).lower(),
-                                                        "nexus.jooq.cache.dir": d.cache_dir})
+                                                        "nexus.jooq.cache.dir": d.cache_dir,
+                                                        "nexus.jooq.producer": d.producer})
                 assert done.returncode == 0, f"stamp step failed:\n{done.stdout}\n{done.stderr}"
             self.check_invariant()
         return d
@@ -446,9 +453,14 @@ def _other_worktree(p: Project, name: str = "wt-b") -> Project:
     return _make_project(p.root.parent.parent / name, p.ant_cp, cache=p.cache)
 
 
-def _entry(p: Project, kind: str, digest: str) -> Path:
+#: what the pom's jooq-inputs step names as the producer unless a -D says otherwise
+_PRODUCER = "testcontainers-fresh-replay"
+
+
+def _entry(p: Project, kind: str, digest: str, producer: str = _PRODUCER) -> Path:
+    """The cache entry for a hash AND a producer: the producer is part of the key."""
     assert p.cache and p.cache != "off"
-    return Path(p.cache) / f"{kind}-{digest}"
+    return Path(p.cache) / f"{kind}-{digest}-{producer}"
 
 
 def _sources(root: Path) -> dict[str, str]:
@@ -463,7 +475,10 @@ def test_a_generation_publishes_both_trees_to_the_shared_cache(cached: Project) 
         assert (entry / "complete").is_file(), f"{kind}: the entry is published without its completeness marker"
         assert _sources(entry / "generated") == _sources(cached.gen_dir[kind]) != {}
         meta = (entry / "meta.properties").read_text(encoding="utf-8")
-        assert f"hash={d.hash[kind]}" in meta and "producer=" in meta, "the entry names its inputs and its producer"
+        assert f"hash={d.hash[kind]}" in meta and f"producer={_PRODUCER}" in meta, "the entry names its inputs and its producer"
+        tree = re.search(r"^treehash=(\w+)$", meta, re.MULTILINE)
+        assert tree and (entry / "complete").read_text(encoding="utf-8").strip() == tree.group(1), (
+            "the marker carries the digest of the tree it closes, so a restore can tell a torn copy")
     assert [c.name for c in Path(cached.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
 
 
@@ -603,6 +618,7 @@ def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Pat
              f"-Dproject.basedir={peer.root}", f"-Dproject.build.directory={peer.target}",
              f"-Djooq.generated.dir={peer.gen_dir['main']}", f"-Djooq.generated.test.dir={peer.gen_dir['test']}",
              f"-Dnexus.jooq.cache.dir={peer.cache}", f"-Dnexus.jooq.main.hash={a.hash['main']}",
+             f"-Dnexus.jooq.producer={_PRODUCER}",
              "-Dnexus.jooq.main.skip=true", "-Djooq.version=3.20.11", "stamp-main"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=peer.root.parent) for peer in peers]
         outs = [pr.communicate(timeout=120)[0] for pr in procs]
@@ -625,14 +641,14 @@ def test_the_cache_is_found_through_NX_JOOQ_CACHE_then_the_git_common_dir(tmp_pa
     via_env = _make_project(tmp_path / "via-env", ant_classpath, cache=None)
     via_env.env = {"NX_JOOQ_CACHE": str(env_cache)}
     d = via_env.build()
-    assert (env_cache / f"main-{d.hash['main']}" / "complete").is_file()
+    assert (env_cache / f"main-{d.hash['main']}-{_PRODUCER}" / "complete").is_file()
 
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     in_repo = _make_project(repo, ant_classpath, cache=None)
     in_repo.build()
     common = repo / ".git" / "nexus-jooq-cache"
-    assert (common / f"main-{d.hash['main']}" / "complete").is_file(), "default location is the git common dir"
+    assert (common / f"main-{d.hash['main']}-{_PRODUCER}" / "complete").is_file(), "default location is the git common dir"
 
     # Not a repository and no NX_JOOQ_CACHE: no cache, and the build still works exactly as before.
     lone = _make_project(tmp_path / "lone", ant_classpath, cache=None)
@@ -645,3 +661,144 @@ def test_the_cache_is_found_through_NX_JOOQ_CACHE_then_the_git_common_dir(tmp_pa
     off.env = {"NX_JOOQ_CACHE": "off"}
     off.build()
     assert not (tmp_path / "off-env" / "off").exists()
+
+
+# ----------------------------- the cache is best-effort, and a torn entry is never vouched for
+
+
+def test_the_default_producer_is_the_one_these_tests_assume(cached: Project) -> None:
+    assert cached.build().producer == _PRODUCER
+
+
+def test_a_cache_root_that_cannot_be_created_never_fails_the_build(tmp_path: Path, ant_classpath: str) -> None:
+    """A regular file where the cache directory should be: unwritable for every user, root included."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    p = _make_project(tmp_path / "wt", ant_classpath, cache=str(blocker / "cache"))
+    d = p.build()  # every Ant step must exit 0
+    assert p.generations == ["main", "test"] and d.skip == {"main": False, "test": False}
+    assert p.stamp("main").is_file() and p.stamp("test").is_file(), "the build is stamped as without a cache"
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+    assert any("not published" in chunk for chunk in p.log), "the cache's failure must be said, not swallowed"
+    assert p.build().skip == {"main": True, "test": True}, "and the next build is an ordinary stamp skip"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes; the regular-file variant above covers it")
+def test_a_read_only_cache_dir_never_fails_the_build_and_still_serves_restores(tmp_path: Path, ant_classpath: str) -> None:
+    cache = tmp_path / "jooq-cache"
+    first = _make_project(tmp_path / "wt-a", ant_classpath, cache=str(cache))
+    a = first.build()
+    cache.chmod(0o555)
+    try:
+        assert not os.access(cache, os.W_OK), "the fixture must really be read-only"
+        fresh = _make_project(tmp_path / "wt-b", ant_classpath, cache=str(cache))
+        d = fresh.build()
+        assert d.restored == {"main": True, "test": True} and fresh.generations == [], "reading needs no write access"
+        # a different key cannot be published into it: the build still succeeds, generating
+        other = _make_project(tmp_path / "wt-c", ant_classpath, cache=str(cache))
+        other.put("src/main/resources/db/changelog/other.xml", "<main-other>B</main-other>")
+        o = other.build()
+        assert other.generations == ["main", "test"] and any("not published" in c for c in other.log)
+        assert not _entry(other, "main", o.hash["main"]).exists()
+        assert (_entry(first, "main", a.hash["main"]) / "complete").is_file()
+    finally:
+        cache.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through modes")
+def test_an_unreadable_entry_falls_through_to_a_regeneration(tmp_path: Path, ant_classpath: str) -> None:
+    cached = _make_project(tmp_path / "wt-a", ant_classpath, cache=str(tmp_path / "jooq-cache"))
+    a = cached.build()
+    victim = _entry(cached, "main", a.hash["main"])
+    victim.chmod(0o000)
+    try:
+        fresh = _other_worktree(cached)
+        d = fresh.build()
+        assert d.restored["main"] is False and "main" in fresh.generations, "an unreadable entry must be regenerated over"
+        assert d.restored["test"] is True, "the other kind's entry is untouched"
+    finally:
+        for leftover in Path(cached.cache).iterdir():
+            leftover.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through modes")
+def test_an_unreadable_generated_dir_in_an_entry_falls_through_to_a_regeneration(tmp_path: Path, ant_classpath: str) -> None:
+    cached = _make_project(tmp_path / "wt-a", ant_classpath, cache=str(tmp_path / "jooq-cache"))
+    a = cached.build()
+    gen = _entry(cached, "main", a.hash["main"]) / "generated"
+    gen.chmod(0o000)
+    try:
+        fresh = _other_worktree(cached)
+        d = fresh.build()
+        assert d.restored["main"] is False and "main" in fresh.generations
+    finally:
+        gen.chmod(0o755)
+        for leftover in Path(cached.cache).rglob("*"):
+            if leftover.is_dir():
+                leftover.chmod(0o755)
+
+
+@pytest.mark.parametrize("damage", ["missing-file", "truncated-file", "extra-file"])
+@pytest.mark.parametrize("kind", ["main", "test"])
+def test_a_torn_entry_is_neither_restored_nor_stamped_and_is_repaired(cached: Project, kind: str, damage: str) -> None:
+    """The review's ship-blocker shape: the marker is there, a file is not (or is wrong)."""
+    a = cached.build()
+    gen = _entry(cached, kind, a.hash[kind]) / "generated"
+    if damage == "missing-file":
+        (gen / "B.java").unlink()  # marker present, >= 1 java file left: a count-only test passes this
+    elif damage == "truncated-file":
+        (gen / "B.java").write_text("class B {", encoding="utf-8")
+    else:
+        (gen / "Stray.java").write_text("class Stray {}", encoding="utf-8")
+    fresh = _other_worktree(cached)
+    d = fresh.decide()
+    assert d.restored[kind] is False, f"{kind}: a {damage} entry was restored"
+    assert d.skip[kind] is False, f"{kind}: the codegen must run"
+    assert not fresh.gen_dir[kind].exists(), "the half-copied tree must not be left for the codegen to build over"
+    assert not fresh.stamp(kind).exists(), "no stamp may exist over a tree nobody vouched for"
+    fresh.check_invariant()
+    regen = _other_worktree(cached, "wt-c")
+    regen.build()
+    assert kind in regen.generations
+    healed = _other_worktree(cached, "wt-d")
+    h = healed.build()
+    assert h.restored[kind] is True and healed.generations == [], "the torn entry was repaired by the regeneration"
+    assert _sources(_entry(cached, kind, a.hash[kind]) / "generated") == _sources(regen.gen_dir[kind])
+
+
+def test_a_different_producer_never_serves_or_replaces_another_producers_tree(cached: Project) -> None:
+    a = cached.build()
+    other = "nexus-v0ts5-migrated-template"
+    v = _other_worktree(cached, "wt-v")
+    d = v.build(props={"nexus.jooq.producer": other})
+    assert d.producer == other
+    assert d.restored == {"main": False, "test": False} and v.generations == ["main", "test"], (
+        "an entry made by another producer was served")
+    for kind in ("main", "test"):
+        assert (_entry(cached, kind, a.hash[kind]) / "complete").is_file(), "the original producer's entry was lost"
+        assert (_entry(cached, kind, a.hash[kind], other) / "complete").is_file(), "the new producer's entry was not published"
+        assert f"producer={other}" in (_entry(cached, kind, a.hash[kind], other) / "meta.properties").read_text()
+    back = _other_worktree(cached, "wt-back")
+    assert back.build().restored == {"main": True, "test": True} and back.generations == []
+    again = _other_worktree(cached, "wt-v2")
+    assert again.build(props={"nexus.jooq.producer": other}).restored == {"main": True, "test": True}
+
+
+# The three cases above that rely on file modes cannot run as root (root reads and writes through any mode),
+# so they skip there; the regular-file cases cover the same publish and restore paths for every user. The budget
+# below is the whole of what may skip, and the census proves each skip is conditioned on root and nothing else, so
+# a non-root run (a laptop, chas as nxtest) executes all of them.
+MODE_CASES_MAX_SKIP = 3
+_MODE_CASES = (
+    test_a_read_only_cache_dir_never_fails_the_build_and_still_serves_restores,
+    test_an_unreadable_entry_falls_through_to_a_regeneration,
+    test_an_unreadable_generated_dir_in_an_entry_falls_through_to_a_regeneration,
+)
+
+
+def test_the_mode_based_cases_skip_for_root_and_for_nobody_else() -> None:
+    assert len(_MODE_CASES) == MODE_CASES_MAX_SKIP
+    for case in _MODE_CASES:
+        skips = [m for m in case.pytestmark if m.name == "skipif"]
+        assert len(skips) == 1, f"{case.__name__}: exactly one skip condition, found {len(skips)}"
+        assert bool(skips[0].args[0]) == (os.geteuid() == 0), f"{case.__name__}: skips for something other than root"

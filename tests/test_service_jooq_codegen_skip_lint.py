@@ -287,44 +287,149 @@ def test_a_hand_set_skip_property_fails_the_build() -> None:
 # keeps the stamp invariant true when a restore swaps the tree.
 
 
+def _live(text: str) -> str:
+    """The Ant text with its XML comments removed: a pin on a word must not be satisfied by prose."""
+    return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
+
+def _open_tags(text: str, name: str) -> list[str]:
+    return re.findall(r"<" + name + r"(?=[\s/>])[^>]*>", _live(text), re.DOTALL)
+
+
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_restore_deletes_the_stamp_before_it_swaps_the_tree_and_is_part_of_the_skip(kind: str) -> None:
-    text = _target_text(_hash_execution(_pom()))
+def test_a_restore_touches_the_entry_first_then_drops_the_stamp_then_the_tree_then_copies(kind: str) -> None:
+    text = _live(_target_text(_hash_execution(_pom())))
+    gen = "jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"
+    touch = text.index('<exec executable="touch"', text.index(f'property="nexus.jooq.{kind}.restore.try"'))
     stamp_del = text.index(f'<delete file="${{nexus.jooq.stamp.dir}}/{kind}.sha256" quiet="true"\n'
-                           f'                                        if:true="${{nexus.jooq.{kind}.restored}}"')
-    tree_del = text.index(f'<delete dir="${{{"jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"}}}"')
-    copy = text.index(f'<copy todir=', tree_del)
-    assert stamp_del < tree_del < copy, f"{kind}: the restore must drop the stamp, then the old tree, then copy the new one"
+                           f'                                        if:true="${{nexus.jooq.{kind}.restore.try}}"')
+    tree_del = text.index(f'<delete dir="${{{gen}}}" quiet="true" if:true="${{nexus.jooq.{kind}.restore.try}}"')
+    copy = text.index(f'<copy todir="${{{gen}}}"', tree_del)
+    assert text.index(f'property="nexus.jooq.{kind}.restore.try"') < touch < stamp_del < tree_del < copy, (
+        f"{kind}: touch the entry (so a prune by use skips it), then drop the stamp, then the old tree, then copy")
     assert text.index(f'property="nexus.jooq.{kind}.restored"') < text.index(f'<condition property="nexus.jooq.{kind}.skip"')
     assert f'<istrue value="${{nexus.jooq.{kind}.restored}}"/>' in _condition(text, kind), (
         f"{kind}: a restored tree must skip the codegen")
     # nothing in the inputs step writes a stamp: only the jooq-stamp-* steps do
     assert not re.search(rf'<echo[^>]*{kind}\.sha256', text), f"{kind}: the inputs step must never write a stamp"
+    assert "<touch" not in text, "the touch task fails the build on an entry this user does not own; use the exec"
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_restore_never_runs_for_a_forced_regeneration_or_without_a_complete_entry(kind: str) -> None:
-    text = _target_text(_hash_execution(_pom()))
-    cond = re.search(rf'<condition property="nexus\.jooq\.{kind}\.restored".*?</condition>', text, re.DOTALL).group()
+def test_a_restore_is_verified_and_a_failed_one_leaves_neither_tree_nor_entry(kind: str) -> None:
+    text = _live(_target_text(_hash_execution(_pom())))
+    gen = "jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"
+    restored = re.search(rf'<condition property="nexus\.jooq\.{kind}\.restored".*?</condition>', text, re.DOTALL).group()
+    assert (f'<equals arg1="${{nexus.jooq.{kind}.restore.treehash}}" arg2="${{nexus.jooq.{kind}.entry.treehash}}"/>'
+            in restored), f"{kind}: the copy is not compared with the digest in the entry's marker"
+    assert f'<istrue value="${{nexus.jooq.{kind}.restore.copied}}"/>' in restored
+    # the digest is of what is on disk after the copy, in a stable order
+    digest = re.search(rf'<checksum[^>]*totalproperty="nexus\.jooq\.{kind}\.restore\.treehash".*?</checksum>', text, re.DOTALL)
+    assert digest and "<sort>" in digest.group() and f'<fileset dir="${{{gen}}}"/>' in digest.group()
+    # failure path: the half tree and the torn entry are both removed, after the verdict, only when a restore was tried
+    for target in (f'<delete dir="${{{gen}}}" quiet="true"', f'<delete dir="${{nexus.jooq.{kind}.entry}}" quiet="true"'):
+        tag = next((t for t in _open_tags(text, "delete")
+                    if t.startswith(target) and f'unless:true="${{nexus.jooq.{kind}.restored}}"' in t), None)
+        assert tag, f"{kind}: nothing removes {target} after a failed restore"
+        assert f'if:true="${{nexus.jooq.{kind}.restore.try}}"' in tag
+        assert text.index(tag) > text.index(restored)
+    # every cache-touching step of the restore tolerates its own failure
+    for copy in _open_tags(text, "copy"):
+        if "entry" in copy:
+            assert 'failonerror="false"' in copy, f"{kind}: a restore copy that can fail the build: {copy}"
+    for loadfile in _open_tags(text, "loadfile"):
+        assert 'failonerror="false"' in loadfile, f"a loadfile that can fail the build: {loadfile}"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_restore_never_runs_for_a_forced_regeneration_or_without_a_complete_readable_entry(kind: str) -> None:
+    text = _live(_target_text(_hash_execution(_pom())))
+    cond = re.search(rf'<condition property="nexus\.jooq\.{kind}\.restore\.try".*?</condition>', text, re.DOTALL).group()
     assert '<not><istrue value="${nexus.jooq.regenerate}"/></not>' in cond, "-Dnexus.jooq.regenerate=true must bypass the cache"
-    assert f'<available file="${{nexus.jooq.{kind}.entry}}/complete"/>' in cond, "an entry counts only with its marker"
+    assert f'<isset property="nexus.jooq.{kind}.entry.treehash"/>' in cond, "an entry counts only with its marker"
+    assert f'<isfileselected file="${{nexus.jooq.{kind}.entry}}/generated"><readable/></isfileselected>' in cond, (
+        "an unreadable generated dir makes the fileset scan fail the build; it must be a fall-through")
     assert "<resourcecount" in cond, "an entry with no sources is not restorable"
-    assert f'${{nexus.jooq.{kind}.hash}}' in text and f'{kind}-${{nexus.jooq.{kind}.hash}}' in text, "keyed on the input hash"
+    assert f'{kind}-${{nexus.jooq.{kind}.hash}}-${{nexus.jooq.producer}}' in text, "keyed on the input hash and the producer"
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_publishing_stages_beside_the_entry_and_renames_it_into_place_marker_last(kind: str) -> None:
+def test_publishing_is_best_effort_and_stages_beside_the_entry_marker_last(kind: str) -> None:
     root = _pom()
-    text = _target_text(_stamp_execution(root, EXEC_OF[kind]))
+    text = _live(_target_text(_stamp_execution(root, EXEC_OF[kind])))
+    gen = "jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"
     stage = f"${{nexus.jooq.{kind}.stage}}"
     entry = f"${{nexus.jooq.{kind}.entry}}"
     assert f'value="${{nexus.jooq.cache.dir}}/.staging.{kind}.' in text, "the staging dir must sit in the cache root (same filesystem)"
-    copy = text.index(f'<copy todir="{stage}/generated"')
-    marker = text.index(f'<echo file="{stage}/complete"')
+    probe = text.index(f'<copy file="${{project.build.directory}}/jooq-stamps/{kind}.sha256" tofile="${{nexus.jooq.{kind}.probe}}"')
+    tree_copy = text.index(f'<copy todir="{stage}/generated"')
+    meta = text.index(f'<copy file="${{nexus.jooq.stamp.dir}}/{kind}.cache-meta" tofile="{stage}/meta.properties"')
+    marker = text.index(f'<copy file="${{nexus.jooq.stamp.dir}}/{kind}.cache-complete" tofile="{stage}/complete"')
     rename = text.index(f'<move file="{stage}" tofile="{entry}"')
-    assert copy < marker < rename, f"{kind}: copy, then the completeness marker, then the rename"
-    assert text.index("<echo file=") < copy, "the stamp is still the stamp step's first act"
-    assert "producer" in text, "an entry names what produced it, so a template-based generator can say so (nexus-v0ts5)"
+    assert text.index("<echo file=") < probe < tree_copy < meta < marker < rename, (
+        f"{kind}: stamp, writability probe, tree copy, meta, the completeness marker, then the rename")
+    assert text.index(f'<condition property="nexus.jooq.{kind}.stage.whole"') < marker, "the staged tree is verified before it is marked complete"
+    whole = re.search(rf'<condition property="nexus\.jooq\.{kind}\.stage\.whole".*?</condition>', text, re.DOTALL).group()
+    assert f'<equals arg1="${{nexus.jooq.{kind}.stage.hash}}" arg2="${{nexus.jooq.{kind}.tree.hash}}"/>' in whole, (
+        f"{kind}: the staged copy is not compared with the live tree")
+    # nothing that touches the cache directory can fail the build
+    for tag in _open_tags(text, "copy") + _open_tags(text, "move"):
+        assert 'failonerror="false"' in tag, f"{kind}: a cache write that can fail the build: {tag}"
+    for tag in _open_tags(text, "delete"):
+        assert 'quiet="true"' in tag, f"{kind}: a cache delete that can fail the build: {tag}"
+    for tag in _open_tags(text, "echo"):
+        if 'file="' in tag:
+            assert "nexus.jooq.cache.dir" not in tag and ".stage}" not in tag, f"{kind}: echo writes into the cache: {tag}"
+    assert f'unless:true="${{nexus.jooq.{kind}.publish}}"' in "".join(_open_tags(text, "echo")), (
+        f"{kind}: an unpublishable cache must be said, not swallowed")
+
+
+def test_the_producer_is_declared_once_and_is_part_of_every_entry_key() -> None:
+    root = _pom()
+    inputs = _live(_target_text(_hash_execution(root)))
+    assert re.search(r'<property name="nexus\.jooq\.producer" value="[\w.-]+"/>', inputs), (
+        "the jooq-inputs step must declare the producer (a -D overrides it)")
+    for kind in KINDS:
+        stamp = _live(_target_text(_stamp_execution(root, EXEC_OF[kind])))
+        assert 'name="nexus.jooq.producer"' not in stamp, "the stamp steps take the producer the inputs step exported"
+        for text in (inputs, stamp):
+            m = re.search(rf'<property name="nexus\.jooq\.{kind}\.entry" value="([^"]+)"', text)
+            assert m and m.group(1).endswith(f"/{kind}-${{nexus.jooq.{kind}.hash}}-${{nexus.jooq.producer}}"), (
+                f"{kind}: the entry key must be <kind>-<hash>-<producer>: {m and m.group(1)}")
+
+
+def _mvn_codegen_steps() -> list[tuple[str, str, str, dict[str, str]]]:
+    """(workflow, job, step name, effective env) of every workflow step that runs a Maven lifecycle which reaches
+    the jooq-inputs step: any mvnw run except the prebuilt-jooq native builds and a maven-help-plugin evaluate query (no lifecycle phase runs)."""
+    import yaml
+
+    out = []
+    for wf in sorted((_POM.parents[1] / (".gith" + "ub") / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+        for job_id, job in (doc.get("jobs") or {}).items():
+            for i, step in enumerate(job.get("steps") or []):
+                run = step.get("run") or ""
+                if "mvnw" not in run or "-Pprebuilt-jooq" in run or re.search(r"help(-plugin)?[\w.:-]*:evaluate", run):
+                    continue
+                env = {**(doc.get("env") or {}), **(job.get("env") or {}), **(step.get("env") or {})}
+                out.append((wf.name, job_id, step.get("name") or f"step {i}", {k: str(v) for k, v in env.items()}))
+    return out
+
+
+def test_no_ci_job_restores_a_cached_tree_over_the_codegen_it_exists_to_check() -> None:
+    """A runner that keeps its checkout (the lab pool) keeps the shared cache in .git too, so a CI Maven run that
+    can restore from it would no longer replay the changelog it is gating. Every CI mvnw step that reaches
+    jooq-inputs turns the cache off (NX_JOOQ_CACHE=off, or -Dnexus.jooq.cache.dir=off / -Dnexus.jooq.regenerate=true)."""
+    steps = _mvn_codegen_steps()
+    assert len(steps) >= 6, f"the sweep examined only {len(steps)} Maven steps: the workflows moved, fix this census"
+    offenders = [f"{wf}:{job}:{name}" for wf, job, name, env in steps if env.get("NX_JOOQ_CACHE") != "off"]
+    assert offenders == [], f"Maven steps that may restore a cached jOOQ tree in CI: {offenders}"
+    assert {wf for wf, *_ in steps} >= {"service-ci.yml", "engine-service-release.yml"}, "the pool job and the release job are the two that matter"
+
+
+def test_the_pom_does_not_claim_ci_always_regenerates_from_a_clean_checkout() -> None:
+    text = _POM.read_text(encoding="utf-8")
+    assert "CI starts from a clean checkout" not in text, "a persistent runner does not start clean; the CI jobs set NX_JOOQ_CACHE=off instead"
 
 
 # --- every changelog reference resolves under the hashed db/ tree --------------------------------

@@ -85,6 +85,10 @@ jobs:
     name: jOOQ codegen (linux, Docker)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
       - name: Set up GraalVM 25.0.3

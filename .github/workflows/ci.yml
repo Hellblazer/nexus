@@ -421,6 +421,10 @@ jobs:
     name: service jar (pytest substrate)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     # nexus-n0ful: doc-only pushes/PRs need no engine substrate at all. Job-
     # level skip (never a workflow-level paths: filter — that hangs required
     # checks, see the pytest-gate job below for the fan-in that makes this
@@ -2158,6 +2162,10 @@ jobs:
     name: engine-service native build (PR trip-wire)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -2289,6 +2297,10 @@ jobs:
     name: write-seam behavioural gate (nexus-h29w1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@v7
         with:

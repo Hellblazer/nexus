@@ -170,6 +170,9 @@ jobs:
     # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
     timeout-minutes: 60
     env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs): the pool runner keeps its checkout, and so the cache.
+      NX_JOOQ_CACHE: "off"
       # The pool job is confined to 16 of the host's 64 CPUs, and ONNX Runtime
       # sizes its thread pool from the HOST's cores unless told otherwise.
       # Under that load OrtShutdownSafetyTest saw the SIGSEGV on SIGTERM

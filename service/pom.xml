@@ -675,7 +675,9 @@
                          `mvn compile` does not cost the following `mvn test` a regeneration.
 
                          `mvn clean`, any changelog or pom edit, or -Dnexus.jooq.regenerate=true
-                         regenerates; CI starts from a clean checkout, so it always does. The hash
+                         regenerates. A CI runner that keeps its checkout between runs (the lab pool does)
+                         keeps target/ and the shared cache too, so the CI jobs set NX_JOOQ_CACHE=off and
+                         start every build from the replay they exist to check. The hash
                          cannot see the floating pg17 image tag; -Dnexus.jooq.regenerate=true is the
                          answer to that. nexus.jooq.main.skip and nexus.jooq.test.skip are this step's
                          OUTPUT: setting one by hand would beat the decision (Ant properties are
@@ -691,18 +693,24 @@
                          clean` cannot be vouched for and used to replay the whole changelog through the codegen
                          container (~350 MB written) for a tree it had already generated elsewhere. The generated
                          trees are a pure function of the hash this step already computes, so after a generation the
-                         jooq-stamp-* steps publish them to <git common dir>/nexus-jooq-cache/<main|test>-<hash>/
-                         (generated/, meta.properties, complete), and when the stamp does not match but the cache
-                         holds the hash this step restores the tree instead of setting a regenerate. A restore
-                         deletes the stamp before it swaps the tree and never writes one, so THE INVARIANT holds
-                         at every instant; the stamp step then vouches for the restored tree as for a generated one.
+                         jooq-stamp-* steps publish them to
+                         <git common dir>/nexus-jooq-cache/<main|test>-<hash>-<producer>/ (generated/,
+                         meta.properties, complete), and when the stamp does not match but the cache holds the key this
+                         step restores the tree instead of setting a regenerate. A restore deletes the stamp before it
+                         swaps the tree and never writes one, so THE INVARIANT holds at every instant; the stamp step
+                         then vouches for the restored tree as for a generated one. The `complete` marker carries the
+                         digest of the tree it closes: a restore digests what it copied and, on any mismatch (a torn
+                         entry, a prune racing the copy), drops the copy and the entry and regenerates. The cache is
+                         best-effort end to end: an unwritable or full cache directory costs a warning and no publish,
+                         an unreadable or unusable entry costs a regeneration, neither fails the build.
                          -Dnexus.jooq.regenerate=true skips the restore and replaces the entry. Publication copies
-                         into a .staging dir beside the entry and renames it in, marker last, so a reader never sees
-                         half an entry. -Dnexus.jooq.cache.dir=<dir|off>, then $NX_JOOQ_CACHE, then the git common
-                         dir choose the location; off, or no git checkout, is the pre-fkhd3 behaviour.
-                         scripts/lib/gate-jar-cache.sh gate_jar_cache_prune_jooq trims it. The entry carries the
-                         name of its producer (nexus.jooq.producer): generating against the nexus-v0ts5 migrated
-                         template instead of a fresh replay changes the producer and not the key. -->
+                         into a .staging dir beside the entry, checks the copy against the live tree, and renames it
+                         in, marker last, so a reader never sees half an entry. -Dnexus.jooq.cache.dir=<dir|off>, then
+                         $NX_JOOQ_CACHE, then the git common dir choose the location; off, or no git checkout, is the
+                         pre-fkhd3 behaviour. scripts/lib/gate-jar-cache.sh gate_jar_cache_prune_jooq trims it, and only
+                         scripts/build-gate-jar.sh calls that. The producer (nexus.jooq.producer) is part of the key:
+                         generating against the nexus-v0ts5 migrated template instead of a fresh replay never serves,
+                         or is served, the other's tree. -->
                     <execution>
                         <id>jooq-inputs</id>
                         <phase>initialize</phase>
@@ -756,6 +764,10 @@
                                     </and>
                                 </condition>
                                 <property name="nexus.jooq.cache.dir" value="off"/>
+                                <!-- What makes the generated trees. It is part of the entry key (see the SHARED CACHE
+                                     note above): -Dnexus.jooq.producer=<name> for a generation by anything other than a
+                                     fresh Testcontainers replay, the nexus-v0ts5 migrated template for one. -->
+                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
                                 <condition property="nexus.jooq.cache.on" value="true" else="false">
                                     <not>
                                         <or>
@@ -791,20 +803,30 @@
                                     </union>
                                 </checksum>
                                 <!-- main: restore the tree from the shared cache when the stamp does not vouch for the
-                                     one on disk but the cache holds this hash (a fresh worktree, a `mvn clean`, a
-                                     branch switch back to inputs generated before). The stamp is deleted BEFORE the
-                                     tree is swapped, and only the jooq-stamp-main step writes one, so the invariant
-                                     below holds at every instant; a restore killed mid-copy leaves no stamp. -->
+                                     one on disk but the cache holds this hash made by this producer (a fresh worktree,
+                                     a `mvn clean`, a branch switch back to inputs generated before). The entry is trusted
+                                     only as far as it checks out: its `complete` marker carries the digest of the tree it
+                                     closes, the copy is digested again, and a mismatch (a file missing, cut short or added,
+                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy and the
+                                     entry away and falls through to the regeneration, with no stamp. The entry is touched
+                                     FIRST, so a prune ordering by use does not pick the entry being read. The stamp is
+                                     deleted BEFORE the tree is swapped, and only the jooq-stamp-main step writes one, so the
+                                     invariant above holds at every instant; a restore killed mid-copy leaves no stamp. -->
                                 <loadfile property="nexus.jooq.main.prestamp"
                                           srcFile="${nexus.jooq.stamp.dir}/main.sha256" failonerror="false" quiet="true">
                                     <filterchain><striplinebreaks/></filterchain>
                                 </loadfile>
-                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}"/>
-                                <condition property="nexus.jooq.main.restored" value="true" else="false">
+                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}-${nexus.jooq.producer}"/>
+                                <loadfile property="nexus.jooq.main.entry.treehash"
+                                          srcFile="${nexus.jooq.main.entry}/complete" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <condition property="nexus.jooq.main.restore.try" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.cache.on}"/>
                                         <not><istrue value="${nexus.jooq.regenerate}"/></not>
-                                        <available file="${nexus.jooq.main.entry}/complete"/>
+                                        <isset property="nexus.jooq.main.entry.treehash"/>
+                                        <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
                                                      erroronmissingdir="false"/>
@@ -820,15 +842,50 @@
                                         </not>
                                     </and>
                                 </condition>
+                                <!-- (exec, not the touch task: that one fails the build on an entry this user does not own,
+                                     and recency only matters to a prune on a POSIX host.) -->
+                                <exec executable="touch" failonerror="false" failifexecutionfails="false"
+                                      if:true="${nexus.jooq.main.restore.try}">
+                                    <arg value="-c"/>
+                                    <arg value="${nexus.jooq.main.entry}"/>
+                                </exec>
                                 <delete file="${nexus.jooq.stamp.dir}/main.sha256" quiet="true"
-                                        if:true="${nexus.jooq.main.restored}"/>
-                                <delete dir="${jooq.generated.dir}" quiet="true" if:true="${nexus.jooq.main.restored}"/>
-                                <copy todir="${jooq.generated.dir}" if:true="${nexus.jooq.main.restored}">
+                                        if:true="${nexus.jooq.main.restore.try}"/>
+                                <delete dir="${jooq.generated.dir}" quiet="true" if:true="${nexus.jooq.main.restore.try}"/>
+                                <copy todir="${jooq.generated.dir}" failonerror="false" if:true="${nexus.jooq.main.restore.try}">
                                     <fileset dir="${nexus.jooq.main.entry}/generated"/>
                                 </copy>
-                                <touch if:true="${nexus.jooq.main.restored}">
-                                    <dirset dir="${nexus.jooq.cache.dir}" includes="main-${nexus.jooq.main.hash}"/>
-                                </touch>
+                                <condition property="nexus.jooq.main.restore.copied" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.restore.try}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.dir}" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.restore.treehash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-restore-sums"
+                                          if:true="${nexus.jooq.main.restore.copied}">
+                                    <sort>
+                                        <fileset dir="${jooq.generated.dir}"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.main.restored" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.restore.copied}"/>
+                                        <equals arg1="${nexus.jooq.main.restore.treehash}" arg2="${nexus.jooq.main.entry.treehash}"/>
+                                    </and>
+                                </condition>
+                                <!-- A restore that did not deliver the whole tree leaves nothing behind: no half tree for the
+                                     codegen to build over, no torn entry for the next worktree (the stamp step republishes). -->
+                                <delete dir="${jooq.generated.dir}" quiet="true"
+                                        if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"/>
+                                <delete dir="${nexus.jooq.main.entry}" quiet="true"
+                                        if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"/>
+                                <echo level="warning"
+                                      if:true="${nexus.jooq.main.restore.try}" unless:true="${nexus.jooq.main.restored}"
+                                      message="jOOQ cache: the main entry ${nexus.jooq.main.entry} could not be restored whole; regenerating"/>
 
                                 <loadfile property="nexus.jooq.main.stamp"
                                           srcFile="${nexus.jooq.stamp.dir}/main.sha256" failonerror="false" quiet="true">
@@ -876,20 +933,30 @@
                                     </union>
                                 </checksum>
                                 <!-- test: restore the tree from the shared cache when the stamp does not vouch for the
-                                     one on disk but the cache holds this hash (a fresh worktree, a `mvn clean`, a
-                                     branch switch back to inputs generated before). The stamp is deleted BEFORE the
-                                     tree is swapped, and only the jooq-stamp-test step writes one, so the invariant
-                                     below holds at every instant; a restore killed mid-copy leaves no stamp. -->
+                                     one on disk but the cache holds this hash made by this producer (a fresh worktree,
+                                     a `mvn clean`, a branch switch back to inputs generated before). The entry is trusted
+                                     only as far as it checks out: its `complete` marker carries the digest of the tree it
+                                     closes, the copy is digested again, and a mismatch (a file missing, cut short or added,
+                                     a copy that died, a prune that renamed the entry away mid-copy) throws the copy and the
+                                     entry away and falls through to the regeneration, with no stamp. The entry is touched
+                                     FIRST, so a prune ordering by use does not pick the entry being read. The stamp is
+                                     deleted BEFORE the tree is swapped, and only the jooq-stamp-test step writes one, so the
+                                     invariant above holds at every instant; a restore killed mid-copy leaves no stamp. -->
                                 <loadfile property="nexus.jooq.test.prestamp"
                                           srcFile="${nexus.jooq.stamp.dir}/test.sha256" failonerror="false" quiet="true">
                                     <filterchain><striplinebreaks/></filterchain>
                                 </loadfile>
-                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}"/>
-                                <condition property="nexus.jooq.test.restored" value="true" else="false">
+                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}-${nexus.jooq.producer}"/>
+                                <loadfile property="nexus.jooq.test.entry.treehash"
+                                          srcFile="${nexus.jooq.test.entry}/complete" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <condition property="nexus.jooq.test.restore.try" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.cache.on}"/>
                                         <not><istrue value="${nexus.jooq.regenerate}"/></not>
-                                        <available file="${nexus.jooq.test.entry}/complete"/>
+                                        <isset property="nexus.jooq.test.entry.treehash"/>
+                                        <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
                                                      erroronmissingdir="false"/>
@@ -905,15 +972,50 @@
                                         </not>
                                     </and>
                                 </condition>
+                                <!-- (exec, not the touch task: that one fails the build on an entry this user does not own,
+                                     and recency only matters to a prune on a POSIX host.) -->
+                                <exec executable="touch" failonerror="false" failifexecutionfails="false"
+                                      if:true="${nexus.jooq.test.restore.try}">
+                                    <arg value="-c"/>
+                                    <arg value="${nexus.jooq.test.entry}"/>
+                                </exec>
                                 <delete file="${nexus.jooq.stamp.dir}/test.sha256" quiet="true"
-                                        if:true="${nexus.jooq.test.restored}"/>
-                                <delete dir="${jooq.generated.test.dir}" quiet="true" if:true="${nexus.jooq.test.restored}"/>
-                                <copy todir="${jooq.generated.test.dir}" if:true="${nexus.jooq.test.restored}">
+                                        if:true="${nexus.jooq.test.restore.try}"/>
+                                <delete dir="${jooq.generated.test.dir}" quiet="true" if:true="${nexus.jooq.test.restore.try}"/>
+                                <copy todir="${jooq.generated.test.dir}" failonerror="false" if:true="${nexus.jooq.test.restore.try}">
                                     <fileset dir="${nexus.jooq.test.entry}/generated"/>
                                 </copy>
-                                <touch if:true="${nexus.jooq.test.restored}">
-                                    <dirset dir="${nexus.jooq.cache.dir}" includes="test-${nexus.jooq.test.hash}"/>
-                                </touch>
+                                <condition property="nexus.jooq.test.restore.copied" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.restore.try}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.test.dir}" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.restore.treehash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-restore-sums"
+                                          if:true="${nexus.jooq.test.restore.copied}">
+                                    <sort>
+                                        <fileset dir="${jooq.generated.test.dir}"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.test.restored" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.restore.copied}"/>
+                                        <equals arg1="${nexus.jooq.test.restore.treehash}" arg2="${nexus.jooq.test.entry.treehash}"/>
+                                    </and>
+                                </condition>
+                                <!-- A restore that did not deliver the whole tree leaves nothing behind: no half tree for the
+                                     codegen to build over, no torn entry for the next worktree (the stamp step republishes). -->
+                                <delete dir="${jooq.generated.test.dir}" quiet="true"
+                                        if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"/>
+                                <delete dir="${nexus.jooq.test.entry}" quiet="true"
+                                        if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"/>
+                                <echo level="warning"
+                                      if:true="${nexus.jooq.test.restore.try}" unless:true="${nexus.jooq.test.restored}"
+                                      message="jOOQ cache: the test entry ${nexus.jooq.test.entry} could not be restored whole; regenerating"/>
 
                                 <loadfile property="nexus.jooq.test.stamp"
                                           srcFile="${nexus.jooq.stamp.dir}/test.sha256" failonerror="false" quiet="true">
@@ -942,20 +1044,25 @@
                         <phase>process-sources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target xmlns:if="ant:if">
+                            <target xmlns:unless="ant:unless" xmlns:if="ant:if">
                                 <echo file="${project.build.directory}/jooq-stamps/main.sha256" message="${nexus.jooq.main.hash}"/>
-
                                 <!-- nexus-fkhd3: publish the tree this stamp now vouches for to the shared cache, when
                                      the cache has no usable entry for the hash (it seeds from an existing target/ too),
-                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The tree is
-                                     copied into a staging dir beside the entry and renamed into place, so a reader sees
-                                     the whole entry or none of it; the `complete` marker is written last. A peer that
-                                     publishes the same hash while this copy runs wins: the swap is skipped if the entry
-                                     became usable meanwhile, and the staging dir is deleted either way. nexus.jooq.producer names what made the tree (a generation against the
-                                     nexus-v0ts5 template would say so) and is the only thing a different generator changes:
-                                     the key is the input hash. -->
-                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
-                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}"/>
+                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The cache
+                                     is best-effort: nothing below can fail the build. A directory that cannot be written
+                                     (read-only, another owner, a file in the way, a full disk) is found by a probe copy
+                                     and costs only a warning, every copy tolerates its own failure, and the staged tree
+                                     is digested against the live tree before it is renamed in, so a copy that ran out
+                                     of space is not published. The tree is copied into a staging dir beside the entry and
+                                     renamed into place, so a reader sees the whole entry or none of it; the `complete`
+                                     marker, which carries the tree digest, is staged last. A peer that publishes the same
+                                     key while this copy runs wins: the swap is skipped if the entry became usable
+                                     meanwhile, and the staging dir is deleted either way. The entry key carries the
+                                     producer (nexus.jooq.producer, named by the jooq-inputs step), so a tree made by a
+                                     different generator, a generation against the nexus-v0ts5 template for one, is neither
+                                     served as nor replaced by this one. -->
+                                <property name="nexus.jooq.stamp.dir" value="${project.build.directory}/jooq-stamps"/>
+                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}-${nexus.jooq.producer}"/>
                                 <condition property="nexus.jooq.main.cache.on" value="true" else="false">
                                     <and>
                                         <isset property="nexus.jooq.cache.dir"/>
@@ -978,13 +1085,14 @@
                                     <and>
                                         <istrue value="${nexus.jooq.main.cache.on}"/>
                                         <available file="${nexus.jooq.main.entry}/complete"/>
+                                        <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
                                                      erroronmissingdir="false"/>
                                         </resourcecount>
                                     </and>
                                 </condition>
-                                <condition property="nexus.jooq.main.publish" value="true" else="false">
+                                <condition property="nexus.jooq.main.publish.wanted" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.main.cache.on}"/>
                                         <resourcecount when="greater" count="0">
@@ -996,30 +1104,83 @@
                                         </or>
                                     </and>
                                 </condition>
-                                <tstamp if:true="${nexus.jooq.main.publish}">
+                                <tstamp if:true="${nexus.jooq.main.publish.wanted}">
                                     <format property="nexus.jooq.main.publish.ts" pattern="yyyyMMddHHmmssSSS"/>
                                 </tstamp>
                                 <dirname property="nexus.jooq.main.publish.wtdir" file="${project.basedir}"/>
                                 <basename property="nexus.jooq.main.publish.wt" file="${nexus.jooq.main.publish.wtdir}"/>
+                                <!-- writability probe: a one-line copy that is allowed to fail -->
+                                <property name="nexus.jooq.main.probe"
+                                          value="${nexus.jooq.cache.dir}/.probe.main.${nexus.jooq.main.hash}.${nexus.jooq.main.publish.wt}.${nexus.jooq.main.publish.ts}"/>
+                                <copy file="${project.build.directory}/jooq-stamps/main.sha256" tofile="${nexus.jooq.main.probe}"
+                                      failonerror="false" if:true="${nexus.jooq.main.publish.wanted}"/>
+                                <condition property="nexus.jooq.main.publish" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.publish.wanted}"/>
+                                        <available file="${nexus.jooq.main.probe}"/>
+                                    </and>
+                                </condition>
+                                <delete file="${nexus.jooq.main.probe}" quiet="true" if:true="${nexus.jooq.main.publish}"/>
+                                <echo level="warning" if:true="${nexus.jooq.main.publish.wanted}" unless:true="${nexus.jooq.main.publish}"
+                                      message="jOOQ cache: the main tree was not published (cannot write under ${nexus.jooq.cache.dir}); the build goes on without it"/>
                                 <property name="nexus.jooq.main.stage"
                                           value="${nexus.jooq.cache.dir}/.staging.main.${nexus.jooq.main.hash}.${nexus.jooq.main.publish.wt}.${nexus.jooq.main.publish.ts}"/>
-                                <copy todir="${nexus.jooq.main.stage}/generated" if:true="${nexus.jooq.main.publish}">
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.tree.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-tree-sums"
+                                          if:true="${nexus.jooq.main.publish}">
+                                    <sort>
+                                        <fileset dir="${jooq.generated.dir}"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <copy todir="${nexus.jooq.main.stage}/generated" failonerror="false" if:true="${nexus.jooq.main.publish}">
                                     <fileset dir="${jooq.generated.dir}"/>
                                 </copy>
-                                <echo file="${nexus.jooq.main.stage}/meta.properties" if:true="${nexus.jooq.main.publish}"
-                                      message="hash=${nexus.jooq.main.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;"/>
-                                <echo file="${nexus.jooq.main.stage}/complete" if:true="${nexus.jooq.main.publish}"
-                                      message="${nexus.jooq.main.hash}"/>
+                                <condition property="nexus.jooq.main.stage.copied" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.publish}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.main.stage}/generated" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.stage.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-stage-sums"
+                                          if:true="${nexus.jooq.main.stage.copied}">
+                                    <sort>
+                                        <fileset dir="${nexus.jooq.main.stage}/generated"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.main.stage.whole" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.stage.copied}"/>
+                                        <equals arg1="${nexus.jooq.main.stage.hash}" arg2="${nexus.jooq.main.tree.hash}"/>
+                                    </and>
+                                </condition>
+                                <!-- meta and marker are written beside the stamp, where the build can always write, and copied
+                                     in (a copy may fail quietly; the readiness check below sees it). The marker is staged last. -->
+                                <echo file="${nexus.jooq.stamp.dir}/main.cache-meta" if:true="${nexus.jooq.main.stage.whole}"
+                                      message="hash=${nexus.jooq.main.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;treehash=${nexus.jooq.main.tree.hash}&#10;"/>
+                                <echo file="${nexus.jooq.stamp.dir}/main.cache-complete" if:true="${nexus.jooq.main.stage.whole}"
+                                      message="${nexus.jooq.main.tree.hash}"/>
+                                <copy file="${nexus.jooq.stamp.dir}/main.cache-meta" tofile="${nexus.jooq.main.stage}/meta.properties"
+                                      failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
+                                <copy file="${nexus.jooq.stamp.dir}/main.cache-complete" tofile="${nexus.jooq.main.stage}/complete"
+                                      failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
                                 <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
                                      entry is still unusable, or this run deliberately replaces it. -->
                                 <condition property="nexus.jooq.main.swap" value="true" else="false">
                                     <and>
-                                        <istrue value="${nexus.jooq.main.publish}"/>
+                                        <istrue value="${nexus.jooq.main.stage.whole}"/>
+                                        <available file="${nexus.jooq.main.stage}/complete"/>
+                                        <available file="${nexus.jooq.main.stage}/meta.properties"/>
                                         <or>
                                             <istrue value="${nexus.jooq.main.fresh}"/>
                                             <not>
                                                 <and>
                                                     <available file="${nexus.jooq.main.entry}/complete"/>
+                                                    <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
                                                     <resourcecount when="greater" count="0">
                                                         <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
                                                                  erroronmissingdir="false"/>
@@ -1036,6 +1197,8 @@
                                       if:true="${nexus.jooq.main.swap}"/>
                                 <delete dir="${nexus.jooq.main.stage}" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                                 <delete dir="${nexus.jooq.main.stage}.old" quiet="true" if:true="${nexus.jooq.main.publish}"/>
+                                <echo level="warning" if:true="${nexus.jooq.main.publish}" unless:true="${nexus.jooq.main.swap}"
+                                      message="jOOQ cache: the main tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
                         </configuration>
                     </execution>
@@ -1044,20 +1207,25 @@
                         <phase>process-test-sources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target xmlns:if="ant:if">
+                            <target xmlns:unless="ant:unless" xmlns:if="ant:if">
                                 <echo file="${project.build.directory}/jooq-stamps/test.sha256" message="${nexus.jooq.test.hash}"/>
-
                                 <!-- nexus-fkhd3: publish the tree this stamp now vouches for to the shared cache, when
                                      the cache has no usable entry for the hash (it seeds from an existing target/ too),
-                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The tree is
-                                     copied into a staging dir beside the entry and renamed into place, so a reader sees
-                                     the whole entry or none of it; the `complete` marker is written last. A peer that
-                                     publishes the same hash while this copy runs wins: the swap is skipped if the entry
-                                     became usable meanwhile, and the staging dir is deleted either way. nexus.jooq.producer names what made the tree (a generation against the
-                                     nexus-v0ts5 template would say so) and is the only thing a different generator changes:
-                                     the key is the input hash. -->
-                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
-                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}"/>
+                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The cache
+                                     is best-effort: nothing below can fail the build. A directory that cannot be written
+                                     (read-only, another owner, a file in the way, a full disk) is found by a probe copy
+                                     and costs only a warning, every copy tolerates its own failure, and the staged tree
+                                     is digested against the live tree before it is renamed in, so a copy that ran out
+                                     of space is not published. The tree is copied into a staging dir beside the entry and
+                                     renamed into place, so a reader sees the whole entry or none of it; the `complete`
+                                     marker, which carries the tree digest, is staged last. A peer that publishes the same
+                                     key while this copy runs wins: the swap is skipped if the entry became usable
+                                     meanwhile, and the staging dir is deleted either way. The entry key carries the
+                                     producer (nexus.jooq.producer, named by the jooq-inputs step), so a tree made by a
+                                     different generator, a generation against the nexus-v0ts5 template for one, is neither
+                                     served as nor replaced by this one. -->
+                                <property name="nexus.jooq.stamp.dir" value="${project.build.directory}/jooq-stamps"/>
+                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}-${nexus.jooq.producer}"/>
                                 <condition property="nexus.jooq.test.cache.on" value="true" else="false">
                                     <and>
                                         <isset property="nexus.jooq.cache.dir"/>
@@ -1080,13 +1248,14 @@
                                     <and>
                                         <istrue value="${nexus.jooq.test.cache.on}"/>
                                         <available file="${nexus.jooq.test.entry}/complete"/>
+                                        <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
                                                      erroronmissingdir="false"/>
                                         </resourcecount>
                                     </and>
                                 </condition>
-                                <condition property="nexus.jooq.test.publish" value="true" else="false">
+                                <condition property="nexus.jooq.test.publish.wanted" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.test.cache.on}"/>
                                         <resourcecount when="greater" count="0">
@@ -1098,30 +1267,83 @@
                                         </or>
                                     </and>
                                 </condition>
-                                <tstamp if:true="${nexus.jooq.test.publish}">
+                                <tstamp if:true="${nexus.jooq.test.publish.wanted}">
                                     <format property="nexus.jooq.test.publish.ts" pattern="yyyyMMddHHmmssSSS"/>
                                 </tstamp>
                                 <dirname property="nexus.jooq.test.publish.wtdir" file="${project.basedir}"/>
                                 <basename property="nexus.jooq.test.publish.wt" file="${nexus.jooq.test.publish.wtdir}"/>
+                                <!-- writability probe: a one-line copy that is allowed to fail -->
+                                <property name="nexus.jooq.test.probe"
+                                          value="${nexus.jooq.cache.dir}/.probe.test.${nexus.jooq.test.hash}.${nexus.jooq.test.publish.wt}.${nexus.jooq.test.publish.ts}"/>
+                                <copy file="${project.build.directory}/jooq-stamps/test.sha256" tofile="${nexus.jooq.test.probe}"
+                                      failonerror="false" if:true="${nexus.jooq.test.publish.wanted}"/>
+                                <condition property="nexus.jooq.test.publish" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.publish.wanted}"/>
+                                        <available file="${nexus.jooq.test.probe}"/>
+                                    </and>
+                                </condition>
+                                <delete file="${nexus.jooq.test.probe}" quiet="true" if:true="${nexus.jooq.test.publish}"/>
+                                <echo level="warning" if:true="${nexus.jooq.test.publish.wanted}" unless:true="${nexus.jooq.test.publish}"
+                                      message="jOOQ cache: the test tree was not published (cannot write under ${nexus.jooq.cache.dir}); the build goes on without it"/>
                                 <property name="nexus.jooq.test.stage"
                                           value="${nexus.jooq.cache.dir}/.staging.test.${nexus.jooq.test.hash}.${nexus.jooq.test.publish.wt}.${nexus.jooq.test.publish.ts}"/>
-                                <copy todir="${nexus.jooq.test.stage}/generated" if:true="${nexus.jooq.test.publish}">
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.tree.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-tree-sums"
+                                          if:true="${nexus.jooq.test.publish}">
+                                    <sort>
+                                        <fileset dir="${jooq.generated.test.dir}"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <copy todir="${nexus.jooq.test.stage}/generated" failonerror="false" if:true="${nexus.jooq.test.publish}">
                                     <fileset dir="${jooq.generated.test.dir}"/>
                                 </copy>
-                                <echo file="${nexus.jooq.test.stage}/meta.properties" if:true="${nexus.jooq.test.publish}"
-                                      message="hash=${nexus.jooq.test.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;"/>
-                                <echo file="${nexus.jooq.test.stage}/complete" if:true="${nexus.jooq.test.publish}"
-                                      message="${nexus.jooq.test.hash}"/>
+                                <condition property="nexus.jooq.test.stage.copied" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.publish}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.test.stage}/generated" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.stage.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-stage-sums"
+                                          if:true="${nexus.jooq.test.stage.copied}">
+                                    <sort>
+                                        <fileset dir="${nexus.jooq.test.stage}/generated"/>
+                                        <name/>
+                                    </sort>
+                                </checksum>
+                                <condition property="nexus.jooq.test.stage.whole" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.stage.copied}"/>
+                                        <equals arg1="${nexus.jooq.test.stage.hash}" arg2="${nexus.jooq.test.tree.hash}"/>
+                                    </and>
+                                </condition>
+                                <!-- meta and marker are written beside the stamp, where the build can always write, and copied
+                                     in (a copy may fail quietly; the readiness check below sees it). The marker is staged last. -->
+                                <echo file="${nexus.jooq.stamp.dir}/test.cache-meta" if:true="${nexus.jooq.test.stage.whole}"
+                                      message="hash=${nexus.jooq.test.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;treehash=${nexus.jooq.test.tree.hash}&#10;"/>
+                                <echo file="${nexus.jooq.stamp.dir}/test.cache-complete" if:true="${nexus.jooq.test.stage.whole}"
+                                      message="${nexus.jooq.test.tree.hash}"/>
+                                <copy file="${nexus.jooq.stamp.dir}/test.cache-meta" tofile="${nexus.jooq.test.stage}/meta.properties"
+                                      failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
+                                <copy file="${nexus.jooq.stamp.dir}/test.cache-complete" tofile="${nexus.jooq.test.stage}/complete"
+                                      failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
                                 <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
                                      entry is still unusable, or this run deliberately replaces it. -->
                                 <condition property="nexus.jooq.test.swap" value="true" else="false">
                                     <and>
-                                        <istrue value="${nexus.jooq.test.publish}"/>
+                                        <istrue value="${nexus.jooq.test.stage.whole}"/>
+                                        <available file="${nexus.jooq.test.stage}/complete"/>
+                                        <available file="${nexus.jooq.test.stage}/meta.properties"/>
                                         <or>
                                             <istrue value="${nexus.jooq.test.fresh}"/>
                                             <not>
                                                 <and>
                                                     <available file="${nexus.jooq.test.entry}/complete"/>
+                                                    <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
                                                     <resourcecount when="greater" count="0">
                                                         <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
                                                                  erroronmissingdir="false"/>
@@ -1138,6 +1360,8 @@
                                       if:true="${nexus.jooq.test.swap}"/>
                                 <delete dir="${nexus.jooq.test.stage}" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                                 <delete dir="${nexus.jooq.test.stage}.old" quiet="true" if:true="${nexus.jooq.test.publish}"/>
+                                <echo level="warning" if:true="${nexus.jooq.test.publish}" unless:true="${nexus.jooq.test.swap}"
+                                      message="jOOQ cache: the test tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
                         </configuration>
                     </execution>
