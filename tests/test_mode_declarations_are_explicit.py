@@ -1236,7 +1236,9 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard(
     fast and side-effect-free on top of that.
     """
     # What a lab-run grant gives this process: a real tempdir that is not the probe's.
-    # The nested env below must drop it, here as well as in a grant (nexus-g2f0p).
+    # The nested env below drops it through the helper. This line does not make the
+    # probe fail if the drop is lost (see the comment at the env); it only keeps the
+    # inherited state the same on a laptop as in a grant (nexus-g2f0p).
     monkeypatch.setenv(_tmp_root.ORIG_ENV, str(tmp_path))
     # This test's OWN nodeid must be excluded from the scoped invocation
     # below -- otherwise landing this same test in one of the 4 groups
@@ -1390,8 +1392,12 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard(
                     # child_env_with_tmpdir drops the outer run's NX_TEST_TMP_ORIG: inside
                     # a lab-run grant it names the box's real tempdir, the nested run's
                     # boot slot would go there, and the boot-lock check below would look
-                    # where no boot ever lands (nexus-kyujr). The test sets it to a decoy
-                    # so dropping it matters outside a grant too (nexus-g2f0p).
+                    # where no boot ever lands (nexus-kyujr). Nothing here goes red if the
+                    # helper is swapped for a raw env: with NX_TEST_T2_SUBSTRATE=none the
+                    # nested run never boots, so the decoy set at the top of this test is
+                    # inert. The drop is pinned by the boot-lock resolution test below
+                    # (nexus-g2f0p) and by the lint that rejects a TMPDIR override
+                    # outside the helper.
                     **_tmp_root.child_env_with_tmpdir(os.environ, probe_tmp),
                     "NX_TEST_T2_SUBSTRATE": "none",
                     # Without this a Linux nested run puts its clusters on

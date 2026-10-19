@@ -8,6 +8,7 @@ pytest (serial, xdist and a SIGKILLed one) against a directory standing in for
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -614,6 +615,111 @@ _FAILED = [
 ]
 
 
+_ENV_SETTERS = frozenset({"setdefault", "setenv", "putenv"})
+
+
+def _tmpdir_override_sites(source: str) -> list[tuple[str, int]]:
+    """``(enclosing scope, line)`` of every place *source* WRITES a ``TMPDIR`` into an
+    environment mapping, whatever the spelling: a dict literal key (``{**os.environ,
+    "TMPDIR": x}``), ``env["TMPDIR"] = x``, a ``TMPDIR=x`` keyword (``env.update(...)``,
+    ``dict(...)``), ``setdefault``/``setenv``/``putenv`` with ``"TMPDIR"`` first, and a
+    ``"TMPDIR=..."`` string (an argv-style assignment). Reads (``os.environ["TMPDIR"]``,
+    ``.get("TMPDIR")``) and the word inside a docstring or a comment are not sites.
+    Blind to a key held in a variable; every site found has to be justified below."""
+    def is_name(n: ast.AST) -> bool:
+        return isinstance(n, ast.Constant) and n.value == "TMPDIR"
+
+    def is_assignment_str(n: ast.AST) -> bool:
+        if not (isinstance(n, ast.Constant) and isinstance(n.value, str)):
+            return False
+        name, eq, _value = n.value.partition("=")
+        return bool(eq) and name == "TMPDIR"
+
+    found: list[tuple[str, int]] = []
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = (*scope, node.name)
+        hit = False
+        if isinstance(node, ast.Dict):
+            hit = any(k is not None and is_name(k) for k in node.keys)
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            hit = any(kw.arg == "TMPDIR" for kw in node.keywords) or (
+                isinstance(fn, ast.Attribute) and fn.attr in _ENV_SETTERS and bool(node.args) and is_name(node.args[0])
+            )
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            hit = any(isinstance(t, ast.Subscript) and is_name(t.slice) for t in targets)
+        elif is_assignment_str(node):
+            hit = True
+        if hit:
+            found.append((".".join(scope) or "<module>", node.lineno))
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(ast.parse(source), ())
+    return found
+
+
+_FROM_SCRATCH = "env built from scratch (never os.environ), so NX_TEST_TMP_ORIG cannot be in it"
+_IN_PROCESS = "an in-process env mapping or monkeypatch; no child process is spawned with it"
+_NOT_NEXUS_TEST_CODE = (
+    "the child is a shell or python tool that never imports tests.* nor runs tests/conftest.py, "
+    "the only readers of NX_TEST_TMP_ORIG"
+)
+#: Every place under ``tests/`` that writes a ``TMPDIR`` into an environment mapping and
+#: does NOT go through :func:`tests._tmp_root.child_env_with_tmpdir`, with the reason it
+#: is safe. A new site is a failure until it uses the helper or is added here with a
+#: reason; an entry that no longer matches a site is a failure too, so the list cannot rot.
+_TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
+    "tests/e2e/lib/setup_journey.py::sandbox_env": _FROM_SCRATCH,
+    "tests/prose_edit/conftest.py::prose": _NOT_NEXUS_TEST_CODE + " (prose-edit scripts and the nx CLI)",
+    "tests/prose_edit/test_allow_rule_setup.py::test_the_documented_path_command_is_the_base_every_work_directory_sits_under":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/prose_edit/test_brief_review.py::test_tmpdir_refuses_a_location_inside_the_repository_and_leaves_nothing":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/prose_edit/test_fix_round5.py::test_each_runner_refuses_while_another_runner_holds_the_lock_before_it_writes_anything":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/prose_edit/test_fix_round5.py::test_run_review_refuses_an_unknown_scenario_before_anything_runs":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/prose_edit/test_fix_round7.py::test_the_readme_says_scenario_b_needs_a_and_the_runner_refuses_it_alone":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/prose_edit/test_memory.py::test_user_level_records_lock_across_repos_in_a_per_user_directory":
+        _NOT_NEXUS_TEST_CODE,
+    "tests/scripts/test_container_io_sampler.py::_env": _NOT_NEXUS_TEST_CODE + " (a bash sampler script)",
+    "tests/scripts/test_container_io_sampler.py::test_the_state_directory_goes_on_shared_memory_when_it_is_writable":
+        _FROM_SCRATCH + " (_pick_state_base passes only PATH and its keywords)",
+    "tests/test_engine_substrate_pg_root.py::TestDiskDecisionStaysOffTheRunsTmpfs.moved_tmpdir":
+        _IN_PROCESS + "; it sets NX_TEST_TMP_ORIG itself",
+    "tests/test_fresh_install_mvv_published_mode.py::_isolated_tmpdir": _IN_PROCESS + "; the children are install shell scripts",
+    "tests/test_fresh_install_mvv_tmpdir.py::_run_block": _FROM_SCRATCH,
+    "tests/test_install_ps1.py::Box.env": _FROM_SCRATCH,
+    "tests/test_install_sh.py::Box.env": _FROM_SCRATCH,
+    "tests/test_jvm_jar_launch_error_file_lint.py::test_the_hs_err_report_goes_to_the_original_tempdir_not_the_runs_tmpfs":
+        _IN_PROCESS + "; it sets the marker itself",
+    "tests/test_macos_guest_driver.py::Harness.env": _FROM_SCRATCH,
+    "tests/test_native_boot_shapes_smoke_lint.py::test_missing_binary_fails_with_exit_2": _FROM_SCRATCH,
+    "tests/test_native_boot_shapes_smoke_lint.py::test_external_db_url_without_a_container_skips_loudly_and_leaves_no_scratch":
+        _FROM_SCRATCH,
+    "tests/test_native_smoke_scratch_dir_lint.py::test_trap_removes_dir_on_success_and_keeps_it_on_failure": _FROM_SCRATCH,
+    "tests/test_tmp_root.py::_plugin": _IN_PROCESS + " (handed to TmpRootPlugin as its env)",
+    "tests/test_tmp_root.py::TestPlugin.test_a_worker_imported_after_the_switch_still_keeps_its_boot_slots_on_the_original_tempdir":
+        "drops every NX_TEST_TMP* key, then sets NX_TEST_TMP_ORIG to a value of its own",
+    "tests/test_tmp_root.py::TestPlugin.test_a_forced_root_is_kept_and_never_swept": _IN_PROCESS,
+    "tests/test_tmp_root.py::TestPlugin.test_a_refusal_stays_on_disk_says_why_and_warns_in_a_grant": _IN_PROCESS,
+    "tests/test_tmp_root.py::TestPlugin.test_outside_a_grant_is_quiet_and_unchanged": _IN_PROCESS,
+    "tests/test_tmp_root.py::TestPlugin.test_a_decision_that_raises_falls_back_to_disk": _IN_PROCESS,
+    "tests/test_tmp_root.py::TestChildEnvWithTmpdir.test_it_sets_tmpdir_and_drops_the_original_tempdir_marker":
+        "the unit test of the helper itself: a plain dict in, a plain dict out",
+    "tests/test_tmp_root.py::TestChildEnvWithTmpdir.test_it_adds_nothing_when_there_was_no_marker":
+        "the unit test of the helper itself: a plain dict in, a plain dict out",
+    "tests/test_tmp_root.py::TestFailureEvidence._finished_plugin": _IN_PROCESS,
+    "tests/test_tmp_root.py::_clean_env": "drops every NX_TEST_TMP* key (the marker included) before it sets TMPDIR",
+    "tests/test_windows_gate_driver.py::Harness._env": _FROM_SCRATCH,
+}
+
+
 class TestChildEnvWithTmpdir:
     """A child that gets its own TMPDIR must not inherit the outer run's
     NX_TEST_TMP_ORIG: inside a lab-run grant it names the box's real tempdir and wins over
@@ -628,21 +734,60 @@ class TestChildEnvWithTmpdir:
     def test_it_adds_nothing_when_there_was_no_marker(self, tmp_path) -> None:
         assert tr.child_env_with_tmpdir({"A": "b"}, tmp_path) == {"A": "b", "TMPDIR": str(tmp_path)}
 
-    def test_no_test_spells_the_marker_filter_itself(self) -> None:
-        """The helper is the one place the filter lives; a pasted copy is how the rule
-        went stale in three files (nexus-g2f0p). Non-vacuity: the scan must have read
-        the test tree."""
-        pat = re.compile(r"!=\s*[\"']" + re.escape(tr.ORIG_ENV) + r"[\"']")
-        tests_dir = REPO_ROOT / "tests"
-        scanned, offenders = 0, []
-        for f in tests_dir.rglob("*.py"):
+    @pytest.mark.parametrize("source", [
+        'env = {**os.environ, "TMPDIR": str(d)}',
+        'env = {"TMPDIR": str(d), **os.environ}',
+        'env["TMPDIR"] = str(d)',
+        'env.update(TMPDIR=str(d), PYTHONPATH=p)',
+        'env = dict(prose.env, TMPDIR=str(d))',
+        'env.setdefault("TMPDIR", str(d))',
+        'monkeypatch.setenv("TMPDIR", str(d))',
+        'os.putenv("TMPDIR", str(d))',
+        'cmd = ["env", "TMPDIR=/x", "pytest"]',
+        'def f():\n    env = {k: v for k, v in os.environ.items() if k != tr.ORIG_ENV}\n    env["TMPDIR"] = "x"',
+    ], ids=["splat-first", "splat-last", "subscript", "update-kw", "dict-kw", "setdefault", "setenv", "putenv",
+            "argv-assignment", "filter-pasted-under-another-spelling"])
+    def test_the_scanner_flags_every_spelling_of_a_tmpdir_override(self, source) -> None:
+        """Positive control for the lint below: it passes on a tree where it finds nothing,
+        so each way a test can write a TMPDIR into an env must show up here (nexus-g2f0p)."""
+        assert len(_tmpdir_override_sites(source)) == 1, source
+
+    @pytest.mark.parametrize("source", [
+        'd = os.environ["TMPDIR"]',
+        'd = os.environ.get("TMPDIR", "/tmp")',
+        '"""TMPDIR is a per-run tmpfs in a grant."""  # TMPDIR',
+        'env = tr.child_env_with_tmpdir(os.environ, d)',
+        'monkeypatch.delenv("TMPDIR")',
+        'assert env["TMPDIR"] == str(d)',
+    ])
+    def test_the_scanner_ignores_reads_and_prose(self, source) -> None:
+        assert _tmpdir_override_sites(source) == [], source
+
+    def test_every_tmpdir_override_in_the_tests_goes_through_the_helper_or_is_exempt_with_a_reason(self) -> None:
+        """A test that gives a child pytest (or a substrate-importing script) its own
+        ``TMPDIR`` must drop ``NX_TEST_TMP_ORIG`` or, inside a lab-run grant, the child
+        scans and reaps the box's real tempdir. The filter lives in ONE place,
+        :func:`tests._tmp_root.child_env_with_tmpdir`; it went stale in three pasted copies
+        and a fourth pair hid in ``test_fence_home_twins_agree`` (nexus-g2f0p). This asserts
+        the property rather than one spelling of the filter. Non-vacuity: the scan read the
+        test tree and found the sites it is known to have."""
+        scanned, found = 0, {}
+        for f in sorted((REPO_ROOT / "tests").rglob("*.py")):
             if f.name == "_tmp_root.py":
                 continue
             scanned += 1
-            if pat.search(f.read_text(encoding="utf-8", errors="replace")):
-                offenders.append(str(f.relative_to(REPO_ROOT)))
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            for scope, line in _tmpdir_override_sites(f.read_text(encoding="utf-8")):
+                found.setdefault(f"{rel}::{scope}", line)
         assert scanned > 100, f"scanned only {scanned} files; the lint saw nothing"
-        assert not offenders, f"use tests._tmp_root.child_env_with_tmpdir, not a copy of its filter: {offenders}"
+        assert len(found) >= len(_TMPDIR_OVERRIDE_EXEMPT) // 2, f"the scan found only {len(found)} sites"
+        unexplained = {k: v for k, v in found.items() if k not in _TMPDIR_OVERRIDE_EXEMPT}
+        assert not unexplained, (
+            "a TMPDIR override outside tests._tmp_root.child_env_with_tmpdir, with no entry in "
+            f"_TMPDIR_OVERRIDE_EXEMPT (site: line): {unexplained}"
+        )
+        stale = sorted(set(_TMPDIR_OVERRIDE_EXEMPT) - set(found))
+        assert not stale, f"_TMPDIR_OVERRIDE_EXEMPT names sites that no longer exist: {stale}"
 
     def test_a_child_that_re_resolves_its_tempdir_sees_the_given_one_even_with_a_marker_outside(
         self, tmp_path, monkeypatch,
@@ -794,6 +939,24 @@ class TestKeptReportPath:
     def test_a_basetemp_report_is_named_by_its_disk_copy(self, tmp_path) -> None:
         run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345")
         report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        assert tr.kept_report_path(report, self._env(run)) == (
+            Path("/orig/tmp") / f"nexus-test-reports-{sub._current_uid()}" / "rabc12345" / "nx-ddl-report.json"
+        )
+
+    def test_a_report_path_resolved_through_a_symlinked_run_root_is_still_named_by_its_disk_copy(
+        self, tmp_path,
+    ) -> None:
+        """pytest hands back a RESOLVED basetemp, so a report path is resolved while the
+        run dir in ``SESSION_ENV`` is the path the plugin built, which can hold a symlink.
+        Comparing the two unresolved named the tmpfs file the run deletes (nexus-g2f0p)."""
+        real = tmp_path / "real-shm"
+        link = tmp_path / "shm"
+        real.mkdir()
+        link.symlink_to(real, target_is_directory=True)
+        run = self._owned(link / _ROOT / "rabc12345")
+        (run / "p" / "pytest-of-u" / "pytest-0").mkdir(parents=True)
+        report = (run / "p" / "pytest-of-u" / "pytest-0").resolve() / "nx-ddl-report.json"
+        assert not report.is_relative_to(run) and report.is_relative_to(real.resolve())  # a real symlinked layout
         assert tr.kept_report_path(report, self._env(run)) == (
             Path("/orig/tmp") / f"nexus-test-reports-{sub._current_uid()}" / "rabc12345" / "nx-ddl-report.json"
         )

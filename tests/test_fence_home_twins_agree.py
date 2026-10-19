@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests import _tmp_root as tr
 from tests._fence_home import MIRRORED_ENTRIES, NEVER_MIRRORED, fence_home
 from tests._module_seam import patch_in, setattr_in
 
@@ -637,11 +638,13 @@ def _suite_session(tmp_path: Path, *, fail: bool, keep: bool) -> tuple[subproces
     tmpdir.mkdir(parents=True)
     drop = {"NX_REAL_HOME", "NX_FENCED_HOME", "NX_NO_HOME_FENCE", "NX_KEEP_FENCED_HOME", "NX_SUITE_LEASE_HELD_BY",
             "NX_SUITE_LEASE_WAIT", "NX_SUITE_LEASE_UNGUARDED", "NEXUS_PG_BIN", "PYTEST_ADDOPTS"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
+    # child_env_with_tmpdir also drops NX_TEST_TMP_ORIG: in a lab-run grant the child's
+    # session fixture would otherwise scan and reap the box's real tempdir (nexus-g2f0p)
+    env = tr.child_env_with_tmpdir({k: v for k, v in os.environ.items() if k not in drop}, tmpdir)
     # the real home, as the fence recorded it, so the child fences the OPERATOR's home like a fresh run
     env["HOME"] = os.environ.get("NX_REAL_HOME") or os.environ["HOME"]
     env.update(
-        TMPDIR=str(tmpdir), PYTHONPATH=str(seam_dir), PYTEST_ADDOPTS="",
+        PYTHONPATH=str(seam_dir), PYTEST_ADDOPTS="",
         NX_TEST_T2_SUBSTRATE="none",
         NX_BUILD_LEASE_ROOT=str(tmp_path / "leases"),
     )
@@ -695,10 +698,10 @@ def test_a_nested_session_leaves_the_parents_fenced_home_alone(tmp_path: Path) -
     (parent / ".m2").symlink_to(real / ".m2")
     drop = {"NX_NO_HOME_FENCE", "NX_KEEP_FENCED_HOME", "NX_SUITE_LEASE_HELD_BY", "NX_SUITE_LEASE_WAIT",
             "NX_SUITE_LEASE_UNGUARDED", "NEXUS_PG_BIN", "PYTEST_ADDOPTS"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env = tr.child_env_with_tmpdir({k: v for k, v in os.environ.items() if k not in drop}, tmpdir)
     env.update(
         HOME=str(parent), NX_REAL_HOME=str(parent), NX_FENCED_HOME=str(parent),
-        TMPDIR=str(tmpdir), PYTEST_ADDOPTS="", NX_TEST_T2_SUBSTRATE="none",
+        PYTEST_ADDOPTS="", NX_TEST_T2_SUBSTRATE="none",
         NX_BUILD_LEASE_ROOT=str(tmp_path / "leases"),
     )
     proc = subprocess.run(

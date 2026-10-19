@@ -423,8 +423,12 @@ def kept_report_path(
         return path
     run = Path(session.removeprefix("tmpfs="))
     try:
-        rel = path.relative_to(run / "p")
-    except ValueError:
+        # pytest's factory hands back a RESOLVED basetemp, so a report path is resolved
+        # while *run* is the path the plugin built and can hold a symlink. Compare like
+        # with like (the rule of :meth:`TmpRootPlugin._report_files`), or the tmpfs path
+        # the run deletes is what gets printed (nexus-g2f0p).
+        rel = (path.parent.resolve() / path.name).relative_to((run / "p").resolve())
+    except (ValueError, OSError):
         return path
     if len(rel.parts) != 3 or not path.name.startswith("nx-"):
         return path  # the harvest copies only <p>/pytest-of-<user>/pytest-<n>/nx-*
