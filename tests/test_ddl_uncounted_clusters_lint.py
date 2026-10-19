@@ -24,8 +24,9 @@ WHAT THIS LINT DOES NOT SCAN, so a green run is not read as "every cluster the s
 * anything that starts a cluster without NAMING it: the argv head must name ``initdb`` / ``pg_ctl`` / ``postgres``
   (``exe = bins / "initdb"; run([str(exe), "-D", tmp])`` passes in a file whose census is met by other uses),
   ``os.system(f"initdb -D ...")``, ``getattr(mod, "pg_ctl_start")(...)`` and ``functools.partial(provision, tmp_path)``;
-* a ``provision(x)`` whose ``x`` is a parameter, or unpacked from one, in a file that also makes a dir through the
-  helper (the call re-provisions a dir another function made; a caller can still pass it anything).
+* a ``provision(x)`` rooted at a parameter that names a same-file fixture returning a helper-made dir, in a file that
+  also makes a dir through the helper: the fixture's value is checked, not what a test later does to it (a method on
+  the fixture's object that swaps the dir, or a fixture overridden in a conftest).
 
 The figure "N of M data-dir uses come from the helper" counts call sites the scan understands, not clusters
 and not bytes. Since nexus-0ajjm the five ``provision()`` files are among them (one ``provision(h())`` is one
@@ -44,15 +45,7 @@ from tests import _ddl_counter as ddl
 
 pytestmark = pytest.mark.lint
 
-#: The files whose clusters come from ``pg_provision.provision(config_dir)`` (nexus-0ajjm): ``config_dir`` is a
-#: ``pg_data_tempdir`` dir, the cluster sits at ``<config_dir>/postgres`` and the owner-record sweep reads that.
-PROVISION_DRIVEN: tuple[str, ...] = (
-    "tests/db/test_pg_provision.py",
-    "tests/db/test_pg_provision_ca3_bundle.py",
-    "tests/db/test_pg_bundle_relocation.py",
-    "tests/db/test_pg_scram_auth.py",
-    "tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py",
-)
+PROVISION_DRIVEN = sites.PROVISION_DRIVEN  # one definition, shared with tests/test_integration_pg_cluster.py
 
 
 def _allowlist() -> tuple[list[str], dict[str, int]]:
@@ -368,23 +361,53 @@ _HELPER_FIXTURE = (
 )
 
 
-@pytest.mark.parametrize(
-    "reuse",
-    [
-        "def test_a(cluster):\n    result, config_dir = cluster\n    provision(config_dir)\n",
-        "def test_a(box):\n    provision(box.config_dir)\n",
-        "def test_a(config_dir):\n    provision(Path(config_dir))\n",
-        "def test_a(cluster):\n    result, config_dir = cluster\n    dir_ = config_dir\n    provision(dir_)\n",
-    ],
-    ids=["unpacked-from-a-fixture", "attribute-of-a-fixture", "parameter-through-path", "alias-of-unpacked"],
+_BOX_FIXTURE = (
+    "@pytest.fixture\n"
+    "def box():\n"
+    "    config_dir = Path(pg_data_tempdir('x_'))\n"
+    "    provision(config_dir, force_new_port=True)\n"
+    "    yield Box(config_dir, bins)\n"
 )
-def test_re_provisioning_a_dir_handed_in_is_accepted_beside_a_helper_made_one(tmp_path: Path, reuse: str) -> None:
-    """The five provision() files re-run provision(config_dir) on the dir their module fixture made (idempotency,
-    repair legs): a new call, not a new cluster, so it is neither a problem nor a traced use."""
-    repo = _fixture_repo(tmp_path, {"tests/test_p.py": _HELPER_FIXTURE + reuse})
+_DIR_FIXTURE = (
+    "@pytest.fixture\n"
+    "def config_dir():\n"
+    "    d = Path(pg_data_tempdir('x_'))\n"
+    "    provision(d)\n"
+    "    return d\n"
+)
+_DEPENDENT_FIXTURE = (
+    "@pytest.fixture\n"
+    "def view(cluster):\n"
+    "    result, config_dir = cluster\n"
+    "    yield result, config_dir, 'u'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _HELPER_FIXTURE + "def test_a(cluster):\n    result, config_dir = cluster\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "def test_a(cluster):\n    provision(cluster[1])\n",
+        _BOX_FIXTURE + "def test_a(box):\n    provision(box.config_dir)\n",
+        _DIR_FIXTURE + "def test_a(config_dir):\n    provision(Path(config_dir))\n",
+        _DIR_FIXTURE + "def test_a(config_dir):\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "def test_a(cluster):\n    result, config_dir = cluster\n    dir_ = config_dir\n    provision(dir_)\n",
+        _HELPER_FIXTURE + _DEPENDENT_FIXTURE + "def test_a(view):\n    result, config_dir, user = view\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "class TestA:\n    def test_a(self, cluster):\n        _, config_dir = cluster\n        provision(config_dir)\n",
+    ],
+    ids=[
+        "unpacked-from-a-fixture", "subscript-of-a-fixture", "attribute-of-a-fixture", "parameter-through-path",
+        "bare-fixture-parameter", "alias-of-unpacked", "fixture-from-a-fixture", "method-of-a-class",
+    ],
+)
+def test_re_provisioning_a_dir_handed_in_is_accepted_beside_a_helper_made_one(tmp_path: Path, body: str) -> None:
+    """The five provision() files re-run provision(config_dir) on the dir their fixture made (idempotency, repair
+    legs): a new call, not a new cluster, so it is neither a problem nor a traced use. The dir must come from a fixture of
+    the same file whose value is helper-made."""
+    repo = _fixture_repo(tmp_path, {"tests/test_p.py": body})
     assert sites.provenance_problems(repo) == []
     kinds = [(u.from_helper, u.handed_in) for u in sites.data_dir_uses(repo) if u.kind == "provision"]
-    assert kinds == [(True, False), (False, True)], kinds
+    assert kinds[-1] == (False, True) and all(k == (True, False) for k in kinds[:-1]), kinds
 
 
 @pytest.mark.parametrize(
@@ -397,8 +420,34 @@ def test_re_provisioning_a_dir_handed_in_is_accepted_beside_a_helper_made_one(tm
         "def test_a():\n    with tempfile.TemporaryDirectory() as d:\n        provision(Path(d))\n",
         "def test_a(cluster):\n    for d in cluster.dirs:\n        provision(d)\n",
         "def test_a(config_dir):\n    config_dir = Path(config_dir) / 'x'\n    provision(config_dir)\n",
+        # nexus-0ajjm review: a parameter is no proof. Each of these used to pass in a file with one helper-made provision.
+        "@pytest.fixture\ndef cfg(tmp_path):\n    return tmp_path\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path_factory):\n    return tmp_path_factory.mktemp('x')\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield tmp_path / 'x'\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield Box(tmp_path)\ndef test_a(cfg):\n    provision(cfg.dir)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield tmp_path, 1\ndef test_a(cfg):\n    d, _ = cfg\n    provision(d)\n",
+        "@pytest.fixture\ndef cfg(request):\n    return request.param\ndef test_a(cfg):\n    provision(cfg)\n",
+        "def test_a(d=Path('/tmp/zz')):\n    provision(d)\n",
+        "def test_a(cluster, d=Path('/tmp/zz')):\n    provision(d)\n",
+        "class T:\n    def test_a(self):\n        provision(self.cfg)\n",
+        "def _go(d):\n    provision(d)\ndef test_a(tmp_path):\n    _go(tmp_path)\n",
+        "def test_a(request):\n    provision(request.config.cache.dir)\n",
+        "def test_a(workdir):\n    provision(workdir)\n",
+        "def test_a(workdir):\n    provision(workdir.parent)\n",
+        "def test_a(tmp_path):\n    base = tmp_path\n    provision(base)\n",
+        "def test_a(tmp_path):\n    provision(tmp_path.parent)\n",
+        "def test_a(tmpdir):\n    provision(str(tmpdir))\n",
+        "@pytest.fixture\ndef cfg(other):\n    return other\ndef test_a(cfg):\n    provision(cfg)\n",
+        "def test_a(cluster):\n    provision(cluster[0])\n",
     ],
-    ids=["tmp_path", "tmp_path_factory", "tmp-path-join", "param-join", "with-target", "for-target", "reassigned-join"],
+    ids=[
+        "tmp_path", "tmp_path_factory", "tmp-path-join", "param-join", "with-target", "for-target", "reassigned-join",
+        "fixture-returns-tmp_path", "fixture-returns-mktemp", "fixture-yields-tmp_path-join",
+        "fixture-object-built-from-tmp_path", "fixture-tuple-element-from-tmp_path", "fixture-returns-request-param",
+        "param-default", "unrelated-param-default", "self-attr", "helper-fn-called-with-tmp_path",
+        "request-chain", "unresolved-param", "unresolved-param-chain", "tmp_path-alias", "tmp_path-attr", "tmpdir-str",
+        "fixture-of-an-unresolved-fixture", "wrong-tuple-element",
+    ],
 )
 def test_a_provision_the_scan_cannot_prove_handed_in_is_still_flagged(tmp_path: Path, reuse: str) -> None:
     repo = _fixture_repo(tmp_path, {"tests/test_p.py": _HELPER_FIXTURE + reuse})
@@ -407,7 +456,12 @@ def test_a_provision_the_scan_cannot_prove_handed_in_is_still_flagged(tmp_path: 
 
 
 def test_a_handed_in_provision_needs_a_helper_made_one_in_the_same_file(tmp_path: Path) -> None:
-    body = "def test_a(box):\n    provision(box.config_dir)\n"
+    """A fixture can carry a helper-made dir without ever calling provision() on it (a Box wrapping the dir): the
+    handed-in call is then the file's only provision(), and the file must list itself or make one through the helper."""
+    body = (
+        "@pytest.fixture\ndef box():\n    yield Box(Path(pg_data_tempdir('x_')))\n"
+        "def test_a(box):\n    provision(box.config_dir)\n"
+    )
     problems = sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_p.py": body}))
     assert len(problems) == 1 and "no provision() in this file takes its dir from pg_data_tempdir" in problems[0], problems
 

@@ -25,6 +25,7 @@ import structlog.testing
 
 from nexus.daemon.service_registry import pid_alive, process_command
 from tests import _child_process as cp
+from tests import _ddl_cluster_sites as csites
 from tests import _engine_substrate as sub
 from tests._module_seam import setattr_in
 
@@ -101,6 +102,71 @@ class TestClusterConf:
     def test_child_process_exposes_the_conf_helper(self, tmp_path) -> None:
         pgdata = tmp_path / "nexus_x_pg_abc"
         assert "fsync = off" in cp.integration_pg_conf(str(pgdata))
+
+
+class TestReloadableConf:
+    """After ``provision()`` has started the cluster, only settings a ``pg_ctl reload`` applies can be given to it
+    (nexus-0ajjm): ``wal_level``, ``max_wal_senders`` and ``dynamic_shared_memory_type`` are restart-only."""
+
+    _TRIO = {"fsync = off", "synchronous_commit = off", "full_page_writes = off"}
+
+    def test_a_tmpfs_cluster_gets_the_trio_and_the_wal_sizes_but_no_restart_only_setting(self) -> None:
+        lines = set(sub.reloadable_cluster_conf(
+            "/dev/shm/nexus-test-pg-1000/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
+        ).splitlines())
+        assert lines == self._TRIO | {"max_wal_size = 64MB", "min_wal_size = 32MB", "wal_keep_size = 0"}
+
+    def test_a_disk_cluster_gets_only_the_trio(self) -> None:
+        lines = set(sub.reloadable_cluster_conf(
+            "/home/nxtest/tmp/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS,
+        ).splitlines())
+        assert lines == self._TRIO
+
+    def test_the_restart_only_set_names_exactly_what_the_full_conf_gives_beyond_the_reloadable_part(self) -> None:
+        full = sub.integration_cluster_conf(
+            "/dev/shm/nexus-test-pg-1000/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
+        ).splitlines()
+        part = sub.reloadable_cluster_conf(
+            "/dev/shm/nexus-test-pg-1000/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
+        ).splitlines()
+        assert {ln.split("=")[0].strip() for ln in full if ln not in part} == sub.RESTART_ONLY_SETTINGS
+
+    def test_it_appends_to_the_nested_conf_and_reloads_that_pgdata(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "nexus_provision_pg_abc"
+        nested = config_dir / "postgres"
+        nested.mkdir(parents=True)
+        (nested / "postgresql.conf").write_text("port = 5433\n")
+        calls: list[list[str]] = []
+
+        def fake_reload(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        conf = cp.apply_reloadable_throwaway_conf("pg_ctl", config_dir, run=fake_reload)
+
+        text = (nested / "postgresql.conf").read_text()
+        assert text.startswith("port = 5433\n") and text.endswith(conf)
+        assert self._TRIO <= set(text.splitlines())
+        assert not sub.RESTART_ONLY_SETTINGS & {ln.split("=")[0].strip() for ln in text.splitlines()}
+        assert calls == [["pg_ctl", "-D", str(nested), "reload"]]
+
+    def test_a_failed_reload_is_logged_not_raised(self, tmp_path: Path) -> None:
+        nested = tmp_path / "cfg" / "postgres"
+        nested.mkdir(parents=True)
+        (nested / "postgresql.conf").write_text("")
+
+        def failing(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(argv, 1, "", "pg_ctl: no server running")
+
+        with structlog.testing.capture_logs() as logs:
+            cp.apply_reloadable_throwaway_conf("pg_ctl", tmp_path / "cfg", run=failing)
+        events = [e for e in logs if e["event"] == "apply_reloadable_throwaway_conf.reload_failed"]
+        assert len(events) == 1 and events[0]["returncode"] == 1 and events[0]["log_level"] == "warning", logs
+
+    def test_a_cluster_with_no_conf_file_is_a_loud_error(self, tmp_path: Path) -> None:
+        (tmp_path / "cfg" / "postgres").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError):
+            cp.apply_reloadable_throwaway_conf("pg_ctl", tmp_path / "cfg", run=lambda *a, **k: pytest.fail("reloaded"))
 
 
 class TestPgDataTempdirRouting:
@@ -576,6 +642,27 @@ class TestSweepReadsANestedProvisionPgdata:
         assert (nested / "postmaster.pid").exists() and config_dir.is_dir(), "removed under a live postmaster"
         assert rec.exists() and result.reaped == [] and result.errors == [str(rec)]
 
+    def test_a_top_level_postmaster_that_survives_its_stop_keeps_the_dir_and_the_record(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        """The survivor guard is not nested-only: a recorded dir with its own ``postmaster.pid`` and a live
+        postmaster whose stop did nothing keeps the dir and the record (before nexus-0ajjm it was removed under it)."""
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        assert sub._owner_pgdata_candidates(pgdata) == [pgdata]
+        pm = _sleeper(owned_children, str(pgdata))
+        (pgdata / "postmaster.pid").write_text(f"{pm.pid}\n{pgdata}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[pgdata])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: None)  # the stop did nothing
+
+        with pytest.warns(UserWarning, match="still running"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert pid_alive(pm.pid)
+        assert (pgdata / "postmaster.pid").exists() and pgdata.is_dir(), "removed under a live postmaster"
+        assert rec.exists() and result.reaped == [] and result.errors == [str(rec)]
+
     def test_a_dead_nested_postmaster_is_reaped_without_a_kill(self, tmp_path, monkeypatch) -> None:
         root, config_dir, nested = self._nested(tmp_path)
         (nested / "postmaster.pid").write_text(f"{_dead_pid()}\n{nested}\n")
@@ -779,21 +866,37 @@ class TestEveryIntegrationClusterGetsTheConf:
 
     #: This file exercises the helper with fakes; _child_process defines it; the cluster-sites lint
     #: names it inside source strings it feeds its own scanner (nexus-szyun), which that lint's
-    #: provenance scan covers for every real caller.
-    _NOT_FIXTURES = {"_child_process.py", "test_integration_pg_cluster.py", "test_ddl_uncounted_clusters_lint.py"}
+    #: provenance scan covers for every real caller; ``_ddl_cluster_sites.py`` IS that scanner and names the helper in
+    #: its docstrings and as the call it traces.
+    _NOT_FIXTURES = {
+        "_child_process.py", "_ddl_cluster_sites.py", "test_integration_pg_cluster.py",
+        "test_ddl_uncounted_clusters_lint.py",
+    }
 
     #: The five files whose cluster is made by ``pg_provision.provision(config_dir)`` on a ``pg_data_tempdir``
-    #: dir (nexus-0ajjm). provision() runs initdb and starts the cluster inside one call, so there is no moment
-    #: to append the conf before the first start, and a restart afterwards would change what these tests test
-    #: (the fast path needs the running port; the stopped-cluster legs stop it themselves). They keep default
-    #: fsync: only the directory moved to the run's tmpfs root. Each must really call ``provision(``.
-    _PROVISION_DRIVEN = {
-        "db/test_pg_provision.py",
-        "db/test_pg_provision_ca3_bundle.py",
-        "db/test_pg_bundle_relocation.py",
-        "db/test_pg_scram_auth.py",
-        "daemon/test_storage_service_daemon_pg_monitor_backfill.py",
+    #: dir (nexus-0ajjm); the one list is ``tests/_ddl_cluster_sites.PROVISION_DRIVEN``, relative to this directory
+    #: here. provision() runs initdb and starts the cluster inside one call, so there is no moment to append the conf
+    #: before the first start. After provision() each fixture appends the settings a reload applies
+    #: (``apply_reloadable_throwaway_conf``: fsync, synchronous_commit, full_page_writes, and on tmpfs
+    #: max_wal_size / min_wal_size / wal_keep_size). ``wal_level`` and ``dynamic_shared_memory_type`` need a restart and
+    #: stay at provision's values: wal_level=replica, DSM posix. Each file must really call ``provision(``, and
+    #: ``_APPLY_CALLS`` pins how many fixtures apply the reload settings. Skipped: the two scram tests that call
+    #: provision() in their own body under a ``_run`` spy or a simulated crash (pwfile permission audit, crash after
+    #: initdb); their clusters keep provision's defaults.
+    _PROVISION_DRIVEN = {p.removeprefix("tests/") for p in csites.PROVISION_DRIVEN}
+    _APPLY_CALLS = {
+        "db/test_pg_provision.py": 4,
+        "db/test_pg_provision_ca3_bundle.py": 1,
+        "db/test_pg_bundle_relocation.py": 1,
+        "db/test_pg_scram_auth.py": 1,
+        "daemon/test_storage_service_daemon_pg_monitor_backfill.py": 1,
     }
+
+    def test_every_provision_driven_file_applies_the_reloadable_conf(self) -> None:
+        assert set(self._APPLY_CALLS) == self._PROVISION_DRIVEN
+        for rel, want in self._APPLY_CALLS.items():
+            code = _code_only((_TESTS / rel).read_text())
+            assert code.count("apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)") == want, rel
 
     def test_every_caller_appends_the_conf(self) -> None:
         counts: dict[str, tuple[int, int]] = {}
@@ -860,6 +963,31 @@ class TestStopAndRemoveCluster:
             cp.stop_and_remove_cluster("pg_ctl", pgdata, run=hung_stop)
         events = [e for e in logs if e["event"] == "stop_and_remove_cluster.stop_timed_out"]
         assert len(events) == 1 and events[0]["pgdata"] == str(pgdata) and events[0]["log_level"] == "warning", logs
+
+    def test_a_stop_that_exits_nonzero_is_logged_and_the_dir_is_still_removed(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        pgdata.mkdir()
+
+        def refused(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(argv, 4, "", "pg_ctl: directory is not a database cluster directory")
+
+        with structlog.testing.capture_logs() as logs:
+            cp.stop_and_remove_cluster("pg_ctl", pgdata, run=refused)
+        events = [e for e in logs if e["event"] == "stop_and_remove_cluster.stop_failed"]
+        assert len(events) == 1 and events[0]["returncode"] == 4 and events[0]["pgdata"] == str(pgdata), logs
+        assert events[0]["log_level"] == "warning" and "not a database cluster" in events[0]["stderr"]
+        assert not pgdata.exists()
+
+    def test_a_clean_stop_logs_nothing(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        pgdata.mkdir()
+
+        def ok(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with structlog.testing.capture_logs() as logs:
+            cp.stop_and_remove_cluster("pg_ctl", pgdata, run=ok)
+        assert [e for e in logs if str(e["event"]).startswith("stop_and_remove_cluster")] == []
 
     def test_a_provisioned_cluster_is_stopped_at_its_nested_pgdata_and_its_config_dir_removed(
         self, tmp_path: Path,

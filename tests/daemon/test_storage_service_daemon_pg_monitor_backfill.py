@@ -53,7 +53,7 @@ from nexus.db.pg_provision import (
 
 # THE GATE RESOLVES THROUGH THE SELF-PROVISIONING SEAM, NEVER AMBIENT
 # DISCOVERY — see tests/db/test_pg_provision.py's identical header comment.
-from tests._child_process import pg_data_tempdir, stop_and_remove_cluster
+from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from tests.db._service_fixture import pg_bin_dir  # noqa: E402 — gate needs it here
 
@@ -130,6 +130,9 @@ def upgrade_shaped_cluster(bins: PgBinaries):
                 os.environ.pop("NEXUS_CONFIG_DIR", None)
             else:
                 os.environ["NEXUS_CONFIG_DIR"] = old_env
+
+        # nexus-0ajjm: fsync/WAL-size settings a reload can apply (wal_level and DSM keep provision's values).
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
 
         # nexus-ja4pq: the cluster demands passwords; the raw psql calls here and in
         # the tests present the superuser's recorded one through PGPASSFILE.

@@ -35,8 +35,9 @@ argument back to ``tests._child_process.pg_data_tempdir``; an argv it cannot rea
 shell string, a variable argv in a file that starts a cluster) is itself a use to list. ``provision(<dir>)`` nests the
 cluster at ``<dir>/postgres``; the crash sweep reads that nested ``postmaster.pid`` (nexus-0ajjm), so ``<dir>`` itself
 must be the helper's result (a traced use, like an initdb data dir), a join under it is rejected, and any other
-``<dir>`` must be listed. A ``provision(x)`` whose ``x`` is a parameter, or unpacked from one, re-provisions a dir
-another function made, and is accepted in a file that makes one through the helper. :func:`provenance_problems` is what
+``<dir>`` must be listed. A ``provision(x)`` whose ``x`` is rooted at a parameter naming a fixture of the same file
+that returns or yields a helper-made dir re-provisions a dir another function made, and is accepted in a file that makes
+one through the helper; any other parameter, a fixture returning ``tmp_path``, ``self.x`` and the like are flagged. :func:`provenance_problems` is what
 ``tests/test_ddl_uncounted_clusters_lint.py`` asserts is empty. The files that do not (or cannot) use the helper are
 listed WITH A REASON in ``tests/pg_data_dir_exceptions.toml``, whose two tables have ceilings and may only shrink
 (``disk_required`` is empty and its ceiling 0 since nexus-0ajjm).
@@ -149,6 +150,16 @@ _SUBPROCESS_CALLS = frozenset({
 #: ``provision()`` files until nexus-0ajjm taught the owner-record sweep a nested ``postmaster.pid`` and moved them
 #: to the helper; it is empty. ``not_a_cluster`` is the files that name initdb / ``provision`` but never run a
 #: postmaster. Raising either number is a decision to make on purpose, in a diff a reviewer reads.
+#: The five files whose clusters come from ``pg_provision.provision(config_dir)`` (nexus-0ajjm): ``config_dir`` is a
+#: ``pg_data_tempdir`` dir, the cluster sits at ``<config_dir>/postgres`` and the owner-record sweep reads that. ONE
+#: definition: the lint test and ``tests/test_integration_pg_cluster.py`` (the conf census) both read it. Repo-relative.
+PROVISION_DRIVEN: tuple[str, ...] = (
+    "tests/db/test_pg_provision.py",
+    "tests/db/test_pg_provision_ca3_bundle.py",
+    "tests/db/test_pg_bundle_relocation.py",
+    "tests/db/test_pg_scram_auth.py",
+    "tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py",
+)
 NOT_A_CLUSTER_CEILING = 9
 DISK_REQUIRED_CEILING = 0
 
@@ -185,7 +196,8 @@ class DataDirUse:
     #: ``provision`` only: the directory handed in is built UNDER the helper's result (``Path(h()) / "cfg"``), a
     #: pgdata nested deeper than the recorded dir, which the owner-record sweep does not read.
     nests_helper: bool = False
-    #: ``provision`` only: the directory is a parameter, or unpacked from one (a fixture's yield), so the call
+    #: ``provision`` only: the directory is rooted at a parameter naming a same-file fixture that returns or
+    #: yields a helper-made dir (directly, unpacked, or as an attribute of an object built from it), so the call
     #: re-provisions a dir another function made. It is not a new cluster and is not counted as a traced use.
     handed_in: bool = False
 
@@ -292,29 +304,141 @@ def _from_helper(
     return False
 
 
-def _handed_in(
-    expr: ast.expr | None, scopes: list[ast.AST], aliases: dict[str, str], seen: frozenset[str] = frozenset(),
-) -> bool:
-    """True when *expr* is a bare name or attribute chain (through ``str``/``Path`` and subscripts) rooted at a
-    parameter of the use's function or module-level scope, or at a name bound only to such a chain: a dir some other
-    function made, handed in. A pytest dir fixture (``tmp_path``), a ``/`` join, an f-string, a call, a ``for``/``with``
-    target and anything unknown are all False."""
-    while True:
-        if isinstance(expr, ast.Call) and _call_name(expr, aliases) in _PATH_WRAPPERS and len(expr.args) == 1 and not expr.keywords:
-            expr = expr.args[0]
-        elif isinstance(expr, (ast.Attribute, ast.Subscript)):
-            expr = expr.value
-        else:
-            break
-    if not isinstance(expr, ast.Name) or expr.id in _PYTEST_DIR_FIXTURES or expr.id in seen:
+def _is_fixture(fn: ast.AST) -> bool:
+    """A ``def`` decorated with ``fixture`` / ``pytest.fixture`` / ``pytest.fixture(...)``."""
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return False
-    for scope in scopes:  # innermost first
-        values = _scope_assignments(scope).get(expr.id)
-        if values:  # a reassigned parameter is judged by what it is reassigned to
-            return all(v is not None and _handed_in(v, scopes, aliases, seen | {expr.id}) for v in values)
-        if expr.id in _params(scope):
+    for dec in fn.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if (isinstance(target, ast.Name) and target.id == "fixture") or (
+            isinstance(target, ast.Attribute) and target.attr == "fixture"
+        ):
             return True
     return False
+
+
+def _fixture_values(fn: ast.AST) -> list[ast.expr | None]:
+    """Every value a fixture returns or yields (not in nested defs); ``[]`` when it gives none."""
+    out: list[ast.expr | None] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(child, (ast.Return, ast.Yield)) and child.value is not None:
+                out.append(child.value)
+            walk(child)
+
+    walk(fn)
+    return out
+
+
+def _has_default(fn: ast.AST, name: str) -> bool:
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    a = fn.args
+    positional = [*a.posonlyargs, *a.args]
+    defaulted = {x.arg for x in positional[len(positional) - len(a.defaults):]} if a.defaults else set()
+    defaulted |= {x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
+    return name in defaulted
+
+
+def _handed_in(expr: ast.expr | None, scopes: list[ast.AST], aliases: dict[str, str]) -> bool:
+    """True when *expr* is a dir that a same-file FIXTURE made through the helper, handed to the use as a parameter.
+
+    The root of *expr* (through ``str``/``Path``, attributes, subscripts and a tuple unpack) must be a parameter of
+    the use's function that names a fixture defined in this file, and every such fixture must return or yield a
+    value that carries ``pg_data_tempdir(...)``: the dir itself, element *i* of a tuple (``a, b = fx`` binds
+    ``fx[i]``), or an object built from it (an attribute of ``Box(config_dir, ...)``). A bare parameter is accepted
+    on the same terms. A parameter with a default, ``self``/``request``, a name that is no fixture here, a fixture
+    that returns a pytest dir fixture, a ``/`` join, an f-string, a call, a ``for``/``with`` target and anything
+    unknown are all False. Fixtures that take other fixtures are followed, not trusted."""
+    tree = scopes[-1]
+    fixtures: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if _is_fixture(node):
+            fixtures.setdefault(node.name, []).append(node)  # type: ignore[attr-defined]
+
+    visiting: set[tuple[int, str]] = set()  # a name being resolved: `d = d` must not loop
+
+    def fixture_value_ok(name: str, idx: int | None, container: bool, seen_fx: frozenset[str]) -> bool:
+        defs = fixtures.get(name)
+        if not defs or name in seen_fx:
+            return False
+        for fn in defs:
+            values = _fixture_values(fn)
+            fscopes = [fn, tree]
+            if not values or not all(
+                v is not None and (
+                    container_ok(v, idx, fscopes, seen_fx | {name}) if container else dir_ok(v, fscopes, seen_fx | {name})
+                )
+                for v in values
+            ):
+                return False
+        return True
+
+    def container_ok(base: ast.expr, idx: int | None, sc: list[ast.AST], seen_fx: frozenset[str]) -> bool:
+        """*base* holds a helper-made dir at element *idx* (any element or attribute when ``None``)."""
+        if isinstance(base, (ast.Tuple, ast.List)):
+            if any(isinstance(e, ast.Starred) for e in base.elts):
+                return False
+            if idx is None:
+                return any(dir_ok(e, sc, seen_fx) for e in base.elts)
+            return idx < len(base.elts) and dir_ok(base.elts[idx], sc, seen_fx)
+        if isinstance(base, ast.Call):
+            if idx is not None or _call_name(base, aliases) in _PATH_WRAPPERS:
+                return False
+            return any(dir_ok(a, sc, seen_fx) for a in (*base.args, *(k.value for k in base.keywords)))
+        if isinstance(base, (ast.Attribute, ast.Subscript)):
+            return container_ok(base.value, None, sc, seen_fx)
+        if isinstance(base, ast.Name):
+            key = (id(sc[0]), base.id)
+            if key in visiting:
+                return False
+            for scope in sc:  # innermost first
+                values = _scope_assignments(scope).get(base.id)
+                if values:
+                    visiting.add(key)
+                    try:
+                        return all(v is not None and container_ok(v, idx, sc, seen_fx) for v in values)
+                    finally:
+                        visiting.discard(key)
+                if base.id in _params(scope):
+                    return not _has_default(scope, base.id) and fixture_value_ok(base.id, idx, True, seen_fx)
+        return False
+
+    def dir_ok(e: ast.expr | None, sc: list[ast.AST], seen_fx: frozenset[str]) -> bool:
+        """*e* is a helper-made dir, a bare fixture parameter included."""
+        if e is None:
+            return False
+        if _from_helper(e, sc, aliases):
+            return True
+        if isinstance(e, ast.Call):
+            if _call_name(e, aliases) in _PATH_WRAPPERS and len(e.args) == 1 and not e.keywords:
+                return dir_ok(e.args[0], sc, seen_fx)
+            return False
+        if isinstance(e, ast.Subscript):
+            i = e.slice.value if isinstance(e.slice, ast.Constant) and type(e.slice.value) is int else None
+            return i is not None and container_ok(e.value, i, sc, seen_fx)
+        if isinstance(e, ast.Attribute):
+            return container_ok(e.value, None, sc, seen_fx)
+        if isinstance(e, ast.Name):
+            key = (id(sc[0]), e.id)
+            if key in visiting:
+                return False
+            for scope in sc:  # innermost first
+                values = _scope_assignments(scope).get(e.id)
+                if values:  # a reassigned parameter is judged by what it is reassigned to
+                    visiting.add(key)
+                    try:
+                        return all(v is not None and dir_ok(v, sc, seen_fx) for v in values)
+                    finally:
+                        visiting.discard(key)
+                if e.id in _params(scope):
+                    return not _has_default(scope, e.id) and fixture_value_ok(e.id, None, False, seen_fx)
+        return False
+
+    return dir_ok(expr, scopes, frozenset())
 
 
 def _mentions_helper(expr: ast.expr | None, scopes: list[ast.AST], aliases: dict[str, str]) -> bool:
@@ -513,9 +637,10 @@ def provenance_problems(
     2. ``provision(<dir>)`` where the dir is built UNDER the helper's result (``Path(h()) / "cfg"``): ``provision``
        nests the cluster at ``<dir>/postgres`` and the owner-record sweep reads ``postmaster.pid`` at the recorded
        dir and at its ``postgres/`` child only, so a deeper nest is a problem (listing does not excuse it).
-       ``provision(h())`` itself is fine: a traced use, as an initdb data dir is (nexus-0ajjm). A dir that is a
-       parameter, or unpacked from one, re-provisions a dir another function made and is accepted only in a file
-       that also makes one through the helper.
+       ``provision(h())`` itself is fine: a traced use, as an initdb data dir is (nexus-0ajjm). A dir handed in
+       as a parameter is accepted only when the parameter names a fixture defined in the same file whose return or
+       yield carries a helper-made dir (directly, through a tuple unpack, or as an attribute of an object built from
+       it), and only in a file that also makes one through the helper; anything else is a problem.
     3. An unlisted file with fewer traced (helper-made) uses than census sites: each ``pg_ctl_start`` call and
        each ``exe_name("initdb")`` lookup is a cluster the scan must have traced, not one proof per file. A
        ``provision(h())`` is one traced use.

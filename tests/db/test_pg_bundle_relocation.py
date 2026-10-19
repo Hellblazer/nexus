@@ -51,7 +51,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install.layout_core import exe_name
-from tests._child_process import pg_data_tempdir, stop_and_remove_cluster
+from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     NEXUS_DB_NAME,
@@ -155,6 +155,9 @@ def provisioned(bins: PgBinaries):
                 os.environ.pop("NEXUS_CONFIG_DIR", None)
             else:
                 os.environ["NEXUS_CONFIG_DIR"] = old_cfg
+
+        # nexus-0ajjm: fsync/WAL-size settings a reload can apply (wal_level and DSM keep provision's values).
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
 
         # nexus-ja4pq: the cluster demands passwords; raw psql below uses the
         # superuser's recorded one through PGPASSFILE.

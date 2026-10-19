@@ -834,6 +834,23 @@ def integration_cluster_conf(pgdata: str, **kw) -> str:
     return throwaway_cluster_conf(str(Path(pgdata).parent), **kw)
 
 
+#: The settings :func:`integration_cluster_conf` can give that Postgres reads only at a postmaster start. A cluster
+#: that is already running (``pg_provision.provision`` initdbs and starts in one call) cannot take them by a conf
+#: append and a reload, so :func:`reloadable_cluster_conf` leaves them out (nexus-0ajjm).
+RESTART_ONLY_SETTINGS = frozenset({"wal_level", "max_wal_senders", "dynamic_shared_memory_type"})
+
+
+def reloadable_cluster_conf(pgdata: str, **kw) -> str:
+    """:func:`integration_cluster_conf` minus :data:`RESTART_ONLY_SETTINGS`: ``fsync``, ``synchronous_commit``,
+    ``full_page_writes`` and, where the cluster is on the tmpfs root, ``max_wal_size`` / ``min_wal_size`` /
+    ``wal_keep_size``. A conf append plus ``pg_ctl reload`` applies all of them to a running cluster."""
+    return "".join(
+        line + "\n"
+        for line in integration_cluster_conf(pgdata, **kw).splitlines()
+        if line.split("=", 1)[0].strip() not in RESTART_ONLY_SETTINGS
+    )
+
+
 # ── Integration clusters: owner records (nexus-942h9) ────────────────────────
 #
 # An integration fixture (``tests._child_process.pg_data_tempdir``) makes its

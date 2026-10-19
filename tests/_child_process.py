@@ -247,17 +247,24 @@ def stop_and_remove_cluster(
     root, where it holds RAM until the crash sweep (nexus-szyun). The exception still propagates, so a
     stuck postmaster is a loud teardown error, not a silent one.
 
-    A timed-out stop is logged: the removal that follows then runs under a postmaster that may still be
-    alive. It exits by itself once its ``postmaster.pid`` is gone, and nothing here waits for that.
+    A timed-out stop and a stop that exits non-zero are both logged: the removal that follows then runs
+    under a postmaster that may still be alive. It exits by itself once its ``postmaster.pid`` is gone, and nothing here waits for that.
 
     *remove_dir* is the directory to remove when it is not *pgdata* itself: ``pg_provision.provision(dir)``
     puts the cluster at ``<dir>/postgres`` and its credentials beside it, so a test that provisions on a
     :func:`pg_data_tempdir` dir stops ``<dir>/postgres`` and removes ``<dir>`` (nexus-0ajjm)."""
     try:
-        run(
+        done = run(
             [str(pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
             capture_output=True, text=True, timeout=30, check=False,
         )
+        code = getattr(done, "returncode", 0)
+        if code != 0:
+            # A wrong -D, a postmaster that is not ours, a pg_ctl that cannot signal: the removal below still runs.
+            _log.warning(
+                "stop_and_remove_cluster.stop_failed", pgdata=str(pgdata), removing=str(remove_dir or pgdata),
+                returncode=code, stderr=str(getattr(done, "stderr", "") or "")[-300:],
+            )
     except subprocess.TimeoutExpired:
         _log.warning("stop_and_remove_cluster.stop_timed_out", pgdata=str(pgdata), removing=str(remove_dir or pgdata))
         raise
@@ -274,7 +281,36 @@ def integration_pg_conf(pgdata: str) -> str:
     return integration_cluster_conf(pgdata)
 
 
+def apply_reloadable_throwaway_conf(
+    pg_ctl: str | os.PathLike[str],
+    config_dir: str | os.PathLike[str],
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> str:
+    """Give a cluster that ``pg_provision.provision(config_dir)`` already started the throwaway settings that a
+    reload can apply (nexus-0ajjm): append :func:`tests._engine_substrate.reloadable_cluster_conf` to
+    ``<config_dir>/postgres/postgresql.conf`` and ``pg_ctl reload``. ``wal_level`` and ``dynamic_shared_memory_type``
+    need a restart, so those clusters keep provision's values. A reload that exits non-zero is logged, not raised: the
+    cluster still works, only slower. Returns the text appended."""
+    from tests._engine_substrate import reloadable_cluster_conf  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    pgdata = Path(config_dir) / "postgres"
+    conf_path = pgdata / "postgresql.conf"
+    if not conf_path.is_file():  # not a provisioned cluster: appending would create a conf nothing reads
+        raise FileNotFoundError(str(conf_path))
+    conf = reloadable_cluster_conf(str(config_dir))
+    with open(conf_path, "a", encoding="utf-8") as f:
+        f.write("\n# nexus-0ajjm: throwaway settings, applied by reload\n" + conf)
+    done = run([str(pg_ctl), "-D", str(pgdata), "reload"], capture_output=True, text=True, timeout=30, check=False)
+    code = getattr(done, "returncode", 0)
+    if code != 0:
+        _log.warning("apply_reloadable_throwaway_conf.reload_failed", pgdata=str(pgdata), returncode=code,
+                     stderr=str(getattr(done, "stderr", "") or "")[-300:])
+    return conf
+
+
 __all__ = [
+    "apply_reloadable_throwaway_conf",
     "group_alive",
     "group_popen_kwargs",
     "java_available",

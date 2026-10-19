@@ -32,7 +32,7 @@ from nexus._install.layout_core import exe_name
 from nexus._winsec import owner_only_problem
 from nexus.db import pg_provision as pp
 from nexus.db.pg_auth import cluster_auth_state, hba_has_trust
-from tests._child_process import pg_data_tempdir, stop_and_remove_cluster
+from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
 
 _PG_BIN = pg_bin_dir()
@@ -185,6 +185,8 @@ def box(bins: pp.PgBinaries):
             pg_log = config_dir / "postgres" / "pg.log"
             tail = pg_log.read_text()[-2000:] if pg_log.exists() else "(no pg.log)"
             raise AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}") from exc
+        # nexus-0ajjm: fsync/WAL-size settings a reload can apply (wal_level and DSM keep provision's values).
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
         yield _Box(config_dir, bins)
     finally:
         _remove(bins, config_dir)
@@ -197,6 +199,16 @@ class TestFreshClusterDemandsPasswords:
     def test_pg_hba_has_no_trust_line(self, box: _Box) -> None:
         assert not hba_has_trust(box.hba_bytes.decode())
         assert cluster_auth_state(box.pgdata) == "scram"
+
+    def test_the_fixture_applied_the_reloadable_throwaway_settings(self, box: _Box) -> None:
+        """nexus-0ajjm: the box is a provision()ed cluster that then took fsync, synchronous_commit and
+        full_page_writes off by a conf append and a reload (the restart-only settings keep provision's values)."""
+        with pp.superuser_auth(box.creds["PG_SUPERUSER_PASS"]):
+            shown = {
+                name: pp._psql_tuples(box.bins, box.port, "postgres", _os_user(), f"SHOW {name}")
+                for name in ("fsync", "synchronous_commit", "full_page_writes")
+            }
+        assert shown == {"fsync": "off", "synchronous_commit": "off", "full_page_writes": "off"}
 
     def test_the_superuser_is_refused_without_a_password(self, box: _Box) -> None:
         res = _login(box.bins, box.port, _os_user(), None)
