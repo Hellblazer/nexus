@@ -48,17 +48,23 @@ def test_classification_follows_the_evidence() -> None:
         _rec("t/a.py::test_provisioned", provisioned=True),
         _rec("t/a.py::test_exempt", touched=True, exempt=True),
         _rec("t/a.py::test_skipped", outcome="skipped"),
+        _rec("t/a.py::test_xfailed_after_a_touch", outcome="xfailed", touched=True),
+        _rec("t/a.py::test_skipped_after_a_touch", outcome="skipped", touched=True),
         _rec("t/a.py::test_dirty", touched=True, provisioned=True),
         {"k": "late_thread", "nodeid": "t/a.py::test_leaker", "n": 1},
     ])
-    assert c.need == {"t/a.py::test_touched", "t/a.py::test_failed_without_a_trace"}
+    assert c.need == {
+        "t/a.py::test_touched", "t/a.py::test_failed_without_a_trace",
+        "t/a.py::test_xfailed_after_a_touch", "t/a.py::test_skipped_after_a_touch",
+    }
     assert c.failed_blind == ["t/a.py::test_failed_without_a_trace"]
     assert c.peek == {"t/a.py::test_peeks"}
     assert c.mint["t/a.py"] == {
         "t/a.py::test_touched", "t/a.py::test_failed_without_a_trace", "t/a.py::test_clean", "t/a.py::test_peeks",
+        "t/a.py::test_xfailed_after_a_touch", "t/a.py::test_skipped_after_a_touch",
     }
     assert c.provisioned_dirty == ["t/a.py::test_dirty"] and c.late_owners == ["t/a.py::test_leaker"]
-    assert c.total == 8
+    assert c.total == 10
     assert _census([_rec("t/a.py::test_peeks", peek=True)], include_peeks=True).need == {"t/a.py::test_peeks"}
 
 

@@ -563,6 +563,7 @@ def _rollup(records: list[dict]) -> dict:
     collect_skipped: set[str] = set()
     late_child: list[dict] = []
     late_thread: list[dict] = []
+    xfail_touches: list[str] = []
     for rec in records:
         kind = rec["k"]
         if kind == "collect_skip":
@@ -631,6 +632,8 @@ def _rollup(records: list[dict]) -> dict:
                         files.append(t["fixture_file"])
         if finding is not None:
             findings.append(finding)
+            if rec["outcome"] == "xfailed":
+                xfail_touches.append(rec["nodeid"])
         for p in rec.get("soft_peeks", ()):
             entry = peeks.setdefault((p["kind"], p["site"]), {
                 "kind": p["kind"], "site": p["site"], "count": 0, "tests": 0, "example": rec["nodeid"],
@@ -665,6 +668,7 @@ def _rollup(records: list[dict]) -> dict:
         "collect_skipped": sorted(collect_skipped),
         "late_child_touches": late_child,
         "late_thread_touches": late_thread,
+        "xfail_touches": sorted(xfail_touches),
     }
 
 
@@ -1123,6 +1127,13 @@ class Guard:
             problems.append(
                 f"vacuous sweep: {c['children_spawned']} Python child(ren) were spawned but the shim saw none "
                 "(PYTHONPATH scrubbed, or the shim could not load): child touches are unexamined"
+            )
+        if report["xfail_touches"]:
+            shown = ", ".join(report["xfail_touches"][:5])
+            problems.append(
+                f"storage touch swallowed by xfail: {len(report['xfail_touches'])} xfailed test(s) reached storage "
+                f"without a tenant, and xfail turns the teardown failure into an expected one: {shown}. "
+                "Mark them t2_tenant so they xfail for their own reason."
             )
         late = report["late_child_touches"] + report["late_thread_touches"]
         if late:

@@ -1196,3 +1196,40 @@ def test_uninstall_puts_thread_and_popen_back_in_a_fresh_process() -> None:
         [sys.executable, "-c", code], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120,
     )
     assert out.returncode == 0 and out.stdout.strip() == "restored", out.stdout + out.stderr
+
+
+def test_xfail_cannot_swallow_a_storage_touch(pytester, monkeypatch) -> None:
+    """pytest applies a test's xfail to its TEARDOWN failure too, so the guard's own
+    failure for an xfailed test that reached storage is turned into an expected one.
+    The session verdict names it instead, and fail mode ends non-zero."""
+    body = '''
+import pytest
+from helpers import touch_storage_and_swallow
+
+@pytest.mark.xfail(strict=False, reason="known broken for another reason")
+def test_xfails_after_a_touch():
+    touch_storage_and_swallow()
+    assert False
+
+@pytest.mark.xfail(strict=False, reason="known broken for another reason")
+def test_xfails_with_a_tenant(t2_tenant):
+    touch_storage_and_swallow()
+    assert False
+
+@pytest.mark.xfail(strict=False, reason="known broken for another reason")
+def test_xfails_untouched():
+    assert False
+'''
+    result = _run(pytester, monkeypatch, body, mode="fail")
+    # three xfails, and a fourth report: the guard's teardown failure for the touching one,
+    # which the xfail turned into an expected failure as well
+    result.assert_outcomes(xfailed=4)
+    out = result.stdout.str()
+    assert result.ret != 0
+    assert "storage touch swallowed by xfail: 1 xfailed test(s)" in out
+    assert "test_inner.py::test_xfails_after_a_touch" in out
+    assert "test_xfails_with_a_tenant" not in out.split("swallowed by xfail")[1].split("storage-touch report")[0]
+    assert _report(result)["xfail_touches"] == ["test_inner.py::test_xfails_after_a_touch"]
+    # report mode says the same and keeps the exit status
+    result = _run(pytester, monkeypatch, body, mode="report")
+    assert result.ret == 0 and "storage touch swallowed by xfail" in result.stdout.str()

@@ -14,8 +14,9 @@ This script reads those lines and writes the marks:
   thread, a child process, or a fixture), or when it FAILED without one (a test
   that reads ``NX_SERVICE_TOKEN`` from the environment raises ``KeyError`` and
   constructs no guarded error, so the guard cannot see it; the failure is the
-  evidence). A test already provisioned, exempt or skipped needs nothing; one
-  that is only a soft peek needs nothing unless ``--include-peeks``;
+  evidence). A skipped or xfailed test needs one only if it touched storage. A
+  test already provisioned or exempt needs nothing; one that is only a soft peek
+  needs nothing unless ``--include-peeks``;
 * a module whose needing tests are at least ``--module-threshold`` of the tests
   that would otherwise mint nothing gets one ``pytestmark``; otherwise a class
   whose every such test needs one gets a class mark; otherwise each test is marked;
@@ -121,9 +122,12 @@ def classify(records: list[dict], *, include_peeks: bool = False) -> Census:
         total += 1
         nodeid = rec["nodeid"]
         outcomes[rec["outcome"]] += 1
-        if rec["exempt"] or rec.get("stale") or rec["outcome"] in ("skipped", "xfailed"):
-            continue
         touched = bool(rec["unprov_events"])
+        # A skipped or xfailed test that never touched storage needs nothing. One that DID
+        # needs a tenant all the same: it would run (or xfail for its own reason) with one,
+        # and an xfail turns the guard's teardown failure into an expected one.
+        if rec["exempt"] or rec.get("stale") or (rec["outcome"] in ("skipped", "xfailed") and not touched):
+            continue
         if rec["provisioned"]:
             if touched:
                 dirty.add(nodeid)

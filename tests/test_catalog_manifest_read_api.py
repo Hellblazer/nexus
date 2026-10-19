@@ -720,6 +720,7 @@ class TestManifestWriteBatchHook:
         assert rows[0] == (0, "a" * 64)
         assert rows[1] == (1, "b" * 64)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.xfail(
         strict=True,
         reason=(
@@ -910,6 +911,7 @@ class TestManifestWriteBatchHook:
             f"chunk_count={chunk_count} != manifest_size={manifest_size}"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.xfail(
         strict=True,
         reason=(
