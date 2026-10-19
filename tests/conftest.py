@@ -37,7 +37,7 @@ import sys as _sys  # noqa: E402
 # tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
 # guard; active in the default substrate (optin), inert under none and per-test.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
-pytest_plugins = ["pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter"]
+pytest_plugins = ["pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool"]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
 
@@ -2783,7 +2783,7 @@ def t2_service_env(request: pytest.FixtureRequest,
     if _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_tenant")
         return
-    with _engine_tenant_env(monkeypatch, pin_local=True) as tenant:
+    with _engine_tenant_env(monkeypatch, pin_local=True, request=request) as tenant:
         yield tenant
 
 
@@ -2803,7 +2803,7 @@ def t2_tenant(request: pytest.FixtureRequest,
     if not _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_service_env")
         return
-    with _engine_tenant_env(monkeypatch, pin_local=False) as tenant:
+    with _engine_tenant_env(monkeypatch, pin_local=False, request=request) as tenant:
         _mint_t1_session_env(monkeypatch)
         yield tenant
 
@@ -2832,6 +2832,7 @@ def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
 @contextlib.contextmanager
 def _engine_tenant_env(
     monkeypatch: pytest.MonkeyPatch, *, pin_local: bool,
+    request: pytest.FixtureRequest | None = None,
 ) -> Iterator[str]:
     """Point this test's env at the session engine with a freshly minted
     tenant; yields the tenant name. The body of ``t2_service_env`` and, under
@@ -2843,7 +2844,8 @@ def _engine_tenant_env(
     overwrite that fixture's ``NX_LOCAL=0``. The enclosed span is the guard's
     "tenant active" window (``tests/_storage_touch_guard.py``).
     """
-    from tests._engine_substrate import ensure_engine, minted_test_tenant
+    from tests._engine_substrate import ensure_engine
+    from tests._tenant_pool import tenant_lease
     from tests.db._service_fixture import jar_freshness_skip_reason
 
     # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
@@ -2861,7 +2863,7 @@ def _engine_tenant_env(
                     "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
 
     state = ensure_engine()
-    with minted_test_tenant(state) as (tenant, token), _storage_touch_guard.tenant_active():
+    with tenant_lease(state, request) as (tenant, token), _storage_touch_guard.tenant_active():
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)

@@ -2102,8 +2102,16 @@ def _boot() -> dict:
         "NX_DB_ADMIN_URL": f"jdbc:postgresql://127.0.0.1:{pg_port}/{_DBNAME}",
         "NX_DB_ADMIN_USER": pg_user,
         "NX_DB_ADMIN_PASS": "",
+        # nexus-fpwj1: registers POST /v1/_test/tenant-reset (loopback-only, root token only), which the
+        # per-worker tenant pool (tests/_tenant_pool.py, NX_TEST_TENANT_POOL=1) calls. Unused with the pool off.
+        "NX_TEST_TENANT_RESET_ROUTE": "1",
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    # The tenant reset route answers 503 while NX_SEARCH_PCI is on, and the engine's default for an unset variable
+    # IS on: per-collection index builds are DDL a data reset cannot undo (nexus-fpwj1). The substrate's collections
+    # sit far below the build threshold (NX_SEARCH_PCI_BUILD_MIN_ROWS, 20000), so turning the DDL half off changes
+    # nothing a test can see; it is set whether or not the pool is on, so the pool's own tests run on every engine.
+    env.setdefault("NX_SEARCH_PCI", "0")
     _pin_ownerless_write_mode(env)
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
