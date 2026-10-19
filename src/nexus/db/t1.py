@@ -972,28 +972,6 @@ def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
     return token
 
 
-def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
-    """Remove a published T1 session lease file (live-MCP teardown cleanup).
-
-    Best-effort / idempotent: a missing file is not an error (double-clear,
-    or a lease that was never published because no resolvable session id
-    existed for this process -- see the ``no_resolvable_session`` branch in
-    ``mcp.core._t1_lifespan``). Removing the lease promptly on
-    teardown ensures a stale lease is never read by a later, unrelated
-    process once this session has genuinely ended.
-
-    UNCONDITIONAL unlink -- safe only at genuine session teardown (this
-    process is the sole, permanent owner and nothing else will ever read
-    or republish this lease again). NOT safe mid-process, where a
-    concurrent sibling could have republished a fresh lease for the same
-    ``session_id`` between this caller's own liveness check and the
-    unlink: see :func:`clear_t1_session_lease_if_matches` for that case
-    (nexus-r0d37 fix-round finding 1).
-    """
-    _unlink_t1_session_lease(session_id, config_dir)
-    _unlink_t1_session_mint_lock(session_id, config_dir)
-
-
 def _unlink_t1_session_lease(session_id: str, config_dir: Path) -> None:
     try:
         _t1_session_lease_path(session_id, config_dir).unlink()
@@ -1001,22 +979,55 @@ def _unlink_t1_session_lease(session_id: str, config_dir: Path) -> None:
         pass
 
 
-def _unlink_t1_session_mint_lock(session_id: str, config_dir: Path) -> None:
-    # The mint lock file for this session (``_t1_session_mint_lock_path``)
-    # is created on first mint-or-borrow and was never removed: 706
-    # zero-byte files had accumulated by 2026-09-05. It cannot be unlinked
-    # under the flock (a waiter on the old inode and a newcomer on the new
-    # one would both hold "the" lock), so it goes at session end, after the
-    # lock is released, when no recoverer has a live session to mint for.
-    try:
-        _t1_session_mint_lock_path(session_id, config_dir).unlink()
-    except OSError:
-        pass
+def _acquire_t1_mint_lock(
+    session_id: str, config_dir: Path, *, deadline: float | None,
+) -> int | None:
+    """Open and lock ``session_id``'s mint lock; return the locked fd.
+
+    ``deadline=None`` blocks. Otherwise the lock is polled non-blocking
+    until ``deadline`` (``time.monotonic()``) and ``None`` comes back if a
+    holder still has it.
+
+    After locking, the fd is checked to still be the file at the lock path.
+    An owner's teardown unlinks that file once it has released the lock
+    (nexus-g5mir); a waiter already queued on the old inode would otherwise
+    hold "the" lock while a newcomer locks a fresh file at the same path,
+    and both could mint. A stale lock is dropped and the open is retried.
+    """
+    path = _t1_session_mint_lock_path(session_id, config_dir)
+    while True:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            if deadline is None:
+                _locking.lock_fd(fd, blocking=True)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+            else:
+                while True:
+                    try:
+                        _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: bounded-poll variant of the same one-shot mint-or-borrow mutex
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            os.close(fd)
+                            return None
+                        time.sleep(0.02)
+            locked = os.fstat(fd)
+            try:
+                named = os.stat(path)
+                current = (named.st_dev, named.st_ino) == (locked.st_dev, locked.st_ino)
+            except FileNotFoundError:
+                current = False
+            if current:
+                return fd
+            _locking.unlock_fd(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
 
 
-#: How long an owner's teardown polls for the per-session mint lock before
-#: it falls back to an unlocked compare (nexus-g5mir). Teardown runs in the
-#: SIGTERM handler's synchronous chain, so it never blocks on the lock.
+#: How long an owner's teardown polls for the per-session mint lock
+#: (nexus-g5mir). Teardown runs in the SIGTERM handler's synchronous chain,
+#: so it never blocks on the lock.
 _T1_TEARDOWN_LOCK_WAIT_SECONDS: float = 0.2
 
 
@@ -1028,8 +1039,13 @@ class T1TeardownOutcome(enum.StrEnum):
     DISPLACED = "displaced"
     #: Lease cleared and token revoked under the mint lock.
     ENDED = "ended"
-    #: Same, but the lock stayed contended past the poll, so the compare
-    #: ran unlocked (the pre-g5mir behaviour).
+    #: The mint lock stayed held past the poll. A borrow holds it for
+    #: milliseconds, so the holder is almost certainly a successor minting;
+    #: revoking by id would kill its new token. Nothing was touched; the
+    #: owner's token is rotated by that mint or expires on its TTL.
+    LEFT_TO_HOLDER = "left_to_holder"
+    #: The lock file could not be opened or locked at all (not contention):
+    #: the compare ran unlocked, the pre-g5mir behaviour.
     ENDED_UNLOCKED = "ended_unlocked"
 
 
@@ -1046,56 +1062,57 @@ def end_owned_t1_session_lease(
 
     ``revoke`` closes the session server-side BY ID, so it kills whatever
     token the session holds at that moment. Read-compare, unlink and revoke
-    therefore all run under the per-session mint flock
+    therefore all run under the per-session mint lock
     (:func:`_lock_guarded_mint_or_borrow`'s lock): a successor re-minting
     the same session id waits until this owner is done, then mints on a
     clean slate, instead of minting in the gap and having its fresh lease
     deleted and its token revoked.
 
-    The lock is polled non-blocking for ``lock_wait_s``; if a holder keeps
-    it past that, the compare runs unlocked rather than stall a SIGTERM
-    teardown. A displaced owner revokes nothing, its own token included:
-    the revoke route cannot name a token, only the session, so the
-    displaced token is left to expire on its TTL.
+    The lock is polled non-blocking for ``lock_wait_s`` and never blocks a
+    SIGTERM teardown. A displaced owner revokes nothing, its own token
+    included: the revoke route cannot name a token, only the session, so
+    the displaced token is left to expire on its TTL. ``revoke`` is bounded
+    by the caller; a revoke thread that outlives that bound can still land
+    after the lock is released (a wedged server, with process exit next).
+
+    The lock file is unlinked only by an owner that held it, after release;
+    :func:`_acquire_t1_mint_lock` makes a waiter on the unlinked inode retry
+    on the path.
 
     Args:
         owned_tokens: every token this process minted for ``session_id``.
             Empty means "unknown", which is treated as owning the lease.
         revoke: closes the session server-side; bounded by the caller.
     """
-    lock_fd: int | None = None
-    locked = False
     try:
-        try:
-            lock_fd = os.open(
-                str(_t1_session_mint_lock_path(session_id, config_dir)),
-                os.O_WRONLY | os.O_CREAT, 0o600,
-            )
-        except OSError:
-            lock_fd = None
-        if lock_fd is not None:
-            deadline = time.monotonic() + lock_wait_s
-            while True:
-                try:
-                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: bounded poll on the one-shot mint-or-borrow mutex at owner teardown (nexus-g5mir), not a lifecycle election
-                    locked = True
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.02)
+        lock_fd = _acquire_t1_mint_lock(
+            session_id, config_dir, deadline=time.monotonic() + lock_wait_s,
+        )
+    except OSError as exc:
+        _log.warning("t1_teardown_mint_lock_unavailable", session_id=session_id, error=str(exc))
+        lock_fd = -1
+    if lock_fd is None:
+        return T1TeardownOutcome.LEFT_TO_HOLDER
+    try:
         published = read_t1_session_lease(session_id, config_dir)
         if published and owned_tokens and published not in owned_tokens:
             return T1TeardownOutcome.DISPLACED
         _unlink_t1_session_lease(session_id, config_dir)
         revoke()
     finally:
-        if lock_fd is not None:
-            if locked:
-                _locking.unlock_fd(lock_fd)
+        if lock_fd >= 0:
+            _locking.unlock_fd(lock_fd)
             os.close(lock_fd)
-    _unlink_t1_session_mint_lock(session_id, config_dir)
-    return T1TeardownOutcome.ENDED if locked else T1TeardownOutcome.ENDED_UNLOCKED
+    if lock_fd < 0:
+        return T1TeardownOutcome.ENDED_UNLOCKED
+    # The mint lock file is created on first mint-or-borrow and was never
+    # removed: 706 zero-byte files had accumulated by 2026-09-05. It goes
+    # here, after release, at the session's end.
+    try:
+        _t1_session_mint_lock_path(session_id, config_dir).unlink()
+    except OSError:
+        pass
+    return T1TeardownOutcome.ENDED
 
 
 def clear_t1_session_lease_if_matches(
@@ -1106,10 +1123,8 @@ def clear_t1_session_lease_if_matches(
 
     A MID-PROCESS abandonment (an MCP handoff tick moving this process's
     T1 scope away from ``session_id``, as opposed to genuine process
-    teardown) cannot safely reuse :func:`clear_t1_session_lease`'s
-    unconditional unlink: that function's own contract requires this
-    process to be the lease's sole, PERMANENT owner, which a handoff-away
-    is not -- another live MCP sibling could independently win
+    teardown) cannot unlink the lease unconditionally: a handoff-away does
+    not make this process the lease's sole, permanent owner -- another live MCP sibling could independently win
     :func:`_lock_guarded_mint_or_borrow`'s flock for the SAME
     ``session_id`` and publish a fresh lease at any point between this
     caller checking its own ownership and the unlink running. An
@@ -1133,11 +1148,9 @@ def clear_t1_session_lease_if_matches(
     the sibling's fresher lease survives untouched.
 
     Deliberately does NOT unlink the mint-lock file (contrast
-    :func:`clear_t1_session_lease`'s teardown-only cleanup of it) --
+    :func:`end_owned_t1_session_lease`'s teardown-only cleanup of it) --
     this call happens mid-process, while the session may still be
-    resumed and re-leased any number of further times; removing the lock
-    file here would race a concurrent locker exactly the way
-    :func:`clear_t1_session_lease`'s own docstring says it must not.
+    resumed and re-leased any number of further times.
 
     Args:
         session_id: the session whose lease to conditionally clear.
@@ -1157,10 +1170,10 @@ def clear_t1_session_lease_if_matches(
     """
     if not expected_token:
         return False
-    lock_path = _t1_session_mint_lock_path(session_id, config_dir)
-    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    lock_fd = _acquire_t1_mint_lock(session_id, config_dir, deadline=None)
+    if lock_fd is None:  # unreachable: a blocking acquire returns a fd
+        return False
     try:
-        _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: same one-shot mint-or-borrow mutex, guarding this compare-then-delete against a concurrent mint-or-borrow publish
         try:
             path = _t1_session_lease_path(session_id, config_dir)
             try:
@@ -1494,38 +1507,27 @@ def _lock_guarded_mint_or_borrow(
             failure unwinds through this function's own ``finally``).
     """
     make_user_dir(config_dir)
-    lock_path = _t1_session_mint_lock_path(session_id, config_dir)
-
-    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    # Not a daemon-lifecycle election (RDR-149's ServiceRegistry._elect):
+    # a one-shot "double-check the lease, mint if still stale" mutex for
+    # a single session id, mirroring _cli_dedicated_session_id's own
+    # one-shot idempotent lock above -- not a leased-liveness election.
+    #
+    # nexus-by875 (critic Critical): with a *deadline*, the lock wait is
+    # BOUNDED — non-blocking acquire + short poll until the deadline —
+    # so a sibling holding the lock through its own slow mint can never
+    # wedge this caller past its wall-clock budget. Deadline-less
+    # callers (the MCP Branch-0 stale-lease recovery path) keep the
+    # original blocking semantics.
+    lock_fd = _acquire_t1_mint_lock(session_id, config_dir, deadline=deadline)
+    if lock_fd is None:
+        raise RuntimeError(
+            f"T1 {context}: could not acquire the mint lock "
+            "within the wall-clock budget — a sibling process "
+            "holds it (T1 service slow/unreachable?); check "
+            "`nx doctor` / engine convergence "
+            "(budget: NX_T1_CLI_BUDGET_S)"
+        )
     try:
-        # Not a daemon-lifecycle election (RDR-149's ServiceRegistry._elect):
-        # a one-shot "double-check the lease, mint if still stale" mutex for
-        # a single session id, mirroring _cli_dedicated_session_id's own
-        # one-shot idempotent lock above -- not a leased-liveness election.
-        #
-        # nexus-by875 (critic Critical): with a *deadline*, the lock wait is
-        # BOUNDED — non-blocking acquire + short poll until the deadline —
-        # so a sibling holding the lock through its own slow mint can never
-        # wedge this caller past its wall-clock budget. Deadline-less
-        # callers (the MCP Branch-0 stale-lease recovery path) keep the
-        # original blocking semantics.
-        if deadline is None:
-            _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
-        else:
-            while True:
-                try:
-                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: bounded-poll variant of the same one-shot mint-or-borrow mutex
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(
-                            f"T1 {context}: could not acquire the mint lock "
-                            "within the wall-clock budget — a sibling process "
-                            "holds it (T1 service slow/unreachable?); check "
-                            "`nx doctor` / engine convergence "
-                            "(budget: NX_T1_CLI_BUDGET_S)"
-                        ) from None
-                    time.sleep(0.05)
         try:
             leased_token = read_t1_session_lease(session_id, config_dir)
             if leased_token and leased_token != stale_token:

@@ -3455,7 +3455,7 @@ def _run_check_t1() -> None:
     * **Session resolves, lease present and fresh.** Healthy. Exit 0.
     * **Session resolves, lease present but expired/corrupt.** Stale
       litter from an ungraceful owner death -- only clean teardown
-      (``clear_t1_session_lease``) removes this file; nothing else sweeps
+      (``end_owned_t1_session_lease``) removes this file; nothing else sweeps
       it (see ``nx doctor``'s orphan-T1-lease health check, which DOES
       reap these). Exit 1.
     """

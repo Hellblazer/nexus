@@ -2464,7 +2464,7 @@ def _check_orphan_t1_lease() -> list[HealthResult]:
 
     Unlike the retired check, THIS one actually reaps: nothing else sweeps
     an expired ``t1_session_lease.*`` file after an ungraceful owner death
-    (only clean teardown -- ``clear_t1_session_lease`` -- removes one), so
+    (only clean teardown -- ``end_owned_t1_session_lease`` -- removes one), so
     without this check stale lease files accumulate forever. A lease past
     its ``expires_at`` (plus the reader's freshness margin) is unlinked
     here, not merely reported.

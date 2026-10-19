@@ -311,7 +311,7 @@ async def test_abandoning_a_session_does_not_delete_a_siblings_fresher_lease(
 ) -> None:
     """nexus-r0d37 fix-round finding 1: the abandoned-lease clear must be a
     compare-then-delete (``clear_t1_session_lease_if_matches``), not
-    ``clear_t1_session_lease``'s unconditional unlink.
+    an unconditional teardown unlink.
 
     Between this process's own belief about `old_session_id`'s lease and
     the delete running, a live SIBLING MCP process (another window/host

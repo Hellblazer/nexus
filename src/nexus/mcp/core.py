@@ -1470,10 +1470,9 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # a failure to clear just leaves an orphaned lease that self-heals
     # once its own TTL genuinely elapses, same as today.
     #
-    # nexus-r0d37 fix-round finding 1: NOT `clear_t1_session_lease`'s
-    # unconditional unlink -- that function's own contract requires
-    # PERMANENT sole ownership (genuine process teardown), which a
-    # handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
+    # nexus-r0d37 fix-round finding 1: NOT an unconditional unlink --
+    # that needs PERMANENT sole ownership (genuine process teardown),
+    # which a handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
     # above and the delete running, a live sibling MCP process (another
     # window/host resolved to the SAME `old_session_id`) could
     # independently win `_lock_guarded_mint_or_borrow`'s flock and
@@ -2341,10 +2340,11 @@ def _t1_session_shutdown() -> None:
             msg="another process owns this session's token now; leaving its "
             "lease and token alone",
         )
-    elif outcome == _t1.T1TeardownOutcome.ENDED_UNLOCKED:
+    elif outcome == _t1.T1TeardownOutcome.LEFT_TO_HOLDER:
         _log.warning(
-            "t1_session_teardown_lock_contended", session_id=session_id,
-            msg="the session's mint lock stayed held; compared the lease unlocked",
+            "t1_session_teardown_lock_held", session_id=session_id,
+            msg="another process is minting this session; leaving its lease "
+            "and token alone",
         )
 
 

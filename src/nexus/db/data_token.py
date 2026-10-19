@@ -1472,7 +1472,7 @@ class DataTokenManager:
         self, base_url: str, tenant: str, *, expected_token: str | None = None,
     ) -> None:
         """Remove the cross-process lease file, best-effort/idempotent
-        (mirrors :func:`nexus.db.t1.clear_t1_session_lease`).
+        (mirrors :func:`nexus.db.t1.end_owned_t1_session_lease`).
 
         With ``expected_token`` given (the :meth:`invalidate` path), the
         file is unlinked ONLY when its on-disk token still equals that
