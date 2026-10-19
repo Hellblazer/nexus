@@ -196,10 +196,11 @@ class MainBootEnvValidationIntegrationTest {
      * A real boot with {@code NX_TEST_TENANT_RESET_ROUTE=1} on a non-loopback bind exits 1 with the refusal event,
      * and never reaches the schema migration. A source-text check cannot tell this from a Main whose
      * {@code System.exit(1)} was removed: the event would still be logged, the boot would carry on to open the pool
-     * and migrate, and only the missing exit makes this test red.
+     * and migrate, and only the missing exit makes this test red. This test cannot tell where the refusal sits
+     * relative to the pool (the database here accepts the pool); the test below pins that.
      */
     @Test
-    void theTenantResetRouteOnANonLoopbackBind_exitsOneBeforeThePoolOrTheMigration() throws Exception {
+    void theTenantResetRouteOnANonLoopbackBind_exitsOneBeforeTheMigration() throws Exception {
         for (String bind : new String[] {"0.0.0.0", "10.1.2.3"}) {
             Boot boot = bootWith(java.util.Map.of("NX_TEST_TENANT_RESET_ROUTE", "1", "NX_SERVICE_BIND", bind),
                 MIGRATION_START);
@@ -209,6 +210,31 @@ class MainBootEnvValidationIntegrationTest {
             assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
             assertThat(lines(boot, BIND_REFUSED)).as("exactly one refusal event:\n" + boot.output()).hasSize(1);
             assertThat(lines(boot, BIND_REFUSED).get(0)).contains("NX_TEST_TENANT_RESET_ROUTE").contains(bind);
+        }
+    }
+
+    /**
+     * The refusal comes BEFORE the database pool opens (nexus-vr8wk fix round, critic S3): the same boot with
+     * {@code NX_DB_URL} on a port nothing listens on. HikariCP connects eagerly, so a Main that opened the pool
+     * first would die on a pool-initialization error and never log the refusal; a Main that refuses first logs it
+     * and exits 1 without ever touching the database.
+     */
+    @Test
+    void theTenantResetRouteOnANonLoopbackBind_isRefusedBeforeThePoolOpens() throws Exception {
+        int closedPort;
+        try (var s = new java.net.ServerSocket(0)) {
+            closedPort = s.getLocalPort();
+        }
+        for (String bind : new String[] {"0.0.0.0", "10.1.2.3"}) {
+            Boot boot = bootWith(java.util.Map.of("NX_TEST_TENANT_RESET_ROUTE", "1", "NX_SERVICE_BIND", bind,
+                "NX_DB_URL", "jdbc:postgresql://127.0.0.1:" + closedPort + "/postgres"), MIGRATION_START);
+
+            assertThat(lines(boot, BIND_REFUSED)).as("bind " + bind + ": the refusal event, with no database to "
+                + "open a pool on:\n" + boot.output()).hasSize(1);
+            assertThat(lines(boot, BIND_REFUSED).get(0)).contains("NX_TEST_TENANT_RESET_ROUTE").contains(bind);
+            assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
+            assertThat(boot.output()).as("the pool was never opened")
+                .doesNotContain("HikariPool").doesNotContain("PoolInitializationException");
         }
     }
 

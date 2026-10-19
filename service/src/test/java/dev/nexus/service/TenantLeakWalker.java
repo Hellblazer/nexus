@@ -8,6 +8,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.ConcurrentModificationException;
 import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -30,9 +31,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * hit.
  *
  * <p>What it does NOT see, stated so a green walk is read for what it covers: any other JDK or third-party object
- * (an executor's queue, the HTTP server's contexts, a connection pool) is opaque and counted by class in
- * {@link Result#opaque()}; a tenant referenced only by a hash of its name; and a holder nothing reachable from the
- * roots or the listed classes refers to.
+ * (an executor's queue, the HTTP server's contexts, a connection pool, a {@link ThreadLocal}, a Caffeine or Guava
+ * cache) is opaque and counted by class in {@link Result#opaque()}, which a caller prints when a walk fails; a
+ * tenant referenced only by a hash of its name; and a holder nothing reachable from the roots or the listed classes
+ * refers to.
+ *
+ * <p>A walk that did not finish is a failed walk, never a green one: reaching {@link #MAX_DEPTH} or the object cap
+ * throws {@link WalkTruncatedException}, so a result that comes back is a complete walk of what it can see. The
+ * walk runs while engine threads may still be changing the structures; a {@link ConcurrentModificationException}
+ * from a non-concurrent collection restarts the walk, up to {@link #MAX_ATTEMPTS} times, then fails.
  */
 final class TenantLeakWalker {
 
@@ -64,12 +71,22 @@ final class TenantLeakWalker {
     }
 
     static final int MAX_HITS = 500;
-    private static final int MAX_OBJECTS = 3_000_000;
-    private static final int MAX_DEPTH = 64;
+    static final int MAX_OBJECTS = 3_000_000;
+    static final int MAX_DEPTH = 64;
+    /** How many times a walk restarts after a {@link ConcurrentModificationException} before it fails. */
+    static final int MAX_ATTEMPTS = 3;
+
+    /** The walk stopped at a cap, so it cannot say the needle is absent. */
+    static final class WalkTruncatedException extends IllegalStateException {
+        WalkTruncatedException(String message) {
+            super(message);
+        }
+    }
 
     private record Node(String path, Object value, int depth) { }
 
     private final String needle;
+    private final int maxObjects;
     private final Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Class<?>> staticsRead = new java.util.HashSet<>();
     private final Deque<Node> todo = new ArrayDeque<>();
@@ -78,8 +95,9 @@ final class TenantLeakWalker {
     private final List<String> staticSkipped = new ArrayList<>();
     private int objects;
 
-    private TenantLeakWalker(String needle) {
+    private TenantLeakWalker(String needle, int maxObjects) {
         this.needle = needle;
+        this.maxObjects = maxObjects;
     }
 
     /**
@@ -88,10 +106,29 @@ final class TenantLeakWalker {
      * @param staticOwners classes whose static fields are roots too (a class reached by an instance is read anyway)
      */
     static Result walk(String needle, Map<String, Object> roots, Collection<Class<?>> staticOwners) {
+        return walk(needle, roots, staticOwners, MAX_OBJECTS);
+    }
+
+    /** {@link #walk(String, Map, Collection)} with an object cap of the caller's choosing (a test of the cap). */
+    static Result walk(String needle, Map<String, Object> roots, Collection<Class<?>> staticOwners, int maxObjects) {
         if (needle == null || needle.length() < 6) {
             throw new IllegalArgumentException("a needle this short would match unrelated strings: " + needle);
         }
-        var w = new TenantLeakWalker(needle);
+        ConcurrentModificationException last = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                return walkOnce(needle, roots, staticOwners, maxObjects);
+            } catch (ConcurrentModificationException e) {
+                last = e;   // an engine thread changed a plain collection under the walk; start over
+            }
+        }
+        throw new IllegalStateException("the walk hit a ConcurrentModificationException in all " + MAX_ATTEMPTS
+            + " attempts: the engine is still changing the structures it walks", last);
+    }
+
+    private static Result walkOnce(String needle, Map<String, Object> roots, Collection<Class<?>> staticOwners,
+                                   int maxObjects) {
+        var w = new TenantLeakWalker(needle, maxObjects);
         for (Class<?> c : staticOwners) {
             w.readStatics(c);
         }
@@ -102,7 +139,11 @@ final class TenantLeakWalker {
     }
 
     private void run() {
-        while (!todo.isEmpty() && objects < MAX_OBJECTS && hits.size() < MAX_HITS) {
+        while (!todo.isEmpty() && hits.size() < MAX_HITS) {
+            if (objects >= maxObjects) {
+                throw new WalkTruncatedException("the walk stopped at its cap of " + maxObjects
+                    + " objects with " + todo.size() + " still to visit, so it cannot say the needle is absent");
+            }
             Node n = todo.pop();
             visit(n);
         }
@@ -110,7 +151,7 @@ final class TenantLeakWalker {
 
     private void visit(Node n) {
         Object v = n.value();
-        if (v == null || n.depth() > MAX_DEPTH) {
+        if (v == null) {
             return;
         }
         if (v instanceof String s) {
@@ -125,6 +166,10 @@ final class TenantLeakWalker {
         }
         if (!seen.add(v)) {
             return;
+        }
+        if (n.depth() > MAX_DEPTH) {
+            throw new WalkTruncatedException("the walk went deeper than " + MAX_DEPTH + " at " + n.path()
+                + ", so it cannot say the needle is absent below it");
         }
         objects++;
         if (v instanceof Map<?, ?> m) {

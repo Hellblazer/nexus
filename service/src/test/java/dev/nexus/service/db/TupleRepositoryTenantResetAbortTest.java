@@ -297,6 +297,66 @@ class TupleRepositoryTenantResetAbortTest {
             .isInstanceOf(TenantResetException.class);
     }
 
+    // ── an abort that lands in the InterruptedException branch (nexus-vr8wk fix round, F1) ───────────────
+    //
+    // The first pass plants the next test's row and interrupts the waiting thread, so the park's await throws at
+    // once and the loop takes its InterruptedException branch. The abort lands inside that branch (a hook that
+    // runs before the branch's own check), so the only thing between the wait and the row is that check.
+    // The interrupt flag is set again by that branch, so without the check the final query fails at the pool's
+    // interruptible admission with a RuntimeException rather than returning the row: what the check changes is the
+    // outcome the caller sees (TenantResetException, a 409) and that no query or claim is attempted at all.
+
+    /** At the park loop's top on its first pass: the next test's row appears, and the waiting thread is interrupted. */
+    private Runnable interruptWithTheRowPlanted(String tenant, String to) {
+        return once(() -> {
+            plant(tenant, to);
+            Thread.currentThread().interrupt();
+        });
+    }
+
+    @Test
+    void anRdAbortedAndInterruptedThrowsInsteadOfRunningItsFinalQuery() {
+        String tenant = "reset-rd-intr-" + UUID.randomUUID();
+        String to = "agent-rd-intr-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAtParkLoopTop = interruptWithTheRowPlanted(tenant, to);
+        waiter.testOnlyAfterInterrupt = () -> waiter.testOnlyWaitRegistry().abortTenant(tenant, 0);
+
+        assertThatThrownBy(() -> waiter.rd(tenant, "mailbox/" + to, Map.of("to", to), 10, null, PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+        Thread.interrupted();   // the wait restores the interrupt flag; do not leak it into the next test
+    }
+
+    @Test
+    void anInAbortedAndInterruptedThrowsAndLeavesTheTuple() {
+        String tenant = "reset-in-intr-" + UUID.randomUUID();
+        String to = "agent-in-intr-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAtParkLoopTop = interruptWithTheRowPlanted(tenant, to);
+        waiter.testOnlyAfterInterrupt = () -> waiter.testOnlyWaitRegistry().abortTenant(tenant, 0);
+
+        assertThatThrownBy(() ->
+            waiter.in(tenant, "mailbox/" + to, Map.of("to", to), "dead-test-worker", 60L, PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+        Thread.interrupted();
+        assertThat(writer.inp(tenant, "mailbox/" + to, Map.of("to", to), "next-test-worker", 60L))
+            .as("the next test's tuple was not claimed by the dead waiter").isPresent();
+    }
+
+    @Test
+    void aWaitAnyAbortedAndInterruptedThrowsInsteadOfRunningItsFinalQuery() {
+        String tenant = "reset-wait-intr-" + UUID.randomUUID();
+        String to = "agent-wait-intr-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        var spec = new TupleRepository.WaitSpec("mailbox/" + to, Map.of("to", to), 10, null);
+        waiter.testOnlyAtParkLoopTop = interruptWithTheRowPlanted(tenant, to);
+        waiter.testOnlyAfterInterrupt = () -> waiter.testOnlyWaitRegistry().abortTenant(tenant, 0);
+
+        assertThatThrownBy(() -> waiter.waitAny(tenant, List.of(spec), PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+        Thread.interrupted();
+    }
+
     // ── the evictor reports a tenant that did not quiesce (critic S3) ─────────────────────────────────────
 
     @Test

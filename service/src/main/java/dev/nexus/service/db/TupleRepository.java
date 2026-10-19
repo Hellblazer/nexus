@@ -303,6 +303,9 @@ public final class TupleRepository {
     /** Test-only (nexus-vr8wk): runs at the top of every park-loop iteration, BEFORE the abort and deadline checks,
      *  so a test can land a tenant abort in the same instant the wait's deadline passes. Null in production. */
     volatile Runnable testOnlyAtParkLoopTop;
+    /** Test-only (nexus-vr8wk): runs on the waiting thread inside a park loop's InterruptedException branch, BEFORE
+     *  the abort check, so a test can land a tenant abort between the interrupt and that check. Null in production. */
+    volatile Runnable testOnlyAfterInterrupt;
 
     private static void runHook(Runnable hook) {
         if (hook != null) {
@@ -904,6 +907,10 @@ public final class TupleRepository {
                         waiter.awaitSignalOrTimer();
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
+                        runHook(testOnlyAfterInterrupt);
+                        if (waiter.aborted()) {
+                            throw new TenantResetException(tenant);   // nexus-vr8wk: an interrupt does not exempt a reset
+                        }
                         return queryOnce(tenant, subspace, pattern, n, since, null, order);
                     }
                     if (waiter.aborted()) {
@@ -1512,6 +1519,10 @@ public final class TupleRepository {
                         waiter.awaitSignalOrTimer();
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
+                        runHook(testOnlyAfterInterrupt);
+                        if (waiter.aborted()) {
+                            throw new TenantResetException(tenant);   // nexus-vr8wk: an interrupt does not exempt a reset
+                        }
                         return queryEachOnceFenced(tenant, specs);
                     }
                     if (waiter.aborted()) {
@@ -1650,6 +1661,10 @@ public final class TupleRepository {
                         waiter.awaitSignalOrTimer();
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
+                        runHook(testOnlyAfterInterrupt);
+                        if (waiter.aborted()) {
+                            throw new TenantResetException(tenant);   // nexus-vr8wk: an interrupt does not exempt a reset
+                        }
                         return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                     }
                     if (waiter.aborted()) {

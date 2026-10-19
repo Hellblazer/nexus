@@ -638,7 +638,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (19)
+            // TEST_HOOK (20)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
@@ -656,6 +656,7 @@ public class TenantKeyedStateGateTest {
                 "TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY",
                 "TupleRepository.TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY",
                 "TupleRepository.TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK",
+                "TupleRepository.testOnlyAfterInterrupt",
                 "TupleRepository.testOnlyAfterRegister",
                 "TupleRepository.testOnlyAtParkLoopTop",
                 "TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK"

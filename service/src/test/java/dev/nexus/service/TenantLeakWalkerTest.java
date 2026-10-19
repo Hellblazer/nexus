@@ -116,4 +116,86 @@ class TenantLeakWalkerTest {
         assertThatThrownBy(() -> TenantLeakWalker.walk("ab", Map.of(), List.of()))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    // ── a walk that did not finish is a failure, not a green result (nexus-vr8wk fix round, critic S2) ──
+
+    @Test
+    void aWalkPastTheDepthCapFailsInsteadOfTruncating() {
+        Object chain = X;   // the needle sits below the cap: a silent cut-off would hide it
+        for (int i = 0; i < TenantLeakWalker.MAX_DEPTH + 6; i++) {
+            chain = List.of(chain);
+        }
+        Object root = chain;
+
+        assertThatThrownBy(() -> TenantLeakWalker.walk(X, Map.of("root", root), List.of()))
+            .isInstanceOf(TenantLeakWalker.WalkTruncatedException.class)
+            .hasMessageContaining("deeper than " + TenantLeakWalker.MAX_DEPTH);
+    }
+
+    @Test
+    void aChainJustWithinTheDepthCapStillWalksAndFindsTheNeedle() {
+        Object chain = X;
+        for (int i = 0; i < TenantLeakWalker.MAX_DEPTH - 2; i++) {
+            chain = List.of(chain);
+        }
+
+        var r = TenantLeakWalker.walk(X, Map.of("root", chain), List.of());
+
+        assertThat(r.hits()).hasSize(1);
+    }
+
+    @Test
+    void aWalkPastTheObjectCapFailsInsteadOfTruncating() {
+        var big = new ArrayList<Object>();
+        for (int i = 0; i < 50; i++) {
+            big.add(new ArrayList<>(List.of("filler-" + i)));
+        }
+
+        assertThatThrownBy(() -> TenantLeakWalker.walk(X, Map.of("root", big), List.of(), 20))
+            .isInstanceOf(TenantLeakWalker.WalkTruncatedException.class)
+            .hasMessageContaining("cap of 20 objects");
+        assertThat(TenantLeakWalker.walk(X, Map.of("root", big), List.of(), 1_000).objects())
+            .as("the same graph under a roomy cap completes").isGreaterThan(50);
+    }
+
+    /** A list whose iterator throws {@link java.util.ConcurrentModificationException} the first {@code failures}
+     *  times it is asked for one: an engine thread changing it under the walk. */
+    static final class FlakyList extends ArrayList<Object> {
+        int failures;
+        int iterators;
+
+        @Override
+        public java.util.Iterator<Object> iterator() {
+            iterators++;
+            if (failures-- > 0) {
+                throw new java.util.ConcurrentModificationException("simulated");
+            }
+            return super.iterator();
+        }
+    }
+
+    @Test
+    void aConcurrentModificationRestartsTheWalk_andThenSucceeds() {
+        var flaky = new FlakyList();
+        flaky.add("row-" + X);
+        flaky.failures = TenantLeakWalker.MAX_ATTEMPTS - 1;
+
+        var r = TenantLeakWalker.walk(X, Map.of("root", flaky), List.of());
+
+        assertThat(flaky.iterators).as("it retried").isEqualTo(TenantLeakWalker.MAX_ATTEMPTS);
+        assertThat(holderPaths(r)).containsExactly("root[0]");
+    }
+
+    @Test
+    void aConcurrentModificationThatNeverClearsFailsTheWalkAfterTheBound() {
+        var flaky = new FlakyList();
+        flaky.add("row");
+        flaky.failures = Integer.MAX_VALUE;
+
+        assertThatThrownBy(() -> TenantLeakWalker.walk(X, Map.of("root", flaky), List.of()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("all " + TenantLeakWalker.MAX_ATTEMPTS + " attempts")
+            .hasCauseInstanceOf(java.util.ConcurrentModificationException.class);
+        assertThat(flaky.iterators).isEqualTo(TenantLeakWalker.MAX_ATTEMPTS);
+    }
 }
