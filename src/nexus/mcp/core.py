@@ -2275,44 +2275,13 @@ def _t1_session_shutdown() -> None:
     # best-effort second chance (T2 puts upsert, so running both is safe).
     _flush_flagged_t1_entries(session_id)
 
-    # nexus-k9sec: revoke and clear only what is still OURS. The revoke is by
-    # (tenant, session_id), so it kills whichever token the session holds. If
-    # the published lease names a different token than this process's own, a
-    # successor owner (a borrower that recovered while this owner looked dead,
-    # or a same-id process that started in the window) has taken the session;
-    # revoking would strand it, with the lease it published wiped besides.
-    try:
-        import nexus.config as _nexus_config  # noqa: PLC0415 — module attribute, not a by-value import (nexus-78blw ratchet)
-        from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-
-        published = read_t1_session_lease(session_id, _nexus_config.nexus_config_dir())
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; an unreadable lease means "not displaced", the pre-k9sec behaviour
-        published = None
-        _log.warning("t1_session_lease_read_failed", session_id=session_id, error=str(_exc))
     minted_here = _OWNED_T1_MINTED.pop(session_id, None)
     if not minted_here:
         # Ownership recorded without a mint record (a test's, or a path that
         # predates this bookkeeping): fall back to the process env.
         env_token = _os.environ.get("NX_T1_SESSION", "").strip()
         minted_here = {env_token} if env_token else set()
-    if published and minted_here and published not in minted_here:
-        _log.warning(
-            "t1_session_teardown_displaced", session_id=session_id,
-            msg="another process owns this session's token now; leaving its "
-            "lease and token alone",
-        )
-        return
 
-    # nexus-c8yvj: remove the published lease FIRST so a stale lease is
-    # never read by a later, unrelated process once this session has
-    # genuinely ended (mirrors the existing t1_addr.<session_id>
-    # cleanup-before-token-close ordering used elsewhere in this module).
-    try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.db.t1 import clear_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        clear_t1_session_lease(session_id, nexus_config_dir())
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
-        _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
     # The revoke is bounded the same way as the flush: HttpTokenStore's client
     # waits up to 30 s plus a 12 s rebind retry, and this runs in the SIGTERM
     # handler's synchronous chain (critique of cf234888a). An abandoned revoke
@@ -2330,13 +2299,52 @@ def _t1_session_shutdown() -> None:
             token_outcome["error"] = str(_exc)
             _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
 
-    revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
-    revoker.start()
-    revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
-    if not token_outcome:
+    revoke_started = False
+
+    def _bounded_revoke() -> None:
+        nonlocal revoke_started
+        revoke_started = True
+        revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
+        revoker.start()
+        revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+        if not token_outcome:
+            _log.warning(
+                "t1_session_token_close_incomplete", session_id=session_id,
+                timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+            )
+
+    # nexus-k9sec: revoke and clear only what is still OURS. The revoke is by
+    # (tenant, session_id), so it kills whichever token the session holds. If
+    # the published lease names a different token than this process's own, a
+    # successor owner (a borrower that recovered while this owner looked dead,
+    # or a same-id process that started in the window) has taken the session;
+    # revoking would strand it, with the lease it published wiped besides.
+    # nexus-g5mir: the compare, the lease unlink (nexus-c8yvj: lease first, so
+    # a stale lease is never read once the session has ended) and the revoke
+    # run under the session's mint lock, so a successor cannot mint between
+    # the compare and the revoke.
+    try:
+        import nexus.config as _nexus_config  # noqa: PLC0415 — module attribute, not a by-value import (nexus-78blw ratchet)
+        from nexus.db import t1 as _t1  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        outcome = _t1.end_owned_t1_session_lease(
+            session_id, _nexus_config.nexus_config_dir(), minted_here, _bounded_revoke,
+        )
+    except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
+        _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
+        if not revoke_started:
+            _bounded_revoke()
+        return
+    if outcome == _t1.T1TeardownOutcome.DISPLACED:
         _log.warning(
-            "t1_session_token_close_incomplete", session_id=session_id,
-            timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+            "t1_session_teardown_displaced", session_id=session_id,
+            msg="another process owns this session's token now; leaving its "
+            "lease and token alone",
+        )
+    elif outcome == _t1.T1TeardownOutcome.ENDED_UNLOCKED:
+        _log.warning(
+            "t1_session_teardown_lock_contended", session_id=session_id,
+            msg="the session's mint lock stayed held; compared the lease unlocked",
         )
 
 

@@ -24,7 +24,7 @@ import uuid
 
 import pytest
 
-from nexus import mcp_infra
+from nexus import _locking, mcp_infra
 from nexus.config import nexus_config_dir
 from nexus.db import t1 as t1_mod
 from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER, HttpScratchStore
@@ -766,6 +766,76 @@ def test_a_displaced_owners_exit_revokes_and_clears_nothing_of_its_successors(ow
 
     assert read_t1_session_lease(sid, cfg) == successor
     HttpScratchStore(session_id=sid, _session_token=successor).list_entries()  # still resolves
+
+
+def test_a_successor_minting_during_the_owners_teardown_keeps_its_lease_and_token(owner, monkeypatch) -> None:
+    """nexus-g5mir: the successor starts its mint right after the owner's
+    teardown has read the lease (it named the owner's own token). It waits
+    on the mint lock until the owner has cleared and revoked, then mints on
+    a clean slate; before the fix it minted in that gap and the owner's
+    unlink and revoke-by-id destroyed its lease and token."""
+    sid, own_token, cfg = owner
+    core._OWNED_T1_SESSION["session_id"] = sid
+    core._note_t1_minted(sid, own_token)
+    real_read = t1_mod.read_t1_session_lease
+    got: list[tuple[str, bool, float | None]] = []
+    successor: list[threading.Thread] = []
+
+    def _read_then_successor_mints(session_id, config_dir):
+        published = real_read(session_id, config_dir)
+        if not successor:
+            thread = threading.Thread(
+                target=lambda: got.append(_lock_guarded_mint_or_borrow(sid, cfg, stale_token=own_token)),
+            )
+            successor.append(thread)
+            thread.start()
+            thread.join(1.0)  # the fix holds it on the lock; before it, the mint lands here
+        return published
+
+    monkeypatch.setattr(t1_mod, "read_t1_session_lease", _read_then_successor_mints)
+    core._t1_session_shutdown()
+    successor[0].join(30)
+
+    assert not successor[0].is_alive()
+    (token, minted, _ttl) = got[0]
+    assert minted and token != own_token
+    assert real_read(sid, cfg) == token
+    HttpScratchStore(session_id=sid, _session_token=token).list_entries()  # still resolves
+
+
+def test_teardown_compares_unlocked_when_the_mint_lock_stays_held(owner) -> None:
+    """A holder that keeps the mint lock past the bounded poll does not stall
+    teardown: the compare runs unlocked and the owner still ends its own
+    session."""
+    sid, own_token, cfg = owner
+    revoked: list[str] = []
+    lock_fd = os.open(str(t1_mod._t1_session_mint_lock_path(sid, cfg)), os.O_WRONLY | os.O_CREAT, 0o600)
+    holder_locked = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        _locking.lock_fd(lock_fd, blocking=True)
+        holder_locked.set()
+        release.wait(10)
+        _locking.unlock_fd(lock_fd)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    try:
+        assert holder_locked.wait(5)
+        started = time.monotonic()
+        outcome = t1_mod.end_owned_t1_session_lease(
+            sid, cfg, {own_token}, lambda: revoked.append(sid), lock_wait_s=0.1,
+        )
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        holder.join(10)
+        os.close(lock_fd)
+
+    assert outcome == t1_mod.T1TeardownOutcome.ENDED_UNLOCKED
+    assert revoked == [sid]
+    assert read_t1_session_lease(sid, cfg) is None
 
 
 # ── item 6: the failed-mint cooldown is per session ─────────────────────────

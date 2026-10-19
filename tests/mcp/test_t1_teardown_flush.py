@@ -36,7 +36,7 @@ def owned_session(monkeypatch):
         return real_write(fn, op=op)
 
     monkeypatch.setattr(mcp_infra, "t2_index_write", _recording_write)
-    monkeypatch.setattr("nexus.db.t1.clear_t1_session_lease", lambda sid, cfg: order.append("lease_cleared"))
+    monkeypatch.setattr("nexus.db.t1._unlink_t1_session_lease", lambda sid, cfg: order.append("lease_cleared"))
 
     class _Tokens:
         def __init__(self, **_):

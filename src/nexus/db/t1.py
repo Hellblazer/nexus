@@ -990,21 +990,112 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
     unlink: see :func:`clear_t1_session_lease_if_matches` for that case
     (nexus-r0d37 fix-round finding 1).
     """
-    path = _t1_session_lease_path(session_id, config_dir)
+    _unlink_t1_session_lease(session_id, config_dir)
+    _unlink_t1_session_mint_lock(session_id, config_dir)
+
+
+def _unlink_t1_session_lease(session_id: str, config_dir: Path) -> None:
     try:
-        path.unlink()
+        _t1_session_lease_path(session_id, config_dir).unlink()
     except OSError:
         pass
+
+
+def _unlink_t1_session_mint_lock(session_id: str, config_dir: Path) -> None:
     # The mint lock file for this session (``_t1_session_mint_lock_path``)
     # is created on first mint-or-borrow and was never removed: 706
     # zero-byte files had accumulated by 2026-09-05. It cannot be unlinked
     # under the flock (a waiter on the old inode and a newcomer on the new
-    # one would both hold "the" lock), so it goes here, at session end,
-    # when no recoverer has a live session to mint for.
+    # one would both hold "the" lock), so it goes at session end, after the
+    # lock is released, when no recoverer has a live session to mint for.
     try:
         _t1_session_mint_lock_path(session_id, config_dir).unlink()
     except OSError:
         pass
+
+
+#: How long an owner's teardown polls for the per-session mint lock before
+#: it falls back to an unlocked compare (nexus-g5mir). Teardown runs in the
+#: SIGTERM handler's synchronous chain, so it never blocks on the lock.
+_T1_TEARDOWN_LOCK_WAIT_SECONDS: float = 0.2
+
+
+class T1TeardownOutcome(enum.StrEnum):
+    """What :func:`end_owned_t1_session_lease` did."""
+
+    #: The lease named a token this process never minted: a successor owns
+    #: the session, so neither its lease nor its token was touched.
+    DISPLACED = "displaced"
+    #: Lease cleared and token revoked under the mint lock.
+    ENDED = "ended"
+    #: Same, but the lock stayed contended past the poll, so the compare
+    #: ran unlocked (the pre-g5mir behaviour).
+    ENDED_UNLOCKED = "ended_unlocked"
+
+
+def end_owned_t1_session_lease(
+    session_id: str,
+    config_dir: Path,
+    owned_tokens: set[str],
+    revoke: Callable[[], None],
+    *,
+    lock_wait_s: float = _T1_TEARDOWN_LOCK_WAIT_SECONDS,
+) -> T1TeardownOutcome:
+    """An owner's teardown: compare the lease, clear it and revoke, as one
+    step against a successor's mint (nexus-g5mir).
+
+    ``revoke`` closes the session server-side BY ID, so it kills whatever
+    token the session holds at that moment. Read-compare, unlink and revoke
+    therefore all run under the per-session mint flock
+    (:func:`_lock_guarded_mint_or_borrow`'s lock): a successor re-minting
+    the same session id waits until this owner is done, then mints on a
+    clean slate, instead of minting in the gap and having its fresh lease
+    deleted and its token revoked.
+
+    The lock is polled non-blocking for ``lock_wait_s``; if a holder keeps
+    it past that, the compare runs unlocked rather than stall a SIGTERM
+    teardown. A displaced owner revokes nothing, its own token included:
+    the revoke route cannot name a token, only the session, so the
+    displaced token is left to expire on its TTL.
+
+    Args:
+        owned_tokens: every token this process minted for ``session_id``.
+            Empty means "unknown", which is treated as owning the lease.
+        revoke: closes the session server-side; bounded by the caller.
+    """
+    lock_fd: int | None = None
+    locked = False
+    try:
+        try:
+            lock_fd = os.open(
+                str(_t1_session_mint_lock_path(session_id, config_dir)),
+                os.O_WRONLY | os.O_CREAT, 0o600,
+            )
+        except OSError:
+            lock_fd = None
+        if lock_fd is not None:
+            deadline = time.monotonic() + lock_wait_s
+            while True:
+                try:
+                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: bounded poll on the one-shot mint-or-borrow mutex at owner teardown (nexus-g5mir), not a lifecycle election
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.02)
+        published = read_t1_session_lease(session_id, config_dir)
+        if published and owned_tokens and published not in owned_tokens:
+            return T1TeardownOutcome.DISPLACED
+        _unlink_t1_session_lease(session_id, config_dir)
+        revoke()
+    finally:
+        if lock_fd is not None:
+            if locked:
+                _locking.unlock_fd(lock_fd)
+            os.close(lock_fd)
+    _unlink_t1_session_mint_lock(session_id, config_dir)
+    return T1TeardownOutcome.ENDED if locked else T1TeardownOutcome.ENDED_UNLOCKED
 
 
 def clear_t1_session_lease_if_matches(
