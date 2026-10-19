@@ -200,7 +200,9 @@ echo "stamped build_ref=$build_ref"
 gate_jar_cache_unshare "$repo_root/service/target/$jar_name"
 
 cd "$repo_root/service"
-./mvnw -q package -DskipTests "$@"
+# -Dnexus.jlink.skip=true: the jlink image is not part of the gate jar and nothing
+# reads it here; skipping it saves its writes per miss (service/pom.xml, nexus-0a1hw).
+./mvnw -q package -DskipTests -Dnexus.jlink.skip=true "$@"
 
 built_jar="$repo_root/service/target/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }

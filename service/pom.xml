@@ -105,6 +105,14 @@
              trigger, marks, collector, count files), so a run can be compared with one at the same sha.
              Default on. Anything but true/false fails the first container build. -->
         <nexus.ddl.count>true</nexus.ddl.count>
+
+        <!-- nexus-0a1hw: -Dnexus.jlink.skip=true skips the jlink image (jlink-image execution,
+             package phase). Nothing in the repo reads it for the gate jar or any test;
+             scripts/build-gate-jar.sh passes it, which saves the image's writes (the image is
+             ~83 MB on disk) on every gate-jar MISS, on any host. The saving's measured size is
+             <MEASURED-MIB-PLACEHOLDER>. Default false: an IDE, a bare mvn, CI and the engine
+             release build keep the image. -->
+        <nexus.jlink.skip>false</nexus.jlink.skip>
     </properties>
 
     <dependencies>
@@ -1676,6 +1684,7 @@
                         <phase>package</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
+                            <skip>${nexus.jlink.skip}</skip>
                             <target>
                                 <!-- Remove stale image so jlink won't refuse to overwrite -->
                                 <delete dir="${jlink.output}" quiet="true"/>
