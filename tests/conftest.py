@@ -94,7 +94,11 @@ def pytest_configure(config):
     here rather than in a ``-p`` plugin because xdist resolves ``-n auto`` to
     an integer in ``pytest_cmdline_main`` and builds its session in a
     ``trylast`` ``pytest_configure``, so this sees a resolved number and
-    still lands before the workers are spawned. ``NX_XDIST_NO_CAP=1`` opts
+    still lands before the workers are spawned. xdist also derives
+    ``option.tx`` (what the scheduler really spawns) from that number in
+    ``pytest_cmdline_main``, so the clamp rewrites both
+    (``tests/_xdist_cap.set_worker_count``); changing ``numprocesses`` alone
+    left every clamp inert (nexus-vo9qn). ``NX_XDIST_NO_CAP=1`` opts
     out; see ``tests/_xdist_cap.py``.
 
     Default run: WARNING level — quiet, no clutter.
@@ -521,19 +525,21 @@ def _clamp_xdist_workers(config) -> None:
             effective_cap,
             effective_memory_cap,
             memory_clamp_note,
+            set_worker_count,
         )
 
         cap = effective_cap()
         if cap is not None:
             value, note = clamp_numprocesses(requested=requested, cap=cap)
             if note is not None:
-                config.option.numprocesses = requested = value
+                set_worker_count(config.option, value)
+                requested = value
                 # Printed, not logged: the operator needs to see this before a
                 # 15-minute run, and log level here is not yet configured.
                 print(f"\n[nexus] {note}\n")
         mem_cap = effective_memory_cap()
         if mem_cap is not None and requested > mem_cap:
-            config.option.numprocesses = mem_cap
+            set_worker_count(config.option, mem_cap)
             print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return
@@ -553,8 +559,10 @@ def _begin_pg_root_session(config) -> None:
         begin_pg_root_session()
     except ValueError:
         raise  # an over-long NX_TEST_PG_ROOT is a loud, pre-run failure
-    except Exception:  # noqa: BLE001 — a missing decision is made lazily instead
-        return
+    except Exception as exc:  # noqa: BLE001 — never leave workers to decide alone
+        from tests._engine_substrate import persist_controller_failure
+
+        persist_controller_failure(exc)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

@@ -302,8 +302,8 @@ def _cgroup_headroom(
     ``credit_reclaimable`` adds the level's droppable page cache to its room. A
     long run fills ``memory.current`` with file cache up to the limit and the
     kernel reclaims it on demand, so the raw figure reads near zero on a healthy
-    run; the mid-run exhaustion check (nexus-vo9qn) needs the credited one. The
-    decision at session start keeps the raw figure."""
+    run; the mid-run exhaustion check and the start decision (nexus-vo9qn) both
+    use the credited one, and the decision logs both."""
     best: int | None = None
     for d in _cgroup_dirs(proc_cgroup=proc_cgroup, cgroup_root=cgroup_root):
         try:
@@ -402,11 +402,31 @@ def decide_pg_root(
             f"{shm_dir} has {free // 1024**2} MiB free, below the "
             f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor"
         )
-    headroom = (cgroup_headroom or _cgroup_headroom)()
+    # The CREDITED figure decides, the same one the mid-run floor uses: a grant
+    # warmed by a build or ``uv sync`` has its memory.current full of reclaimable
+    # page cache, and the raw figure would send the whole run to disk (nexus-vo9qn).
+    raw_headroom: int | None = None
+    if cgroup_headroom is not None:
+        headroom = cgroup_headroom()
+    else:
+        raw_headroom = _cgroup_headroom()
+        headroom = _cgroup_headroom(credit_reclaimable=True)
+    _log.info(
+        "nexus_t2_substrate.root_decision_headroom",
+        raw_headroom_mib=None if raw_headroom is None else raw_headroom // 1024**2,
+        credited_headroom_mib=None if headroom is None else headroom // 1024**2,
+        floor_mib=_TMPFS_MIN_FREE_BYTES // 1024**2,
+        bead="nexus-vo9qn",
+    )
     if headroom is not None and headroom < _TMPFS_MIN_FREE_BYTES:
+        raw_note = (
+            "" if raw_headroom is None else f", {raw_headroom // 1024**2} MiB before "
+            f"crediting reclaimable page cache"
+        )
         return None, (
-            f"the cgroup memory headroom is {headroom // 1024**2} MiB, below the "
-            f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor (tmpfs pages are charged to it)"
+            f"the cgroup memory headroom is {headroom // 1024**2} MiB{raw_note}, "
+            f"below the {_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor (tmpfs pages "
+            f"are charged to it)"
         )
     root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
     if not _socket_path_fits(root):
@@ -497,12 +517,35 @@ def begin_pg_root_session() -> None:
     session decision now, so no worker decides on its own, and open the run's
     cluster log for the workers to append to. A nested pytest inherits both and
     leaves them alone."""
-    session_pg_root()
+    try:
+        session_pg_root()
+    except ValueError:
+        raise  # an over-long NX_TEST_PG_ROOT is a loud, pre-run failure
+    except Exception as exc:  # noqa: BLE001 — workers must not decide on their own
+        persist_controller_failure(exc)
     if not os.environ.get(_PG_ROOT_LOG_ENV):
-        fd, path = tempfile.mkstemp(prefix="nexus-pg-roots-", suffix=".log")
+        try:
+            fd, path = tempfile.mkstemp(prefix="nexus-pg-roots-", suffix=".log")
+        except OSError as exc:  # the summary is lost; the decision above stands
+            _log.warning("nexus_t2_substrate.cluster_log_unavailable", error=str(exc))
+            return
         os.close(fd)
         os.environ[_PG_ROOT_LOG_ENV] = path
         _OWNED_LOGS.add(path)
+
+
+def persist_controller_failure(exc: BaseException) -> None:
+    """The controller could not take the run's root decision. Persist a DISK
+    decision naming why, so every xdist worker inherits one run-wide answer rather
+    than deciding on its own as memory fills (the per-worker flip this bead
+    removes), and say so loudly. Never raises, and leaves a valid decision alone."""
+    with contextlib.suppress(Exception):
+        valid, _root, _why = _decode_session_root(os.environ.get(_PG_ROOT_SESSION_ENV))
+        if valid:
+            return
+        reason = f"the controller could not decide ({type(exc).__name__}: {exc})"
+        os.environ[_PG_ROOT_SESSION_ENV] = _encode_session_root(None, reason)
+        _tmpfs_refused(reason)
 
 
 def _record_cluster_root(kind: str, root: str | None, reason: str | None) -> None:
@@ -546,13 +589,20 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
     return line
 
 
-def _check_tmpfs_has_room(
+#: A start below the hard floor waits this long for headroom to come back before
+#: it errors: a neighbour's JVM heap spike or page cache not yet reclaimed is a
+#: moment, not a lack of capacity (nexus-vo9qn review S3). Polled every
+#: :data:`_TMPFS_FLOOR_POLL_S`.
+_TMPFS_FLOOR_WAIT_S = 45.0
+_TMPFS_FLOOR_POLL_S = 3.0
+
+
+def _tmpfs_floor_cause(
     root: Path,
-    *,
-    free_bytes: Callable[[Path], int] | None = None,
-    cgroup_headroom: Callable[[], int | None] | None = None,
-) -> None:
-    """Fail loud when a run that chose tmpfs cannot fit one more cluster."""
+    free_bytes: Callable[[Path], int] | None,
+    cgroup_headroom: Callable[[], int | None] | None,
+) -> str | None:
+    """Why one more cluster does not fit right now, or None when it does."""
     try:
         free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(
             root if root.exists() else root.parent
@@ -562,23 +612,52 @@ def _check_tmpfs_has_room(
     headroom = (
         cgroup_headroom or (lambda: _cgroup_headroom(credit_reclaimable=True))
     )()
-    cause = None
     if free is not None and free < _TMPFS_HARD_FLOOR_BYTES:
-        cause = f"{root} has {free // 1024**2} MiB free"
-    elif headroom is not None and headroom < _TMPFS_HARD_FLOOR_BYTES:
-        cause = (
+        return f"{root} has {free // 1024**2} MiB free"
+    if headroom is not None and headroom < _TMPFS_HARD_FLOOR_BYTES:
+        return (
             f"the cgroup has {headroom // 1024**2} MiB of memory headroom left "
             f"(tmpfs pages are charged to it)"
         )
-    if cause is None:
-        return
+    return None
+
+
+def _check_tmpfs_has_room(
+    root: Path,
+    *,
+    free_bytes: Callable[[Path], int] | None = None,
+    cgroup_headroom: Callable[[], int | None] | None = None,
+    wait_s: float | None = None,
+    poll_s: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Fail loud when a run that chose tmpfs cannot fit one more cluster, after
+    polling for up to *wait_s* (default :data:`_TMPFS_FLOOR_WAIT_S`) for the
+    headroom to recover. Clock and sleep are injectable."""
+    wait = _TMPFS_FLOOR_WAIT_S if wait_s is None else wait_s
+    poll = _TMPFS_FLOOR_POLL_S if poll_s is None else poll_s
+    start = clock()
+    while True:
+        cause = _tmpfs_floor_cause(root, free_bytes, cgroup_headroom)
+        if cause is None:
+            return
+        if clock() - start >= wait:
+            break
+        sleep(poll)
     raise SubstrateRootExhausted(
         f"nexus test substrate: no room for another cluster on tmpfs: {cause}, "
-        f"below the {_TMPFS_HARD_FLOOR_BYTES // 1024**2} MiB a cluster start needs. "
+        f"below the {_TMPFS_HARD_FLOOR_BYTES // 1024**2} MiB floor a cluster start "
+        f"needs, and it did not recover in {wait:g} s. "
         f"This run chose tmpfs at its start and will not fall back to disk mid-run "
-        f"(that wrote 3.9 GB to the NVMe in 4 minutes, nexus-vo9qn). Run fewer "
-        f"workers (-n N), a larger lab-run class, or set {_PG_ROOT_ENV}=<dir> or "
-        f"{_PG_ROOT_ENV}=default for the whole run."
+        f"(that wrote 3.9 GB to the NVMe in 4 minutes, nexus-vo9qn). Read the cause "
+        f"in the summary line ('clusters on tmpfs N, on disk M') and the "
+        f"nexus_t2_substrate.cluster_root / root_decision_headroom log events "
+        f"(info level: re-run with --log-level=INFO). "
+        f"In order: run fewer workers (-n N, with N = headroom / 2.5 GiB) or a "
+        f"larger lab-run class; set {_PG_ROOT_ENV}=<dir> to put clusters on a "
+        f"disk you choose; {_PG_ROOT_ENV}=default puts every cluster back on the "
+        f"tempdir (disk) and brings the NVMe writes this check exists to prevent."
     )
 
 

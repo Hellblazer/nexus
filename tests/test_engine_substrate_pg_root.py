@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tests import _engine_substrate as sub
+from tests._module_seam import setattr_in
 
 _TMPFS_MOUNTS = (
     "proc /proc proc rw 0 0\n"
@@ -54,6 +55,30 @@ def _fresh_session_decision(monkeypatch):
     monkeypatch.setenv(sub._PG_ROOT_SESSION_ENV, "")
     monkeypatch.delenv(sub._PG_ROOT_LOG_ENV, raising=False)
     monkeypatch.setattr(sub, "_LOCAL_ROWS", [])
+
+
+@pytest.fixture
+def info_logs():
+    """The suite's conftest filters structlog at WARNING (the default run is quiet),
+    which drops info events before ``capture_logs`` sees them; a test of an info
+    event lowers the filter for its body and puts it back."""
+    import logging
+
+    import structlog
+
+    old = structlog.get_config()["wrapper_class"]
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    try:
+        yield
+    finally:
+        structlog.configure(wrapper_class=old)
+
+
+@pytest.fixture(autouse=True)
+def _no_floor_wait(monkeypatch):
+    """The fail-loud floor polls for up to 45 s before it raises; tests that
+    expect the raise must not wait it out (the polling tests pass their own)."""
+    monkeypatch.setattr(sub, "_TMPFS_FLOOR_WAIT_S", 0.0)
 
 
 def _choose(**kw) -> Path | None:
@@ -861,3 +886,222 @@ class TestEveryClusterStartSaysWhereItWent:
         monkeypatch.setenv("NX_TEST_PG_ROOT", str(tmp_path / "r"))
         assert sub.pg_cluster_parent() == str(tmp_path / "r")
         assert sub._LOCAL_ROWS and sub._LOCAL_ROWS[-1]["root"] == str(tmp_path / "r")
+
+
+class TestStartDecisionCreditsReclaimableCache:
+    """A grant warmed by a build or ``uv sync`` has memory.current full of page
+    cache the kernel will drop; the raw figure would send the WHOLE run to disk."""
+
+    GIB = 1024**3
+
+    def _headroom(self, raw: int, credited: int):
+        def fn(*, credit_reclaimable: bool = False, **_k):
+            return credited if credit_reclaimable else raw
+
+        return fn
+
+    def test_raw_below_the_floor_but_credited_above_picks_tmpfs(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_cgroup_headroom", self._headroom(1 * self.GIB, 6 * self.GIB))
+        root, refusal = sub.decide_pg_root(
+            env={}, system="Linux", mounts_text=_TMPFS_MOUNTS, free_bytes=_roomy,
+            writable=_writable, uid=1000,
+        )
+        assert root == Path("/dev/shm/nexus-test-pg-1000") and refusal is None
+
+    def test_credited_below_the_floor_still_refuses_and_names_both(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_cgroup_headroom", self._headroom(1 * self.GIB, 2 * self.GIB))
+        root, refusal = sub.decide_pg_root(
+            env={}, system="Linux", mounts_text=_TMPFS_MOUNTS, free_bytes=_roomy,
+            writable=_writable, uid=1000,
+        )
+        assert root is None
+        assert "2048 MiB" in refusal and "1024 MiB before crediting" in refusal
+
+    def test_the_decision_logs_raw_and_credited_headroom(self, monkeypatch, info_logs) -> None:
+        import structlog.testing
+
+        monkeypatch.setattr(sub, "_cgroup_headroom", self._headroom(1 * self.GIB, 6 * self.GIB))
+        with structlog.testing.capture_logs() as logs:
+            sub.decide_pg_root(
+                env={}, system="Linux", mounts_text=_TMPFS_MOUNTS, free_bytes=_roomy,
+                writable=_writable, uid=1000,
+            )
+        ev = next(e for e in logs if e["event"] == "nexus_t2_substrate.root_decision_headroom")
+        assert ev["raw_headroom_mib"] == 1024 and ev["credited_headroom_mib"] == 6144
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, s: float) -> None:
+        self.sleeps.append(s)
+        self.now += s
+
+
+class TestFloorPollsBeforeRaising:
+    MIB = 1024**2
+
+    def test_a_transient_dip_that_recovers_does_not_raise(self, tmp_path) -> None:
+        readings = iter([100 * self.MIB, 100 * self.MIB, 4 * 1024 * self.MIB])
+        fc = _FakeClock()
+        sub._check_tmpfs_has_room(
+            tmp_path, free_bytes=lambda _p: 64 * 1024**3,
+            cgroup_headroom=lambda: next(readings),
+            wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep,
+        )
+        assert fc.sleeps == [3.0, 3.0]
+
+    def test_a_dip_that_does_not_recover_raises_after_the_bound(self, tmp_path) -> None:
+        fc = _FakeClock()
+        with pytest.raises(sub.SubstrateRootExhausted) as ei:
+            sub._check_tmpfs_has_room(
+                tmp_path, free_bytes=lambda _p: 64 * 1024**3,
+                cgroup_headroom=lambda: 100 * self.MIB,
+                wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep,
+            )
+        assert fc.now == 45.0 and len(fc.sleeps) == 15
+        msg = str(ei.value)
+        assert "100 MiB" in msg and "did not recover in 45 s" in msg
+        assert "will not fall back to disk" in msg
+
+    def test_room_at_the_first_look_never_sleeps(self, tmp_path) -> None:
+        fc = _FakeClock()
+        sub._check_tmpfs_has_room(
+            tmp_path, free_bytes=lambda _p: 64 * 1024**3,
+            cgroup_headroom=lambda: None, clock=fc.clock, sleep=fc.sleep,
+        )
+        assert fc.sleeps == []
+
+    def test_the_shipped_bound_is_tens_of_seconds_and_polls_inside_it(self) -> None:
+        import re
+
+        src = Path(sub.__file__).read_text()
+        wait = float(re.search(r"^_TMPFS_FLOOR_WAIT_S = ([\d.]+)", src, re.M).group(1))
+        poll = float(re.search(r"^_TMPFS_FLOOR_POLL_S = ([\d.]+)", src, re.M).group(1))
+        assert 30 <= wait <= 60 and 0 < poll <= wait / 5
+
+    def test_the_message_names_the_remedies_in_order_and_the_disk_escape(self, tmp_path) -> None:
+        with pytest.raises(sub.SubstrateRootExhausted) as ei:
+            sub._check_tmpfs_has_room(
+                tmp_path, free_bytes=lambda _p: 1, cgroup_headroom=lambda: None,
+                wait_s=0.0,
+            )
+        msg = str(ei.value)
+        order = [msg.index(k) for k in ("fewer workers", "NX_TEST_PG_ROOT=<dir>", "NX_TEST_PG_ROOT=default")]
+        assert order == sorted(order)
+        assert "headroom / 2.5 GiB" in msg and "NVMe writes" in msg
+        assert "cluster_root" in msg and "summary line" in msg
+
+
+class TestControllerFailureDoesNotLeaveWorkersDecidingAlone:
+    def test_a_decision_that_raises_is_persisted_as_disk_with_the_reason(
+        self, monkeypatch,
+    ) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        calls: list[int] = []
+
+        def _boom(**_k):
+            calls.append(1)
+            raise RuntimeError("mount table exploded")
+
+        monkeypatch.setattr(sub, "decide_pg_root", _boom)
+        try:
+            with pytest.warns(UserWarning, match="controller could not decide"):
+                sub.begin_pg_root_session()
+            raw = os.environ[sub._PG_ROOT_SESSION_ENV]
+            assert raw.startswith("disk=") and "mount table exploded" in raw
+            # a worker inheriting that env takes the same answer and decides nothing
+            root, refusal, _ex = sub.session_pg_root()
+            assert root is None and "RuntimeError" in (refusal or "")
+            assert calls == [1]
+        finally:
+            sub.pg_root_run_summary(finish=True)
+
+    def test_an_unwritable_cluster_log_does_not_lose_the_decision(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(
+            sub, "decide_pg_root", lambda **_k: (Path("/dev/shm/nexus-test-pg-9"), None),
+        )
+
+        def _nope(**_k):
+            raise OSError("no space")
+
+        setattr_in(monkeypatch, sub, "tempfile.mkstemp", _nope)
+        sub.begin_pg_root_session()
+        assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+        assert not os.environ.get(sub._PG_ROOT_LOG_ENV)
+
+    def test_conftest_persists_a_decision_when_the_controller_hook_fails(
+        self, monkeypatch,
+    ) -> None:
+        from tests import conftest as ct
+
+        def _boom():
+            raise RuntimeError("hook exploded")
+
+        monkeypatch.setattr(sub, "begin_pg_root_session", _boom)
+
+        class Opt:
+            numprocesses = 4
+
+        class Cfg:
+            option = Opt()
+
+        with pytest.warns(UserWarning):
+            ct._begin_pg_root_session(Cfg())
+        assert os.environ[sub._PG_ROOT_SESSION_ENV].startswith("disk=")
+
+    def test_a_valid_decision_is_not_overwritten_by_a_late_failure(self, monkeypatch) -> None:
+        monkeypatch.setenv(sub._PG_ROOT_SESSION_ENV, "tmpfs=/dev/shm/nexus-test-pg-9")
+        sub.persist_controller_failure(RuntimeError("late"))
+        assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+
+    def test_an_over_long_explicit_root_still_fails_the_run(self, monkeypatch, tmp_path) -> None:
+        from tests import conftest as ct
+
+        monkeypatch.setenv("NX_TEST_PG_ROOT", str(tmp_path / ("x" * 200)))
+
+        class Opt:
+            numprocesses = 4
+
+        class Cfg:
+            option = Opt()
+
+        with pytest.raises(ValueError, match="too long"):
+            ct._begin_pg_root_session(Cfg())
+
+
+class TestCleanupAndTmpfsLogging:
+    def test_finishing_the_summary_removes_the_log_and_unsets_the_env(
+        self, monkeypatch,
+    ) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        monkeypatch.setattr(
+            sub, "decide_pg_root", lambda **_k: (Path("/dev/shm/nexus-test-pg-9"), None),
+        )
+        sub.begin_pg_root_session()
+        path = Path(os.environ[sub._PG_ROOT_LOG_ENV])
+        assert path.is_file()
+        sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-9", None)
+        line = sub.pg_root_run_summary(finish=True)
+        assert line and "clusters on tmpfs 1" in line
+        assert not path.exists()
+        assert sub._PG_ROOT_LOG_ENV not in os.environ
+
+    def test_a_tmpfs_start_logs_cluster_root_at_info_on_tmpfs(self, monkeypatch, info_logs) -> None:
+        import structlog.testing
+
+        monkeypatch.setattr(sub, "_read_mounts", lambda: _TMPFS_MOUNTS)
+        with structlog.testing.capture_logs() as logs:
+            sub._log_cluster_root(Path("/dev/shm/nexus-test-pg-1000"), None)
+        row = next(e for e in logs if e["event"] == "nexus_t2_substrate.cluster_root")
+        assert row["log_level"] == "info"
+        assert row["on"] == "tmpfs" and row["root"] == "/dev/shm/nexus-test-pg-1000"
+        assert sub._LOCAL_ROWS[-1]["kind"] == "tmpfs"

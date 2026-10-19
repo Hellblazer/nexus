@@ -341,3 +341,107 @@ class TestMemoryCap:
         cfg = Cfg()
         _clamp_xdist_workers(cfg)
         assert cfg.option.numprocesses == 16
+
+
+class TestSetWorkerCount:
+    """nexus-vo9qn. xdist 3.8.0 turns ``-n N`` into ``option.tx = ["popen"] * N``
+    in ``pytest_cmdline_main``, before conftest's ``pytest_configure``, and spawns
+    ``len(tx)`` workers. A clamp that sets ``numprocesses`` only is inert."""
+
+    def test_the_generated_tx_list_follows_the_count(self) -> None:
+        from tests._xdist_cap import set_worker_count
+
+        class Opt:
+            numprocesses = 4
+            tx = ["popen"] * 4
+
+        opt = Opt()
+        set_worker_count(opt, 2)
+        assert opt.numprocesses == 2 and opt.tx == ["popen", "popen"]
+
+    def test_a_hand_written_tx_is_left_alone(self) -> None:
+        from tests._xdist_cap import set_worker_count
+
+        class Opt:
+            numprocesses = 4
+            tx = ["popen", "ssh=box"]
+
+        opt = Opt()
+        set_worker_count(opt, 2)
+        assert opt.numprocesses == 2 and opt.tx == ["popen", "ssh=box"]
+
+
+# A tiny rootdir whose conftest runs the REAL ``_clamp_xdist_workers`` at the real
+# ``pytest_configure`` time, against real xdist; ``setup`` fakes the box.
+_PROBE_CONFTEST = '''
+{setup}
+from tests.conftest import _clamp_xdist_workers
+
+
+def pytest_configure(config):
+    _clamp_xdist_workers(config)
+'''
+_PROBE_TEST = '''
+import pytest
+
+
+@pytest.mark.parametrize("i", range(8))
+def test_p(i):
+    pass
+'''
+
+
+def _run_real_xdist(tmp_path, *, setup: str, env_extra: dict[str, str], n: int):
+    """Run a real ``pytest -n N`` (real xdist workers) in a scratch rootdir and
+    return ``(created, total, output)`` from xdist's "created: A/B workers"."""
+    import os
+    import re
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    (tmp_path / "conftest.py").write_text(_PROBE_CONFTEST.format(setup=setup))
+    (tmp_path / "test_probe.py").write_text(_PROBE_TEST)
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("LAB_MEM_MB", "NX_XDIST_NO_CAP", "PYTEST_ADDOPTS")
+    }
+    env["PYTHONPATH"] = str(repo)
+    env["NX_TEST_T2_SUBSTRATE"] = "none"  # the child needs no engine (nexus-fam6l)
+    env.update(env_extra)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=",
+         "-n", str(n), "-v", f"--basetemp={tmp_path / 'bt'}", str(tmp_path)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=240,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    m = re.search(r"created: (\d+)/(\d+) workers", out)
+    assert m, out
+    return int(m.group(1)), int(m.group(2)), out
+
+
+class TestClampsReallyReduceWorkers:
+    """The fake-Cfg tests above cannot see that the clamp is inert; only a real
+    xdist run can. Each asserts the worker count xdist actually created."""
+
+    def test_the_memory_cap_creates_fewer_workers(self, tmp_path) -> None:
+        # 5200 MiB grant / 2560 MiB per worker = 2 workers (a tighter cgroup can
+        # only lower it).
+        created, total, out = _run_real_xdist(
+            tmp_path, setup="", env_extra={"LAB_MEM_MB": "5200"}, n=4,
+        )
+        assert "clamped 4 ->" in out
+        assert 1 <= created <= 2 and created == total
+
+    def test_the_sysv_cap_creates_fewer_workers(self, tmp_path) -> None:
+        # 32 segments, 22 in use, reserve 8 -> room for 2 workers.
+        setup = (
+            "import tests._xdist_cap as c\n"
+            "c._sysctl_int = lambda name: 32\n"
+            "c.segments_in_use = lambda: 22\n"
+        )
+        created, total, out = _run_real_xdist(tmp_path, setup=setup, env_extra={}, n=4)
+        assert "SysV shared memory" in out
+        assert created == total == 2

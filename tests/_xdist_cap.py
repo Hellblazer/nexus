@@ -163,6 +163,23 @@ def cap_from_headroom(
     return max(1, min(by_segments, cpu_count))
 
 
+def set_worker_count(option: object, count: int) -> None:
+    """Make xdist run *count* workers, not just say so.
+
+    ``numprocesses`` alone is inert (nexus-vo9qn, measured on xdist 3.8.0): xdist
+    builds ``option.tx = ["popen"] * numprocesses`` in its ``pytest_cmdline_main``,
+    which runs BEFORE conftest's ``pytest_configure``, and the scheduler spawns
+    ``len(tx)`` workers. A clamp applied afterwards printed "clamped 4 -> 2" and
+    still created 4 workers, so the SysV cap (nexus-6qp25) was inert the same way.
+    ``tx`` is rewritten only when it is xdist's own generated all-``popen`` list;
+    a hand-written ``--tx`` is never produced alongside a ``-n`` count."""
+    tx = getattr(option, "tx", None)
+    generated = isinstance(tx, list) and bool(tx) and all(t == "popen" for t in tx)
+    option.numprocesses = count  # type: ignore[attr-defined]
+    if generated:
+        option.tx = ["popen"] * count  # type: ignore[attr-defined]
+
+
 def clamp_numprocesses(
     *, requested: int | None, cap: int
 ) -> tuple[int | None, str | None]:
