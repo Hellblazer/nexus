@@ -9832,6 +9832,23 @@ public final class CatalogRepository {
     }
 
     /**
+     * Forget that {@code tenant}'s ghost sweep ran in this process (bead nexus-0bl77, the test-only tenant reset
+     * route). The durable {@code catalog_meta} marker is a row the reset deletes with the tenant's other rows, so
+     * after this the tenant's next request re-sweeps exactly as a brand-new tenant's first request does.
+     *
+     * @return 1 when the tenant was marked checked, 0 otherwise
+     */
+    public int evictGhostSweepTenant(String tenant) {
+        return ghostSweepCheckedTenants.remove(tenant) ? 1 : 0;
+    }
+
+    /** Whether {@code tenant}'s ghost sweep has been checked in this process: operational visibility, and the
+     *  assertion point of the reset route's tests. */
+    public boolean ghostSweepChecked(String tenant) {
+        return ghostSweepCheckedTenants.contains(tenant);
+    }
+
+    /**
      * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
      * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
      *

@@ -73,6 +73,12 @@ public final class DataTokenHandler implements HttpHandler {
         return new DataTokenHandler(store, MintRateLimiter.fromEnv(clock), ttlCeilingFromEnv());
     }
 
+    /** As {@link #fromEnv(TokenStore, Clock)}, with the caller's limiter, so it can evict a tenant's buckets
+     *  (bead nexus-0bl77). */
+    public static DataTokenHandler fromEnv(TokenStore store, MintRateLimiter rateLimiter) {
+        return new DataTokenHandler(store, rateLimiter, ttlCeilingFromEnv());
+    }
+
     /** The env-resolved data-token TTL ceiling — shared with the session-mint
      *  guard for data-scoped callers ({@link SessionTokenHandler}). */
     static long ttlCeilingFromEnv() {

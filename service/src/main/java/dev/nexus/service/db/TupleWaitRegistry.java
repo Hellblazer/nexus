@@ -179,6 +179,9 @@ final class TupleWaitRegistry {
         /** Nanotime of the last registration, release, or signal on this group,
          *  guarded by {@link #lock}. The other eviction precondition. */
         long lastActivityNanos;
+        /** Set once, under {@link #lock}, by {@link #abortTenant}; sticky, so a waiter still holding this
+         *  group after it was removed from {@link #groups} still learns it was aborted (nexus-0bl77). */
+        volatile boolean aborted;
         /**
          * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): {@link MultiWaiter}s parked
          * across THIS group alongside others -- notified by {@link #signalAll} in
@@ -410,6 +413,7 @@ final class TupleWaitRegistry {
                     g.waiters++;
                     g.multiListeners.add(mw);
                     g.lastActivityNanos = now();
+                    mw.registeredGroups.add(g);
                 } finally {
                     g.lock.unlock();
                 }
@@ -442,6 +446,11 @@ final class TupleWaitRegistry {
          *  counter a not-yet-parked reader would still need to notice. */
         private final Set<String> pendingSubspaces = new HashSet<>();
         private volatile boolean released;
+        /** Set by {@link #abortTenant}; the caller checks {@link #aborted()} after each wake (nexus-0bl77). */
+        private volatile boolean aborted;
+        /** The exact groups this waiter registered in, so {@link #release} decrements those and never a
+         *  fresh group that took the same key after {@link #abortTenant} removed the old one. */
+        private final List<Group> registeredGroups = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         private MultiWaiter(String tenant, List<String> subspaces) {
             this.tenant = tenant;
@@ -485,6 +494,11 @@ final class TupleWaitRegistry {
             }
         }
 
+        /** True once {@link #abortTenant} aborted this waiter's tenant; the caller then stops, without a re-query. */
+        boolean aborted() {
+            return aborted;
+        }
+
         /**
          * Marks this waiter done across EVERY subspace group it registered in
          * (decrementing occupancy and removing this listener from each) -- the
@@ -496,11 +510,7 @@ final class TupleWaitRegistry {
                 return;
             }
             released = true;
-            for (String subspace : subspaces) {
-                Group g = groups.get(new WaitKey(tenant, subspace));
-                if (g == null) {
-                    continue; // already evicted -- nothing left to release against
-                }
+            for (Group g : registeredGroups) {
                 g.lock.lock();
                 try {
                     g.waiters--;
@@ -542,6 +552,69 @@ final class TupleWaitRegistry {
         }
     }
 
+    /**
+     * Bead nexus-0bl77 (rtg20 phase A), the {@code TupleWaitRegistry} evictor of the test-only tenant reset route.
+     * Aborts every wait of {@code tenant}: marks each of its groups aborted and wakes its waiters at once, so a
+     * parked {@code rd}/{@code in}/{@code wait} of a dead test returns to its caller as aborted instead of
+     * re-querying and claiming the next test's tuple. Then waits up to {@code boundNanos} for those waiters to
+     * leave (they release in a {@code finally}), and removes the tenant's groups either way, so a later wait on the
+     * same tenant and subspace gets a fresh, un-aborted group. A waiter that outlives the bound still sees
+     * {@code aborted()} (the flag is on the group it holds).
+     *
+     * @return the number of groups removed
+     */
+    int abortTenant(String tenant, long boundNanos) {
+        List<Map.Entry<WaitKey, Group>> mine = new java.util.ArrayList<>();
+        for (var entry : groups.entrySet()) {
+            if (entry.getKey().tenant().equals(tenant)) {
+                mine.add(entry);
+            }
+        }
+        for (var entry : mine) {
+            Group g = entry.getValue();
+            g.lock.lock();
+            try {
+                g.aborted = true;
+                g.generation++;
+                g.condition.signalAll();
+                for (MultiWaiter mw : g.multiListeners) {
+                    mw.aborted = true;
+                    mw.notifyWake(entry.getKey().subspace());
+                }
+            } finally {
+                g.lock.unlock();
+            }
+        }
+        long deadline = System.nanoTime() + boundNanos;
+        while (true) {
+            boolean pending = false;
+            for (var entry : mine) {
+                Group g = entry.getValue();
+                g.lock.lock();
+                try {
+                    pending |= g.waiters > 0;
+                } finally {
+                    g.lock.unlock();
+                }
+            }
+            if (!pending || System.nanoTime() >= deadline) {
+                break;
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            if (Thread.interrupted()) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        int removed = 0;
+        for (var entry : mine) {
+            if (groups.remove(entry.getKey(), entry.getValue())) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     /** Current group count -- test-only visibility into {@link #groups}' size
      *  (nexus-em75s.37), so a test can assert eviction actually shrank the map. */
     int groupCount() {
@@ -567,6 +640,11 @@ final class TupleWaitRegistry {
          * calling {@link Condition#await}, closing the lost-wakeup window between a
          * caller's {@link #register}/first query and its first park.
          */
+        /** True once {@link #abortTenant} aborted this waiter's tenant; the caller then stops, without a re-query. */
+        boolean aborted() {
+            return g.aborted;
+        }
+
         void awaitSignalOrTimer() throws InterruptedException {
             g.lock.lock();
             try {

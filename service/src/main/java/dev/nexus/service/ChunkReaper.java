@@ -531,6 +531,38 @@ final class ChunkReaper {
     private final Map<String, String> resumeCollection = new ConcurrentHashMap<>();
     private final Map<String, String> resumeExpiry = new ConcurrentHashMap<>();
 
+    /**
+     * Forget everything this reaper remembers about {@code tenant}: its timeout streaks and rest passes, its
+     * per-tenant resume cursors, and the wall-clock-cut cursor when it names that tenant (bead nexus-0bl77, the
+     * test-only tenant reset route). Streak keys are {@code tenant/collection#stage}, so they match on the
+     * {@code tenant/} prefix; a tenant id that itself contained {@code '/'} could lose a sibling's streak, which
+     * only shortens a backoff.
+     *
+     * @return the number of entries removed
+     */
+    public int evictTenant(String tenant) {
+        int removed = 0;
+        String prefix = tenant + "/";
+        var streaks = timeoutStreaks.keySet().iterator();
+        while (streaks.hasNext()) {
+            if (streaks.next().startsWith(prefix)) {
+                streaks.remove();
+                removed++;
+            }
+        }
+        if (resumeCollection.remove(tenant) != null) {
+            removed++;
+        }
+        if (resumeExpiry.remove(tenant) != null) {
+            removed++;
+        }
+        if (tenant.equals(resumeTenant)) {
+            resumeTenant = null;
+            removed++;
+        }
+        return removed;
+    }
+
     /** Consecutive timeouts of one statement, and the last pass it is skipped through. */
     private static final class TimeoutStreak {
         int consecutive;

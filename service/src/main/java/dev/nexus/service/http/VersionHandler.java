@@ -137,6 +137,19 @@ public final class VersionHandler implements HttpHandler {
         return this;
     }
 
+    private volatile boolean testTenantResetRoute;
+
+    /**
+     * Bead nexus-0bl77: whether this engine registered the test-only {@code POST /v1/_test/tenant-reset} route
+     * ({@code NX_TEST_TENANT_RESET_ROUTE=1}). Reported as {@code test_tenant_reset_route} so the cloud client-path
+     * gate can assert it is {@code false} (an engine older than the route omits the key; the gate treats absent
+     * and {@code false} alike).
+     */
+    public VersionHandler testTenantResetRoute(boolean enabled) {
+        this.testTenantResetRoute = enabled;
+        return this;
+    }
+
     /**
      * @param embedderRouter the doc-side router; supplies the
      *        nexus-pebfx.5 embedding-mode handshake fields
@@ -486,6 +499,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-nyry9.9 / RDR-203 P2: both flags always present, always true on any
         // engine carrying the corresponding handler.
         appendNxAnswerStepsCapabilityField(body);
+        // nexus-0bl77, [additive]: always present, true only when the test-only tenant reset route is registered.
+        body.append(",\"test_tenant_reset_route\":").append(testTenantResetRoute);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

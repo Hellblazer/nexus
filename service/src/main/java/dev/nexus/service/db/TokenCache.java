@@ -153,6 +153,28 @@ public final class TokenCache {
         }
     }
 
+    /**
+     * Remove every cached principal of {@code tenant} (bead nexus-0bl77, the test-only tenant reset route). The
+     * reset deletes the tenant's token rows, and this cache would otherwise keep answering for them up to its
+     * positive TTL, so a late writer holding the dead test's bearer would still reach the tenant.
+     *
+     * @return the number of entries removed
+     */
+    public int invalidateTenant(String tenant) {
+        if (tenant == null) {
+            return 0;
+        }
+        int[] removed = {0};
+        map.entrySet().removeIf(e -> {
+            boolean mine = tenant.equals(e.getValue().tenantId());
+            if (mine) {
+                removed[0]++;
+            }
+            return mine;
+        });
+        return removed[0];
+    }
+
     /** Test/operational visibility into the current cache size. */
     public int size() {
         return map.size();

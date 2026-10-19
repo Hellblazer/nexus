@@ -776,6 +776,12 @@ public final class PgVectorRepository {
     /** Rate limit for the refusal / would-refuse WARN line: one per (route, tenant, collection) per minute. */
     private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
 
+    /** Drops the ownerless-write log windows of {@code tenant} (bead nexus-0bl77, the test-only tenant reset
+     *  route); returns how many were removed. */
+    public int evictOwnerlessLogTenant(String tenant) {
+        return ownerlessLogLimiter.evictTenant(tenant);
+    }
+
     /**
      * The chashes of {@code distinctHex} that have a LIVE manifest row in {@code collection}: a
      * {@code catalog_document_chunks} row whose document is not tombstoned, the same owner {@code

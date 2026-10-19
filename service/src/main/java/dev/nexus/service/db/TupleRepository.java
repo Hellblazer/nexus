@@ -321,6 +321,18 @@ public final class TupleRepository {
         waitRegistry.shutdown();
     }
 
+    /**
+     * Bead nexus-0bl77 (rtg20 phase A): the tuple evictor of the test-only tenant reset route. Aborts every parked
+     * wait of {@code tenant} (each throws {@link TenantResetException} without re-querying), waits up to
+     * {@code bound} for those waits to leave, and drops the tenant's wait groups; see
+     * {@link TupleWaitRegistry#abortTenant}.
+     *
+     * @return the number of wait groups removed
+     */
+    public int abortTenantWaiters(String tenant, java.time.Duration bound) {
+        return waitRegistry.abortTenant(tenant, bound.toNanos());
+    }
+
     // ── park stats (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ─────────────
 
     /**
@@ -862,6 +874,9 @@ public final class TupleRepository {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return queryOnce(tenant, subspace, pattern, n, since, null, order);
+                    }
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-0bl77: no re-query after a reset
                     }
                     List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since, null, order);
                     if (!again.isEmpty()) {
@@ -1460,6 +1475,9 @@ public final class TupleRepository {
                         Thread.currentThread().interrupt();
                         return queryEachOnceFenced(tenant, specs);
                     }
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-0bl77: no re-query after a reset
+                    }
                     List<WaitResult> again = queryEachOnceFenced(tenant, specs);
                     if (!again.isEmpty()) {
                         return again;
@@ -1586,6 +1604,9 @@ public final class TupleRepository {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    }
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-0bl77: no claim after a reset
                     }
                     Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                     if (again.isPresent()) {

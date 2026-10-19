@@ -192,6 +192,9 @@ public final class NexusService {
     private final java.util.concurrent.ConcurrentHashMap<String, Integer> dataSweepFailuresByTenant =
         new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Bead nexus-0bl77: the evictors behind {@code POST /v1/_test/tenant-reset}; see {@link #tenantKeyedState()}. */
+    private final List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState;
+
     /**
      * nexus-4tosp test seam: overrides the per-tenant data-token sweep call
      * (tenant -&gt; deleted count; throw to simulate that tenant's failure) so
@@ -373,6 +376,33 @@ public final class NexusService {
         return bind;
     }
 
+    /** Bead nexus-0bl77 (rtg20 phase A): the flag that registers {@code POST /v1/_test/tenant-reset}. */
+    static final String TENANT_RESET_ROUTE_ENV = "NX_TEST_TENANT_RESET_ROUTE";
+
+    /** True only for the exact value {@code 1}: any other value, including {@code true}, leaves the route absent. */
+    static boolean tenantResetRouteEnabled(java.util.function.Function<String, String> env) {
+        String raw = env.apply(TENANT_RESET_ROUTE_ENV);
+        return raw != null && raw.trim().equals("1");
+    }
+
+    /**
+     * Boot refusal (bead nexus-0bl77): the test-only tenant reset route is operator-gated, but it is still a
+     * route that wipes a tenant's cached state, so it is never allowed on an engine reachable beyond loopback.
+     *
+     * @throws IllegalStateException when the flag is on and {@code NX_SERVICE_BIND} resolves to anything but
+     *         {@code 127.0.0.1} or {@code ::1}
+     */
+    static void verifyTenantResetRouteBind(java.util.function.Function<String, String> env) {
+        if (!tenantResetRouteEnabled(env)) {
+            return;
+        }
+        String bind = resolveBindHost(env.apply("NX_SERVICE_BIND"));
+        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
+            throw new IllegalStateException(TENANT_RESET_ROUTE_ENV + "=1 refuses a non-loopback bind (NX_SERVICE_BIND="
+                + bind + "): the test-only tenant reset route must not be reachable beyond this host");
+        }
+    }
+
     /**
      * Full constructor — the production wiring (RDR-155 P4a.2, bead nexus-1k8s1).
      *
@@ -471,6 +501,29 @@ public final class NexusService {
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry,
                         ScheduledExecutorService sweepSchedulerOverride) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, sweepSchedulerOverride, System::getenv,
+                () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled());
+    }
+
+    /**
+     * The constructor with the two inputs of the test-only tenant reset route as seams (bead nexus-0bl77): the
+     * environment {@code NX_TEST_TENANT_RESET_ROUTE} and {@code NX_SERVICE_BIND} are read from, and whether
+     * {@code NX_SEARCH_PCI} is on. Package-private: production passes {@code System::getenv} and the boot-resolved
+     * PCI setting through the constructor above.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride,
+                        java.util.function.Function<String, String> env,
+                        java.util.function.BooleanSupplier pciEnabled) throws IOException {
+        // Before anything binds or touches the database: a refused configuration must not half-start.
+        verifyTenantResetRouteBind(env);
+        final boolean tenantResetRoute = tenantResetRouteEnabled(env);
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
 
@@ -514,7 +567,8 @@ public final class NexusService {
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
         var versionHandler = new VersionHandler(dataSource, docEmbedderRouter)
-                .embedPosture(() -> this.embedPosture);
+                .embedPosture(() -> this.embedPosture)
+                .testTenantResetRoute(tenantResetRoute);
         server.createContext("/version", versionHandler);
 
         // /v1/status — unauthenticated live embed-activity counters (bead
@@ -637,9 +691,11 @@ public final class NexusService {
         // scope=mint credential (nexus-x1h07, conexus RDR-005 A1). Rate-limited
         // + TTL-ceilinged from env; the AuthFilter confines mint credentials to
         // exactly this surface.
+        // The limiter is held here (not built inside the handler) so the tenant reset route can evict a
+        // tenant's buckets (nexus-0bl77).
+        var mintRateLimiter = dev.nexus.service.http.MintRateLimiter.fromEnv(java.time.Clock.systemUTC());
         var dataTokensCtx = server.createContext("/v1/data-tokens",
-                dev.nexus.service.http.DataTokenHandler.fromEnv(
-                    tokenStore, java.time.Clock.systemUTC()));
+                dev.nexus.service.http.DataTokenHandler.fromEnv(tokenStore, mintRateLimiter));
         dataTokensCtx.getFilters().addAll(authFilter);
 
         // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2;
@@ -755,6 +811,50 @@ public final class NexusService {
             log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
                 pgVectorRepository != null, reaperSettings.enabled());
         }
+
+        // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
+        // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
+        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
+        if (tenantResetRoute) {
+            var resetCtx = server.createContext(dev.nexus.service.http.TenantResetHandler.PATH,
+                    new dev.nexus.service.http.TenantResetHandler(this.tenantKeyedState, pciEnabled));
+            resetCtx.getFilters().addAll(authFilter);
+            log.warn("event=test_tenant_reset_route_enabled path={} evictors={}",
+                    dev.nexus.service.http.TenantResetHandler.PATH,
+                    this.tenantKeyedState.stream().map(dev.nexus.service.db.TenantKeyedState::name).toList());
+        }
+    }
+
+    /** How long the tuple evictor waits for an aborted tenant's parked waits to leave before dropping its groups. */
+    private static final java.time.Duration TENANT_RESET_TUPLE_BOUND = java.time.Duration.ofSeconds(5);
+
+    /**
+     * Every JVM structure keyed by tenant, with the call that clears a tenant from it (bead nexus-0bl77). The names
+     * are the ones {@code TenantKeyedStateGateTest} lists against the fields they clear; adding a tenant-keyed
+     * structure means adding it here AND to that table, or the gate fails.
+     */
+    private List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState(
+            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository) {
+        return List.of(
+            dev.nexus.service.db.TenantKeyedState.of("TupleWaitRegistry",
+                t -> tupleRepo == null ? 0 : tupleRepo.abortTenantWaiters(t, TENANT_RESET_TUPLE_BOUND)),
+            dev.nexus.service.db.TenantKeyedState.of("TokenCache", tokenCache::invalidateTenant),
+            dev.nexus.service.db.TenantKeyedState.of("CollectionRegistry",
+                dev.nexus.service.db.CollectionRegistry::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("CatalogRepository.ghostSweepCheckedTenants",
+                catalogRepo::evictGhostSweepTenant),
+            dev.nexus.service.db.TenantKeyedState.of("MintRateLimiter", mintRateLimiter::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("OwnerlessLogLimiter",
+                t -> pgVectorRepository == null ? 0 : pgVectorRepository.evictOwnerlessLogTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("ChunkReaper",
+                t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
+                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0));
+    }
+
+    /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
+    List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState() {
+        return tenantKeyedState;
     }
 
     /**

@@ -81,6 +81,14 @@ public final class Main {
         // per start on Windows (its DLLs are locked at exit, so deleteOnExit loses). Remove
         // the dead ones from earlier runs; Windows only, best effort, never throws.
         OrtTempSweep.sweepAtBoot();
+        // nexus-0bl77 (rtg20 phase A): the test-only tenant reset route is refused on a non-loopback bind, before
+        // any pool or listener exists. NexusService's constructor checks the same rule for direct constructions.
+        try {
+            NexusService.verifyTenantResetRouteBind(System::getenv);
+        } catch (IllegalStateException e) {
+            log.error("event=tenant_reset_route_bind_refused error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves

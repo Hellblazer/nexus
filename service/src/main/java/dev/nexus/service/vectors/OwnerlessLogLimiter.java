@@ -69,6 +69,26 @@ public final class OwnerlessLogLimiter {
     }
 
     /** Number of keys currently remembered, the overflow bucket excluded; never above {@link #MAX_KEYS}. */
+    /**
+     * Drop every window whose key names {@code tenant} (bead nexus-0bl77, the test-only tenant reset route). Keys
+     * are {@code route|tenant|collection}; a tenant id carries no {@code '|'}, so the second field is the tenant
+     * exactly.
+     *
+     * @return the number of windows removed
+     */
+    public int evictTenant(String tenant) {
+        int[] removed = {0};
+        states.keySet().removeIf(key -> {
+            String[] parts = key.split("\\|", 3);
+            boolean mine = parts.length == 3 && parts[1].equals(tenant);
+            if (mine) {
+                removed[0]++;
+            }
+            return mine;
+        });
+        return removed[0];
+    }
+
     int size() {
         return states.size();
     }

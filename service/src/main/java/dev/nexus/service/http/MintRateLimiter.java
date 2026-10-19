@@ -170,6 +170,23 @@ public final class MintRateLimiter {
         }
     }
 
+    /**
+     * Drop every per-tenant bucket of {@code tenant}, under every credential (bead nexus-0bl77, the test-only
+     * tenant reset route): the next mint for that tenant starts with a full burst, as a new tenant's does. The
+     * per-credential global bucket is left alone; it is not keyed by tenant.
+     *
+     * @return the number of buckets removed
+     */
+    public int evictTenant(String tenant) {
+        int removed = 0;
+        for (CredentialState state : credentials.values()) {
+            if (state.tenants.remove(tenant) != null) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     int tenantBurst() {
         return tenantBurst;
     }
