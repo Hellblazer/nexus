@@ -282,6 +282,51 @@ def test_a_hand_set_skip_property_fails_the_build() -> None:
     assert text.index("<fail ") < text.index("<condition property="), "the guard must run before the decisions"
 
 
+# --- the shared cache of generated trees (nexus-fkhd3) ---------------------------------------------
+# tests/test_service_jooq_codegen_skip_behaviour.py runs the Ant logic; these pin the shape that
+# keeps the stamp invariant true when a restore swaps the tree.
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_restore_deletes_the_stamp_before_it_swaps_the_tree_and_is_part_of_the_skip(kind: str) -> None:
+    text = _target_text(_hash_execution(_pom()))
+    stamp_del = text.index(f'<delete file="${{nexus.jooq.stamp.dir}}/{kind}.sha256" quiet="true"\n'
+                           f'                                        if:true="${{nexus.jooq.{kind}.restored}}"')
+    tree_del = text.index(f'<delete dir="${{{"jooq.generated.dir" if kind == "main" else "jooq.generated.test.dir"}}}"')
+    copy = text.index(f'<copy todir=', tree_del)
+    assert stamp_del < tree_del < copy, f"{kind}: the restore must drop the stamp, then the old tree, then copy the new one"
+    assert text.index(f'property="nexus.jooq.{kind}.restored"') < text.index(f'<condition property="nexus.jooq.{kind}.skip"')
+    assert f'<istrue value="${{nexus.jooq.{kind}.restored}}"/>' in _condition(text, kind), (
+        f"{kind}: a restored tree must skip the codegen")
+    # nothing in the inputs step writes a stamp: only the jooq-stamp-* steps do
+    assert not re.search(rf'<echo[^>]*{kind}\.sha256', text), f"{kind}: the inputs step must never write a stamp"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_restore_never_runs_for_a_forced_regeneration_or_without_a_complete_entry(kind: str) -> None:
+    text = _target_text(_hash_execution(_pom()))
+    cond = re.search(rf'<condition property="nexus\.jooq\.{kind}\.restored".*?</condition>', text, re.DOTALL).group()
+    assert '<not><istrue value="${nexus.jooq.regenerate}"/></not>' in cond, "-Dnexus.jooq.regenerate=true must bypass the cache"
+    assert f'<available file="${{nexus.jooq.{kind}.entry}}/complete"/>' in cond, "an entry counts only with its marker"
+    assert "<resourcecount" in cond, "an entry with no sources is not restorable"
+    assert f'${{nexus.jooq.{kind}.hash}}' in text and f'{kind}-${{nexus.jooq.{kind}.hash}}' in text, "keyed on the input hash"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_publishing_stages_beside_the_entry_and_renames_it_into_place_marker_last(kind: str) -> None:
+    root = _pom()
+    text = _target_text(_stamp_execution(root, EXEC_OF[kind]))
+    stage = f"${{nexus.jooq.{kind}.stage}}"
+    entry = f"${{nexus.jooq.{kind}.entry}}"
+    assert f'value="${{nexus.jooq.cache.dir}}/.staging.{kind}.' in text, "the staging dir must sit in the cache root (same filesystem)"
+    copy = text.index(f'<copy todir="{stage}/generated"')
+    marker = text.index(f'<echo file="{stage}/complete"')
+    rename = text.index(f'<move file="{stage}" tofile="{entry}"')
+    assert copy < marker < rename, f"{kind}: copy, then the completeness marker, then the rename"
+    assert text.index("<echo file=") < copy, "the stamp is still the stamp step's first act"
+    assert "producer" in text, "an entry names what produced it, so a template-based generator can say so (nexus-v0ts5)"
+
+
 # --- every changelog reference resolves under the hashed db/ tree --------------------------------
 
 _SRC = _POM.parent / "src"

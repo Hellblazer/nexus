@@ -92,7 +92,7 @@ gate_jar_cache_key() {
     local idx listing p
     local -a paths=()
     for p in "${GATE_JAR_KEY_PATHS[@]}"; do
-        if [[ -e "$repo/$p" ]] || [[ -n "$(git -C "$repo" ls-files -- "$p" 2>/dev/null | head -n 1)" ]]; then
+        if [[ -e "$repo/$p" ]] || git -C "$repo" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
             paths+=("$p")
         fi
     done
@@ -191,4 +191,38 @@ _gate_jar_cache_prune() {
             rm -rf "${root:?}/${d:?}"
         fi
     done < <(ls -t "$root" 2>/dev/null)
+}
+
+# gate_jar_cache_prune_jooq <repo> -- trim the shared cache of jOOQ generated
+# trees that service/pom.xml's jooq-inputs/jooq-stamp-* steps keep (nexus-fkhd3):
+# the newest JOOQ_CACHE_KEEP entries of each kind (main-<hash>, test-<hash>)
+# survive, by directory mtime (a restore touches the entry, so "newest" means
+# most recently used), and any .staging.* / *.old leftover of a killed publish
+# older than a day goes. Location: $NX_JOOQ_CACHE (a directory; "off" disables),
+# else <git common dir>/nexus-jooq-cache -- the same rule the pom applies.
+gate_jar_cache_prune_jooq() {
+    local repo="${1:?gate_jar_cache_prune_jooq: usage: gate_jar_cache_prune_jooq <repo>}"
+    local root common kind d n
+    case "${NX_JOOQ_CACHE:-}" in
+        off|OFF|0) return 0 ;;
+        "")
+            common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+            [[ -n "$common" ]] || return 0
+            root="$common/nexus-jooq-cache" ;;
+        *) root="$NX_JOOQ_CACHE" ;;
+    esac
+    [[ -d "$root" ]] || return 0
+    for kind in main test; do
+        n=0
+        while IFS= read -r d; do
+            [[ -n "$d" && -d "$root/$d" ]] || continue
+            [[ "$d" == .* || "$d" == *.old ]] && continue
+            n=$((n + 1))
+            if (( n > JOOQ_CACHE_KEEP )); then
+                rm -rf "${root:?}/${d:?}"
+            fi
+        done < <(cd "$root" && ls -t -d "$kind"-* 2>/dev/null)
+    done
+    find "$root" -maxdepth 1 \( -name '.staging.*' -o -name '*.old' \) -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+    return 0
 }

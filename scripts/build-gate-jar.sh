@@ -181,4 +181,7 @@ cd "$repo_root/service"
 built_jar="$repo_root/service/target/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }
 gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref"
+# The build just (re)published the jOOQ generated trees to the shared cache
+# (service/pom.xml, nexus-fkhd3); keep it bounded.
+gate_jar_cache_prune_jooq "$repo_root"
 echo "built $built_jar"

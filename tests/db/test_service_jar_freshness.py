@@ -493,3 +493,25 @@ class TestBootCheckHonoursTheLeaseWait:
         monkeypatch.setattr(sf, "wait_for_build_lease", _forbidden)
         monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
         assert sf.jar_freshness_skip_reason(tmp_path / "x.jar") == "held"
+
+
+def test_the_freshness_dirs_sit_inside_the_gate_jar_cache_key_paths() -> None:
+    """nexus-fkhd3: the gate-jar cache keys on pom + src/main + mvnw + .mvn only, so a
+    test-only change under service/ is a cache HIT. The mtime freshness check must agree:
+    every directory it watches has to be covered by the key (else an edit there marks the jar
+    stale while the rebuild HITS and hands back the old jar with a fresh mtime), and none of
+    them may be a test tree (else a test-only commit marks the jar stale for nothing)."""
+    import re
+
+    from tests.db._service_fixture import _REPO_ROOT, _SERVICE_SRC_DIRS
+
+    text = (_REPO_ROOT / "scripts" / "lib" / "gate-jar-cache.sh").read_text(encoding="utf-8")
+    m = re.search(r"^GATE_JAR_KEY_PATHS=\(([^)]*)\)", text, re.MULTILINE)
+    assert m, "GATE_JAR_KEY_PATHS is no longer declared in scripts/lib/gate-jar-cache.sh"
+    key_paths = m.group(1).split()
+    assert key_paths and not any("src/test" in k for k in key_paths), key_paths
+    for watched in _SERVICE_SRC_DIRS:
+        rel = watched.relative_to(_REPO_ROOT).as_posix()
+        assert "src/test" not in rel, f"{rel}: a test tree marks the jar stale"
+        assert any(rel == k or rel.startswith(k + "/") for k in key_paths), (
+            f"{rel} is watched for jar staleness but is not part of the gate-jar cache key {key_paths}")

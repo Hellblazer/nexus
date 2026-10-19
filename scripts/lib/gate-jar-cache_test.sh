@@ -104,6 +104,10 @@ echo '# changed' >> "$repo2/service/mvnw"
 kx="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" != "$kx" ]] && ok "an mvnw edit moves the key" || bad "mvnw edit did not move the key"
 git -C "$repo2" checkout -q -- service/mvnw
+rm -rf "$repo2/service/.mvn"
+kg="$(gate_jar_cache_key "$repo2" 0.1.0 "")"; rcg=$?
+[[ $rcg -eq 0 && -n "$kg" && "$kb" != "$kg" ]] && ok "a tracked key dir removed from the working tree still keys (and differs)" || bad "removed .mvn/: rc=$rcg key=$kg"
+git -C "$repo2" checkout -q -- service/.mvn
 echo 'class N {}' > "$repo2/service/src/main/N.java"
 kn="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" != "$kn" ]] && ok "a new untracked src/main file moves the key" || bad "new main file did not move the key"
@@ -144,6 +148,26 @@ done
 n="$(ls -d "$root"/key* | wc -l | tr -d ' ')"
 [[ "$n" -eq 3 ]] && ok "prune keeps the newest 3 (found $n)" || bad "prune kept $n entries"
 [[ -d "$root/key7" ]] && ok "newest entry survives prune" || bad "newest entry pruned"
+
+echo "Test 4 (nexus-fkhd3): the jOOQ generated-tree cache is trimmed per kind, newest used first"
+jroot="$WORKDIR/jooq-cache"
+mkdir -p "$jroot"
+for i in 1 2 3 4 5; do
+    for kind in main test; do
+        mkdir -p "$jroot/$kind-h$i/generated"; echo x > "$jroot/$kind-h$i/complete"
+        touch -t "20260101010$i" "$jroot/$kind-h$i"
+    done
+done
+mkdir -p "$jroot/.staging.main.dead.wt.1" "$jroot/.staging.main.fresh.wt.2"
+touch -t 202601010101 "$jroot/.staging.main.dead.wt.1"
+touch -t 202601010109 "$jroot/main-h1" # most recently USED: a restore touches the entry
+NX_JOOQ_CACHE="$jroot" JOOQ_CACHE_KEEP=2 gate_jar_cache_prune_jooq "$repo"
+left="$(cd "$jroot" && ls -d main-* test-* | tr '\n' ' ')"
+# main keeps h1 (touched) and h5 (newest); test keeps h5, h4
+[[ "$left" == "main-h1 main-h5 test-h4 test-h5 " ]] && ok "keeps the newest 2 of each kind by use ($left)" || bad "pruned to: $left"
+[[ ! -d "$jroot/.staging.main.dead.wt.1" ]] && ok "a day-old staging leftover is removed" || bad "dead staging dir survived"
+NX_JOOQ_CACHE=off gate_jar_cache_prune_jooq "$repo" && ok "NX_JOOQ_CACHE=off prunes nothing and succeeds" || bad "off prune failed"
+NX_JOOQ_CACHE="$WORKDIR/does-not-exist" gate_jar_cache_prune_jooq "$repo" && ok "a missing cache dir is a no-op" || bad "missing dir failed"
 
 echo
 echo "gate-jar-cache_test.sh: $PASS passed, $FAIL failed"

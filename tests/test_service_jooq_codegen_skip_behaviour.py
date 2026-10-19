@@ -31,6 +31,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,7 +106,9 @@ def _build_xml() -> str:
         f'<project name="jooq-codegen-skip-harness" default="inputs" {ns}>\n{body}'
         '<target name="report"><echo file="${harness.out}/report.txt" '
         'message="main_skip=${nexus.jooq.main.skip}&#10;test_skip=${nexus.jooq.test.skip}&#10;'
-        'main_hash=${nexus.jooq.main.hash}&#10;test_hash=${nexus.jooq.test.hash}"/></target>\n</project>\n'
+        'main_hash=${nexus.jooq.main.hash}&#10;test_hash=${nexus.jooq.test.hash}&#10;'
+        'main_restored=${nexus.jooq.main.restored}&#10;test_restored=${nexus.jooq.test.restored}&#10;'
+        'cache_dir=${nexus.jooq.cache.dir}"/></target>\n</project>\n'
     )
 
 
@@ -115,6 +119,10 @@ def _build_xml() -> str:
 class Decision:
     skip: dict[str, bool]
     hash: dict[str, str]
+    #: kind -> True when the jooq-inputs step restored the tree from the shared cache
+    restored: dict[str, bool]
+    #: the cache directory the jooq-inputs step resolved (Maven exports it to the stamp steps)
+    cache_dir: str = "off"
 
 
 @dataclass
@@ -124,6 +132,10 @@ class Project:
     #: kind -> hash the generated tree was produced from (None = no tree / torn tree)
     tree_hash: dict[str, str | None] = field(default_factory=lambda: {"main": None, "test": None})
     generations: list[str] = field(default_factory=list)
+    #: the shared jOOQ cache directory (nexus-fkhd3); "off" = no cache, as before; None = no -D at all,
+    #: so the pom's own resolution (NX_JOOQ_CACHE, then the git common dir) is what runs
+    cache: str | None = "off"
+    env: dict[str, str] = field(default_factory=dict)
 
     # layout ---------------------------------------------------------------
     @property
@@ -154,19 +166,34 @@ class Project:
             "postgresql.version": "42.7.4",
             "testcontainers.version": "1.21.4",
             "harness.out": str(self.root / "out"),
+            **({} if self.cache is None else {"nexus.jooq.cache.dir": self.cache}),
             **(props or {}),
         }
         (self.root / "out").mkdir(exist_ok=True)
         cmd = ["java", "-cp", self.ant_cp, "org.apache.tools.ant.launch.Launcher",
                "-q", "-f", str(self.root / "build.xml"), *[f"-D{k}={v}" for k, v in defines.items()], *targets]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+        env = {k: v for k, v in os.environ.items() if k != "NX_JOOQ_CACHE"} | self.env
+        # cwd is the scratch parent: a buggy relative cache path lands here, never in the repo
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False,
+                              cwd=self.root.parent, env=env)
 
     def decide(self, props: dict[str, str] | None = None) -> Decision:
         done = self.ant("inputs", "report", props=props)
         assert done.returncode == 0, f"Ant failed:\n{done.stdout}\n{done.stderr}"
         kv = dict(line.split("=", 1) for line in (self.root / "out" / "report.txt").read_text().splitlines())
-        return Decision(skip={k: kv[f"{k}_skip"] == "true" for k in ("main", "test")},
-                        hash={k: kv[f"{k}_hash"] for k in ("main", "test")})
+        d = Decision(skip={k: kv[f"{k}_skip"] == "true" for k in ("main", "test")},
+                     hash={k: kv[f"{k}_hash"] for k in ("main", "test")},
+                     restored={k: kv[f"{k}_restored"] == "true" for k in ("main", "test")},
+                     cache_dir=kv["cache_dir"])
+        for kind in ("main", "test"):
+            if d.restored[kind]:  # the tree on disk is now the cache entry's: read what it really is
+                self.tree_hash[kind] = self.disk_tree_hash(kind)
+        return d
+
+    def disk_tree_hash(self, kind: str) -> str | None:
+        """The hash the generated tree on disk was produced from (None: no tree / torn tree)."""
+        b = self.gen_dir[kind] / "B.java"
+        return b.read_text(encoding="utf-8").split("// ")[1].split()[0] if b.is_file() else None
 
     # the fake codegen -------------------------------------------------------
     def inputs_digest(self, kind: str) -> str:
@@ -186,7 +213,9 @@ class Project:
         (self.gen_dir[kind] / "A.java").write_text("class A {}", encoding="utf-8")
         if killed:
             return
-        (self.gen_dir[kind] / "B.java").write_text("class B {}", encoding="utf-8")
+        # the content names the inputs AND the generation, so a restored/republished tree is identifiable
+        (self.gen_dir[kind] / "B.java").write_text(
+            f"class B {{}} // {d.hash[kind]} gen{len(self.generations)}", encoding="utf-8")
         self.tree_hash[kind] = d.hash[kind]
 
     # Maven phases, replayed ---------------------------------------------------
@@ -212,7 +241,10 @@ class Project:
                     self.check_invariant()
                     return d
             else:
-                done = self.ant(f"stamp-{kind}", props={**(props or {}), f"nexus.jooq.{kind}.hash": d.hash[kind]})
+                # Maven carries the inputs step's exported properties (hash, skip) into the stamp step.
+                done = self.ant(f"stamp-{kind}", props={**(props or {}), f"nexus.jooq.{kind}.hash": d.hash[kind],
+                                                        f"nexus.jooq.{kind}.skip": str(d.skip[kind]).lower(),
+                                                        "nexus.jooq.cache.dir": d.cache_dir})
                 assert done.returncode == 0, f"stamp step failed:\n{done.stdout}\n{done.stderr}"
             self.check_invariant()
         return d
@@ -227,11 +259,11 @@ class Project:
                     f"(tree generated from {self.tree_hash[kind]!r})")
 
 
-@pytest.fixture()
-def proj(tmp_path: Path, ant_classpath: str) -> Project:
-    root = tmp_path.resolve() / "service"
-    p = Project(root=root, ant_cp=ant_classpath)
-    root.mkdir()
+def _make_project(parent: Path, ant_cp: str, cache: str | None = "off") -> Project:
+    """A scratch ``service/`` under *parent* holding the pom's real Ant steps and version-A inputs."""
+    root = parent.resolve() / "service"
+    p = Project(root=root, ant_cp=ant_cp, cache=cache)
+    root.mkdir(parents=True)
     (root / "build.xml").write_text(_build_xml(), encoding="utf-8")
     p.put("pom.xml", "<project>A</project>")
     p.put("src/main/resources/db/changelog/master.xml", "<main>A</main>")
@@ -240,6 +272,11 @@ def proj(tmp_path: Path, ant_classpath: str) -> Project:
     # an unrelated file under resources/ that the hash must NOT cover
     p.put("src/main/resources/META-INF/nexus/release.properties", "stamp=1")
     return p
+
+
+@pytest.fixture()
+def proj(tmp_path: Path, ant_classpath: str) -> Project:
+    return _make_project(tmp_path, ant_classpath)
 
 
 # -------------------------------------------------------------------- scenarios
@@ -385,3 +422,226 @@ def test_a_hand_set_skip_is_rejected_not_obeyed(proj: Project, prop: str) -> Non
     done = proj.ant("inputs", props={prop: "true"})
     assert done.returncode != 0, "a hand-set skip property must fail the build"
     assert "nexus.jooq.regenerate" in (done.stdout + done.stderr), "the failure must name the supported lever"
+
+
+# ------------------------------------------------- the shared cache (nexus-fkhd3)
+#
+# A fresh worktree has an empty target/, so the stamp (which lives in target/) cannot vouch for
+# anything and every worktree used to boot the codegen container and replay the whole changelog
+# (~350 MB written). The generated trees are a pure function of the hash the stamp already
+# compares, so they are published under <cache>/<kind>-<hash>/ after a successful generation and
+# restored by the jooq-inputs step when the stamp does not match but the cache holds that hash.
+# The stamp invariant is untouched: the restore deletes any stamp BEFORE it swaps the tree in, and
+# only the stamp-* steps write one.
+
+
+@pytest.fixture()
+def cached(tmp_path: Path, ant_classpath: str) -> Project:
+    """Worktree A of a pair sharing one cache (``other_worktree`` makes B)."""
+    return _make_project(tmp_path / "wt-a", ant_classpath, cache=str(tmp_path / "jooq-cache"))
+
+
+def _other_worktree(p: Project, name: str = "wt-b") -> Project:
+    """A second, empty worktree with the same inputs and the same shared cache."""
+    return _make_project(p.root.parent.parent / name, p.ant_cp, cache=p.cache)
+
+
+def _entry(p: Project, kind: str, digest: str) -> Path:
+    assert p.cache and p.cache != "off"
+    return Path(p.cache) / f"{kind}-{digest}"
+
+
+def _sources(root: Path) -> dict[str, str]:
+    return {f.relative_to(root).as_posix(): f.read_text(encoding="utf-8") for f in sorted(root.rglob("*.java"))}
+
+
+def test_a_generation_publishes_both_trees_to_the_shared_cache(cached: Project) -> None:
+    d = cached.build()
+    assert cached.generations == ["main", "test"]
+    for kind in ("main", "test"):
+        entry = _entry(cached, kind, d.hash[kind])
+        assert (entry / "complete").is_file(), f"{kind}: the entry is published without its completeness marker"
+        assert _sources(entry / "generated") == _sources(cached.gen_dir[kind]) != {}
+        meta = (entry / "meta.properties").read_text(encoding="utf-8")
+        assert f"hash={d.hash[kind]}" in meta and "producer=" in meta, "the entry names its inputs and its producer"
+    assert [c.name for c in Path(cached.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
+
+
+def test_a_fresh_worktree_restores_from_the_cache_and_never_runs_codegen(cached: Project) -> None:
+    first = cached.build()
+    fresh = _other_worktree(cached)
+    assert not fresh.target.exists()
+    for kind in ("main", "test"):  # age the entries: a restore must mark them recently used (the pruner keeps the newest)
+        os.utime(_entry(cached, kind, first.hash[kind]), (1_000_000, 1_000_000))
+    d = fresh.build()
+    for kind in ("main", "test"):
+        assert _entry(cached, kind, first.hash[kind]).stat().st_mtime > 1_000_000 + 86400
+    assert d.skip == {"main": True, "test": True} and d.restored == {"main": True, "test": True}
+    assert fresh.generations == [], "the codegen container would have booted"
+    for kind in ("main", "test"):
+        assert _sources(fresh.gen_dir[kind]) == _sources(cached.gen_dir[kind]) != {}
+        assert fresh.stamp(kind).read_text().strip() == first.hash[kind], "stamped by the stamp step, from the cache's hash"
+    again = fresh.build()  # and the next build is an ordinary stamp skip, not another restore
+    assert again.skip == {"main": True, "test": True} and again.restored == {"main": False, "test": False}
+
+
+def test_a_clean_in_the_same_worktree_restores_too(cached: Project) -> None:
+    cached.build()
+    shutil.rmtree(cached.target)  # mvn clean
+    cached.tree_hash = {"main": None, "test": None}
+    cached.generations.clear()
+    d = cached.build()
+    assert d.restored == {"main": True, "test": True} and cached.generations == []
+
+
+def test_a_changelog_change_regenerates_and_publishes_under_a_new_key_and_the_old_key_still_restores(
+        cached: Project) -> None:
+    a = cached.build()
+    cached.generations.clear()
+    cached.put("src/main/resources/db/changelog/other.xml", "<main-other>B</main-other>")
+    b = cached.build()
+    assert b.skip == {"main": False, "test": False} and b.restored == {"main": False, "test": False}
+    assert cached.generations == ["main", "test"]
+    for kind in ("main", "test"):
+        assert a.hash[kind] != b.hash[kind]
+        assert (_entry(cached, kind, a.hash[kind]) / "complete").is_file(), "the old key was lost"
+        assert (_entry(cached, kind, b.hash[kind]) / "complete").is_file(), "the new key was not published"
+    # a fresh worktree on the NEW inputs restores B's trees; on the OLD inputs it restores A's
+    wt_b = _other_worktree(cached)
+    wt_b.put("src/main/resources/db/changelog/other.xml", "<main-other>B</main-other>")
+    assert wt_b.build().restored == {"main": True, "test": True}
+    assert wt_b.disk_tree_hash("main") == b.hash["main"]
+    wt_c = _other_worktree(cached, "wt-c")
+    assert wt_c.build().restored == {"main": True, "test": True}
+    assert wt_c.disk_tree_hash("main") == a.hash["main"] and wt_c.generations == []
+
+
+def test_restore_swaps_out_a_stale_tree_and_its_stamp_before_the_stamp_step_runs(cached: Project) -> None:
+    """Built A, then B (tree and stamp are B's), then back to A: a stamp that outlived the swap would
+    vouch for the wrong tree. The harness asserts the invariant after every phase; this pins the end."""
+    a = cached.build()
+    cached.put("src/main/resources/db/changelog/other.xml", "<main-other>B</main-other>")
+    cached.build()
+    cached.put("src/main/resources/db/changelog/other.xml", "<main-other>A</main-other>")
+    cached.generations.clear()
+    d = cached.decide()  # the initialize phase alone: tree swapped, stale stamp already gone
+    assert d.restored == {"main": True, "test": True} and d.hash == a.hash
+    assert cached.disk_tree_hash("main") == a.hash["main"]
+    assert not cached.stamp("main").exists() and not cached.stamp("test").exists()
+    cached.check_invariant()
+    assert cached.build().skip == {"main": True, "test": True} and cached.generations == []
+
+
+@pytest.mark.parametrize("kind", ["main", "test"])
+def test_restore_heals_a_torn_tree_left_by_a_killed_codegen(cached: Project, kind: str) -> None:
+    a = cached.build()
+    cached.put("src/test/resources/db/changelog-test/test-master.xml", "<test>B</test>")
+    cached.put("src/main/resources/db/changelog/other.xml", "<main-other>B</main-other>")
+    cached.build(kill_in_generate=kind)
+    cached.put("src/test/resources/db/changelog-test/test-master.xml", "<test>A</test>")
+    cached.put("src/main/resources/db/changelog/other.xml", "<main-other>A</main-other>")
+    cached.generations.clear()
+    d = cached.build()
+    assert d.restored[kind] and kind not in cached.generations
+    assert cached.disk_tree_hash(kind) == a.hash[kind] and (cached.gen_dir[kind] / "B.java").is_file()
+
+
+def test_regenerate_true_bypasses_the_cache_and_republishes_the_fresh_tree(cached: Project) -> None:
+    cached.build()
+    cached.generations.clear()
+    d = cached.build(props={"nexus.jooq.regenerate": "true"})
+    assert d.restored == {"main": False, "test": False} and cached.generations == ["main", "test"]
+    for kind in ("main", "test"):
+        assert _sources(_entry(cached, kind, d.hash[kind]) / "generated") == _sources(cached.gen_dir[kind]), (
+            "-Dnexus.jooq.regenerate=true is the answer to the floating image tag: it must replace the entry")
+
+
+def test_an_entry_without_its_marker_or_sources_is_regenerated_and_repaired(cached: Project) -> None:
+    a = cached.build()
+    (_entry(cached, "main", a.hash["main"]) / "complete").unlink()
+    shutil.rmtree(_entry(cached, "test", a.hash["test"]) / "generated")  # marker present, nothing to restore
+    fresh = _other_worktree(cached)
+    d = fresh.build()
+    assert d.restored == {"main": False, "test": False} and fresh.generations == ["main", "test"]
+    for kind in ("main", "test"):
+        entry = _entry(cached, kind, a.hash[kind])
+        assert (entry / "complete").is_file() and _sources(entry / "generated") == _sources(fresh.gen_dir[kind]) != {}
+
+
+def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Path) -> None:
+    """Publication is a rename from a staging dir: a reader that sees <kind>-<hash> sees all of it."""
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    want = _sources(entry / "generated")
+    shutil.rmtree(entry)
+    # Several worktrees with identical inputs and a populated tree publish at the same moment.
+    peers = []
+    for i in range(4):
+        peer = _other_worktree(cached, f"peer-{i}")
+        shutil.copytree(cached.target, peer.target)
+        peers.append(peer)
+    seen_partial: list[str] = []
+    stop = threading.Event()
+
+    def reader() -> None:
+        while not stop.is_set():
+            if entry.is_dir():
+                try:
+                    got = {"complete": (entry / "complete").is_file(),
+                           "gen": _sources(entry / "generated") if (entry / "generated").is_dir() else None}
+                except FileNotFoundError as e:  # the entry vanished mid-read: also not an atomic publish
+                    got = {"vanished": str(e)}
+                if not got.get("complete") or got.get("gen") != want:
+                    seen_partial.append(repr(got))
+            time.sleep(0.001)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    try:
+        procs = [subprocess.Popen(  # the stamp step of each peer: its stamp matches, the entry is absent
+            ["java", "-cp", peer.ant_cp, "org.apache.tools.ant.launch.Launcher", "-q", "-f", str(peer.root / "build.xml"),
+             f"-Dproject.basedir={peer.root}", f"-Dproject.build.directory={peer.target}",
+             f"-Djooq.generated.dir={peer.gen_dir['main']}", f"-Djooq.generated.test.dir={peer.gen_dir['test']}",
+             f"-Dnexus.jooq.cache.dir={peer.cache}", f"-Dnexus.jooq.main.hash={a.hash['main']}",
+             "-Dnexus.jooq.main.skip=true", "-Djooq.version=3.20.11", "stamp-main"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=peer.root.parent) for peer in peers]
+        outs = [pr.communicate(timeout=120)[0] for pr in procs]
+        assert [pr.returncode for pr in procs] == [0] * 4, outs
+    finally:
+        stop.set()
+        t.join()
+    assert seen_partial == [], f"a reader saw a half-published entry: {seen_partial[:3]}"
+    assert (entry / "complete").is_file() and _sources(entry / "generated") == want
+    assert [c.name for c in Path(cached.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
+
+
+def test_cache_off_touches_no_directory(proj: Project) -> None:
+    proj.build()
+    assert not (proj.root.parent / "off").exists() and not (proj.root / "off").exists()
+
+
+def test_the_cache_is_found_through_NX_JOOQ_CACHE_then_the_git_common_dir(tmp_path: Path, ant_classpath: str) -> None:
+    env_cache = tmp_path / "env-cache"
+    via_env = _make_project(tmp_path / "via-env", ant_classpath, cache=None)
+    via_env.env = {"NX_JOOQ_CACHE": str(env_cache)}
+    d = via_env.build()
+    assert (env_cache / f"main-{d.hash['main']}" / "complete").is_file()
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    in_repo = _make_project(repo, ant_classpath, cache=None)
+    in_repo.build()
+    common = repo / ".git" / "nexus-jooq-cache"
+    assert (common / f"main-{d.hash['main']}" / "complete").is_file(), "default location is the git common dir"
+
+    # Not a repository and no NX_JOOQ_CACHE: no cache, and the build still works exactly as before.
+    lone = _make_project(tmp_path / "lone", ant_classpath, cache=None)
+    lone.env = {"GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    lone.build()
+    assert lone.generations == ["main", "test"]
+    assert sorted(c.name for c in (tmp_path / "lone").iterdir()) == ["service"]
+
+    off = _make_project(tmp_path / "off-env", ant_classpath, cache=None)
+    off.env = {"NX_JOOQ_CACHE": "off"}
+    off.build()
+    assert not (tmp_path / "off-env" / "off").exists()

@@ -685,13 +685,30 @@
                          tests/test_service_jooq_codegen_skip_lint.py pins that every changelog
                          reference resolves under db/, and the wiring. The Ant logic itself is run by
                          tests/test_service_jooq_codegen_skip_behaviour.py. -Pprebuilt-jooq unbinds all
-                         three steps. -->
+                         three steps.
+
+                         SHARED CACHE (nexus-fkhd3). The stamp lives in target/, so a fresh worktree or a `mvn
+                         clean` cannot be vouched for and used to replay the whole changelog through the codegen
+                         container (~350 MB written) for a tree it had already generated elsewhere. The generated
+                         trees are a pure function of the hash this step already computes, so after a generation the
+                         jooq-stamp-* steps publish them to <git common dir>/nexus-jooq-cache/<main|test>-<hash>/
+                         (generated/, meta.properties, complete), and when the stamp does not match but the cache
+                         holds the hash this step restores the tree instead of setting a regenerate. A restore
+                         deletes the stamp before it swaps the tree and never writes one, so THE INVARIANT holds
+                         at every instant; the stamp step then vouches for the restored tree as for a generated one.
+                         -Dnexus.jooq.regenerate=true skips the restore and replaces the entry. Publication copies
+                         into a .staging dir beside the entry and renames it in, marker last, so a reader never sees
+                         half an entry. -Dnexus.jooq.cache.dir=<dir|off>, then $NX_JOOQ_CACHE, then the git common
+                         dir choose the location; off, or no git checkout, is the pre-fkhd3 behaviour.
+                         scripts/lib/gate-jar-cache.sh gate_jar_cache_prune_jooq trims it. The entry carries the
+                         name of its producer (nexus.jooq.producer): generating against the nexus-v0ts5 migrated
+                         template instead of a fresh replay changes the producer and not the key. -->
                     <execution>
                         <id>jooq-inputs</id>
                         <phase>initialize</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target xmlns:unless="ant:unless">
+                            <target xmlns:unless="ant:unless" xmlns:if="ant:if">
                                 <fail message="nexus.jooq.main.skip and nexus.jooq.test.skip are computed by the jooq-inputs step from the input hash; do not set them. -Dnexus.jooq.regenerate=true forces a regeneration; -Pprebuilt-jooq skips codegen on purpose.">
                                     <condition>
                                         <or>
@@ -702,6 +719,52 @@
                                 </fail>
                                 <property name="nexus.jooq.stamp.dir" value="${project.build.directory}/jooq-stamps"/>
                                 <mkdir dir="${nexus.jooq.stamp.dir}"/>
+
+                                <!-- nexus-fkhd3: the shared cache of generated trees. -Dnexus.jooq.cache.dir=<dir|off>
+                                     wins, then $NX_JOOQ_CACHE, then <git common dir>/nexus-jooq-cache (the
+                                     directory every worktree of a clone shares, next to nexus-gate-jar-cache);
+                                     outside a git checkout, or with git absent, there is no cache and the build is
+                                     what it was before. -->
+                                <!-- (printenv, not <property environment>: exportAntProperties would copy every
+                                     env.* variable into the Maven project's properties.) -->
+                                <exec executable="printenv" outputproperty="nexus.jooq.env.cache" resultproperty="nexus.jooq.env.rc"
+                                      failonerror="false" failifexecutionfails="false"
+                                      unless:set="nexus.jooq.cache.dir">
+                                    <arg value="NX_JOOQ_CACHE"/>
+                                </exec>
+                                <condition property="nexus.jooq.cache.dir" value="${nexus.jooq.env.cache}">
+                                    <and>
+                                        <isset property="nexus.jooq.env.rc"/>
+                                        <equals arg1="${nexus.jooq.env.rc}" arg2="0"/>
+                                        <length string="${nexus.jooq.env.cache}" when="greater" length="0"/>
+                                    </and>
+                                </condition>
+                                <exec executable="git" outputproperty="nexus.jooq.git.common" resultproperty="nexus.jooq.git.rc"
+                                      errorproperty="nexus.jooq.git.err" failonerror="false" failifexecutionfails="false"
+                                      unless:set="nexus.jooq.cache.dir">
+                                    <arg value="-C"/>
+                                    <arg value="${project.basedir}"/>
+                                    <arg value="rev-parse"/>
+                                    <arg value="--path-format=absolute"/>
+                                    <arg value="--git-common-dir"/>
+                                </exec>
+                                <condition property="nexus.jooq.cache.dir" value="${nexus.jooq.git.common}/nexus-jooq-cache">
+                                    <and>
+                                        <isset property="nexus.jooq.git.rc"/>
+                                        <equals arg1="${nexus.jooq.git.rc}" arg2="0"/>
+                                        <length string="${nexus.jooq.git.common}" when="greater" length="0"/>
+                                    </and>
+                                </condition>
+                                <property name="nexus.jooq.cache.dir" value="off"/>
+                                <condition property="nexus.jooq.cache.on" value="true" else="false">
+                                    <not>
+                                        <or>
+                                            <equals arg1="${nexus.jooq.cache.dir}" arg2="off" casesensitive="false"/>
+                                            <equals arg1="${nexus.jooq.cache.dir}" arg2="0"/>
+                                            <equals arg1="${nexus.jooq.cache.dir}" arg2=""/>
+                                        </or>
+                                    </not>
+                                </condition>
 
                                 <!-- main: hash, decide, and drop the stamp when regenerating. -->
                                 <fileset id="nexus.jooq.main.inputs" dir="${project.basedir}">
@@ -727,19 +790,62 @@
                                         <file file="${nexus.jooq.stamp.dir}/main.names"/>
                                     </union>
                                 </checksum>
+                                <!-- main: restore the tree from the shared cache when the stamp does not vouch for the
+                                     one on disk but the cache holds this hash (a fresh worktree, a `mvn clean`, a
+                                     branch switch back to inputs generated before). The stamp is deleted BEFORE the
+                                     tree is swapped, and only the jooq-stamp-main step writes one, so the invariant
+                                     below holds at every instant; a restore killed mid-copy leaves no stamp. -->
+                                <loadfile property="nexus.jooq.main.prestamp"
+                                          srcFile="${nexus.jooq.stamp.dir}/main.sha256" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}"/>
+                                <condition property="nexus.jooq.main.restored" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.cache.on}"/>
+                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                        <available file="${nexus.jooq.main.entry}/complete"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                        <not>
+                                            <and>
+                                                <equals arg1="${nexus.jooq.main.prestamp}" arg2="${nexus.jooq.main.hash}"/>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${jooq.generated.dir}" includes="**/*.java"
+                                                             erroronmissingdir="false"/>
+                                                </resourcecount>
+                                            </and>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <delete file="${nexus.jooq.stamp.dir}/main.sha256" quiet="true"
+                                        if:true="${nexus.jooq.main.restored}"/>
+                                <delete dir="${jooq.generated.dir}" quiet="true" if:true="${nexus.jooq.main.restored}"/>
+                                <copy todir="${jooq.generated.dir}" if:true="${nexus.jooq.main.restored}">
+                                    <fileset dir="${nexus.jooq.main.entry}/generated"/>
+                                </copy>
+                                <touch if:true="${nexus.jooq.main.restored}">
+                                    <dirset dir="${nexus.jooq.cache.dir}" includes="main-${nexus.jooq.main.hash}"/>
+                                </touch>
+
                                 <loadfile property="nexus.jooq.main.stamp"
                                           srcFile="${nexus.jooq.stamp.dir}/main.sha256" failonerror="false" quiet="true">
                                     <filterchain><striplinebreaks/></filterchain>
                                 </loadfile>
                                 <condition property="nexus.jooq.main.skip" value="true" else="false">
-                                    <and>
-                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
-                                        <equals arg1="${nexus.jooq.main.stamp}" arg2="${nexus.jooq.main.hash}"/>
-                                        <resourcecount when="greater" count="0">
-                                            <fileset dir="${jooq.generated.dir}" includes="**/*.java"
-                                                     erroronmissingdir="false"/>
-                                        </resourcecount>
-                                    </and>
+                                    <or>
+                                        <istrue value="${nexus.jooq.main.restored}"/>
+                                        <and>
+                                            <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                            <equals arg1="${nexus.jooq.main.stamp}" arg2="${nexus.jooq.main.hash}"/>
+                                            <resourcecount when="greater" count="0">
+                                                <fileset dir="${jooq.generated.dir}" includes="**/*.java"
+                                                         erroronmissingdir="false"/>
+                                            </resourcecount>
+                                        </and>
+                                    </or>
                                 </condition>
                                 <delete file="${nexus.jooq.stamp.dir}/main.sha256" quiet="true"
                                         unless:true="${nexus.jooq.main.skip}"/>
@@ -769,19 +875,62 @@
                                         <file file="${nexus.jooq.stamp.dir}/test.names"/>
                                     </union>
                                 </checksum>
+                                <!-- test: restore the tree from the shared cache when the stamp does not vouch for the
+                                     one on disk but the cache holds this hash (a fresh worktree, a `mvn clean`, a
+                                     branch switch back to inputs generated before). The stamp is deleted BEFORE the
+                                     tree is swapped, and only the jooq-stamp-test step writes one, so the invariant
+                                     below holds at every instant; a restore killed mid-copy leaves no stamp. -->
+                                <loadfile property="nexus.jooq.test.prestamp"
+                                          srcFile="${nexus.jooq.stamp.dir}/test.sha256" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}"/>
+                                <condition property="nexus.jooq.test.restored" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.cache.on}"/>
+                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                        <available file="${nexus.jooq.test.entry}/complete"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                        <not>
+                                            <and>
+                                                <equals arg1="${nexus.jooq.test.prestamp}" arg2="${nexus.jooq.test.hash}"/>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${jooq.generated.test.dir}" includes="**/*.java"
+                                                             erroronmissingdir="false"/>
+                                                </resourcecount>
+                                            </and>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <delete file="${nexus.jooq.stamp.dir}/test.sha256" quiet="true"
+                                        if:true="${nexus.jooq.test.restored}"/>
+                                <delete dir="${jooq.generated.test.dir}" quiet="true" if:true="${nexus.jooq.test.restored}"/>
+                                <copy todir="${jooq.generated.test.dir}" if:true="${nexus.jooq.test.restored}">
+                                    <fileset dir="${nexus.jooq.test.entry}/generated"/>
+                                </copy>
+                                <touch if:true="${nexus.jooq.test.restored}">
+                                    <dirset dir="${nexus.jooq.cache.dir}" includes="test-${nexus.jooq.test.hash}"/>
+                                </touch>
+
                                 <loadfile property="nexus.jooq.test.stamp"
                                           srcFile="${nexus.jooq.stamp.dir}/test.sha256" failonerror="false" quiet="true">
                                     <filterchain><striplinebreaks/></filterchain>
                                 </loadfile>
                                 <condition property="nexus.jooq.test.skip" value="true" else="false">
-                                    <and>
-                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
-                                        <equals arg1="${nexus.jooq.test.stamp}" arg2="${nexus.jooq.test.hash}"/>
-                                        <resourcecount when="greater" count="0">
-                                            <fileset dir="${jooq.generated.test.dir}" includes="**/*.java"
-                                                     erroronmissingdir="false"/>
-                                        </resourcecount>
-                                    </and>
+                                    <or>
+                                        <istrue value="${nexus.jooq.test.restored}"/>
+                                        <and>
+                                            <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                            <equals arg1="${nexus.jooq.test.stamp}" arg2="${nexus.jooq.test.hash}"/>
+                                            <resourcecount when="greater" count="0">
+                                                <fileset dir="${jooq.generated.test.dir}" includes="**/*.java"
+                                                         erroronmissingdir="false"/>
+                                            </resourcecount>
+                                        </and>
+                                    </or>
                                 </condition>
                                 <delete file="${nexus.jooq.stamp.dir}/test.sha256" quiet="true"
                                         unless:true="${nexus.jooq.test.skip}"/>
@@ -793,8 +942,100 @@
                         <phase>process-sources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target>
+                            <target xmlns:if="ant:if">
                                 <echo file="${project.build.directory}/jooq-stamps/main.sha256" message="${nexus.jooq.main.hash}"/>
+
+                                <!-- nexus-fkhd3: publish the tree this stamp now vouches for to the shared cache, when
+                                     the cache has no usable entry for the hash (it seeds from an existing target/ too),
+                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The tree is
+                                     copied into a staging dir beside the entry and renamed into place, so a reader sees
+                                     the whole entry or none of it; the `complete` marker is written last. A peer that
+                                     publishes the same hash while this copy runs wins: the swap is skipped if the entry
+                                     became usable meanwhile, and the staging dir is deleted either way. nexus.jooq.producer names what made the tree (a generation against the
+                                     nexus-v0ts5 template would say so) and is the only thing a different generator changes:
+                                     the key is the input hash. -->
+                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
+                                <property name="nexus.jooq.main.entry" value="${nexus.jooq.cache.dir}/main-${nexus.jooq.main.hash}"/>
+                                <condition property="nexus.jooq.main.cache.on" value="true" else="false">
+                                    <and>
+                                        <isset property="nexus.jooq.cache.dir"/>
+                                        <not>
+                                            <or>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2="off" casesensitive="false"/>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2="0"/>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2=""/>
+                                            </or>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.main.fresh" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.regenerate}"/>
+                                        <isfalse value="${nexus.jooq.main.skip}"/>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.main.entry.usable" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.cache.on}"/>
+                                        <available file="${nexus.jooq.main.entry}/complete"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.main.publish" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.cache.on}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.dir}" includes="**/*.java" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                        <or>
+                                            <isfalse value="${nexus.jooq.main.entry.usable}"/>
+                                            <istrue value="${nexus.jooq.main.fresh}"/>
+                                        </or>
+                                    </and>
+                                </condition>
+                                <tstamp if:true="${nexus.jooq.main.publish}">
+                                    <format property="nexus.jooq.main.publish.ts" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <dirname property="nexus.jooq.main.publish.wtdir" file="${project.basedir}"/>
+                                <basename property="nexus.jooq.main.publish.wt" file="${nexus.jooq.main.publish.wtdir}"/>
+                                <property name="nexus.jooq.main.stage"
+                                          value="${nexus.jooq.cache.dir}/.staging.main.${nexus.jooq.main.hash}.${nexus.jooq.main.publish.wt}.${nexus.jooq.main.publish.ts}"/>
+                                <copy todir="${nexus.jooq.main.stage}/generated" if:true="${nexus.jooq.main.publish}">
+                                    <fileset dir="${jooq.generated.dir}"/>
+                                </copy>
+                                <echo file="${nexus.jooq.main.stage}/meta.properties" if:true="${nexus.jooq.main.publish}"
+                                      message="hash=${nexus.jooq.main.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;"/>
+                                <echo file="${nexus.jooq.main.stage}/complete" if:true="${nexus.jooq.main.publish}"
+                                      message="${nexus.jooq.main.hash}"/>
+                                <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
+                                     entry is still unusable, or this run deliberately replaces it. -->
+                                <condition property="nexus.jooq.main.swap" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.publish}"/>
+                                        <or>
+                                            <istrue value="${nexus.jooq.main.fresh}"/>
+                                            <not>
+                                                <and>
+                                                    <available file="${nexus.jooq.main.entry}/complete"/>
+                                                    <resourcecount when="greater" count="0">
+                                                        <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
+                                                                 erroronmissingdir="false"/>
+                                                    </resourcecount>
+                                                </and>
+                                            </not>
+                                        </or>
+                                    </and>
+                                </condition>
+                                <available property="nexus.jooq.main.entry.exists" file="${nexus.jooq.main.entry}" type="dir"/>
+                                <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.old" failonerror="false"
+                                      if:true="${nexus.jooq.main.swap}" if:set="nexus.jooq.main.entry.exists"/>
+                                <move file="${nexus.jooq.main.stage}" tofile="${nexus.jooq.main.entry}" failonerror="false"
+                                      if:true="${nexus.jooq.main.swap}"/>
+                                <delete dir="${nexus.jooq.main.stage}" quiet="true" if:true="${nexus.jooq.main.publish}"/>
+                                <delete dir="${nexus.jooq.main.stage}.old" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                             </target>
                         </configuration>
                     </execution>
@@ -803,8 +1044,100 @@
                         <phase>process-test-sources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target>
+                            <target xmlns:if="ant:if">
                                 <echo file="${project.build.directory}/jooq-stamps/test.sha256" message="${nexus.jooq.test.hash}"/>
+
+                                <!-- nexus-fkhd3: publish the tree this stamp now vouches for to the shared cache, when
+                                     the cache has no usable entry for the hash (it seeds from an existing target/ too),
+                                     or this run was a -Dnexus.jooq.regenerate=true that generated a fresh tree. The tree is
+                                     copied into a staging dir beside the entry and renamed into place, so a reader sees
+                                     the whole entry or none of it; the `complete` marker is written last. A peer that
+                                     publishes the same hash while this copy runs wins: the swap is skipped if the entry
+                                     became usable meanwhile, and the staging dir is deleted either way. nexus.jooq.producer names what made the tree (a generation against the
+                                     nexus-v0ts5 template would say so) and is the only thing a different generator changes:
+                                     the key is the input hash. -->
+                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
+                                <property name="nexus.jooq.test.entry" value="${nexus.jooq.cache.dir}/test-${nexus.jooq.test.hash}"/>
+                                <condition property="nexus.jooq.test.cache.on" value="true" else="false">
+                                    <and>
+                                        <isset property="nexus.jooq.cache.dir"/>
+                                        <not>
+                                            <or>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2="off" casesensitive="false"/>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2="0"/>
+                                                <equals arg1="${nexus.jooq.cache.dir}" arg2=""/>
+                                            </or>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.test.fresh" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.regenerate}"/>
+                                        <isfalse value="${nexus.jooq.test.skip}"/>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.test.entry.usable" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.cache.on}"/>
+                                        <available file="${nexus.jooq.test.entry}/complete"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                                <condition property="nexus.jooq.test.publish" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.cache.on}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.test.dir}" includes="**/*.java" erroronmissingdir="false"/>
+                                        </resourcecount>
+                                        <or>
+                                            <isfalse value="${nexus.jooq.test.entry.usable}"/>
+                                            <istrue value="${nexus.jooq.test.fresh}"/>
+                                        </or>
+                                    </and>
+                                </condition>
+                                <tstamp if:true="${nexus.jooq.test.publish}">
+                                    <format property="nexus.jooq.test.publish.ts" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <dirname property="nexus.jooq.test.publish.wtdir" file="${project.basedir}"/>
+                                <basename property="nexus.jooq.test.publish.wt" file="${nexus.jooq.test.publish.wtdir}"/>
+                                <property name="nexus.jooq.test.stage"
+                                          value="${nexus.jooq.cache.dir}/.staging.test.${nexus.jooq.test.hash}.${nexus.jooq.test.publish.wt}.${nexus.jooq.test.publish.ts}"/>
+                                <copy todir="${nexus.jooq.test.stage}/generated" if:true="${nexus.jooq.test.publish}">
+                                    <fileset dir="${jooq.generated.test.dir}"/>
+                                </copy>
+                                <echo file="${nexus.jooq.test.stage}/meta.properties" if:true="${nexus.jooq.test.publish}"
+                                      message="hash=${nexus.jooq.test.hash}&#10;producer=${nexus.jooq.producer}&#10;jooq.version=${jooq.version}&#10;"/>
+                                <echo file="${nexus.jooq.test.stage}/complete" if:true="${nexus.jooq.test.publish}"
+                                      message="${nexus.jooq.test.hash}"/>
+                                <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
+                                     entry is still unusable, or this run deliberately replaces it. -->
+                                <condition property="nexus.jooq.test.swap" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.publish}"/>
+                                        <or>
+                                            <istrue value="${nexus.jooq.test.fresh}"/>
+                                            <not>
+                                                <and>
+                                                    <available file="${nexus.jooq.test.entry}/complete"/>
+                                                    <resourcecount when="greater" count="0">
+                                                        <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
+                                                                 erroronmissingdir="false"/>
+                                                    </resourcecount>
+                                                </and>
+                                            </not>
+                                        </or>
+                                    </and>
+                                </condition>
+                                <available property="nexus.jooq.test.entry.exists" file="${nexus.jooq.test.entry}" type="dir"/>
+                                <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.old" failonerror="false"
+                                      if:true="${nexus.jooq.test.swap}" if:set="nexus.jooq.test.entry.exists"/>
+                                <move file="${nexus.jooq.test.stage}" tofile="${nexus.jooq.test.entry}" failonerror="false"
+                                      if:true="${nexus.jooq.test.swap}"/>
+                                <delete dir="${nexus.jooq.test.stage}" quiet="true" if:true="${nexus.jooq.test.publish}"/>
+                                <delete dir="${nexus.jooq.test.stage}.old" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                             </target>
                         </configuration>
                     </execution>
