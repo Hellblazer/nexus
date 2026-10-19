@@ -27,7 +27,7 @@ import java.util.function.BooleanSupplier;
  * the tenant and answers with the per-evictor counts.
  *
  * <p>Registered by {@code NexusService} ONLY when {@code NX_TEST_TENANT_RESET_ROUTE=1}; otherwise the path is simply
- * absent (404). Boot refuses the flag on a non-loopback bind, {@code /version} reports
+ * absent (404). Boot refuses the flag on a non-loopback bind, {@code /v1/status} reports
  * {@code test_tenant_reset_route} so a cloud gate can assert it is false there, and this handler adds its own
  * guards: operator (root token) only, and 503 while {@code NX_SEARCH_PCI=1}, because per-collection indexes are DDL
  * that a data reset does not drop. The default tenant is never reset.
@@ -35,7 +35,13 @@ import java.util.function.BooleanSupplier;
  * <p>Request: {@code {"tenant": "<name>"}}. Response 200:
  * {@code {"tenant": "<name>", "evicted": {"<evictor>": <count>, ...}}} naming every evictor, in registration order.
  * If an evictor throws, the others still run and the answer is 500 with the counts so far and a {@code failed} object;
- * the caller retires the tenant.
+ * the caller retires the tenant. The tuple evictor throws when waiters are still registered after its bound, so a
+ * 200 means the tenant's waits were all gone, and a 500 naming {@code TupleWaitRegistry} means they were not.
+ *
+ * <p><b>This is not a quiesce.</b> The route evicts what the engine remembers; it cannot stop a client. The caller
+ * must stop its own clients of the tenant (parked waits, writers, retrying readers) BEFORE it calls the route: a
+ * request that arrives after the eviction repopulates the caches from the tenant's next-test state, and a wait
+ * registered after the tuple groups are dropped is a live wait of the next test.
  */
 public final class TenantResetHandler implements HttpHandler {
 

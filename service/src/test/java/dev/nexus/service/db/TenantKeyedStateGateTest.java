@@ -25,18 +25,23 @@ import java.util.stream.Stream;
  * {@code nexus/design-nexus-rtg20-data-reset-pool-2026-10-18}). {@code POST /v1/_test/tenant-reset} must evict every
  * JVM structure that is keyed by tenant. A new cache added later without an evictor would survive a data reset and
  * serve the next test a dead tenant's state, so this gate makes the question unavoidable: every field in
- * {@code service/src/main/java} that holds a collection (a {@code Map}, {@code Set}, {@code Queue}, {@code Deque} or
- * {@code Cache}, or is built with {@code newKeySet}) or whose NAME contains {@code tenant}, must be listed in one of
- * two CHECKED tables below, with an evictor name (keyed) or a reason (not keyed). A field in neither table fails; a
- * table entry whose field no longer exists fails (a stale entry would keep claiming a cache is evicted).
+ * {@code service/src/main/java} that holds a collection (a {@code Map}, {@code Set}, {@code Queue}, {@code Deque},
+ * {@code Cache}, {@code List} or {@code Collection}, or is built with {@code newKeySet}), is an {@code Atomic*}
+ * holder, is a {@code volatile} reference (a hot-swapped or last-result slot), or whose NAME contains {@code tenant},
+ * must be listed in one of two CHECKED tables below, with an evictor name (keyed) or a reason (not keyed). A field in
+ * neither table fails; a table entry whose field no longer exists fails (a stale entry would keep claiming a cache is
+ * evicted). A table says what was ACKNOWLEDGED, not what was cleared: the evictor behind each keyed entry has its own
+ * test in {@code TenantKeyedEvictorsTest}.
  *
  * <p>The scan is lexical (comments and string literals blanked, braces matched), in the style of
- * {@link RawSqlGateTest}. It reads declared fields only: record components are not scanned (a record's
- * {@code tenant} component is data, not a store), and a collection built by {@code Map.of}/{@code Set.of} (and the
- * other immutable factories) as a {@code static final} constant is exempt because it cannot hold per-tenant state;
- * those are counted, not silently skipped. {@code TypeReference} constants and the {@code jooq} directory are
- * excluded. Non-vacuity: the walk must reach 100 files and examine at least 15 fields, and the synthetic-source tests
- * below prove the scanner finds what it claims to.
+ * {@link RawSqlGateTest}. It reads declared fields AND record components (a record holds its components as surely as
+ * a class holds fields, and a {@code Map} component is as much a store as a {@code Map} field). A collection built by
+ * {@code Map.of}/{@code Set.of} (and the other immutable factories) as a {@code static final} constant is exempt
+ * because it cannot hold per-tenant state; those are counted, not silently skipped. {@code TypeReference} constants
+ * and the {@code jooq} directory are excluded. Non-vacuity: the walk must reach 100 files and examine at least 15
+ * fields, and the synthetic-source tests below prove the scanner finds what it claims to. Its blind spots, stated:
+ * a holder typed as an interface or class with none of these words in its name, an array, and anything declared in
+ * an anonymous class body.
  *
  * <p>Keys are {@code TopLevelClass[.Nested].field}. The live check that the route's response names exactly the
  * {@link #TENANT_KEYED} evictors is {@code TenantResetRouteTest}; this class also checks each evictor name is wired as
@@ -64,13 +69,25 @@ public class TenantKeyedStateGateTest {
 
     // ── the scanner ──────────────────────────────────────────────────────────────────────────────
 
-    record FieldDecl(String key, String type, String name, boolean isStatic, boolean immutableConstant) { }
+    record FieldDecl(String key, String type, String name, boolean isStatic, boolean immutableConstant,
+                     boolean isVolatile) { }
 
     private static final Pattern MODIFIER = Pattern.compile(
         "\\b(public|private|protected|static|final|volatile|transient)\\b");
     private static final Pattern ANNOTATION = Pattern.compile("@\\w+(?:\\.\\w+)*(?:\\s*\\([^)]*\\))?");
     private static final Pattern TYPE_DECL = Pattern.compile("(?:^|\\s)(class|interface|enum|record)\\s+(\\w+)");
-    private static final Pattern COLLECTION_TYPE = Pattern.compile("\\b[A-Za-z]*(Map|Set|Queue|Deque|Cache)\\b");
+    /**
+     * Types that can hold more than one tenant's state: a Map, Set, Queue, Deque, Cache, List or Collection (any
+     * implementation: the prefix is free), and the Atomic holders ({@code AtomicReference<RunResult>} and
+     * {@code AtomicReference<Map<..>>} both hide a payload from a collection-only match; a counter such as
+     * {@code AtomicLong} is examined too and listed with its reason).
+     */
+    private static final Pattern COLLECTION_TYPE = Pattern.compile(
+        "\\b[A-Za-z]*(Map|Set|Queue|Deque|Cache|List|Collection)\\b|\\bAtomic\\w+\\b");
+    private static final Pattern PRIMITIVE_OR_STRING = Pattern.compile(
+        "(boolean|byte|short|int|long|float|double|char|String|Boolean|Integer|Long|Double)");
+    private static final Pattern RECORD_HEADER = Pattern.compile(
+        "(?:^|\\s)record\\s+\\w+\\s*(?:<[^>]*>)?\\s*\\((.*)\\)[^()]*$", Pattern.DOTALL);
     private static final Pattern IMMUTABLE_INIT = Pattern.compile(
         "^\\s*(?:java\\.util\\.)?(?:Map\\.(?:of|ofEntries|copyOf)|Set\\.(?:of|copyOf)|List\\.(?:of|copyOf)"
             + "|Collections\\.(?:unmodifiable\\w+|empty\\w+|singleton\\w*))\\s*\\(.*", Pattern.DOTALL);
@@ -114,6 +131,9 @@ public class TenantKeyedStateGateTest {
                 if (isType) {
                     List<String> nested = new ArrayList<>(typePath);
                     nested.add(t.group(2));
+                    if (t.group(1).equals("record")) {
+                        recordComponents(stripAnnotations(head), nested, examined, exempt, seen);
+                    }
                     i = members(s, i + 1, nested, false, examined, exempt, seen);
                     stmt.setLength(0);
                     continue;
@@ -137,6 +157,36 @@ public class TenantKeyedStateGateTest {
             i++;
         }
         return n;
+    }
+
+    /**
+     * A record's components are its (private final) fields: {@code record Key(String tenant, Set<String> parts)}
+     * holds a tenant id and a collection as surely as a class with two fields does. Each component is examined as a
+     * field of the record, keyed {@code Outer.Rec.component}.
+     */
+    private static void recordComponents(String head, List<String> typePath, List<FieldDecl> examined,
+                                         List<FieldDecl> exempt, int[] seen) {
+        Matcher m = RECORD_HEADER.matcher(head);
+        if (!m.find()) return;
+        String list = m.group(1);
+        int depth = 0;
+        StringBuilder part = new StringBuilder();
+        List<String> parts = new ArrayList<>();
+        for (int i = 0; i < list.length(); i++) {
+            char c = list.charAt(i);
+            if (c == '<' || c == '(' || c == '[') depth++;
+            if (c == '>' || c == ')' || c == ']') depth--;
+            if (c == ',' && depth == 0) {
+                parts.add(part.toString());
+                part.setLength(0);
+            } else {
+                part.append(c);
+            }
+        }
+        if (!part.toString().isBlank()) parts.add(part.toString());
+        for (String component : parts) {
+            field(component, typePath, false, examined, exempt, seen);
+        }
     }
 
     private static int matchingBrace(String s, int open) {
@@ -173,12 +223,16 @@ public class TenantKeyedStateGateTest {
         if (type.isEmpty()) return;
         seen[0]++;
         if (type.startsWith("TypeReference") || type.contains(".TypeReference")) return;
-        boolean collection = COLLECTION_TYPE.matcher(type).find() || init.contains("newKeySet");
+        boolean isVolatile = Pattern.compile("\\bvolatile\\b").matcher(typeAndMods).find();
+        // A volatile reference is a holder written by one thread and read by another, which is how a hot-swapped
+        // cache or a last-result slot is kept; only a volatile primitive or String flag is not a holder.
+        boolean volatileHolder = isVolatile && !PRIMITIVE_OR_STRING.matcher(type).matches();
+        boolean collection = COLLECTION_TYPE.matcher(type).find() || init.contains("newKeySet") || volatileHolder;
         boolean tenantNamed = name.toLowerCase(java.util.Locale.ROOT).contains("tenant");
         if (!collection && !tenantNamed) return;
         String key = String.join(".", typePath) + "." + name;
         boolean immutable = isStatic && isFinal && IMMUTABLE_INIT.matcher(init).matches();
-        FieldDecl decl = new FieldDecl(key, type, name, isStatic, immutable);
+        FieldDecl decl = new FieldDecl(key, type, name, isStatic, immutable, isVolatile);
         (immutable ? exempt : examined).add(decl);
     }
 
@@ -242,20 +296,28 @@ public class TenantKeyedStateGateTest {
                 files++;
             }
         }
-        assertThat(files).as("non-vacuity: the walk reached the main sources").isGreaterThanOrEqualTo(100);
-        assertThat(fieldsSeen).as("non-vacuity: the scanner parsed field declarations").isGreaterThanOrEqualTo(500);
+        assertThat(files).as("non-vacuity: the walk reached the main sources").isGreaterThanOrEqualTo(150);
+        assertThat(fieldsSeen).as("non-vacuity: the scanner parsed field declarations").isGreaterThanOrEqualTo(1500);
         assertThat(examined.size()).as("non-vacuity: collection or tenant-named fields examined (%d immutable "
-            + "constants exempt)", exempt.size()).isGreaterThanOrEqualTo(15);
+            + "constants exempt)", exempt.size()).isGreaterThanOrEqualTo(200);
 
         Set<String> found = new LinkedHashSet<>();
+        Map<String, FieldDecl> declByKey = new TreeMap<>();
         List<String> duplicates = new ArrayList<>();
         for (FieldDecl d : examined) {
             if (!found.add(d.key())) duplicates.add(d.key());
+            declByKey.put(d.key(), d);
         }
         assertThat(duplicates).as("two fields share a key: disambiguate the scanner's key").isEmpty();
+        // The first-live-run numbers of the bead's review record, and a standing line in every run's output.
+        System.out.printf("TenantKeyedStateGateTest: files=%d fieldsSeen=%d examined=%d exemptConstants=%d "
+            + "keyed=%d notKeyed=%d%n", files, fieldsSeen, examined.size(), exempt.size(), TENANT_KEYED.size(),
+            NOT_TENANT_KEYED.size());
 
         Verdict v = judge(found, TENANT_KEYED, NOT_TENANT_KEYED);
-        assertThat(v.unlisted()).as("UNLISTED collection or tenant-named fields in src/main: add each to "
+        assertThat(v.unlisted().stream().map(k -> k + "  ::  "
+                + (declByKey.get(k).isVolatile() ? "volatile " : "") + declByKey.get(k).type()).toList())
+            .as("UNLISTED collection, holder or tenant-named fields in src/main: add each to "
             + "TenantKeyedStateGateTest.Tables as keyed (with the NexusService evictor that clears it for a "
             + "tenant) or not keyed (with the reason it holds no per-tenant state)").isEmpty();
         assertThat(v.stale()).as("STALE entries: the field no longer exists or was renamed; remove or fix the entry")
@@ -296,7 +358,15 @@ public class TenantKeyedStateGateTest {
             private final Runnable task = () -> { Map<String, String> inLambda = new HashMap<>(); };
             Sample(Map<String, String> ctorArg) { Set<String> local = new HashSet<>(); }
             void method() { Map<String, String> localMap = new HashMap<>(); }
+            private volatile Thread owner;
+            private volatile boolean flag;
+            private volatile long stamp;
+            private final List<String> names = new ArrayList<>();
+            private final java.util.concurrent.atomic.AtomicLong counter = new java.util.concurrent.atomic.AtomicLong();
+            private volatile Runnable hook;
             record Key(String tenant, Set<String> components) { }
+            record Plain(String name, int n) { }
+            record Pair<A>(List<A> items, Map<String, List<A>> byName, String label) { }
             static final class Inner {
                 final Queue<String> queue = new ArrayDeque<>();
                 // private Map<String,String> commented = null;
@@ -312,7 +382,13 @@ public class TenantKeyedStateGateTest {
         scan.examined().forEach(d -> keys.add(d.key()));
         assertThat(keys).containsExactlyInAnyOrder(
             "Sample.MUTABLE_CONSTANT", "Sample.byTenant", "Sample.checked", "Sample.resumeTenant", "Sample.held",
-            "Sample.Inner.queue", "Sample.Mode.perMode");
+            "Sample.Inner.queue", "Sample.Mode.perMode",
+            // widened: Lists, Atomic* holders, volatile reference holders, and record components
+            "Sample.owner", "Sample.names", "Sample.counter", "Sample.hook",
+            "Sample.Key.tenant", "Sample.Key.components", "Sample.Pair.items", "Sample.Pair.byName");
+        assertThat(keys).as("a volatile primitive flag and a plain record component are not holders")
+            .doesNotContain("Sample.flag", "Sample.stamp", "Sample.Plain.name", "Sample.Plain.n",
+                "Sample.Pair.label");
         assertThat(scan.exemptConstants()).extracting(FieldDecl::key).containsExactly("Sample.CONSTANT");
         assertThat(scan.fieldsSeen()).as("fields seen include the ones filtered out").isGreaterThanOrEqualTo(10);
     }
@@ -361,6 +437,37 @@ public class TenantKeyedStateGateTest {
             + "default tenant); it holds no state";
         private static final String PCI_OFF = "PCI index state: populated only when NX_SEARCH_PCI=1, and the tenant "
             + "reset route answers 503 in that mode, so it is never carried across a reset";
+        private static final String RESULT = "a field of an immutable per-call value (result, parameter, outcome or "
+            + "exception) built for one request or one pass and dropped with it; no long-lived structure holds it";
+        private static final String COUNTER = "a process-wide counter or flag since boot, or a pass counter; not keyed "
+            + "by tenant, and a data reset does not reset counters";
+        private static final String TEST_HOOK = "a test-only hook, null in production";
+        private static final String CONFIG = "process configuration set at boot or swapped as a whole; not keyed by "
+            + "tenant";
+        private static final String TEMPLATE = "tuple template schema, parsed at boot and immutable; "
+            + "tenant-independent";
+        private static final String ORT = "ONNX runtime init state, one per process; tenant-independent";
+        private static final String JOOQ_COLUMN = "a jOOQ column reference to tenant_id, a constant naming the "
+            + "column; it holds no state";
+        private static final String PRINCIPAL = "an immutable value naming a tenant, carried on one request's or one "
+            + "sweep step's stack; the long-lived holders of tenant principals are the keyed entries (TokenCache.map)";
+        private static final String REQUEST = "state of one search arm; dies with the request";
+        private static final String EVICTOR_LIST = "the evictor list itself: an immutable List.copyOf of stateless "
+            + "evictors";
+        private static final String TOKEN_EPOCH = "a counter that only moves forward: invalidateTenant bumps it and "
+            + "resolve compares it, so no tenant's data is in it";
+        private static final String MULTI_GROUPS = "the wait groups one parked MultiWaiter registered in, so its "
+            + "release decrements those and never a fresh group of the same key; it dies with that wait, and "
+            + "TupleWaitRegistry.abortTenant reaches the waiter through the group's multiListeners";
+        private static final String WAITER_LOCAL = "the subspaces one parked wait asked for, immutable; dies when "
+            + "that request ends";
+        private static final String REAPER_COUNTS = "the previous completed pass's tenant COUNTS (ints) and its end "
+            + "time: no tenant identity, replaced by every pass";
+        private static final String REAPER_LAST_RUN = "the previous completed pass's per-tenant result (tenant "
+            + "names, collection names, refusal reasons), replaced wholesale by every pass and read only by tests "
+            + "(ChunkReaper.lastRun); it can name a reset tenant until the next pass and nothing in the engine "
+            + "decides on it, so it is not a cache a reset must clear";
+
         private static final String TOKEN_CACHE_REF = "a reference to the TokenCache, which is evicted under "
             + "TokenCache.map";
 
@@ -381,6 +488,8 @@ public class TenantKeyedStateGateTest {
             keyed.put("ChunkReaper.resumeCollection", REAPER);
             keyed.put("ChunkReaper.resumeExpiry", REAPER);
             keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
+            keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
+            keyed.put("TokenCache.Entry.tenantId", TOKEN_CACHE);   // the value of map
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
@@ -439,10 +548,292 @@ public class TenantKeyedStateGateTest {
                 + "filled once, tenant-independent");
             notKeyed.put("NexusService.tenantKeyedState", "the evictor list itself: an immutable List.copyOf built "
                 + "once at construction from stateless lambdas");
-            notKeyed.put("VersionHandler.testTenantResetRoute", "a boolean reported on /version: whether the "
-                + "reset route is registered; set once at construction");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
+            // CONFIG (12)
+            for (String f : List.of(
+                "Bge768Embedder.admissionGate",
+                "ChunkReaper.Settings.floorExemptCollections",
+                "HttpUtil.gzipper",
+                "NexusService.embedPosture",
+                "NexusService.perCollectionIndexes",
+                "OwnerlessWriteMode.envReader",
+                "OwnerlessWritePolicy.mode",
+                "PgSession.scanBudget",
+                "StatusHandler.embedPosture",
+                "StatusHandler.testTenantResetRoute",
+                "VersionHandler.embedPosture",
+                "VersionHandler.schemaIdentity"
+            )) {
+                notKeyed.put(f, CONFIG);
+            }
+            // COUNTER (41)
+            for (String f : List.of(
+                "Bge768Embedder.onnxInvocationCount",
+                "CatalogRepository.vacuumInProgress",
+                "CceEmbedder.callEwmaNanos",
+                "CceEmbedder.waitingBatches",
+                "NexusService.consecutiveDataSweepFailures",
+                "ChunkReaper.censusBackoffTotal",
+                "ChunkReaper.censusTimedOutTotal",
+                "ChunkReaper.failedPassesTotal",
+                "ChunkReaper.gateBusyTotal",
+                "ChunkReaper.lockTimeoutTotal",
+                "ChunkReaper.passNumber",
+                "ChunkReaper.refusedTotal",
+                "ChunkReaper.statementBackoffTotal",
+                "ChunkReaper.statementTimedOutTotal",
+                "DeadlockRetry.RETRY_ATTEMPTS",
+                "EmbedActivityTracker.admissionRefusalsTotal",
+                "EmbedActivityTracker.chunksDoneTotal",
+                "EmbedActivityTracker.deadlineAbortsTotal",
+                "EmbedActivityTracker.lastActivityNanos",
+                "EmbedActivityTracker.lastChunksPerSecBits",
+                "EmbedActivityTracker.subBatchesTotal",
+                "EmbedProgressGate.lastLogNanos",
+                "HttpUtil.GZIP_FAILURE_LOGGED",
+                "NexusService.SweepCounts.tenants",
+                "NexusService.TupleSweepRunResult.tenantsVisited",
+                "OwnerlessWriteActivity.REFUSED",
+                "OwnerlessWriteActivity.WOULD_REFUSE",
+                "PgVectorRepository.EXACT_FALLBACKS",
+                "PgVectorRepository.ROUTED_EXACT",
+                "PgVectorRepository.ROUTED_HNSW",
+                "PgVectorRepository.existenceSelectCalls",
+                "PgVectorRepository.sourceUriJoinCalls",
+                "RacedEmbedActivity.RACED_EMBEDS_TOTAL",
+                "RequestLedgerActivity.IN_FLIGHT",
+                "RequestLedgerActivity.KEY_REUSED",
+                "RequestLedgerActivity.REPLAYS",
+                "RequestLedgerActivity.TAKEOVERS",
+                "SuppliedVectorMismatchActivity.MISMATCHES_TOTAL",
+                "TupleWaitRegistry.claimantRefused",
+                "TupleWaitRegistry.globalParked",
+                "TupleWaitRegistry.globalRefused",
+                "VoyageEmbedder.voyageRequestCount"
+            )) {
+                notKeyed.put(f, COUNTER);
+            }
+            // TEST_HOOK (17)
+            for (String f : List.of(
+                "CatalogRepository.afterChunkUpsertHookForTests",
+                "CatalogRepository.beforeReadHookForTests",
+                "ChunkReaper.testOnlyAfterNoteTimeout",
+                "CombinedWriteService.afterExistencePartitionHookForTests",
+                "CombinedWriteService.afterNeedEmbedResolvedHookForTests",
+                "HttpUtil.sendObserverForTests",
+                "PgVectorRepository.afterExistencePartitionHookForTests",
+                "PgVectorRepository.afterNeedEmbedResolvedHookForTests",
+                "PgVectorRepository.afterSweepSqlHookForTests",
+                "TaxonomyRepository.betweenOwnAndCrossPassHookForTests",
+                "TaxonomyRepository.duringOwnPassHookForTests",
+                "TokenCache.testOnlyAfterStoreRead",
+                "TupleRepository.TEST_ONLY_ANNOUNCE_TXN_HOLD",
+                "TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY",
+                "TupleRepository.TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY",
+                "TupleRepository.TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK",
+                "TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK"
+            )) {
+                notKeyed.put(f, TEST_HOOK);
+            }
+            // RESULT (67)
+            for (String f : List.of(
+                "CatalogRepository.AppendOutcome.sweep",
+                "CatalogRepository.DanglingEndpointException.missing",
+                "CatalogRepository.DeleteOutcome.counts",
+                "CatalogRepository.DeleteOutcome.unregisteredSiblings",
+                "CatalogRepository.GhostSweepResult.dormantNames",
+                "CatalogRepository.GhostSweepResult.ghostNames",
+                "CatalogRepository.RacedEmbeds.sample",
+                "CatalogRepository.RehomeResult.leftBehindByTable",
+                "CatalogRepository.RehomeResult.movedByTable",
+                "CatalogRepository.RehomeStatus.remainingByTable",
+                "CatalogRepository.ResolvedChunk.mergeDeleteKeys",
+                "CceEmbedder.BatchOutcome.vectors",
+                "ChunksIsolationCheck.Probe.found",
+                "ChunksIsolationCheck.Probe.gaps",
+                "ChunksIsolationCheck.StructureReport.gaps",
+                "ChunksLeafAutovacuumCheck.Report.autovacuumDisabled",
+                "ChunksLeafAutovacuumCheck.Report.policyUnset",
+                "CombinedWriteService.CombinedWriteResult.response",
+                "CombinedWriteService.MetadataMode.deleteKeys",
+                "CombinedWriteService.ResolvedBatch.mismatchedChashes",
+                "CombinedWriteService.ResolvedBatch.resolved",
+                "EmbedResult.embeddings",
+                "LocalModelProbe.FileState.missing",
+                "LocalModelProbe.Presence.bgeMissing",
+                "LocalModelProbe.Presence.crossEncoderMissing",
+                "MemoryRepository.ExpireResult.deletedIds",
+                "MemoryRepository.ExpireResult.quarantinedIds",
+                "MemoryRepository.ResolveResult.candidates",
+                "OwnerlessChunkWriteException.unownedSample",
+                "PgSession.GucBatch.calls",
+                "PgVectorRepository.Candidate.row",
+                "PgVectorRepository.ExistencePartition.haveVectorIdx",
+                "PgVectorRepository.ExistencePartition.needEmbedIdx",
+                "PgVectorRepository.ManifestLessCensusResult.chashes",
+                "PgVectorRepository.ManifestLessCensusResult.owners",
+                "PgVectorRepository.ManifestLessCensusResult.totals",
+                "PgVectorRepository.MetadataUpdateOutcome.missing",
+                "PgVectorRepository.NeedEmbedResolution.needEmbedIdx",
+                "PgVectorRepository.NeedEmbedResolution.originalAbsentIdx",
+                "PgVectorRepository.PerCollectionResult.perCollection",
+                "PgVectorRepository.PerCollectionResult.rows",
+                "PgVectorRepository.PerCollectionResult.skippedCollections",
+                "PgVectorRepository.QuarantineBoundedOutcome.sample",
+                "PgVectorRepository.QuarantineFlooredOutcome.sample",
+                "PgVectorRepository.QuarantineOutcome.sample",
+                "PgVectorRepository.QuarantineRestoreBusyException.auditIds",
+                "PgVectorRepository.QuarantineRestoreBusyException.movedChashes",
+                "PgVectorRepository.QuarantineRestoreOutcome.auditIds",
+                "PgVectorRepository.QuarantineRestoreOutcome.quarantineCollections",
+                "PgVectorRepository.QuarantineRestoreOutcome.rows",
+                "PgVectorRepository.Tokened.skippedCollections",
+                "SchemaMigrator.WalkChangesetCounts.duplicateChangesetIds",
+                "TaxonomyRepository.OwnPassOutcome.unmatched",
+                "TelemetryRepository.StepInput.bundledSteps",
+                "TokenStore.MixedScopeRotationRefused.scopes",
+                "TokenStore.RotationResult.expiredHashes",
+                "TupleRepository.ParkStats.perClaimant",
+                "TupleRepository.PreparedOut.dims",
+                "TupleRepository.PreparedOut.keys",
+                "TupleRepository.ReplySpec.dims",
+                "TupleRepository.ReplySpec.keys",
+                "TupleRepository.SubspacePage.items",
+                "TupleRepository.TupleRow.dims",
+                "TupleRepository.TupleRow.keys",
+                "TupleRepository.WaitResult.tuples",
+                "TupleRepository.WaitSpec.pattern",
+                "VoyageEmbedder.SubBatchResponse.texts"
+            )) {
+                notKeyed.put(f, RESULT);
+            }
+            // REAPER_COUNTS (10)
+            for (String f : List.of(
+                "ChunkReaper.LastPass.tenantsEmpty",
+                "ChunkReaper.LastPass.tenantsErrored",
+                "ChunkReaper.LastPass.tenantsRefused",
+                "ChunkReaper.LastPass.tenantsVisited",
+                "ChunkReaper.lastCompletedPassAt",
+                "ChunkReaper.lastPass",
+                "StatusHandler.ReaperStatus.LastPass.tenantsEmpty",
+                "StatusHandler.ReaperStatus.LastPass.tenantsErrored",
+                "StatusHandler.ReaperStatus.LastPass.tenantsRefused",
+                "StatusHandler.ReaperStatus.LastPass.tenantsVisited"
+            )) {
+                notKeyed.put(f, REAPER_COUNTS);
+            }
+            // REAPER_LAST_RUN (7)
+            for (String f : List.of(
+                "ChunkReaper.RunResult.tenants",
+                "ChunkReaper.TenantResult.clientExpiries",
+                "ChunkReaper.TenantResult.collections",
+                "ChunkReaper.TenantResult.expiries",
+                "ChunkReaper.TenantResult.tenant",
+                "ChunkReaper.TenantResult.tenantRefusal",
+                "ChunkReaper.lastRun"
+            )) {
+                notKeyed.put(f, REAPER_LAST_RUN);
+            }
+            // JOOQ_COLUMN (2)
+            for (String f : List.of(
+                "DimTables.CentroidTable.tenantId",
+                "DimTables.ChunkTable.tenantId"
+            )) {
+                notKeyed.put(f, JOOQ_COLUMN);
+            }
+            // PRINCIPAL (7)
+            for (String f : List.of(
+                "NexusService.TupleTenantCursor.tenantId",
+                "RequestContext.Principal.tenant",
+                "RequestLedger.RetentionPass.tenant",
+                "SessionPrincipal.tenantId",
+                "TokenCache.Resolved.tenantId",
+                "TokenStore.ServiceToken.tenantId",
+                "TokenStore.TokenInfo.tenantId"
+            )) {
+                notKeyed.put(f, PRINCIPAL);
+            }
+            // ORT (5)
+            for (String f : List.of(
+                "OrtInitGate.boundExpiredCleanup",
+                "OrtInitGate.exitSignals",
+                "OrtInitGate.halting",
+                "OrtInitGate.installed",
+                "OrtNativeDir.UID_WARNED"
+            )) {
+                notKeyed.put(f, ORT);
+            }
+            // PCI_OFF (17)
+            for (String f : List.of(
+                "PciBuilderSession.state",
+                "PciCatalog.Key.tenant",
+                "PciCatalog.Leaf.indexes",
+                "PciCatalog.Leaf.tenant",
+                "PciCatalog.LeafBuilder.indexes",
+                "PciCatalog.Snapshot.leaves",
+                "PciIndexSweep.State.entries",
+                "PciIndexSweep.State.expiryLogged",
+                "PciIndexSweep.State.set",
+                "PciIndexSweep.State.since",
+                "PciIndexSweep.state",
+                "PciPlanCheck.armsSeen",
+                "PciReconciler.Planned.actions",
+                "PciReconciler.building",
+                "PciReconciler.lastDdlPassAt",
+                "PciReconciler.passStartedAt",
+                "PciReconciler.passes"
+            )) {
+                notKeyed.put(f, PCI_OFF);
+            }
+            // REQUEST (1)
+            for (String f : List.of(
+                "PgVectorRepository.ArmRun.limiter"
+            )) {
+                notKeyed.put(f, REQUEST);
+            }
+            // TEMPLATE (13)
+            for (String f : List.of(
+                "TemplateRegistry.Snapshot.sources",
+                "TemplateRegistry.Snapshot.templates",
+                "TemplateRegistry.SourceGroup.files",
+                "TemplateRegistry.sources",
+                "TemplateRegistry.templates",
+                "TemplateSchema.Dimension.values",
+                "TemplateSchema.dimensions",
+                "TemplateSchema.idDims",
+                "TemplateSchema.keyValues",
+                "TemplateSchema.keys",
+                "TemplateSchema.nameSegments",
+                "TemplateSchemaParser.ParsedKeys.names",
+                "TemplateSchemaParser.ParsedKeys.values"
+            )) {
+                notKeyed.put(f, TEMPLATE);
+            }
+            // EVICTOR_LIST (1)
+            for (String f : List.of(
+                "TenantResetHandler.evictors"
+            )) {
+                notKeyed.put(f, EVICTOR_LIST);
+            }
+            // TOKEN_EPOCH (1)
+            for (String f : List.of(
+                "TokenCache.tenantInvalidations"
+            )) {
+                notKeyed.put(f, TOKEN_EPOCH);
+            }
+            // MULTI_GROUPS (1)
+            for (String f : List.of(
+                "TupleWaitRegistry.MultiWaiter.registeredGroups"
+            )) {
+                notKeyed.put(f, MULTI_GROUPS);
+            }
+            // WAITER_LOCAL (1)
+            for (String f : List.of(
+                "TupleWaitRegistry.MultiWaiter.subspaces"
+            )) {
+                notKeyed.put(f, WAITER_LOCAL);
+            }
             notKeyed.put("PciReconciler.failures", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);

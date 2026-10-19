@@ -235,6 +235,78 @@ class TenantKeyedEvictorsTest {
         assertThat(resumeTenant(reaper)).isEqualTo("ry");
     }
 
+    private static ChunkReaper newReaper() {
+        return new ChunkReaper(null, null, null, null, List::of, ChunkReaper.Settings.fromEnv(k -> null),
+            Clock.systemUTC(), null, System::nanoTime);
+    }
+
+    /**
+     * Code review B1. A timeout caller used to ask {@code noteTimeout} to record the streak and then re-{@code get}
+     * the streak from the map to print its length; a reset that evicted the tenant in between left it
+     * dereferencing null. {@code noteTimeout} now returns the streak length and rest, and the callers format from
+     * that. {@code testOnlyAfterNoteTimeout} evicts the tenant exactly between the two.
+     */
+    @Test
+    void chunkReaper_timeoutCallersDoNotReReadTheStreakAfterAnEviction() throws Exception {
+        var reaper = newReaper();
+        reaper.testOnlyAfterNoteTimeout = () -> reaper.evictTenant("rx");
+        Method statementTimedOut = ChunkReaper.class.getDeclaredMethod("statementTimedOut",
+            String.class, String.class, String.class, String.class, long.class);
+        statementTimedOut.setAccessible(true);
+        Method censusTimedOut = ChunkReaper.class.getDeclaredMethod("censusTimedOut",
+            String.class, String.class, dev.nexus.service.vectors.ReaperRepository.Pass.class, String.class, long.class);
+        censusTimedOut.setAccessible(true);
+
+        Object statement = statementTimedOut.invoke(reaper, "rx", "coll-1", "#move", "rx/coll-1#move", 1L);
+        Object census = censusTimedOut.invoke(reaper, "rx", "coll-1",
+            new dev.nexus.service.vectors.ReaperRepository.Pass(0, 0, 0, false, 0), "rx/coll-1#census", 1L);
+
+        assertThat(statement.toString()).contains("STATEMENT_TIMED_OUT");
+        assertThat(census.toString()).contains("CENSUS_TIMED_OUT");
+        assertThat(map(reaper, "timeoutStreaks")).as("and the eviction did happen between note and format").isEmpty();
+    }
+
+    @Test
+    void chunkReaper_noteTimeoutReturnsTheStreakLengthAndTheRest() throws Exception {
+        var reaper = newReaper();
+        Method noteTimeout = ChunkReaper.class.getDeclaredMethod("noteTimeout", String.class, long.class);
+        noteTimeout.setAccessible(true);
+        assertThat(noteTimeout.invoke(reaper, "rx/c#census", 1L).toString()).contains("consecutive=1, rest=0");
+        assertThat(noteTimeout.invoke(reaper, "rx/c#census", 2L).toString()).contains("consecutive=2, rest=0");
+        assertThat(noteTimeout.invoke(reaper, "rx/c#census", 3L).toString())
+            .contains("consecutive=3").doesNotContain("rest=0,").doesNotContain("rest=0]");
+    }
+
+    /**
+     * Critic minor: the tenant id charset is not enforced anywhere (any non-wildcard string is a valid tenant), so a
+     * tenant id may hold {@code '|'} or {@code '/'}, the separators of three evictors' keys. Each evictor must still
+     * clear ALL of that tenant's state; they may over-reach onto a lookalike tenant (which only forgets a cache
+     * entry, a backoff or a log window) but must never leave the tenant's own entries behind.
+     */
+    @Test
+    void evictorsKeyedOnPipeOrSlashStillClearATenantWhoseIdContainsThem() throws Exception {
+        String piped = "we|ird-" + UUID.randomUUID().toString().substring(0, 8);
+        var limiter = new OwnerlessLogLimiter(() -> 1_000_000L);
+        limiter.tryAcquire("/v1/vectors/add|" + piped + "|coll-1");
+        limiter.tryAcquire("/v1/vectors/upsert|" + piped + "|coll|2");
+        assertThat(limiter.evictTenant(piped)).as("OwnerlessLogLimiter, both windows").isEqualTo(2);
+        assertThat(limiter.tryAcquire("/v1/vectors/add|" + piped + "|coll-1")).as("logs again").isGreaterThanOrEqualTo(0);
+
+        var row = new CollectionRow("code", "1.1", "voyage-code-3", 1024, "live");
+        CollectionRegistry.markKnown(piped, "c1", row);
+        CollectionRegistry.markKnown(piped, "c|2", row);
+        assertThat(CollectionRegistry.evictTenant(piped)).as("CollectionRegistry, both pairs").isEqualTo(2);
+
+        String slashed = "we/ird-" + UUID.randomUUID().toString().substring(0, 8);
+        var reaper = newReaper();
+        Method noteTimeout = ChunkReaper.class.getDeclaredMethod("noteTimeout", String.class, long.class);
+        noteTimeout.setAccessible(true);
+        noteTimeout.invoke(reaper, slashed + "/coll-1#census", 1L);
+        noteTimeout.invoke(reaper, slashed + "/coll/2#expire", 1L);
+        assertThat(reaper.evictTenant(slashed)).as("ChunkReaper, both streaks").isEqualTo(2);
+        assertThat(map(reaper, "timeoutStreaks")).isEmpty();
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> map(ChunkReaper reaper, String field) throws Exception {
         Field f = ChunkReaper.class.getDeclaredField(field);

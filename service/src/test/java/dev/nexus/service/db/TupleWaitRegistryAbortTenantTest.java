@@ -41,7 +41,7 @@ class TupleWaitRegistryAbortTenantTest {
             Thread.sleep(200);   // both are parked on a one-second timer at most
 
             long start = System.nanoTime();
-            int removed = registry.abortTenant(X, BOUND_NANOS);
+            int removed = registry.abortTenant(X, BOUND_NANOS).groupsRemoved();
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
             assertThat(sawAbort1.get(2, TimeUnit.SECONDS)).as("x1 woke aborted").isTrue();
@@ -80,7 +80,7 @@ class TupleWaitRegistryAbortTenantTest {
         TupleWaitRegistry.Waiter stuck = registry.register(X, "s1");   // never released by anyone
 
         long start = System.nanoTime();
-        int removed = registry.abortTenant(X, TimeUnit.MILLISECONDS.toNanos(300));
+        int removed = registry.abortTenant(X, TimeUnit.MILLISECONDS.toNanos(300)).groupsRemoved();
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
         assertThat(elapsedMs).as("waited for the stuck waiter, then gave up").isBetween(250L, 1500L);
@@ -95,7 +95,7 @@ class TupleWaitRegistryAbortTenantTest {
         TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
         registry.register(Y, "s1");
         long start = System.nanoTime();
-        assertThat(registry.abortTenant(X, BOUND_NANOS)).isZero();
+        assertThat(registry.abortTenant(X, BOUND_NANOS).groupsRemoved()).isZero();
         assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isLessThan(500);
         assertThat(registry.groupCount()).isEqualTo(1);
     }
@@ -136,7 +136,7 @@ class TupleWaitRegistryAbortTenantTest {
         });
         Thread.sleep(150);
 
-        int removed = registry.abortTenant(X, BOUND_NANOS);
+        int removed = registry.abortTenant(X, BOUND_NANOS).groupsRemoved();
 
         assertThat(woke.await(2, TimeUnit.SECONDS)).isTrue();
         t.join();
@@ -158,5 +158,125 @@ class TupleWaitRegistryAbortTenantTest {
         assertThat(registry.groupCount()).isEqualTo(1);
         longer.release();
         exact.release();
+    }
+
+    // ── MultiWaiter.release against the groups it registered in (code review ship-blocker 2) ─────────
+
+    /**
+     * A MultiWaiter that outlives the abort bound is still registered in a group {@code abortTenant} has dropped. A
+     * fresh wait on the same key then creates a NEW group. The old waiter's {@code release()} must decrement the
+     * group it registered in, not look the key up again and decrement the fresh group (which would drop its waiter
+     * count below the truth and let idle eviction reap a group with a parked wait in it).
+     */
+    @Test
+    void anOldMultiWaiterReleasedAfterTheAbortDoesNotDecrementAFreshGroupOfTheSameKey() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.MultiWaiter old = registry.registerMulti(X, java.util.List.of("a"));
+        TupleWaitRegistry.AbortResult aborted = registry.abortTenant(X, TimeUnit.MILLISECONDS.toNanos(50));
+        assertThat(aborted.waitersStillParked()).as("the old waiter outlived the bound").isEqualTo(1);
+
+        TupleWaitRegistry.Waiter fresh = registry.register(X, "a");
+        assertThat(registry.waiterCount(X, "a")).as("the fresh group holds exactly its own waiter").isEqualTo(1);
+
+        old.release();
+
+        assertThat(registry.waiterCount(X, "a")).as("the old waiter's release left the fresh group alone")
+            .isEqualTo(1);
+        fresh.release();
+        assertThat(registry.waiterCount(X, "a")).isZero();
+    }
+
+    @Test
+    void anOldMultiWaiterReleasedAfterTheAbortDoesNotDecrementAFreshMultiGroupEither() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.MultiWaiter old = registry.registerMulti(X, java.util.List.of("a", "b"));
+        registry.abortTenant(X, TimeUnit.MILLISECONDS.toNanos(50));
+
+        TupleWaitRegistry.MultiWaiter fresh = registry.registerMulti(X, java.util.List.of("a", "b"));
+        old.release();
+
+        assertThat(registry.waiterCount(X, "a")).isEqualTo(1);
+        assertThat(registry.waiterCount(X, "b")).isEqualTo(1);
+        fresh.release();
+        assertThat(registry.waiterCount(X, "a")).isZero();
+        assertThat(registry.waiterCount(X, "b")).isZero();
+    }
+
+    // ── the abort reports a tenant that did not quiesce (critic S3) ────────────────────────────────
+
+    @Test
+    void theResultCountsTheWaitersStillRegisteredWhenTheBoundExpires() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.Waiter stuck1 = registry.register(X, "s1");
+        TupleWaitRegistry.Waiter stuck2 = registry.register(X, "s1");
+        TupleWaitRegistry.MultiWaiter stuck3 = registry.registerMulti(X, java.util.List.of("s2"));
+
+        TupleWaitRegistry.AbortResult r = registry.abortTenant(X, TimeUnit.MILLISECONDS.toNanos(50));
+
+        assertThat(r.groupsRemoved()).isEqualTo(2);
+        assertThat(r.waitersStillParked()).as("three waiters never left").isEqualTo(3);
+        stuck1.release();
+        stuck2.release();
+        stuck3.release();
+        assertThat(registry.abortTenant(X, BOUND_NANOS))
+            .as("nothing is registered any more").isEqualTo(new TupleWaitRegistry.AbortResult(0, 0));
+    }
+
+    @Test
+    void aCleanAbortReportsNoWaitersStillParked() throws Exception {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.Waiter w = registry.register(X, "s1");
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> left = pool.submit(() -> parkThenRelease(w));
+            Thread.sleep(150);
+            TupleWaitRegistry.AbortResult r = registry.abortTenant(X, BOUND_NANOS);
+            assertThat(left.get(2, TimeUnit.SECONDS)).isTrue();
+            assertThat(r).isEqualTo(new TupleWaitRegistry.AbortResult(1, 0));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ── a registration inside the abort window gets a fresh group (code review B2) ─────────────────
+
+    /**
+     * {@code abortTenant} flags a group and then waits for its waiters to leave before it drops it. A NEW wait that
+     * registers inside that window must not join the flagged group: it would read as aborted at once (a plain
+     * waiter) or be left on a group that is about to leave {@code groups}, never signalled again (a multi waiter).
+     */
+    @Test
+    void aWaitRegisteredWhileTheAbortIsStillWaitingGetsAFreshGroup() throws Exception {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.Waiter stuck = registry.register(X, "s1");
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<TupleWaitRegistry.AbortResult> abort = pool.submit(() -> registry.abortTenant(X, BOUND_NANOS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!stuck.aborted() && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(stuck.aborted()).as("the abort has flagged the group and is waiting").isTrue();
+
+            TupleWaitRegistry.Waiter late = registry.register(X, "s1");
+            TupleWaitRegistry.MultiWaiter lateMulti = registry.registerMulti(X, java.util.List.of("s1"));
+
+            assertThat(late.aborted()).as("a wait that begins after the abort is not aborted").isFalse();
+            assertThat(lateMulti.aborted()).isFalse();
+            assertThat(registry.waiterCount(X, "s1")).as("both late waits sit in the live group").isEqualTo(2);
+
+            stuck.release();
+            assertThat(abort.get(2, TimeUnit.SECONDS)).isEqualTo(new TupleWaitRegistry.AbortResult(1, 0));
+            assertThat(registry.waiterCount(X, "s1")).as("the abort's removal left the live group alone")
+                .isEqualTo(2);
+            // And a write still reaches them: they are in the group signalAll looks up.
+            registry.signalAll(X, "s1");
+            late.awaitSignalOrTimer();
+            lateMulti.awaitSignalOrTimer();
+            late.release();
+            lateMulti.release();
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Bead nexus-0bl77 (rtg20 phase A): {@code POST /v1/_test/tenant-reset}, end to end through real {@link NexusService}
  * instances. Covers the route's gates (absent without the flag, operator only, refused while {@code NX_SEARCH_PCI}
- * is on, advertised on {@code /version}), its boot refusal on a non-loopback bind, and that a reset names every
+ * is on, advertised on {@code /v1/status}), its boot refusal on a non-loopback bind, and that a reset names every
  * evictor and clears tenant X without touching tenant Y. The per-structure semantics are
  * {@link TenantKeyedEvictorsTest}; the exhaustiveness of the evictor list is {@code TenantKeyedStateGateTest}.
  *
@@ -107,18 +107,33 @@ class TenantResetRouteTest {
     // ── gates ────────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    void withoutTheFlag_theRouteIsAbsent_andVersionSaysSo() throws Exception {
+    void withoutTheFlag_theRouteIsAbsent_andStatusSaysSo() throws Exception {
         assertThat(post(off, PATH, ROOT, "{\"tenant\":\"rr-any\"}").statusCode()).isEqualTo(404);
-        assertThat(version(off).path("test_tenant_reset_route").asBoolean(true))
-            .as("/version reports the route as not registered").isFalse();
+        assertThat(status(off).path("test_tenant_reset_route").asBoolean(true))
+            .as("/v1/status reports the route as not registered").isFalse();
         assertThat(off.tenantKeyedState()).as("the evictors are built either way").isNotEmpty();
     }
 
     @Test
-    void withTheFlag_versionAdvertisesTheRoute() throws Exception {
-        JsonNode v = version(on);
-        assertThat(v.has("test_tenant_reset_route")).isTrue();
-        assertThat(v.get("test_tenant_reset_route").asBoolean()).isTrue();
+    void withTheFlag_statusAdvertisesTheRoute_andVersionDoesNot() throws Exception {
+        JsonNode s = status(on);
+        assertThat(s.has("test_tenant_reset_route")).isTrue();
+        assertThat(s.get("test_tenant_reset_route").asBoolean()).isTrue();
+        // The conexus image smoke fails on any /version key outside the public contract, so the flag lives on
+        // /v1/status and /version never carries it, with the flag on or off.
+        assertThat(version(on).has("test_tenant_reset_route")).as("/version, flag on").isFalse();
+        assertThat(version(off).has("test_tenant_reset_route")).as("/version, flag off").isFalse();
+    }
+
+    @Test
+    void anUnauthenticatedProbeSeparatesAbsentFromRegistered() throws Exception {
+        // What the cloud gate's fail-closed leg sends through the edge: no bearer. An engine without the flag has
+        // no context for the path (the JDK server's own 404, not a JSON body); one with it answers 401 from the
+        // auth filter. Nothing else separates the two without a credential.
+        var absent = TestHttp.request(base(off) + PATH).POST(HttpRequest.BodyPublishers.ofString("{}")).build();
+        assertThat(http.send(absent, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(404);
+        var registered = TestHttp.request(base(on) + PATH).POST(HttpRequest.BodyPublishers.ofString("{}")).build();
+        assertThat(http.send(registered, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(401);
     }
 
     @Test
@@ -343,6 +358,11 @@ class TenantResetRouteTest {
         var req = TestHttp.request(base(s) + path)
             .header("Authorization", "Bearer " + bearer).GET().build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private JsonNode status(NexusService s) throws Exception {
+        var req = TestHttp.request(base(s) + "/v1/status").GET().build();
+        return MAPPER.readTree(http.send(req, HttpResponse.BodyHandlers.ofString()).body());
     }
 
     private JsonNode version(NexusService s) throws Exception {

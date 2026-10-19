@@ -567,8 +567,7 @@ public final class NexusService {
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
         var versionHandler = new VersionHandler(dataSource, docEmbedderRouter)
-                .embedPosture(() -> this.embedPosture)
-                .testTenantResetRoute(tenantResetRoute);
+                .embedPosture(() -> this.embedPosture);
         server.createContext("/version", versionHandler);
 
         // /v1/status — unauthenticated live embed-activity counters (bead
@@ -585,7 +584,8 @@ public final class NexusService {
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
                                 dataSource, java.time.Clock.systemUTC()),
                         this::perCollectionIndexesStatus)
-                        .embedPosture(() -> this.embedPosture));
+                        .embedPosture(() -> this.embedPosture)
+                        .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -835,10 +835,13 @@ public final class NexusService {
      */
     private List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState(
             dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository) {
+        // TokenCache FIRST (code review B3): it is the one that closes the dead test's bearer. Evicting it before the
+        // tuple evictor, which may wait up to TENANT_RESET_TUPLE_BOUND, keeps the window in which the old token still
+        // authenticates as short as the first call, instead of the length of that wait.
         return List.of(
+            dev.nexus.service.db.TenantKeyedState.of("TokenCache", tokenCache::invalidateTenant),
             dev.nexus.service.db.TenantKeyedState.of("TupleWaitRegistry",
                 t -> tupleRepo == null ? 0 : tupleRepo.abortTenantWaiters(t, TENANT_RESET_TUPLE_BOUND)),
-            dev.nexus.service.db.TenantKeyedState.of("TokenCache", tokenCache::invalidateTenant),
             dev.nexus.service.db.TenantKeyedState.of("CollectionRegistry",
                 dev.nexus.service.db.CollectionRegistry::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("CatalogRepository.ghostSweepCheckedTenants",

@@ -131,6 +131,21 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile boolean testTenantResetRoute;
+
+    /**
+     * Bead nexus-0bl77, [additive]: whether this engine registered the test-only
+     * {@code POST /v1/_test/tenant-reset} route ({@code NX_TEST_TENANT_RESET_ROUTE=1}). Reported as
+     * {@code test_tenant_reset_route}, always present, so the cloud client-path gate can assert it is {@code false}
+     * there (an engine older than the route omits the key; the gate treats absent and {@code false} alike). It is
+     * on this route and not on {@code /version} because the conexus image smoke fails on any {@code /version} key
+     * outside the public contract, and this route carries no such allowlist.
+     */
+    public StatusHandler testTenantResetRoute(boolean enabled) {
+        this.testTenantResetRoute = enabled;
+        return this;
+    }
+
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
     }
@@ -418,6 +433,9 @@ public final class StatusHandler implements HttpHandler {
             body.append(",\"ownerless_write_mode\":")
                 .append(HttpUtil.jsonString(ownerlessWritePolicy.mode().wire()));
         }
+
+        // nexus-0bl77, [additive]: always present; true only when the test-only tenant reset route is registered.
+        body.append(",\"test_tenant_reset_route\":").append(testTenantResetRoute);
 
         // RDR-192 Phase 3 gate S5 (bead nexus-wbfpw.56), [additive]: the engine reaper's liveness. Absent key =
         // an engine (or wiring) that predates it; {"enabled":false} = no reaper in this process.

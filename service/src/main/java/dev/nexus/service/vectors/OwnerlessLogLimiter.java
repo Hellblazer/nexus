@@ -68,19 +68,20 @@ public final class OwnerlessLogLimiter {
         return s;
     }
 
-    /** Number of keys currently remembered, the overflow bucket excluded; never above {@link #MAX_KEYS}. */
     /**
      * Drop every window whose key names {@code tenant} (bead nexus-0bl77, the test-only tenant reset route). Keys
-     * are {@code route|tenant|collection}; a tenant id carries no {@code '|'}, so the second field is the tenant
-     * exactly.
+     * are {@code route|tenant|collection}. Nothing forbids a {@code '|'} inside a tenant id, so the key is not
+     * split: a key is the tenant's when it contains {@code |tenant|}, which every key of that tenant does, whatever
+     * the tenant, route or collection contain. The match can over-reach (tenant {@code a} also matches the key of
+     * tenant {@code b|a}), and over-reaching only forgets another window, so that tenant logs one extra line.
      *
      * @return the number of windows removed
      */
     public int evictTenant(String tenant) {
+        String needle = "|" + tenant + "|";
         int[] removed = {0};
         states.keySet().removeIf(key -> {
-            String[] parts = key.split("\\|", 3);
-            boolean mine = parts.length == 3 && parts[1].equals(tenant);
+            boolean mine = key.contains(needle);
             if (mine) {
                 removed[0]++;
             }
@@ -89,6 +90,7 @@ public final class OwnerlessLogLimiter {
         return removed[0];
     }
 
+    /** Number of keys currently remembered, the overflow bucket excluded; never above {@link #MAX_KEYS}. */
     int size() {
         return states.size();
     }

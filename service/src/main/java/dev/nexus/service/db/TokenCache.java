@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * RDR-152 bead nexus-gmiaf.32.2 — bounded positive cache for bearer token →
@@ -70,6 +71,18 @@ public final class TokenCache {
     private final Duration ttl;
     private final int maxEntries;
     private final ConcurrentHashMap<String, Entry> map = new ConcurrentHashMap<>();
+    /**
+     * Bumped by every {@link #invalidateTenant} (bead nexus-0bl77, critic S2). {@link #resolve} reads it BEFORE
+     * its store read and skips its cache put when it moved, so a resolve that read a token row before a tenant
+     * reset deleted it cannot store a positive after the eviction and shadow the delete for the cache TTL. One
+     * counter rather than one per tenant because the tenant is only known after the store read; the cost of the
+     * coarseness is that a resolve overlapping ANY tenant's invalidation skips one cache fill, and the next
+     * request fills it.
+     */
+    private final AtomicLong tenantInvalidations = new AtomicLong();
+    /** Test-only (nexus-0bl77): runs between the store read and the cache put of {@link #resolve}, so a test can
+     *  place an invalidation exactly in that window. Null in production. */
+    volatile Runnable testOnlyAfterStoreRead;
 
     public TokenCache(TokenStore store, Clock clock) {
         this(store, clock, DEFAULT_TTL, DEFAULT_MAX_ENTRIES);
@@ -120,7 +133,12 @@ public final class TokenCache {
             map.remove(tokenHash, cached);
         }
 
+        long invalidationsBeforeRead = tenantInvalidations.get();
         Optional<TokenStore.ServiceToken> loaded = store.lookupServiceToken(tokenHash);
+        Runnable afterRead = testOnlyAfterStoreRead;
+        if (afterRead != null) {
+            afterRead.run();
+        }
         if (loaded.isEmpty()) {
             return Optional.empty();  // missing/revoked — do NOT cache negatives
         }
@@ -142,7 +160,16 @@ public final class TokenCache {
                 it.remove();
             }
         }
-        map.put(tokenHash, new Entry(st.tenantId(), st.isRoot(), st.scope(), st.expiresAt(), now));
+        Entry fresh = new Entry(st.tenantId(), st.isRoot(), st.scope(), st.expiresAt(), now);
+        map.put(tokenHash, fresh);
+        if (tenantInvalidations.get() != invalidationsBeforeRead) {
+            // A tenant was invalidated while this read was in flight, so the row it saw may be one a reset has
+            // since deleted. Checked AFTER the put, not before it: invalidateTenant bumps the counter and then
+            // sweeps, so either its sweep sees this entry or this check sees the bump; a check before the put
+            // would leave a window between the two. The request is answered from what was read (it was in
+            // flight before the reset) but the entry is not kept; the next request reads the store again.
+            map.remove(tokenHash, fresh);
+        }
         return Optional.of(new Resolved(st.tenantId(), st.isRoot(), st.scope()));
     }
 
@@ -164,6 +191,7 @@ public final class TokenCache {
         if (tenant == null) {
             return 0;
         }
+        tenantInvalidations.incrementAndGet();   // before the sweep: a resolve that starts now sees it moved
         int[] removed = {0};
         map.entrySet().removeIf(e -> {
             boolean mine = tenant.equals(e.getValue().tenantId());

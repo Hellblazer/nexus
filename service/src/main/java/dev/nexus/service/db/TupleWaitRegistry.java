@@ -274,6 +274,10 @@ final class TupleWaitRegistry {
                 if (groups.get(key) != g) {
                     continue; // evicted in between, same retry as register()
                 }
+                if (g.aborted) {
+                    groups.remove(key, g);   // nexus-0bl77: see register()
+                    continue;
+                }
                 g.lastActivityNanos = now();
                 String current = g.currentWaiter.get(who);
                 int cmp = current == null ? 1 : compareWaiterTokens(token, current);
@@ -367,6 +371,13 @@ final class TupleWaitRegistry {
                     // a fresh one).
                     continue;
                 }
+                if (g.aborted) {
+                    // nexus-0bl77: abortTenant flagged this group and is still waiting for its waiters to leave
+                    // before it drops it. A registration is a NEW wait, never one of those, so it must not
+                    // join (it would wake aborted at once); drop the group here and retry against a fresh one.
+                    groups.remove(key, g);
+                    continue;
+                }
                 g.waiters++;
                 g.lastActivityNanos = now();
                 seenGeneration = g.generation;
@@ -408,6 +419,10 @@ final class TupleWaitRegistry {
                     if (groups.get(key) != g) {
                         // Evicted between computeIfAbsent and this lock acquisition --
                         // retry against whatever's there now, same as register().
+                        continue;
+                    }
+                    if (g.aborted) {
+                        groups.remove(key, g);   // nexus-0bl77: see register()
                         continue;
                     }
                     g.waiters++;
@@ -552,6 +567,10 @@ final class TupleWaitRegistry {
         }
     }
 
+    /** What {@link #abortTenant} did: how many of the tenant's wait groups it aborted and dropped, and how many
+     *  waiters were STILL registered in them when the bound expired (zero on a clean abort). */
+    record AbortResult(int groupsRemoved, int waitersStillParked) { }
+
     /**
      * Bead nexus-0bl77 (rtg20 phase A), the {@code TupleWaitRegistry} evictor of the test-only tenant reset route.
      * Aborts every wait of {@code tenant}: marks each of its groups aborted and wakes its waiters at once, so a
@@ -559,11 +578,13 @@ final class TupleWaitRegistry {
      * re-querying and claiming the next test's tuple. Then waits up to {@code boundNanos} for those waiters to
      * leave (they release in a {@code finally}), and removes the tenant's groups either way, so a later wait on the
      * same tenant and subspace gets a fresh, un-aborted group. A waiter that outlives the bound still sees
-     * {@code aborted()} (the flag is on the group it holds).
+     * {@code aborted()} (the flag is on the group it holds), and is reported in
+     * {@link AbortResult#waitersStillParked()} so the caller can tell a quiesced tenant from one that is not.
      *
-     * @return the number of groups removed
+     * <p>This is not a quiesce: a request that registers a NEW wait after the groups are dropped is a live wait of
+     * the next test. The harness must stop its own clients of the tenant before it calls the route.
      */
-    int abortTenant(String tenant, long boundNanos) {
+    AbortResult abortTenant(String tenant, long boundNanos) {
         List<Map.Entry<WaitKey, Group>> mine = new java.util.ArrayList<>();
         for (var entry : groups.entrySet()) {
             if (entry.getKey().tenant().equals(tenant)) {
@@ -586,18 +607,19 @@ final class TupleWaitRegistry {
             }
         }
         long deadline = System.nanoTime() + boundNanos;
+        int stillParked;
         while (true) {
-            boolean pending = false;
+            stillParked = 0;
             for (var entry : mine) {
                 Group g = entry.getValue();
                 g.lock.lock();
                 try {
-                    pending |= g.waiters > 0;
+                    stillParked += g.waiters;
                 } finally {
                     g.lock.unlock();
                 }
             }
-            if (!pending || System.nanoTime() >= deadline) {
+            if (stillParked == 0 || System.nanoTime() >= deadline) {
                 break;
             }
             java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
@@ -606,13 +628,25 @@ final class TupleWaitRegistry {
                 break;
             }
         }
-        int removed = 0;
         for (var entry : mine) {
-            if (groups.remove(entry.getKey(), entry.getValue())) {
-                removed++;
-            }
+            groups.remove(entry.getKey(), entry.getValue());   // may already be gone: register() drops an aborted group
         }
-        return removed;
+        return new AbortResult(mine.size(), stillParked);
+    }
+
+    /** Live waiters registered in the {@code (tenant, subspace)} group, 0 when there is none: test-only visibility
+     *  (nexus-0bl77), so a test can assert a release decremented the group it registered in and no other. */
+    int waiterCount(String tenant, String subspace) {
+        Group g = groups.get(new WaitKey(tenant, subspace));
+        if (g == null) {
+            return 0;
+        }
+        g.lock.lock();
+        try {
+            return g.waiters;
+        } finally {
+            g.lock.unlock();
+        }
     }
 
     /** Current group count -- test-only visibility into {@link #groups}' size
@@ -632,6 +666,11 @@ final class TupleWaitRegistry {
             this.seenGeneration = seenGeneration;
         }
 
+        /** True once {@link #abortTenant} aborted this waiter's tenant; the caller then stops, without a re-query. */
+        boolean aborted() {
+            return g.aborted;
+        }
+
         /**
          * Parks until {@link #signalAll} bumps this waiter's group's generation past
          * what it last observed, or one second elapses — whichever comes first. A
@@ -640,11 +679,6 @@ final class TupleWaitRegistry {
          * calling {@link Condition#await}, closing the lost-wakeup window between a
          * caller's {@link #register}/first query and its first park.
          */
-        /** True once {@link #abortTenant} aborted this waiter's tenant; the caller then stops, without a re-query. */
-        boolean aborted() {
-            return g.aborted;
-        }
-
         void awaitSignalOrTimer() throws InterruptedException {
             g.lock.lock();
             try {

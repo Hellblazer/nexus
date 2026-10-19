@@ -239,6 +239,21 @@ class StatusHandlerTest {
     }
 
     @Test
+    void testTenantResetRoute_isAlwaysPresent_falseUnlessTheRouteIsRegistered() throws Exception {
+        // nexus-0bl77, [additive]. On /v1/status and not /version: the conexus image smoke fails on any /version
+        // key outside the public contract.
+        start(new StatusHandler(null));
+        JsonNode off = get();
+        assertThat(off.has("test_tenant_reset_route")).as("always present").isTrue();
+        assertThat(off.get("test_tenant_reset_route").isBoolean()).isTrue();
+        assertThat(off.get("test_tenant_reset_route").asBoolean()).isFalse();
+        stop();
+
+        start(new StatusHandler(null).testTenantResetRoute(true));
+        assertThat(get().get("test_tenant_reset_route").asBoolean()).isTrue();
+    }
+
+    @Test
     void processStartTime_reflectsTheExplicitlyProvidedInstant() throws Exception {
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2): production
         // wiring (NexusService) passes VersionHandler's OWN processStartMillis()

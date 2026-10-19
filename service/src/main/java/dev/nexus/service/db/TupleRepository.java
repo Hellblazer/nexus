@@ -328,9 +328,18 @@ public final class TupleRepository {
      * {@link TupleWaitRegistry#abortTenant}.
      *
      * @return the number of wait groups removed
+     * @throws IllegalStateException when waiters were still registered after {@code bound}: the tenant is NOT
+     *         quiesced (a wait is parked on something that does not wake, or its client keeps re-registering), so
+     *         the caller must retire the tenant rather than reuse it. The groups are dropped regardless.
      */
     public int abortTenantWaiters(String tenant, java.time.Duration bound) {
-        return waitRegistry.abortTenant(tenant, bound.toNanos());
+        TupleWaitRegistry.AbortResult r = waitRegistry.abortTenant(tenant, bound.toNanos());
+        if (r.waitersStillParked() > 0) {
+            throw new IllegalStateException(r.waitersStillParked() + " tuple waiter(s) of tenant '" + tenant
+                + "' were still registered after " + bound.toMillis() + " ms (" + r.groupsRemoved()
+                + " wait group(s) dropped): the tenant is not quiesced, retire it");
+        }
+        return r.groupsRemoved();
     }
 
     // ── park stats (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ─────────────
