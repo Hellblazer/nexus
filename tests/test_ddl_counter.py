@@ -395,8 +395,9 @@ def test_a_serial_run_prints_and_writes_the_counts(pytester, monkeypatch, tmp_pa
     result = _fake_substrate_run(pytester, monkeypatch, tmp_path=tmp_path, args=(), subprocess=False)
     result.assert_outcomes(passed=8)
     result.stdout.fnmatch_lines([
-        "ddl: migration=9 tests=17 per_test=2.12 wal: migration=1000B tests=4.4KB per_test=562B "
-        "| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
+        "ddl: migration=9 tests=17 per_test=2.12 wal: migration=1000B tests=4.4KB per_test=562B"
+        # a cgroup (Linux, under lab-run) adds " io_wbytes=<n>" before the bar
+        "*| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert report["total"]["total"] == 26
@@ -413,8 +414,9 @@ def test_xdist_workers_merge_into_one_report(pytester, monkeypatch, tmp_path) ->
     result = _fake_substrate_run(pytester, monkeypatch, tmp_path=tmp_path, args=("-n", "2"), subprocess=True)
     result.assert_outcomes(passed=8)
     result.stdout.fnmatch_lines([
-        "ddl: migration=18 tests=34 per_test=4.25 wal: migration=2.0KB tests=8.8KB per_test=1.1KB "
-        "| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
+        "ddl: migration=18 tests=34 per_test=4.25 wal: migration=2.0KB tests=8.8KB per_test=1.1KB"
+        # a cgroup (Linux, under lab-run) adds " io_wbytes=<n>" before the bar
+        "*| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert (report["workers"], report["workers_booted"], report["recovered_workers"]) == (2, 2, 0)
