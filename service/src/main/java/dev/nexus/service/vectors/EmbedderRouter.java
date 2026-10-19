@@ -71,6 +71,12 @@ public final class EmbedderRouter implements Embedder {
     private final String         inputType;             // "document" or "query"
 
     /**
+     * Which family new collections get (RDR-210 Phase 2 Step 3, nexus-qhclj): the seeded
+     * tokens follow this, not which embedders were built. Never null.
+     */
+    private final EmbeddingProfile profile;
+
+    /**
      * RDR-103 model-segment → embedder dispatch table (bead nexus-pebfx.2).
      * Built per mode at construction; the collection name's model segment is
      * the authority for conformant names — prefix routing is the fallback for
@@ -138,6 +144,21 @@ public final class EmbedderRouter implements Embedder {
      * @throws IllegalArgumentException when neither family is present
      */
     public EmbedderRouter(Embedder localEmbedder, String voyageApiKey, String inputType) {
+        this(localEmbedder, voyageApiKey, inputType, null);
+    }
+
+    /**
+     * The present-set form with an explicit embedding profile (RDR-210 Phase 2 Step 3,
+     * bead nexus-qhclj). The profile decides which family's tokens the profile table is
+     * seeded with, independent of which embedders were built, so a choice this boot
+     * cannot serve (a {@code voyage} profile with no key, a {@code bge} profile with no
+     * bge files) still seeds its own tokens and the engine boots degraded.
+     *
+     * @param profile the chosen profile, or {@code null} for the unset rule: keyed means
+     *                Voyage, keyless means bge
+     */
+    public EmbedderRouter(Embedder localEmbedder, String voyageApiKey, String inputType,
+                          EmbeddingProfile profile) {
         boolean voyage = voyageApiKey != null && !voyageApiKey.isBlank();
         if (localEmbedder == null && !voyage) {
             throw new IllegalArgumentException(
@@ -146,6 +167,8 @@ public final class EmbedderRouter implements Embedder {
         }
         this.localEmbedder = localEmbedder;
         this.inputType     = inputType;
+        this.profile       = profile != null ? profile
+                           : voyage ? EmbeddingProfile.VOYAGE : EmbeddingProfile.BGE;
         Map<String, Embedder> table = new LinkedHashMap<>();
         if (localEmbedder != null) {
             table.put(localEmbedder.modelToken(), localEmbedder);
@@ -227,25 +250,25 @@ public final class EmbedderRouter implements Embedder {
      * value, and the CCE bucket already serves the majority (3 of 4) of this
      * router's named content types.
      *
-     * <p>Local mode (no Voyage): every content type maps to the single
-     * injected local embedder's token (RDR-160: bge-768) — trivially
-     * including "unknown", since local mode routes everything through it
-     * regardless of content type.
+     * <p>RDR-210 Phase 2 Step 3 (nexus-qhclj): the tokens are per-family CONSTANTS
+     * chosen by this router's {@link EmbeddingProfile}, never read from a built
+     * embedder. {@code voyage}: {@code voyage-code-3} for "code",
+     * {@code voyage-context-3} for the rest. {@code bge}: bge-768 for every content
+     * type. A profile this router cannot serve (no key, no bge files) still seeds its
+     * own tokens; the family it does not hold is refused per collection (422).
+     *
+     * @see EmbeddingProfile#contentTypeTokens()
      *
      * @return content type → model token, keyed by "code", "docs", "rdr",
      *         "knowledge", "unknown"
      */
     public Map<String, String> contentTypeModelTokens() {
-        String cceToken  = (voyageCodeEmbedder == null) ? localEmbedder.modelToken() : cceEmbedder.modelToken();
-        String codeToken = (voyageCodeEmbedder == null) ? localEmbedder.modelToken() : voyageCodeEmbedder.modelToken();
+        return profile.contentTypeTokens();
+    }
 
-        Map<String, String> tokens = new LinkedHashMap<>();
-        tokens.put("knowledge", cceToken);
-        tokens.put("docs",      cceToken);
-        tokens.put("rdr",       cceToken);
-        tokens.put("code",      codeToken);
-        tokens.put("unknown",   cceToken);
-        return tokens;
+    /** The embedding profile this router seeds (never null). */
+    public EmbeddingProfile profile() {
+        return profile;
     }
 
     /**

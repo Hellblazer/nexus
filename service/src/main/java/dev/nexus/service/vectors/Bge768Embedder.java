@@ -301,7 +301,7 @@ public final class Bge768Embedder implements Embedder {
 
     @Override
     public String modelToken() {
-        return "bge-base-en-v15-768";
+        return EmbeddingProfile.BGE_TOKEN;
     }
 
     @Override

@@ -39,6 +39,10 @@ import org.slf4j.LoggerFactory;
  *       route by collection prefix to Voyage (CCE for {@code knowledge__}/{@code docs__}/
  *       {@code rdr__}, voyage-code-3 for {@code code__}), ONNX fallback for
  *       unrecognised prefixes. Absent: ONNX-only (local mode).</li>
+ *   <li>{@code NX_EMBED_PROFILE} — optional, {@code voyage} or {@code bge} (RDR-210): the
+ *       family new collections get. Seeds {@code nexus.embedding_profile}; unset keeps
+ *       keyed-means-Voyage, keyless-means-bge; any other value fails the boot. A choice
+ *       the boot cannot serve boots degraded.</li>
  * </ul>
  *
  * <p>Binds to {@code 127.0.0.1} only (loopback). No external TLS — forward proxy
@@ -262,6 +266,24 @@ public final class Main {
         var presence = dev.nexus.service.vectors.LocalModelProbe.probe(voyageKey);
         log.info("event=embedder_presence bge_present={} voyage_key_present={} bge=\"{}\"",
                 presence.bgePresent(), presence.voyageKeyPresent(), presence.bgeDetail());
+        // RDR-210 Phase 2 Step 3 (nexus-qhclj): the embedding profile is a CHOICE the
+        // supervisor passes in NX_EMBED_PROFILE (voyage | bge). Unset keeps today's rule
+        // (keyed means Voyage, keyless means bge). An invalid value fails the boot loudly,
+        // before anything is built; the seed below follows the profile, not what was built.
+        dev.nexus.service.vectors.EmbeddingProfile embedProfile;
+        try {
+            embedProfile = dev.nexus.service.vectors.EmbeddingProfile.resolve(
+                    System.getenv(dev.nexus.service.vectors.EmbeddingProfile.ENV), voyagePresent);
+        } catch (IllegalArgumentException e) {
+            ds.close();
+            log.error("event=embed_profile_invalid error=\"{}\"", e.getMessage());
+            System.exit(1);
+            return;
+        }
+        log.info("event=embed_profile_resolved profile={} source={}", embedProfile.value(),
+                dev.nexus.service.vectors.EmbeddingProfile.parse(
+                        System.getenv(dev.nexus.service.vectors.EmbeddingProfile.ENV)).isPresent()
+                        ? "NX_EMBED_PROFILE" : "unset_default");
         if (presence.bgePartial()) {
             // nexus-ngvxb (RDR-210 TD1, Sam 2026-10-18): exactly one of the bge model and its
             // tokenizer is on disk. Never construct Bge768Embedder or touch ORT for it.
@@ -292,6 +314,15 @@ public final class Main {
                     presence.bgeDetail());
             System.exit(1);
         }
+        // A choice this boot cannot serve boots DEGRADED, never refused (Sam, RDR-210 gate
+        // round 1): the profile is still seeded with the chosen family's tokens, the other
+        // family serves, and only the chosen family's collections get the 422. The full
+        // dual banner and the doctor row are Step 4's.
+        embedProfile.degradation(presence).ifPresent(d -> log.warn(
+                "event=embed_profile_degraded profile={} missing=\"{}\" serving={} "
+                + "{}_collections=REFUSED_422 hint=\"{}\"",
+                d.chosen().value(), d.missingPiece(), d.serving().value(),
+                d.refusedCollections(), d.remedy()));
 
         // The local (bge) member, present only when its files are. ONNX Runtime is
         // touched ONLY inside this block: the cloud shape (key, no model files) never
@@ -348,8 +379,8 @@ public final class Main {
         var qryLocal = bge == null ? null
                 : new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, true);
         String routerKey = voyagePresent ? voyageKey : null;
-        docEmbedRouter = new EmbedderRouter(docLocal, routerKey, "document");
-        qryEmbedRouter = new EmbedderRouter(qryLocal, routerKey, "query");
+        docEmbedRouter = new EmbedderRouter(docLocal, routerKey, "document", embedProfile);
+        qryEmbedRouter = new EmbedderRouter(qryLocal, routerKey, "query", embedProfile);
 
         if (voyagePresent) {
             // Voyage present (Voyage-only on the cloud shape, nexus-0n7uc: no local ONNX
@@ -390,8 +421,8 @@ public final class Main {
         var tenantScope = new TenantScope(ds);
 
         // Embedding profile (RDR-204 Phase 1, bead nexus-ft04v.6): the engine is
-        // the only writer of nexus.embedding_profile, and this mode decision
-        // (Voyage vs local, just resolved above) IS the profile. Seed the LOCAL
+        // the only writer of nexus.embedding_profile, and the profile (NX_EMBED_PROFILE,
+        // resolved above; the routers hold it) IS what is seeded. Seed the LOCAL
         // tenant's row for every content type now, after the routers exist —
         // idempotent (a second boot in the same mode changes nothing; a boot
         // after a config-driven mode switch overwrites every row). Fail loud,
