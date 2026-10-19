@@ -26,6 +26,7 @@ turn the safety net into a pass over nothing.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -74,7 +75,7 @@ def _ant_jar(name: str) -> Path:
 @pytest.fixture(scope="module")
 def ant_classpath() -> str:
     assert shutil.which("java"), "no java on PATH: this file runs Ant and must not skip"
-    return ":".join(str(_ant_jar(n)) for n in _ANT_JARS)
+    return os.pathsep.join(str(_ant_jar(n)) for n in _ANT_JARS)
 
 
 # ------------------------------------------------------------- pom extraction
