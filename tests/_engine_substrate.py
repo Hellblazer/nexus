@@ -79,6 +79,7 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import random
 import re
 import shutil
@@ -89,7 +90,7 @@ import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,9 +140,192 @@ _lock = threading.Lock()
 _state: dict | None = None
 _boot_error: str | None = None
 
-#: Glob for a substrate pgdata cluster dir, matched under the process
-#: tempdir root (``tempfile.gettempdir()`` — same default ``mkdtemp`` uses).
+#: Glob for a substrate pgdata cluster dir, matched under every root in
+#: :func:`substrate_pg_roots` (the process tempdir and the tmpfs root).
 _STRAY_GLOB = "nexus_t2_substrate_pg_*"
+
+#: Where substrate clusters live (nexus-me3gm). The per-worker Postgres clusters
+#: wrote about 2.1 TB/day to chas's only NVMe: catalog churn from per-test tenants
+#: drives WAL and heap writes, and nothing in a throwaway cluster needs to survive
+#: a reboot. On Linux the clusters therefore go on tmpfs (``/dev/shm``) when it is
+#: tmpfs, writable and has room; everywhere else they stay under the process
+#: tempdir. ``NX_TEST_PG_ROOT=<dir>`` picks a root outright and
+#: ``NX_TEST_PG_ROOT=default`` forces the old tempdir root (and, for the sweep,
+#: leaves the tmpfs root alone).
+_PG_ROOT_ENV = "NX_TEST_PG_ROOT"
+_SHM_DIR = Path("/dev/shm")
+_TMPFS_DIR_PREFIX = "nexus-test-pg"
+
+#: Free space a tmpfs must offer before clusters are put on it: 2 GiB plus a
+#: 1 GiB margin. Measured footprint of one booted cluster is in the bead
+#: (nexus-me3gm); 32 chas workers at the 64 MB WAL cap fit inside it.
+_TMPFS_MIN_FREE_BYTES = 3 * 1024**3
+
+#: ``sun_path`` holds 107 bytes plus the NUL on Linux. A cluster dir is
+#: ``<root>/nexus_t2_substrate_pg_<8 random>`` and the socket ``/.s.PGSQL.<port>``
+#: inside it, so the root may use ``107 - this`` bytes.
+_SOCKET_PATH_MAX = 107
+_SOCKET_SUFFIX_RESERVE = len("/nexus_t2_substrate_pg_") + 8 + len("/.s.PGSQL.65535")
+
+#: Appended to the substrate's ``postgresql.conf`` (nexus-me3gm). Caps pg_wal at
+#: about 64 MB instead of the 1 GB default. ``wal_level = minimal`` requires
+#: ``max_wal_senders = 0`` and ``archive_mode = off`` (the default). Nothing in
+#: ``tests/`` or ``service/src/test`` uses replication, logical decoding or
+#: ``pg_basebackup`` against this cluster (grepped 2026-10-19).
+WAL_CAP_CONF = (
+    "wal_level = minimal\n"
+    "max_wal_senders = 0\n"
+    "max_wal_size = 64MB\n"
+    "min_wal_size = 32MB\n"
+    "wal_keep_size = 0\n"
+)
+
+
+def _current_uid() -> str:
+    """The service identity (``str(os.getuid())`` on POSIX); every raw ``getuid``
+    in a test-support module is a lint failure (tests/test_service_identity_lint.py)."""
+    from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred: keep this module's import light
+
+    return service_identity()
+
+
+def _tmpfs_candidate(uid: int | str, shm_dir: Path = _SHM_DIR) -> Path:
+    return shm_dir / f"{_TMPFS_DIR_PREFIX}-{uid}"
+
+
+def _mount_fstype(mounts_text: str, mountpoint: str) -> str | None:
+    """The filesystem type ``/proc/mounts``-style text gives *mountpoint*, last
+    entry winning (a later mount shadows an earlier one)."""
+    found: str | None = None
+    for line in mounts_text.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == mountpoint:
+            found = fields[2]
+    return found
+
+
+def _socket_path_fits(root: Path) -> bool:
+    return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _SOCKET_PATH_MAX
+
+
+def choose_pg_root(
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    mounts_text: str | None = None,
+    free_bytes: Callable[[Path], int] | None = None,
+    writable: Callable[[Path], bool] | None = None,
+    uid: int | str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> Path | None:
+    """The directory substrate clusters are created under, or ``None`` for the
+    process tempdir. Pure decision: it creates nothing. Every input is injectable
+    so the outcomes (override, forced default, tmpfs, no tmpfs, too small) are
+    unit tests, not machine state.
+    """
+    env = os.environ if env is None else env
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    if override == "default":
+        return None
+    if override:
+        root = Path(override).expanduser()
+        if not _socket_path_fits(root):
+            raise ValueError(
+                f"{_PG_ROOT_ENV}={root} is too long: a substrate cluster's unix "
+                f"socket path under it would pass the {_SOCKET_PATH_MAX}-byte "
+                f"sun_path limit (root may use at most "
+                f"{_SOCKET_PATH_MAX - _SOCKET_SUFFIX_RESERVE} bytes)"
+            )
+        return root
+    if (platform.system() if system is None else system) != "Linux":
+        return None
+    if mounts_text is None:
+        try:
+            mounts_text = Path("/proc/mounts").read_text()
+        except OSError:
+            return None
+    if _mount_fstype(mounts_text, str(shm_dir)) != "tmpfs":
+        return None
+    can_write = writable or (lambda p: os.access(p, os.W_OK | os.X_OK))
+    if not can_write(shm_dir):
+        return None
+    try:
+        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(shm_dir)
+    except OSError:
+        return None
+    if free < _TMPFS_MIN_FREE_BYTES:
+        return None
+    root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
+    return root if _socket_path_fits(root) else None
+
+
+def pg_cluster_parent() -> str | None:
+    """:func:`choose_pg_root` plus creating the directory (0700, owned by us).
+    ``None`` means "use the tempdir". A tmpfs root that cannot be made private
+    falls back to the tempdir with a warning; an explicit ``NX_TEST_PG_ROOT``
+    that cannot be made fails loud."""
+    root = choose_pg_root()
+    if root is None:
+        return None
+    explicit = bool((os.environ.get(_PG_ROOT_ENV) or "").strip())
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not explicit:
+            # /dev/shm is world-writable: refuse a dir someone else pre-created
+            # under our predictable name.
+            st = root.stat()
+            if st.st_uid != int(_current_uid()):
+                raise PermissionError(f"{root} is owned by uid {st.st_uid}")
+            if st.st_mode & 0o077:
+                root.chmod(0o700)
+    except OSError as exc:
+        if explicit:
+            raise
+        warnings.warn(
+            f"nexus test substrate: cannot use {root} for clusters ({exc}); "
+            f"falling back to the tempdir",
+            stacklevel=2,
+        )
+        return None
+    _log.info("nexus_t2_substrate.cluster_root", root=str(root), explicit=explicit)
+    return str(root)
+
+
+def substrate_pg_roots(
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    uid: int | str | None = None,
+    tempdir: Path | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> list[Path]:
+    """Every root the stray-cluster sweep must look in: the tempdir (where the
+    older clusters live) plus wherever :func:`choose_pg_root` may have put them.
+    A tmpfs root is included whenever its directory EXISTS, even if today's choice
+    would not use it (a crashed run's cluster is RAM until reaped).
+    ``NX_TEST_PG_ROOT=default`` opts out of the tmpfs root.
+    """
+    env = os.environ if env is None else env
+    base = Path(tempfile.gettempdir()) if tempdir is None else tempdir
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    roots: list[Path] = []
+    if override == "default":
+        pass
+    elif override:
+        roots.append(Path(override).expanduser())
+    elif (platform.system() if system is None else system) == "Linux":
+        cand = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
+        if cand.is_dir():
+            roots.append(cand)
+    roots.append(base)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for r in roots:
+        key = r.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
 
 #: Sidecar filename, written INSIDE the pgdata dir so it is glob-scoped by
 #: construction and removed for free whenever the cluster dir is.
@@ -1042,6 +1226,7 @@ def _boot() -> dict:
         # the 21 empty cluster dirs the previous shape stranded here.
         pgdata = _initdb_cluster(
             bin_dir, prefix="nexus_t2_substrate_pg_", username=pg_user,
+            parent_dir=pg_cluster_parent(),
         )
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
@@ -1052,6 +1237,8 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
+            # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster).
+            f.write(WAL_CAP_CONF)
         pg_log = os.path.join(pgdata, "pg.log")
         for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
             # A lost race leaves its failure in pg.log; start each attempt on a clean log
@@ -1377,21 +1564,25 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
     to the next cluster; nothing here may block substrate boot.
     """
     result = SweepResult()
-    root = tmp_root if tmp_root is not None else Path(tempfile.gettempdir())
-    if not root.exists():
-        return result
-    for cluster_dir in sorted(root.glob(_STRAY_GLOB)):
-        if not cluster_dir.is_dir():
+    # No explicit root: every root clusters may live under (the tempdir AND the
+    # tmpfs root, nexus-me3gm), so a crash-orphaned cluster in RAM is reaped
+    # exactly like one on disk.
+    roots = [tmp_root] if tmp_root is not None else substrate_pg_roots()
+    for root in roots:
+        if not root.exists():
             continue
-        try:
-            _sweep_one_cluster(cluster_dir, result)
-        except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
-            result.errors.append(str(cluster_dir))
-            warnings.warn(
-                f"nexus test substrate sweep: error processing "
-                f"{cluster_dir}: {exc}",
-                stacklevel=2,
-            )
+        for cluster_dir in sorted(root.glob(_STRAY_GLOB)):
+            if not cluster_dir.is_dir():
+                continue
+            try:
+                _sweep_one_cluster(cluster_dir, result)
+            except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
+                result.errors.append(str(cluster_dir))
+                warnings.warn(
+                    f"nexus test substrate sweep: error processing "
+                    f"{cluster_dir}: {exc}",
+                    stacklevel=2,
+                )
     return result
 
 

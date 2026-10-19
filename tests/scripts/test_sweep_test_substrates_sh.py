@@ -42,8 +42,13 @@ def _write_sidecar(cluster_dir: Path, **fields) -> None:
     (cluster_dir / "nexus_substrate_sidecar.json").write_text(json.dumps(fields))
 
 
-def _run_script(fake_tmpdir: Path) -> subprocess.CompletedProcess:
-    env = {**os.environ, "TMPDIR": str(fake_tmpdir)}
+def _run_script(
+    fake_tmpdir: Path, pg_root: str = "default",
+) -> subprocess.CompletedProcess:
+    # NX_TEST_PG_ROOT=default keeps the sweep off the box's real /dev/shm root
+    # (nexus-me3gm), where a concurrent session's live clusters would otherwise
+    # show up in this test's counts.
+    env = {**os.environ, "TMPDIR": str(fake_tmpdir), "NX_TEST_PG_ROOT": pg_root}
     return subprocess.run(
         [str(SCRIPT)], cwd=REPO_ROOT, env=env,
         capture_output=True, text=True, timeout=60,
@@ -119,3 +124,28 @@ class TestRefusesALiveOwnerCluster:
             "a live owner's cluster must never be removed"
         )
         assert (cluster_dir / "nexus_substrate_sidecar.json").exists()
+
+
+class TestSweepsTheTmpfsRoot:
+    def test_dead_owner_cluster_under_the_pg_root_is_reaped(self, tmp_path) -> None:
+        """A crash-orphaned cluster in the tmpfs root is RAM until reaped
+        (nexus-me3gm): the script must look there, not only in the tempdir."""
+        fake_tmpdir = tmp_path / "empty_tmp"
+        fake_tmpdir.mkdir()
+        pg_root = tmp_path / "shm_root"
+        cluster_dir = pg_root / "nexus_t2_substrate_pg_shmtest001"
+        _write_sidecar(
+            cluster_dir,
+            owner_pytest_pid=_dead_pid(),
+            postmaster_pid=_dead_pid(),
+            postmaster_cmdline="",
+            engine_pid=_dead_pid(),
+            engine_cmdline="",
+        )
+
+        result = _run_script(fake_tmpdir, pg_root=str(pg_root))
+
+        assert result.returncode == 0, result.stderr
+        assert f"root: {pg_root}" in result.stdout
+        assert "reaped (dead owner, killed + removed): 1" in result.stdout
+        assert not cluster_dir.exists()
