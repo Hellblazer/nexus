@@ -37,14 +37,64 @@ class DdlLogParserTest {
     }
 
     @Test
-    void the_golden_log_splits_migration_from_tests() throws IOException {
+    void the_golden_log_splits_boot_and_migration_from_tests_and_measures_the_wal() throws IOException {
         DdlLogParser.Parsed parsed = DdlLogParser.parse(resource("golden-pg-log.txt"));
         JsonNode expected = new ObjectMapper().readTree(resource("golden.json"));
-        assertThat(asJson(DdlLogParser.tally(parsed.entries().stream().filter(DdlLogParser.Entry::beforeMark).toList())))
+        assertThat(asJson(DdlLogParser.tally(parsed.entries().stream().filter(DdlLogParser.Entry::boot).toList())))
+            .isEqualTo(expected.get("boot"));
+        assertThat(asJson(DdlLogParser.tally(
+            parsed.entries().stream().filter(e -> e.beforeMark() && !e.boot()).toList())))
             .isEqualTo(expected.get("migration"));
         assertThat(asJson(DdlLogParser.tally(parsed.entries().stream().filter(e -> !e.beforeMark()).toList())))
             .isEqualTo(expected.get("tests"));
-        assertThat(parsed.marks()).containsExactly("ready");
+        assertThat(parsed.marks()).containsExactly("start", "ready", "end");
+        assertThat(asJson(DdlLogParser.walSplit(parsed.stats()))).isEqualTo(expected.get("wal"));
+    }
+
+    @Test
+    void a_phase_whose_marks_are_not_both_in_the_log_is_null_not_zero() {
+        String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
+            + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=250 dbsize=-1\n";
+        java.util.Map<String, Long> wal = DdlLogParser.walSplit(DdlLogParser.parse(log).stats());
+        assertThat(wal.get("migration_bytes")).isEqualTo(150L);
+        assertThat(wal.get("tests_bytes")).isNull();
+        assertThat(wal.get("total_bytes")).isNull();
+        assertThat(wal.get("dbsize_growth_bytes")).isNull();
+    }
+
+    @Test
+    void statements_that_fire_no_event_hold_no_claim_over_a_later_nested_event() {
+        for (String sql : List.of(
+            "GRANT svc TO bob", "REVOKE ADMIN OPTION FOR svc FROM bob", "GRANT CONNECT ON DATABASE d TO r",
+            "REVOKE CONNECT ON DATABASE d FROM r", "GRANT SET ON PARAMETER work_mem TO r",
+            "GRANT CREATE ON TABLESPACE pg_default TO r", "COMMENT ON DATABASE d IS 'x'",
+            "COMMENT ON ROLE r IS 'x'", "CLUSTER t USING i", "REASSIGN OWNED BY a TO b",
+            "ALTER ROLE r SET work_mem='5MB'", "DROP ROLE r")) {
+            String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  statement: " + sql + "\n"
+                + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl: CREATE TABLE\n";
+            assertThat(DdlLogParser.parse(log).entries()).as(sql).hasSize(2);
+        }
+    }
+
+    @Test
+    void statements_that_do_fire_an_event_are_still_one_command() {
+        for (String sql : List.of(
+            "GRANT SELECT ON t TO r", "REVOKE SELECT ON t FROM r", "GRANT USAGE ON SCHEMA public TO r",
+            "GRANT ALL ON ALL TABLES IN SCHEMA public TO r", "COMMENT ON TABLE t IS 'x'",
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO r", "DROP OWNED BY r")) {
+            String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  statement: " + sql + "\n"
+                + "2026-10-19 05:00:00.101 UTC [7] db=x LOG:  nx_ddl: GRANT\n";
+            assertThat(DdlLogParser.parse(log).entries()).as(sql).hasSize(1);
+        }
+    }
+
+    @Test
+    void reindex_is_never_logged_so_its_event_is_one_nested_command() {
+        String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl: REINDEX\n";
+        List<DdlLogParser.Entry> entries = DdlLogParser.parse(log).entries();
+        assertThat(entries).hasSize(1);
+        assertThat(entries.get(0).nested()).isTrue();
+        assertThat(entries.get(0).tag()).isEqualTo("REINDEX");
     }
 
     @Test
@@ -82,7 +132,8 @@ class DdlLogParserTest {
         String log = String.join("\n", resource("golden-pg-log.txt").lines()
             .filter(l -> !l.contains("nx_ddl_mark")).toList());
         List<DdlLogParser.Entry> entries = DdlLogParser.parse(log).entries();
-        assertThat(entries).hasSize(17).allMatch(DdlLogParser.Entry::beforeMark);
+        assertThat(entries).hasSize(29).allMatch(DdlLogParser.Entry::beforeMark)
+            .noneMatch(DdlLogParser.Entry::boot);
     }
 
     @Test
@@ -101,34 +152,56 @@ class DdlLogParserTest {
     @Test
     void folding_logs_sums_into_buckets_and_attributes_databases_to_classes() throws IOException {
         DdlCounts.Totals totals = new DdlCounts.Totals(); // not the fork's: the real file must stay real
-        totals.noteDatabase("nexus_test_1", "SomeIntegrationTest", false);
+        totals.noteDatabase("nexus_test_1", "SomeIntegrationTest", false, 3_000L);
+        totals.noteRelease("nexus_test_1", 4_250L);
         totals.fold(resource("golden-pg-log.txt"), true, "unused");
         totals.fold(resource("golden-pg-log.txt"), false, "GoldenDedicatedTest");
-        JsonNode out = asJson(totals.snapshot());
+        JsonNode out = asJson(totals.snapshot(2));
+        assertThat(out.at("/buckets/boot/total").asLong()).as("boot of both containers, never counted below").isEqualTo(6);
         assertThat(out.at("/buckets/shared_migration/total").asLong()).isEqualTo(9);
-        assertThat(out.at("/buckets/shared_tests/total").asLong()).isEqualTo(8);
-        assertThat(out.at("/buckets/dedicated/total").asLong()).isEqualTo(17);
+        assertThat(out.at("/buckets/shared_tests/total").asLong()).isEqualTo(17);
+        assertThat(out.at("/buckets/dedicated/total").asLong()).isEqualTo(26);
         assertThat(out.at("/containers/shared").asLong()).isEqualTo(1);
         assertThat(out.at("/containers/dedicated").asLong()).isEqualTo(1);
+        assertThat(out.at("/containers_unread").asLong()).isEqualTo(2);
         assertThat(out.at("/ready_mark_seen").asBoolean()).isTrue();
-        assertThat(out.at("/per_class/GoldenDedicatedTest/ddl").asLong()).isEqualTo(17);
+        assertThat(out.at("/wal/shared_migration_bytes").asLong()).isEqualTo(1_000);
+        assertThat(out.at("/wal/shared_tests_bytes").asLong()).isEqualTo(4_500);
+        assertThat(out.at("/wal/dedicated_bytes").asLong()).isEqualTo(5_500);
+        assertThat(out.at("/wal/dbsize_growth_bytes").asLong()).isEqualTo(3_400);
+        assertThat(out.at("/wal/incomplete_containers").asLong()).isZero();
+        assertThat(out.at("/wal/unreleased_databases").asLong()).isZero();
+        assertThat(out.at("/per_class/GoldenDedicatedTest/ddl").asLong()).isEqualTo(26);
+        assertThat(out.at("/per_class/GoldenDedicatedTest/wal_bytes").asLong()).isEqualTo(5_500);
         assertThat(out.at("/per_class/SomeIntegrationTest/databases").asLong()).isEqualTo(1);
-        // the four commands the log runs in nexus_test_1 (a GRANT, a DROP, two CREATE INDEX)
-        assertThat(out.at("/per_class/SomeIntegrationTest/ddl").asLong()).isEqualTo(4);
+        assertThat(out.at("/per_class/SomeIntegrationTest/wal_bytes").asLong())
+            .as("the cluster's WAL between the class's CREATE DATABASE and the end of its drop").isEqualTo(1_250);
+        // the eleven commands the log runs in nexus_test_1
+        assertThat(out.at("/per_class/SomeIntegrationTest/ddl").asLong()).isEqualTo(11);
+    }
+
+    @Test
+    void a_container_whose_marks_are_missing_is_incomplete_not_free() {
+        DdlCounts.Totals totals = new DdlCounts.Totals();
+        totals.fold("2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl: CREATE TABLE\n", false, "NoMarksTest");
+        totals.fold("2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl: CREATE TABLE\n", true, "unused");
+        JsonNode out = asJson(totals.snapshot());
+        assertThat(out.at("/wal/incomplete_containers").asLong()).isEqualTo(2);
+        assertThat(out.at("/ready_mark_seen").asBoolean()).isFalse();
     }
 
     @Test
     void an_empty_database_s_commands_are_their_own_bucket_and_still_attributed_to_its_class() throws IOException {
         DdlCounts.Totals totals = new DdlCounts.Totals();
-        totals.noteDatabase("nexus_test_1", "SomeMigrationTest", true);
+        totals.noteDatabase("nexus_test_1", "SomeMigrationTest", true, -1);
         totals.fold(resource("golden-pg-log.txt"), true, "unused");
         JsonNode out = asJson(totals.snapshot());
         assertThat(out.at("/buckets/shared_migration/total").asLong()).isEqualTo(9);
-        assertThat(out.at("/buckets/shared_empty/total").asLong()).as("the four commands run in nexus_test_1").isEqualTo(4);
-        assertThat(out.at("/buckets/shared_tests/total").asLong()).as("the rest of the tests' time").isEqualTo(4);
+        assertThat(out.at("/buckets/shared_empty/total").asLong()).as("the eleven commands run in nexus_test_1").isEqualTo(11);
+        assertThat(out.at("/buckets/shared_tests/total").asLong()).as("the rest of the tests' time").isEqualTo(6);
         assertThat(out.at("/buckets/dedicated/total").asLong()).isZero();
         assertThat(out.at("/per_class/SomeMigrationTest/databases").asLong()).isEqualTo(1);
-        assertThat(out.at("/per_class/SomeMigrationTest/ddl").asLong()).isEqualTo(4);
+        assertThat(out.at("/per_class/SomeMigrationTest/ddl").asLong()).isEqualTo(11);
     }
 
     @Test
@@ -137,6 +210,9 @@ class DdlLogParserTest {
         assertThat(block).startsWith("DO $nxdo$ BEGIN EXECUTE $nxq$").endsWith("$nxq$; END $nxdo$");
         assertThat(block).contains("CREATE EVENT TRIGGER nx_ddl_probe", "nx_ddl_probe.fire()", "nx_ddl_probe.mark(");
         assertThat(block).doesNotContain("\\connect").doesNotContain("\\set").doesNotContain("\\gset");
+        // The start mark is the container's own, run after the install: not part of an empty database's block.
+        assertThat(block).doesNotContain("mark('start')").doesNotContain("nx-ddl-probe-end");
+        assertThat(block).contains("wal=% dbsize=%");
         // The probe is installed once only: the template1 half of the file is not in the block.
         assertThat(block.split("CREATE EVENT TRIGGER", -1)).hasSize(2);
     }

@@ -23,22 +23,48 @@ final class DdlLogParser {
 
     static final String EVENT_PREFIX = "nx_ddl: ";
     static final String MARK_PREFIX = "nx_ddl_mark: ";
+    static final String START_LABEL = "start";
     static final String READY_LABEL = "ready";
+    static final String END_LABEL = "end";
     static final List<String> KINDS = List.of("create_table", "create_index", "drop", "alter", "other");
 
-    /** One counted command. {@code beforeMark}: logged before the {@code ready} mark. */
-    record Entry(String db, String kind, String tag, boolean nested, boolean beforeMark) {}
+    /**
+     * One counted command. {@code beforeMark}: logged before the {@code ready} mark. {@code boot}: logged
+     * before the {@code start} mark (the probe's own install and the container bootstrap: never counted);
+     * always false for a log with no {@code start} mark.
+     */
+    record Entry(String db, String kind, String tag, boolean nested, boolean beforeMark, boolean boot) {}
 
-    record Parsed(List<Entry> entries, List<String> marks) {}
+    /**
+     * A {@code nx_ddl_mark} line: the WAL position (bytes since LSN 0/0) and the summed size of every
+     * database when the mark ran. Null when the line did not carry the figure.
+     */
+    record MarkStat(String label, Long wal, Long dbsize) {}
+
+    record Parsed(List<Entry> entries, List<String> marks, List<MarkStat> stats) {}
 
     private static final Pattern LINE = Pattern.compile(
         "^(\\d{4}-\\d\\d-\\d\\d) (\\d\\d:\\d\\d:\\d\\d)(?:\\.(\\d+))? (\\S+) \\[(\\d+)\\] db=(\\S*) ([A-Z]+[0-9]*):  (.*)$");
     private static final Pattern LOGGED = Pattern.compile("^(?:statement|execute [^:]*): (.*)$", Pattern.DOTALL);
     private static final java.util.Set<String> CREATE_MODIFIERS = java.util.Set.of(
         "OR", "REPLACE", "UNIQUE", "TEMP", "TEMPORARY", "UNLOGGED", "GLOBAL", "LOCAL");
+    /**
+     * Statements {@code log_statement='ddl'} logs that never fire the event trigger, so they must not claim
+     * the next event of their backend (measured on PG 17.5): shared-object DDL, the trigger itself, ALTER
+     * SYSTEM, REASSIGN OWNED, CLUSTER, COMMENT ON a shared object, and GRANT/REVOKE of a role membership (no
+     * ON) or on a database, tablespace or parameter. REINDEX is the opposite: it fires the event but is not
+     * logged, so it is counted once, as nested. Mirrors _NO_EVENT in tests/_ddl_counter.py.
+     */
     private static final Pattern NO_EVENT = Pattern.compile(
-        "^(?:CREATE|ALTER|DROP)\\s+(?:DATABASE|ROLE|USER|GROUP|TABLESPACE|EVENT\\s+TRIGGER)\\b|^ALTER\\s+SYSTEM\\b",
-        Pattern.CASE_INSENSITIVE);
+        "^(?:CREATE|ALTER|DROP)\\s+(?:DATABASE|ROLE|USER|GROUP|TABLESPACE|EVENT\\s+TRIGGER)\\b"
+            + "|^ALTER\\s+SYSTEM\\b"
+            + "|^REASSIGN\\s+OWNED\\b"
+            + "|^CLUSTER\\b"
+            + "|^COMMENT\\s+ON\\s+(?:DATABASE|ROLE|TABLESPACE)\\b"
+            + "|^(?:GRANT|REVOKE)\\b(?:(?!\\bON\\b)(?!\\b(?:TO|FROM)\\b).)*\\b(?:TO|FROM)\\b"
+            + "|^(?:GRANT|REVOKE)\\b(?:(?!\\bON\\b).)*\\bON\\s+(?:DATABASE|TABLESPACE|PARAMETER)\\b",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern START_MARK = Pattern.compile("\\bnx_ddl_mark: " + START_LABEL + "\\b");
     private static final Pattern COMMENT = Pattern.compile("\\A(?:\\s+|--[^\\n]*\\n?|/\\*.*?\\*/)+", Pattern.DOTALL);
     private static final Pattern WORD = Pattern.compile("[A-Za-z_]+");
 
@@ -104,11 +130,73 @@ final class DdlLogParser {
         return w.size() > 1 ? first + " " + w.get(1) : first;
     }
 
+    private static Long figure(String text) {
+        if (text == null) {
+            return null;
+        }
+        try {
+            long v = Long.parseLong(text);
+            return v >= 0 ? v : null; // -1 is the probe's "could not read"
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static MarkStat parseMark(String msg) {
+        String[] parts = msg.substring(MARK_PREFIX.length()).strip().split("\\s+");
+        Map<String, String> fields = new HashMap<>();
+        for (int i = 1; i < parts.length; i++) {
+            int eq = parts[i].indexOf('=');
+            if (eq > 0) {
+                fields.put(parts[i].substring(0, eq), parts[i].substring(eq + 1));
+            }
+        }
+        return new MarkStat(parts[0], figure(fields.get("wal")), figure(fields.get("dbsize")));
+    }
+
+    private static Long minus(MarkStat later, MarkStat earlier, boolean wal) {
+        if (later == null || earlier == null) {
+            return null;
+        }
+        Long a = wal ? later.wal() : later.dbsize();
+        Long b = wal ? earlier.wal() : earlier.dbsize();
+        return a == null || b == null ? null : a - b;
+    }
+
+    /**
+     * WAL bytes and database growth by phase, from the {@code start}, {@code ready} and {@code end} marks
+     * (the first of each, except {@code end}, which is the last). A phase whose two marks are not both in
+     * the log is null, never 0: an unmeasured phase must not read as a free one. Mirrors wal_split.
+     */
+    static Map<String, Long> walSplit(List<MarkStat> stats) {
+        MarkStat start = null;
+        MarkStat ready = null;
+        MarkStat end = null;
+        for (MarkStat s : stats) {
+            if (s.label().equals(START_LABEL) && start == null) {
+                start = s;
+            } else if (s.label().equals(READY_LABEL) && ready == null) {
+                ready = s;
+            } else if (s.label().equals(END_LABEL)) {
+                end = s;
+            }
+        }
+        Map<String, Long> out = new LinkedHashMap<>();
+        out.put("migration_bytes", minus(ready, start, true));
+        out.put("tests_bytes", minus(end, ready, true));
+        out.put("total_bytes", minus(end, start, true));
+        out.put("dbsize_growth_bytes", minus(end, ready, false));
+        return out;
+    }
+
     static Parsed parse(String log) {
         List<Entry> entries = new ArrayList<>();
         List<String> marks = new ArrayList<>();
+        List<MarkStat> stats = new ArrayList<>();
         Map<Integer, Boolean> claim = new HashMap<>();
         boolean seenMark = false;
+        boolean hasStart = START_MARK.matcher(log).find();
+        boolean seenStart = false;
         String[] lines = log.split("\\R", -1);
         for (int i = 0; i < lines.length; i++) {
             Matcher m = LINE.matcher(lines[i]);
@@ -127,18 +215,21 @@ final class DdlLogParser {
                 continue;
             }
             if (msg.startsWith(MARK_PREFIX)) {
-                String label = msg.substring(MARK_PREFIX.length()).strip();
-                marks.add(label);
-                seenMark = seenMark || label.equals(READY_LABEL);
+                MarkStat stat = parseMark(msg);
+                marks.add(stat.label());
+                stats.add(stat);
+                seenMark = seenMark || stat.label().equals(READY_LABEL);
+                seenStart = seenStart || stat.label().equals(START_LABEL);
                 continue;
             }
             boolean before = !seenMark;
+            boolean boot = hasStart && !seenStart;
             if (msg.startsWith(EVENT_PREFIX)) {
                 String tag = msg.substring(EVENT_PREFIX.length()).strip();
                 if (claim.remove(pid) != null) {
                     continue; // the command the client sent; already counted from its statement line
                 }
-                entries.add(new Entry(db, classify(tag), tagOf(tag), true, before));
+                entries.add(new Entry(db, classify(tag), tagOf(tag), true, before, boot));
                 continue;
             }
             Matcher logged = LOGGED.matcher(msg);
@@ -160,9 +251,9 @@ final class DdlLogParser {
             } else {
                 claim.put(pid, Boolean.TRUE);
             }
-            entries.add(new Entry(db, classify(sql), tagOf(sql), false, before));
+            entries.add(new Entry(db, classify(sql), tagOf(sql), false, before, boot));
         }
-        return new Parsed(entries, marks);
+        return new Parsed(entries, marks, stats);
     }
 
     /** {@code total/toplevel/nested/by_kind}, the same shape the Python tally writes. */

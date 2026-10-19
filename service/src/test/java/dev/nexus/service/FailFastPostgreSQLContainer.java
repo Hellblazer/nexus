@@ -122,8 +122,14 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
 
     @Override
     public void stop() {
-        DdlCounts.record(this);
-        super.stop();
+        try {
+            DdlCounts.record(this);
+        } catch (RuntimeException e) {
+            // Counting is a diagnostic: whatever it hits, the container still has to stop.
+            System.err.println("nexus-sz651: recording a container's DDL failed: " + e);
+        } finally {
+            super.stop();
+        }
     }
 
     /**

@@ -102,7 +102,7 @@ from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests._child_process import kill_group, popen_in_group, stop_group
-from tests._ddl_counter import LOG_CONF, PROBE_SQL, READY_LABEL, mark_sql
+from tests._ddl_counter import LOG_CONF, PROBE_SQL, READY_LABEL, START_LABEL, mark_sql
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -1507,13 +1507,18 @@ def _jar_ready_reason(jar: Path) -> str | None:
     return jar_freshness_skip_reason(jar)
 
 
-def _psql_command(bin_dir: Path, pg_port: int, pg_user: str, sql: str) -> None:
+def _psql_command(
+    bin_dir: Path, pg_port: int, pg_user: str, sql: str, *, timeout: float | None = None,
+) -> None:
     """Run *sql* in the substrate database as the cluster owner; RuntimeError on failure."""
-    proc = subprocess.run(
-        [str(bin_dir / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(pg_port),
-         "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [str(bin_dir / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"psql timed out after {timeout}s") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"psql failed: {proc.stderr.strip()[-300:]}")
 
@@ -1722,6 +1727,13 @@ def _boot() -> dict:
         # nexus-sz651: before the engine migrates, so its DDL (and every nested leaf a
         # tenant mint creates) reaches pg.log through the event trigger.
         _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)
+        # Everything in pg.log before this mark is boot (the bootstrap and the probe's own
+        # install, never counted); the engine's migration is after it. Best effort: a missing
+        # mark leaves the run unmeasured, which the ratchet refuses, but must not fail the boot.
+        try:
+            _psql_command(bin_dir, pg_port, pg_user, mark_sql(START_LABEL))
+        except RuntimeError as exc:
+            warnings.warn(f"nexus test substrate: DDL start mark failed: {exc}", stacklevel=2)
     except BaseException:
         _kill_pg()
         raise

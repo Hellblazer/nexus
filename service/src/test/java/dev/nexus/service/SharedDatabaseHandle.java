@@ -135,6 +135,8 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
              var st = admin.createStatement()) {
             admin.setAutoCommit(true);
             st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\" WITH (FORCE)");
+            // nexus-sz651: the cluster's WAL position after this class's last write, for its bytes.
+            DdlCounts.noteRelease(dbName, DdlCounts.walBytes(admin));
         } catch (SQLException e) {
             LOG.warn("best-effort DROP DATABASE \"{}\" failed (nexus-yhmav shared-cluster handle) "
                 + "-- leaking a per-class database for the remainder of this fork's run; if this class declared "

@@ -5,6 +5,7 @@ package dev.nexus.service;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -293,6 +294,48 @@ class SharedClusterEmptyDatabaseTest {
         } finally {
             pg.stop();
         }
+    }
+
+    /**
+     * nexus-sz651: bytes written. The shared cluster logs a {@code start} mark (the container's init script)
+     * and a {@code ready} mark (the migrated template) with the WAL position, and {@code DdlCounts.markEnd}
+     * adds the {@code end} mark, so a migration's bytes and the tests' bytes are differences of positions.
+     * Non-vacuity: the work between {@code ready} and {@code end} here is a real table created and written
+     * in an empty database, and both phases must come out positive.
+     */
+    @Test
+    void theSharedClusterLogsWalPositionsAtItsStartReadyAndEndMarks() throws Exception {
+        PgContainerHelper.start().stop();
+        FailFastPostgreSQLContainer cluster = (FailFastPostgreSQLContainer) clusterOf();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.createTable("nx_sz651_bytes_probe").column("i", SQLDataType.INTEGER).execute();
+            ctx.insertInto(DSL.table(DSL.name("nx_sz651_bytes_probe"))).columns(DSL.field(DSL.name("i"), Integer.class))
+                .select(DSL.select(DSL.field(DSL.name("g", "i"), Integer.class))
+                    .from(DSL.generateSeries(1, 5000).as("g", "i"))).execute();
+            assertThat(DdlCounts.walBytes(su)).as("the position is readable").isPositive();
+        } finally {
+            pg.stop();
+        }
+        assertThat(DdlCounts.markEnd(cluster)).as("the end mark can be logged on a live cluster").isTrue();
+        DdlLogParser.Parsed parsed = null;
+        for (int attempt = 0; attempt < 30; attempt++) {
+            parsed = DdlLogParser.parse(cluster.getLogs());
+            if (parsed.marks().contains(DdlLogParser.END_LABEL)) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(parsed.marks()).startsWith(DdlLogParser.START_LABEL, DdlLogParser.READY_LABEL)
+            .contains(DdlLogParser.END_LABEL);
+        java.util.Map<String, Long> wal = DdlLogParser.walSplit(parsed.stats());
+        assertThat(wal.get("migration_bytes")).as("the Liquibase migration wrote WAL").isPositive();
+        assertThat(wal.get("tests_bytes")).as("the table and its rows wrote WAL").isPositive();
+        assertThat(wal.get("total_bytes")).isEqualTo(wal.get("migration_bytes") + wal.get("tests_bytes"));
+        assertThat(wal.get("dbsize_growth_bytes")).as("database sizes are readable").isNotNull();
+        assertThat(parsed.entries().stream().filter(DdlLogParser.Entry::boot).count())
+            .as("the probe's own install and the container bootstrap are boot, not counted").isPositive();
     }
 
     /** The commands the shared cluster's log attributes to {@code db}; with {@code expectSome}, read until the server flushed them. */

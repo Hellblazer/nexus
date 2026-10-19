@@ -174,8 +174,10 @@ final class SharedCluster {
         PostgreSQLContainer<?> c = ensureBootstrapped();
         String dbName = "nexus_test_" + DB_COUNTER.incrementAndGet();
         String holder = PgContainerHelper.callerClass();
+        long startLsn;
         try (Connection admin = controlConnection(c)) {
             admin.setAutoCommit(true);
+            startLsn = DdlCounts.walBytes(admin);
             requireRolesAbsent(admin, exclusiveRoles);
             try (var st = admin.createStatement()) {
                 // nexus-tyiht: cluster-wide role-level GUCs (ALTER ROLE ... SET with no
@@ -201,7 +203,7 @@ final class SharedCluster {
             // would go uncounted. nexus-sz651.
             installDdlProbe(c, dbName);
         }
-        DdlCounts.noteDatabase(dbName, DdlCounts.callerClass(), empty);
+        DdlCounts.noteDatabase(dbName, DdlCounts.callerClass(), empty, startLsn);
         for (String role : exclusiveRoles) {
             EXCLUSIVE_HOLDERS.put(role, holder);
         }
@@ -400,8 +402,9 @@ final class SharedCluster {
                         DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
                             new JdbcConnection(tsu)));
                     lb.update(new Contexts());
-                    // nexus-sz651: DDL logged before this line is the template's boot and
-                    // migration; after it, the clones and the tests' own DDL.
+                    // nexus-sz651: DDL and WAL logged before this line are the template's
+                    // migration; after it, the clones and the tests' own. Best effort: a missing
+                    // mark leaves the run unmeasured (the ratchet refuses it), never fails the boot.
                     DdlCounts.markReady(tsu);
                 } catch (Exception e) {
                     throw new SQLException("nexus-yhmav shared-cluster template migration failed", e);

@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""DDL-statements-per-run counter for the engine test substrate (nexus-sz651).
+"""Bytes-written and DDL-per-run counter for the engine test substrate (nexus-sz651).
 
-The test suites rebuild schema over and over (epic nexus-aca0q). This module
-makes the number visible: how many DDL statements one run executes, split into
-the migration the substrate boots with and the DDL the tests themselves cause,
-and by kind.
+The test suites rebuild schema over and over (epic nexus-aca0q), and what that costs is disk
+thrashing, so the TARGET is bytes written. This module counts two things per run, each split
+into the migration the substrate boots with and what the tests themselves cause:
+
+* WAL bytes the substrate cluster generated: the probe's ``mark()`` logs
+  ``pg_current_wal_lsn()`` (as a byte count) and the summed database size at the ``start``,
+  ``ready`` and ``end`` marks; ``ready - start`` is the migration and ``end - ready`` is the
+  tests. On a tmpfs cluster (every cluster here) WAL measures churn, not disk: it is the bytes
+  the server wrote, which a disk-backed cluster would put on the block device. The job
+  cgroup's ``io.stat`` ``wbytes`` is read around the run where readable (Linux, cgroup v2); it
+  is the real block-device figure, and only means something when the run owns its cgroup.
+* DDL statements, the secondary diagnostic that explains where the bytes come from, split by
+  kind.
 
 Two signals, because one is blind to the churn that matters:
 
@@ -21,16 +30,19 @@ Two signals, because one is blind to the churn that matters:
   ``log_statement`` covers.
 
 Counting rule (identical in ``DdlLogParser.java``; the two parsers share one
-golden log, ``tests/data/ddl_golden-pg-log.txt`` and its copy under
-``service/src/test/resources``): ``total = logged + nested``, where ``logged`` is
+golden log, ``tests/fixtures/ddl/golden-pg-log.txt`` and its copy under
+``service/src/test/resources/ddl``): ``total = logged + nested``, where ``logged`` is
 the number of ``statement:`` / ``execute ...:`` lines and ``nested`` is the
 number of event-trigger lines NOT matched to a logged statement on the same
 backend. A logged statement that will fire the event trigger claims the next
 event from its backend; shared-object DDL, a failed statement (an ``ERROR``
 line from the backend) and a re-logged statement release the claim.
 
-The migration/test split is a ``nx_ddl_mark: <label>`` LOG line the substrate
-emits once it is ready; everything before it is migration. Per-test
+The phases are ``nx_ddl_mark: <label> wal=<bytes> dbsize=<bytes>`` LOG lines the substrate
+emits: ``start`` once the probe is installed (everything before it is ``boot``, which holds the
+probe's own install and is never counted), ``ready`` once the engine has migrated (start to
+ready is ``migration``), and ``end`` at session end (ready to end is ``tests``). A log with no
+``start`` mark has no boot phase. Per-test
 attribution compares each DDL line's ``%m`` timestamp (``log_timezone`` is
 pinned to UTC) with the wall-clock window the plugin recorded for each test.
 
@@ -40,7 +52,8 @@ file and hands it to the controller through ``workeroutput``; the controller
 merges them, prints ``ddl: migration=<n> tests=<n> per_test=<x>`` and writes
 ``nx-ddl-report.json`` under ``NX_DDL_REPORT_DIR`` (default: the controller's
 basetemp). Clusters other than the substrate's (``throwaway_pg_cluster``, a
-test's own engine) are not counted.
+test's own engine) are not counted; ``tests/ddl_uncounted_clusters.toml`` lists every such
+start site, and the terminal line prints how many there are.
 """
 from __future__ import annotations
 
@@ -50,7 +63,9 @@ import contextlib
 import json
 import os
 import re
+import tempfile
 import time
+import tomllib
 import uuid
 from collections import Counter
 from collections.abc import Iterable
@@ -68,7 +83,9 @@ _WORKEROUTPUT_KEY = "nx_ddl_report"
 
 EVENT_PREFIX = "nx_ddl: "
 MARK_PREFIX = "nx_ddl_mark: "
+START_LABEL = "start"
 READY_LABEL = "ready"
+END_LABEL = "end"
 
 #: Appended to the substrate's postgresql.conf. ``%d`` is the database name
 #: (empty for background processes, hence the ``db=`` anchor); the clock is UTC
@@ -94,8 +111,16 @@ END
 $probe$;
 CREATE OR REPLACE FUNCTION nx_ddl_probe.mark(label text) RETURNS void
 LANGUAGE plpgsql SET log_error_verbosity = terse SET log_min_error_statement = panic AS $probe$
+DECLARE
+  wal numeric := pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0');
+  dbsize numeric := -1;
 BEGIN
-  RAISE LOG 'nx_ddl_mark: %', label;
+  BEGIN
+    SELECT coalesce(sum(pg_database_size(oid)), 0) INTO dbsize FROM pg_database;
+  EXCEPTION WHEN OTHERS THEN
+    dbsize := -1;
+  END;
+  RAISE LOG 'nx_ddl_mark: % wal=% dbsize=%', label, wal, dbsize;
 END
 $probe$;
 CREATE EVENT TRIGGER nx_ddl_probe ON ddl_command_end EXECUTE FUNCTION nx_ddl_probe.fire();
@@ -116,13 +141,25 @@ _LINE = re.compile(
 )
 _LOGGED = re.compile(r"^(?:statement|execute [^:]*): (?P<sql>.*)$", re.DOTALL)
 _CREATE_MODIFIERS = frozenset({"OR", "REPLACE", "UNIQUE", "TEMP", "TEMPORARY", "UNLOGGED", "GLOBAL", "LOCAL"})
-#: DDL the event trigger never sees (shared objects, or the trigger itself).
+#: Statements ``log_statement = 'ddl'`` logs that never fire the event trigger, so they must not
+#: claim the next event of their backend (measured on PG 17.5, 2026-10-19): shared-object DDL
+#: (databases, roles, tablespaces), the trigger itself, ``ALTER SYSTEM``, ``REASSIGN OWNED``,
+#: ``CLUSTER``, ``COMMENT ON`` a shared object, ``GRANT``/``REVOKE`` of a role membership (no
+#: ``ON``) or on a database, tablespace or parameter. ``REINDEX`` is the opposite case: it fires
+#: the event but ``log_statement = 'ddl'`` does not log it, so it is counted once, as nested.
+#: The two ``(?:(?!\bON\b).)*`` clauses stop at the first ``ON`` keyword.
 _NO_EVENT = re.compile(
     r"^(?:CREATE|ALTER|DROP)\s+(?:DATABASE|ROLE|USER|GROUP|TABLESPACE|EVENT\s+TRIGGER)\b"
-    r"|^ALTER\s+SYSTEM\b",
-    re.IGNORECASE,
+    r"|^ALTER\s+SYSTEM\b"
+    r"|^REASSIGN\s+OWNED\b"
+    r"|^CLUSTER\b"
+    r"|^COMMENT\s+ON\s+(?:DATABASE|ROLE|TABLESPACE)\b"
+    r"|^(?:GRANT|REVOKE)\b(?:(?!\bON\b)(?!\b(?:TO|FROM)\b).)*\b(?:TO|FROM)\b"
+    r"|^(?:GRANT|REVOKE)\b(?:(?!\bON\b).)*\bON\s+(?:DATABASE|TABLESPACE|PARAMETER)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _COMMENT = re.compile(r"\A(?:\s+|--[^\n]*\n?|/\*.*?\*/)+", re.DOTALL)
+_START_MARK = re.compile(r"\bnx_ddl_mark: " + START_LABEL + r"\b")
 
 
 def _head(sql: str) -> str:
@@ -167,15 +204,29 @@ class Entry:
     db: str
     kind: str
     nested: bool
-    #: Entries in the log before the ``ready`` mark, i.e. boot/migration time.
+    #: Logged before the ``ready`` mark, i.e. boot or migration time.
     before_mark: bool
     tag: str = ""
+    #: Logged before the ``start`` mark (the probe's own install and the cluster bootstrap):
+    #: never counted. Always False for a log with no ``start`` mark.
+    boot: bool = False
+
+
+@dataclass(frozen=True)
+class MarkStat:
+    """A ``nx_ddl_mark`` line: the WAL position (bytes since LSN 0/0) and the summed size of
+    every database when the mark ran. None when the line did not carry the figure."""
+
+    label: str
+    wal: int | None
+    dbsize: int | None
 
 
 @dataclass(frozen=True)
 class ParsedLog:
     entries: tuple[Entry, ...]
     marks: tuple[str, ...]  # labels seen, in order
+    stats: tuple[MarkStat, ...] = ()
 
 
 def _timestamp(m: re.Match[str]) -> float | None:
@@ -189,16 +240,37 @@ def _timestamp(m: re.Match[str]) -> float | None:
     return whole + (int(ms) / 10 ** len(ms) if ms else 0.0)
 
 
-def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
-    """Count the DDL in a PG log; entries before the first ``mark`` line are flagged ``before_mark``.
+def _figure(text: str | None) -> int | None:
+    """A non-negative integer figure from a mark line; ``-1`` (the probe's 'could not read') is None."""
+    if text is None:
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
-    A log with no such mark is all ``before_mark`` (never reached ready). A logged
+
+def _parse_mark(msg: str) -> MarkStat:
+    parts = msg[len(MARK_PREFIX):].split()
+    fields = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+    return MarkStat(parts[0] if parts else "", _figure(fields.get("wal")), _figure(fields.get("dbsize")))
+
+
+def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
+    """Count the DDL in a PG log; entries before the first ``mark`` line are flagged ``before_mark``,
+    and, when the log has a ``start`` mark, entries before it are flagged ``boot``.
+
+    A log with no ``mark`` line is all ``before_mark`` (never reached ready). A logged
     statement whose first line is empty (``psql -c`` handed a leading newline) is
     read from its tab-indented continuation lines."""
     entries: list[Entry] = []
     marks: list[str] = []
+    stats: list[MarkStat] = []
     claim: dict[int, bool] = {}  # pid -> a logged statement is waiting for its event
     seen_mark = False
+    has_start = _START_MARK.search(text) is not None
+    seen_start = False
     lines = text.splitlines()
     for i, raw in enumerate(lines):
         m = _LINE.match(raw)
@@ -211,16 +283,19 @@ def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
         if level != "LOG":
             continue
         if msg.startswith(MARK_PREFIX):
-            label = msg[len(MARK_PREFIX):].strip()
-            marks.append(label)
-            seen_mark = seen_mark or label == mark
+            stat = _parse_mark(msg)
+            marks.append(stat.label)
+            stats.append(stat)
+            seen_mark = seen_mark or stat.label == mark
+            seen_start = seen_start or stat.label == START_LABEL
             continue
         before = not seen_mark
+        boot = has_start and not seen_start
         if msg.startswith(EVENT_PREFIX):
             tag = msg[len(EVENT_PREFIX):].strip()
             if claim.pop(pid, False):
                 continue  # the command the client sent; already counted from its statement line
-            entries.append(Entry(_timestamp(m), pid, m["db"], classify(tag), True, before, tag_of(tag)))
+            entries.append(Entry(_timestamp(m), pid, m["db"], classify(tag), True, before, tag_of(tag), boot))
             continue
         logged = _LOGGED.match(msg)
         if logged is None:
@@ -239,8 +314,33 @@ def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
             claim.pop(pid, None)
         else:
             claim[pid] = True
-        entries.append(Entry(_timestamp(m), pid, m["db"], classify(sql), False, before, tag_of(sql)))
-    return ParsedLog(tuple(entries), tuple(marks))
+        entries.append(Entry(_timestamp(m), pid, m["db"], classify(sql), False, before, tag_of(sql), boot))
+    return ParsedLog(tuple(entries), tuple(marks), tuple(stats))
+
+
+def wal_split(stats: Iterable[MarkStat]) -> dict[str, int | None]:
+    """WAL bytes and database growth by phase, from the ``start``, ``ready`` and ``end`` marks (the
+    first of each, except ``end``, which is the last). A phase whose two marks are not both in the
+    log is None, never 0: an unmeasured phase must not read as a free one."""
+    first: dict[str, MarkStat] = {}
+    last: dict[str, MarkStat] = {}
+    for s in stats:
+        first.setdefault(s.label, s)
+        last[s.label] = s
+    start, ready, end = first.get(START_LABEL), first.get(READY_LABEL), last.get(END_LABEL)
+
+    def diff(b: MarkStat | None, a: MarkStat | None, field: str) -> int | None:
+        if a is None or b is None:
+            return None
+        x, y = getattr(a, field), getattr(b, field)
+        return None if x is None or y is None else y - x
+
+    return {
+        "migration_bytes": diff(ready, start, "wal"),
+        "tests_bytes": diff(end, ready, "wal"),
+        "total_bytes": diff(end, start, "wal"),
+        "dbsize_growth_bytes": diff(end, ready, "dbsize"),
+    }
 
 
 def empty_tally() -> dict[str, Any]:
@@ -282,7 +382,11 @@ def attribute(
 ) -> dict[str, Any]:
     """DDL per test: each entry goes to the test whose [start, end] window holds its
     timestamp, else to ``unattributed`` (a session or module fixture, or a line with no
-    usable timestamp). ``windows`` is (start, end, nodeid) in any order."""
+    usable timestamp). ``windows`` is (start, end, nodeid) in any order.
+
+    WAL bytes have no per-test figure here: the substrate would need an LSN read at every test
+    boundary, a round trip per test on a 20k-test run. The per-test WAL number is the run's
+    ``tests`` bytes over its test count."""
     ordered = sorted(windows)
     starts = [w[0] for w in ordered]
     per: Counter[str] = Counter()
@@ -313,32 +417,40 @@ def worker_report(
     """One process's report. ``log_text`` None means the substrate never booted here."""
     if log_text is None:
         return {
-            "schema": 1, "source": "python-worker", "pid": pid, "booted": False,
+            "schema": 2, "source": "python-worker", "pid": pid, "booted": False,
             "tests_run": tests_run,
-            "buckets": {"migration": empty_tally(), "tests": empty_tally()},
+            "buckets": {"boot": empty_tally(), "migration": empty_tally(), "tests": empty_tally()},
             "per_test": attribute([], windows),
         }
     parsed = parse_log(log_text)
+    boot = [e for e in parsed.entries if e.boot]
+    migration = [e for e in parsed.entries if e.before_mark and not e.boot]
     after = [e for e in parsed.entries if not e.before_mark]
     return {
-        "schema": 1, "source": "python-worker", "pid": pid, "booted": True,
+        "schema": 2, "source": "python-worker", "pid": pid, "booted": True,
         "ready_mark_seen": READY_LABEL in parsed.marks,
         "tests_run": tests_run,
-        "buckets": {
-            "migration": tally(e for e in parsed.entries if e.before_mark),
-            "tests": tally(after),
-        },
-        "tags": {
-            "migration": tag_counts(e for e in parsed.entries if e.before_mark),
-            "tests": tag_counts(after),
-        },
+        "buckets": {"boot": tally(boot), "migration": tally(migration), "tests": tally(after)},
+        "wal": wal_split(parsed.stats),
+        "tags": {"migration": tag_counts(migration), "tests": tag_counts(after)},
         "log_bytes": len(log_text.encode("utf-8", errors="replace")),
         "per_test": attribute(after, windows),
     }
 
 
+def _sum_known(values: Iterable[int | None]) -> int | None:
+    """Sum, or None when any term is unknown: one unmeasured worker voids the total."""
+    total = 0
+    for v in values:
+        if v is None:
+            return None
+        total += v
+    return total
+
+
 def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Sum worker (or Java fork) reports into one: buckets add, per-test summaries combine."""
+    """Sum worker reports into one: buckets add, per-test summaries combine. ``total`` is
+    migration plus tests; ``boot`` (the probe's own install) is reported but not in it."""
     buckets: dict[str, dict[str, Any]] = {}
     for r in reports:
         for name, t in r.get("buckets", {}).items():
@@ -358,16 +470,28 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         histogram.update(pt.get("histogram", {}))
         top.extend(pt.get("top", []))
     top.sort(key=lambda row: -row[1])
-    total = add_tallies(*buckets.values()) if buckets else empty_tally()
+    total = add_tallies(buckets.get("migration", empty_tally()), buckets.get("tests", empty_tally()))
     tests_run = sum(r.get("tests_run", 0) for r in reports)
+    booted = [r for r in reports if r.get("booted", True)]
+    wals = [r.get("wal") or {} for r in booted]
     return {
-        "schema": 1,
+        "schema": 2,
         "workers": len(reports),
-        "workers_booted": sum(1 for r in reports if r.get("booted", True)),
+        "workers_booted": len(booted),
+        "workers_ready_mark_seen": sum(1 for r in booted if r.get("ready_mark_seen")),
         "tests_run": tests_run,
         "log_bytes": sum(r.get("log_bytes", 0) for r in reports),
         "buckets": buckets,
         "total": total,
+        "wal": {
+            "migration_bytes": _sum_known(w.get("migration_bytes") for w in wals),
+            "tests_bytes": _sum_known(w.get("tests_bytes") for w in wals),
+            "total_bytes": _sum_known(w.get("total_bytes") for w in wals),
+            "dbsize_growth_bytes": _sum_known(w.get("dbsize_growth_bytes") for w in wals),
+            "workers_complete": sum(
+                1 for w in wals if w.get("migration_bytes") is not None and w.get("tests_bytes") is not None
+            ),
+        },
         "tags": {b: dict(c.most_common(_TOP_TAGS)) for b, c in tags.items()},
         "per_test": {
             "tests_with_ddl": with_ddl,
@@ -379,13 +503,96 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def summary_line(merged: dict[str, Any]) -> str:
+def fmt_bytes(n: int | None) -> str:
+    """Human size for the terminal line; the report carries exact integers."""
+    if n is None:
+        return "n/a"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size) < 1024 or unit == "GB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{n}B"  # pragma: no cover
+
+
+def summary_line(merged: dict[str, Any], *, uncounted: int | None = None) -> str:
     b = merged["buckets"]
     migration = b.get("migration", empty_tally())["total"]
     tests = b.get("tests", empty_tally())["total"]
     run = merged["tests_run"]
     per_test = f"{tests / run:.2f}" if run else "n/a"
-    return f"ddl: migration={migration} tests={tests} per_test={per_test}"
+    wal = merged.get("wal") or {}
+    wal_tests = wal.get("tests_bytes")
+    wal_per_test = fmt_bytes(round(wal_tests / run)) if wal_tests is not None and run else "n/a"
+    line = (
+        f"ddl: migration={migration} tests={tests} per_test={per_test}"
+        f" wal: migration={fmt_bytes(wal.get('migration_bytes'))} tests={fmt_bytes(wal_tests)}"
+        f" per_test={wal_per_test}"
+    )
+    io = merged.get("cgroup_io")
+    if io is not None and io.get("wbytes_delta") is not None:
+        line += f" io_wbytes={fmt_bytes(io['wbytes_delta'])}"
+    if uncounted is not None:
+        line += f" | {uncounted} uncounted clusters"
+    return line
+
+
+# ── cgroup block-device writes ───────────────────────────────────────────────
+
+
+def cgroup_io_wbytes(
+    proc_cgroup: Path = Path("/proc/self/cgroup"), cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> dict[str, Any] | None:
+    """The calling process's cgroup (v2) ``io.stat``, ``wbytes`` summed over its block devices,
+    or None where it cannot be read (not Linux, cgroup v1, no ``io`` controller). Only a run that
+    owns its cgroup (a Nomad task, a container, a systemd scope) gets a figure that is the run's;
+    on a shared cgroup the delta also counts every sibling's writes. A tmpfs write is not a
+    block-device write, so a run entirely on tmpfs reads near zero here and WAL is the measure."""
+    try:
+        for line in proc_cgroup.read_text().splitlines():
+            hierarchy, _, rest = line.partition(":")
+            if hierarchy == "0":
+                path = rest.partition(":")[2].lstrip("/")
+                break
+        else:
+            return None
+        stat = (cgroup_root / path / "io.stat").read_text()
+    except OSError:
+        return None
+    per_device: dict[str, int] = {}
+    for row in stat.splitlines():
+        device, _, rest = row.partition(" ")
+        fields = dict(p.split("=", 1) for p in rest.split() if "=" in p)
+        if "wbytes" in fields:
+            per_device[device] = int(fields["wbytes"])
+    return {"cgroup": path or "/", "wbytes": sum(per_device.values()), "per_device": per_device}
+
+
+def cgroup_io_delta(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
+    if before is None or after is None or before["cgroup"] != after["cgroup"]:
+        return None
+    return {
+        "cgroup": after["cgroup"],
+        "wbytes_delta": after["wbytes"] - before["wbytes"],
+        "per_device_delta": {
+            d: v - before["per_device"].get(d, 0) for d, v in after["per_device"].items()
+        },
+    }
+
+
+# ── uncounted clusters ───────────────────────────────────────────────────────
+
+UNCOUNTED_FILE = Path(__file__).resolve().parent / "ddl_uncounted_clusters.toml"
+
+
+def uncounted_cluster_count(path: Path = UNCOUNTED_FILE) -> int | None:
+    """How many cluster start sites in the test tree the counter does not see: the sum of the
+    ``[uncounted]`` table of ``tests/ddl_uncounted_clusters.toml`` (a lint keeps that file equal to
+    the tree). None when the file cannot be read."""
+    try:
+        return sum(int(n) for n in tomllib.loads(path.read_text()).get("uncounted", {}).values())
+    except (OSError, ValueError):
+        return None
 
 
 # ── plugin ───────────────────────────────────────────────────────────────────
@@ -397,18 +604,23 @@ def _basetemp(config: pytest.Config) -> Path:
     factory = getattr(config, "_tmp_path_factory", None)
     if factory is not None:
         return factory.getbasetemp()
-    import tempfile
-
     return Path(tempfile.mkdtemp(prefix="nx-ddl-"))
 
 
 def substrate_log_text() -> str | None:
-    """The live substrate's pg.log, or None when this process never booted one."""
+    """The live substrate's pg.log, or None when this process never booted one. Logs the ``end``
+    mark first (best effort: a cluster that is already gone just has no end figure)."""
     from tests import _engine_substrate  # noqa: PLC0415 — deferred: the plugin loads in every session
 
     state = _engine_substrate._state
     if state is None:
         return None
+    try:
+        _engine_substrate._psql_command(
+            state["pg_bin"], state["pg_port"], state["pg_user"], mark_sql(END_LABEL), timeout=30,
+        )
+    except (RuntimeError, OSError, KeyError):
+        pass
     try:
         return (Path(state["pgdata"]) / "pg.log").read_text(errors="replace")
     except OSError:
@@ -422,6 +634,7 @@ class _Recorder:
         self._open: dict[str, float] = {}
         self.reported: list[dict[str, Any]] = []
         self.run_id = os.environ.get(RUN_ID_ENV) or uuid.uuid4().hex[:8]
+        self.cgroup_start = cgroup_io_wbytes() if not hasattr(config, "workerinput") else None
 
     def pytest_runtest_logstart(self, nodeid, location):
         self._open[nodeid] = time.time()
@@ -465,10 +678,15 @@ class _Recorder:
             self.reported.append(report)
 
     def recovered(self) -> list[dict[str, Any]]:
-        """Worker files this run left that no worker handed over (a worker died)."""
+        """Worker files this run left that no worker handed over (a worker died). Without
+        ``NX_DDL_REPORT_DIR`` a worker's basetemp is the controller's ``/popen-gwN`` (xdist names it
+        so), so those are searched too."""
         known = {r["pid"] for r in self.reported}
+        directory = self.report_dir()
+        pattern = WORKER_FILE.format(run=self.run_id, pid="*")
+        paths = sorted({*directory.glob(pattern), *directory.glob(f"popen-gw*/{pattern}")})
         found = []
-        for path in sorted(self.report_dir().glob(WORKER_FILE.format(run=self.run_id, pid="*"))):
+        for path in paths:
             with contextlib.suppress(OSError, ValueError, KeyError):
                 report = json.loads(path.read_text())
                 if report["pid"] not in known:
@@ -483,10 +701,14 @@ class _Recorder:
         merged["recovered_workers"] = len(recovered)
         if not merged["workers_booted"]:
             return
+        merged["cgroup_io"] = cgroup_io_delta(self.cgroup_start, cgroup_io_wbytes())
+        merged["uncounted_clusters"] = uncounted_cluster_count()
         path = self.report_dir() / REPORT_NAME
         path.write_text(json.dumps(merged, indent=1))
         lost = f" RECOVERED {len(recovered)} worker file(s) no worker handed over;" if recovered else ""
-        terminalreporter.write_line(f"{summary_line(merged)} (report: {path}){lost}")
+        terminalreporter.write_line(
+            f"{summary_line(merged, uncounted=merged['uncounted_clusters'])} (report: {path}){lost}"
+        )
 
 
 def pytest_configure(config: pytest.Config) -> None:
