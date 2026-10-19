@@ -18,11 +18,16 @@ bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 source "$HERE/gate-jar-cache.sh"
 
 repo="$WORKDIR/repo"
-mkdir -p "$repo/service/src" "$repo/service/target"
+mkdir -p "$repo/service/src/main" "$repo/service/src/test" "$repo/service/.mvn" "$repo/service/target"
 git -C "$repo" init -q
 git -C "$repo" config user.email t@t; git -C "$repo" config user.name t
 printf 'service/target/\nservice/.build-lease/\n' > "$repo/.gitignore"
-echo 'class A {}' > "$repo/service/src/A.java"
+echo 'class A {}' > "$repo/service/src/main/A.java"
+echo 'class T {}' > "$repo/service/src/test/T.java"
+echo '<project/>' > "$repo/service/pom.xml"
+echo '#!/bin/sh' > "$repo/service/mvnw"
+echo '-Xmx1g' > "$repo/service/.mvn/jvm.config"
+echo 'readme' > "$repo/service/README.md"
 echo 'junk' > "$repo/service/target/out.class"
 git -C "$repo" add .gitignore service && git -C "$repo" commit -qm base
 
@@ -43,14 +48,14 @@ k1b="$(gate_jar_cache_key "$repo" 0.1.0 "")"
 echo 'more junk' > "$repo/service/target/other.class"
 k1c="$(gate_jar_cache_key "$repo" 0.1.0 "")"
 [[ "$k1" == "$k1c" ]] && ok "gitignored service/target does not move the key" || bad "target/ moved the key"
-echo '// edit' >> "$repo/service/src/A.java"
+echo '// edit' >> "$repo/service/src/main/A.java"
 k2="$(gate_jar_cache_key "$repo" 0.1.0 "")"
 [[ "$k1" != "$k2" ]] && ok "an uncommitted tracked edit moves the key" || bad "tracked edit did not move the key"
-echo 'class B {}' > "$repo/service/src/B.java"
+echo 'class B {}' > "$repo/service/src/main/B.java"
 k3="$(gate_jar_cache_key "$repo" 0.1.0 "")"
 [[ "$k2" != "$k3" ]] && ok "an untracked new file moves the key" || bad "untracked file did not move the key"
 status_after="$(git -C "$repo" status --porcelain)"
-[[ "$status_after" == *"?? service/src/B.java"* ]] && ok "the real index is untouched (B.java still untracked)" || bad "the real index was modified: $status_after"
+[[ "$status_after" == *"?? service/src/main/B.java"* ]] && ok "the real index is untouched (B.java still untracked)" || bad "the real index was modified: $status_after"
 k4="$(gate_jar_cache_key "$repo" 0.2.0 "")"
 [[ "$k3" != "$k4" ]] && ok "release_version is part of the key" || bad "release_version not in key"
 k5="$(gate_jar_cache_key "$repo" 0.1.0 "-Pnative")"
@@ -58,6 +63,56 @@ k5="$(gate_jar_cache_key "$repo" 0.1.0 "-Pnative")"
 echo 'x' > "$repo/outside.txt"
 k6="$(gate_jar_cache_key "$repo" 0.1.0 "")"
 [[ "$k3" == "$k6" ]] && ok "a file outside service/ does not move the key" || bad "outside file moved the key"
+
+echo "Test 1b (nexus-fkhd3): the key covers what the jar is built from and nothing else"
+# A fresh clean fixture so the earlier edits do not blur the comparison.
+repo2="$WORKDIR/repo2"
+mkdir -p "$repo2/service/src/main" "$repo2/service/src/test" "$repo2/service/.mvn" "$repo2/service/deploy"
+git -C "$repo2" init -q
+git -C "$repo2" config user.email t@t; git -C "$repo2" config user.name t
+echo 'class A {}' > "$repo2/service/src/main/A.java"
+echo 'class T {}' > "$repo2/service/src/test/T.java"
+echo '<project/>' > "$repo2/service/pom.xml"
+echo '#!/bin/sh' > "$repo2/service/mvnw"
+echo '-Xmx1g' > "$repo2/service/.mvn/jvm.config"
+echo 'readme' > "$repo2/service/README.md"
+git -C "$repo2" add service && git -C "$repo2" commit -qm base
+kb="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+echo '// test-only edit' >> "$repo2/service/src/test/T.java"
+echo 'class T2 {}' > "$repo2/service/src/test/T2.java"
+echo 'more readme' >> "$repo2/service/README.md"
+echo 'x' > "$repo2/service/deploy/d.sh"
+kt="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ -n "$kb" && "$kb" == "$kt" ]] && ok "src/test edits, a new test file, README and deploy/ do NOT move the key" || bad "a non-build input moved the key ($kb vs $kt)"
+git -C "$repo2" add service/src/test service/README.md service/deploy
+git -C "$repo2" commit -qm "test-only commit"
+kc="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" == "$kc" ]] && ok "a test-only COMMIT keeps the key" || bad "test-only commit moved the key"
+echo '// main edit' >> "$repo2/service/src/main/A.java"
+km="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$km" ]] && ok "a src/main edit moves the key" || bad "src/main edit did not move the key"
+git -C "$repo2" checkout -q -- service/src/main/A.java
+echo '<project>x</project>' > "$repo2/service/pom.xml"
+kp="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kp" ]] && ok "a pom.xml edit moves the key" || bad "pom edit did not move the key"
+git -C "$repo2" checkout -q -- service/pom.xml
+echo '-Xmx2g' > "$repo2/service/.mvn/jvm.config"
+kj="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kj" ]] && ok "a .mvn/ edit moves the key" || bad ".mvn edit did not move the key"
+git -C "$repo2" checkout -q -- service/.mvn/jvm.config
+echo '# changed' >> "$repo2/service/mvnw"
+kx="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kx" ]] && ok "an mvnw edit moves the key" || bad "mvnw edit did not move the key"
+git -C "$repo2" checkout -q -- service/mvnw
+echo 'class N {}' > "$repo2/service/src/main/N.java"
+kn="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kn" ]] && ok "a new untracked src/main file moves the key" || bad "new main file did not move the key"
+rm "$repo2/service/src/main/N.java" "$repo2/service/src/main/A.java"
+kd="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kd" ]] && ok "deleting a src/main file moves the key" || bad "deleting a main file did not move the key"
+git -C "$repo2" checkout -q -- service/src/main/A.java
+kr="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" == "$kr" ]] && ok "restoring the inputs restores the key" || bad "key did not return after restore"
 
 echo "Test 2: store/lookup roundtrip, worktree shares the cache, corrupt entry is a miss"
 jar="$WORKDIR/built.jar"; _fake_jar "$jar"
@@ -69,9 +124,9 @@ gate_jar_cache_lookup "$repo" "nope" >/dev/null 2>&1 && bad "unknown key hit" ||
 root="$(gate_jar_cache_root "$repo")"
 [[ "$(cd "$root" && pwd -P)" == "$(cd "$repo/.git" && pwd -P)/nexus-gate-jar-cache" ]] && ok "root is in the git common dir" || bad "root is $root"
 git -C "$repo" worktree add -q "$WORKDIR/wt" -b wt 2>/dev/null
-cp "$repo/service/src/B.java" "$WORKDIR/wt/service/src/B.java"
+cp "$repo/service/src/main/B.java" "$WORKDIR/wt/service/src/main/B.java"
 # the worktree branch lacks the uncommitted A.java edit; replay it so content matches
-cp "$repo/service/src/A.java" "$WORKDIR/wt/service/src/A.java"
+cp "$repo/service/src/main/A.java" "$WORKDIR/wt/service/src/main/A.java"
 kw="$(gate_jar_cache_key "$WORKDIR/wt" 0.1.0 "")"
 [[ "$kw" == "$k3" ]] && ok "worktree with identical service/ content computes the same key" || bad "worktree key differs: $kw vs $k3"
 gate_jar_cache_lookup "$WORKDIR/wt" "$k3" >/dev/null && ok "worktree hits the primary's cache entry" || bad "worktree missed the shared cache"

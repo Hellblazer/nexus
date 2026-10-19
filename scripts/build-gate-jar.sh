@@ -64,13 +64,16 @@
 # GATE-JAR CACHE (nexus-g6xpa, 2026-09-07): a fresh worktree used to spend
 # ~9 minutes here rebuilding a jar byte-identical to the primary's. The
 # stamped jar is now cached in the git common dir keyed on the EXACT
-# service/ working-tree content (tracked, modified and untracked non-ignored
-# files, via a throwaway git index) plus the stamped release_version; a hit
+# working-tree content of what the jar is built from -- service/pom.xml,
+# service/src/main/**, service/mvnw, service/.mvn/** (tracked, modified and
+# untracked non-ignored files, via a throwaway index; src/test, docs and
+# scripts under service/ are NOT part of it, nexus-fkhd3) -- plus the
+# stamped release_version; a hit
 # copies the cached jar into service/target and prints the build_ref that
 # jar carries, a miss builds and stores. "Never rebuild deterministic
 # artifacts" (.claude/rules/ci-and-runners.md § CI Cost Discipline), applied to the dev box. A hit
 # therefore REUSES a build_ref: the per-run-unique guarantee below holds per
-# distinct service/ content, not per invocation — a caller that captured the
+# distinct build-input content, not per invocation — a caller that captured the
 # printed value still matches the jar it is given. NX_GATE_JAR_CACHE=off
 # disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
 # scripts/lib/gate-jar-cache.sh.
@@ -123,7 +126,7 @@ print('.'.join(m.groups()))
 # unique to the BUILD that stamped it, so no other build (dev or release)
 # can bake the identical value. A cache hit (nexus-g6xpa) hands back the
 # jar that build produced together with its build_ref, so the value still
-# identifies exactly one artifact; it is per distinct service/ content, not
+# identifies exactly one artifact; it is per distinct build-input content, not
 # per invocation.
 sha="$(cd "$repo_root" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 nonce="$(date +%s)-$$"
@@ -131,7 +134,7 @@ build_ref="${sha}+${nonce}"
 
 # Cache lookup, AFTER the lease is held (so no concurrent stamp is in the
 # tree while the key is computed) and BEFORE this run stamps anything.
-# The key covers service/ content; extra mvn args are part of it too, so a
+# The key covers the build inputs; extra mvn args are part of it too, so a
 # `-Pfoo` build never serves a plain one.
 jar_name="nexus-service-1.0-SNAPSHOT.jar"
 cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"
@@ -141,7 +144,7 @@ if cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
     build_ref="$(cat "$cached/build_ref")"
     echo "stamped release_version=$ver"
     echo "stamped build_ref=$build_ref"
-    echo "gate jar cache HIT key=$cache_key (service/ content unchanged since that build; $cached)"
+    echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached)"
     echo "built $repo_root/service/target/$jar_name"
     build_lease_release service
     exit 0

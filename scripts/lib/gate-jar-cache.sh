@@ -10,14 +10,30 @@
 # Maven args, so it is cached on exactly that key and rebuilt only on a miss
 # — "never rebuild deterministic artifacts", applied to the dev box.
 #
-# KEY. `gate_jar_cache_key <repo> <release_version> <mvn-args>` stages the
-# service/ directory of the WORKING TREE into a throwaway copy of the
-# checkout's index (`git add -A -- service` under GIT_INDEX_FILE) and takes
-# the resulting subtree hash: tracked, modified, and untracked-but-not-
-# ignored files all count; service/target and service/.build-lease do not
-# (gitignored). That hash, the release_version and the args are sha256'd
-# into the key. Two worktrees with identical service/ content share a key
-# regardless of which commits they sit on.
+# KEY. `gate_jar_cache_key <repo> <release_version> <mvn-args>` keys on what
+# the jar is BUILT FROM and nothing else (nexus-fkhd3): service/pom.xml,
+# service/src/main/**, service/mvnw and service/.mvn/** (GATE_JAR_KEY_PATHS).
+# `-DskipTests` leaves tests out of the jar, so a src/test edit, a README, a
+# deploy script or a smoke probe cannot change a byte of it; keying on the
+# whole service/ subtree (the first version) missed on every test-only commit
+# and paid a ~350 MB jOOQ-codegen rebuild each time. Those paths of the
+# WORKING TREE are staged into a throwaway copy of the checkout's index
+# (`git add -A -- <paths>` under GIT_INDEX_FILE) and the staged
+# `ls-files -s` listing (mode, blob hash, path) is hashed: tracked, modified,
+# and untracked-but-not-ignored files all count; service/target and
+# service/.build-lease do not (gitignored). That hash, the release_version
+# and the args are sha256'd into the key. Two worktrees with identical build
+# inputs share a key regardless of which commits they sit on.
+#
+# tests/db/_service_fixture.py's jar freshness check (_SERVICE_SRC_DIRS =
+# src/main/java + src/main/resources/db/changelog) already ignores src/test,
+# so a test-only change marks the jar neither stale there nor a miss here.
+#
+# The jOOQ generated sources inside that build are cached separately, keyed
+# on the codegen input hash, by service/pom.xml (jooq-inputs step,
+# nexus-fkhd3): a gate-jar MISS caused by a src/main edit that leaves the
+# changelog alone restores them instead of booting the codegen container.
+# gate_jar_cache_prune_jooq below trims that cache; the pom writes it.
 #
 # LOCATION. $NX_GATE_JAR_CACHE if set to a directory; "off" disables both
 # lookup and store; else <git common dir>/nexus-gate-jar-cache (shared by
@@ -39,14 +55,19 @@
 # tests/db/_service_fixture.py applies), else it is a miss and the entry is
 # discarded.
 #
-# `git write-tree` writes real loose objects into the repo's object store
-# on every key computation (the staged blobs and trees). They are ordinary
-# unreachable objects; `git gc` / `git prune` reap them on the usual
-# schedule. Documented so nobody mistakes them for corruption.
+# `git add` writes the staged blobs into the repo's object store as ordinary
+# unreachable loose objects on a key computation; `git gc` / `git prune` reap
+# them on the usual schedule. Documented so nobody mistakes them for corruption.
 
 set -u -o pipefail
 
 GATE_JAR_CACHE_KEEP="${GATE_JAR_CACHE_KEEP:-5}"
+JOOQ_CACHE_KEEP="${JOOQ_CACHE_KEEP:-6}"
+
+# What the stamped jar is a pure function of (see KEY above). Relative to the
+# repo root; a path absent from both the working tree and the index is skipped
+# so a fixture or a trimmed checkout without, say, service/.mvn still keys.
+GATE_JAR_KEY_PATHS=(service/pom.xml service/src/main service/mvnw service/.mvn)
 
 gate_jar_cache_root() {
     local repo="${1:?gate_jar_cache_root: usage: gate_jar_cache_root <repo>}"
@@ -68,14 +89,21 @@ gate_jar_cache_key() {
     local repo="${1:?gate_jar_cache_key: usage: gate_jar_cache_key <repo> <release_version> <mvn-args>}"
     local ver="${2:?gate_jar_cache_key: release_version required}"
     local args="${3:-}"
-    local idx tree subtree
+    local idx listing p
+    local -a paths=()
+    for p in "${GATE_JAR_KEY_PATHS[@]}"; do
+        if [[ -e "$repo/$p" ]] || [[ -n "$(git -C "$repo" ls-files -- "$p" 2>/dev/null | head -n 1)" ]]; then
+            paths+=("$p")
+        fi
+    done
+    [[ ${#paths[@]} -gt 0 ]] || { echo "gate_jar_cache_key: none of ${GATE_JAR_KEY_PATHS[*]} exist in $repo" >&2; return 1; }
     idx="$(mktemp "${TMPDIR:-/tmp}/gate-jar-index.XXXXXX")"
     # Start from the checkout's own index so `add -A` only re-hashes what
     # changed; a missing index (fresh clone) just makes it slower.
     cp "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
-    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- service >/dev/null 2>&1; then
+    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- "${paths[@]}" >/dev/null 2>&1; then
         rm -f "$idx"
-        echo "gate_jar_cache_key: could not stage service/ into a throwaway index" >&2
+        echo "gate_jar_cache_key: could not stage ${paths[*]} into a throwaway index" >&2
         return 1
     fi
     # Normalize the stamp lines (see header) if release.properties is staged.
@@ -85,14 +113,13 @@ gate_jar_cache_key() {
         GIT_INDEX_FILE="$idx" git -C "$repo" update-index --cacheinfo "100644,$blob,$props" >/dev/null 2>&1 || {
             rm -f "$idx"; echo "gate_jar_cache_key: could not normalize $props in the throwaway index" >&2; return 1; }
     fi
-    tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree 2>/dev/null)"
+    # The staged listing of exactly the key paths: mode, blob hash, path. No
+    # tree object is written, so a key computation leaves only the blobs
+    # `add` hashed.
+    listing="$(GIT_INDEX_FILE="$idx" git -C "$repo" ls-files -s -- "${paths[@]}" 2>/dev/null | awk '{print $1, $2, $4}')"
     rm -f "$idx"
-    [[ -n "$tree" ]] || { echo "gate_jar_cache_key: write-tree failed" >&2; return 1; }
-    subtree="$(git -C "$repo" rev-parse --verify --quiet "$tree:service" 2>/dev/null)" || {
-        echo "gate_jar_cache_key: no service/ subtree in $repo" >&2
-        return 1
-    }
-    printf 'service=%s release_version=%s args=%s\n' "$subtree" "$ver" "$args" | shasum -a 256 | cut -c1-40
+    [[ -n "$listing" ]] || { echo "gate_jar_cache_key: nothing staged from ${paths[*]} in $repo" >&2; return 1; }
+    printf 'inputs=%s\nrelease_version=%s\nargs=%s\n' "$(printf '%s\n' "$listing" | shasum -a 256 | cut -c1-64)" "$ver" "$args" | shasum -a 256 | cut -c1-40
 }
 
 _gate_jar_cache_entry_ok() {

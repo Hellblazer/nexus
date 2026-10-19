@@ -30,7 +30,7 @@ cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' > "$repo/src/nexus/engine_version.py"
-echo 'class A {}' > "$repo/service/A.java"
+echo 'class A {}' > "$repo/service/src/main/A.java"
 printf 'service/target/\nservice/.build-lease/\n' > "$repo/.gitignore"
 # Fake mvnw: MVNW_FAIL=1 fails; otherwise writes a real jar whose payload
 # is the stamped release.properties it saw, and counts its invocations.
@@ -81,7 +81,7 @@ out3="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc3=$?
 [[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 2 ]] && ok "mvnw NOT invoked on a hit" || bad "mvnw ran on a hit"
 [[ "$out3" == *"stamped build_ref=$ref2"* ]] && ok "hit reprints the cached build_ref" || bad "hit printed a different build_ref: $out3"
 [[ -f "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" ]] && ok "jar copied into service/target" || bad "no jar after hit"
-if [[ "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" -nt "$repo/service/A.java" ]]; then ok "copied jar is newer than the sources (freshness gate satisfied)"; else bad "copied jar older than sources"; fi
+if [[ "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" -nt "$repo/service/src/main/A.java" ]]; then ok "copied jar is newer than the sources (freshness gate satisfied)"; else bad "copied jar older than sources"; fi
 [[ "$out3" == *"built "* ]] && ok "hit prints the built line callers grep for" || bad "no built line on hit"
 
 echo "Test 4: a leftover stamp in release.properties REFUSES (nexus-iexvl guard) instead of silently serving a cache hit"
@@ -102,13 +102,28 @@ git -C "$repo" checkout -q -- "$props_rel"
 out4b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc4b=$?
 [[ $rc4b -eq 0 && "$out4b" == *"HIT"* ]] && ok "a clean tree after git checkout serves a HIT again" || bad "clean tree after checkout did not HIT (rc $rc4b): $out4b"
 
+echo "Test 4c (nexus-fkhd3): a service/src/test-only change still HITS; a pom change MISSES"
+before4c="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+mkdir -p "$repo/service/src/test/java" "$repo/service/docs"
+echo 'class T {}' > "$repo/service/src/test/java/T.java"
+echo 'notes' > "$repo/service/README.md"
+out4c="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc4c=$?
+[[ $rc4c -eq 0 && "$out4c" == *"HIT"* ]] && ok "a src/test + README change HITS" || bad "test-only change did not HIT (rc $rc4c): $out4c"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$before4c" ]] && ok "mvnw NOT invoked for a test-only change" || bad "mvnw ran for a test-only change"
+rm -rf "$repo/service/src/test" "$repo/service/README.md" "$repo/service/docs"
+echo '<project/>' > "$repo/service/pom.xml"
+out4d="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc4d=$?
+[[ $rc4d -eq 0 && "$out4d" == *"MISS"* ]] && ok "a new pom.xml MISSES and rebuilds" || bad "pom change did not miss (rc $rc4d): $out4d"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((before4c + 1))" ]] && ok "mvnw ran once for the pom change" || bad "mvnw count after pom change: $(wc -l < "$MVNW_COUNT")"
+rm -f "$repo/service/pom.xml"
+
 echo "Test 5: a service/ change misses and rebuilds; NX_GATE_JAR_CACHE=off always builds"
-echo 'class B {}' > "$repo/service/B.java"
+echo 'class B {}' > "$repo/service/src/main/B.java"
 out5="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc5=$?
 [[ $rc5 -eq 0 && "$out5" == *"MISS"* ]] && ok "changed service/ misses" || bad "expected MISS: $out5"
-[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 3 ]] && ok "mvnw rebuilt" || bad "mvnw count $(wc -l < "$MVNW_COUNT")"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 4 ]] && ok "mvnw rebuilt" || bad "mvnw count $(wc -l < "$MVNW_COUNT")"
 out6="$(cd "$repo" && NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc6=$?
-[[ $rc6 -eq 0 && "$out6" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 4 ]] && ok "cache off: builds every time" || bad "cache off misbehaved: $out6"
+[[ $rc6 -eq 0 && "$out6" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 5 ]] && ok "cache off: builds every time" || bad "cache off misbehaved: $out6"
 
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &
