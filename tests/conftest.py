@@ -253,10 +253,16 @@ _RETIRED_T2_SUBSTRATES: dict[str, str] = {
 #: deselect them (``-m 'not integration and not slow and not lint'``), so no
 #: census says which of them touch storage. They keep a tenant per test, as the
 #: whole suite did before the opt-in default, until a census taken with
-#: ``-m integration`` / ``-m slow`` marks them (``scripts/annotate_t2_tenant.py``)
-#: and this carve-out is deleted (nexus-j23ni). ``lint`` is not here: its CI job
-#: runs under ``NX_TEST_T2_SUBSTRATE=none`` already, with no tenant.
-_UNCENSUSED_MARKERS: tuple[str, ...] = ("integration", "slow")
+#: ``-m integration`` / ``-m slow`` / ``-m lint`` marks them
+#: (``scripts/annotate_t2_tenant.py``) and this carve-out is deleted
+#: (nexus-j23ni). ``lint`` is here although its main CI job runs under
+#: ``NX_TEST_T2_SUBSTRATE=none``: the ``test-docs-readers`` job
+#: (``-o addopts=""``) and a local ``pytest -m lint`` run lint-marked tests under
+#: the default env, and no census covered them. The cost is nil where the
+#: default addopts apply, because they deselect the marker. Every marker the
+#: addopts deselect must be listed
+#: (``test_every_marker_the_default_addopts_deselect_is_uncensused``).
+_UNCENSUSED_MARKERS: tuple[str, ...] = ("integration", "slow", "lint")
 
 
 def _selected_t2_substrate_boots_engine() -> bool:

@@ -60,12 +60,14 @@ the test) or ``report`` (findings go to a report, the test is untouched). Either
 way the session verdict (``vacuity`` in the report, printed in the summary) lists
 what makes the sweep untrustworthy, and in fail mode the session ends non-zero on
 it: fewer workers reported than started, fewer tests recorded than collected, a
-guard error, Python children spawned but none seen by the shim, and a storage
-touch AFTER its test finished (a thread or child the test leaked: the test itself
-already passed, so the session carries the finding). The whole-run shape (some
-test provisioned, some clean, some touch event) is asked only when
-``NX_STORAGE_TOUCH_SWEEP=1``, which a full-suite run sets; a scoped run of three
-provisioned tests is not vacuous for having no clean one. At start-up a canary
+guard error, and an xfailed test that reached storage (xfail would otherwise
+swallow the teardown failure). The whole-run shape (some test provisioned, some
+clean, some touch event, and Python children that were spawned reached the shim) is
+asked only when ``NX_STORAGE_TOUCH_SWEEP=1``, which a full-suite run sets; a scoped
+run of three provisioned tests is not vacuous for having no clean one. A storage
+touch AFTER its test finished (a thread or child the test leaked) lands or not by
+thread timing, so it is a printed warning (``warnings`` in the report) in every
+mode and never changes the exit status. At start-up a canary
 constructs each guarded class and checks the ``Thread``/``Popen`` patches, so a
 run that finds nothing is a run that could have found something.
 
@@ -416,7 +418,11 @@ def _rebind(old: object, new: object) -> None:
 
 _thread_init: list[object] = []  # [the original Thread.__init__] while installed
 _popen_init: list[object] = []  # [the original subprocess.Popen.__init__] while installed
-_PYTHON_LAUNCHERS = frozenset({"nx", "uv", "pytest", "py.test", "pip", "pipx"})
+# Console scripts whose first line is a Python shebang, so the child loads the shim.
+# The package managers (uv, pip, pipx) are not here: they are native binaries or
+# re-exec elsewhere, so the shim never loads in them and counting them as spawned
+# would make the vacuity rule fire on a run that did nothing wrong.
+_PYTHON_LAUNCHERS = frozenset({"nx", "pytest", "py.test"})
 
 
 def _is_python_command(cmd: object) -> bool:
@@ -731,6 +737,7 @@ class Guard:
         self.collected = 0
         self._begin_state()
         self._verdict: list[str] = []
+        self._warned: list[str] = []
         self._merged: dict | None = None
 
     # per-test state -------------------------------------------------------
@@ -1097,12 +1104,14 @@ class Guard:
     def _vacuity(self, report: dict) -> list[str]:
         """Everything that makes the sweep's verdict untrustworthy or the run
         unclean, as lines. Always checked: every worker reported, the recorder
-        raised nothing, every collected test was recorded, children that were
-        spawned reached the shim, and nothing touched storage after its test
-        finished. The shape of the WHOLE run (some test provisioned, some clean,
-        some touch event) is asked only when ``NX_STORAGE_TOUCH_SWEEP=1``: a
-        scoped run of three provisioned tests is not vacuous for having no
-        clean one, and the start-up canary already proved the recorder fires."""
+        raised nothing, every collected test was recorded, and no xfailed test
+        reached storage. The shape of the WHOLE run (some test provisioned, some
+        clean, some touch event, and Python children that were spawned reached
+        the shim) is asked only when ``NX_STORAGE_TOUCH_SWEEP=1``: a scoped run of
+        three provisioned tests is not vacuous for having no clean one, a scoped
+        run whose children scrub PYTHONPATH is not unclean, and the start-up
+        canary already proved the recorder fires. A late touch is a warning, not
+        a verdict (``_warnings``): whether one lands depends on thread timing."""
         c = report["counts"]
         problems = []
         if self.sweep:
@@ -1123,7 +1132,7 @@ class Guard:
             problems.append(
                 f"vacuous sweep: recorded {report['recorded']} of {report['collected']} collected tests"
             )
-        if c["children_spawned"] and not c["children_seen"]:
+        if self.sweep and c["children_spawned"] and not c["children_seen"]:
             problems.append(
                 f"vacuous sweep: {c['children_spawned']} Python child(ren) were spawned but the shim saw none "
                 "(PYTHONPATH scrubbed, or the shim could not load): child touches are unexamined"
@@ -1135,16 +1144,22 @@ class Guard:
                 f"without a tenant, and xfail turns the teardown failure into an expected one: {shown}. "
                 "Mark them t2_tenant so they xfail for their own reason."
             )
-        late = report["late_child_touches"] + report["late_thread_touches"]
-        if late:
-            owners = sorted({r["nodeid"] for r in late})
-            shown = ", ".join(owners[:5]) + (f", ... {len(owners) - 5} more" if len(owners) > 5 else "")
-            problems.append(
-                f"late storage touch: {sum(r.get('n', 1) for r in late)} construction(s) after their test finished, "
-                f"from {len(owners)} test(s) that leaked a thread or child: {shown}. "
-                "Join the thread or wait for the child inside the test."
-            )
         return problems
+
+    def _warnings(self, report: dict) -> list[str]:
+        """Findings printed in every mode that never change the exit status: a
+        construction after its test finished lands or not by thread timing, so
+        failing a session on it would turn a green run red at random."""
+        late = report["late_child_touches"] + report["late_thread_touches"]
+        if not late:
+            return []
+        owners = sorted({r["nodeid"] for r in late})
+        shown = ", ".join(owners[:5]) + (f", ... {len(owners) - 5} more" if len(owners) > 5 else "")
+        return [
+            f"late storage touch: {sum(r.get('n', 1) for r in late)} construction(s) after their test finished, "
+            f"from {len(owners)} test(s) that leaked a thread or child: {shown}. "
+            "Join the thread or wait for the child inside the test."
+        ]
 
     def run_canary(self) -> None:
         """Prove, at session start, that the patches are in and the recorder is
@@ -1190,6 +1205,7 @@ class Guard:
         report = self.merged()
         report["collected"] = self.collected
         self._verdict = report["vacuity"] = self._vacuity(report)
+        self._warned = report["warnings"] = self._warnings(report)
         if self.mode == "fail" and self._verdict and not session.exitstatus:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
@@ -1249,6 +1265,8 @@ class Guard:
         for problem in self._verdict:
             # report mode shows the problem without changing the exit status
             tr.write_line(problem, red=self.mode == "fail", yellow=self.mode != "fail")
+        for warning in self._warned:
+            tr.write_line(warning, yellow=True)
         tr.write_line(f"storage-touch report: {path}")
 
 

@@ -563,17 +563,52 @@ def test_inside():
     result.assert_outcomes(passed=1)
 
 
-def test_the_shim_and_the_guard_patch_the_same_classes() -> None:
-    """The shim is self-contained (it must run with the repo not importable), so
-    its class table is a copy; this keeps the two from drifting."""
+def _load_shim_inert(monkeypatch):
+    """Execute the shim's source to read its tables WITHOUT running its
+    ``_install()``. The shim installs itself on import whenever the log variable
+    is set, and under the default flip an outer guard session exports it, so a
+    bare ``exec_module`` here would wrap the guarded ``__init__`` s a second time
+    and add a ``_TouchFinder`` to this process for the rest of the run."""
     import importlib.util
 
-    from tests._storage_touch_guard import GUARDED
-
+    monkeypatch.delenv(CHILD_LOG_ENV, raising=False)
     spec = importlib.util.spec_from_file_location("nx_shim_check", SHIM_DIR / "sitecustomize.py")
     assert spec is not None and spec.loader is not None
     shim = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(shim)
+    return shim
+
+
+def test_reading_the_shim_installs_nothing_in_this_process(monkeypatch, tmp_path) -> None:
+    """With the log variable SET (as an outer guard session sets it), loading the
+    shim for inspection leaves ``sys.meta_path`` and every guarded ``__init__`` as
+    it found them."""
+    from tests._storage_touch_guard import _guarded_classes
+
+    monkeypatch.setenv(CHILD_LOG_ENV, str(tmp_path / "log.jsonl"))
+    classes = _guarded_classes()
+    inits = [(cls, cls.__dict__.get("__init__")) for cls in classes]
+    meta_path = list(sys.meta_path)
+    try:
+        shim = _load_shim_inert(monkeypatch)
+        assert shim._TARGETS, "the shim was loaded"
+        assert sys.meta_path == meta_path, "the shim added a finder to this process"
+        assert all(cls.__dict__.get("__init__") is init for cls, init in inits), "the shim re-wrapped a guarded __init__"
+    finally:  # a regression must not poison the tests that run after this one
+        sys.meta_path[:] = meta_path
+        for cls, init in inits:
+            if init is not None:
+                cls.__init__ = init
+            elif "__init__" in cls.__dict__:
+                del cls.__init__
+
+
+def test_the_shim_and_the_guard_patch_the_same_classes(monkeypatch) -> None:
+    """The shim is self-contained (it must run with the repo not importable), so
+    its class table is a copy; this keeps the two from drifting."""
+    from tests._storage_touch_guard import GUARDED
+
+    shim = _load_shim_inert(monkeypatch)
     flat = sorted((mod, name) for mod, names in shim._TARGETS.items() for name in names)
     assert flat == sorted(GUARDED)
 
@@ -1024,30 +1059,34 @@ def test_thread_and_popen_patches_live_only_while_an_optin_session_runs(pytester
     import subprocess
     import threading
 
+    from tests import _storage_touch_guard as g
+
     before = (threading.Thread.__init__, subprocess.Popen.__init__)
-    outer_patched = (
-        getattr(before[0], "_nx_storage_touch_thread", False), getattr(before[1], "_nx_storage_touch_popen", False)
-    )
+    # An outer guard session (the default) already holds the patches and the nested
+    # one only takes a reference, so "patched while inside" proves nothing there.
+    # What the nested session adds is its reference: compare the count, and the
+    # functions themselves, before and inside.
+    monkeypatch.setenv("EXPECT_REFS_BEFORE", str(g._patch_refs))
     monkeypatch.setenv("EXPECT_PATCHED", "1" if substrate == "optin" else "")
-    monkeypatch.setenv("EXPECT_OUTER", json.dumps(outer_patched))
     result = _run(pytester, monkeypatch, '''
-import json, os, subprocess, threading
+import os, subprocess, threading
+from tests import _storage_touch_guard as g
 
 def test_patches():
-    now = (
-        getattr(threading.Thread.__init__, "_nx_storage_touch_thread", False),
-        getattr(subprocess.Popen.__init__, "_nx_storage_touch_popen", False),
-    )
+    refs_before = int(os.environ["EXPECT_REFS_BEFORE"])
     if os.environ["EXPECT_PATCHED"]:
-        assert now == (True, True)
+        assert g._patch_refs == refs_before + 1, "the opt-in session took no reference on the patches"
+        assert getattr(threading.Thread.__init__, "_nx_storage_touch_thread", False)
+        assert getattr(subprocess.Popen.__init__, "_nx_storage_touch_popen", False)
     else:
-        assert now == tuple(json.loads(os.environ["EXPECT_OUTER"])), "the escape hatch added nothing"
+        assert g._patch_refs == refs_before, "the escape hatch took a reference on the patches"
 ''', mode="report", substrate=substrate)
     result.assert_outcomes(passed=1)
     assert (threading.Thread.__init__, subprocess.Popen.__init__) == before
+    assert g._patch_refs == int(os.environ["EXPECT_REFS_BEFORE"]), "the nested session leaked a reference"
 
 
-def test_a_late_thread_touch_fails_a_fail_mode_session_and_names_its_owner(pytester, monkeypatch) -> None:
+def test_a_late_thread_touch_is_a_warning_in_every_mode_and_names_its_owner(pytester, monkeypatch) -> None:
     pytester.makepyfile(leak='''
 import threading
 from helpers import touch_storage_and_swallow
@@ -1078,18 +1117,19 @@ def test_2_lets_it_touch():
     assert leak.DONE.wait(30)
     leak.THREADS[0].join()
 '''
-    result = _run(pytester, monkeypatch, body, mode="fail")
-    result.assert_outcomes(passed=2)  # both tests pass: the finding is the session's
-    out = result.stdout.str()
-    assert result.ret != 0
-    assert "late storage touch: 1 construction(s) after their test finished" in out
-    assert "test_inner.py::test_1_leaks_a_thread" in out
-    # report mode prints the same line and keeps the exit status
-    result = _run(pytester, monkeypatch, body, mode="report")
-    assert result.ret == 0 and "late storage touch: 1 construction(s)" in result.stdout.str()
+    # whether the touch lands before the session ends is thread timing, so it is
+    # a printed warning in BOTH modes and never the reason a session exits non-zero
+    for mode in ("fail", "report"):
+        result = _run(pytester, monkeypatch, body, mode=mode, sweep=False)
+        result.assert_outcomes(passed=2)
+        out = result.stdout.str()
+        assert result.ret == 0, mode
+        assert "late storage touch: 1 construction(s) after their test finished" in out
+        assert "test_inner.py::test_1_leaks_a_thread" in out
+        assert _report(result)["warnings"] and _report(result)["vacuity"] == []
 
 
-def test_a_late_child_touch_fails_a_fail_mode_session(pytester, monkeypatch, tmp_path) -> None:
+def test_a_late_child_touch_is_a_warning_not_a_failure(pytester, monkeypatch, tmp_path) -> None:
     trigger = tmp_path / "go"
     pytester.makepyfile(late_child=f'''
 import subprocess, sys
@@ -1119,15 +1159,17 @@ def test_1_spawns_and_returns():
 
 def test_2_releases_it():
     late_child.release_and_wait()
-''', mode="fail")
+''', mode="fail", sweep=False)
     result.assert_outcomes(passed=2)
-    assert result.ret != 0
+    assert result.ret == 0
     assert "late storage touch" in result.stdout.str() and "test_1_spawns_and_returns" in result.stdout.str()
 
 
 def test_python_children_that_never_reach_the_shim_are_a_vacuity_problem(pytester, monkeypatch) -> None:
     """A child that scrubs PYTHONPATH loads no shim. Spawning Python children
-    while seeing none is the signature of an unexamined run."""
+    while seeing none is the signature of an unexamined WHOLE run, so it is asked
+    only under ``NX_STORAGE_TOUCH_SWEEP=1``: a scoped run, or one whose children
+    scrub PYTHONPATH for their own reasons, is not unclean for it."""
     hidden = '''
 import os, subprocess, sys
 
@@ -1137,10 +1179,13 @@ def test_hides_its_child():
 '''
     result = _run(pytester, monkeypatch, hidden, mode="fail", sweep=False)
     result.assert_outcomes(passed=1)
-    assert result.ret != 0
-    assert "1 Python child(ren) were spawned but the shim saw none" in result.stdout.str()
+    assert result.ret == 0, "a scoped run is not unclean for hiding a child"
+    assert "were spawned but the shim saw none" not in result.stdout.str()
     c = _report(result)["counts"]
     assert (c["children_spawned"], c["children_seen"]) == (1, 0)
+    result = _run(pytester, monkeypatch, hidden, mode="fail", sweep=True)
+    assert result.ret != 0
+    assert "1 Python child(ren) were spawned but the shim saw none" in result.stdout.str()
     # control: the same spawn with the environment intact reaches the shim
     result = _run(pytester, monkeypatch, '''
 import subprocess, sys
@@ -1166,7 +1211,9 @@ def test_which_commands_count_as_a_python_child(tmp_path: Path) -> None:
 
     assert _is_python_command([sys.executable, "-c", "pass"])
     assert _is_python_command(["python3", "-m", "pytest"]) and _is_python_command(["/usr/bin/python3.12"])
-    assert _is_python_command(["nx", "store", "put"]) and _is_python_command([Path("/opt/bin/uv"), "run"])
+    assert _is_python_command(["nx", "store", "put"]) and _is_python_command(["pytest", "-q"])
+    for native in ("uv", "pip", "pipx"):
+        assert not _is_python_command([native, "run"]), f"{native} is a native launcher: it never loads the shim"
     assert not _is_python_command(["git", "status"])
     assert not _is_python_command("python -c pass"), "a shell string is not parsed"
     assert not _is_python_command([]) and not _is_python_command(None)

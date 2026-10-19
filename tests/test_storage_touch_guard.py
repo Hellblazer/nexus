@@ -297,6 +297,22 @@ def test_2_sees_no_lease():
     result.assert_outcomes(passed=2)
 
 
+def test_every_marker_the_default_addopts_deselect_is_uncensused() -> None:
+    """The census runs under the default addopts, so a marker they deselect was
+    never examined and must keep a tenant per test. ``lint`` was missing: the
+    docs-readers CI job and a local ``pytest -m lint`` run it under the default
+    substrate."""
+    import tomllib
+
+    from tests.conftest import _UNCENSUSED_MARKERS
+
+    addopts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["addopts"]
+    (expression,) = re.findall(r"-m\s+'([^']+)'", addopts)
+    deselected = set(re.findall(r"not\s+(\w+)", expression))
+    assert deselected >= {"integration", "slow", "lint"}, expression
+    assert deselected <= set(_UNCENSUSED_MARKERS), sorted(deselected - set(_UNCENSUSED_MARKERS))
+
+
 def test_optin_counts_as_a_session_that_may_boot_the_engine() -> None:
     from tests.conftest import _selected_t2_substrate_boots_engine
 
