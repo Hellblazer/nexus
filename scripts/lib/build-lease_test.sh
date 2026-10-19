@@ -119,8 +119,26 @@ leasedir4="$repo4/service/.build-lease/trapped"
 # in that gap kills the holder with nothing to release the lease
 # (nexus-n70xz, seen under a 32-worker suite).
 ready4="$WORKDIR/repo4.ready"
-bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30" &
+# The holder starts with SIGTERM at its default and unblocked. A non-interactive bash
+# cannot trap a signal that was ignored when it started, and a blocked one stays
+# pending, and both pass across exec: a suite launched with TERM ignored or blocked
+# made this case fail with the lease still held at 16 s and the holder alive
+# (5588beead CI shard 3; reproduced in a container both ways, never under CPU load).
+# The disposition the suite inherits is the launcher's business; the property under
+# test is that a holder that CAN receive TERM releases its lease (the HUP twin:
+# nexus-0a1hw).
+holder4_cmd=(bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30")
+if command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'sigprocmask(SIG_UNBLOCK, POSIX::SigSet->new(SIGTERM)); $SIG{TERM} = "DEFAULT"; exec { $ARGV[0] } @ARGV or exit 127' "${holder4_cmd[@]}" &
+else
+    "${holder4_cmd[@]}" &
+fi
 holder4=$!
+# State, SigBlk and SigIgn of a pid, for the failure message (Linux /proc only).
+_sigs4() {
+    [[ -r "/proc/$1/status" ]] || { printf 'pid %s: no /proc status' "$1"; return; }
+    printf 'pid %s: %s' "$1" "$(awk '/^(State|SigBlk|SigIgn):/ { printf "%s %s ", $1, $2 }' "/proc/$1/status")"
+}
 # Polled up to 15 s: a holder that has to start, source and acquire under a loaded host
 # (nexus-ys8a4) can take well over the 5 s this used to allow.
 for _ in $(seq 1 150); do
@@ -145,7 +163,10 @@ else
         # Elapsed seconds tell the two causes apart: well past the 15 s the poll nominally
         # allows means the host starved the loop itself; about 15 s means the trap really
         # did not release.
-        bad "lease dir still present $((SECONDS - term4_at)) s after SIGTERM (polled up to 15 s); the holder should have released it"
+        # The masks say which: a holder with SIGTERM (bit 15, 0x4000) in SigIgn or SigBlk
+        # never acted on it, a Z state died without its trap, and the suite's own masks
+        # say whether the disposition came from whatever launched the suite.
+        bad "lease dir still present $((SECONDS - term4_at)) s after SIGTERM (polled up to 15 s); the holder should have released it [holder $(_sigs4 "$holder4")] [suite $(_sigs4 $$)]"
     fi
     # A fresh acquire must now succeed cleanly, with NO stale-reclaim
     # WARNING (the lease was released properly, not left stale).
@@ -154,6 +175,8 @@ else
     if [[ $rc4 -eq 0 ]]; then ok "fresh acquire after clean release succeeds"; else bad "fresh acquire failed (rc $rc4): $out4"; fi
     if [[ "$out4" != *"WARNING"* ]]; then ok "fresh acquire is clean (no stale-reclaim WARNING)"; else bad "unexpected WARNING on a cleanly-released lease: $out4"; fi
 fi
+# A holder that survived TERM would hold the suite here for the rest of its sleep.
+kill -KILL "$holder4" 2>/dev/null
 wait "$holder4" 2>/dev/null
 
 # ── Test 5: mid-hold eviction — the lease must survive `mvn clean` ───────
