@@ -75,6 +75,9 @@ def test_c():
     assert by_phase == {("setup", "inner_seed"), ("call", None)}
     # the rollup counts TESTS whose setup touch a fixture caused
     assert report["modules"]["test_inner.py"]["setup_fixtures"] == {"inner_seed": 2}
+    # and names where the fixture is defined
+    assert report["modules"]["test_inner.py"]["setup_fixture_files"] == {"inner_seed": ["test_inner.py"]}
+    assert {t["fixture_file"] for t in by_id["test_a"]["touches"]} == {"test_inner.py"}
 
 
 def test_the_report_rolls_up_per_module_with_denominators_and_outcomes(pytester, monkeypatch) -> None:
@@ -116,12 +119,19 @@ pytest.skip("whole module", allow_module_level=True)
     result.assert_outcomes(passed=4, failed=1, skipped=4)
     report = _report(result)
     mod = report["modules"]["test_inner.py"]
-    assert mod.pop("setup_fixtures") == {}
+    assert mod.pop("setup_fixtures") == {} and mod.pop("setup_fixture_files") == {}
+    # the nodeids behind the counts, skips with their reason
+    assert mod.pop("failed_tests") == ["test_inner.py::test_clean_but_fails"]
+    assert mod.pop("skipped_tests") == [{"nodeid": "test_inner.py::test_skipped", "reason": "not run"}]
     assert mod == {
-        "tests": 6, "touched": 1, "clean": 2, "provisioned": 1, "exempt": 1,
-        "skipped": 1, "failed": 1,
+        "tests": 6, "touched": 1, "thread_touched": 0, "peek_only": 0, "clean": 2, "provisioned": 1,
+        "exempt": 1, "skipped": 1, "failed": 1, "late_touches": 0,
     }
     assert report["modules"]["test_all_skipped.py"]["skipped"] == 2
+    assert report["modules"]["test_all_skipped.py"]["skipped_tests"] == [
+        {"nodeid": "test_all_skipped.py::test_x", "reason": "wholesale"},
+        {"nodeid": "test_all_skipped.py::test_y", "reason": "wholesale"},
+    ]
     assert report["skipped_modules"] == ["test_all_skipped.py"]
     assert report["collect_skipped"] == ["test_module_skip.py"]
     c = report["counts"]
@@ -192,23 +202,32 @@ def test_the_default_mode_keeps_the_singleton(pytester, monkeypatch) -> None:
 # ── soft peeks: reviewed, never failing ──────────────────────────────────────
 
 
-def test_a_soft_peek_from_src_nexus_while_unprovisioned_is_listed_not_failed(pytester, monkeypatch) -> None:
+def test_a_soft_peek_is_attributed_to_the_src_consumer_not_the_endpoint_helper(pytester, monkeypatch) -> None:
+    """The site is the first src/nexus frame outside service_endpoint.py,
+    http_vector_client.py and config.py (the code that WANTED the endpoint), the
+    origin is the tests/ frame, and a test that only peeked is its own bucket."""
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)  # the outer test may carry its own tenant
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     result = _run(pytester, monkeypatch, '''
 from nexus.db import service_endpoint as se
+from nexus.mcp_infra import _service_t2_is_env_pinned
+from nexus.db.t2._refreshable_client import _resolve_token_only
 
 def test_peeks_from_src():
-    se.is_endpoint_env_pinned()                       # get_credential(service_url) from src/nexus
-    se.discover_lease_with_wait(budget_s=0.0)         # discover_lease() from src/nexus
+    _service_t2_is_env_pinned()                       # get_credential(service_url) via the helper
+    try:
+        _resolve_token_only()                         # get_credential(service_token) + discover_lease
+    except Exception:
+        pass
 
 def test_peeks_from_the_test_itself():
     from nexus.config import get_credential
     get_credential("service_url")                     # a tests/ frame: not a src/nexus peek
+    se.is_endpoint_env_pinned()                       # helper called by the test: no src consumer
     se.discover_lease()
 
 def test_peek_with_a_tenant(t2_tenant):
-    se.is_endpoint_env_pinned()                       # provisioned: not recorded
+    _service_t2_is_env_pinned()                       # provisioned: not recorded
 
 def test_unrelated_credential():
     from nexus.config import get_credential
@@ -216,14 +235,69 @@ def test_unrelated_credential():
 ''', mode="fail")
     result.assert_outcomes(passed=4)  # a peek never fails a test
     report = _report(result)
-    kinds = {(p["kind"], p["site"].split(" in ")[-1]) for p in report["soft_peeks"]}
-    assert kinds == {
-        ("get_credential:service_url", "is_endpoint_env_pinned"),
-        ("discover_lease", "discover_lease_with_wait"),
+    by_kind = {(p["kind"], p["site"].split(" in ")[-1]): p for p in report["soft_peeks"]}
+    assert set(by_kind) == {
+        ("get_credential:service_url", "_service_t2_is_env_pinned"),
+        ("get_credential:service_token", "_resolve_token_only"),
+        ("discover_lease", "_resolve_token_only"),
     }, report["soft_peeks"]
-    assert all(p["tests"] == 1 and p["count"] >= 1 for p in report["soft_peeks"])
-    assert all("service_endpoint.py" in p["site"] for p in report["soft_peeks"])
-    assert report["findings"] == [] and report["counts"]["touch_events"] == 0
+    # the consumer, not the resolver internals, and the tests/ frame that started it
+    assert not any("service_endpoint.py" in p["site"] or "config.py" in p["site"] for p in report["soft_peeks"])
+    assert any("mcp_infra.py" in p["site"] for p in report["soft_peeks"])
+    for p in report["soft_peeks"]:
+        assert p["tests"] == 1 and p["count"] >= 1
+        assert p["peek_only_tests"] == ["test_inner.py::test_peeks_from_src"]
+        assert len(p["origins"]) == 1 and re.fullmatch(r"test_inner\.py:\d+ in test_peeks_from_src", p["origins"][0])
+    # peek-only is a bucket of its own: not clean, not touched
+    c = report["counts"]
+    assert (c["peek_only"], c["clean_unprovisioned"], c["touched_unprovisioned"]) == (1, 2, 0), c
+    assert report["modules"]["test_inner.py"]["peek_only"] == 1 and report["modules"]["test_inner.py"]["clean"] == 2
+    assert report["findings"] == [] and c["touch_events"] == 0
+    assert "peek_only=1" in result.stdout.str()
+
+
+def test_a_provisioned_test_costs_no_stack_walk_or_formatting_for_a_peek(pytester, monkeypatch) -> None:
+    from tests import _storage_touch_guard as g
+
+    calls: list[str] = []
+    for name in ("_fmt", "_frames"):
+        original = getattr(g, name)
+        monkeypatch.setattr(g, name, lambda *a, _o=original, _n=name, **k: calls.append(_n) or _o(*a, **k))
+    result = _run(pytester, monkeypatch, '''
+from nexus.mcp_infra import _service_t2_is_env_pinned
+
+def test_provisioned_peek(t2_tenant):
+    _service_t2_is_env_pinned()
+''', mode="report")
+    result.assert_outcomes(passed=1)
+    assert calls == [], calls
+
+
+def test_module_level_aliases_of_the_peeked_functions_are_rebound_and_restored(pytester, monkeypatch) -> None:
+    """``from x import f as alias`` copies the function: the wrapper must replace
+    every such binding for the session and put the original back after it."""
+    import types
+
+    from nexus import config
+    from nexus.db import service_endpoint
+
+    probe = types.ModuleType("nx_alias_probe")
+    probe.cred_alias = config.get_credential  # type: ignore[attr-defined]
+    probe.lease_alias = service_endpoint.discover_lease  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "nx_alias_probe", probe)
+    originals = (probe.cred_alias, probe.lease_alias)  # type: ignore[attr-defined]
+    outer_wrapped = tuple(getattr(f, "_nx_storage_touch_peek", False) for f in originals)
+    result = _run(pytester, monkeypatch, '''
+import sys
+
+def test_aliases_are_wrappers_in_here():
+    probe = sys.modules["nx_alias_probe"]
+    assert getattr(probe.cred_alias, "_nx_storage_touch_peek", False)
+    assert getattr(probe.lease_alias, "_nx_storage_touch_peek", False)
+''', mode="report")
+    result.assert_outcomes(passed=1)
+    assert (probe.cred_alias, probe.lease_alias) == originals  # type: ignore[attr-defined]
+    assert tuple(getattr(f, "_nx_storage_touch_peek", False) for f in originals) == outer_wrapped
 
 
 def test_peek_wrappers_are_removed_with_the_session(pytester, monkeypatch) -> None:
@@ -249,7 +323,7 @@ def test_wrapped_in_here():
 # ── threads ──────────────────────────────────────────────────────────────────
 
 
-def test_a_construction_on_another_thread_is_not_the_tests_touch(pytester, monkeypatch) -> None:
+def test_a_construction_on_another_thread_is_a_finding_and_never_a_clean_test(pytester, monkeypatch) -> None:
     result = _run(pytester, monkeypatch, '''
 import threading
 from helpers import touch_storage_and_swallow
@@ -258,13 +332,164 @@ def test_background_thread():
     t = threading.Thread(target=touch_storage_and_swallow)
     t.start(); t.join()
 
+def test_background_thread_with_a_tenant(t2_tenant):
+    t = threading.Thread(target=touch_storage_and_swallow)
+    t.start(); t.join()
+
 def test_own_thread():
     touch_storage_and_swallow()
+
+def test_clean():
+    pass
+''', mode="report")
+    result.assert_outcomes(passed=4)
+    report = _report(result)
+    by_id = {f["nodeid"].split("::")[-1]: f for f in report["findings"]}
+    assert {k: f["kind"] for k, f in by_id.items()} == {
+        "test_background_thread": "thread_touch", "test_own_thread": "unprovisioned_touch",
+    }
+    thread = by_id["test_background_thread"]
+    assert thread["error_types"] == ["ServiceEndpointUnresolvableError"] and thread["count"] == 1
+    (touch,) = thread["touches"]
+    assert touch["source"] == "thread" and touch["stack"] and touch["phase"] == "call"
+    assert any("touch_storage_and_swallow" in line for line in touch["stack"])
+    mod = report["modules"]["test_inner.py"]
+    assert (mod["touched"], mod["thread_touched"], mod["clean"], mod["provisioned"]) == (1, 1, 1, 1), mod
+    c = report["counts"]
+    assert (c["thread_touched"], c["touched_unprovisioned"], c["clean_unprovisioned"]) == (1, 1, 1)
+    assert c["foreign_thread_events"] == 2 and c["touch_events"] == 3  # the provisioned one counts as an event
+    assert "thread_touched=1" in result.stdout.str()
+
+
+def test_fail_mode_fails_a_test_whose_only_touch_was_on_a_thread(pytester, monkeypatch) -> None:
+    result = _run(pytester, monkeypatch, '''
+import threading
+from helpers import touch_storage_and_swallow
+
+def test_background_thread():
+    t = threading.Thread(target=touch_storage_and_swallow)
+    t.start(); t.join()
+''', mode="fail")
+    result.assert_outcomes(passed=1, errors=1)
+    out = result.stdout.str()
+    assert "test_background_thread: reached storage without a tenant" in out
+    assert "on a thread the test did not run on" in out
+
+
+def test_a_thread_a_finished_test_leaked_is_not_charged_to_the_next_test(pytester, monkeypatch) -> None:
+    """The thread records the test running when it was created. When it touches
+    storage during a later test, the later test stays clean and the touch is
+    listed on its own, naming its owner."""
+    pytester.makepyfile(leak='''
+import threading
+from helpers import touch_storage_and_swallow
+
+GO = threading.Event()
+DONE = threading.Event()
+
+def _run():
+    GO.wait(30)
+    touch_storage_and_swallow()
+    DONE.set()
+
+THREADS = []
+
+def start():
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    THREADS.append(t)
+''')
+    result = _run(pytester, monkeypatch, '''
+import leak
+
+def test_1_leaks_a_thread():
+    leak.start()
+
+def test_2_lets_it_touch():
+    leak.GO.set()
+    assert leak.DONE.wait(30)
+    leak.THREADS[0].join()
 ''', mode="report")
     result.assert_outcomes(passed=2)
     report = _report(result)
-    assert [f["nodeid"].split("::")[-1] for f in report["findings"]] == ["test_own_thread"]
-    assert report["counts"]["foreign_thread_events"] == 1
+    assert report["findings"] == []
+    (late,) = report["late_thread_touches"]
+    assert late["nodeid"] == "test_inner.py::test_1_leaks_a_thread"
+    assert late["running"] == "test_inner.py::test_2_lets_it_touch"
+    assert late["error_type"] == "ServiceEndpointUnresolvableError" and late["stack"]
+    assert report["modules"]["test_inner.py"]["late_touches"] == 1
+    c = report["counts"]
+    assert (c["clean_unprovisioned"], c["thread_touched"], c["touch_events"]) == (2, 0, 0)
+    assert "late_thread_touches=1" in result.stdout.str()
+
+
+def test_late_touches_are_reported_uncapped() -> None:
+    from tests._storage_touch_guard import _rollup
+
+    records = [
+        {"k": "late_child", "nodeid": f"test_mod.py::test_{i}", "phase": "call", "error_type": "E", "stack": [], "n": 1}
+        for i in range(120)
+    ] + [{"k": "late_thread", "nodeid": "test_mod.py::test_x", "running": None, "error_type": "E", "stack": [], "n": 3}]
+    report = _rollup(records)
+    assert len(report["late_child_touches"]) == 120 and len(report["late_thread_touches"]) == 1
+    assert report["modules"]["test_mod.py"]["late_touches"] == 123
+
+
+# ── a recorder never raises into the code under test ─────────────────────────
+
+
+def test_a_deleted_cwd_does_not_raise_into_the_code_under_test(pytester, monkeypatch) -> None:
+    """``Path.cwd()`` raises ``FileNotFoundError`` once the cwd is gone, and it ran
+    inside the guarded error's constructor and the credential wrappers."""
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    result = _run(pytester, monkeypatch, '''
+import os, shutil, tempfile
+from helpers import touch_storage_and_swallow
+from nexus.mcp_infra import _service_t2_is_env_pinned
+
+def test_cwd_is_gone():
+    here = os.getcwd()
+    gone = tempfile.mkdtemp()
+    os.chdir(gone)
+    shutil.rmtree(gone)
+    try:
+        touch_storage_and_swallow()      # would raise FileNotFoundError out of the constructor
+        _service_t2_is_env_pinned()      # and out of the get_credential wrapper
+    finally:
+        os.chdir(here)
+''', mode="report")
+    result.assert_outcomes(passed=1)
+    report = _report(result)
+    (finding,) = report["findings"]
+    assert finding["count"] == 1 and report["counts"]["guard_errors"] == 0
+    assert [p["kind"] for p in report["soft_peeks"]] == ["get_credential:service_url"]
+
+
+def test_an_internal_error_is_counted_and_swallowed(pytester, monkeypatch) -> None:
+    from tests import _storage_touch_guard as g
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("internal guard failure")
+
+    monkeypatch.setattr(g, "_short_stack", boom)
+    monkeypatch.setattr(g, "_peek_consumer", boom)
+    result = _run(pytester, monkeypatch, '''
+from helpers import touch_storage_and_swallow
+from nexus.mcp_infra import _service_t2_is_env_pinned
+
+def test_touches_and_peeks():
+    touch_storage_and_swallow()          # must not raise, whatever the recorder does
+    _service_t2_is_env_pinned()
+
+def test_next():
+    pass
+''', mode="report")
+    result.assert_outcomes(passed=2)
+    report = _report(result)
+    assert report["counts"]["guard_errors"] == 2
+    assert any("guard failure: 2 internal error(s)" in v for v in report["vacuity"]), report["vacuity"]
+    assert "guard_errors=2" in result.stdout.str()
 
 
 # ── child processes ──────────────────────────────────────────────────────────
@@ -368,6 +593,162 @@ def test_the_shim_installs_only_when_the_log_variable_is_set(tmp_path: Path) -> 
     assert has_finder(str(tmp_path / "log.jsonl")) == "True"
 
 
+def test_every_child_is_counted_and_its_soft_peeks_are_recorded(pytester, monkeypatch) -> None:
+    pytester.makepyfile(child_helpers=_CHILD)
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    result = _run(pytester, monkeypatch, '''
+import subprocess, sys
+
+PEEK = (
+    "from nexus.mcp_infra import _service_t2_is_env_pinned\\n"
+    "_service_t2_is_env_pinned()\\n"
+)
+
+def test_three_quiet_children_and_a_peeking_one():
+    for _ in range(3):
+        subprocess.run([sys.executable, "-c", "pass"], check=True, timeout=120)
+    subprocess.run([sys.executable, "-c", PEEK], check=True, timeout=120)
+
+def test_no_children():
+    pass
+''', mode="report")
+    result.assert_outcomes(passed=2)
+    report = _report(result)
+    assert report["counts"]["children_seen"] == 4 and report["findings"] == []
+    (peek,) = report["soft_peeks"]
+    assert peek["kind"] == "get_credential:service_url" and "mcp_infra.py" in peek["site"]
+    assert peek["site"].endswith("in _service_t2_is_env_pinned")
+    assert peek["peek_only_tests"] == ["test_inner.py::test_three_quiet_children_and_a_peeking_one"]
+    assert report["counts"]["peek_only"] == 1 and "children_seen=4" in result.stdout.str()
+
+
+def test_child_touches_are_deduped_and_capped_like_the_parents(pytester, monkeypatch) -> None:
+    sites = "\\n".join("E('site')" for _ in range(12))  # 12 distinct line numbers: 12 signatures
+    result = _run(pytester, monkeypatch, f'''
+import subprocess, sys
+
+CODE = (
+    "from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\\n"
+    "{sites}\\n"
+    "for _ in range(300):\\n"
+    "    E('loop')\\n"
+)
+
+def test_noisy_child():
+    subprocess.run([sys.executable, "-c", CODE], check=True, timeout=120)
+''', mode="report")
+    result.assert_outcomes(passed=1)
+    (finding,) = _report(result)["findings"]
+    assert finding["count"] == 312, finding["count"]  # every event counted ...
+    assert len(finding["touches"]) == 8  # ... 13 signatures, 8 kept
+    assert finding["dropped_events"] + sum(t["count"] for t in finding["touches"]) == 312
+    assert finding["dropped_events"] > 0
+
+
+def test_a_child_that_outlives_its_test_is_reported_late_with_its_owner(pytester, monkeypatch, tmp_path) -> None:
+    trigger = tmp_path / "go"
+    pytester.makepyfile(late_child=f'''
+import subprocess, sys
+from pathlib import Path
+
+CODE = (
+    "import os, time\\n"
+    "while not os.path.exists({str(trigger)!r}):\\n"
+    "    time.sleep(0.05)\\n"
+    "from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\\n"
+    "E('late')\\n"
+)
+PROCS = []
+
+def spawn():
+    PROCS.append(subprocess.Popen([sys.executable, "-c", CODE]))
+
+def release_and_wait():
+    Path({str(trigger)!r}).touch()
+    assert PROCS[0].wait(timeout=120) == 0
+''')
+    result = _run(pytester, monkeypatch, '''
+import late_child
+
+def test_1_spawns_and_returns():
+    late_child.spawn()
+
+def test_2_releases_it():
+    late_child.release_and_wait()
+
+def test_3_runs_after():
+    pass
+''', mode="report")
+    result.assert_outcomes(passed=3)
+    report = _report(result)
+    assert report["findings"] == []  # the owner was already written clean
+    (late,) = report["late_child_touches"]
+    assert late["nodeid"] == "test_inner.py::test_1_spawns_and_returns" and late["error_type"] == "ServiceEndpointUnresolvableError"
+    assert report["modules"]["test_inner.py"]["late_touches"] == 1
+    assert "late_child_touches=1" in result.stdout.str()
+
+
+def test_the_shim_chains_a_real_sitecustomize_further_down_the_path(tmp_path: Path) -> None:
+    import subprocess
+
+    other = tmp_path / "other"
+    other.mkdir()
+    marker = tmp_path / "chained"
+    (other / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')\n")
+    env = {k: v for k, v in os.environ.items() if k != CHILD_LOG_ENV}
+    env.update({"PYTHONPATH": os.pathsep.join([str(SHIM_DIR), str(other)]), CHILD_LOG_ENV: str(tmp_path / "log.jsonl")})
+    out = subprocess.run(
+        [sys.executable, "-c", "import sys; print(any(type(f).__name__ == '_TouchFinder' for f in sys.meta_path))"],
+        env=env, capture_output=True, text=True, timeout=60, check=True,
+    ).stdout.strip()
+    assert out == "True", "the shim itself is installed"
+    assert marker.read_text() == "ran", "and the sitecustomize it shadows still ran"
+
+
+def test_a_shim_that_fails_to_install_still_chains(tmp_path: Path) -> None:
+    """``_install`` and ``_chain`` are separate try blocks: a recorder that
+    cannot install must not take the real sitecustomize down with it."""
+    import subprocess
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    source = (SHIM_DIR / "sitecustomize.py").read_text()
+    needle = "def _install() -> None:\n"
+    assert source.count(needle) == 1
+    (shim / "sitecustomize.py").write_text(source.replace(needle, needle + "    raise RuntimeError('install failed')\n"))
+    other = tmp_path / "other"
+    other.mkdir()
+    marker = tmp_path / "chained"
+    (other / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')\n")
+    env = {k: v for k, v in os.environ.items() if k != CHILD_LOG_ENV}
+    env.update({"PYTHONPATH": os.pathsep.join([str(shim), str(other)]), CHILD_LOG_ENV: str(tmp_path / "log.jsonl")})
+    subprocess.run([sys.executable, "-c", "pass"], env=env, check=True, timeout=60)
+    assert marker.read_text() == "ran"
+
+
+def test_a_process_that_hosts_a_guard_leaves_no_child_lines_even_at_exit(tmp_path: Path) -> None:
+    """An xdist worker inherits the shim but keeps its own books. Its repeat
+    counts used to resurface in the PARENT's log when the worker's guard
+    restored the environment before the process exited."""
+    import subprocess
+
+    log = tmp_path / "log.jsonl"
+    env = {k: v for k, v in os.environ.items() if k != CHILD_LOG_ENV}
+    env.update({"PYTHONPATH": str(SHIM_DIR), CHILD_LOG_ENV: str(log), "PYTEST_CURRENT_TEST": "t.py::t (call)"})
+    code = (
+        "import os\n"
+        "os.environ['NX_STORAGE_TOUCH_GUARD_PID'] = str(os.getpid())\n"
+        "from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\n"
+        "for _ in range(3):\n"
+        "    E('x')\n"
+        "os.environ['NX_STORAGE_TOUCH_GUARD_PID'] = '1'\n"  # the guard restoring the parent's environment
+    )
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=120)
+    kinds = [json.loads(line)["k"] for line in log.read_text().splitlines()]
+    assert kinds == ["child_start"], kinds  # started as a plain child; recorded nothing once it hosted the guard
+
+
 # ── durability and non-vacuity ───────────────────────────────────────────────
 
 
@@ -431,7 +812,49 @@ def test_d_after():
     # a_provisioned and b_clean survived the kill on disk; d_after ran on the replacement
     assert c["tests"] == 3 and c["provisioned"] == 1, c
     assert result.ret != 0
+    # the vacuity verdict itself, not just any failure (the crash fails a test too)
     assert "vacuous sweep: workers reported 1 of 2 started" in out, out
+    assert "workers reported 1 of 2 started" in report["vacuity"][0], report["vacuity"]
+    assert [v for v in report["vacuity"] if "workers reported" in v] == [
+        "vacuous sweep: workers reported 1 of 2 started"
+    ]
+    assert report["collected"] == 4 and report["recorded"] == 3
+
+
+def test_fail_mode_accepts_a_whole_xdist_sweep(pytester, monkeypatch, tmp_path) -> None:
+    """The happy path across workers: every worker reports, the merged counts are
+    the sum (not doubled), and the controller exits zero."""
+    pytest.importorskip("xdist")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(REPO_ROOT), *filter(None, [os.environ.get("PYTHONPATH")])]))
+    monkeypatch.setenv(REPORT_DIR_ENV, str(tmp_path / "rep"))
+    monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
+    monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "fail")
+    pytester.makeconftest(_CONFTEST)
+    pytester.makepyfile(helpers=_TOUCH)
+    pytester.makepyfile(test_inner='''
+import pytest
+from helpers import touch_storage_and_swallow
+
+@pytest.mark.parametrize("i", range(5))
+def test_provisioned(i, t2_tenant):
+    touch_storage_and_swallow()
+
+@pytest.mark.parametrize("i", range(5))
+def test_clean(i):
+    pass
+''')
+    result = pytester.runpytest_subprocess(
+        "-p", "tests._storage_touch_guard", "-p", "no:cacheprovider", "-n", "2", "-q",
+    )
+    out = result.stdout.str()
+    result.assert_outcomes(passed=10)
+    assert result.ret == 0, out
+    report = _report(result)
+    assert report["workers_started"] == report["workers"] == 2 and report["recovered_files"] == []
+    c = report["counts"]
+    assert (c["tests"], c["provisioned"], c["clean_unprovisioned"], c["touch_events"]) == (10, 5, 5, 5)
+    assert (report["collected"], report["recorded"], report["vacuity"]) == (10, 10, [])
+    assert "vacuous" not in out
 
 
 def test_fail_mode_refuses_a_vacuous_sweep(pytester, monkeypatch) -> None:
@@ -461,3 +884,30 @@ def test_clean():
 def test_report_mode_never_changes_the_exit_status(pytester, monkeypatch) -> None:
     result = _run(pytester, monkeypatch, "def test_nothing():\n    pass\n", mode="report")
     assert result.ret == 0
+
+
+def test_report_mode_prints_and_stores_the_vacuity_verdict_without_failing(pytester, monkeypatch) -> None:
+    """A census that read a vacuous or short run must say so even when it only
+    reports, or a report-mode sweep passes over input it never examined."""
+    result = _run(pytester, monkeypatch, "def test_nothing():\n    pass\n", mode="report")
+    assert result.ret == 0
+    out = result.stdout.str()
+    assert "vacuous sweep: provisioned=0" in out and "vacuous sweep: touch_events=0" in out
+    report = _report(result)
+    assert report["vacuity"] == [
+        "vacuous sweep: provisioned=0 (must be > 0)",
+        "vacuous sweep: touch_events=0 (must be > 0)",
+    ]
+    assert (report["collected"], report["recorded"]) == (1, 1)
+    assert "collected=1 recorded=1" in out
+    # and a sweep that examined every class carries an empty verdict
+    result = _run(pytester, monkeypatch, '''
+from helpers import touch_storage_and_swallow
+
+def test_provisioned_toucher(t2_tenant):
+    touch_storage_and_swallow()
+
+def test_clean():
+    pass
+''', mode="report")
+    assert result.ret == 0 and _report(result)["vacuity"] == []
