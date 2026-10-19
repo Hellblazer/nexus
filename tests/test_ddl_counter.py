@@ -127,6 +127,37 @@ def test_the_java_init_script_installs_the_same_probe() -> None:
     assert script.index("-- nx-ddl-probe-end") > script.rindex(ddl.PROBE_SQL.strip())
 
 
+def test_every_wal_mark_reads_the_insert_pointer_not_the_write_pointer() -> None:
+    """nexus-sz651: the write pointer lags the insert pointer by megabytes under
+    synchronous_commit=off, so a mark at it leaves recent WAL out of its interval."""
+    java_counts = (REPO_ROOT / "service" / "src" / "test" / "java" / "dev" / "nexus" / "service" / "DdlCounts.java").read_text()
+    script = (JAVA_GOLDEN_DIR / "nx-ddl-probe.sql").read_text()
+    assert "pg_current_wal_insert_lsn()" in ddl.PROBE_SQL
+    assert "pg_current_wal_lsn()" not in ddl.PROBE_SQL
+    assert script.count("pg_current_wal_insert_lsn()") == 2  # template1 and the default database
+    assert "pg_current_wal_lsn()" not in script
+    assert '"pg_current_wal_insert_lsn"' in java_counts and '"pg_current_wal_lsn"' not in java_counts
+
+
+def test_the_wal_figure_is_documented_as_a_lower_bound_proxy_with_an_unmeasured_list() -> None:
+    """nexus-sz651: WAL is not what a disk-backed cluster would write, and the NVMe writers it cannot
+    see are named wherever the figure is documented."""
+    docs = {
+        "tests/_ddl_counter.py": (REPO_ROOT / "tests" / "_ddl_counter.py").read_text(),
+        "tests/AGENTS.md": (REPO_ROOT / "tests" / "AGENTS.md").read_text(),
+        "scripts/ddl_ratchet.py": (REPO_ROOT / "scripts" / "ddl_ratchet.py").read_text(),
+        "tests/ddl_ceiling.toml": (REPO_ROOT / "tests" / "ddl_ceiling.toml").read_text(),
+    }
+    for name, text in docs.items():
+        flat = " ".join(text.replace("#", " ").split())
+        assert "lower-bound" in flat.lower() or "lower bound" in flat.lower(), name
+        assert "NVMe sampler" in flat and "source of truth" in flat, name
+        for unmeasured in ("journald", "jar builds", ".venv"):
+            assert unmeasured in flat, (name, unmeasured)
+        stripped = flat.replace("not what a disk-backed cluster would write", "")
+        assert "disk-backed cluster would write" not in stripped, name  # only ever as a negation
+
+
 def test_a_log_that_never_reached_ready_is_all_migration() -> None:
     log = "\n".join(line for line in GOLDEN_LOG.read_text().splitlines() if "nx_ddl_mark" not in line)
     parsed = ddl.parse_log(log)
@@ -250,7 +281,7 @@ def test_two_workers_merge_into_one_report() -> None:
     assert ddl.summary_line(merged) == (
         "ddl: migration=18 tests=34 per_test=0.76 wal: migration=2.0KB tests=8.8KB per_test=200B"
     )
-    assert ddl.summary_line(merged, uncounted=3).endswith(" | 3 uncounted clusters")
+    assert ddl.summary_line(merged, uncounted=3).endswith(" | 3 uncounted cluster start sites (static tree census)")
 
 
 def test_one_worker_with_an_unmeasured_phase_voids_the_wal_total() -> None:
@@ -365,7 +396,7 @@ def test_a_serial_run_prints_and_writes_the_counts(pytester, monkeypatch, tmp_pa
     result.assert_outcomes(passed=8)
     result.stdout.fnmatch_lines([
         "ddl: migration=9 tests=17 per_test=2.12 wal: migration=1000B tests=4.4KB per_test=562B "
-        "| * uncounted clusters (report: *nx-ddl-report.json)",
+        "| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert report["total"]["total"] == 26
@@ -374,7 +405,7 @@ def test_a_serial_run_prints_and_writes_the_counts(pytester, monkeypatch, tmp_pa
     assert report["buckets"]["boot"]["total"] == 3
     assert report["wal"]["tests_bytes"] == 4500
     assert report["workers_ready_mark_seen"] == 1
-    assert isinstance(report["uncounted_clusters"], int)
+    assert isinstance(report["uncounted_cluster_start_sites"], int)
 
 
 def test_xdist_workers_merge_into_one_report(pytester, monkeypatch, tmp_path) -> None:
@@ -383,7 +414,7 @@ def test_xdist_workers_merge_into_one_report(pytester, monkeypatch, tmp_path) ->
     result.assert_outcomes(passed=8)
     result.stdout.fnmatch_lines([
         "ddl: migration=18 tests=34 per_test=4.25 wal: migration=2.0KB tests=8.8KB per_test=1.1KB "
-        "| * uncounted clusters (report: *nx-ddl-report.json)",
+        "| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert (report["workers"], report["workers_booted"], report["recovered_workers"]) == (2, 2, 0)

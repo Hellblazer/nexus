@@ -38,7 +38,7 @@ def _py_report(tmp_path: Path, *, name="nx-ddl-report.json", migration_ddl=2000,
             "dbsize_growth_bytes": 1,
             "workers_complete": workers if wal_complete else 0,
         },
-        "uncounted_clusters": 59,
+        "uncounted_cluster_start_sites": 59,
     }))
     return path
 
@@ -128,15 +128,18 @@ def test_an_unset_ceiling_does_not_pass_and_prints_the_numbers_to_commit(tmp_pat
     assert "ddl_per_test = 75" in message
 
 
-def test_the_committed_unset_ceilings_fail_a_real_looking_run(tmp_path) -> None:
-    code, _ = ratchet.check("python_unit", _py_report(tmp_path))
-    assert code == ratchet.EXIT_UNSET
+def test_unset_ceilings_fail_a_real_looking_run(tmp_path) -> None:
+    """A ceilings file with every metric still "measure" (a temp file: the committed one goes from
+    "measure" to real numbers after the first full run, and this must not turn red when it does)."""
+    unset = _py_ceilings(tmp_path, **{name: "measure" for name in ratchet.PYTHON_METRICS})
+    code, message = ratchet.check("python_unit", _py_report(tmp_path), unset)
+    assert code == ratchet.EXIT_UNSET, message
 
 
 def test_a_run_at_every_ceiling_passes(tmp_path) -> None:
     code, message = ratchet.check("python_unit", _py_report(tmp_path), _py_ceilings(tmp_path))
     assert code == ratchet.EXIT_OK, message
-    assert "uncounted_clusters=59" in message
+    assert "uncounted_cluster_start_sites=59 (static tree census)" in message
 
 
 def test_bytes_pass_inside_the_tolerance_band_and_fail_outside_it(tmp_path) -> None:
@@ -340,10 +343,10 @@ def test_the_cli_fan_in(tmp_path, capsys) -> None:
     assert "python_unit fan-in" in capsys.readouterr().out
 
 
-def test_a_java_check_reports_the_uncounted_clusters_next_to_its_ceilings(tmp_path) -> None:
+def test_a_java_check_reports_the_uncounted_cluster_start_sites_next_to_its_ceilings(tmp_path) -> None:
     d = tmp_path / "ddl-counts"
     _java_fork(d, "ddl-main-r1-1.json")
     (tmp_path / "ddl_uncounted_clusters.toml").write_text('[counted]\nsites = []\n[uncounted]\n"tests/a.py::b::pg_ctl_start" = 2\n"service/pom.xml::gen" = 1\n')
     code, message = ratchet.check("java_main", d, _jv_ceilings(tmp_path))
     assert code == ratchet.EXIT_OK, message
-    assert "1 uncounted clusters" in message
+    assert "1 uncounted cluster start sites (static tree census" in message

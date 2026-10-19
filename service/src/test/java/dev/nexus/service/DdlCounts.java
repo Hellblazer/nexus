@@ -37,10 +37,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * and the summed database size at the {@code start} (container init script), {@code ready}
  * (template migrated) and {@code end} (this class, before the log is read) marks, so a shared
  * cluster's migration is {@code ready - start} and everything the tests caused is {@code end -
- * ready}; a dedicated container's whole life is {@code end - start}. Containers run on tmpfs, so
- * WAL measures churn, not disk: it is what a disk-backed cluster would write. The job cgroup's
- * {@code io.stat} {@code wbytes} (where readable) is the real block-device figure; every fork of a
- * run shares one cgroup, so the per-fork deltas overlap and are reported, never summed or ratcheted.
+ * ready}; a dedicated container's whole life is {@code end - start}. WAL is a RELATIVE, LOWER-BOUND
+ * churn proxy, not what a disk-backed cluster would write: the containers run {@code fsync=off} and
+ * {@code full_page_writes=off} and sit on tmpfs, and Python's substrate runs {@code wal_level=minimal},
+ * so Python and Java WAL are not comparable. NOT MEASURED: the job workspace and checkout,
+ * {@code target/}, {@code .venv}, jar builds, journald, anything before the tests start, and the
+ * docker-run and e2e shell clusters. The labrun NVMe sampler is the source of truth for disk writes.
  *
  * <p>Buckets: {@code boot} (everything before the {@code start} mark: the container bootstrap and
  * the probe's own install, never counted), {@code shared_migration} (the per-fork template: the
@@ -150,14 +152,17 @@ final class DdlCounts {
     }
 
     /**
-     * The cluster's WAL position as bytes since LSN 0/0 ({@code pg_wal_lsn_diff}, a typed jOOQ
+     * The cluster's WAL INSERT position as bytes since LSN 0/0 ({@code pg_wal_lsn_diff}, a typed jOOQ
      * call), or -1 when it cannot be read. Two reads bracket a class's use of a shared cluster.
+     * Insert, not {@code pg_current_wal_lsn()} (the write pointer): under {@code synchronous_commit=off}
+     * the write pointer lags the insert pointer by megabytes, so a read at it would leave recent WAL out
+     * of the interval. The probe's marks read the same pointer.
      */
     static long walBytes(Connection connection) {
         try {
             BigDecimal v = DSL.using(connection, SQLDialect.POSTGRES).select(
                 DSL.function("pg_wal_lsn_diff", BigDecimal.class,
-                    DSL.function("pg_current_wal_lsn", Object.class), DSL.inline("0/0"))).fetchOne(0, BigDecimal.class);
+                    DSL.function("pg_current_wal_insert_lsn", Object.class), DSL.inline("0/0"))).fetchOne(0, BigDecimal.class);
             return v == null ? -1 : v.longValue();
         } catch (RuntimeException e) {
             return -1;

@@ -6,12 +6,21 @@ thrashing, so the TARGET is bytes written. This module counts two things per run
 into the migration the substrate boots with and what the tests themselves cause:
 
 * WAL bytes the substrate cluster generated: the probe's ``mark()`` logs
-  ``pg_current_wal_lsn()`` (as a byte count) and the summed database size at the ``start``,
+  ``pg_current_wal_insert_lsn()`` (as a byte count) and the summed database size at the ``start``,
   ``ready`` and ``end`` marks; ``ready - start`` is the migration and ``end - ready`` is the
-  tests. On a tmpfs cluster (every cluster here) WAL measures churn, not disk: it is the bytes
-  the server wrote, which a disk-backed cluster would put on the block device. The job
-  cgroup's ``io.stat`` ``wbytes`` is read around the run where readable (Linux, cgroup v2); it
-  is the real block-device figure, and only means something when the run owns its cgroup.
+  tests. WAL is a RELATIVE, LOWER-BOUND churn proxy, not what a disk-backed cluster would write:
+  the clusters run ``fsync = off`` and ``full_page_writes = off`` (so no full-page images), the
+  Python substrate also ``wal_level = minimal`` (so WAL-skipped bulk operations log nothing), and
+  the Java containers keep the default ``wal_level``, so Python and Java WAL are not comparable
+  with each other. The clusters sit on tmpfs on Linux with headroom (else the tempdir), where
+  their data files are not NVMe writes at all. Use WAL to compare one run with another of the
+  same suite, never as a disk-write figure. The job cgroup's ``io.stat`` ``wbytes`` is read around
+  the pytest window where readable (Linux, cgroup v2); it is informational, not ratcheted, and
+  only means something when the run owns its cgroup.
+
+  NOT MEASURED here: the job workspace and checkout, ``target/``, ``.venv``, jar builds,
+  journald, anything before pytest starts, and the docker-run and e2e shell clusters. The labrun
+  NVMe sampler is the source of truth for bytes written to disk.
 * DDL statements, the secondary diagnostic that explains where the bytes come from, split by
   kind.
 
@@ -52,8 +61,10 @@ file and hands it to the controller through ``workeroutput``; the controller
 merges them, prints ``ddl: migration=<n> tests=<n> per_test=<x>`` and writes
 ``nx-ddl-report.json`` under ``NX_DDL_REPORT_DIR`` (default: the controller's
 basetemp). Clusters other than the substrate's (``throwaway_pg_cluster``, a
-test's own engine) are not counted; ``tests/ddl_uncounted_clusters.toml`` lists every such
-start site, and the terminal line prints how many there are.
+test's own engine) are not counted; ``tests/ddl_uncounted_clusters.toml`` lists the start sites a
+static scan of ``tests/`` and ``scripts/`` finds (docker-run and e2e shell clusters are not scanned),
+and the terminal line prints how many there are. That figure is a census of call sites, printed on
+every run whether or not the tests that reach them ran, and unweighted by size.
 """
 from __future__ import annotations
 
@@ -96,6 +107,11 @@ LOG_CONF = (
     "log_timezone = 'UTC'\n"
 )
 
+#: The mark reads the WAL INSERT position, not ``pg_current_wal_lsn()`` (the write pointer): under
+#: ``synchronous_commit = off``, which the test clusters run, the write pointer lags the insert
+#: pointer by megabytes, so a mark at the write pointer leaves recent WAL out of its interval.
+#: ``service/src/test/resources/ddl/nx-ddl-probe.sql`` carries the same SQL; a test keeps them equal.
+#:
 #: Run once per database, as the cluster owner, before anything migrates it. The two SET clauses
 #: keep each event to one short log line: without them every line also carries the whole PL/pgSQL
 #: call stack and the triggering statement, 114 KB per tenant mint (measured 2026-10-19), which on
@@ -112,7 +128,7 @@ $probe$;
 CREATE OR REPLACE FUNCTION nx_ddl_probe.mark(label text) RETURNS void
 LANGUAGE plpgsql SET log_error_verbosity = terse SET log_min_error_statement = panic AS $probe$
 DECLARE
-  wal numeric := pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0');
+  wal numeric := pg_wal_lsn_diff(pg_current_wal_insert_lsn(), '0/0');
   dbsize numeric := -1;
 BEGIN
   BEGIN
@@ -533,7 +549,7 @@ def summary_line(merged: dict[str, Any], *, uncounted: int | None = None) -> str
     if io is not None and io.get("wbytes_delta") is not None:
         line += f" io_wbytes={fmt_bytes(io['wbytes_delta'])}"
     if uncounted is not None:
-        line += f" | {uncounted} uncounted clusters"
+        line += f" | {uncounted} uncounted cluster start sites (static tree census)"
     return line
 
 
@@ -547,7 +563,9 @@ def cgroup_io_wbytes(
     or None where it cannot be read (not Linux, cgroup v1, no ``io`` controller). Only a run that
     owns its cgroup (a Nomad task, a container, a systemd scope) gets a figure that is the run's;
     on a shared cgroup the delta also counts every sibling's writes. A tmpfs write is not a
-    block-device write, so a run entirely on tmpfs reads near zero here and WAL is the measure."""
+    block-device write, so a run entirely on tmpfs reads near zero here. This figure covers the
+    pytest window only (not the checkout, ``target/``, ``.venv``, jar builds or journald) and is
+    informational: the labrun NVMe sampler is the source of truth for disk writes."""
     try:
         for line in proc_cgroup.read_text().splitlines():
             hierarchy, _, rest = line.partition(":")
@@ -702,12 +720,12 @@ class _Recorder:
         if not merged["workers_booted"]:
             return
         merged["cgroup_io"] = cgroup_io_delta(self.cgroup_start, cgroup_io_wbytes())
-        merged["uncounted_clusters"] = uncounted_cluster_count()
+        merged["uncounted_cluster_start_sites"] = uncounted_cluster_count()
         path = self.report_dir() / REPORT_NAME
         path.write_text(json.dumps(merged, indent=1))
         lost = f" RECOVERED {len(recovered)} worker file(s) no worker handed over;" if recovered else ""
         terminalreporter.write_line(
-            f"{summary_line(merged, uncounted=merged['uncounted_clusters'])} (report: {path}){lost}"
+            f"{summary_line(merged, uncounted=merged['uncounted_cluster_start_sites'])} (report: {path}){lost}"
         )
 
 

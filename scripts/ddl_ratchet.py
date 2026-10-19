@@ -9,10 +9,15 @@
 
 THE TARGET IS BYTES WRITTEN (disk thrashing); the DDL count is the secondary diagnostic that
 explains where the bytes come from. Both are ratcheted. Bytes are WAL bytes the test clusters
-generated (``pg_current_wal_lsn`` between the probe's marks): on a tmpfs cluster that is churn,
-not disk, which is what a disk-backed cluster would write. WAL varies a little from run to run
-(autovacuum, hint-bit full-page images), so every bytes ceiling carries a tolerance band
-(``bytes_tolerance``, a fraction); DDL is deterministic and carries ``ddl_tolerance`` (default 0).
+generated (``pg_current_wal_insert_lsn`` between the probe's marks). WAL is a RELATIVE, LOWER-BOUND
+churn proxy, not what a disk-backed cluster would write: the clusters run ``fsync = off`` and
+``full_page_writes = off``, the Python substrate also ``wal_level = minimal``, so Python and Java
+WAL are not comparable with each other and neither sees full-page images or WAL-skipped bulk
+operations. NOT MEASURED: the job workspace and checkout, ``target/``, ``.venv``, jar builds,
+journald, anything before pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe
+sampler is the source of truth for bytes written to disk. WAL varies a little from run to run
+(autovacuum, hint bits), so every bytes ceiling carries a tolerance band (``bytes_tolerance``, a
+fraction); DDL is deterministic and carries ``ddl_tolerance`` (default 0).
 
 A shard is not the run. CI splits the Python suite into shards of differing width and test count,
 so ``check`` compares INTENSIVE numbers, which do not move with how the work was split: bytes per
@@ -116,8 +121,8 @@ def measure_python(report: Path) -> Measurement:
     extra = f"tests={tests_run} workers_booted={booted}"
     if data.get("recovered_workers"):
         extra += f" recovered_workers={data['recovered_workers']}"
-    if data.get("uncounted_clusters") is not None:
-        extra += f" uncounted_clusters={data['uncounted_clusters']}"
+    if data.get("uncounted_cluster_start_sites") is not None:
+        extra += f" uncounted_cluster_start_sites={data['uncounted_cluster_start_sites']} (static tree census)"
     io = data.get("cgroup_io")
     if io and io.get("wbytes_delta") is not None:
         extra += f" cgroup_io_wbytes={io['wbytes_delta']} (the job's block-device writes; informational)"
@@ -208,7 +213,7 @@ def fan_in(reports: list[Path], shards: int) -> Measurement:
 
 
 def uncounted_clusters(path: Path, prefix: str = "") -> int | None:
-    """The sum of the ``[uncounted]`` table of the cluster-start-site allowlist (only the sites whose key
+    """The sum of the ``[uncounted]`` table of the cluster-start-site allowlist (a static census of call sites) (only the sites whose key
     starts with *prefix*), or None when the file is absent."""
     try:
         table = tomllib.loads(path.read_text()).get("uncounted", {})
@@ -293,7 +298,7 @@ def check(suite: str, report: Path, ceilings_path: Path = DEFAULT_CEILINGS, run:
     if suite != "python_unit":
         count = uncounted_clusters(ceilings_path.parent / "ddl_uncounted_clusters.toml", "service/")
         if count is not None:
-            measured.extra += f" | {count} uncounted clusters (the jOOQ code generator's build-time container)"
+            measured.extra += f" | {count} uncounted cluster start sites (static tree census: the jOOQ code generator's build-time container)"
     names = PYTHON_METRICS if suite == "python_unit" else JAVA_METRICS
     return compare(suite, measured, entry, names, ceilings_path.name, suite)
 

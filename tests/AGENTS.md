@@ -253,13 +253,20 @@ deselects them, so no census has said which of them touch storage.
 The target is **bytes written** (disk thrashing); the DDL count is the secondary diagnostic that
 explains them. Every run with the engine substrate prints
 `ddl: migration=<n> tests=<n> per_test=<x> wal: migration=<size> tests=<size> per_test=<size>
-[io_wbytes=<size>] | <n> uncounted clusters` in the terminal summary and writes `nx-ddl-report.json`
+[io_wbytes=<size>] | <n> uncounted cluster start sites (static tree census)` in the terminal summary and writes `nx-ddl-report.json`
 (under `NX_DDL_REPORT_DIR`, else the controller's basetemp; a worker's own file is under
-`<basetemp>/popen-gwN`). WAL bytes are `pg_current_wal_lsn()` differences between the probe's
-`start`, `ready` and `end` marks, so `migration` is the engine's boot and `tests` is everything the
-tests caused. Every cluster here sits on tmpfs, so WAL measures churn (what a disk-backed cluster
-would write), not disk; `io_wbytes` is the job cgroup's `io.stat` `wbytes` where readable (Linux,
-cgroup v2) and means something only when the run owns its cgroup. There is no per-test WAL figure
+`<basetemp>/popen-gwN`). WAL bytes are `pg_current_wal_insert_lsn()` differences between the probe's
+`start`, `ready` and `end` marks (insert, not the write pointer `pg_current_wal_lsn()`, which lags
+by megabytes under `synchronous_commit=off`), so `migration` is the engine's boot and `tests` is
+everything the tests caused. **WAL is a relative, lower-bound churn proxy, not what a disk-backed
+cluster would write**: the clusters run `fsync=off` and `full_page_writes=off` (no full-page images),
+the Python substrate also `wal_level=minimal` (WAL-skipped bulk operations log nothing), so Python
+and Java WAL are not comparable with each other. Clusters sit on tmpfs on Linux with headroom, else
+the tempdir. `io_wbytes` is the job cgroup's `io.stat` `wbytes` over the pytest window where
+readable (Linux, cgroup v2); it is informational, not ratcheted, and means something only when the
+run owns its cgroup. **Not measured**: the job workspace and checkout, `target/`, `.venv`, jar
+builds, journald, anything before pytest starts, and the docker-run and e2e shell clusters. The
+labrun NVMe sampler is the source of truth for bytes written to disk. There is no per-test WAL figure
 in Python (an LSN read at every test boundary is a round trip per test); the per-test number is the
 tests' bytes over the test count. `tests/_ddl_counter.py` explains the DDL signals
 (`log_statement=ddl` for client statements, an event trigger for the DDL a function runs through
@@ -278,10 +285,13 @@ tolerance band (`bytes_tolerance`), WAL varying a little; ceilings stay `"measur
 (the Maven build timestamp); the ratchet reads one suite of one run. Exit codes: 0 ok, 10 above a
 ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
 
-Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists every
-`pg_ctl_start` / `initdb` site in the test tree the counter cannot see (the terminal line prints their
-number); `tests/test_ddl_uncounted_clusters_lint.py` keeps it equal to the tree, so a new cluster
-start must be read through the counter or listed on purpose.
+Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
+`pg_ctl_start` / `initdb` sites a static scan of `tests/` and `scripts/` finds (plus the jOOQ code
+generator); docker-run and e2e shell clusters are not scanned, so the list is not every start site.
+The terminal line prints the total as `<n> uncounted cluster start sites (static tree census)`: a
+census of call sites, the same on every run whichever tests ran, unweighted by size.
+`tests/test_ddl_uncounted_clusters_lint.py` keeps the list equal to the scan, so a new start site
+must be read through the counter or listed on purpose.
 
 The Java report has five buckets: `boot` (before the container's `start` mark; the probe's install),
 `shared_migration` (the per-fork template), `shared_tests` (clones and the tests' own DDL),

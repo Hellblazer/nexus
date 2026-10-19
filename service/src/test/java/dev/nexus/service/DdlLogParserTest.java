@@ -204,6 +204,22 @@ class DdlLogParserTest {
         assertThat(out.at("/per_class/SomeMigrationTest/ddl").asLong()).isEqualTo(11);
     }
 
+    /**
+     * The marks are best effort: a probe that cannot be read must cost the run a number, never fail
+     * the template's boot that calls {@link DdlCounts#markReady}. A connection whose every call fails
+     * stands in for a closed one; with the catch in {@code DdlCounts.mark} removed this throws.
+     */
+    @Test
+    void a_mark_on_a_connection_that_fails_returns_false_and_does_not_throw() {
+        java.sql.Connection dead = (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
+            DdlLogParserTest.class.getClassLoader(), new Class<?>[] {java.sql.Connection.class},
+            (proxy, method, args) -> {
+                throw new java.sql.SQLException("connection is closed");
+            });
+        assertThat(DdlCounts.markReady(dead)).as("a failed mark is reported, not thrown").isFalse();
+        assertThat(DdlCounts.mark(dead, "start")).isFalse();
+    }
+
     @Test
     void the_probe_install_block_is_the_probe_file_after_its_connect_line_and_has_no_psql_syntax() {
         String block = DdlCounts.probeInstallBlock();

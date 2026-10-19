@@ -14,6 +14,10 @@ sites whose cluster the counter reads; every other site is in the ``[uncounted]`
 ``tests/ddl_uncounted_clusters.toml`` with how many times it occurs. A new site that is in neither
 fails ``tests/test_ddl_uncounted_clusters_lint.py``: it must be counted or listed on purpose.
 
+The figure is a STATIC CENSUS OF CALL SITES, labelled "uncounted cluster start sites" wherever it
+prints: not a count of clusters that ran (it is the same on every run, whichever tests ran), not
+weighted by size, and not complete. Docker-run sites and e2e shell clusters are not scanned.
+
 Scope, stated so the figure is not trusted past it: only the Python test tree and ``scripts/`` are
 scanned (product code under ``src/`` provisions Postgres for real use, and tests that run it are
 listed through their own ``initdb`` lookups); the Java suite is gated by
@@ -98,10 +102,12 @@ def render(sites: Counter[str]) -> str:
         "# Postgres cluster start sites the DDL/bytes counter does not read (nexus-sz651, epic nexus-aca0q).",
         "#",
         "# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line",
-        "# prints the sum of [uncounted] as `uncounted_clusters=N`; tests/test_ddl_uncounted_clusters_lint.py",
-        "# fails when this file and the tree differ, in either direction. Regenerate with",
+        "# prints the sum of [uncounted] as `N uncounted cluster start sites (static tree census)`;",
+        "# tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either",
+        "# direction. The scan covers tests/**/*.py, scripts/**/*.py and the pom's code generator; docker-run",
+        "# and e2e shell clusters are not scanned, so this is not every start site. Regenerate with",
         "#   uv run python -m tests._ddl_cluster_sites --write",
-        "# and review the diff: a new line is a cluster the counter cannot see.",
+        "# and review the diff: a new line is a start site whose cluster the counter cannot see.",
         "",
         "[counted]",
         "sites = [" + ", ".join(f'"{s}"' for s in COUNTED) + "]",

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-sz651: every Postgres cluster start site in the test tree is either read by the DDL/bytes
-counter or listed in ``tests/ddl_uncounted_clusters.toml``.
+"""nexus-sz651: every Postgres cluster start site the scan finds in the test tree is either read by
+the DDL/bytes counter or listed in ``tests/ddl_uncounted_clusters.toml`` (docker-run and e2e shell
+clusters are not scanned).
 
 A counter that sees one kind of cluster and says nothing about the others reports a smaller
 number than the run caused. The allowlist makes the omission a committed figure, and this lint

@@ -1,9 +1,13 @@
 # What one test run may write, in bytes and in DDL statements (nexus-sz651, epic nexus-aca0q).
 #
 # THE TARGET IS BYTES WRITTEN (disk thrashing). The metrics named `*wal_bytes*` are WAL bytes the
-# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java); on a
-# tmpfs cluster that is churn, not disk. The `*ddl*` metrics are the DDL statement counts that
-# explain them. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are reduce-only:
+# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java). WAL is
+# a RELATIVE, LOWER-BOUND churn proxy, not what a disk-backed cluster would write: fsync and
+# full_page_writes are off, the Python substrate also runs wal_level=minimal, so Python and Java WAL
+# are not comparable. NOT MEASURED: the job workspace/checkout, target/, .venv, jar builds, journald,
+# anything before pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe sampler
+# is the source of truth for disk writes. The `*ddl*` metrics are the DDL statement counts that
+# explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are reduce-only:
 # lower one in the commit that lowers the number, raising one needs a reviewed reason in that
 # commit's message. A set ceiling is the WORST value any shard (or run) measured.
 #
