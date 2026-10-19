@@ -55,6 +55,9 @@ differ from a GitHub-hosted runner:
   `lab-run -c <class> -- <command>`: it queues behind CI, then runs the
   command in place with the class's cores and memory cap, and `-n auto`
   resolves to the grant.
+  An engine build inverts the order: `scripts/mvnw-leased.sh --lab-run <class>
+  ...` takes the build lease first and then the grant, so waiting for another
+  build holds no cores (nexus-iqmih).
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two persistent self-hosted registrations, `hellmini`

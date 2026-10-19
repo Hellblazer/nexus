@@ -14,6 +14,9 @@ set -u -o pipefail
 # root: the lease dir is then missing from the fake repo, and the fixture
 # leases this suite writes would land in the shared root.
 unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+# A lab-run grant exports LAB_CPUS, which changes the wrapper's behaviour
+# (nexus-iqmih); the cases that want it set it themselves.
+unset LAB_CPUS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -136,7 +139,7 @@ PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$labmarker" MVNW_STUB_MARKER="$marker1
 rc1b=$?
 if [[ $rc1b -eq 0 ]]; then ok "wrapper exited 0 under --lab-run"; else bad "wrapper exited $rc1b under --lab-run"; fi
 labcontent="$(cat "$labmarker" 2>/dev/null)"
-if [[ "$labcontent" == *"LABRUN_ARGS=-c lab-m -- ./mvnw -q test -Dtest=Foo"* ]]; then
+if [[ "$labcontent" == "LABRUN_ARGS=-c lab-m -- python3 -c "*" ./mvnw -q test -Dtest=Foo"* ]]; then
     ok "lab-run got the class and ./mvnw with the args untouched"
 else
     bad "lab-run args mismatch: ${labcontent:-<lab-run never invoked>}"
@@ -165,6 +168,14 @@ echo "Test 1d: --lab-run without a class is a usage error"
 out1d="$(MVNW_STUB_MARKER="$WORKDIR/unused" "$repo/scripts/mvnw-leased.sh" --lab-run 2>&1)"
 rc1d=$?
 if [[ $rc1d -eq 64 ]]; then ok "rc 64 for --lab-run with no class"; else bad "rc $rc1d (expected 64): $out1d"; fi
+
+echo "Test 1e: --lab-run inside a lab-run grant is refused (no nested grant)"
+marker1e="$WORKDIR/stub-invocation-1e.txt"
+rm -f "$marker1e"
+out1e="$(LAB_CPUS=8 PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/unused-lab" MVNW_STUB_MARKER="$marker1e" "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test 2>&1)"
+rc1e=$?
+if [[ $rc1e -eq 64 && "$out1e" == *"inside a lab-run grant"* ]]; then ok "rc 64 naming the nested grant"; else bad "rc $rc1e (expected 64): $out1e"; fi
+if [[ ! -f "$marker1e" && ! -d "$leasedir" ]]; then ok "no mvnw run, no lease left"; else bad "mvnw ran or the lease was left held"; fi
 
 # ── Test 2: refuses (rc 75) and never invokes mvnw when the lease is held ─
 echo "Test 2: mvnw-leased.sh refuses when the lease is already held"
@@ -461,6 +472,72 @@ else
     done
     wait "$probe_pid" 2>/dev/null
 fi
+
+# ── Test 4b: SIGTERM under --lab-run when lab-run does NOT forward it
+# (nexus-iqmih review). On chas lab-run ends in sudo and a systemd scope; the
+# build runs in its own process group, and a TERM that kills sudo need not
+# reach it. The stub lab-run below dies on TERM and leaves its command
+# running, the worst case. The wrapper must signal the build's own group and
+# hold the lease until that group is gone.
+echo "Test 4b: SIGTERM under --lab-run reaches the build even when lab-run does not forward it"
+cat > "$stubbin/lab-run" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == "-c" && "$3" == "--" ]] || exit 64
+shift 3
+trap 'exit 143' TERM
+# Its own process group for the command, as sudo with a pty gives it.
+set -m
+"$@" &
+set +m
+wait $!
+STUB
+chmod +x "$stubbin/lab-run"
+started4b="$WORKDIR/stub4b-started.txt"
+rm -f "$started4b"
+cat > "$repo/service/mvnw" <<STUB
+#!/usr/bin/env bash
+echo "\$\$" > "$started4b"
+sleep 30
+STUB
+chmod +x "$repo/service/mvnw"
+set -m
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build &
+wrapper4b=$!
+set +m
+for _ in $(seq 1 100); do [[ -f "$started4b" ]] && break; sleep 0.1; done
+if [[ ! -f "$started4b" ]]; then
+    bad "fake mvnw never started under the stub lab-run (setup failure)"
+    kill -9 "$wrapper4b" 2>/dev/null
+else
+    build4b="$(cat "$started4b")"
+    # Let the wrapper's poll pick up the build's group before signalling.
+    for _ in $(seq 1 30); do [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build4b" ]] && break; sleep 0.1; done
+    if [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build4b" ]]; then
+        ok "the lease's pgid names the build's own group, not lab-run's"
+    else
+        bad "the lease's pgid is $(cat "$leasedir/pgid" 2>/dev/null), not the build's group $build4b"
+    fi
+    kill -s TERM "$wrapper4b" 2>/dev/null
+    released_while_alive=0
+    for _ in $(seq 1 400); do
+        if [[ ! -d "$leasedir" ]] && kill -0 -- "-$build4b" 2>/dev/null; then released_while_alive=1; fi
+        kill -0 "$wrapper4b" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$build4b" 2>/dev/null; then
+        bad "the build's group is still alive after the wrapper exited: TERM never reached it"
+        kill -9 -- "-$build4b" 2>/dev/null
+    else
+        ok "TERM reached the build's own group"
+    fi
+    if [[ $released_while_alive -eq 0 && ! -d "$leasedir" ]]; then
+        ok "the lease was released only after the build's group was gone"
+    else
+        bad "lease released while the build ran ($released_while_alive) or still held after"
+        bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_release service" 2>/dev/null
+    fi
+fi
+wait "$wrapper4b" 2>/dev/null
 
 echo
 echo "mvnw-leased_test.sh: $PASS passed, $FAIL failed, $SKIP skipped"

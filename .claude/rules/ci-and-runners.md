@@ -27,4 +27,4 @@ Full text (runner inventory, lab pool, hellmini, win-release): [self-hosted-runn
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
 - **Read a contributor change as release-runner code, not only a fork-PR run:** merged code on `win-release` runs without a further click. Read in full what it executes if it touches `windows-pg-bundle-rehearsal.yml`'s `paths:` filter (including `service/pom.xml`), `scripts/*windows*`, `scripts/windows_*.py`, `.github/actions/windows-*`, `.github/actions/resolve-windows-python/**`, or the Windows jobs of `engine-service-release.yml` and `pg-bundle-cache-seed.yml`.
 - Registering `win-release` or flipping `NX_WINDOWS_RELEASE_LEGS` needs Sam's explicit go.
-- On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI.
+- On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI. An engine build is the exception: `scripts/mvnw-leased.sh --lab-run <class> ...`, never wrapped in lab-run, so the build lease is taken before the grant.

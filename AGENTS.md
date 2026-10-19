@@ -92,7 +92,7 @@ These load only when you read a file their `paths:` matches; each is a verbatim 
 Two of them hold always-on rules, repeated here because no file read triggers them:
 
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
-- On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI.
+- On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI. An engine build is the exception: `scripts/mvnw-leased.sh --lab-run <class> ...`, never wrapped in lab-run, so the build lease is taken before the grant.
 
 ## Worktrees: one session, one worktree (2026-09-19)
 

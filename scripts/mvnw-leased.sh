@@ -67,6 +67,12 @@ if [[ "${1:-}" == "--lab-run" ]]; then
     fi
     lab_class="$2"
     shift 2
+    if [[ -n "${LAB_CPUS:-}" ]]; then
+        # A second grant requested from inside a grant can wait forever on a
+        # full pool while holding the first.
+        echo "mvnw-leased.sh: --lab-run given inside a lab-run grant (LAB_CPUS is set); run it outside lab-run, or drop --lab-run" >&2
+        exit 64
+    fi
     if ! command -v lab-run >/dev/null 2>&1; then
         echo "mvnw-leased.sh: --lab-run $lab_class given but lab-run is not on PATH" >&2
         exit 127
@@ -87,14 +93,35 @@ build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
 # before the real build is launched below.
 child_pgid=""
 child_pid=""
+# Under --lab-run the child is lab-run, and the real build runs further down
+# (sudo, then a systemd scope) in a process group of its own that a signal to
+# child_pgid need not reach: killing sudo can leave mvnw building. The inner
+# command makes itself a group leader and writes its pid here; that group is
+# tracked as well, and is what the lease's pgid names once it exists.
+build_pgid=""
+build_pidfile="$(_build_lease_dir service)/build_pid"
+
+_build_alive() {
+    { [[ -n "$child_pgid" ]] && _build_lease_group_alive "$child_pgid" 2>/dev/null; } ||
+        { [[ -n "$build_pgid" ]] && _build_lease_group_alive "$build_pgid" 2>/dev/null; }
+}
+
+_note_build_pgid() {
+    if [[ -z "$build_pgid" && -s "$build_pidfile" ]]; then
+        build_pgid="$(cat "$build_pidfile" 2>/dev/null || true)"
+        [[ "$build_pgid" =~ ^[0-9]+$ ]] || { build_pgid=""; return 0; }
+        build_lease_track_pid service "$build_pgid"
+    fi
+}
 
 # _release_if_safe — the EXIT trap. Never releases while the tracked build
 # is still alive (round-3 fix); an unconditional release here is exactly
 # what let a SIGTERM'd wrapper free the lease out from under a
 # still-running child.
 _release_if_safe() {
-    if [[ -n "$child_pgid" ]] && _build_lease_group_alive "$child_pgid" 2>/dev/null; then
-        echo "mvnw-leased.sh: WARNING — exiting WITHOUT releasing the build lease 'service': the tracked build (process group $child_pgid) is still alive. A future acquire will reclaim it as stale once that process actually exits; it is not being silently held forever, but it is also not released early." >&2
+    _note_build_pgid
+    if _build_alive; then
+        echo "mvnw-leased.sh: WARNING — exiting WITHOUT releasing the build lease 'service': the tracked build (process group ${build_pgid:-$child_pgid}) is still alive. A future acquire will reclaim it as stale once that process actually exits; it is not being silently held forever, but it is also not released early." >&2
         return 0
     fi
     build_lease_release service
@@ -112,16 +139,19 @@ _forward_signal() {
         # No child launched yet — nothing to forward to.
         exit 130
     fi
-    echo "mvnw-leased.sh: received $sig — forwarding to the build (process group $child_pgid)..." >&2
+    _note_build_pgid
+    echo "mvnw-leased.sh: received $sig — forwarding to the build (process group $child_pgid${build_pgid:+ and $build_pgid})..." >&2
     kill -s "$sig" -- "-$child_pgid" 2>/dev/null || true
+    [[ -z "$build_pgid" ]] || kill -s "$sig" -- "-$build_pgid" 2>/dev/null || true
     local waited=0
-    while _build_lease_group_alive "$child_pgid" 2>/dev/null && (( waited < 30 )); do
+    while _build_alive && (( waited < 30 )); do
         sleep 1
         waited=$((waited + 1))
     done
-    if _build_lease_group_alive "$child_pgid" 2>/dev/null; then
+    if _build_alive; then
         echo "mvnw-leased.sh: build did not exit ${waited}s after $sig — escalating to KILL" >&2
         kill -9 -- "-$child_pgid" 2>/dev/null || true
+        [[ -z "$build_pgid" ]] || kill -9 -- "-$build_pgid" 2>/dev/null || true
     fi
     wait "$child_pid" 2>/dev/null || true
     exit 130
@@ -131,13 +161,30 @@ trap '_forward_signal TERM' TERM
 
 cd "$repo_root/service"
 if [[ -n "$lab_class" ]]; then
-    lab-run -c "$lab_class" -- ./mvnw "$@" &
+    rm -f "$build_pidfile"
+    # The inner build: become a process-group leader, publish the pid, exec
+    # mvnw (which execs java), so the pid and group are the build's own.
+    lab-run -c "$lab_class" -- python3 -c '
+import os, sys
+os.setpgid(0, 0)
+with open(sys.argv[1], "w") as f:
+    f.write(f"{os.getpid()}\n")
+os.execvp(sys.argv[2], sys.argv[2:])
+' "$build_pidfile" ./mvnw "$@" &
 else
     ./mvnw "$@" &
 fi
 child_pid=$!
 child_pgid="$child_pid"
 build_lease_track_pid service "$child_pgid"
+if [[ -n "$lab_class" ]]; then
+    # lab-run may queue for its grant first; pick up the build's group as soon
+    # as it starts. A trap set during `sleep` runs when the sleep returns.
+    while kill -0 "$child_pid" 2>/dev/null; do
+        _note_build_pgid
+        sleep 1
+    done
+fi
 # `wait` on a specific pid returns that process's own exit status; under
 # `set -e` a nonzero result here still exits this script with the same
 # code (same propagation as the direct foreground call this replaces). By
