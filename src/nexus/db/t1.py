@@ -989,7 +989,7 @@ def _acquire_t1_mint_lock(
     holder still has it.
 
     After locking, the fd is checked to still be the file at the lock path.
-    An owner's teardown unlinks that file once it has released the lock
+    An owner's teardown unlinks that file just before it releases the lock
     (nexus-g5mir); a waiter already queued on the old inode would otherwise
     hold "the" lock while a newcomer locks a fresh file at the same path,
     and both could mint. A stale lock is dropped and the open is retried.
@@ -1075,9 +1075,9 @@ def end_owned_t1_session_lease(
     by the caller; a revoke thread that outlives that bound can still land
     after the lock is released (a wedged server, with process exit next).
 
-    The lock file is unlinked only by an owner that held it, after release;
-    :func:`_acquire_t1_mint_lock` makes a waiter on the unlinked inode retry
-    on the path.
+    The lock file is unlinked only by an owner that holds it, before it
+    releases; :func:`_acquire_t1_mint_lock` makes a waiter on the unlinked
+    file retry on the path.
 
     Args:
         owned_tokens: every token this process minted for ``session_id``.
@@ -1093,26 +1093,32 @@ def end_owned_t1_session_lease(
         lock_fd = -1
     if lock_fd is None:
         return T1TeardownOutcome.LEFT_TO_HOLDER
+    ended = False
     try:
         published = read_t1_session_lease(session_id, config_dir)
         if published and owned_tokens and published not in owned_tokens:
             return T1TeardownOutcome.DISPLACED
         _unlink_t1_session_lease(session_id, config_dir)
         revoke()
+        ended = True
     finally:
         if lock_fd >= 0:
-            _locking.unlock_fd(lock_fd)
-            os.close(lock_fd)
-    if lock_fd < 0:
-        return T1TeardownOutcome.ENDED_UNLOCKED
-    # The mint lock file is created on first mint-or-borrow and was never
-    # removed: 706 zero-byte files had accumulated by 2026-09-05. It goes
-    # here, after release, at the session's end.
-    try:
-        _t1_session_mint_lock_path(session_id, config_dir).unlink()
-    except OSError:
-        pass
-    return T1TeardownOutcome.ENDED
+            if ended:
+                # The mint lock file is created on first mint-or-borrow and
+                # was never removed: 706 zero-byte files had accumulated by
+                # 2026-09-05. It goes at the session's end, unlinked while
+                # still held, so a waiter queued on it wakes to a path that
+                # no longer names its file and retries. (On Windows the
+                # unlink of a file a waiter holds open fails and is ignored.)
+                try:
+                    _t1_session_mint_lock_path(session_id, config_dir).unlink()
+                except OSError:
+                    pass
+            try:
+                _locking.unlock_fd(lock_fd)
+            finally:
+                os.close(lock_fd)
+    return T1TeardownOutcome.ENDED if lock_fd >= 0 else T1TeardownOutcome.ENDED_UNLOCKED
 
 
 def clear_t1_session_lease_if_matches(
