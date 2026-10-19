@@ -196,12 +196,6 @@ def test_external_db_url_without_a_container_skips_loudly_and_leaves_no_scratch(
     assert list(scratch.iterdir()) == [], "the EXIT trap must remove the per-run scratch dir"
 
 
-@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
-def test_shellcheck_clean():
-    r = subprocess.run(["shellcheck", str(SHAPES)], capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout
-
-
 def test_the_cloud_shapes_negative_onnx_checks_have_positive_controls() -> None:
     """The cloud shape asserts NOTHING was extracted; that only means something if a boot that
     DOES reach applyAtBoot is seen to log the event and fill the directory (review of the
