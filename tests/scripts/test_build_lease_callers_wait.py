@@ -18,6 +18,8 @@ EXEMPT = {
     LIB,
     REPO_ROOT / "scripts" / "lib" / "build-lease_test.sh",
     REPO_ROOT / "scripts" / "mvnw-leased_test.sh",
+    # Builds a fixture holder with a bare acquire to prove the in-grant refusal (nexus-dfg0q).
+    REPO_ROOT / "scripts" / "build-gate-jar_test.sh",
     # The macOS guest hold fails closed on a held lease (exit 75) rather than
     # queueing: a waiting hold would sit with a VM provisioned and idle.
     REPO_ROOT / "tests" / "e2e" / "macos-guest" / "host.sh",
