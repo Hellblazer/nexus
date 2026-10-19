@@ -49,14 +49,25 @@ class PgContainerTmpfsGateTest {
         Pattern.compile("new\\s+([\\w.]+\\.)?\\w*PostgreSQLContainer\\b"),
         Pattern.compile("PostgreSQLContainer\\s*::\\s*new"),
         // a GenericContainer or ImageFromDockerfile on a Postgres image, or a jdbc:tc: URL
-        Pattern.compile("\"(pgvector/pgvector[^\"]*|postgres:[^\"]+)\""),
+        Pattern.compile("\"(pgvector/pgvector[^\"]*|postgres:(?!//)[^\"]+)\""),
         Pattern.compile("jdbc:tc:"));
 
     private static final Pattern SUBCLASSING = Pattern.compile(
         "extends\\s+([\\w.]+\\.)?PostgreSQLContainer\\b");
 
-    /** Line and block comments, so prose that names a pattern does not trip the scan. */
-    private static final Pattern COMMENTS = Pattern.compile("//[^\\n]*|/\\*.*?\\*/", Pattern.DOTALL);
+    /**
+     * String literals, line comments and block comments in one pass, so a {@code "/*"}
+     * inside a string is not read as a comment start. {@link #stripComments} keeps the
+     * strings and drops the comments, so prose that names a pattern does not trip the scan.
+     */
+    private static final Pattern COMMENTS = Pattern.compile(
+        "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])'|//[^\\n]*|/\\*.*?\\*/", Pattern.DOTALL);
+
+    static String stripComments(String src) {
+        return COMMENTS.matcher(src).replaceAll(
+            m -> m.group().startsWith("\"") || m.group().startsWith("'")
+                ? java.util.regex.Matcher.quoteReplacement(m.group()) : "");
+    }
 
     @Test
     void only_the_factory_constructs_a_postgres_container() throws IOException {
@@ -68,7 +79,7 @@ class PgContainerTmpfsGateTest {
         // Non-vacuity: the scan sees the test tree, and the factory trips its own patterns.
         assertThat(files.size()).isGreaterThan(300);
         assertThat(files).contains(FACTORY);
-        String factory = COMMENTS.matcher(Files.readString(FACTORY)).replaceAll("");
+        String factory = stripComments(Files.readString(FACTORY));
         assertThat(BYPASSES.stream().filter(b -> b.matcher(factory).find()).count())
             .as("the factory's own construction and image literal").isGreaterThanOrEqualTo(2);
         List<String> offenders = new ArrayList<>();
@@ -76,7 +87,7 @@ class PgContainerTmpfsGateTest {
             if (p.equals(FACTORY) || p.getFileName().toString().equals("PgContainerTmpfsGateTest.java")) {
                 continue;
             }
-            String src = COMMENTS.matcher(Files.readString(p)).replaceAll("");
+            String src = stripComments(Files.readString(p));
             for (Pattern b : BYPASSES) {
                 if (b.matcher(src).find()) {
                     offenders.add(p + ": " + b.pattern());
@@ -90,6 +101,51 @@ class PgContainerTmpfsGateTest {
             .as("build test Postgres containers through PgContainerHelper.newContainer(), "
                 + "which puts PGDATA on tmpfs under a memory limit (nexus-xynce)")
             .isEmpty();
+    }
+
+    /** Positive control: every bypass spelling the scan exists for is caught, and nothing near it is. */
+    @Test
+    void the_scan_patterns_catch_every_bypass_spelling() {
+        List<String> dodges = List.of(
+            "var c = new PostgreSQLContainer<>(img);",
+            "c = new org.testcontainers.containers.PostgreSQLContainer<>(img);",
+            "c = new\n    PostgreSQLContainer(img);",
+            "c = new MyPostgreSQLContainer(img);",
+            "Function<DockerImageName, ?> f = PostgreSQLContainer :: new;",
+            "new GenericContainer<>(\"pgvector/pgvector:pg17\")",
+            "new GenericContainer<>(\"postgres:17\")",
+            "String url = \"jdbc:tc:postgresql:17:///db\";");
+        for (String d : dodges) {
+            assertThat(BYPASSES.stream().anyMatch(b -> b.matcher(stripComments(d)).find()))
+                .as("caught: %s", d).isTrue();
+        }
+        assertThat(SUBCLASSING.matcher("class X extends org.testcontainers.containers.PostgreSQLContainer<X> {").find())
+            .isTrue();
+        List<String> clean = List.of(
+            "String url = \"jdbc:postgresql://localhost:5432/postgres\";",
+            "String u = \"postgres://u@h/db\";",
+            ".withDatabaseName(\"postgres\")",
+            "// new PostgreSQLContainer<>(img) in a comment",
+            "/* \"pgvector/pgvector:pg17\" in a block comment */");
+        for (String c : clean) {
+            assertThat(BYPASSES.stream().noneMatch(b -> b.matcher(stripComments(c)).find()))
+                .as("not a bypass: %s", c).isTrue();
+        }
+        // A quote in a char literal must not open a fake string.
+        assertThat(stripComments("char q = '\"'; var c = new PostgreSQLContainer<>(i); char r = '\"';"))
+            .contains("new PostgreSQLContainer");
+        // A "/*" inside a string must not swallow the code after it.
+        assertThat(stripComments("String g = \"**/*.java\"; var c = new PostgreSQLContainer<>(i); // */"))
+            .contains("new PostgreSQLContainer");
+    }
+
+    @Test
+    void sizes_are_whole_gibibytes_only() {
+        assertThat(PgContainerHelper.gibibytes("2g")).isEqualTo(2L * 1024 * 1024 * 1024);
+        for (String bad : List.of("512m", "0g", "1G", "g", "1.5g")) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> PgContainerHelper.gibibytes(bad))
+                .as(bad).isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     @Test
