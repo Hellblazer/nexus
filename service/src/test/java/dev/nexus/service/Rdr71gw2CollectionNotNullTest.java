@@ -108,6 +108,12 @@ class Rdr71gw2CollectionNotNullTest {
             // by this call (its <include> is well before vectors-004-1's).
             migrateUpTo(su, "vectors-004-1");
         }
+        // nexus_test.lock_table for the lock-window test (an empty database has no
+        // test objects of its own; nexus-cbo4a batch 6). A fresh connection, since
+        // migrateUpTo's Liquibase closes the one it ran on.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.installTestObjects(su);
+        }
     }
 
     /**
