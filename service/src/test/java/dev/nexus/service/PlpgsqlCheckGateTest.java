@@ -103,9 +103,7 @@ class PlpgsqlCheckGateTest {
                 .build());
         String imageName = image.get();
         buildMillis = (System.nanoTime() - t0) / 1_000_000;
-        pg = new PostgreSQLContainer<>(DockerImageName.parse(imageName).asCompatibleSubstituteFor("postgres"))
-            .withDatabaseName("postgres").withUsername("postgres").withPassword("postgres")
-            .withUrlParam("sslmode", "disable");
+        pg = PgContainerHelper.newContainer(DockerImageName.parse(imageName));
         pg.start();
         Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
         var cfg = new HikariConfig();

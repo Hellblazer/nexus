@@ -66,6 +66,33 @@ public final class PgContainerHelper {
     public static final String PASSWORD = "postgres";
 
     /**
+     * The image's data directory. nexus-xynce: it is mounted as tmpfs, because in
+     * Docker's overlay it sat on the host disk and the engine suites wrote about
+     * 50 MB/s to chas's NVMe (measured 2026-10-19).
+     */
+    public static final String PGDATA = "/var/lib/postgresql/data";
+
+    /**
+     * tmpfs cap for {@link #PGDATA}. Measured live containers on chas held 19 to 171 MB
+     * (most of it WAL before the 64 MB cap below); a cluster that outgrows this fails
+     * with "No space left on device" instead of eating host memory.
+     */
+    public static final String TMPFS_SIZE = "1g";
+
+    /**
+     * Container memory limit (swap included). tmpfs pages are charged to the
+     * container, so the limit is the tmpfs cap plus room for shared_buffers and
+     * backends. Containers run under the Docker daemon, outside any lab-run grant:
+     * this limit is what bounds each one, and the pool reserves limit times the most
+     * containers a run holds.
+     */
+    public static final long MEMORY_LIMIT_BYTES = 1536L * 1024 * 1024;
+
+    static long tmpfsSizeBytes() {
+        return Long.parseLong(TMPFS_SIZE.substring(0, TMPFS_SIZE.length() - 1)) * 1024 * 1024 * 1024;
+    }
+
+    /**
      * Production service role (NOSUPERUSER NOBYPASSRLS) — the credential the app layer
      * should run under in tests so it is subject to the same RLS as production, rather
      * than the BYPASSRLS superuser (nexus-5j7pb). The role is created by each test's
@@ -109,13 +136,38 @@ public final class PgContainerHelper {
      * mechanism.
      */
     public static PostgreSQLContainer<?> newContainer() {
-        return new FailFastPostgreSQLContainer(
-            DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))
+        return newContainer(DockerImageName.parse(IMAGE));
+    }
+
+    /**
+     * {@link #newContainer()} on another image derived from {@link #IMAGE} (one with an
+     * extra extension installed, say). Every test Postgres container is built here, so
+     * every one gets the tmpfs data directory and the memory limit
+     * ({@code PgContainerTmpfsGateTest} forbids constructing one anywhere else).
+     */
+    public static PostgreSQLContainer<?> newContainer(DockerImageName image) {
+        return new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
             .withDatabaseName(DATABASE)
             .withUsername(USERNAME)
             .withPassword(PASSWORD)
             .withUrlParam("sslmode", "disable")
-            .withStartupAttempts(3);
+            .withStartupAttempts(3)
+            // nexus-xynce: PGDATA on a capped tmpfs, nothing a throwaway cluster
+            // needs to survive a crash written durably, pg_wal bounded to ~64 MB.
+            .withTmpFs(Map.of(PGDATA, "rw,size=" + TMPFS_SIZE))
+            .withCommand("postgres",
+                "-c", "fsync=off",
+                "-c", "synchronous_commit=off",
+                "-c", "full_page_writes=off",
+                "-c", "max_wal_size=64MB",
+                "-c", "min_wal_size=32MB",
+                "-c", "wal_keep_size=0")
+            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
+                .withMemory(MEMORY_LIMIT_BYTES)
+                .withMemorySwap(MEMORY_LIMIT_BYTES))
+            // Lets a host count one run's containers among everyone else's:
+            // docker ps --filter label=dev.nexus.test.run=<id>.
+            .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
     }
 
     /**
