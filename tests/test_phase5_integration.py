@@ -552,6 +552,7 @@ class TestDoctorTrimTelemetry:
         assert "Would trim 8 routing_events" in result.output
         assert "Trimmed" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_empty_table_is_safe(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:

@@ -45,6 +45,7 @@ def repo_with_rdrs(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_discovers_markdown_files(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -59,6 +60,7 @@ def test_index_rdr_discovers_markdown_files(
     assert filenames == ["001-use-sqlite.md", "002-adopt-click.md"]
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_uses_correct_collection_name(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -102,6 +104,7 @@ def test_index_rdr_empty_rdr_dir(runner: CliRunner, tmp_path: Path) -> None:
     assert "0" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_excludes_postmortem_dir(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -115,6 +118,7 @@ def test_index_rdr_excludes_postmortem_dir(
         assert "post-mortem" not in str(p), f"Unexpected subdirectory file: {p}"
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_force_flag(runner: CliRunner, repo_with_rdrs: Path) -> None:
     """nx index rdr <path> --force passes force=True to batch_index_markdowns."""
     with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
@@ -136,6 +140,7 @@ def test_index_rdr_re_embed_requires_force(runner: CliRunner, repo_with_rdrs: Pa
     assert "--re-embed requires --force" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_force_without_re_embed_defaults_false(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -150,6 +155,7 @@ def test_index_rdr_force_without_re_embed_defaults_false(
     assert kwargs.get("force_re_embed") is False
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_force_and_re_embed_together(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -166,6 +172,7 @@ def test_index_rdr_force_and_re_embed_together(
     assert kwargs.get("force_re_embed") is True
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_monitor_flag_and_on_file(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -179,6 +186,7 @@ def test_index_rdr_monitor_flag_and_on_file(
     assert callable(kwargs.get("on_file")), "on_file must be passed when --monitor is set"
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_single_file_scope(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -223,6 +231,7 @@ def test_index_rdr_single_file_rejects_non_markdown(
     assert "Not a markdown file" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_single_file_fallback_layout(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
@@ -250,6 +259,7 @@ def test_index_rdr_single_file_fallback_layout(
 # signal at all between per-file completion lines.
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_heartbeat_ticks_during_a_slow_file_by_default(
     runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
 ) -> None:
@@ -281,6 +291,7 @@ def test_index_rdr_heartbeat_ticks_during_a_slow_file_by_default(
     assert "elapsed)" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_heartbeat_silent_on_a_fast_run(
     runner: CliRunner, repo_with_rdrs: Path,
 ) -> None:
@@ -294,6 +305,7 @@ def test_index_rdr_heartbeat_silent_on_a_fast_run(
     assert "still running" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_heartbeat_disarmed_on_exception(
     runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
 ) -> None:
@@ -322,6 +334,7 @@ def test_index_rdr_heartbeat_disarmed_on_exception(
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_heartbeat_never_armed_if_embed_fn_setup_raises(
     runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
 ) -> None:
@@ -352,6 +365,7 @@ def test_index_rdr_heartbeat_never_armed_if_embed_fn_setup_raises(
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_reports_why_a_document_failed_and_exits_nonzero(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:

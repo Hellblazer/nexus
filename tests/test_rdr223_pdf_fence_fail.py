@@ -63,6 +63,7 @@ def _fence_fail_ref():
     return doc_indexer
 
 
+@pytest.mark.t2_tenant
 def test_a_progress_callback_that_raises_after_the_stamp_does_not_fail_the_write() -> None:
     """The completion stamp rides ``finish()``, so the final ``(total, total)`` progress call comes
     AFTER the document is stamped complete. An exception from a progress callback there must not

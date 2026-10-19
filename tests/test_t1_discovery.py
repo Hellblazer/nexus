@@ -560,6 +560,7 @@ class TestFindMcpSiblingPids:
             proc.wait(timeout=10)
 
 
+@pytest.mark.t2_tenant
 class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
     """Path D (RDR-105 P2 / nexus-mj2o, narrowed further at nexus-4lkmz):
     no env, no addr file, no client injection -> raise
@@ -674,6 +675,7 @@ class TestT1DatabaseIsolatedLegRetired:
         with pytest.raises(T1IsolatedLegRetiredError):
             get_t1_database()
 
+    @pytest.mark.t2_tenant
     def test_legacy_skip_t1_alias_does_not_trigger_isolated_retirement(self, tmp_path, monkeypatch):
         """Post-removal (6.5.2): a stale ``NEXUS_SKIP_T1=1`` in the ambient
         env is INERT — it does NOT count as ``NX_T1_ISOLATED``, so with

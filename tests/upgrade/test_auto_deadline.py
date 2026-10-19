@@ -248,6 +248,7 @@ class TestCommandWiring:
         (deadline,) = seen
         assert isinstance(deadline, Deadline) and deadline.seconds == 77.0
 
+    @pytest.mark.t2_tenant
     def test_interactive_upgrade_has_no_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(AUTO_DEADLINE_ENV, "1")
         called: list[bool] = []
@@ -273,6 +274,7 @@ class TestCommandWiring:
         assert result.exit_code == 0, result.output
         assert seen == []
 
+    @pytest.mark.t2_tenant
     def test_dry_run_has_no_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = self._capture(monkeypatch)
         result = CliRunner().invoke(main, ["upgrade", "--dry-run"])

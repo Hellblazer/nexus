@@ -352,6 +352,7 @@ class TestChunkTextDedup:
 # ── --t3-vs-catalog ───────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestT3VsCatalog:
     def test_clean_state_passes(
         self, isolated_nexus, runner, chroma_client,
@@ -520,6 +521,7 @@ class TestT3VsCatalog:
 # ── nexus-b6enc: --store-put-integrity ────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestStorePutIntegrity:
     """store_put-origin integrity: drift (chunk_count vs manifest) and
     ghosts (row + zero manifest + zero chunks), fatal on both, with

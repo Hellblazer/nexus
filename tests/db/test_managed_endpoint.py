@@ -120,6 +120,7 @@ def test_resolve_config_yml_only_no_env(monkeypatch, tmp_path):
     assert token == "cfg-only-token"
 
 
+@pytest.mark.t2_tenant
 def test_resolve_missing_token_fails_loud(monkeypatch):
     with pytest.raises(ManagedServiceIncompatible) as exc:
         resolve_managed_endpoint()
@@ -136,6 +137,7 @@ def test_resolve_token_optional_when_not_required(monkeypatch):
 # ── probe: unreachable ───────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_probe_unreachable_connect_error_fails_loud():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         raise httpx.ConnectError("connection refused")
@@ -147,6 +149,7 @@ def test_probe_unreachable_connect_error_fails_loud():
     assert "NX_SERVICE_URL" in msg  # remedy names the override
 
 
+@pytest.mark.t2_tenant
 def test_probe_unreachable_timeout_fails_loud():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         raise httpx.TimeoutException("timed out")
@@ -158,6 +161,7 @@ def test_probe_unreachable_timeout_fails_loud():
     assert "NX_SERVICE_URL" in msg  # remedy present, not just the type
 
 
+@pytest.mark.t2_tenant
 def test_probe_non_json_body_is_incompatible():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         resp = MagicMock(spec=httpx.Response)
@@ -173,6 +177,7 @@ def test_probe_non_json_body_is_incompatible():
 # ── probe: incompatible ──────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_probe_non_200_is_incompatible():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         return _resp(503, {"error": "unavailable"})
@@ -182,6 +187,7 @@ def test_probe_non_200_is_incompatible():
     assert "503" in str(exc.value)
 
 
+@pytest.mark.t2_tenant
 def test_probe_missing_release_version_is_incompatible():
     # No release_version at all -> fail-closed (a pre-field / dev engine).
     def fake_get(url: str, timeout: float) -> httpx.Response:
@@ -192,6 +198,7 @@ def test_probe_missing_release_version_is_incompatible():
     assert "release_version" in str(exc.value)
 
 
+@pytest.mark.t2_tenant
 def test_probe_null_release_version_is_incompatible():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         body = _version_body()
@@ -202,6 +209,7 @@ def test_probe_null_release_version_is_incompatible():
         probe_managed_service(base_url="https://x", http_get=fake_get)
 
 
+@pytest.mark.t2_tenant
 def test_probe_snapshot_release_version_fails_closed():
     # A SNAPSHOT/dev release identity is NOT a release — gate refuses.
     def fake_get(url: str, timeout: float) -> httpx.Response:
@@ -211,6 +219,7 @@ def test_probe_snapshot_release_version_fails_closed():
         probe_managed_service(base_url="https://x", http_get=fake_get)
 
 
+@pytest.mark.t2_tenant
 def test_probe_unparseable_release_version_fails_closed():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         return _resp(200, _version_body(release_version="unknown"))
@@ -219,6 +228,7 @@ def test_probe_unparseable_release_version_fails_closed():
         probe_managed_service(base_url="https://x", http_get=fake_get)
 
 
+@pytest.mark.t2_tenant
 def test_probe_below_release_floor_is_incompatible():
     def fake_get(url: str, timeout: float) -> httpx.Response:
         return _resp(200, _version_body(release_version="0.1.5"))
@@ -229,6 +239,7 @@ def test_probe_below_release_floor_is_incompatible():
     assert "0.1.5" in str(exc.value) and _FLOOR_STR in str(exc.value)
 
 
+@pytest.mark.t2_tenant
 def test_probe_below_release_floor_exception_carries_structured_versions():
     """nexus-b6qlf Fix 2: the below-floor raise must expose the deployed and
     required versions as STRUCTURED attributes, not only baked into the
@@ -247,6 +258,7 @@ def test_probe_below_release_floor_exception_carries_structured_versions():
     assert exc.value.required_version == _FLOOR_STR
 
 
+@pytest.mark.t2_tenant
 def test_managed_service_incompatible_fields_default_to_none():
     """Every other raise site (no token, non-200, non-JSON, no usable
     release_version) constructs ManagedServiceIncompatible with just a
@@ -366,6 +378,7 @@ def test_probe_uses_the_canonical_engine_version_floor():
     assert not hasattr(managed_endpoint, "_parse_release_version")
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("bad", [True, False, 1, 0, 1.5, [], {}, None])
 def test_probe_non_string_release_version_fails_closed(bad):
     """A non-string release_version (malformed/JSON-confused service) must

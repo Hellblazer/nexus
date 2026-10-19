@@ -23,6 +23,8 @@ from nexus.taxonomy import (
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-225: the substrate registers every collection under bge-base-en-v15-768, and the
 # engine requires a centroid's width to equal its collection model's dimension.
 _DIM = 768

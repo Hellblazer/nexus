@@ -72,6 +72,7 @@ def _reset_module_state():
     rdr_hook_module._T2_PENDING.clear()
 
 
+@pytest.mark.t2_tenant
 def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
     rdr_hook_mod, tmp_path, monkeypatch,
 ):
@@ -149,6 +150,7 @@ def test_rdr_files_on_the_real_tree_is_not_vacuous(rdr_hook_mod) -> None:
     assert "AGENTS.md" not in {p.name for p in files}
 
 
+@pytest.mark.t2_tenant
 def test_summary_prints_for_this_repos_real_tree(rdr_hook_mod, monkeypatch) -> None:
     """The ruling's own test: run the verb against THIS checkout's real
     ``docs/rdr/`` tree, with only the substrate calls (T2, catalog, the
@@ -202,6 +204,7 @@ def test_real_table_declares_a_version():
     assert isinstance(doc["table"].get("version"), int)
 
 
+@pytest.mark.t2_tenant
 def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_mod, tmp_path, monkeypatch) -> None:
     """nexus-zbdm0: a draft RDR whose file moved past its gated commit gets a
     one-line pointer at /conexus:rdr-fix, so the fix step has a surface
@@ -476,6 +479,7 @@ def test_resolution_failure_is_named_on_the_verdict_line_and_in_the_log(rdr_hook
     rdr_hook_mod._RESOLUTION_FAILURES.clear()
 
 
+@pytest.mark.t2_tenant
 def test_main_prints_the_resolution_failure_on_the_verdict_line(rdr_hook_mod, tmp_path, monkeypatch):
     """Reverting the verdict-line print leaves this red (nexus-4ti7e)."""
     root = tmp_path / "repo"
@@ -537,6 +541,7 @@ def test_status_loader_leaves_out_an_rdr_whose_title_shapes_disagree(rdr_hook_mo
     assert mod._load_all_t2_statuses("nexus") == {"7": "closed"}
 
 
+@pytest.mark.t2_tenant
 def test_closed_rdr_with_no_t2_status_row_is_not_told_to_run_rdr_fix(rdr_hook_mod, tmp_path, monkeypatch) -> None:
     """nexus-u1jxt.7: an RDR absent from the T2 status map (no row, or two
     disagreeing shapes the loader drops) defaulted to draft and was told to
@@ -630,6 +635,7 @@ def _run_hook(cwd: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]
     )
 
 
+@pytest.mark.t2_tenant
 def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> None:
     """Before this fix: a bare interpreter (no ``configure_logging`` call
     ahead of the ``nexus.catalog``/``nexus.db`` imports triggered by

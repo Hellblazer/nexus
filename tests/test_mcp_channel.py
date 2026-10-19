@@ -875,6 +875,7 @@ class TestChannelWaiterFakeStore:
         await waiter.tick()
         assert waiter._stopped is True  # noqa: SLF001 — white-box assertion
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_a_refused_wait_does_not_stop_the_waiter(self) -> None:
         """(h) any OTHER status is a transient fault: `run()` logs, backs
@@ -897,6 +898,7 @@ class TestChannelWaiterFakeStore:
         with pytest.raises(asyncio.CancelledError):
             await run_task
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_a_store_exception_in_a_tick_does_not_end_the_loop(self) -> None:
         session_id = str(uuid.uuid4())

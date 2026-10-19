@@ -349,6 +349,7 @@ def test_empty_t2_is_not_confused_with_unreachable(tmp_path: Path, mock_engine) 
     )
 
 
+@pytest.mark.t2_tenant
 def test_unreachable_arm_warns_when_no_endpoint_resolvable(tmp_path: Path) -> None:
     """Arm 1: no env, a config dir that does not exist yet, no lease (fresh
     install / no supervisor running) -> a VISIBLE warning line, never the

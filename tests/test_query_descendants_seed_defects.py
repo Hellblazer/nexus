@@ -29,6 +29,9 @@ These tests pin the fix for (1): a disclosed, capped seed list.
 from __future__ import annotations
 
 from nexus.mcp import core
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 # ═════════════════════════════════════════════════════════════════════════

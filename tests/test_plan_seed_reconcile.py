@@ -64,6 +64,7 @@ def _row_for(library, template_path: Path) -> dict:
 # ── reconcile leg ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_insert_only_pass_leaves_drift_in_place(tmp_path, library):
     """The pre-fix behaviour, pinned as the thing reconcile exists to fix.
 
@@ -81,6 +82,7 @@ def test_insert_only_pass_leaves_drift_in_place(tmp_path, library):
     assert _row_for(library, path)["query"] == "Seed reconcile fixture drift-a."
 
 
+@pytest.mark.t2_tenant
 def test_reconcile_rewrites_a_changed_description_without_duplicating(tmp_path, library):
     """The description is the upsert key, so this is the path that would
     collide with the dimensional unique index if the stale row were not
@@ -96,6 +98,7 @@ def test_reconcile_rewrites_a_changed_description_without_duplicating(tmp_path, 
     assert _row_for(library, path)["query"] == "Rewritten description."
 
 
+@pytest.mark.t2_tenant
 def test_reconcile_rewrites_plan_json_under_an_unchanged_description(tmp_path, library):
     """Same description => the upsert lands in place, no delete needed."""
     path = _write_template(tmp_path, "drift-c")
@@ -109,6 +112,7 @@ def test_reconcile_rewrites_plan_json_under_an_unchanged_description(tmp_path, l
     assert json.loads(_row_for(library, path)["plan_json"]) == new_steps
 
 
+@pytest.mark.t2_tenant
 def test_reconcile_is_a_no_op_when_nothing_changed(tmp_path, library):
     """A reconcile run over a current library must perform zero writes —
     otherwise every run would reset every row's counters."""
@@ -121,6 +125,7 @@ def test_reconcile_is_a_no_op_when_nothing_changed(tmp_path, library):
     assert result.skipped_existing == ["drift-d.yml"]
 
 
+@pytest.mark.t2_tenant
 def test_reconcile_inserts_a_template_the_library_has_never_seen(tmp_path, library):
     _write_template(tmp_path, "drift-e")
     result = load_seed_directory(tmp_path, library=library, reconcile=True)
@@ -128,6 +133,7 @@ def test_reconcile_inserts_a_template_the_library_has_never_seen(tmp_path, libra
     assert result.updated == []
 
 
+@pytest.mark.t2_tenant
 def test_reconcile_refuses_to_overwrite_a_grown_plan(tmp_path, library):
     """Grown plans are the only plans in this library that currently match
     anything. A reconcile that clobbered one would take the working path
@@ -157,6 +163,7 @@ def test_reconcile_refuses_to_overwrite_a_grown_plan(tmp_path, library):
     assert surviving["query"] == "What did the user actually ask?"
 
 
+@pytest.mark.t2_tenant
 def test_write_refuses_when_the_description_belongs_to_another_row(tmp_path, library):
     """nexus-wp94t. The write key is (project, QUERY); the lookup key is
     (project, dimensions). So a lookup that found nothing — or found a row
@@ -191,6 +198,7 @@ def test_write_refuses_when_the_description_belongs_to_another_row(tmp_path, lib
     assert victim["tags"] == "ad-hoc,grown"
 
 
+@pytest.mark.t2_tenant
 def test_collision_guard_applies_to_the_insert_only_path_too(tmp_path, library):
     """The hazard is in save_plan's upsert key, so it predates the
     reconcile leg and is not conditional on it."""
@@ -213,6 +221,7 @@ def test_collision_guard_applies_to_the_insert_only_path_too(tmp_path, library):
     assert [name for name, _ in result.protected] == ["collide2.yml"]
 
 
+@pytest.mark.t2_tenant
 def test_two_templates_in_one_run_cannot_clobber_each_other(tmp_path, library):
     """The collision guard must see writes made by its own run.
 
@@ -247,6 +256,7 @@ def test_two_templates_in_one_run_cannot_clobber_each_other(tmp_path, library):
     assert row is not None, f"{survivor} was written and then destroyed"
 
 
+@pytest.mark.t2_tenant
 def test_a_freed_description_can_be_claimed_later_in_the_same_run(tmp_path, library):
     """Deleting a row must free its description within the run.
 
@@ -274,6 +284,7 @@ def test_a_freed_description_can_be_claimed_later_in_the_same_run(tmp_path, libr
     assert result.inserted == ["bbb-taker.yml"]
 
 
+@pytest.mark.t2_tenant
 def test_rewriting_a_rows_own_description_is_not_a_collision(tmp_path, library):
     """The guard must not fire on the row being updated itself, or every
     same-description rewrite would refuse."""
@@ -413,6 +424,7 @@ def test_truncated_listing_still_reports_drift_it_could_see():
 # ── deliberate retirement (nexus-77cct) ────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_retired_templates_are_removed_from_the_library(tmp_path, library):
     """Deleting the YAML is not enough — the row has to go too.
 
@@ -443,6 +455,7 @@ def test_retired_templates_are_removed_from_the_library(tmp_path, library):
     assert library.get_plan_by_dimensions(project="", dimensions=canonical) is None
 
 
+@pytest.mark.t2_tenant
 def test_retirement_does_not_touch_a_user_plan_at_those_dimensions(tmp_path, library):
     """Scoped to builtin-template rows. A user plan that happens to occupy a
     retired template's dimensions is reported and left alone, never deleted
@@ -468,6 +481,7 @@ def test_retirement_does_not_touch_a_user_plan_at_those_dimensions(tmp_path, lib
     assert library.get_plan_by_dimensions(project="", dimensions=canonical) is not None
 
 
+@pytest.mark.t2_tenant
 def test_insert_only_pass_never_retires(tmp_path, library):
     """Retirement is a reconcile action; the insert-only pass deletes
     nothing, ever."""

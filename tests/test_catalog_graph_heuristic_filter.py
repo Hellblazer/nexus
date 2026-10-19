@@ -11,6 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests._catalog_fixture_ops import ActiveCatalog
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 # nexus-i711w terminal deletion: TestFilterLinkTypesHelper (4 tests) and
 # TestHeuristicTokenSet retired WITH nexus.catalog.catalog_links — the

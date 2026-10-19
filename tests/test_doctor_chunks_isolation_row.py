@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from nexus.health import _check_chunks_tenant_isolation
+import pytest
 
 _FETCH = "nexus.db.http_engine_status.fetch_engine_status"
 
@@ -74,6 +75,7 @@ def test_a_status_passed_in_is_used_and_nothing_is_fetched() -> None:
         assert r.ok is True and "not applicable" in r.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_default_sweep_runs_the_row_from_the_one_status_fetch(monkeypatch) -> None:
     from click.testing import CliRunner
 

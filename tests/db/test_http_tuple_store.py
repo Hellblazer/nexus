@@ -80,6 +80,7 @@ def _uniq(label: str) -> str:
 # ── out ──────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestOut:
     def test_out_then_rd_returns_the_written_tuple(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -128,6 +129,7 @@ class TestOut:
 # ── rd / rdp ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRd:
     def test_rd_finds_nothing_before_out_and_the_row_after(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -153,6 +155,7 @@ class TestRd:
         assert exc_info.value.code == "TimeoutTooLong"
 
 
+@pytest.mark.t2_tenant
 class TestRdp:
     def test_rdp_is_a_non_blocking_probe(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -175,6 +178,7 @@ class TestRdp:
 # ── in_ / inp ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestIn:
     def test_out_then_in_claims_the_tuple(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -203,6 +207,7 @@ class TestIn:
         assert exc_info.value.code == "TakeDisabled"
 
 
+@pytest.mark.t2_tenant
 class TestInp:
     def test_inp_claims_without_blocking(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -237,6 +242,7 @@ class TestInp:
 # ── ack / nack ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestAck:
     def test_ack_consumes_the_row(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -264,6 +270,7 @@ class TestAck:
         assert exc_info.value.code == "ClaimNotFound"
 
 
+@pytest.mark.t2_tenant
 class TestNack:
     def test_nack_releases_the_claim(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -298,6 +305,7 @@ class TestNack:
 # ── release (RDR-211 Phase 1 Step 1, bead nexus-rplay.2) ────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRelease:
     def test_release_ends_the_claim_without_counting_an_attempt(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -368,6 +376,7 @@ class TestRelease:
                 store.release(bad["claim_id"], bad["claimant"])
 
 
+@pytest.mark.t2_tenant
 class TestReleaseAgainstAnOldEngine:
     """Mirrors ``TestRenewAgainstAnOldEngine``: an engine predating
     ``/release`` must fail loud, never silently no-op."""
@@ -408,6 +417,7 @@ class TestReleaseAgainstAnOldEngine:
 
 
 class TestRegistry:
+    @pytest.mark.t2_tenant
     def test_registry_carries_all_v1_templates(self, t2_service_env) -> None:
         store = HttpTupleStore()
         reg = store.registry()
@@ -416,6 +426,7 @@ class TestRegistry:
         assert {"ledger/<session_id>", "mailbox/<address>", "directory/<name>"} <= names
 
 
+@pytest.mark.t2_tenant
 class TestSubspaceList:
     def test_subspace_list_filters_by_prefix(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -476,6 +487,7 @@ class TestSubspaceList:
         assert next_cursor is None
 
 
+@pytest.mark.t2_tenant
 class TestSubspaceStats:
     def test_subspace_stats_matches_a_written_row(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -501,6 +513,7 @@ class TestSubspaceStats:
 
 
 class TestParkCapExceeded:
+    @pytest.mark.t2_tenant
     def test_a_claimants_fifth_concurrent_park_is_refused(self, t2_service_env) -> None:
         """Per-claimant park cap defaults to 4 (``NX_TUPLE_PARK_CAP_
         PER_CLAIMANT``, ``TupleWaitRegistry.DEFAULT_PARK_CAP_PER_CLAIMANT``).
@@ -919,6 +932,7 @@ class TestTypedErrorMapping:
 # ── renew (nexus-h61dl.8, RDR-206 Phase 2) ───────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRenew:
     """``renew`` extends a live claim's lease without touching attempts.
 
@@ -1027,6 +1041,7 @@ class TestRenew:
                 store.renew(bad["claim_id"], bad["claimant"], 60)
 
 
+@pytest.mark.t2_tenant
 class TestRenewAgainstAnOldEngine:
     """An engine predating ``/renew`` must produce a LOUD failure, never a
     silent no-op that would let a caller believe its lease was extended
@@ -1089,6 +1104,7 @@ class TestRenewAgainstAnOldEngine:
 
 
 class TestWait:
+    @pytest.mark.t2_tenant
     def test_wait_on_three_subspaces_returns_only_the_matching_one(
         self, t2_service_env,
     ) -> None:
@@ -1115,6 +1131,7 @@ class TestWait:
         assert len(results[0].tuples) == 1
         assert results[0].tuples[0].body == "for-b"
 
+    @pytest.mark.t2_tenant
     def test_wait_wakes_on_a_write_to_any_of_its_subspaces(self, t2_service_env) -> None:
         store = HttpTupleStore()
         addr_a, addr_b = _uniq("a"), _uniq("b")
@@ -1136,6 +1153,7 @@ class TestWait:
         assert results[0].subspace == f"mailbox/{addr_b}"
         assert results[0].tuples[0].body == "arrived"
 
+    @pytest.mark.t2_tenant
     def test_wait_cursor_round_trip_sees_nothing_new_on_a_second_call(
         self, t2_service_env,
     ) -> None:
@@ -1175,6 +1193,7 @@ class TestWait:
             store.wait(specs, timeout_s=0)
         assert exc_info.value.code == "SchemaViolation"
 
+    @pytest.mark.t2_tenant
     def test_exactly_the_cap_is_accepted_client_side(self, t2_service_env) -> None:
         """The boundary companion to the refusal above: exactly
         ``_MAX_WAIT_SPECS`` subspaces must reach the engine, not be
@@ -1194,6 +1213,7 @@ class TestWaitPerSubscriberAnnounceSince:
     side -- against the real gate-jar engine, not the Python-side fake
     ``tests/test_mcp_channel.py`` models it with."""
 
+    @pytest.mark.t2_tenant
     def test_since_excludes_a_pre_watermark_row_and_delivers_a_post_watermark_one(
         self, t2_service_env,
     ) -> None:
@@ -1224,6 +1244,7 @@ class TestWaitPerSubscriberAnnounceSince:
         )
 
 
+@pytest.mark.t2_tenant
 class TestWaitAgainstAnOldEngine:
     """Mirrors ``TestRenewAgainstAnOldEngine``."""
 
@@ -1256,6 +1277,7 @@ class TestWaitAgainstAnOldEngine:
 # CLI verb here either.
 
 
+@pytest.mark.t2_tenant
 class TestParkStats:
     def test_park_stats_reports_the_six_fields(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -1287,6 +1309,7 @@ class TestParkStats:
         assert rows == []  # nothing was ever written for this address
 
 
+@pytest.mark.t2_tenant
 class TestParkStatsAgainstAnOldEngine:
     """Mirrors ``TestRenewAgainstAnOldEngine``; ``park_stats`` is a GET,
     unlike ``renew``/``release``/``wait``."""
@@ -1355,6 +1378,7 @@ class TestReplySpec:
         assert payload["body"] == ""
         assert "dims" not in payload
 
+    @pytest.mark.t2_tenant
     def test_the_payload_matches_what_out_would_send_for_the_same_arguments(
         self, monkeypatch,
     ) -> None:
@@ -1382,6 +1406,7 @@ class TestReplySpec:
         ).to_payload()
 
 
+@pytest.mark.t2_tenant
 class TestAckWithReply:
     def _request_claimed_by(self, store: HttpTupleStore, reply_addr: str):
         addr = _uniq("addr")
@@ -1496,6 +1521,7 @@ class TestAckWithReply:
         assert sent == [], "the oversized ack reached the transport"
 
 
+@pytest.mark.t2_tenant
 class TestAckReplyAgainstAnOldEngine:
     """nexus-u7blf. engine-service-v0.1.116's handleAck reads the body as a
     map with FAIL_ON_UNKNOWN_PROPERTIES false, ignores ``reply``, consumes

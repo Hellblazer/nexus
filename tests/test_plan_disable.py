@@ -36,6 +36,8 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.t2 import T2Database
 
+pytestmark = pytest.mark.t2_tenant
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 

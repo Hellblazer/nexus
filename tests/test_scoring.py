@@ -72,6 +72,7 @@ def test_hybrid_scoring_empty():
     assert apply_hybrid_scoring([], hybrid=True) == []
 
 
+@pytest.mark.t2_tenant
 def test_hybrid_scoring_no_code_warns():
     r = _r(coll="docs__corpus", dist=0.2)
     results = apply_hybrid_scoring([r], hybrid=True)
@@ -100,12 +101,14 @@ def test_hybrid_score_weighted_sum():
 # 1.0 becomes v_norm = 1.0 - 1.0 = 0.0, the WORST possible score, while two
 # identical results (a non-trivial window) correctly score 1.0 each.
 
+@pytest.mark.t2_tenant
 def test_hybrid_scoring_single_vector_result_is_not_worst_possible():
     r = _r(coll="docs__corpus", dist=0.05)
     results = apply_hybrid_scoring([r], hybrid=False)
     assert results[0].hybrid_score == pytest.approx(1.0, abs=1e-6)
 
 
+@pytest.mark.t2_tenant
 def test_hybrid_scoring_single_result_matches_two_identical_results():
     # Two identical-distance results already score 1.0 each (min_max_normalize
     # over a non-trivial window with equal values -> 0.0 -> inverted -> 1.0).
@@ -176,6 +179,7 @@ def test_round_robin_interleave(groups, expected_dists):
 # tests/test_search_engine.py::TestApplyFileDiversityCap). These tests pin
 # that scoring itself no longer reads chunk_count at all.
 
+@pytest.mark.t2_tenant
 def test_apply_hybrid_scoring_is_chunk_count_blind():
     """Two code__ results at an IDENTICAL vector distance, one from a
     5-chunk file and one from a 5000-chunk file, must score IDENTICALLY —
@@ -186,6 +190,7 @@ def test_apply_hybrid_scoring_is_chunk_count_blind():
     assert results[0].hybrid_score == pytest.approx(results[1].hybrid_score, abs=1e-9)
 
 
+@pytest.mark.t2_tenant
 def test_new_scoring_fixes_the_vlzz0_ranking_the_old_formula_got_wrong():
     """nexus-vlzz0: src/nexus/corpus.py (chunk_count=145, the measured
     plans/runner.py-scale value) at distance 0.1981 lost to 8-chunk test
@@ -290,6 +295,7 @@ def test_resolve_calibration_factors_is_noop_for_single_embedder_result_set():
     }
 
 
+@pytest.mark.t2_tenant
 def test_identical_distance_stays_identical_score_in_single_embedder_mode():
     """End-to-end version of the no-op pin above, through the real
     scoring path: two results at an IDENTICAL raw distance, one code__
@@ -343,6 +349,7 @@ def test_resolve_calibration_factors_is_noop_for_legacy_names_in_local_mode(
     assert factors == {"code__myrepo": 1.0, "knowledge__myrepo": 1.0}
 
 
+@pytest.mark.t2_tenant
 def test_identical_distance_stays_identical_score_legacy_names_local_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -599,6 +606,7 @@ class TestLinkBoost:
             metadata=meta, hybrid_score=score,
         )
 
+    @pytest.mark.t2_tenant
     def test_implements_link_boosts_score(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
@@ -610,6 +618,7 @@ class TestLinkBoost:
         apply_link_boost([r], cat)
         assert r.hybrid_score > 0.5  # boosted
 
+    @pytest.mark.t2_tenant
     def test_heuristic_link_no_boost(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
@@ -626,12 +635,14 @@ class TestLinkBoost:
         apply_link_boost([r], None)
         assert r.hybrid_score == 0.5
 
+    @pytest.mark.t2_tenant
     def test_no_matching_entry_unchanged(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         r = self._make_result(doc_id="nonexistent-tumbler", score=0.5)
         apply_link_boost([r], cat)
         assert r.hybrid_score == 0.5
 
+    @pytest.mark.t2_tenant
     def test_chunk_without_doc_id_skipped(self, tmp_path):
         """nexus-1qed: chunks predating the doc_id backfill are
         skipped silently. WITH TEETH: a regression that re-introduces
@@ -650,6 +661,7 @@ class TestLinkBoost:
         apply_link_boost([r], cat)
         assert r.hybrid_score == 0.5
 
+    @pytest.mark.t2_tenant
     def test_signal_capped_at_one(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
@@ -664,6 +676,7 @@ class TestLinkBoost:
         # signal capped at 1.0, so max boost is 0.15
         assert r.hybrid_score == pytest.approx(0.65, abs=0.01)
 
+    @pytest.mark.t2_tenant
     def test_relates_link_half_boost(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
@@ -676,6 +689,7 @@ class TestLinkBoost:
         # relates = 0.5 weight, so boost = 0.15 * 0.5 = 0.075
         assert r.hybrid_score == pytest.approx(0.575, abs=0.01)
 
+    @pytest.mark.t2_tenant
     def test_custom_type_weights(self, tmp_path):
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
@@ -1038,6 +1052,7 @@ class TestTopicBoost:
         assert _effective_distance(r2, {}) == 0.0
 
 
+@pytest.mark.t2_tenant
 def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
     """Min-max normalisation is relative: the best of any window scores 1.0
     and absolute quality is not expressed (distance thresholds, where they
@@ -1053,6 +1068,7 @@ def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
     assert lone[0].hybrid_score == pytest.approx(max(r.hybrid_score for r in pair)) == pytest.approx(1.0)
 
 
+@pytest.mark.t2_tenant
 def test_a_negative_raw_distance_is_floored_rather_than_winning():
     """A distance below zero is measurement error, not a better-than-perfect match.
 

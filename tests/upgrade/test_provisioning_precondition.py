@@ -19,6 +19,7 @@ from nexus.upgrade_ladder.preconditions import (
     check_preconditions,
     converge_preconditions,
 )
+import pytest
 
 
 @dataclass
@@ -96,6 +97,7 @@ def test_verdict_is_derived_from_on_disk_evidence_only(
     assert calls == {"prov": 2}  # fresh derivation every call
 
 
+@pytest.mark.t2_tenant
 def test_converge_never_provisions(tmp_path: pathlib.Path) -> None:
     """converge_preconditions must not stand anything up for this axis —
     report-only in both provisioned states, no actions ever."""

@@ -184,6 +184,7 @@ def test_main_without_fork_spawns_detached_and_falls_back_inline(
     mock_summary.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_main_windows_inline_fallback_writes_nothing_to_stdout(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -219,6 +220,7 @@ def test_main_windows_inline_fallback_writes_nothing_to_stdout(
     assert captured.out == "", f"structlog output leaked to stdout: {captured.out!r}"
 
 
+@pytest.mark.t2_tenant
 def test_run_session_end_synchronously_configures_hook_file_logging(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

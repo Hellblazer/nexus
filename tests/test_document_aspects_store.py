@@ -34,6 +34,8 @@ from nexus.db.t2.records import AspectRecord
 
 from tests._catalog_fixture_ops import register_real_doc_id
 
+pytestmark = pytest.mark.t2_tenant
+
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
 # carries a REAL FK to catalog_documents(tenant_id, tumbler) -- a fixture
 # record that actually reaches the engine needs a doc_id naming a document

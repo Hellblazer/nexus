@@ -72,6 +72,7 @@ def test_repo_identity_two_tuple_unchanged(tmp_path: Path) -> None:
     assert result[0] == "no_git_here"
 
 
+@pytest.mark.t2_tenant
 def test_ensure_owner_for_repo_writes_main_repo_root_not_input_path(
     cat: Catalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -111,6 +112,7 @@ def test_ensure_owner_for_repo_writes_main_repo_root_not_input_path(
     assert repo_root != str(worktree)
 
 
+@pytest.mark.t2_tenant
 def test_catalog_hook_passes_main_repo_path_to_register_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

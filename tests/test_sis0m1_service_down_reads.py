@@ -35,6 +35,7 @@ def service_down(monkeypatch):
     monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("argv", _VERBS, ids=lambda a: " ".join(a[:2]))
 def test_a_read_verb_names_the_stopped_service(service_down, argv):
     result = CliRunner().invoke(main, argv)

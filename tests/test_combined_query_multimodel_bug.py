@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.mcp import core
+import pytest
 
 # Two conformant collections, SAME dimension (1024), DIFFERENT embedding model.
 # This is the exact shape of the live repro: prefix `code` -> model-code,
@@ -91,6 +92,7 @@ def _max_models_per_call(calls: list[list[str]]) -> int:
     return max((len({_model(c) for c in cols}) for cols in calls), default=0)
 
 
+@pytest.mark.t2_tenant
 class TestSearchGraphHopMultiModel:
     def test_multimodel_corpus_does_not_drop_the_hit(self, monkeypatch):
         # Seed 1.9.80's reachable hit lives in the DOCS (model-ctx) group,
@@ -144,6 +146,7 @@ class TestSearchGraphHopMultiModel:
             "graph-hop merge must be distance-ascending across model groups")
 
 
+@pytest.mark.t2_tenant
 class TestSearchMetadataScopedMultiModel:
     """Sibling tool shares the defect: same single mixed-model call shape."""
 
@@ -220,6 +223,7 @@ def _wire_query(monkeypatch, t3, target: list[str]) -> None:
     monkeypatch.setattr(core, "_get_catalog", lambda: object())
 
 
+@pytest.mark.t2_tenant
 class TestQueryServiceModeMultiModel:
     def test_metadata_scoped_path_does_not_drop_the_hit(self, monkeypatch):
         # content_type (no follow_links) routes through the "else" branch's
@@ -324,6 +328,7 @@ class _PartialFailureServiceT3:
         raise RuntimeError("simulated second-model-group service failure")
 
 
+@pytest.mark.t2_tenant
 class TestPartialGroupFailureIsAllOrNothing:
     def test_metadata_scoped_second_group_failure_returns_error_not_partial_rows(
         self, monkeypatch,

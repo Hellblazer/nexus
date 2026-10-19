@@ -164,6 +164,7 @@ class TestPlainMakeT3ConsumerConnectionPath:
         monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
         monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
 
+    @pytest.mark.t2_tenant
     def test_below_floor_fails_loud(self, monkeypatch, cloud_below_floor) -> None:
         self._env(monkeypatch)
 

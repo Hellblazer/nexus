@@ -145,6 +145,7 @@ def test_register_document_rejects_async_hooks() -> None:
 # ── Failure isolation ────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_fire_document_exception_nonfatal() -> None:
     """A raising hook must not block the next registered hook from firing,
     and the dispatcher itself must never raise.

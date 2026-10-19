@@ -156,6 +156,7 @@ def test_the_token_store_sends_the_version() -> None:
         store._client.close()
 
 
+@pytest.mark.t2_tenant
 def test_the_httpx_scratch_store_sends_the_version() -> None:
     from nexus.db.http_scratch_store import HttpScratchStore
 

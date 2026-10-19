@@ -12,6 +12,7 @@ so MCP store_put and every legacy path are behaviorally unchanged.
 from __future__ import annotations
 
 from nexus.hook_registry import HookRegistry
+import pytest
 
 
 def _mk_hook(calls: list, grain: str | None = None):
@@ -153,6 +154,7 @@ class TestHookTimings:
         reg.fire_batch(["d1"], "code__x", ["t"])
         assert calls == [["d1"]]
 
+    @pytest.mark.t2_tenant
     def test_hook_timings_recorded_even_on_hook_failure(self) -> None:
         """A raising hook is still timed and attributed — best-effort
         failure handling must not blind the timing accounting."""
@@ -261,6 +263,7 @@ class TestFlushGrainOutcomeEquivalence:
                 _STORE.clear()
             server.shutdown()
 
+    @pytest.mark.t2_tenant
     def test_flush_grain_failure_contract_documented(self) -> None:
         # Critic S1 companion: a flush-grain consumer failure affects the
         # WHOLE upload batch's files (widened from per-file). This test

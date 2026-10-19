@@ -27,6 +27,8 @@ import pytest
 from nexus import corpus as corpus_mod
 from nexus import doc_indexer
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _fresh_registration_cache():

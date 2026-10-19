@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id as _cid
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _db(tmp_path):
     return T2Database(tmp_path / "t2.db", run_migrations=True)

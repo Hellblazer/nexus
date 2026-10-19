@@ -26,6 +26,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 # ── AC2: SessionStart — UUID4 session ID ──────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -> None:
     """nx hook session-start calls write_claude_session_id with a UUID4 session ID."""
     import re
@@ -48,6 +49,7 @@ def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -
     ), f"Not a UUID4: {captured['session_id']!r}"
 
 
+@pytest.mark.t2_tenant
 def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) -> None:
     """nx hook session-start prints 'Nexus ready' with session ID."""
     result = runner.invoke(main, ["hook", "session-start"])
@@ -57,6 +59,7 @@ def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) 
 
 # ── Behavior 4: hook and CLI use the same getsid(0) anchor ───────────────────
 
+@pytest.mark.t2_tenant
 def test_hook_and_cli_use_same_getsid_anchor(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -81,6 +84,7 @@ def test_hook_and_cli_use_same_getsid_anchor(
 
 # ── AC3: SessionStart memory summary ─────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_session_start_outputs_session_id(
     runner: CliRunner, fake_home: Path
 ) -> None:
@@ -131,6 +135,7 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
 
 # ── AC6: nx doctor ────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
     """nx doctor runs all required service checks and reports status."""
     result = runner.invoke(main, ["doctor"])
@@ -140,6 +145,7 @@ def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
     assert "git" in output_lower
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_voyage_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -176,6 +182,7 @@ def test_doctor_missing_voyage_key_reports_warning(
     )
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_chroma_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

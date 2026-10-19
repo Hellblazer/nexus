@@ -28,6 +28,8 @@ import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _chash(seed: str) -> str:
     """Deterministic full-width chunk hash (RDR-180: 64 lowercase hex).

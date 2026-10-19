@@ -436,6 +436,7 @@ class TestVersionTransition:
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
+    @pytest.mark.t2_tenant
     def test_transition_reports_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         self._tool = patch(
@@ -679,6 +680,7 @@ class TestCheckVersionTransitionBackfillsInstallMode:
         assert line is None
         backfill.assert_called_once_with()
 
+    @pytest.mark.t2_tenant
     def test_preview_never_calls_the_backfill(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -2217,6 +2219,7 @@ class TestCheckVersionTransitionEngineConvergence:
     """check_version_transition's automatic post-upgrade pass also runs
     engine convergence (nexus-cfgo9) alongside stale-process restart."""
 
+    @pytest.mark.t2_tenant
     def test_transition_includes_convergence_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -2360,6 +2363,7 @@ class TestCheckVersionTransitionDiagViewHeal:
     """check_version_transition's finish pass also runs the diag-view heal
     (nexus-cfgo9), independently try/excepted from engine convergence."""
 
+    @pytest.mark.t2_tenant
     def test_transition_includes_heal_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -2400,6 +2404,7 @@ class TestCheckVersionTransitionDiagViewHeal:
             line = check_version_transition(tmp_path)
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
 
+    @pytest.mark.t2_tenant
     def test_engine_convergence_failure_does_not_block_heal_actions(self, tmp_path):
         """The two new legs (converge_engine, heal_diag_view) are
         independently try/excepted -- one failing must not swallow the

@@ -129,6 +129,7 @@ class TestAdHocSaveOnSuccess:
             "plan_json must round-trip as a non-empty steps DAG"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_matched_plan_does_not_trigger_save(self):
         """plan_id != 0 means the library already has this plan — no save."""
@@ -151,6 +152,7 @@ class TestAdHocSaveOnSuccess:
             "save_plan must NOT be called when a library plan matched"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_plan_run_error_skips_save(self):
         """If plan_run raises, the ad-hoc plan is NOT saved."""
@@ -178,6 +180,7 @@ class TestAdHocSaveOnSuccess:
         )
         assert "error" in result.lower()
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_save_exception_does_not_affect_answer(self):
         """save_plan raising must not prevent the user getting their answer."""
@@ -339,6 +342,7 @@ class TestAdHocTtlConfig:
 # ── Live-SQLite round-trip (critic gap from PR #170) ─────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestLiveSqliteRoundTrip:
     """End-to-end against a real on-disk SQLite T2Database.
 

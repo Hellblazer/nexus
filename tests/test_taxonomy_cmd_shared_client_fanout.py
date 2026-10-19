@@ -29,6 +29,8 @@ from click.testing import CliRunner
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.storage_mode import T2_FACADE_STORES
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     tally: list[int] = []

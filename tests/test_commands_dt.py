@@ -489,6 +489,7 @@ class TestPassthroughFlags:
 # the same faked indexer returns chunks and the record counts as indexed.
 
 
+@pytest.mark.t2_tenant
 class TestForceStalenessBypass:
     def test_without_force_unchanged_record_prints_fresh_hint(
         self, runner, fake_selectors, monkeypatch,
@@ -746,6 +747,7 @@ class TestDtContentExceptionHandling:
 
         monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
 
+    @pytest.mark.t2_tenant
     def test_index_run_verify_refused_collects_and_continues(
         self, runner, fake_selectors, monkeypatch,
     ):
@@ -788,6 +790,7 @@ class TestDtContentExceptionHandling:
         assert result.exit_code != 0, result.output
         assert "listed under failed" in result.output, result.output
 
+    @pytest.mark.t2_tenant
     def test_dt_content_refusal_still_honours_run_level_gate(
         self, runner, fake_selectors, monkeypatch,
     ):
@@ -1058,6 +1061,7 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
 
     from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS as _MEMBERS
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize(
         "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
     )
@@ -1094,6 +1098,7 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
         assert "U-BAD" in result.output, result.output
         assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize(
         "member_cls", list(_MEMBERS), ids=lambda c: c.__name__,
     )
@@ -1129,6 +1134,7 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
         assert "Indexed 1 record(s)" in result.output, result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "exc_type",
     [SourceUriNotFoundError, SourceUriCollectionMismatchError],
@@ -1233,6 +1239,7 @@ class TestGenericFallbackHandlesUnknownTupleMember:
         assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
         assert "synthetic third member: unknown-shape" in result.output, result.output
 
+    @pytest.mark.t2_tenant
     def test_file_backed_branch(self, runner, monkeypatch) -> None:
         from nexus.cli import main
         import nexus.errors as errors_mod
@@ -1394,6 +1401,7 @@ class TestIdentityDropSummary:
         # pbawi acceptance item 3, verbatim requirement: must NOT exit 0.
         assert result.exit_code != 0, result.output
 
+    @pytest.mark.t2_tenant
     def test_register_ok_summary_unchanged(
         self, runner, fake_selectors, monkeypatch, tmp_path,
     ):
@@ -1986,6 +1994,7 @@ class TestStampDtUriOnEntry:
         )
         return cat
 
+    @pytest.mark.t2_tenant
     def test_stamps_source_uri_and_meta_devonthink_uri(
         self, tmp_path, monkeypatch,
     ):
@@ -2022,6 +2031,7 @@ class TestStampDtUriOnEntry:
             # factory.
             pass
 
+    @pytest.mark.t2_tenant
     def test_no_entry_match_logs_and_returns(
         self, tmp_path, monkeypatch,
     ):
@@ -2043,6 +2053,7 @@ class TestStampDtUriOnEntry:
         # Should not raise.
         _stamp_dt_uri_on_entry(file_path, "GHOST-UUID")
 
+    @pytest.mark.t2_tenant
     def test_uninitialized_catalog_logs_and_returns(
         self, tmp_path, monkeypatch,
     ):
@@ -2063,6 +2074,7 @@ class TestStampDtUriOnEntry:
         # Should not raise.
         _stamp_dt_uri_on_entry(tmp_path / "x.pdf", "ANY-UUID")
 
+    @pytest.mark.t2_tenant
     def test_index_record_invokes_stamp_helper(
         self, monkeypatch, tmp_path,
     ):
@@ -2107,6 +2119,7 @@ class TestStampDtUriOnEntry:
         assert pdf_kwargs[0].get("collection_name") == "knowledge__test"
         assert pdf_kwargs[0].get("corpus") == "default"
 
+    @pytest.mark.t2_tenant
     def test_index_record_md_forwards_collection(
         self, monkeypatch, tmp_path,
     ):
@@ -2144,6 +2157,7 @@ class TestStampDtUriOnEntry:
         assert md_kwargs[0].get("collection_name") == "knowledge__notes"
         assert md_kwargs[0].get("corpus") == "default"
 
+    @pytest.mark.t2_tenant
     def test_index_record_forwards_force_to_index_pdf(
         self, monkeypatch, tmp_path,
     ):
@@ -2172,6 +2186,7 @@ class TestStampDtUriOnEntry:
         )
         assert pdf_kwargs[0].get("force") is True
 
+    @pytest.mark.t2_tenant
     def test_index_record_forwards_dt_title_to_index_pdf(
         self, monkeypatch, tmp_path,
     ):
@@ -2213,6 +2228,7 @@ class TestStampDtUriOnEntry:
             "Generation: Encoding Relational Knowledge"
         )
 
+    @pytest.mark.t2_tenant
     def test_index_record_dt_facts_unavailable_leaves_title_override_empty(
         self, monkeypatch, tmp_path,
     ):
@@ -2243,6 +2259,7 @@ class TestStampDtUriOnEntry:
         )
         assert pdf_kwargs[0].get("title_override") == ""
 
+    @pytest.mark.t2_tenant
     def test_index_record_forwards_force_to_index_markdown(
         self, monkeypatch, tmp_path,
     ):
@@ -2270,6 +2287,7 @@ class TestStampDtUriOnEntry:
         )
         assert md_kwargs[0].get("force") is True
 
+    @pytest.mark.t2_tenant
     def test_index_record_force_defaults_to_false_for_both_branches(
         self, monkeypatch, tmp_path,
     ):
@@ -2301,6 +2319,7 @@ class TestStampDtUriOnEntry:
         assert pdf_kwargs[0].get("force") is False
         assert md_kwargs[0].get("force") is False
 
+    @pytest.mark.t2_tenant
     def test_index_record_forwards_force_re_embed_to_index_pdf(
         self, monkeypatch, tmp_path,
     ):
@@ -2330,6 +2349,7 @@ class TestStampDtUriOnEntry:
         )
         assert pdf_kwargs[0].get("force_re_embed") is True
 
+    @pytest.mark.t2_tenant
     def test_index_record_forwards_force_re_embed_to_index_markdown(
         self, monkeypatch, tmp_path,
     ):
@@ -2358,6 +2378,7 @@ class TestStampDtUriOnEntry:
         )
         assert md_kwargs[0].get("force_re_embed") is True
 
+    @pytest.mark.t2_tenant
     def test_index_record_force_re_embed_defaults_to_false_for_both_branches(
         self, monkeypatch, tmp_path,
     ):
@@ -2877,6 +2898,7 @@ class TestEnrichUnchangedRecord:
     was only fed on a write. Enrichment is idempotent per backend, so an
     unchanged record's collection is part of the pass."""
 
+    @pytest.mark.t2_tenant
     def test_unchanged_record_still_enriches_its_collection(
         self, runner, fake_selectors, monkeypatch,
     ):
@@ -2927,6 +2949,7 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         monkeypatch.setattr("nexus.doc_indexer.index_pdf", lambda *a, **kw: seq.pop(0)(*a, **kw))
         return runner.invoke(main, ["dt", "index", "--uuid", records[0][0]]), seq
 
+    @pytest.mark.t2_tenant
     def test_file_backed_branch(self, runner, monkeypatch) -> None:
         result, seq = self._file_backed(
             runner, monkeypatch, ValueError("MultiBatchDocumentWriter: already finished"))
@@ -2941,6 +2964,7 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert isinstance(result.exception, SystemExit), repr(result.exception)
         assert "1 record(s) failed with an unexpected error" in result.output, result.output
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("exc", [RuntimeError("extraction blew up"), ImportError("mineru is corrupt")],
                              ids=["RuntimeError", "ImportError"])
     def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(
@@ -2959,6 +2983,7 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert result.exit_code == 1, result.output
         assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
 
+    @pytest.mark.t2_tenant
     def test_a_run_level_nexus_error_still_stops_the_run(self, runner, monkeypatch) -> None:
         from nexus.errors import CredentialsMissingError
 

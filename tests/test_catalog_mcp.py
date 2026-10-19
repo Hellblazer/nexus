@@ -23,6 +23,8 @@ from nexus.mcp_server import (
     catalog_update,
 )
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):

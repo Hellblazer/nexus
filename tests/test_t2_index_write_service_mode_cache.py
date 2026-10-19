@@ -32,6 +32,8 @@ import pytest
 # fixture collection.
 from tests.db.test_refreshable_client import fake_service  # noqa: F401 — used as a fixture, not called directly
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _reset_around(monkeypatch):

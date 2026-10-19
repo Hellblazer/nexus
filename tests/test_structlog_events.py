@@ -47,6 +47,7 @@ def t2():
 # ── expire_complete ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_expire_complete_event_emitted_with_required_fields(t2):
     """T2.expire() emits expire_complete with memory_deleted and relevance_log_deleted."""
     with capture_logs() as logs:
@@ -60,6 +61,7 @@ def test_expire_complete_event_emitted_with_required_fields(t2):
     assert "relevance_log_error" not in event
 
 
+@pytest.mark.t2_tenant
 def test_expire_complete_includes_error_when_log_purge_fails(t2, monkeypatch):
     """When expire_relevance_log raises, expire_complete includes relevance_log_error."""
     def boom(*args, **kwargs):

@@ -511,6 +511,7 @@ class TestIndexCmdExitCodeRule:
         assert result.exit_code == 0, result.output
         assert "DEVONthink MCP unreachable" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_single_layer_flag_unreachable_exits_2_with_loud_message(
         self, runner, fake_gather, monkeypatch,
     ):
@@ -531,6 +532,7 @@ class TestIndexCmdExitCodeRule:
             "stdio binary /opt/DT MCP (not found)): layers writeback skipped"
         ) in result.output
 
+    @pytest.mark.t2_tenant
     def test_all_three_layer_flags_unreachable_lists_all_three(
         self, runner, fake_gather, monkeypatch,
     ):

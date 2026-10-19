@@ -582,6 +582,7 @@ class TestLiveSessionLease:
         )
         assert entry["content"] == "written by the live MCP session"
 
+    @pytest.mark.t2_tenant
     def test_no_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -602,6 +603,7 @@ class TestLiveSessionLease:
         assert "missing or expired" in msg
         assert "predecessor scopes are readable only while their lease is fresh" in msg
 
+    @pytest.mark.t2_tenant
     def test_lease_after_clear_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -721,6 +723,7 @@ class TestStaleLeaseFallthrough:
     (TestBranch0StaleLeaseRecovery below) -- that path never reaches
     get_t1_database()'s CLI-dedicated branch at all."""
 
+    @pytest.mark.t2_tenant
     def test_stale_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -794,6 +797,7 @@ class TestExplicitVsBareFailLoudGate:
         assert result.session_id == _cli_dedicated_session_id(config_dir)
         assert result.session_id != "file-resolved-not-explicit"
 
+    @pytest.mark.t2_tenant
     def test_claude_code_session_id_env_is_also_explicit(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -828,6 +832,7 @@ class TestExplicitVsBareFailLoudGate:
         assert isinstance(result, HttpScratchStore)
         assert result.session_id == live_session_id
 
+    @pytest.mark.t2_tenant
     def test_repro_guard_nx_scratch_list_errors_not_shared_entries(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -905,6 +910,7 @@ class TestSharedFallbackEscapeHatch:
         assert "t1_shared_scope_fallback" in captured.out
         assert "escape-hatch-warning-probe" in captured.out
 
+    @pytest.mark.t2_tenant
     def test_escape_hatch_value_other_than_1_does_not_activate(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -968,6 +974,7 @@ class TestSharedFallbackEscapeHatch:
 # parent (the exact shape pre_close_verification_hook.sh's export produces).
 
 
+@pytest.mark.t2_tenant
 class TestSessionEndNeverClearsSharedScope:
     def test_lease_less_explicit_session_end_survives_shared_scope(
         self, fake_service, config_dir, monkeypatch

@@ -63,6 +63,7 @@ _ABSENT_TUMBLER = f"{9_000_000 + (_uuid.uuid4().int % 1_000_000)}.999.999"
 
 
 class TestAutoLink:
+    @pytest.mark.t2_tenant
     def test_link_context_creates_relates_link(self, tmp_path):
         """Seeding one LinkContext with a valid tumbler creates a relates link."""
         cat = _make_catalog(tmp_path)
@@ -80,6 +81,7 @@ class TestAutoLink:
         assert len(links) == 1
         assert links[0].created_by == "auto-linker"
 
+    @pytest.mark.t2_tenant
     def test_no_link_context_no_crash(self, tmp_path):
         """Empty context list produces no links and no exception."""
         cat = _make_catalog(tmp_path)
@@ -95,6 +97,7 @@ class TestAutoLink:
         assert links == []
 
 
+    @pytest.mark.t2_tenant
     def test_nonexistent_tumbler_graceful_skip(self, tmp_path):
         """A LinkContext with valid-format-but-non-existent tumbler is counted in skipped_missing_endpoint."""
         cat = _make_catalog(tmp_path)
@@ -113,6 +116,7 @@ class TestAutoLink:
         links = cat.links_from(source_t)
         assert links == []
 
+    @pytest.mark.t2_tenant
     def test_multiple_contexts_create_multiple_links(self, tmp_path):
         """Two LinkContext objects each create one link — two total."""
         cat = _make_catalog(tmp_path)
@@ -174,6 +178,7 @@ class TestAutoLink:
         assert len(contexts) == 1
         assert contexts[0].link_type == "relates"
 
+    @pytest.mark.t2_tenant
     def test_idempotent_no_duplicate(self, tmp_path):
         """Calling auto_link twice with the same inputs creates only one link."""
         cat = _make_catalog(tmp_path)
@@ -194,6 +199,7 @@ class TestAutoLink:
         links = cat.links_from(source_t, link_type="relates")
         assert len(links) == 1
 
+    @pytest.mark.t2_tenant
     def test_created_by_auto_linker(self, tmp_path):
         """Every link created by auto_link has created_by='auto-linker'."""
         cat = _make_catalog(tmp_path)
@@ -226,6 +232,7 @@ class TestAutoLinkResult:
     layer can WARN on the recipe-compliance gap.
     """
 
+    @pytest.mark.t2_tenant
     def test_invalid_tumbler_counts_as_invalid_skip(self, tmp_path):
         """Non-parseable tumbler strings (e.g. T3 chash hex) → skipped_invalid_tumbler."""
         from nexus.catalog.auto_linker import AutoLinkResult
@@ -247,6 +254,7 @@ class TestAutoLinkResult:
         assert result.skipped_missing_endpoint == 0
 
 
+    @pytest.mark.t2_tenant
     def test_mixed_invalid_and_missing_separate_counts(self, tmp_path):
         """A batch with both failure modes counts them separately."""
         cat = _make_catalog(tmp_path)
@@ -267,6 +275,7 @@ class TestAutoLinkResult:
         assert result.skipped_missing_endpoint == 1
 
 
+    @pytest.mark.t2_tenant
     def test_partial_success_counts_correctly(self, tmp_path):
         """Mixed valid + invalid + missing in one batch: each counted in its bucket."""
         cat = _make_catalog(tmp_path)
@@ -295,6 +304,7 @@ class TestAutoLinkResult:
         assert result.skipped_missing_endpoint == 0
 
 
+@pytest.mark.t2_tenant
 class TestCatalogAutoLinkIntegration:
     """Integration test: _catalog_auto_link wired through store_put path."""
 

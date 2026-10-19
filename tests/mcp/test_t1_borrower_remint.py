@@ -37,6 +37,8 @@ from nexus.db.t1 import (
 from nexus.db.t2.http_token_store import HttpTokenStore
 from nexus.mcp import core
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _clean_process_state(monkeypatch):

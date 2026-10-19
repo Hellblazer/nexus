@@ -107,6 +107,7 @@ def test_emit_identity_drop_summary_silent_and_false_when_all_empty(capsys):
     assert captured.err == ""
 
 
+@pytest.mark.t2_tenant
 def test_emit_identity_drop_summary_surfaces_write_failures(capsys):
     from nexus.mcp_infra import _record_manifest_write_failure
 
@@ -310,6 +311,7 @@ def test_emit_identity_drop_summary_surfaces_sweep_skips_as_a_problem(capsys):
     assert "nx t3 gc -c COLLECTION" in err
 
 
+@pytest.mark.t2_tenant
 def test_emit_identity_drop_summary_write_failure_noun_is_hardcoded_document(capsys):
     """nexus-7f5qj: verified pre-extraction that BOTH existing call sites
     (index_repo_cmd, dt.py's index_cmd) hardcode "document(s)" for this
@@ -326,6 +328,7 @@ def test_emit_identity_drop_summary_write_failure_noun_is_hardcoded_document(cap
     assert "catalog manifest write failed for 1 document(s)" in err
 
 
+@pytest.mark.t2_tenant
 def test_emit_identity_drop_summary_default_order_matches_index_repo_cmd(capsys):
     """Default order (no explicit ``order=``) must be write_failed ->
     identity_drops -> refused — index_repo_cmd's pre-extraction sequence,
@@ -350,6 +353,7 @@ def test_emit_identity_drop_summary_default_order_matches_index_repo_cmd(capsys)
     assert idx_write < idx_drop < idx_refused
 
 
+@pytest.mark.t2_tenant
 def test_emit_identity_drop_summary_order_param_controls_print_sequence(capsys):
     """nexus-7f5qj code-review follow-up (T2 [21484]): dt.py's index_cmd
     passes order=("refused", "write_failed", "identity_drops") to

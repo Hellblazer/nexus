@@ -75,6 +75,7 @@ def test_fire_single_calls_registered(
     assert calls[0] == ("doc-1", "test__coll")
 
 
+@pytest.mark.t2_tenant
 def test_fire_single_exception_nonfatal(
     tmp_path: Path,
 ) -> None:
@@ -89,6 +90,7 @@ def test_fire_single_exception_nonfatal(
     registry.fire_single("doc-1", "test__coll", "content")
 
 
+@pytest.mark.t2_tenant
 def test_fire_single_persist_swallowed_when_table_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -184,6 +186,7 @@ def test_fire_batch_empty_doc_ids_early_return() -> None:
     assert calls == []
 
 
+@pytest.mark.t2_tenant
 def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     """First hook raising must not block the second hook from firing.
 
@@ -238,6 +241,7 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     assert is_batch == 1
 
 
+@pytest.mark.t2_tenant
 def test_fire_batch_partial_commit_failure_mode(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -288,6 +292,7 @@ def test_fire_batch_partial_commit_failure_mode(
     assert "cross_collection_projection_failed" in error
 
 
+@pytest.mark.t2_tenant
 def test_record_batch_hook_failure_transient_store_error_is_swallowed(
     tmp_path: Path, monkeypatch,
 ) -> None:

@@ -597,6 +597,7 @@ class TestOutcomeBumpReachesEvictionClassifier:
     unclosed instance is what makes "evicted" and "untouched" distinguishable.
     """
 
+    @pytest.mark.t2_tenant
     def test_connectivity_failure_on_outcome_bump_evicts_the_shared_singleton(
         self, monkeypatch,
     ) -> None:
@@ -1011,6 +1012,7 @@ class TestHandoffArmUseCountInvariant:
 
         db_stub.plans.increment_run_started.assert_called_once_with(1)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_handoff_arm_against_supporting_engine_keeps_use_count_equal_to_outcomes(
         self,

@@ -25,6 +25,8 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def cat() -> ActiveCatalog:

@@ -62,6 +62,8 @@ from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
 # embedding profile per (tenant, content_type) on FIRST write and refuses a
 # later registration naming a DIFFERENT model for that content_type (422

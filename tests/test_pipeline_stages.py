@@ -212,6 +212,7 @@ def _run_service_mode(db, fake_result, fake_chunks, *, service=True, voyage=None
     return t3, mock_col
 
 
+@pytest.mark.t2_tenant
 class TestServiceModeStreaming:
     """nexus-9n1u3: PDF streaming pipeline must server-side-embed in service
     mode instead of demanding a Voyage key (which broke ALL PDF ingestion)."""
@@ -521,6 +522,7 @@ class TestUploaderLoop:
         uploader_loop("h1", db, t3 if t3 is not None else MagicMock(), "docs__test",
                       cancel or threading.Event(), chunking_done, **kw)
 
+    @pytest.mark.t2_tenant
     def test_hands_the_chunks_to_the_writer_and_makes_no_upsert(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
         t3 = MagicMock()
@@ -537,12 +539,14 @@ class TestUploaderLoop:
         assert w.kwargs["content_hash"] == "h1"
         assert w.finished and db.read_uploadable_chunks("h1") == []
 
+    @pytest.mark.t2_tenant
     def test_a_direct_caller_gets_a_writer_that_stamps_itself(self, db, writer) -> None:
         _pop_chunks(db, "h1", 2)
         self._up(db)
         assert writer.instances[0].kwargs["defer_completion"] is False
         assert ("complete",) not in writer.events
 
+    @pytest.mark.t2_tenant
     def test_an_orchestrated_run_defers_the_stamp_to_the_orchestrator(self, db, writer) -> None:
         from nexus.pipeline_stages import UploadRun
 
@@ -553,6 +557,7 @@ class TestUploaderLoop:
         assert run.finished and run.writer is writer.instances[0]
         assert ("complete",) not in writer.events, "only the orchestrator stamps"
 
+    @pytest.mark.t2_tenant
     def test_force_re_embed_true_reaches_the_writer(self, db, writer) -> None:
         """nexus-8143o: uploader_loop's own force_re_embed kwarg (default False) is the writer's
         force_re_embed -- the streaming pipeline's one RDR-181 server-side re-embed control."""
@@ -560,11 +565,13 @@ class TestUploaderLoop:
         self._up(db, force_re_embed=True)
         assert writer.instances[0].kwargs["force_re_embed"] is True
 
+    @pytest.mark.t2_tenant
     def test_force_re_embed_default_is_false(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
         self._up(db)
         assert writer.instances[0].kwargs["force_re_embed"] is False
 
+    @pytest.mark.t2_tenant
     def test_batch_sizing(self, db, writer) -> None:
         _pop_chunks(db, "h1", 200)
         self._up(db)
@@ -579,6 +586,7 @@ class TestUploaderLoop:
         uploader_loop("h1", db, MagicMock(), "docs__test", cancel)
         t.join()
 
+    @pytest.mark.t2_tenant
     def test_marks_uploaded_per_batch_once_its_request_was_sent(self, db, writer) -> None:
         _pop_chunks(db, "h1", 200)
         orig, calls = db.mark_uploaded, []
@@ -590,12 +598,14 @@ class TestUploaderLoop:
         assert ("sent", 0) in calls[0][1] and ("sent", 1) not in calls[0][1]
         assert ("finish",) in calls[1][1] and ("sent", 1) in calls[1][1]
 
+    @pytest.mark.t2_tenant
     def test_done_when_all_uploaded(self, db) -> None:
         _pop_chunks(db, "h1", 2)
         self._up(db)
         s = db.get_pipeline_state("h1")
         assert s["chunks_uploaded"] == 2 and s["status"] == "completed"
 
+    @pytest.mark.t2_tenant
     def test_done_via_chunking_done_event(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
         cd = threading.Event()
@@ -605,6 +615,7 @@ class TestUploaderLoop:
         assert s["chunks_uploaded"] == 3 and s["status"] == "completed"
         assert len(writer.instances[0].batches) == 1
 
+    @pytest.mark.t2_tenant
     def test_the_last_batch_waits_for_the_chunker_to_finish(self, db, writer) -> None:
         """The writer's last request carries the sweep, so it must not be sent while the chunker can
         still produce chunks: the uploader hands over what it has and waits."""
@@ -657,6 +668,7 @@ class TestUploaderLoop:
             self._up(db, chunking_done=cd)
         assert writer.instances == [], "nothing was sent"
 
+    @pytest.mark.t2_tenant
     def test_second_stage_failure_after_upload_progress_does_not_inflate_chunks_uploaded(self, db) -> None:
         """nexus-6m9zy.1 (#3) ship-blocker fix (substantive-critic T2
         nexus/critique-59c07fe5b-uploader-chunks-uploaded-inflation-
@@ -764,6 +776,7 @@ class TestUploaderLoop:
             self._up(db, catalog_doc_id="")
         assert writer.instances == []
 
+    @pytest.mark.t2_tenant
     def test_a_dry_run_puts_the_chunks_in_the_throwaway_store_and_writes_no_catalog(
         self, db, writer, throwaway_t3,
     ) -> None:
@@ -813,6 +826,7 @@ class TestPipelineIndexPdf:
         ``tests/integration/test_rdr223_pdf_journey.py``)."""
         return install_streaming_writer(monkeypatch)
 
+    @pytest.mark.t2_tenant
     def test_full_pipeline(self, db, mock_t3, writer) -> None:
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
                  ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
@@ -831,6 +845,7 @@ class TestPipelineIndexPdf:
         assert writer.events[-2:] == [("finish",), ("complete",)]
         assert db.get_pipeline_state("abc123") is None
 
+    @pytest.mark.t2_tenant
     def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
         """nexus-6m9zy.5 (#10, no probe -- READ finding, test written from
         the bead description). uploader_loop already calls
@@ -887,6 +902,7 @@ class TestPipelineIndexPdf:
             "the retry must actually re-attempt the failed post-pass, not just re-report the old total"
         )
 
+    @pytest.mark.t2_tenant
     def test_force_re_embed_true_forwards_true(self, db, mock_t3, writer) -> None:
         """nexus-8143o: pipeline_index_pdf's own force_re_embed kwarg
         reaches the multi-batch writer as force_re_embed=True -- the fix for the ship-blocker where
@@ -902,6 +918,7 @@ class TestPipelineIndexPdf:
                                force_re_embed=True)
         assert writer.instances[0].kwargs["force_re_embed"] is True
 
+    @pytest.mark.t2_tenant
     def test_force_re_embed_default_forwards_false(self, db, mock_t3, writer) -> None:
         """force_re_embed defaulting to False must NOT set True on the
         write -- the whole point of this bead's decoupling (the
@@ -987,6 +1004,7 @@ class TestPipelineIndexPdf:
             "routed through pipeline_index_pdf"
         )
 
+    @pytest.mark.t2_tenant
     def test_first_exc_propagates_even_when_mark_failed_raises(self, db, mock_t3) -> None:
         """nexus-rewgw: the /fail POST's own failure must never mask the
         ORIGINAL pipeline exception nor skip `raise first_exc`. The
@@ -1003,6 +1021,7 @@ class TestPipelineIndexPdf:
                 pipeline_index_pdf(Path("/test.pdf"), "h1", "docs__test", mock_t3,
                                    db=db, embed_fn=lambda t, m: ([], m))
 
+    @pytest.mark.t2_tenant
     def test_extractor_failure(self, db, mock_t3) -> None:
         with patch(_P_EXT) as ME, patch(_P_CHK):
             ME.return_value.extract.side_effect = RuntimeError("boom")
@@ -1012,6 +1031,7 @@ class TestPipelineIndexPdf:
         s = db.get_pipeline_state("h1")
         assert s["status"] == "failed" and "boom" in s["error"]
 
+    @pytest.mark.t2_tenant
     def test_the_stamp_waits_for_the_post_pass_and_a_failed_post_pass_never_stamps(
         self, db, writer, monkeypatch,
     ) -> None:
@@ -1034,6 +1054,7 @@ class TestPipelineIndexPdf:
         assert w.finished, "every request was sent"
         assert not w.completed and ("complete",) not in writer.events
 
+    @pytest.mark.t2_tenant
     def test_a_post_pass_retry_with_nothing_left_to_upload_stamps_without_a_writer(
         self, db, writer, monkeypatch,
     ) -> None:
@@ -1071,6 +1092,7 @@ class TestPipelineIndexPdf:
         assert len(calls) == 1 and calls[0][1:] == ("abc123", 1, True)
         assert db.get_pipeline_state("abc123") is None, "the buffer goes once the stamp landed"
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("refused", [False, True], ids=["transport-failure", "refusal"])
     def test_a_failed_stamp_keeps_the_buffer_for_a_stamp_only_retry_and_a_refusal_discards_it(
         self, db, mock_t3, writer, monkeypatch, refused,
@@ -1104,6 +1126,7 @@ class TestPipelineIndexPdf:
             assert state is not None and state["status"] == "failed", "kept, and resumable"
             assert db.chunk_counts("abc123")[0] == 1
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
     def test_a_resume_after_a_killed_upload_resends_from_chunk_zero_without_extracting_or_embedding(
         self, db, mock_t3, writer, counter, monkeypatch,
@@ -1142,6 +1165,7 @@ class TestPipelineIndexPdf:
             "never a tail alone: positions start at 0"
         assert db.get_pipeline_state("h1") is None, "the run finished and cleaned up its buffer"
 
+    @pytest.mark.t2_tenant
     def test_a_buffer_the_chunker_finished_but_damaged_is_cleared_and_extracted_again(
         self, db, mock_t3, writer, monkeypatch,
     ) -> None:
@@ -1168,6 +1192,7 @@ class TestPipelineIndexPdf:
         (w,) = writer.instances
         assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6))
 
+    @pytest.mark.t2_tenant
     def test_a_dry_run_builds_its_own_buffer_and_sends_the_engine_nothing(
         self, throwaway_t3, monkeypatch,
     ) -> None:
@@ -1225,6 +1250,7 @@ class TestPipelineIndexPdf:
             pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
                                db=engine_backed, embed_fn=_embed, dry_run=True)
 
+    @pytest.mark.t2_tenant
     def test_a_reconcile_that_fails_hands_the_row_back_so_the_next_run_is_not_locked_out(
         self, db, mock_t3, writer, monkeypatch,
     ) -> None:
@@ -1258,6 +1284,7 @@ class TestPipelineIndexPdf:
         except PipelineConflictRunning:  # pragma: no cover - the failure this test exists to catch
             pytest.fail("the next run was locked out by the row the failed reconcile left running")
 
+    @pytest.mark.t2_tenant
     def test_resume_from_partial(self, db, mock_t3) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.write_page("h1", 0, "Page 0 content.", metadata={"page_number": 1, "text_length": 15})
@@ -1274,6 +1301,7 @@ class TestPipelineIndexPdf:
                                db=db, embed_fn=_embed)
         assert 0 not in written and 2 in written
 
+    @pytest.mark.t2_tenant
     def test_table_regions_postpass(self, db) -> None:
         t3, col = _run_with_col(
             db,
@@ -1292,6 +1320,7 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("table_regions post-pass did not update chunks to table_page")
 
+    @pytest.mark.t2_tenant
     def test_metadata_enrichment_postpass(self, db) -> None:
         """Post-pass writes the resolved title and author into the chunk
         metadata. ``source_title`` was collapsed into ``title``; the
@@ -1320,6 +1349,7 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
+    @pytest.mark.t2_tenant
     def test_metadata_enrichment_postpass_clears_stale_quality_gate_override(self, db) -> None:
         """nexus-w94eo: the engine now MERGES metadata rather than replacing
         it, so a healthy re-index (this run's extraction did NOT trip the
@@ -1349,6 +1379,7 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
+    @pytest.mark.t2_tenant
     def test_metadata_enrichment_postpass_sets_quality_gate_override_no_delete(self, db) -> None:
         """The inverse of the test above: when THIS run's extraction DID trip
         the quality gate, the post-pass sets the key (not delete_keys)."""
@@ -1374,6 +1405,7 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
+    @pytest.mark.t2_tenant
     def test_stale_chunk_pruning_post_pass_removed_as_dead_code(self, db) -> None:
         """nexus-tbkk1: the stale-chunk-pruning post-pass (formerly
         ``_prune_stale_chunks``, called from ``pipeline_index_pdf`` after
@@ -1431,6 +1463,7 @@ class TestPipelineIndexPdf:
                 content_hash="abc123_full")
         col.delete.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_conflict_already_running(self, db, mock_t3) -> None:
         """nexus-lcmbp: a retry against a fresh-heartbeat 'running' row is
         a LOUD failure — never a silent 0-chunk success."""
@@ -1448,6 +1481,7 @@ class TestPipelineIndexPdf:
     # test_embed_fn_none_no_credentials_fails_fast below, which now
     # covers the (only reachable) unconditional-raise behavior.
 
+    @pytest.mark.t2_tenant
     def test_embed_fn_none_no_credentials_fails_fast(self, db, mock_t3) -> None:
         # nexus-sghyo: non-service embedding is retired unconditionally
         # now, not merely credential-gated — the client no longer embeds
@@ -1458,6 +1492,7 @@ class TestPipelineIndexPdf:
             with pytest.raises(RuntimeError, match="non-service embedding was retired"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
+    @pytest.mark.t2_tenant
     def test_streaming_pdf_does_not_emit_source_path(
         self, db, tmp_path, monkeypatch, writer,
     ) -> None:
@@ -1510,6 +1545,7 @@ class TestPipelineIndexPdf:
             f"— the streaming PDF write path."
         )
 
+    @pytest.mark.t2_tenant
     def test_writes_doc_id_when_catalog_initialized(
         self, db, tmp_path, monkeypatch, writer,
     ) -> None:
@@ -1566,6 +1602,7 @@ class TestPipelineIndexPdf:
         assert [r["position"] for r in rows] == [0, 1]
         assert [r["chash"] for r in rows] == [c["chash"] for c in chunks]
 
+    @pytest.mark.t2_tenant
     def test_keyboard_interrupt_stops_stages_and_does_not_complete(self, db, mock_t3) -> None:
         """nexus-6m9zy.3 (#4): a KeyboardInterrupt landing in the
         orchestrator's wait() call never set cancel -- the three stage
@@ -1617,6 +1654,7 @@ class TestPipelineIndexPdf:
         )
 
 
+@pytest.mark.t2_tenant
 class TestPipelineIndexPdfDryRun:
     """nexus-uxg4u: dry_run must gate every catalog/T2 write this
     function makes on its own account (the fallback pre-flight
@@ -1852,6 +1890,7 @@ def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
     assert all(m["title"] == override for m in written_metas)
 
 
+@pytest.mark.t2_tenant
 class TestStreamingCatalogHookTitle:
     """The streaming tail used to read ``metadata["title"]`` / ``["author"]``
     — keys no extractor writes (they are ``docling_title`` / ``pdf_title`` /
@@ -2033,6 +2072,7 @@ class TestDoneSignalsMeanSuccess:
                      chunking_done=chunking_done)
         assert chunking_done.is_set()
 
+    @pytest.mark.t2_tenant
     def test_a_failed_extraction_never_releases_the_writers_last_request(
         self, db, mock_t3, monkeypatch,
     ) -> None:

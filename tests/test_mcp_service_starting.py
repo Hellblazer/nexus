@@ -207,6 +207,7 @@ def test_a_not_ready_listing_is_not_remembered_as_an_empty_store(engine):
     assert mcp_infra.get_collection_names() == ["knowledge__notes"]
 
 
+@pytest.mark.t2_tenant
 def test_the_startup_warmup_failing_does_not_poison_the_names_cache(engine):
     engine.stats_status = 503
     mcp_infra.warm_search_path()  # best-effort: swallows its own step failures

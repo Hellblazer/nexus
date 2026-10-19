@@ -269,6 +269,7 @@ class TestOptInToolAccess:
             "loads ZERO MCP servers (no --mcp-config + strict = none)"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_allowed_tools_emits_flag(self) -> None:
         """Passing allowed_tools must emit --allowedTools with the
@@ -293,6 +294,7 @@ class TestOptInToolAccess:
         val = argv[argv.index("--allowedTools") + 1]
         assert val == "Read,Grep,mcp__nexus"
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_mcp_servers_emits_inline_config(self) -> None:
         """Passing mcp_servers must emit --mcp-config with an inline
@@ -357,6 +359,7 @@ class TestOptInToolAccess:
             "stateless operator injected an MCP server — must stay tool-free"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_tool_enabled_dispatch_still_parses_json(self) -> None:
         """Opt-in tool flags must not change the output contract — the
@@ -585,6 +588,7 @@ class TestSubprocessContract:
         assert "NX_T1_SESSION_ID" not in env
         assert "NX_T1_SESSION" not in env
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_tool_granted_dispatch_mints_own_t1_session(self) -> None:
         """A dispatch that DOES grant tool access (allowed_tools set) mints
@@ -5239,6 +5243,7 @@ class TestIsolatedHermeticChild:
         ask, explicitly. That is now the exceptional case."""
         assert "--setting-sources" not in await self._argv_for(isolated=False)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_isolation_does_not_break_the_t1_mint(self) -> None:
         """The coupling a sibling session asked us to confirm rather than

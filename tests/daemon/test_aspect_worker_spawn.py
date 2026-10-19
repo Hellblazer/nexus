@@ -142,6 +142,7 @@ def test_ensure_aspect_worker_service_mode_uses_daemon(monkeypatch) -> None:
     assert inproc_calls == []              # NO in-process thread in service mode
 
 
+@pytest.mark.t2_tenant
 def test_ensure_aspect_worker_spawn_failure_is_swallowed(monkeypatch) -> None:
     """The row is already enqueued; a daemon-spawn failure must not fail the store."""
     def _boom(**_k):
@@ -175,6 +176,7 @@ def test_intra_process_dedup_suppresses_repeat_spawn(tmp_path: Path) -> None:
     assert len(_FakePopen.calls) == 1   # 50 calls, ONE spawn (window suppresses)
 
 
+@pytest.mark.t2_tenant
 def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -> None:
     """END-TO-END: aspect_extraction_enqueue_hook with AUTOSTART on + SERVICE mode
     must actually reach ensure_aspect_worker_daemon (not just _ensure_aspect_worker

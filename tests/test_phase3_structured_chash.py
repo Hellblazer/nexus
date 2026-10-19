@@ -33,6 +33,8 @@ from nexus.mcp_server import (
 )
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 

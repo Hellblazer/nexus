@@ -64,6 +64,7 @@ class _Reg:
 # ── nexus-k1m2f: `nx upgrade --yes` must actually reach the rung's cost gate ──
 
 
+@pytest.mark.t2_tenant
 def test_yes_flag_reaches_the_rungs_consent_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,6 +99,7 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
     assert seen == [False]
 
 
+@pytest.mark.t2_tenant
 def test_yes_flag_is_not_visible_to_the_daemons_the_upgrade_spawns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

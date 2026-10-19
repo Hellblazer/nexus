@@ -207,6 +207,7 @@ class TestResolutionOrder:
         assert url == "http://127.0.0.1:7173"
         assert token == "env-token"
 
+    @pytest.mark.t2_tenant
     def test_fail_loud_when_neither_no_8080_fallback(self):
         """No env + no lease = RuntimeError. The legacy silent
         ``http://127.0.0.1:8080`` default must be gone — and the message
@@ -223,6 +224,7 @@ class TestResolutionOrder:
         assert "RDR-155" in msg
         assert "8080" not in msg
 
+    @pytest.mark.t2_tenant
     def test_expired_lease_is_absent(self):
         """A TTL-expired lease is the same as no lease: fail loud."""
         reg = ServiceRegistry(
@@ -307,6 +309,7 @@ class TestLeaseGapReresolveRetryVectorClient:
     (real evidence of a working-then-lost lease) DOES wait; the bare
     RuntimeError path does NOT."""
 
+    @pytest.mark.t2_tenant
     def test_cold_start_unresolvable_fails_loud_immediately_no_wait(self, monkeypatch):
         """No lease ever published, no prior successful resolution — the
         exact shape of a unit test or a genuinely-never-configured
@@ -478,6 +481,7 @@ class TestCatalogClientResolution:
         assert port == 9999          # env wins
         assert token == "lease-token"  # lease fills the missing half
 
+    @pytest.mark.t2_tenant
     def test_catalog_fail_loud_when_neither(self):
         from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
@@ -504,6 +508,7 @@ class _OneShotResetHandler(_StubHandler):
 
 
 class TestDualReviewFixes:
+    @pytest.mark.t2_tenant
     def test_lease_miss_is_not_cached_supervisor_starts_later(self):
         """S1: a client that resolves BEFORE the supervisor publishes its
         lease must pick the lease up on a later call without a process
@@ -709,6 +714,7 @@ class TestRecoverEndpointFromLeaseWait:
 
 
 class TestResolveServiceConfigWait:
+    @pytest.mark.t2_tenant
     def test_zero_wait_budget_fails_loud_instantly(self):
         from nexus.db.service_endpoint import resolve_service_config
 
@@ -815,6 +821,7 @@ class TestNoteLeaseResolvedOutOfBand:
         se.note_lease_resolved_out_of_band()
         assert se.has_ever_resolved_lease() is True
 
+    @pytest.mark.t2_tenant
     def test_closes_the_init_race_a_bare_discovery_misses_first(self, monkeypatch):
         """Builds the exact lag from the v0.1.114 acquire gate run 2: a lease
         exists (the supervisor just published it) but the FIRST read after
@@ -854,6 +861,7 @@ class TestNoteLeaseResolvedOutOfBand:
         assert (url, token) == ("http://127.0.0.1:35225", "tok-init-race")
         assert calls["n"] == 2  # missed once, recovered on retry -- never a sleep-based patch
 
+    @pytest.mark.t2_tenant
     def test_without_the_mark_the_same_flaky_read_fails_instantly(self, monkeypatch):
         """Control case: the identical flaky discovery, but with NO prior
         evidence (the pre-fix shape) -- must fail loud on the first miss,

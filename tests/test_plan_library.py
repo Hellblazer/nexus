@@ -37,6 +37,7 @@ def plan_db(tmp_path: Path) -> T2Database:
     database.close()
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_blank_verb_is_refused_client_side(plan_db: T2Database) -> None:
     """hygiene-001 (nexus-tk070.p6a follow-on): a verb-less save_plan call
     is refused BEFORE the wire, not left to the engine's plans.verb NOT
@@ -59,6 +60,7 @@ def test_save_plan_blank_verb_is_refused_client_side(plan_db: T2Database) -> Non
         )
 
 
+@pytest.mark.t2_tenant
 def test_import_plan_blank_verb_is_refused_loudly(plan_db: T2Database) -> None:
     """hygiene-001 (nexus-tk070.p6a follow-on): unlike ``save_plan``,
     ``import_plan`` carries no client-side verb guard -- it is the
@@ -79,6 +81,7 @@ def test_import_plan_blank_verb_is_refused_loudly(plan_db: T2Database) -> None:
     assert excinfo.value.response.status_code == 409
 
 
+@pytest.mark.t2_tenant
 def test_save_plan(plan_db: T2Database) -> None:
     """save_plan() inserts a row and returns an integer row ID."""
     row_id = plan_db.save_plan(
@@ -95,6 +98,7 @@ def test_save_plan(plan_db: T2Database) -> None:
     assert row["tags"] == ""
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_json_stored(plan_db: T2Database) -> None:
     """save_plan() stores plan_json and it is retrievable with equivalent content.
 
@@ -119,6 +123,7 @@ def test_save_plan_json_stored(plan_db: T2Database) -> None:
     assert row["plan_json"] == '{"meta": {"version": 2}, "steps": ["step1", "step2"]}'
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_match(plan_db: T2Database) -> None:
     """search_plans() returns plans whose query text matches the FTS5 query."""
     plan_db.save_plan(query="semantic search over code repositories", plan_json='{"steps":[]}')
@@ -129,6 +134,7 @@ def test_search_plans_match(plan_db: T2Database) -> None:
     assert "semantic" in results[0]["query"]
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_tags(plan_db: T2Database) -> None:
     """search_plans() matches on the tags field via FTS5."""
     plan_db.save_plan(query="generic query", plan_json='{}', tags="indexing,code")
@@ -139,6 +145,7 @@ def test_search_plans_tags(plan_db: T2Database) -> None:
     assert results[0]["tags"] == "indexing,code"
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_no_match(plan_db: T2Database) -> None:
     """search_plans() returns an empty list when no plans match the query."""
     plan_db.save_plan(query="index repository", plan_json='{}')
@@ -147,6 +154,7 @@ def test_search_plans_no_match(plan_db: T2Database) -> None:
     assert results == []
 
 
+@pytest.mark.t2_tenant
 def test_list_plans_ordered(plan_db: T2Database) -> None:
     """list_plans() returns plans ordered by created_at DESC (most recent first)."""
     # Timestamps are placed deliberately: save_plan stamps now() on both
@@ -164,12 +172,14 @@ def test_list_plans_ordered(plan_db: T2Database) -> None:
     assert results[2]["query"] == "first plan"
 
 
+@pytest.mark.t2_tenant
 def test_list_plans_empty(plan_db: T2Database) -> None:
     """list_plans() returns an empty list when the plans table is empty."""
     results = plan_db.list_plans()
     assert results == []
 
 
+@pytest.mark.t2_tenant
 def test_list_plans_limit(plan_db: T2Database) -> None:
     """list_plans() respects the limit parameter."""
     for i in range(5):
@@ -179,6 +189,7 @@ def test_list_plans_limit(plan_db: T2Database) -> None:
     assert len(results) == 3
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_with_project(plan_db: T2Database) -> None:
     """save_plan() stores the project field correctly."""
     row_id = plan_db.save_plan(
@@ -190,6 +201,7 @@ def test_save_plan_with_project(plan_db: T2Database) -> None:
     assert row["project"] == "nexus"
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_project_filter(plan_db: T2Database) -> None:
     """search_plans() with project filter returns only matching project plans."""
     plan_db.save_plan(query="search code patterns", plan_json='{}', project="nexus")
@@ -204,6 +216,7 @@ def test_search_plans_project_filter(plan_db: T2Database) -> None:
     assert len(all_results) == 2
 
 
+@pytest.mark.t2_tenant
 def test_list_plans_project_filter(plan_db: T2Database) -> None:
     """list_plans() with project filter returns only matching project plans."""
     plan_db.save_plan(query="plan a", plan_json='{}', project="nexus")
@@ -215,6 +228,7 @@ def test_list_plans_project_filter(plan_db: T2Database) -> None:
     assert all(r["project"] == "nexus" for r in results)
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_with_ttl(plan_db: T2Database) -> None:
     """save_plan() stores the ttl field correctly."""
     row_id = plan_db.save_plan(
@@ -226,6 +240,7 @@ def test_save_plan_with_ttl(plan_db: T2Database) -> None:
     assert row["ttl"] == 30
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
     """save_plan() without ttl stores NULL (permanent)."""
     row_id = plan_db.save_plan(query="permanent plan", plan_json='{}')
@@ -233,6 +248,7 @@ def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
     assert row["ttl"] is None
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_includes_ttl(plan_db: T2Database) -> None:
     """search_plans() results include the ttl field."""
     plan_db.save_plan(query="search with ttl", plan_json='{}', ttl=7)
@@ -241,6 +257,7 @@ def test_search_plans_includes_ttl(plan_db: T2Database) -> None:
     assert results[0]["ttl"] == 7
 
 
+@pytest.mark.t2_tenant
 def test_list_plans_includes_ttl(plan_db: T2Database) -> None:
     """list_plans() results include the ttl field."""
     plan_db.save_plan(query="plan with ttl", plan_json='{}', ttl=14)
@@ -252,11 +269,13 @@ def test_list_plans_includes_ttl(plan_db: T2Database) -> None:
 # ── plan_exists (RDR-063 Landmine 1 fix) ────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_returns_false_on_empty_db(plan_db: T2Database) -> None:
     """plan_exists() returns False when the plans table is empty."""
     assert plan_db.plan_exists("any query", "any-tag") is False
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_matches_query_and_tag(plan_db: T2Database) -> None:
     """plan_exists() returns True when a plan has both the query and tag."""
     plan_db.save_plan(
@@ -269,6 +288,7 @@ def test_plan_exists_matches_query_and_tag(plan_db: T2Database) -> None:
     assert plan_db.plan_exists("seed query", "author") is True
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_false_on_query_mismatch(plan_db: T2Database) -> None:
     """plan_exists() returns False when the query does not match."""
     plan_db.save_plan(
@@ -279,6 +299,7 @@ def test_plan_exists_false_on_query_mismatch(plan_db: T2Database) -> None:
     assert plan_db.plan_exists("different query", "builtin-template") is False
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_false_on_tag_mismatch(plan_db: T2Database) -> None:
     """plan_exists() returns False when the tag is not among the plan's tags."""
     plan_db.save_plan(
@@ -289,6 +310,7 @@ def test_plan_exists_false_on_tag_mismatch(plan_db: T2Database) -> None:
     assert plan_db.plan_exists("q", "nonexistent-tag") is False
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_uses_comma_boundary_match(plan_db: T2Database) -> None:
     """plan_exists() matches whole tokens, not substrings.
 
@@ -330,6 +352,7 @@ def test_plan_exists_uses_comma_boundary_match(plan_db: T2Database) -> None:
     assert plan_db.plan_exists("end", "builtin-template") is True
 
 
+@pytest.mark.t2_tenant
 def test_plan_exists_isolated_per_query(plan_db: T2Database) -> None:
     """plan_exists() scopes the match to a single query string."""
     plan_db.save_plan(query="query-a", plan_json='{}', tags="builtin-template")
@@ -501,6 +524,7 @@ def test_infer_scope_tags_dedup_and_sort() -> None:
     assert _infer_scope_tags(plan_json) == "code__nexus,rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_explicit_scope_tags_round_trip(plan_db: T2Database) -> None:
     """save_plan(scope_tags=...) stores the value verbatim (after normalization)."""
     row_id = plan_db.save_plan(
@@ -512,6 +536,7 @@ def test_save_plan_explicit_scope_tags_round_trip(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_explicit_scope_tags_normalized(plan_db: T2Database) -> None:
     """Explicit scope_tags with a hash suffix is normalized at save time."""
     row_id = plan_db.save_plan(
@@ -523,6 +548,7 @@ def test_save_plan_explicit_scope_tags_normalized(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
     """save_plan() without scope_tags infers from plan_json."""
     row_id = plan_db.save_plan(
@@ -533,6 +559,7 @@ def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_empty_string_scope_tags_infers_like_none(plan_db: T2Database) -> None:
     """nexus-7g0rg critic finding 3: an explicit ``scope_tags=''`` used to be
     stored verbatim, SKIPPING inference — the unanchored-grown
@@ -548,6 +575,7 @@ def test_save_plan_empty_string_scope_tags_infers_like_none(plan_db: T2Database)
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None:
     """Traverse-only plans save with empty scope_tags (agnostic)."""
     row_id = plan_db.save_plan(
@@ -610,6 +638,7 @@ def test_infer_scope_tags_mixes_all_with_specific_drops_all() -> None:
 # test_set_scope_tags_drops_all_sentinel.
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_explicit_scope_tags_filters_all_sentinel(plan_db: T2Database) -> None:
     """save_plan(scope_tags='all') must drop the sentinel — same contract as
     the inference path. Without this filter the sentinel would reach storage
@@ -623,6 +652,7 @@ def test_save_plan_explicit_scope_tags_filters_all_sentinel(plan_db: T2Database)
     assert row["scope_tags"] == ""
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
     plan_db: T2Database,
 ) -> None:
@@ -648,6 +678,7 @@ def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
 # ── RDR-092 Phase 3.2: match_text wiring into save_plan + search_plans ──────
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_computes_match_text_on_dimensional_insert(
     plan_db: T2Database,
 ) -> None:
@@ -666,6 +697,7 @@ def test_save_plan_computes_match_text_on_dimensional_insert(
     assert "research find-by-author scope global" in row["match_text"]
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_match_text_falls_back_to_query_on_legacy_row(
     plan_db: T2Database,
 ) -> None:
@@ -678,6 +710,7 @@ def test_save_plan_match_text_falls_back_to_query_on_legacy_row(
     assert row["match_text"] == "legacy plan about chunking"
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_hits_on_dimensional_suffix(plan_db: T2Database) -> None:
     """RDR-092 Phase 3.2: FTS now indexes match_text, so a probe
     against the dimensional suffix hits the row even when the raw
@@ -698,6 +731,7 @@ def test_search_plans_hits_on_dimensional_suffix(plan_db: T2Database) -> None:
     assert results[0]["name"] == "find-by-author"
 
 
+@pytest.mark.t2_tenant
 def test_search_plans_still_matches_raw_description(
     plan_db: T2Database,
 ) -> None:
@@ -734,6 +768,7 @@ def test_search_plans_still_matches_raw_description(
 # (PlanLibrary and HttpPlanLibrary — the twin mirrored it verbatim).
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_corpus_all_with_project_stays_agnostic(
     plan_db: T2Database,
 ) -> None:
@@ -758,6 +793,7 @@ def test_save_plan_corpus_all_with_project_stays_agnostic(
     )
 
 
+@pytest.mark.t2_tenant
 def test_corpus_all_plan_survives_a_scoped_caller(
     plan_db: T2Database,
 ) -> None:
@@ -788,6 +824,7 @@ def test_corpus_all_plan_survives_a_scoped_caller(
         )
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_corpus_all_without_project_stays_empty(
     plan_db: T2Database,
 ) -> None:
@@ -814,6 +851,7 @@ def test_save_plan_corpus_all_without_project_stays_empty(
 # every project value rather than just the sentinel.
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_specific_corpus_unaffected_by_project(
     plan_db: T2Database,
 ) -> None:
@@ -836,6 +874,7 @@ def test_save_plan_specific_corpus_unaffected_by_project(
 # ── #1073: set_scope_tags() method in PlanLibrary ──────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_set_scope_tags_writes_normalized_value(plan_db: T2Database) -> None:
     """set_scope_tags writes normalized, sentinel-dropped scope_tags (#1073)."""
     row_id = plan_db.save_plan(
@@ -853,6 +892,7 @@ def test_set_scope_tags_writes_normalized_value(plan_db: T2Database) -> None:
     assert after["scope_tags"] == "canon-chat"
 
 
+@pytest.mark.t2_tenant
 def test_set_scope_tags_normalizes_hash_suffix(plan_db: T2Database) -> None:
     """set_scope_tags applies _normalize_scope_string to each entry (#1073)."""
     row_id = plan_db.save_plan(
@@ -863,6 +903,7 @@ def test_set_scope_tags_normalizes_hash_suffix(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "knowledge__delos,rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_set_scope_tags_drops_all_sentinel(plan_db: T2Database) -> None:
     """set_scope_tags drops the 'all' sentinel (#1073)."""
     row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
@@ -872,6 +913,7 @@ def test_set_scope_tags_drops_all_sentinel(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+@pytest.mark.t2_tenant
 def test_set_scope_tags_idempotent(plan_db: T2Database) -> None:
     """Calling set_scope_tags twice with the same value is a no-op (#1073)."""
     row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
@@ -881,6 +923,7 @@ def test_set_scope_tags_idempotent(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "canon-chat"
 
 
+@pytest.mark.t2_tenant
 def test_set_scope_tags_missing_plan_returns_false(plan_db: T2Database) -> None:
     """set_scope_tags returns False for a non-existent plan_id (#1073)."""
     result = plan_db.plans.set_scope_tags(99999, "canon-chat")
@@ -890,6 +933,7 @@ def test_set_scope_tags_missing_plan_returns_false(plan_db: T2Database) -> None:
 # ── nexus-93cc6 D3: match_description prefers into the stored match_text ─────
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_match_description_replaces_query_in_match_text(
     plan_db: T2Database,
 ) -> None:
@@ -919,6 +963,7 @@ def test_save_plan_match_description_replaces_query_in_match_text(
     )
 
 
+@pytest.mark.t2_tenant
 def test_save_plan_without_match_description_keeps_query_prose(
     plan_db: T2Database,
 ) -> None:

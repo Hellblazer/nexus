@@ -25,6 +25,7 @@ import pytest
 
 
 class TestRecorder:
+    @pytest.mark.t2_tenant
     def test_inserts_row_with_all_fields(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -80,6 +81,7 @@ class TestRecorder:
         # Must not raise.
         _record_tier_write(tool="memory_put", tier="T2")
 
+    @pytest.mark.t2_tenant
     def test_session_id_falls_back_when_env_unset(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -116,6 +118,7 @@ class TestRecorder:
 # ── Wired MCP write tools ────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestWiring:
     """Verify each tier-write MCP tool emits one tier_writes row per call.
 

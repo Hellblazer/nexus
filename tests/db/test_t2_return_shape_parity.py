@@ -65,6 +65,7 @@ def _row_keys(row: dict) -> set[str]:
     return set(row.keys())
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_row_shape_parity(memory_pair):
     sqlite_store, http_store = memory_pair
     for s in (sqlite_store, http_store):
@@ -79,6 +80,7 @@ def test_memory_get_row_shape_parity(memory_pair):
     )
 
 
+@pytest.mark.t2_tenant
 def test_memory_search_row_shape_parity(memory_pair):
     sqlite_store, http_store = memory_pair
     for s in (sqlite_store, http_store):

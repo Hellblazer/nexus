@@ -27,6 +27,7 @@ def engine() -> dict:
     return ensure_engine()
 
 
+@pytest.mark.t2_tenant
 def test_dead_static_token_names_itself_and_the_remedy(engine, monkeypatch) -> None:
     monkeypatch.setenv("NX_SERVICE_TOKEN", _DEAD)
     monkeypatch.delenv("NX_MINT_TOKEN", raising=False)

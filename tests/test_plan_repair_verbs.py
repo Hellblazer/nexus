@@ -77,6 +77,7 @@ class TestSetScopeCommand:
             "nx plan set-scope command must be registered"
         )
 
+    @pytest.mark.t2_tenant
     def test_set_scope_writes_normalized_tags(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -91,6 +92,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == "canon-chat"
 
+    @pytest.mark.t2_tenant
     def test_set_scope_normalizes_hash_suffix(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -106,6 +108,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == "knowledge__delos,rdr__arcaneum"
 
+    @pytest.mark.t2_tenant
     def test_set_scope_drops_all_sentinel(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -119,6 +122,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == "rdr__arcaneum"
 
+    @pytest.mark.t2_tenant
     def test_set_scope_idempotent(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -133,6 +137,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == "canon-chat"
 
+    @pytest.mark.t2_tenant
     def test_set_scope_from_project_stamps_project_column(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -148,6 +153,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == "canon-conductor-compose"
 
+    @pytest.mark.t2_tenant
     def test_set_scope_from_project_drops_all_sentinel(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -161,6 +167,7 @@ class TestSetScopeCommand:
         row = plan_db.plans.get_plan(plan_id)
         assert row["scope_tags"] == ""
 
+    @pytest.mark.t2_tenant
     def test_set_scope_missing_plan_exits_nonzero(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:

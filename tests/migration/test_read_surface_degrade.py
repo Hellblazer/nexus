@@ -148,6 +148,7 @@ def test_decorator_wraps_sync_and_async() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_search_surface_degrades_loud() -> None:
     # nexus-6jlki: ``@degrade_loud_when_migrating`` moved to the private
     # ``_search_render`` when the wire-facing ``search()`` was split out to
@@ -193,6 +194,7 @@ def test_store_get_surface_degrades_loud() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_store_get_many_surface_degrades_loud_structured() -> None:
     from nexus.mcp.core import store_get_many
 
@@ -283,6 +285,7 @@ def test_nx_answer_structured_degrades_loud_top_level_key() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_nx_search_cli_degrades_loud(_isolate_config_dir: Path) -> None:
     from nexus.commands.search_cmd import search_cmd
 

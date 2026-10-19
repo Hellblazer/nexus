@@ -268,6 +268,7 @@ def test_the_default_listing_comes_from_the_t3_client() -> None:
     assert r.warn is True and "docs__a__m__v1" in r.detail
 
 
+@pytest.mark.t2_tenant
 def test_nx_doctor_prints_the_row(monkeypatch) -> None:
     class _T3:
         def list_collections(self):
@@ -279,6 +280,7 @@ def test_nx_doctor_prints_the_row(monkeypatch) -> None:
     assert "rdr__1-79__model-ctx__v1" in result.output and "23,456" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_one_doctor_run_lists_the_collections_once_for_the_t3_count_and_this_row(monkeypatch) -> None:
     """The row and "T3 collections" share the one listing ``run_health_checks`` fetches: a run with both rows real
     makes no more ``list_collections`` calls than the same run with both rows stubbed out (the shared fetch is in
@@ -324,6 +326,7 @@ def test_one_doctor_run_lists_the_collections_once_for_the_t3_count_and_this_row
     assert all(x is seen[0] for x in seen_local)
 
 
+@pytest.mark.t2_tenant
 def test_a_failed_shared_listing_leaves_both_rows_degraded_not_crashed(monkeypatch) -> None:
     monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no engine")))
     result = CliRunner().invoke(main, ["doctor"])

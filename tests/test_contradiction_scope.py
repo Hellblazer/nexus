@@ -353,6 +353,7 @@ _VEC = {
 
 
 class TestTheRenderedPage:
+    @pytest.mark.t2_tenant
     def test_a_mixed_agent_pair_on_the_page_is_flagged_and_exactly_the_candidates_are_fetched(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [
@@ -366,6 +367,7 @@ class TestTheRenderedPage:
         assert _labels(out) == {"n0": True, "n1": True, "n2": False, "n3": False}
         assert spy.calls == [(_NOTES, ["n0", "n1", "n2"])]
 
+    @pytest.mark.t2_tenant
     def test_a_partner_that_is_not_on_the_rendered_page_is_neither_fetched_nor_flagged(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]
@@ -374,6 +376,7 @@ class TestTheRenderedPage:
         assert _labels(out) == {"n0": False}
         assert spy.calls == [], "one row on the page cannot contradict another row"
 
+    @pytest.mark.t2_tenant
     def test_each_page_turn_computes_its_own_flag_and_the_cache_holds_none(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]
@@ -389,6 +392,7 @@ class TestTheRenderedPage:
         assert _labels(second) == {"n1": False}
         assert len(spy.calls) == 1, "no stale flag was stored on the cached rows, no new fetch was made"
 
+    @pytest.mark.t2_tenant
     def test_a_row_lifted_onto_the_page_by_the_file_diversity_cap_is_considered(self):
         """Pool order is a0 a1 a2 b0 (a2 is the third chunk of file A). The render's file-diversity
         cap sends a2 behind b0, so the page of three is a0 a1 b0: b0 was lifted onto it. b0 pairs
@@ -406,6 +410,7 @@ class TestTheRenderedPage:
         assert _labels(out) == {"a0": True, "a1": True, "b0": True}
         assert spy.calls == [(_NOTES, ["a0", "a1", "b0"])]
 
+    @pytest.mark.t2_tenant
     def test_a_row_lifted_onto_the_page_by_the_hybrid_score_is_considered(self):
         """code__ rows carry frecency; with ``search.hybrid_default`` on, apply_ranking_boosts
         lifts the high-frecency c2 over c1. The page of two is c0 c2, so c2 pairs with c0 while
@@ -423,6 +428,7 @@ class TestTheRenderedPage:
         assert _labels(out) == {"c0": True, "c2": True}
         assert spy.calls == [(_CODE, ["c0", "c2"])]
 
+    @pytest.mark.t2_tenant
     def test_a_page_from_indexed_collections_makes_zero_vector_calls(self):
         spy, mock = _spy_t3(_VEC, [_CODE, "docs__d"])
         rows = [
@@ -436,6 +442,7 @@ class TestTheRenderedPage:
         assert spy.calls == []
         mock.get_embeddings.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_one_fetch_per_collection_that_holds_a_mixed_pair_and_none_for_the_rest(self):
         spy, _ = _spy_t3(_VEC, [_NOTES, _OTHER, _CODE])
         rows = [
@@ -448,6 +455,7 @@ class TestTheRenderedPage:
         assert _labels(out) == {"n0": True, "n1": True, "o0": False, "o1": False, "c0": False}
         assert spy.calls == [(_NOTES, ["n0", "n1"])]
 
+    @pytest.mark.t2_tenant
     def test_a_partial_get_embeddings_failure_keeps_the_other_collections_flag(self):
         spy, _ = _spy_t3(_VEC, [_NOTES, _OTHER])
         spy.fail = {_OTHER}
@@ -460,6 +468,7 @@ class TestTheRenderedPage:
         assert not out.startswith("Error"), "a failed flag fetch never fails the search"
         assert _labels(out) == {"n0": True, "n1": True, "o0": False, "o1": False}
 
+    @pytest.mark.t2_tenant
     def test_a_total_get_embeddings_failure_returns_the_page_unflagged(self):
         spy, _ = _spy_t3(_VEC, [_NOTES, _OTHER])
         spy.fail = {_NOTES, _OTHER}
@@ -472,6 +481,7 @@ class TestTheRenderedPage:
         assert not out.startswith("Error")
         assert _labels(out) == {"n0": False, "n1": False, "o0": False, "o1": False}
 
+    @pytest.mark.t2_tenant
     def test_the_check_turned_off_fetches_nothing_and_flags_nothing(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]
@@ -479,6 +489,7 @@ class TestTheRenderedPage:
         assert spy.calls == []
         assert _FLAG not in out
 
+    @pytest.mark.t2_tenant
     def test_the_check_is_off_by_default_and_a_flaggable_page_fetches_nothing(self):
         # Sam 2026-10-08: opt-in. The shipped default and a config with no
         # search.contradiction_check key both leave the page unflagged.
@@ -491,6 +502,7 @@ class TestTheRenderedPage:
         assert spy.calls == []
         assert _FLAG not in out
 
+    @pytest.mark.t2_tenant
     def test_structured_output_carries_no_flag_and_fetches_nothing(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]
@@ -507,6 +519,7 @@ class TestTheRenderedPage:
         assert _FLAG not in out
 
 
+@pytest.mark.t2_tenant
 def test_the_nx_search_cli_makes_zero_vector_calls_for_the_check(monkeypatch):
     """``nx search`` never rendered the flag; it must not pay for it either."""
     for k, v in {"CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "v", "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d"}.items():

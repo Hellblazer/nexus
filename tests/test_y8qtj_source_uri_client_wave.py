@@ -31,6 +31,8 @@ from structlog.testing import capture_logs
 from nexus.cli import main
 from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
+pytestmark = pytest.mark.t2_tenant
+
 # Every test in this suite is routed to a real per-test-tenant engine
 # catalog by the autouse `_pin_t2_substrate` fixture (tests/conftest.py) —
 # no explicit substrate fixture request needed here.

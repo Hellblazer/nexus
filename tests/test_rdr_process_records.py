@@ -17,6 +17,7 @@ from tests.test_rdr_preamble import (  # noqa: F401 — rdr_env and _rdr_git_tem
     _write_rdr,
     rdr_env,
 )
+import pytest
 
 _BODY = "## Problem Statement\n\n#### Gap 1: a\n\ntext\n\n### Approach\n\n1. **A**: one\n\n## Revision History\n\n"
 
@@ -38,6 +39,7 @@ class TestCritiqueRounds:
             "207-gate-critique-2026-09-10", "207-gate-critique-2026-09-11-r2", "207-gate-critique-2026-09-12-r3",
         ]
 
+    @pytest.mark.t2_tenant
     def test_gate_names_the_critique_title_with_the_round_number(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-207-x.md", {"title": "X", "status": "draft"}, _BODY)
         fake = _FakeT2ResearchClient(entries={
@@ -50,6 +52,7 @@ class TestCritiqueRounds:
         assert res.exit_code == 0, res.output
         assert "207-gate-critique-" in res.output and "-r2`" in res.output, res.output
 
+    @pytest.mark.t2_tenant
     def test_first_gate_names_round_one(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-208-x.md", {"title": "X", "status": "draft"}, _BODY)
         fake = _FakeT2ResearchClient()
@@ -57,6 +60,7 @@ class TestCritiqueRounds:
         res = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "208"])
         assert "208-gate-critique-" in res.output and "-r1`" in res.output, res.output
 
+    @pytest.mark.t2_tenant
     def test_a_critique_pointer_outside_the_rdr_project_is_flagged(self, rdr_env, monkeypatch):
         """Item 6: RDR-200's pointer names nexus/critique-rdr-200-gate-...; the
         record of record is {repo}_rdr, and a pointer elsewhere is named."""
@@ -101,12 +105,14 @@ class TestLayerTwoCensus:
     """Item 8: Layer 2 is computed, and zero research records is a named
     vacuity, never a silent pass."""
 
+    @pytest.mark.t2_tenant
     def test_no_research_records_is_named_vacuous(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-209-x.md", {"title": "X", "status": "draft"}, _BODY)
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
         res = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "209"])
         assert "Layer 2" in res.output and "VACUOUS" in res.output, res.output
 
+    @pytest.mark.t2_tenant
     def test_census_counts_classification_and_method(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-209-x.md", {"title": "X", "status": "draft"}, _BODY)
         fake = _FakeT2ResearchClient(entries={
@@ -185,6 +191,7 @@ class TestAuditProcessRows:
         assert "closed: 1 of 2" in text and "abandoned: 0 of 1" in text, text
 
 
+@pytest.mark.t2_tenant
 class TestSetStatusWritesTheReason:
     """Item 4, forward half: a reason given to set-status lands on the file
     and on the T2 record as `close_reason`, so new terminated records never
@@ -234,6 +241,7 @@ class TestSetStatusWritesTheReason:
 class TestReviewRoundFixes:
     """Round-1 code review of 637b8149b, findings 1 to 6."""
 
+    @pytest.mark.t2_tenant
     def test_verdict_count_keeps_a_prior_round_that_this_round_re_raises_verbatim(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-207-x.md", {"title": "X", "status": "draft"}, _BODY)
         crit = "## Critical Issues\n\n### Issue: same finding\n- Location: a\n\n## Verdict\n- **outcome**: not-justified\n- **critical_count**: 1\n"

@@ -18,6 +18,8 @@ import pytest
 
 from nexus.errors import IndexRunVerifyRefused
 
+pytestmark = pytest.mark.t2_tenant
+
 COLLECTION = "docs__wcor-test__bge-base-en-v15-768__v1"
 DOC_ID = "1.7.1"
 

@@ -265,6 +265,7 @@ class TestRunRefusesIdentityLessFilesBeforeChunking:
             str(repo / "other.py"): "catalog_hook_failed",
         }
 
+    @pytest.mark.t2_tenant
     def test_files_with_a_document_are_dispatched_as_before(self, tmp_path: Path) -> None:
         from nexus.mcp_infra import get_manifest_identity_drops
 
@@ -279,6 +280,7 @@ class TestRunRefusesIdentityLessFilesBeforeChunking:
         assert stats["identity_less_dropped_files"] == 0
         assert get_manifest_identity_drops() == []
 
+    @pytest.mark.t2_tenant
     def test_a_refused_worktree_file_is_not_chunked_and_is_not_a_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

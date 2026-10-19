@@ -113,6 +113,7 @@ def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str
     return result["total"], t3, hooks
 
 
+@pytest.mark.t2_tenant
 class TestSecondDocumentSharingTheBytes:
     def test_second_path_with_a_completed_leftover_uploads_its_own_chunks(self, engine, writer) -> None:
         leftover_id = _seed_completed_leftover(engine, "/docs/a.pdf", "docs__test")

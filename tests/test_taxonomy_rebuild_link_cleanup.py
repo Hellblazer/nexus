@@ -20,6 +20,8 @@ import pytest
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768) -> None:
     """RDR-194 P3d (nexus-tk070.p3d): seed a real nexus.chunks row so a

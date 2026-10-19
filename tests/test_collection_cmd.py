@@ -49,6 +49,7 @@ def _invoke(runner, mock_db, args, **kwargs):
 # ── list ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_list_empty(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = []
     result = _invoke(runner, mock_db, ["list"])
@@ -56,6 +57,7 @@ def test_list_empty(runner, env_creds, mock_db) -> None:
     assert "No collections" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_list_shows_names_and_counts(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = [
         {"name": "code__myrepo", "count": 42},
@@ -202,6 +204,7 @@ def test_list_reader_failure_keeps_counts_and_says_so(runner, env_creds, mock_db
 # ── info ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_info_not_found(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = []
     result = _invoke(runner, mock_db, ["info", "no_such"])
@@ -220,6 +223,7 @@ def _mock_db_for_info(mock_db, name, count, metadatas):
     mock_db.get_or_create_collection.return_value = mock_col
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "col_name,expected_model",
     [
@@ -761,6 +765,7 @@ def test_reindex_not_found(runner, env_creds, mock_db) -> None:
     assert "not found" in result.output.lower() or "error" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_routes_delete_through_cascade_not_client_delete(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -798,6 +803,7 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -832,6 +838,7 @@ def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
     register.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -888,6 +895,7 @@ def _setup_reindex_mock(mock_db, metadatas_check, metadatas_batch, before_count=
     return VerifyResult(status="skipped", doc_count=after_count)
 
 
+@pytest.mark.t2_tenant
 def test_reindex_aborts_on_sourceless(runner, env_creds, mock_db) -> None:
     mock_db.collection_info.return_value = {"count": 3, "metadata": {}}
     mock_col = MagicMock()
@@ -961,6 +969,7 @@ def test_reindex_refuses_when_all_entries_sourceless(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -1009,6 +1018,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -1098,6 +1108,7 @@ def test_reindex_treats_doc_id_with_no_catalog_entry_as_sourceless(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")
@@ -1119,6 +1130,7 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_rdr_uses_batch(runner, env_creds, mock_db, tmp_path) -> None:
     rdr_file = tmp_path / "rdr-001.md"
     rdr_file.write_text("# RDR 001\ncontent here")
@@ -1135,6 +1147,7 @@ def test_reindex_rdr_uses_batch(runner, env_creds, mock_db, tmp_path) -> None:
     assert kwargs.get("force") is True
 
 
+@pytest.mark.t2_tenant
 def test_reindex_runs_verify_after(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")
@@ -1151,6 +1164,7 @@ def test_reindex_runs_verify_after(runner, env_creds, mock_db, tmp_path) -> None
     assert "2" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_reindex_warns_on_missing_source_files(runner, env_creds, mock_db) -> None:
     from nexus.db.t3 import VerifyResult
     missing = "/nonexistent/path/that/does/not/exist.md"
@@ -1193,6 +1207,7 @@ def test_run_collection_postprocessing_swallows_t2_t3_errors() -> None:
         )
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_echoes_per_collection_progress() -> None:
     """nexus-47ubt: a slow ``_discover_taxonomy`` on one collection must not
     leave the operator staring at silence between "Building staleness
@@ -1219,6 +1234,7 @@ def test_run_collection_postprocessing_echoes_per_collection_progress() -> None:
     assert any("discovering docs__b" in ln and "2/2" in ln for ln in lines)
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_survives_broken_echo() -> None:
     """A progress-echo failure (e.g. BrokenPipeError on a closed stdout) must
     not abort the taxonomy-discover loop for the remaining collections —
@@ -1316,6 +1332,7 @@ def test_collections_from_registry_info_dedupes() -> None:
     assert len(out) == len(set(out))
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
     """Review #757: prove the warning suppression end-to-end. The alias
     must never reach ``_discover_taxonomy`` (which is where the
@@ -1381,6 +1398,7 @@ def test_index_repo_cmd_help_shows_corpus_flag(runner) -> None:
     assert "knowledge" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> None:
     """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): ``--corpus
     knowledge`` registers a ``knowledge__*`` collection on the
@@ -1447,6 +1465,7 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
     assert "knowledge__" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): omitting
     ``--corpus`` is the default; no ``knowledge__`` collection is
@@ -1532,6 +1551,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
     assert "2" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_reembed_no_dry_run_writes_via_server(
     runner, env_creds, tmp_path, monkeypatch,
     cloud_mode,
@@ -1603,6 +1623,7 @@ def test_reembed_no_dry_run_writes_via_server(
     assert call["embeddings"] is None
 
 
+@pytest.mark.t2_tenant
 def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_mode) -> None:
     """nexus-tysei: voyage-context-3 re-embeds in place. It was refused
     (nexus-bw65) while the client embedded a document's chunks together;
@@ -1646,6 +1667,7 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
     assert upsert_calls[0]["embeddings"] is None
 
 
+@pytest.mark.t2_tenant
 def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, cloud_mode) -> None:
     """nexus-tysei: every chunk in an upsert is embedded before the request
     answers, and the edge gives upsert-chunks 55 s, so a 300-row page goes
@@ -1683,6 +1705,7 @@ def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, 
     assert seen == ids
 
 
+@pytest.mark.t2_tenant
 def test_reembed_skips_empty_documents(
     runner, env_creds, monkeypatch,
 ) -> None:

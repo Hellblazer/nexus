@@ -71,6 +71,8 @@ from tests.test_mcp_server import (  # noqa: F401 -- t1/t2_path/_patch_t2/_reset
     t2_path,
 )
 
+pytestmark = pytest.mark.t2_tenant
+
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _MCP_SOURCE_FILES = [
     _REPO_ROOT / "src" / "nexus" / "mcp" / "core.py",

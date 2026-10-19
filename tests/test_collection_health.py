@@ -201,6 +201,7 @@ class TestChunkCountFromT3:
         # _fake_catalog_stats returns chunk_count=120 for code__alpha
         assert rows[0].chunk_count == 120
 
+    @pytest.mark.t2_tenant
     def test_default_catalog_stats_no_longer_returns_chunk_count(self) -> None:
         """The production ``_default_catalog_stats_fn`` dropped the
         ``chunk_count`` key after 39zi. Production catalog paths now
@@ -376,6 +377,7 @@ class TestCollectionHealthCli:
             _fake_hub_score,
         )
 
+    @pytest.mark.t2_tenant
     def test_default_human_output(self, runner, monkeypatch) -> None:
         from nexus.cli import main
 
@@ -384,6 +386,7 @@ class TestCollectionHealthCli:
         assert result.exit_code == 0, result.output
         assert "code__alpha" in result.output
 
+    @pytest.mark.t2_tenant
     def test_json_output(self, runner, monkeypatch) -> None:
         from nexus.cli import main
 
@@ -393,6 +396,7 @@ class TestCollectionHealthCli:
         payload = json.loads(result.stdout)
         assert "collections" in payload
 
+    @pytest.mark.t2_tenant
     def test_sort_flag(self, runner, monkeypatch) -> None:
         from nexus.cli import main
 

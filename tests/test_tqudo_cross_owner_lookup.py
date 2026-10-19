@@ -31,6 +31,7 @@ import hashlib
 from pathlib import Path
 
 from tests._catalog_fixture_ops import ActiveCatalog
+import pytest
 
 #: A CONFORMANT collection name (RDR-103 <content_type>__<owner>__<model>__v<n>)
 #: that deliberately does NOT carry a voyage token. Nothing here concerns the
@@ -74,6 +75,7 @@ def _pin_repo_probe(monkeypatch, root: Path, repo_hash: str) -> None:
 
 # ── the falsifier: a repo-owner row exists, and must be found ───────────────
 
+@pytest.mark.t2_tenant
 def test_curator_reindex_converges_on_the_repo_owner_document(tmp_path, monkeypatch):
     """THE BEAD. Before this, the curator lookup missed and minted a fork."""
     from nexus.doc_indexer import _register_or_lookup_doc_id
@@ -110,6 +112,7 @@ def test_curator_reindex_converges_on_the_repo_owner_document(tmp_path, monkeypa
     )
 
 
+@pytest.mark.t2_tenant
 def test_the_convergence_goes_through_the_repo_owner_probe(tmp_path, monkeypatch):
     """Pin that the probe is what found it.
 
@@ -139,6 +142,7 @@ def test_the_convergence_goes_through_the_repo_owner_probe(tmp_path, monkeypatch
 
 # ── the other direction: it must not over-reach ────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_no_repo_owner_row_still_registers_under_the_curator(tmp_path, monkeypatch):
     """Unchanged behaviour when there is genuinely nothing to converge on."""
     from nexus.doc_indexer import _register_or_lookup_doc_id
@@ -157,6 +161,7 @@ def test_no_repo_owner_row_still_registers_under_the_curator(tmp_path, monkeypat
     assert any(str(d.tumbler) == doc_id for d in cat.all_documents())
 
 
+@pytest.mark.t2_tenant
 def test_a_file_outside_the_resolved_repo_is_not_claimed(tmp_path, monkeypatch):
     """relative_to fails -> no cross-owner claim.
 
@@ -202,6 +207,7 @@ def test_a_raising_repo_probe_degrades_to_none(tmp_path, monkeypatch):
     assert _repo_owner_document_for(make_catalog_reader(), f) is None
 
 
+@pytest.mark.t2_tenant
 def test_worktree_nested_path_still_converges_on_the_repo_owner_document(tmp_path, monkeypatch):
     """nexus-7or3f. A file reached via its nested-worktree path
     (``<primary>/.claude/worktrees/<agent>/<rel>``) must converge on the
@@ -251,6 +257,7 @@ def test_worktree_nested_path_still_converges_on_the_repo_owner_document(tmp_pat
     assert str(found.tumbler) == str(original)
 
 
+@pytest.mark.t2_tenant
 def test_a_raising_probe_does_not_stop_registration(tmp_path, monkeypatch):
     from nexus.doc_indexer import _register_or_lookup_doc_id
     import nexus.repo_identity as ri

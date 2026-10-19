@@ -1435,6 +1435,7 @@ class TestManagedOnboardingP12:
         assert provisioned == []
         assert "reachable" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_probe_failure_exits_nonzero_with_actionable_message(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

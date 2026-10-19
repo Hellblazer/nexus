@@ -71,6 +71,7 @@ BD = rf"{TOOLS}\bd.exe"
 # -- session_context ---------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_session_context_spawns_git_and_bd_off_the_cwd(windows_box, spawned, monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setenv("HOME", str(tmp_path))

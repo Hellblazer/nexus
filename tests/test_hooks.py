@@ -26,6 +26,7 @@ from nexus.mailbox_arm import mailbox_arm_instruction
 # These tests pin that minimal contract.
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.session.generate_session_id", return_value="test-uuid")
 def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
     """session_start returns the session ID line."""
@@ -44,6 +45,7 @@ def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
 
 
 
+@pytest.mark.t2_tenant
 def test_session_start_does_not_overwrite_current_session_when_inherited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -65,6 +67,7 @@ def test_session_start_does_not_overwrite_current_session_when_inherited(
     mock_write.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_session_start_writes_current_session_when_top_level(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -82,6 +85,7 @@ def test_session_start_writes_current_session_when_top_level(
     mock_write.assert_called_once_with("top-level-uuid")
 
 
+@pytest.mark.t2_tenant
 def test_session_start_uses_inherited_session_id(tmp_path: Path, monkeypatch) -> None:
     """When ``NX_SESSION_ID`` is set in env, the hook uses it verbatim
     rather than generating a new UUID or honouring the stdin payload.
@@ -95,6 +99,7 @@ def test_session_start_uses_inherited_session_id(tmp_path: Path, monkeypatch) ->
     assert "ignored-stdin-uuid" not in output
 
 
+@pytest.mark.t2_tenant
 def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> None:
     """No NX_SESSION_ID env and no stdin payload: generate a fresh UUID
     so invocations outside Claude Code (e.g. ``nx hook session-start``
@@ -119,6 +124,7 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
 # source-gating and confirm it writes real, correctly-keyed marker files.
 
 
+@pytest.mark.t2_tenant
 class TestT1HandoffMarkerWriter:
     def _session_start(self, monkeypatch, tmp_path, *, source, claude_pid=4242,
                         sibling_pids=(5001, 5002)):
@@ -254,6 +260,7 @@ class TestT1HandoffMarkerWriter:
 # record_clear_and_write_session_marker call immediately below it).
 
 
+@pytest.mark.t2_tenant
 class TestTupleWatchSessionMarkerWriter:
     def _session_start(self, monkeypatch, tmp_path, *, source, claude_pid=4242):
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -318,6 +325,7 @@ class TestTupleWatchSessionMarkerWriter:
         assert "Nexus ready" in output
 
 
+@pytest.mark.t2_tenant
 class TestClearRecordsThePreviousSession:
     """RDR-208 Phase 2 Step 3: on ``/clear``, SessionStart records the
     mailbox a ``/clear`` just stranded so the drain can empty it once.
@@ -455,6 +463,7 @@ class TestClearRecordsThePreviousSession:
 
 
 
+@pytest.mark.t2_tenant
 def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
     """Storage errors during flush are caught gracefully.
 
@@ -484,6 +493,7 @@ class TestSessionEndFlush:
     points at this function so the SessionEnd path cannot race the
     MCP-owned chroma teardown."""
 
+    @pytest.mark.t2_tenant
     def test_flush_returns_summary_when_no_record(self, tmp_path, monkeypatch):
         sessions = tmp_path / "sessions"
         sessions.mkdir()
@@ -505,6 +515,7 @@ class TestSessionEndFlush:
 # ── nx hook session-end-flush CLI subcommand ────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
     """The new CLI subcommand routes to session_end_flush, not session_end."""
     from click.testing import CliRunner
@@ -550,6 +561,7 @@ def test_infer_repo_git_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 # ── RDR-155 P4b: the nexus-0rwwv SessionStart migration notice is retired ───
 
 
+@pytest.mark.t2_tenant
 def test_session_start_carries_no_migration_notice(monkeypatch):
     """The bridge died with the migration machinery: SessionStart is the
     plain ready line — stranded pre-PG installs are redirected by the
@@ -588,6 +600,7 @@ class _FakeSkewReport:
         self.installed_version = installed_version
 
 
+@pytest.mark.t2_tenant
 class TestStaleMcpHostSessionStartNudge:
     """nexus-cnzei.2 (S4): the note used to count nx-mcp hosts MACHINE-WIDE,
     including other, unrelated sessions', so these tests now also pin
@@ -724,6 +737,7 @@ class TestStaleMcpHostSessionStartNudge:
 # session_start() specifically).
 
 
+@pytest.mark.t2_tenant
 class TestGuidanceImperativeIntegration:
     def test_guidance_text_appended_when_channel_open(self, monkeypatch) -> None:
         from unittest.mock import patch as _patch
@@ -944,6 +958,7 @@ class TestRenderSessionStartIsPure:
             "compute text only; writes belong to session_start()'s wrapper"
         )
 
+    @pytest.mark.t2_tenant
     def test_session_start_still_performs_the_writes_render_does_not(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1088,6 +1103,7 @@ class TestMailboxArmIntegration:
         assert "Nexus ready" in output
         assert mailbox_arm.ARM_MARKER not in output
 
+    @pytest.mark.t2_tenant
     def test_hook_stays_within_budget_with_engine_genuinely_absent(
         self, tmp_path: Path, monkeypatch,
     ) -> None:

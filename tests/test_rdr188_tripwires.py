@@ -121,6 +121,7 @@ def cloud_env(monkeypatch):
     monkeypatch.delenv("NX_EMBEDDINGS_RERANKER_MODEL", raising=False)
 
 
+@pytest.mark.t2_tenant
 def test_search_reranks_with_voyageai_unimportable(cloud_env):
     """The credential tripwire, strongest form: a service-mode multi-collection
     search with rerank completes successfully while the voyageai package is
@@ -174,6 +175,7 @@ def test_trap_itself_is_live():
 # ── 3. Score-order parity vs the retired client baseline ───────────────────
 
 
+@pytest.mark.t2_tenant
 def test_server_score_order_matches_retired_client_ordering(cloud_env):
     """Parity pin: the retired client reranker ordered by relevance descending,
     wrote the relevance into hybrid_score, and truncated to top_k=n. The
@@ -213,6 +215,7 @@ def test_server_score_order_matches_retired_client_ordering(cloud_env):
 # ── 4. Degrade surfaced — the cross-cutting invariant copy ──────────────────
 
 
+@pytest.mark.t2_tenant
 def test_degrade_surface_invariant(cloud_env):
     """Gap 2's invariant owned by this suite (independent of the .8 unit
     tests): a degraded server rerank is USER-VISIBLE, never silent."""

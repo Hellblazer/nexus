@@ -266,6 +266,7 @@ class TestLiveDistanceProbe:
         assert hist.sample_size == 0
 
 
+    @pytest.mark.t2_tenant
     def test_run_audit_falls_back_to_live_when_telemetry_empty(
         self, tmp_path: Path,
     ) -> None:
@@ -290,6 +291,7 @@ class TestLiveDistanceProbe:
 # ── CLI integration ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCollectionAuditCli:
     """The first two tests here are PORT-BLOCKED on nexus-e9ru2 alongside
     ``TestOrphanChunks``: both monkeypatch

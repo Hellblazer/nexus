@@ -142,6 +142,7 @@ def test_cce_index_query_model_invariant() -> None:
 
 # ── Corpus prefix resolution ──────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "query, all_cols, expected",
     [
@@ -301,6 +302,7 @@ def test_resolve_corpus_excludes_non_live_lifecycle_states(
     )
 
 
+@pytest.mark.t2_tenant
 def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None:
     """A candidate with no catalog row at all is dropped from a bare-corpus
     fan-out (never raised loud -- RDR §Failure Modes: a fan-out skips an

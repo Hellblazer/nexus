@@ -562,6 +562,7 @@ def quiet_upgrade():
         yield
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_runs_the_plugin_step_by_default(registry, fake_claude: Path, wheel, quiet_upgrade) -> None:
     registry({"conexus@nexus-plugins": "7.34.1"})
     result = CliRunner().invoke(main, ["upgrade"])
@@ -570,6 +571,7 @@ def test_nx_upgrade_runs_the_plugin_step_by_default(registry, fake_claude: Path,
     assert fake_claude.read_text().strip() == "plugin update conexus@nexus-plugins -s user -y"
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_dry_run_prints_and_runs_nothing(registry, fake_claude: Path, wheel, quiet_upgrade) -> None:
     registry({"conexus@nexus-plugins": "7.34.1"})
     result = CliRunner().invoke(main, ["upgrade", "--dry-run"])
@@ -578,6 +580,7 @@ def test_nx_upgrade_dry_run_prints_and_runs_nothing(registry, fake_claude: Path,
     assert fake_claude.read_text() == ""
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_auto_skips_the_network_bound_plugin_step(registry, fake_claude: Path, wheel, quiet_upgrade) -> None:
     registry({"conexus@nexus-plugins": "7.34.1"})
     result = CliRunner().invoke(main, ["upgrade", "--auto"])
@@ -585,6 +588,7 @@ def test_nx_upgrade_auto_skips_the_network_bound_plugin_step(registry, fake_clau
     assert fake_claude.read_text() == ""
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_failed_plugin_update_still_exits_zero(
         registry, fake_claude: Path, wheel, quiet_upgrade, monkeypatch: pytest.MonkeyPatch) -> None:
     registry({"conexus@nexus-plugins": "7.34.1"})
@@ -594,6 +598,7 @@ def test_nx_upgrade_failed_plugin_update_still_exits_zero(
     assert "still behind conexus 7.35.0" in result.output and "Run: claude plugin update" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_in_lockstep_is_silent(registry, fake_claude: Path, wheel, quiet_upgrade) -> None:
     registry({"conexus@nexus-plugins": "7.35.0", "sn@nexus-plugins": "7.35.0"})
     result = CliRunner().invoke(main, ["upgrade"])
@@ -601,6 +606,7 @@ def test_nx_upgrade_in_lockstep_is_silent(registry, fake_claude: Path, wheel, qu
     assert "Plugin update" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_upgrade_reports_a_same_version_ref_move(
         registry, fake_claude: Path, wheel, marketplace, quiet_upgrade, monkeypatch: pytest.MonkeyPatch) -> None:
     repo, sha_before, sha_after = marketplace()

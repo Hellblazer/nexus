@@ -12,6 +12,9 @@ from nexus.catalog.link_generator import (
     generate_prose_filepath_links,
     generate_rdr_filepath_links,
 )
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 class TestRdrFilepathLinks:

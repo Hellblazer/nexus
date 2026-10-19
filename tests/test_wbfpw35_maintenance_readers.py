@@ -68,6 +68,7 @@ def _t3_over(collection_name: str, col: _LiveAwareCollection, *, count: int, sto
     return t3
 
 
+@pytest.mark.t2_tenant
 class TestCatalogBackfillReadsStoredChunks:
     def test_from_t3_registers_documents_for_unowned_chunks(
         self, catalog_env, tmp_path: Path,  # noqa: F811
@@ -160,6 +161,7 @@ class TestReindexSafetyScanSeesUnownedChunks:
         db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 class TestMaintenanceReadersLeaveDeletedDocumentsDeleted:
     """Reading stored chunks brings a tombstoned document's chunks back into view,
     and the verbs' "already registered?" lookups exclude tombstones, so without a
@@ -338,6 +340,7 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
         owner = cat.register_owner("notes", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
         return cat, owner
 
+    @pytest.mark.t2_tenant
     def test_a_re_indexed_file_with_a_tombstone_and_a_live_document_is_kept(
         self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     ) -> None:
@@ -365,6 +368,7 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
         assert indexed == [str(again)], (indexed, result.output)
         assert "deleted catalog document" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_a_file_that_is_live_under_another_owner_is_kept(
         self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     ) -> None:
@@ -398,6 +402,7 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
         assert indexed == [str(shared)], (indexed, result.output)
         assert "deleted catalog document" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_a_deleted_root_file_does_not_claim_a_same_named_file_deeper_in(
         self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     ) -> None:
@@ -421,6 +426,7 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
 
         assert indexed == [str(deeper)], (indexed, result.output)
 
+    @pytest.mark.t2_tenant
     def test_it_refuses_when_every_source_is_a_deleted_document(
         self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     ) -> None:
@@ -475,6 +481,7 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
         assert "engine-service-v0.1.142" in result.output
         assert purged == [] and indexed == []
 
+    @pytest.mark.t2_tenant
     def test_a_null_file_path_is_accepted_and_the_verb_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -557,6 +564,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
         )
         return cat, owner, repo_root
 
+    @pytest.mark.t2_tenant
     def test_from_t3_registers_a_file_whose_name_matches_a_deleted_root_file(
         self, catalog_env, tmp_path: Path,  # noqa: F811
     ) -> None:
@@ -581,6 +589,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
         assert registered == 1
         assert len(cat.find_all_by_file_path("pkg/sub/README.md")) == 1
 
+    @pytest.mark.t2_tenant
     def test_from_t3_does_not_call_a_re_indexed_file_a_deleted_document(
         self, catalog_env, tmp_path: Path, capsys: pytest.CaptureFixture[str],  # noqa: F811
     ) -> None:
@@ -606,6 +615,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
         ) == 1
         assert "deleted documents" not in capsys.readouterr().out
 
+    @pytest.mark.t2_tenant
     def test_from_t3_still_skips_a_deleted_path_another_owner_holds_live(
         self, catalog_env, tmp_path: Path,  # noqa: F811
     ) -> None:
@@ -634,6 +644,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
             cat, t3, "code__myrepo-abc12345", dry_run=True,
         ) == 0
 
+    @pytest.mark.t2_tenant
     def test_from_t3_refuses_on_an_engine_without_file_path(
         self, catalog_env, tmp_path: Path,  # noqa: F811
     ) -> None:
@@ -683,6 +694,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
         assert "engine too old" in result.output
         assert "skipped" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_rdr_backfill_does_not_call_a_re_indexed_document_deleted(
         self, catalog_env, tmp_path: Path, capsys: pytest.CaptureFixture[str],  # noqa: F811
     ) -> None:
@@ -706,6 +718,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
         assert _backfill_rdrs(cat, t3, dry_run=True) == 1
         assert "deleted documents" not in capsys.readouterr().out
 
+    @pytest.mark.t2_tenant
     def test_rdr_backfill_refuses_on_an_engine_without_file_path(
         self, catalog_env, tmp_path: Path,  # noqa: F811
     ) -> None:
@@ -727,6 +740,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
             _backfill_rdrs(_AsAnOldEngine(cat), t3, dry_run=False)
         assert cat.find_all_by_file_path(gone) == []
 
+    @pytest.mark.t2_tenant
     def test_paper_backfill_refuses_on_an_engine_without_file_path(
         self, catalog_env,  # noqa: F811
     ) -> None:
@@ -746,6 +760,7 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
             _backfill_papers(_AsAnOldEngine(cat), t3, dry_run=False)
         assert [d for d in cat.all_documents() if d.content_type == "paper"] == []
 
+    @pytest.mark.t2_tenant
     def test_rdr_and_paper_backfills_read_the_trash_once_for_all_collections(
         self, catalog_env, tmp_path: Path,  # noqa: F811
     ) -> None:

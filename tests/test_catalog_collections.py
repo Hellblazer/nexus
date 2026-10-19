@@ -116,6 +116,7 @@ def test_legacy_names_rejected(name):
 # ── Collections schema migration ─────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_register_conformant_collection_marks_not_legacy(active_catalog):
     name = f"code__1-1__{_CODE_MODEL}__v1"
     active_catalog.register_collection(
@@ -140,6 +141,7 @@ def test_register_conformant_collection_marks_not_legacy(active_catalog):
     assert row["legacy_grandfathered"] is False
 
 
+@pytest.mark.t2_tenant
 def test_register_collection_idempotent_on_name(active_catalog):
     """Re-registering the same name keeps ONE row per name (upsert).
 
@@ -162,6 +164,7 @@ def test_register_collection_idempotent_on_name(active_catalog):
     assert len(matching) == 1
 
 
+@pytest.mark.t2_tenant
 def test_list_collections_returns_all(active_catalog):
     name = f"code__1-1__{_CODE_MODEL}__v1"
     active_catalog.register_collection("docs__nexus-571b8edd")
@@ -179,6 +182,7 @@ def test_list_collections_returns_all(active_catalog):
     assert names == sorted([name, "docs__nexus-571b8edd"])
 
 
+@pytest.mark.t2_tenant
 def test_is_legacy_collection_unknown_returns_false(active_catalog):
     """An unknown name has no row; treat as non-legacy (safer default).
 
@@ -249,6 +253,7 @@ def test_parse_conformant_collection_name_raises_on_legacy():
         parse_conformant_collection_name("totally__malformed__weird")
 
 
+@pytest.mark.t2_tenant
 def test_update_document_collection_returns_false_on_unknown_tumbler(active_catalog):
     """update_document_collection must return False (no-op) when the
     document is not registered. Documented contract; pass-#2 review

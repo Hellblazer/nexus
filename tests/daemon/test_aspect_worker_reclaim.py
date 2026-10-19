@@ -37,6 +37,7 @@ from nexus.daemon.aspect_worker_daemon import (
     AspectWorkerDaemon,
     next_reclaim_wait,
 )
+import pytest
 
 
 class _FakeWorker:
@@ -271,6 +272,7 @@ def test_daemon_backs_off_while_the_service_is_down(tmp_path: Path) -> None:
     assert seen == [60.0, 120.0, 240.0, 300.0, 300.0]
 
 
+@pytest.mark.t2_tenant
 def test_real_queue_with_no_service_is_a_quiet_failure_not_a_raise(tmp_path: Path, monkeypatch) -> None:
     """The production factory against an empty config dir (no lease, no env):
     the sweep reports a failure and backs off; it does not raise out of the loop."""

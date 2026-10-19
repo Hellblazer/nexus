@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _plan_yaml(verb: str, *, scope: str = "global", strategy: str = "default") -> dict:
     return {

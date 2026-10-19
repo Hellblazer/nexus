@@ -15,6 +15,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nexus.commands.catalog_cmds.integrity import _never_chunked_breakdown
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 COL = "knowledge__knowledge__voyage-context-3__v1"
 

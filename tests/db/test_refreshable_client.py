@@ -1398,6 +1398,7 @@ class TestLeaseGapReresolveRetry:
         # error propagate — reaching this point proves it was never called.
 
 
+@pytest.mark.t2_tenant
 class TestConstructionTimeEvidenceGate:
     """nexus-7dsgp (critic round 1 CRITICAL): T2Database is built FRESH per
     call (``mcp_infra.t2_ctx()``) — a construction landing in the

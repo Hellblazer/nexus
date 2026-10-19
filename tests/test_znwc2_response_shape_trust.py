@@ -327,6 +327,7 @@ class TestWriteAckNotAssumed:
 # ── 6. upsert-chunks: ack reconciled against ids sent (nexus-ir6eh half) ─────
 
 
+@pytest.mark.t2_tenant
 class TestUpsertChunksAckReconciled:
     def _upsert(self, monkeypatch: pytest.MonkeyPatch, response: Any) -> None:
         monkeypatch.setattr(

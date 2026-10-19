@@ -11,6 +11,9 @@ entries in the same project.
 from __future__ import annotations
 
 from nexus.db.t2 import T2Database
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 def test_put_or_merge_inserts_when_project_empty(db: T2Database) -> None:

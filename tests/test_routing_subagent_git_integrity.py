@@ -311,6 +311,7 @@ def test_the_findings_file_and_state_directories_are_private(box: Box) -> None:
         assert d.stat().st_mode & 0o777 == 0o700, f"{d} is {oct(d.stat().st_mode & 0o777)}"
 
 
+@pytest.mark.t2_tenant
 def test_the_main_conversation_fast_path_imports_nothing_it_does_not_need(box: Box) -> None:
     """With nothing pending the main-conversation call must stay at bare-interpreter cost."""
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(box.primary),

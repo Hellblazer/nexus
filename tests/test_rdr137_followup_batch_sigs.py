@@ -90,6 +90,7 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
+@pytest.mark.t2_tenant
 class TestSig10UpdateReturnsSuccessFlag:
     def test_update_returns_true_on_success(
         self, cat: Catalog, repo: Path, tmp_path: Path,
@@ -150,6 +151,7 @@ class TestSig13CollectionFallbackMatchesCodeCollection:
 
 
 class TestSig14ContextDoesNotSynthesizeMissingRdr:
+    @pytest.mark.t2_tenant
     def test_no_rdr_in_catalog_omits_rdr_from_allowed(
         self, cat: Catalog, repo: Path, tmp_path: Path,
     ) -> None:

@@ -92,6 +92,7 @@ class TestDocumentRecord:
 # ── Catalog CRUD ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCatalogRegisterStoresMtime:
     """PORTED (nexus-i711w Stage 2): ``register`` / ``update`` /
     ``by_file_path`` / ``resolve`` / ``by_doc_id`` are all implemented on both
@@ -187,6 +188,7 @@ class TestCatalogRegisterStoresMtime:
 
 
 class TestIndexSiteCapturesMtime:
+    @pytest.mark.t2_tenant
     def test_real_file_mtime_propagates_via_catalog_hook(self, tmp_path: Path) -> None:
         """The indexer calls register() with file.stat().st_mtime; end-to-end
         we verify the catalog stores the real mtime for a file we created.

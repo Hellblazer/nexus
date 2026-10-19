@@ -160,6 +160,7 @@ def test_migration_state_path_resolves_at_call_time_not_import_time(
         importlib.reload(m)
 
 
+@pytest.mark.t2_tenant
 def test_health_sessions_config_dir_resolves_at_call_time_not_import_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -18,6 +18,8 @@ import pytest
 from nexus import mcp_infra
 from nexus.mcp import core
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def owned_session(monkeypatch):

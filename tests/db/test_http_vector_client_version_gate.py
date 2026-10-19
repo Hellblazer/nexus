@@ -78,6 +78,7 @@ class TestCloudModeCompatible:
         assert probe.call_count == 1
 
 
+@pytest.mark.t2_tenant
 class TestCloudModeIncompatible:
     def test_first_call_raises_with_cloud_specific_no_local_remedy_message(self, monkeypatch):
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
@@ -153,6 +154,7 @@ class TestCloudModeIncompatible:
         assert probe.call_count == 1
 
 
+@pytest.mark.t2_tenant
 class TestUnreachableRetryWindow:
     """nexus-5t1jp: the session HEALS when the managed service comes back."""
 
@@ -217,6 +219,7 @@ class TestLocalModeUntouched:
         probe.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 class TestCloudProbeMessageDoesNotSelfContradict:
     """nexus-b6qlf remediation Fix 2 (CRITICAL): the cloud-mode wrapper
     asserted "This cannot be fixed locally... not by any local action you
@@ -285,6 +288,7 @@ class TestRepeatedReraiseFreshInstance:
     instance (preserving type + message, chained via __cause__) so no
     single object's traceback accumulates across calls."""
 
+    @pytest.mark.t2_tenant
     def test_repeated_calls_raise_distinct_instances_with_stable_traceback_depth(
         self, monkeypatch
     ):
@@ -324,6 +328,7 @@ class TestRepeatedReraiseFreshInstance:
 
 
 class TestResetClearsProbeCache:
+    @pytest.mark.t2_tenant
     def test_reset_allows_reprobe_after_a_prior_failure(self, monkeypatch):
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
         probe = MagicMock(side_effect=ManagedServiceIncompatible("stale engine"))
@@ -345,6 +350,7 @@ class TestResetClearsProbeCache:
         assert probe.call_count == 2
 
 
+@pytest.mark.t2_tenant
 class TestProbeCacheStateHygiene:
     """Review findings H1/M1 (nexus-5t1jp): the cache is the PAIR
     (_version_probe_error, _version_probe_failed_at); nothing may clear one

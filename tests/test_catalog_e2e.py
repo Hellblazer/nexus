@@ -207,6 +207,7 @@ def linked_active():
 # ── Indexer populates catalog ────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("kind,min_count", [
     ("owners", 1),
     ("code", len(_CODE_FILES)),
@@ -223,6 +224,7 @@ def test_index_populates_catalog(indexed_active, kind, min_count):
         assert len(cat.by_content_type(kind)) >= min_count
 
 
+@pytest.mark.t2_tenant
 def test_reindex_preserves_tumblers(
     catalog_repo, registry, local_t3, monkeypatch,
 ):
@@ -238,6 +240,7 @@ def test_reindex_preserves_tumblers(
 # ── MCP tools + graph traversal (class saves blank-line overhead) ────────────
 
 
+@pytest.mark.t2_tenant
 class TestMCP:
     def test_search_returns_indexed_files(self, injected_active):
         """nexus-3lswy: expects 2 matches (ttl.py + the RDR doc), not 3.
@@ -313,6 +316,7 @@ class TestMCP:
 # ── Link generation + lifecycle ──────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestLinks:
     def test_full_link_lifecycle(self, linked_active):
         from nexus.catalog.link_generator import generate_citation_links
@@ -351,6 +355,7 @@ class TestLinks:
 # ── store_put → catalog ─────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
@@ -399,6 +404,7 @@ def test_store_put_registers_in_catalog():
 # ── Tumbler permanence ───────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_tumblers_stable_across_delete_reindex(
     catalog_repo, registry, local_t3, monkeypatch,
 ):
@@ -422,6 +428,7 @@ def test_tumblers_stable_across_delete_reindex(
 # ── Span transclusion ────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_link_with_line_span_resolves_text(tmp_path):
     # PORT-VERIFY: line-range spans resolve CLIENT-side from
     # ``entry.file_path`` (catalog_spans.resolve_span_text_for_entry), so the
@@ -440,6 +447,7 @@ def test_link_with_line_span_resolves_text(tmp_path):
 
 
 class TestChashSpan:
+    @pytest.mark.t2_tenant
     def test_index_produces_chunk_text_hash(self, indexed_active):
         cat, local_t3 = indexed_active
         # nexus-i711w: raw ``SELECT physical_collection`` -> public reader.
@@ -484,6 +492,7 @@ def test_spans_overlap(s1, e1, s2, e2, expected):
 # ── Plan templates ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_catalog_plan_templates_exist(db):
     # nexus-8g79.23: the original ``rows[0][0] >= 0`` was meaningless — a
     # SQLite COUNT(*) is always non-negative — so it was tightened to "the
@@ -503,6 +512,7 @@ def test_catalog_plan_templates_exist(db):
 # ── 'formalizes' link type (RDR-057 P1-1a, nexus-807l) ─────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestFormalizesLinkType:
     """Verify catalog accepts 'formalizes' as a link type — no schema changes needed."""
 

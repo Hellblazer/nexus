@@ -1249,6 +1249,7 @@ def stub_preflight_subprocess(monkeypatch) -> None:
     setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_exits_zero(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1261,6 +1262,7 @@ def test_nx_preflight_exits_zero(
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_plugin_preflight_header(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1273,6 +1275,7 @@ def test_nx_preflight_has_plugin_preflight_header(
     assert "## conexus Plugin Preflight Check" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_nx_cli_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1285,6 +1288,7 @@ def test_nx_preflight_has_nx_cli_section(
     assert "### 1. nx CLI" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_bd_cli_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1297,6 +1301,7 @@ def test_nx_preflight_has_bd_cli_section(
     assert "### 3. bd (Beads) CLI" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_uv_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1309,6 +1314,7 @@ def test_nx_preflight_has_uv_section(
     assert "### 4. uv (package manager)" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_no_node_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1324,6 +1330,7 @@ def test_nx_preflight_has_no_node_section(
     assert "Node.js" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_has_claude_md_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
@@ -1336,6 +1343,7 @@ def test_nx_preflight_has_claude_md_section(
     assert "### 5. CLAUDE.md Agent Readiness" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_nx_preflight_double_dash_terminator(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:

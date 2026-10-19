@@ -41,6 +41,7 @@ def _clean_collectors():
     reset_identity_drop_collectors()
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_records_write_failure_by_catalog_doc_id(monkeypatch):
     """The common shape: fire_batch is called with an explicit
     catalog_doc_id (the RDR-108 Phase 3 identity for the batch's single
@@ -64,6 +65,7 @@ def test_manifest_hook_exception_records_write_failure_by_catalog_doc_id(monkeyp
     assert mcp_infra.get_manifest_identity_drops() == []
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_records_write_failure_by_legacy_meta_doc_id(monkeypatch):
     """Pre-Phase-3 shape: no catalog_doc_id on the call, doc identity
     comes from each chunk's own metadata (mcp_infra's ``by_doc``
@@ -86,6 +88,7 @@ def test_manifest_hook_exception_records_write_failure_by_legacy_meta_doc_id(mon
     assert mcp_infra.get_manifest_identity_drops() == []
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_with_no_doc_identity_records_identity_drop(monkeypatch):
     """A batch with no recoverable document identity at all (no
     catalog_doc_id, no legacy meta doc_id) is the exact shape nexus-94fxl's
@@ -109,6 +112,7 @@ def test_manifest_hook_exception_with_no_doc_identity_records_identity_drop(monk
     ]
 
 
+@pytest.mark.t2_tenant
 def test_non_manifest_hook_exception_does_not_touch_manifest_collectors(monkeypatch):
     """A DIFFERENT hook raising (taxonomy-assign shape) must stay
     best-effort exactly as before -- it must never populate the
@@ -129,6 +133,7 @@ def test_non_manifest_hook_exception_does_not_touch_manifest_collectors(monkeypa
     assert mcp_infra.get_manifest_identity_drops() == []
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_via_locked_registry_still_records(monkeypatch):
     """nx index repo wraps HookRegistry in LockedHookRegistry
     (indexer.py); its invoke seam must not bypass this bead's routing --
@@ -156,6 +161,7 @@ def test_manifest_hook_exception_via_locked_registry_still_records(monkeypatch):
 # ── Fix round 1 (code-review Critical + critic Critical/Important/Significant) ──
 
 
+@pytest.mark.t2_tenant
 def test_malformed_metadata_entry_does_not_crash_fire_batch(monkeypatch):
     """code-review Critical: _record_manifest_hook_batch_exception used to
     call meta.get(...) unconditionally on every entry in metadatas -- a
@@ -227,6 +233,7 @@ def test_real_manifest_hook_get_catalog_none_records_write_failure(monkeypatch):
     assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
 
 
+@pytest.mark.t2_tenant
 def test_real_manifest_hook_get_catalog_writer_raises_does_not_crash_fire_batch(monkeypatch):
     """code-review Important (test-coverage note): closes the
     identity-check coverage gap directly -- proves `hook is
@@ -454,6 +461,7 @@ def test_real_manifest_hook_get_catalog_none_blank_chash_marks_unknown(monkeypat
     assert mcp_infra.get_manifest_write_failure_chashes()["2.1"] is None
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_chash_attribution_two_docs_via_hook_registry(monkeypatch):
     """hook_registry._record_manifest_hook_batch_exception builds its OWN
     chash_by_doc independently of mcp_infra's -- same cross-doc proof,
@@ -481,6 +489,7 @@ def test_manifest_hook_exception_chash_attribution_two_docs_via_hook_registry(mo
     assert expected["1.9.1"] == frozenset({chash_b})
 
 
+@pytest.mark.t2_tenant
 def test_manifest_hook_exception_legacy_meta_doc_id_blank_chash_marks_unknown(monkeypatch):
     """hook_registry's routing on the exact input
     test_manifest_hook_exception_records_write_failure_by_legacy_meta_doc_id

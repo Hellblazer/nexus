@@ -19,6 +19,8 @@ import pytest
 from nexus.catalog.dt_link_generator import generate_dt_links
 from tests._catalog_fixture_ops import ActiveCatalog
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def cat():

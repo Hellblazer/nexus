@@ -111,6 +111,7 @@ class TestT1PutAcceptsAgent:
         assert entry.get("agent", None) == ""
 
 
+@pytest.mark.t2_tenant
 class TestScratchMcpAttribution:
     def test_explicit_agent_round_trips_to_tier_writes(
         self,

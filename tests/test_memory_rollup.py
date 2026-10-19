@@ -64,6 +64,7 @@ def _run(db: T2Database, stub: StubSummarizer, *, dry_run: bool = False):
 # ── the two forced-failure legs (RDR-207 failure modes 5 and 6) ─────────────
 
 
+@pytest.mark.t2_tenant
 def test_a_summary_that_omits_a_title_marks_nothing_and_reap_deletes_nothing(
     db: T2Database,
 ) -> None:
@@ -81,6 +82,7 @@ def test_a_summary_that_omits_a_title_marks_nothing_and_reap_deletes_nothing(
     assert {r["id"] for r in db.memory.list_quarantined(project=PROJECT)} == set(ids)
 
 
+@pytest.mark.t2_tenant
 def test_a_dispatch_failure_on_group_2_of_3_leaves_groups_1_and_3_marked(db: T2Database) -> None:
     oldest = _quarantine(db, "oldest.md", days=80)
     middle = _quarantine(db, "middle.md", days=40)
@@ -99,6 +101,7 @@ def test_a_dispatch_failure_on_group_2_of_3_leaves_groups_1_and_3_marked(db: T2D
     assert middle in {r["id"] for r in db.memory.list_quarantined(project=PROJECT)}
 
 
+@pytest.mark.t2_tenant
 def test_a_source_restored_during_the_summarizer_call_leaves_its_group_unmarked(
     db: T2Database,
 ) -> None:
@@ -127,6 +130,7 @@ def test_a_source_restored_during_the_summarizer_call_leaves_its_group_unmarked(
 # ── dry run, grouping, and the check itself ─────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_dry_run_writes_nothing(db: T2Database) -> None:
     _quarantine(db, "one.md", days=2)
     _quarantine(db, "two.md", days=40)
@@ -140,6 +144,7 @@ def test_dry_run_writes_nothing(db: T2Database) -> None:
     assert _marked(db) == set()
 
 
+@pytest.mark.t2_tenant
 def test_rows_from_two_months_make_two_groups(db: T2Database) -> None:
     first = _quarantine(db, "first.md", days=40)
     second = _quarantine(db, "second.md", days=2)
@@ -210,6 +215,7 @@ def _nx_rollup(db: T2Database, stub: StubSummarizer, *args: str):
         return CliRunner().invoke(main, ["memory", "rollup", "--project", PROJECT, *args])
 
 
+@pytest.mark.t2_tenant
 def test_rollup_cmd_prints_the_groups_then_marks(db: T2Database) -> None:
     row_id = _quarantine(db, "cli.md", days=2)
     out = _nx_rollup(db, StubSummarizer())
@@ -218,6 +224,7 @@ def test_rollup_cmd_prints_the_groups_then_marks(db: T2Database) -> None:
     assert _marked(db) == {row_id}
 
 
+@pytest.mark.t2_tenant
 def test_rollup_cmd_exits_nonzero_when_a_group_is_not_marked(db: T2Database) -> None:
     _quarantine(db, "a.md", days=2)
     _quarantine(db, "b.md", days=2)
@@ -227,6 +234,7 @@ def test_rollup_cmd_exits_nonzero_when_a_group_is_not_marked(db: T2Database) -> 
     assert "1 of 1 group not marked" in out.output
 
 
+@pytest.mark.t2_tenant
 def test_rollup_cmd_dry_run_prints_the_summary_and_writes_nothing(db: T2Database) -> None:
     _quarantine(db, "dry.md", days=2)
     out = _nx_rollup(db, StubSummarizer(), "--dry-run")
@@ -235,6 +243,7 @@ def test_rollup_cmd_dry_run_prints_the_summary_and_writes_nothing(db: T2Database
     assert _marked(db) == set() and db.memory.list_summaries(project=PROJECT) == []
 
 
+@pytest.mark.t2_tenant
 def test_rollup_cmd_with_nothing_quarantined(db: T2Database) -> None:
     stub = StubSummarizer()
     out = _nx_rollup(db, stub)

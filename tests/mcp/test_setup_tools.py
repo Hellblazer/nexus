@@ -469,10 +469,12 @@ def _saved(config: Path, **credentials: str) -> None:
     (config / "config.yml").write_text(body, encoding="utf-8")
 
 
+@pytest.mark.t2_tenant
 def test_nothing_set_is_not_usable(endpoint: Path) -> None:
     assert setup_tools.usable_service() is False
 
 
+@pytest.mark.t2_tenant
 def test_a_service_url_with_no_resolvable_token_is_not_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The case the earlier definition got wrong: every tool that needs storage
     raises RuntimeError there, so setup must not say nothing is missing."""
@@ -498,6 +500,7 @@ def test_a_saved_service_url_and_token_are_usable(endpoint: Path) -> None:
     assert setup_tools.usable_service() is True
 
 
+@pytest.mark.t2_tenant
 def test_a_service_url_with_a_lease_token_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
     _lease(monkeypatch)
@@ -512,6 +515,7 @@ def test_a_service_url_with_a_mint_credential_is_usable(endpoint: Path, monkeypa
     assert setup_tools.usable_service() is True
 
 
+@pytest.mark.t2_tenant
 def test_the_host_port_and_token_variables_are_usable_together_and_not_apart(
     endpoint: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1069,18 +1073,21 @@ def real_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config
 
 
+@pytest.mark.t2_tenant
 def test_status_through_the_real_script_in_an_empty_config_directory(real_script: Path) -> None:
     text = _call("setup_status")
     assert "No usable Nexus service" in text
     assert not (real_script / "setup").exists(), "status created the setup directory"
 
 
+@pytest.mark.t2_tenant
 def test_not_now_through_the_real_script_writes_its_marker_and_nothing_else(real_script: Path) -> None:
     text = _call("setup", mode="not-now")
     assert "nothing was installed" in text.lower()
     assert sorted(p.name for p in (real_script / "setup").iterdir()) == ["not-now"]
 
 
+@pytest.mark.t2_tenant
 def test_cloud_through_the_real_script_starts_a_run_that_serves_the_page(
     real_script: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

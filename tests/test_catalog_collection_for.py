@@ -153,6 +153,7 @@ def test_owner_segment_for_tumbler_single_segment_returns_empty() -> None:
 
 # ── Catalog.collection_for: validation ──────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_rejects_unknown_content_type(catalog) -> None:
     raised = False
     try:
@@ -166,6 +167,7 @@ def test_collection_for_rejects_unknown_content_type(catalog) -> None:
     assert raised, "expected ValueError from the canonical validation contract"
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_rejects_non_canonical_embedding_model(catalog) -> None:
     """Pre-canonical-set models (``voyage-3``) and arbitrary strings are
     rejected at the public API. Pinned decision #1."""
@@ -181,6 +183,7 @@ def test_collection_for_rejects_non_canonical_embedding_model(catalog) -> None:
     assert raised, "expected ValueError from the canonical validation contract"
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_rejects_empty_owner(catalog) -> None:
     """An owner with no derivable segment cannot be turned into a
     collection name; the catalog raises rather than silently emitting
@@ -195,6 +198,7 @@ def test_collection_for_rejects_empty_owner(catalog) -> None:
 
 # ── Catalog.collection_for: new tuple ───────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_new_tuple_returns_v1(catalog) -> None:
     name = catalog.collection_for(
         content_type="code",
@@ -208,6 +212,7 @@ def test_collection_for_new_tuple_returns_v1(catalog) -> None:
     assert name.model_version == 1
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_new_tuple_with_tumbler_instance(catalog) -> None:
     t = Tumbler.parse("2.3.99")
     name = catalog.collection_for(
@@ -220,6 +225,7 @@ def test_collection_for_new_tuple_with_tumbler_instance(catalog) -> None:
 
 # ── Catalog.collection_for: existing tuple is idempotent ─────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_existing_tuple_returns_same_version(catalog) -> None:
     """An already-registered conformant ``(c, o, m)`` returns its
     existing ``vN`` rather than minting a new one."""
@@ -240,6 +246,7 @@ def test_collection_for_existing_tuple_returns_same_version(catalog) -> None:
 
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_takes_max_existing_version(catalog) -> None:
     """When multiple versions exist for the same ``(c, o, m)``, the
     helper returns the highest one. Lexical comparison would put ``v10``
@@ -262,6 +269,7 @@ def test_collection_for_takes_max_existing_version(catalog) -> None:
 
 # ── Catalog.collection_for: bump=True ───────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_bump_increments_version(catalog) -> None:
     catalog.register_collection(
         "code__1-7__voyage-code-3__v3",
@@ -279,6 +287,7 @@ def test_collection_for_bump_increments_version(catalog) -> None:
     assert name.model_version == 4
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_bump_on_new_tuple_returns_v1(catalog) -> None:
     """``bump=True`` on a tuple that has never existed still returns
     ``v1``; bump only takes effect when a prior version exists."""
@@ -293,6 +302,7 @@ def test_collection_for_bump_on_new_tuple_returns_v1(catalog) -> None:
 
 # ── Pinned decision #2: model change is not a version bump ──────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_different_model_lands_in_v1(catalog) -> None:
     """Pinned decision #2: a new ``embedding_model`` produces a new
     tuple ``(c, o, m_new)`` and naturally lands in ``v1`` even when the
@@ -316,6 +326,7 @@ def test_collection_for_different_model_lands_in_v1(catalog) -> None:
 
 # ── Legacy rows must not contribute to MAX(model_version) ────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_ignores_grandfathered_rows(catalog) -> None:
     """A legacy 2-segment name registered as grandfathered must NOT
     poison the version-bump lookup for the conformant tuple.
@@ -335,6 +346,7 @@ def test_collection_for_ignores_grandfathered_rows(catalog) -> None:
     assert name.model_version == 1
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_conformant_row_with_empty_model_version(catalog) -> None:
     """Defensive: a conformant name registered without the
     ``model_version`` kwarg has ``legacy_grandfathered = 0`` and an
@@ -403,6 +415,7 @@ def test_canonical_embedding_model_unknown_raises() -> None:
 
 # ── Catalog.collection_for_repo ────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_for_repo_uses_registered_owner(catalog, tmp_path) -> None:
     """Given a registered repo owner, ``collection_for_repo`` returns
     the conformant ``CollectionName`` with the canonical model."""
@@ -429,6 +442,7 @@ def test_collection_for_repo_uses_registered_owner(catalog, tmp_path) -> None:
     assert name.owner_id  # whatever the owner segment is, it must not be empty
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_repo_docs_uses_voyage_context_3(catalog, tmp_path) -> None:
     repo_root = tmp_path / "docs-repo"
     repo_root.mkdir()
@@ -448,6 +462,7 @@ def test_collection_for_repo_docs_uses_voyage_context_3(catalog, tmp_path) -> No
     assert name.embedding_model == "voyage-context-3"
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_repo_unregistered_owner_raises(catalog, tmp_path) -> None:
     """Without a prior owner registration, the helper raises rather
     than silently emitting a malformed name. The indexer's
@@ -466,6 +481,7 @@ def test_collection_for_repo_unregistered_owner_raises(catalog, tmp_path) -> Non
         reg_mod._repo_identity = original
 
 
+@pytest.mark.t2_tenant
 def test_collection_for_repo_bump_propagates(catalog, tmp_path) -> None:
     """``bump=True`` flag is forwarded to ``collection_for``."""
     repo_root = tmp_path / "bumprepo"

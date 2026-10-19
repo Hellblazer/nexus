@@ -209,6 +209,7 @@ class TestPdfChunksMetadata:
 
 # ── AC-S3 / AC-S4 — index_pdf pipeline ───────────────────────────────────────
 
+@pytest.mark.t2_tenant
 class TestIndexPdfPipeline:
     """AC-S3 / AC-S4: index_pdf with real extraction, mocked embed + T3."""
 
@@ -309,6 +310,7 @@ def pdf_git_repo(tmp_path_factory: pytest.TempPathFactory, simple_pdf: Path) -> 
     return repo
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfFileForceReEmbedDecoupled:
     """nexus-4jj40 sibling (shakedown 2026-09-15): the PDF per-file fallback
     passed ``force`` as ``force_re_embed``, so a plain --force paid for a full
@@ -354,6 +356,7 @@ class TestIndexPdfFileForceReEmbedDecoupled:
         assert flags and set(flags) == {True}
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfFileGitMetadata:
     """AC-S5 / AC-S6: _index_pdf_file augments chunks with git metadata."""
 

@@ -31,6 +31,8 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch):

@@ -69,6 +69,7 @@ def _make_stub_t3(store_by_collection: dict, call_log: list | None = None):
     return mock_t3, call_log
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetMany500ID:
     """SC-11: 500-ID hydration produces 500 contents with no truncation."""
 
@@ -130,6 +131,7 @@ class TestStoreGetMany500ID:
         assert set(call_log[0][1]) == set(ids)
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetManyBatching:
     """Direct proof of the fan-out fix: N ids to one collection must
     resolve via ONE batched call, not N per-id calls.
@@ -179,6 +181,7 @@ class TestStoreGetManyBatching:
         assert call_log[0][1] == ["a", "b", "c"]  # deduped, first-seen order
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetManyBatchBoundary:
     """Verify store_get_many correctly reassembles a batch call's results
     at and above the historical ChromaDB MAX_QUERY_RESULTS=300 boundary —
@@ -240,6 +243,7 @@ class TestStoreGetManyBatchBoundary:
         assert len(result["missing"]) == n
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetManyTruncation:
     """max_chars_per_doc must apply identically regardless of the batched
     fetch path."""
@@ -372,6 +376,7 @@ class TestStoreGetManyMultiCollectionRouting:
         assert (alpha, ["a1", "a2"]) in call_log
         assert (beta, ["b1", "b2"]) in call_log
 
+    @pytest.mark.t2_tenant
     def test_parallel_ids_with_scalar_collections_broadcasts(self):
         from nexus.mcp.core import store_get_many
 
@@ -521,6 +526,7 @@ class TestStoreGetManyLimitPerSource:
         mock_t3, _ = _make_stub_t3({"*": store})
         return mock_t3
 
+    @pytest.mark.t2_tenant
     def test_limit_per_source_none_preserves_default(self):
         from nexus.mcp.core import store_get_many
 
@@ -533,6 +539,7 @@ class TestStoreGetManyLimitPerSource:
         assert len(result["contents"]) == 10
         assert len(result["missing"]) == 0
 
+    @pytest.mark.t2_tenant
     def test_limit_per_source_int_truncates_single_stream(self):
         from nexus.mcp.core import store_get_many
 
@@ -552,6 +559,7 @@ class TestStoreGetManyLimitPerSource:
         assert result["contents"] == [f"body-doc-{i}" for i in range(5)]
         assert len(result["missing"]) == 0
 
+    @pytest.mark.t2_tenant
     def test_limit_per_source_zero_returns_empty(self):
         from nexus.mcp.core import store_get_many
 
@@ -582,6 +590,7 @@ class TestStoreGetManyLimitPerSource:
         assert "limit_per_source" in result["error"]
         assert "negative" in result["error"].lower() or "non-negative" in result["error"].lower()
 
+    @pytest.mark.t2_tenant
     def test_limit_per_source_list_truncates_parallel_streams(self):
         from nexus.mcp.core import store_get_many
 
@@ -637,6 +646,7 @@ class TestStoreGetManyLimitPerSource:
         assert "1" in result["error"] and "2" in result["error"]
         assert "length" in msg or "stream" in msg
 
+    @pytest.mark.t2_tenant
     def test_limit_per_source_int_with_parallel_ids_broadcasts(self):
         from nexus.mcp.core import store_get_many
 
@@ -658,6 +668,7 @@ class TestStoreGetManyLimitPerSource:
         assert result["contents"] == ["body-a0", "body-a1", "body-b0", "body-b1"]
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetManyHumanReadableRendersContent:
     """nexus-z4j8d: the human-readable mode (``structured=False``) of a
     HYDRATION tool must actually render hydrated content, not just a
@@ -780,6 +791,7 @@ class TestStoreGetManyHumanReadableRendersContent:
         assert "small body" in result
 
 
+@pytest.mark.t2_tenant
 class TestStoreGetManySectionTypes:
     """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
     ``structured=True`` also returns ``section_types``, aligned 1:1 with
@@ -859,6 +871,7 @@ class TestStoreGetManySourceNotes:
     dates; "" for a missing id. The plan runner prefixes it onto the
     content an operator prompt sees."""
 
+    @pytest.mark.t2_tenant
     def test_source_notes_aligned_and_empty_for_missing(self):
         from unittest.mock import patch
 

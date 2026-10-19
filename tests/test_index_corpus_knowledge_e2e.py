@@ -31,6 +31,8 @@ from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.commands.index import _CatalogBackedRegistry
 from nexus.repos import read_dual
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-204 Phase 1 follow-up (nexus-f5wwx, mirrored from test_repos_reader.py):
 # the engine pins an install-scoped embedding profile per (tenant,
 # content_type) on first write -- a hardcoded "voyage-context-3" literal

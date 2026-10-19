@@ -177,6 +177,7 @@ class TestManifestRow:
 # ── K6: get_manifest ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestGetManifest:
     """Tests for Catalog.get_manifest(doc_id) -> list[ManifestRow]."""
 
@@ -285,6 +286,7 @@ class TestGetManifest:
 # ── K6: docs_for_chashes ─────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDocsForChashes:
     """Tests for Catalog.docs_for_chashes(chashes) -> dict[str, list[str]]."""
 
@@ -360,6 +362,7 @@ class TestDocsForChashes:
 # ── RDR-108 Phase 4b / nexus-kosc: get_chunk_chashes ─────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestGetChunkChashes:
     """``Catalog.get_chunk_chashes(doc_id)`` returns the ordered list of
     chashes for a document's manifest, used by retrieval call sites that
@@ -400,6 +403,7 @@ class TestGetChunkChashes:
 # ── RDR-108 Phase 4 / nexus-dyxe: chashes_for_collection ─────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestChashesForCollection:
     """Tests for ``Catalog.chashes_for_collection(physical_collection) -> set[str]``.
 
@@ -533,6 +537,7 @@ class TestChashesForCollection:
 # file that could not be ported rather than merely re-seeded.
 
 
+@pytest.mark.t2_tenant
 class TestWriteManifestBatching:
     """write_manifest batches at 300 and must handle >300 chunks correctly."""
 
@@ -613,6 +618,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
         assert callable(manifest_write_batch_hook)
 
+    @pytest.mark.t2_tenant
     def test_manifest_write_batch_hook_writes_manifest(self, tmp_path):
         """Hook writes manifest rows for each doc_id in the batch.
 
@@ -667,6 +673,7 @@ class TestManifestWriteBatchHook:
             metadatas=None,
         )
 
+    @pytest.mark.t2_tenant
     def test_manifest_write_batch_hook_groups_by_doc_id(self, tmp_path):
         """Multiple chunks for the same doc_id are written as one manifest."""
         from unittest.mock import patch
@@ -796,6 +803,7 @@ class TestManifestWriteBatchHook:
         install_default_hooks(registry)
         assert manifest_write_batch_hook in registry._batch
 
+    @pytest.mark.t2_tenant
     def test_manifest_write_batch_hook_accumulates_across_batches(self, tmp_path):
         """RDR-108 Phase 3 (nexus-bdag) regression test: when the hook is
         called multiple times for the same ``catalog_doc_id`` (the
@@ -863,6 +871,7 @@ class TestManifestWriteBatchHook:
         assert rows[0][1] == "a" * 64
         assert rows[4][1] == "e" * 64
 
+    @pytest.mark.t2_tenant
     def test_manifest_write_batch_hook_updates_chunk_count_cache(self, tmp_path):
         """nexus-zq79: documents.chunk_count must track manifest size after
         the hook fires. Pre-fix, catalog-register seeded chunk_count=0 and
@@ -974,6 +983,7 @@ class TestManifestWriteBatchHook:
 # ── nexus-oe2i (RDR-108 Phase 4 review TV-low): manifest-authoritative ──────
 
 
+@pytest.mark.t2_tenant
 class TestManifestIsAuthoritative:
     """nexus-oe2i: lock the contract that under D2 the catalog
     document_chunks manifest is the single source of truth for
@@ -1028,6 +1038,7 @@ class TestManifestIsAuthoritative:
         assert cat.docs_for_chashes(["8" * 64]) == {}
 
 
+@pytest.mark.t2_tenant
 class TestManifestWritesRefreshIndexedAt:
     """nexus-p5qk8 (GH #1397 field report): a manifest write is an indexing
     event — the parent doc's indexed_at must reflect it. Before this fix a

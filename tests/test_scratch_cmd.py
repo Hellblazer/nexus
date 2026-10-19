@@ -12,6 +12,8 @@ from click.testing import CliRunner
 from nexus.cli import main
 from tests._module_seam import patch_in
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def runner() -> CliRunner:

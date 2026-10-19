@@ -195,6 +195,7 @@ def _fake_writer() -> MagicMock:
     return writer
 
 
+@pytest.mark.t2_tenant
 def test_registers_once_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr(
@@ -248,6 +249,7 @@ def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retryi
     writer.register_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_registrar_receives_the_derived_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -264,6 +266,7 @@ def test_registrar_receives_the_derived_kwargs(
     writer.register_collection.assert_called_once_with(name, **expected)
 
 
+@pytest.mark.t2_tenant
 def test_409_is_treated_as_already_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +289,7 @@ def test_409_is_treated_as_already_registered(
     writer.close.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_non_409_http_error_propagates_and_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -322,6 +326,7 @@ class _ScopedFakeRegistrar:
         return self._writer
 
 
+@pytest.mark.t2_tenant
 def test_two_registrar_scopes_for_the_same_name_each_call_their_own_registrar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,6 +365,7 @@ def test_two_registrar_scopes_for_the_same_name_each_call_their_own_registrar(
     assert name not in corpus._REGISTERED_COLLECTIONS
 
 
+@pytest.mark.t2_tenant
 def test_writer_is_closed_even_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -377,6 +383,7 @@ def test_writer_is_closed_even_on_failure(
     writer.close.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_default_registrar_is_make_catalog_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -407,6 +414,7 @@ def _http_422(body_text: str) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(body_text, request=MagicMock(), response=response)
 
 
+@pytest.mark.t2_tenant
 def test_normal_path_registers_once_and_writes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -425,6 +433,7 @@ def test_normal_path_registers_once_and_writes_once(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_stale_registration_422_retries_once_after_re_registering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,6 +464,7 @@ def test_stale_registration_422_retries_once_after_re_registering(
     assert name in corpus._REGISTERED_COLLECTIONS
 
 
+@pytest.mark.t2_tenant
 def test_second_failure_after_retry_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -473,6 +483,7 @@ def test_second_failure_after_retry_propagates(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_a_different_422_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -495,6 +506,7 @@ def test_a_different_422_is_never_retried(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_a_non_http_error_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -512,6 +524,7 @@ def test_a_non_http_error_is_never_retried(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_the_retry_detector_keys_on_the_reason_code_for_the_httpx_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -533,6 +546,7 @@ def test_the_retry_detector_keys_on_the_reason_code_for_the_httpx_family(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_a_422_with_another_reason_is_never_retried_even_if_it_says_not_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,6 +596,7 @@ class _FakeVectorServiceError(RuntimeError):
         self.code = code
 
 
+@pytest.mark.t2_tenant
 def test_vector_service_error_shaped_422_is_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -612,6 +627,7 @@ def test_vector_service_error_shaped_422_is_retried(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_vector_service_error_shaped_non_422_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -940,6 +956,7 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     engine's GC function registers it from the origin's row on first
     insert; see ``indexer._prune_collection_serverside``.)"""
 
+    @pytest.mark.t2_tenant
     def test_explicit_kwargs_bypasses_name_derivation(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -999,6 +1016,7 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
 
         writer.register_collection.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_a_non_canonical_content_type_without_override_raises_under_cloud_mode(
         self, cloud_mode: None,
     ) -> None:

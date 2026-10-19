@@ -118,6 +118,7 @@ def test_corpus_short_form_C_is_removed(runner: CliRunner, cloud_env) -> None:
     assert result.exit_code != 0
 
 
+@pytest.mark.t2_tenant
 def test_corpus_long_form_still_works(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
@@ -127,6 +128,7 @@ def test_corpus_long_form_still_works(runner: CliRunner, cloud_env) -> None:
     assert "Error" not in result.output or result.exit_code == 0
 
 
+@pytest.mark.t2_tenant
 def test_corpus_csv_form_matches_repeat_form(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -162,6 +164,7 @@ def _search_with(runner: CliRunner, collections: list[str], *args: str):
     return result, ms
 
 
+@pytest.mark.t2_tenant
 def test_default_corpus_with_no_knowledge_collection_does_not_warn(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -197,6 +200,7 @@ def test_explicit_knowledge_corpus_still_warns_when_absent(
     assert "no collections match --corpus 'knowledge'" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_a_corpus_that_merely_lists_the_default_legs_in_another_order_warns(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -212,6 +216,7 @@ def test_a_corpus_that_merely_lists_the_default_legs_in_another_order_warns(
 # ── nexus-d9xt2: skip GET /v1/vectors/stats for explicit collection names ──
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_explicit_conformant_collection_name_skips_list_collections(
     runner: CliRunner, cloud_env,
@@ -239,6 +244,7 @@ def test_explicit_conformant_collection_name_skips_list_collections(
     assert list(targets) == ["knowledge__test__voyage-context-3__v1"]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_search_needing_the_listing_asks_for_it_with_the_probe(
     runner: CliRunner, cloud_env,
@@ -254,6 +260,7 @@ def test_search_needing_the_listing_asks_for_it_with_the_probe(
     m_t3.assert_called_once_with(prefetch_routing_listing=True)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_search_with_explicit_names_does_not_prefetch_the_listing(
     runner: CliRunner, cloud_env,
@@ -301,6 +308,7 @@ def test_nonexistent_conformant_collection_name_surfaces_named_warning(
     ms.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_prefix_corpus_still_pays_list_collections_once(
     runner: CliRunner, cloud_env,
@@ -331,6 +339,7 @@ def test_prefix_corpus_still_pays_list_collections_once(
     assert mock_t3.list_collections.call_count == 1
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
     runner: CliRunner, cloud_env,
@@ -356,6 +365,7 @@ def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
     assert mock_t3.list_collections.call_count == 1
 
 
+@pytest.mark.t2_tenant
 def test_corpus_csv_and_repeat_forms_can_mix(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -377,6 +387,7 @@ def test_corpus_csv_and_repeat_forms_can_mix(
     assert "code__one" in target_names
 
 
+@pytest.mark.t2_tenant
 def test_corpus_csv_handles_whitespace(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -397,6 +408,7 @@ def test_corpus_csv_handles_whitespace(
     assert "rdr__nexus" in target_names
 
 
+@pytest.mark.t2_tenant
 def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result(f"r{i}", f"line {i}", distance=float(i) * 0.1)
@@ -416,6 +428,7 @@ def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
     assert len(result_headers) <= 3
 
 
+@pytest.mark.t2_tenant
 def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result("first", "alpha content", distance=0.1,
@@ -453,12 +466,14 @@ def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> Non
 # ── --where metadata filter ─────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_where_single_filter_passed_to_search(runner: CliRunner, search_ctx) -> None:
     _, captured = search_ctx
     runner.invoke(main, ["search", "query", "--corpus", "knowledge", "--where", "lang=python"])
     assert captured[0] == {"lang": "python"}
 
 
+@pytest.mark.t2_tenant
 def test_where_multiple_filters_anded(runner: CliRunner, search_ctx) -> None:
     _, captured = search_ctx
     runner.invoke(main, [
@@ -468,6 +483,7 @@ def test_where_multiple_filters_anded(runner: CliRunner, search_ctx) -> None:
     assert captured[0] == {"store_type": "knowledge", "status": "completed"}
 
 
+@pytest.mark.t2_tenant
 def test_where_no_flag_passes_none(runner: CliRunner, search_ctx) -> None:
     _, captured = search_ctx
     runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -477,6 +493,7 @@ def test_where_no_flag_passes_none(runner: CliRunner, search_ctx) -> None:
 # ── --json zero-hit contract (nexus-von7f) ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_json_zero_hits_emits_valid_json(runner: CliRunner, search_ctx) -> None:
     """A zero-hit `--json` search must emit the SAME top-level shape
     (a JSON array) as the populated case with an empty results list —
@@ -493,6 +510,7 @@ def test_json_zero_hits_emits_valid_json(runner: CliRunner, search_ctx) -> None:
 # ── -A / -B / -C context lines ──────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
     content = "line1\nline2\nline3\nline4\nline5"
     results_pool = [_make_result("r1", content, metadata={"source_path": "foo.py", "line_start": 10})]
@@ -506,6 +524,7 @@ def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 def test_context_C_integer_accepted(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
@@ -545,6 +564,7 @@ def test_format_plain_with_context_zero_equals_format_plain() -> None:
 
 
 
+@pytest.mark.t2_tenant
 def test_hybrid_flag_still_returns_results(runner: CliRunner, cloud_env, tmp_path) -> None:
     """--hybrid survives the ripgrep removal as the frecency-blend switch.
 
@@ -574,6 +594,7 @@ def test_hybrid_flag_still_returns_results(runner: CliRunner, cloud_env, tmp_pat
 # client independently via ``nexus.db.get_voyage_client()``.
 
 
+@pytest.mark.t2_tenant
 def test_search_service_mode_never_calls_client_voyage(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -605,6 +626,7 @@ def test_search_service_mode_never_calls_client_voyage(
     assert [item["id"] for item in items] == ["r0", "r1"]
 
 
+@pytest.mark.t2_tenant
 def test_search_service_mode_no_credential_skips_with_warning(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -628,6 +650,7 @@ def test_search_service_mode_no_credential_skips_with_warning(
     assert "traceback" not in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 def test_search_local_mode_never_touches_voyage_client(
     runner: CliRunner,
 ) -> None:
@@ -729,6 +752,7 @@ def test_parse_where_empty_value_with_operator_raises() -> None:
 # ── --max-file-chunks ───────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_max_file_chunks_does_not_route_through_chroma_where(
     runner: CliRunner, code_search_ctx,
 ) -> None:
@@ -751,6 +775,7 @@ def test_max_file_chunks_does_not_route_through_chroma_where(
     )
 
 
+@pytest.mark.t2_tenant
 def test_max_file_chunks_does_not_pollute_where_when_combined(
     runner: CliRunner, code_search_ctx,
 ) -> None:
@@ -773,6 +798,7 @@ def test_max_file_chunks_does_not_pollute_where_when_combined(
 # ── corpus warning ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
@@ -864,6 +890,7 @@ def _format_results(results: list) -> str:
     return "\n".join(lines)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("query", _QUERIES)
 def test_search_ranking_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
     raw = search_cross_corpus(query, ["code__snapshot", "knowledge__snapshot"], n_results=5, t3=search_corpus)
@@ -871,6 +898,7 @@ def test_search_ranking_snapshot(query: str, search_corpus: T3Database, snapshot
     assert _format_results(scored) == snapshot
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("query", _QUERIES[:3])
 def test_search_single_corpus_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
     raw = search_cross_corpus(query, ["code__snapshot"], n_results=5, t3=search_corpus)
@@ -893,6 +921,7 @@ def _capture_ctx_full(collections: list[str] | None = None):
     return mock, captured, fake
 
 
+@pytest.mark.t2_tenant
 def test_threshold_flag_passes_override_to_engine(runner: CliRunner, cloud_env) -> None:
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
@@ -905,6 +934,7 @@ def test_threshold_flag_passes_override_to_engine(runner: CliRunner, cloud_env) 
     assert captured[0].get("threshold_override") == pytest.approx(0.8)
 
 
+@pytest.mark.t2_tenant
 def test_no_threshold_flag_disables_filtering(runner: CliRunner, cloud_env) -> None:
     import math
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
@@ -919,6 +949,7 @@ def test_no_threshold_flag_disables_filtering(runner: CliRunner, cloud_env) -> N
     assert override is not None and math.isinf(override)
 
 
+@pytest.mark.t2_tenant
 def test_default_passes_none_override(runner: CliRunner, cloud_env) -> None:
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
@@ -950,6 +981,7 @@ def test_threshold_and_no_threshold_mutually_exclusive(
 # ── Phase 1.2 (RDR-087 / nexus-yi4b.1.2): silent-zero stderr ────────────────
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
     runner: CliRunner, cloud_env, monkeypatch,
 ) -> None:
@@ -982,6 +1014,7 @@ def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
     assert "top_distance" in stderr
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_omitted_when_raw_is_zero(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1008,6 +1041,7 @@ def test_silent_zero_omitted_when_raw_is_zero(
     assert "candidates dropped" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_suppressed_by_quiet_flag(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1036,6 +1070,7 @@ def test_silent_zero_suppressed_by_quiet_flag(
     assert "candidates dropped" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_end_to_end_real_engine(
     runner: CliRunner, cloud_env, monkeypatch, tmp_path,
 ) -> None:
@@ -1133,6 +1168,7 @@ def test_silent_zero_end_to_end_real_engine(
     )
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_suppressed_by_config(runner: CliRunner, cloud_env) -> None:
     """``telemetry.stderr_silent_zero = false`` in config disables the note."""
     from nexus.search_engine import SearchDiagnostics
@@ -1161,6 +1197,7 @@ def test_silent_zero_suppressed_by_config(runner: CliRunner, cloud_env) -> None:
     assert "candidates dropped" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_picks_worst_offender_across_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1198,6 +1235,7 @@ def test_silent_zero_picks_worst_offender_across_collections(
 # ── Service-error surface (nexus-pebfx.8) ───────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env) -> None:
     """An all-collections-failed VectorServiceError surfaces as a clean
     click error, not a raw traceback (nexus-pebfx.8 secondary issue)."""
@@ -1219,6 +1257,7 @@ def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env
     assert not isinstance(res.exception, VectorServiceError)
 
 
+@pytest.mark.t2_tenant
 def test_silent_zero_notes_failed_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1251,6 +1290,7 @@ def test_silent_zero_notes_failed_collections(
     assert "knowledge__seam" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_partial_results_still_notes_excluded_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1302,6 +1342,7 @@ def test_partial_results_still_notes_excluded_collections(
 # input-construction divergence — this test pins the input construction.
 
 
+@pytest.mark.t2_tenant
 def test_search_cmd_passes_catalog_to_search_cross_corpus(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1327,6 +1368,7 @@ def test_search_cmd_passes_catalog_to_search_cross_corpus(
     )
 
 
+@pytest.mark.t2_tenant
 def test_search_cmd_catalog_failure_degrades_to_none(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1343,6 +1385,7 @@ def test_search_cmd_catalog_failure_degrades_to_none(
     assert ms.call_args.kwargs.get("catalog") is None
 
 
+@pytest.mark.t2_tenant
 def test_max_file_chunks_warns_when_catalog_unavailable(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1369,6 +1412,7 @@ def test_max_file_chunks_warns_when_catalog_unavailable(
 # ── GH #1527 (nexus-qiah5): --repo NAME scopes to one owner's collections ──
 
 
+@pytest.mark.t2_tenant
 def test_repo_flag_resolves_an_owner_name_to_its_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -1422,6 +1466,7 @@ def test_the_silent_zero_hint_never_suggests_a_threshold_below_the_top_distance(
     assert "Use --threshold 0.453 to surface" in err, err
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     ("extra_args", "expected"),
     [

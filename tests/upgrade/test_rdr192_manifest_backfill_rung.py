@@ -919,6 +919,7 @@ def test_the_real_lock_excludes_a_second_holder_and_frees_on_release() -> None:
         assert again is True, "the lock is released when the holder leaves"
 
 
+@pytest.mark.t2_tenant
 def test_default_census_maps_an_unresolvable_endpoint_to_a_clean_message(monkeypatch) -> None:
     """The endpoint error's own text explains a retired Chroma path; that is
     noise in `nx upgrade` output (verify round N7)."""

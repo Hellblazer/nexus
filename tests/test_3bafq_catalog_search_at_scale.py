@@ -23,6 +23,8 @@ import pytest
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.mcp_server import _reset_singletons, catalog_search
 
+pytestmark = pytest.mark.t2_tenant
+
 N_FILLER = 1200
 TARGET_REL = "src/deep/target_module.py"
 TARGET_ABS = "/Users/someone/git/proj/src/deep/target_module.py"

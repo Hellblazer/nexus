@@ -177,6 +177,7 @@ def test_infer_repo_git_failed_logs_debug():
 
 # ── Site 10: commands/hook.py stdin parse failure ─────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_session_start_stdin_parse_failed_logs_debug():
     """Site 10: stdin JSON parse failure in session_start_cmd emits debug log."""
     from nexus.commands.hook import session_start_cmd
@@ -219,6 +220,7 @@ def test_hook_detection_failed_logs_debug(tmp_path):
 
 # ── Site 12: commands/doctor.py registry load failure ─────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_registry_load_failed_logs_warning():
     """Site 12: enumeration failure during git-hook health check
     emits warning-level log.

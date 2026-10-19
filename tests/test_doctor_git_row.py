@@ -66,6 +66,7 @@ def test_missing_git_leaves_the_exit_code_healthy(no_git_path) -> None:
     assert "✗ git" not in output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_cli_exits_zero_with_only_git_missing(no_git_path, monkeypatch) -> None:
     results = [r for r in _check_tools() if r.label == "git"]
     monkeypatch.setattr(health_mod, "run_health_checks", lambda *_a, **_kw: (results, False))

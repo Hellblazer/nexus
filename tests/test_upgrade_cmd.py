@@ -65,6 +65,7 @@ class TestSubstrateBridgeRetired:
     gone). The surviving pin: `nx upgrade` output never names the deleted
     verb."""
 
+    @pytest.mark.t2_tenant
     def test_upgrade_never_advertises_the_deleted_verb(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
@@ -96,6 +97,7 @@ class TestUpgradeRetiredSqliteOptOut:
         assert "migration-capable" in result.output
 
 
+@pytest.mark.t2_tenant
 class TestUpgradeServiceModeShortCircuit:
     """``nx upgrade`` in SERVICE mode — the whole verb since Stage 4.
 
@@ -193,6 +195,7 @@ class TestUpgradeBackfillsInstallModeRecord:
         (cfg / "last_seen_version").write_text(_pkg_version("conexus") + "\n")
         return cfg
 
+    @pytest.mark.t2_tenant
     def test_successful_upgrade_stamps_the_record(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -203,6 +206,7 @@ class TestUpgradeBackfillsInstallModeRecord:
         data = yaml.safe_load((cfg / "config.yml").read_text())
         assert data["install"]["mode"] == "local"
 
+    @pytest.mark.t2_tenant
     def test_dry_run_does_not_stamp(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -230,6 +234,7 @@ class TestUpgradeBackfillsInstallModeRecord:
         assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 class TestDeferredRungDoesNotAbortTheRestOfTheUpgrade:
     """nexus-wbfpw.41 review: a rung that DEFERS with a permanent residual
     (an unhealable legacy chunk) must not raise out of the ladder walk, or the
@@ -306,6 +311,7 @@ class TestBeadsPrimeWiring:
         )
         return calls
 
+    @pytest.mark.t2_tenant
     def test_plain_upgrade_installs(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -315,6 +321,7 @@ class TestBeadsPrimeWiring:
         assert result.exit_code == 0, result.output
         assert calls == [True]
 
+    @pytest.mark.t2_tenant
     def test_auto_mode_skips_it(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -324,6 +331,7 @@ class TestBeadsPrimeWiring:
         assert result.exit_code == 0, result.output
         assert calls == []
 
+    @pytest.mark.t2_tenant
     def test_dry_run_skips_it(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -333,6 +341,7 @@ class TestBeadsPrimeWiring:
         assert result.exit_code == 0, result.output
         assert calls == []
 
+    @pytest.mark.t2_tenant
     def test_no_beads_prime_flag_reaches_the_helper(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

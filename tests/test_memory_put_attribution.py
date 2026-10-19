@@ -26,6 +26,8 @@ import pytest
 
 from tests._t2_fixture_ops import memory_row
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def isolated_t2(

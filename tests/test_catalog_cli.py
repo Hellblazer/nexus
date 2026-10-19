@@ -134,6 +134,7 @@ class TestNotInitialized:
         assert "not initialized" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 class TestRegisterAndShow:
     def test_register_document(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -311,6 +312,7 @@ class TestRegisterAndShow:
         assert "Citations:" not in result.output
 
 
+@pytest.mark.t2_tenant
 class TestRegisterEphemeralPathGuard:
     """nexus-u8n4r review fix C1 (code-review-expert Critical): ``nx
     catalog register`` must refuse a worktree/tempdir path using the
@@ -423,6 +425,7 @@ class TestRegisterEphemeralPathGuard:
         assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 class TestListCommand:
     def test_list_entries(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -563,6 +566,7 @@ class TestListCommand:
 
 
 class TestSearchCommand:
+    @pytest.mark.t2_tenant
     def test_search(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, [
@@ -576,6 +580,7 @@ class TestSearchCommand:
         assert "authentication" in result.output
 
 
+@pytest.mark.t2_tenant
 class TestLinkCommands:
     def test_link_and_links(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -599,6 +604,7 @@ class TestLinkCommands:
         assert "1" in result.output  # removed count
 
 
+@pytest.mark.t2_tenant
 class TestLinksFilterCommand:
     def test_links_filter_by_type(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -723,6 +729,7 @@ class TestLinksFilterCommand:
         assert uniq.output.count("implements") == 1
 
 
+@pytest.mark.t2_tenant
 class TestUpdateCommand:
     def test_update_source_uri_recovery_path(
         self, initialized_catalog, catalog_env,
@@ -865,6 +872,7 @@ class TestMergeCommand:
     recipe TestUpdateCommand above exercises.
     """
 
+    @pytest.mark.t2_tenant
     def test_merge_moves_source_uri_and_resolves_to_canonical(
         self, initialized_catalog, catalog_env,
     ):
@@ -893,6 +901,7 @@ class TestMergeCommand:
         canon_data = json.loads(show_canon.stdout)
         assert canon_data["source_uri"] == "chroma://knowledge__delos//papers/dup.pdf"
 
+    @pytest.mark.t2_tenant
     def test_merge_refuses_self_merge_cleanly(
         self, initialized_catalog, catalog_env,
     ):
@@ -903,6 +912,7 @@ class TestMergeCommand:
         assert "Traceback" not in result.output
         assert "itself" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_merge_refuses_already_aliased_elsewhere_cleanly(
         self, initialized_catalog, catalog_env,
     ):
@@ -948,6 +958,7 @@ class TestMergeCommand:
         assert "re-running it is safe" in text
         assert writer.closed
 
+    @pytest.mark.t2_tenant
     def test_merge_remaps_a_link_and_reports_the_count(
         self, initialized_catalog, catalog_env,
     ):
@@ -976,6 +987,7 @@ class TestMergeCommand:
 
 
 class TestDeleteCommand:
+    @pytest.mark.t2_tenant
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -983,6 +995,7 @@ class TestDeleteCommand:
         assert result.exit_code == 0
         assert "Deleted" in result.output
 
+    @pytest.mark.t2_tenant
     def test_delete_not_found(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "delete", "1.1.999", "-y"])
@@ -1039,6 +1052,7 @@ class TestDeleteCommand:
 
 
 class TestLinkBulkDeleteCommand:
+    @pytest.mark.t2_tenant
     def test_link_bulk_delete_dry_run(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -1075,6 +1089,7 @@ class TestLinkAuditCommand:
         assert data["total"] == 1
 
 
+@pytest.mark.t2_tenant
 class TestOwnersCommand:
     def test_owners(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -1115,6 +1130,7 @@ _SHIPPED_BUILTIN_COUNT = len(list(
 
 
 class TestSeedPlanTemplates:
+    @pytest.mark.t2_tenant
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
         """All 17 RDR-078/092/097/098/nexus-h33x8 YAML templates seed on
         first run.
@@ -1142,6 +1158,7 @@ class TestSeedPlanTemplates:
         assert len(results) == _SHIPPED_BUILTIN_COUNT
         db.close()
 
+    @pytest.mark.t2_tenant
     def test_seed_idempotent(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
@@ -1152,6 +1169,7 @@ class TestSeedPlanTemplates:
         assert first == _SHIPPED_BUILTIN_COUNT
         assert second == 0
 
+    @pytest.mark.t2_tenant
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
@@ -1165,6 +1183,7 @@ class TestSeedPlanTemplates:
             assert "builtin-template" in p["tags"]
         db.close()
 
+    @pytest.mark.t2_tenant
     def test_setup_fails_loud_on_zero_global_tier(
         self, tmp_path, monkeypatch,
     ):
@@ -1192,6 +1211,7 @@ class TestSeedPlanTemplates:
             _seed_plan_templates()
         assert "global" in str(excinfo.value.message).lower()
 
+    @pytest.mark.t2_tenant
     def test_setup_fails_loud_when_global_tier_absent(
         self, tmp_path, monkeypatch,
     ):
@@ -1212,6 +1232,7 @@ class TestSeedPlanTemplates:
         msg = str(excinfo.value.message).lower()
         assert "global" in msg
 
+    @pytest.mark.t2_tenant
     def test_setup_surfaces_per_tier_errors_to_user(
         self, tmp_path, monkeypatch, capsys,
     ):
@@ -1249,6 +1270,7 @@ class TestSeedPlanTemplates:
         assert "broken.yml" in err
         assert "rdr-099" in err
 
+    @pytest.mark.t2_tenant
     def test_seed_templates_no_ttl(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
@@ -1261,6 +1283,7 @@ class TestSeedPlanTemplates:
             assert p["ttl"] is None
         db.close()
 
+    @pytest.mark.t2_tenant
     def test_setup_produces_dimensional_rows(self, tmp_path, monkeypatch):
         """RDR-092 Phase 0a regression: every seeded plan carries the
         dimensional identity columns (verb/name/dimensions) populated
@@ -1282,6 +1305,7 @@ class TestSeedPlanTemplates:
             assert p["scope"] == "global"
         db.close()
 
+    @pytest.mark.t2_tenant
     def test_legacy_templates_no_longer_ingested_non_dimensionally(
         self, tmp_path, monkeypatch,
     ):
@@ -1322,6 +1346,7 @@ class TestSeedPlanTemplates:
         assert not hasattr(mod, "_PLAN_TEMPLATES")
 
 
+@pytest.mark.t2_tenant
 class TestStatsCommand:
     def test_stats(self, initialized_catalog, catalog_env):
         runner = CliRunner()
@@ -1374,6 +1399,7 @@ class TestStatsCommand:
         assert "taxonomy" not in json.loads(js.stdout)
 
 
+@pytest.mark.t2_tenant
 class TestDiscoveryTools:
     def test_orphans_no_links(self, initialized_catalog, catalog_env):
         """Entries with no links are reported as orphans."""
@@ -1626,6 +1652,7 @@ class TestVerifyCommand:
         assert data["summary"]["lost_docs"] == 1
         assert data["summary"]["exit"] == 1
 
+    @pytest.mark.t2_tenant
     def test_verify_never_chunked_is_exit_neutral(self, catalog_env, monkeypatch):
         """chunk_count==0 + no manifest is report-only (RDR-145 manifest-less
         store_put notes): a clean corpus plus one never-chunked doc still
@@ -1884,6 +1911,7 @@ class TestVerifyCommand:
         human = runner.invoke(main, ["catalog", "verify"])
         assert "Ghost documents" not in human.output
 
+    @pytest.mark.t2_tenant
     def test_verify_scoped_mode_has_no_ghosts_key(self, initialized_catalog, catalog_env, monkeypatch):
         """Ghosts are a whole-catalog census (they have no collection to
         scope into by definition) -- `--collection` scoped mode must not
@@ -1900,6 +1928,7 @@ class TestVerifyCommand:
         assert "ghosts" not in data
         assert "ghost_docs" not in data["summary"]
 
+    @pytest.mark.t2_tenant
     def test_verify_full_mode_heal_refused(self, initialized_catalog, catalog_env):
         """--heal without --collection is refused — full mode has no
         per-document detail to heal from."""
@@ -1908,6 +1937,7 @@ class TestVerifyCommand:
         assert result.exit_code != 0
         assert "--collection" in result.output
 
+    @pytest.mark.t2_tenant
     def test_verify_heal_refused_with_json(self, initialized_catalog, catalog_env):
         """nexus-sj4a3 code-review SUGGESTION: --heal is interactive
         (click.prompt loops); combined with --json it would interleave
@@ -1982,6 +2012,7 @@ class TestVerifyCommand:
 
     # ── critique CRIT-1: never_chunked must not blanket-label RDR-145 ──────
 
+    @pytest.mark.t2_tenant
     def test_verify_never_chunked_breakdown_by_collection(self, catalog_env, monkeypatch):
         """nexus-sj4a3 substantive critique CRIT-1: RDR-145's 'legitimate by
         design' framing is scoped to knowledge__* store_put notes (empty
@@ -2038,6 +2069,7 @@ class TestVerifyCommand:
 
     # ── nexus-rqsh1: zero-content-by-design (verifiably unchunkable source) ─
 
+    @pytest.mark.t2_tenant
     def test_verify_never_chunked_zero_content_by_design_bucket(
         self, catalog_env, tmp_path, monkeypatch,
     ):
@@ -2105,6 +2137,7 @@ class TestVerifyCommand:
         # exemption error, which hid a population like this entirely).
         assert nc["total"] == zc["total"] + nc["unclassified"]["total"] + nc["rdr145_exempt"]["total"]
 
+    @pytest.mark.t2_tenant
     def test_verify_zero_content_by_design_honest_wording_in_human_report(
         self, catalog_env, tmp_path, monkeypatch,
     ):
@@ -2136,6 +2169,7 @@ class TestVerifyCommand:
         assert "will never chunk" in lower
         assert "tombstone" in lower
 
+    @pytest.mark.t2_tenant
     def test_verify_zero_content_degrades_gracefully_without_owners_with_roots(
         self, catalog_env, monkeypatch,
     ):
@@ -2298,6 +2332,7 @@ class TestVerifyCommand:
 
     # ── --collection scoped mode (real ActiveCatalog + mocked T3) ──────────
 
+    @pytest.mark.t2_tenant
     def test_verify_collection_filter(
         self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
@@ -2326,6 +2361,7 @@ class TestVerifyCommand:
         assert "In Scope" in result.output
         assert "Out Of Scope" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_verify_scoped_json_output(
         self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
@@ -2350,6 +2386,7 @@ class TestVerifyCommand:
         assert data["damaged"][0]["title"] == "Ghost"
         assert data["damaged"][0]["missing"] == 1
 
+    @pytest.mark.t2_tenant
     def test_verify_excludes_alias_rows(
         self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
@@ -2391,6 +2428,7 @@ class TestVerifyCommand:
             f"Alias row 'Alias Doc' appeared in verify output — alias filter broken:\n{result.output}"
         )
 
+    @pytest.mark.t2_tenant
     def test_verify_heal_drops_damaged(
         self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
@@ -2418,6 +2456,7 @@ class TestVerifyCommand:
         from tests._catalog_fixture_ops import documents_by_title
         assert documents_by_title("Ghost") == []
 
+    @pytest.mark.t2_tenant
     def test_verify_scoped_all_damaged_not_100_percent_clean(
         self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
@@ -2447,6 +2486,7 @@ class TestVerifyCommand:
         assert "100.0% clean" not in result.output
         assert "0.0% clean" in result.output
 
+    @pytest.mark.t2_tenant
     def test_coverage_report(self, initialized_catalog, catalog_env):
         """Coverage shows linked vs total count per content type."""
         runner = CliRunner()
@@ -2459,6 +2499,7 @@ class TestVerifyCommand:
         assert "code" in result.output
         assert "%" in result.output
 
+    @pytest.mark.t2_tenant
     def test_coverage_empty_catalog(self, initialized_catalog, catalog_env):
         """Empty catalog shows a graceful message."""
         runner = CliRunner()
@@ -2466,6 +2507,7 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         assert "No documents" in result.output
 
+    @pytest.mark.t2_tenant
     def test_coverage_with_owner_filter(self, initialized_catalog, catalog_env):
         """--owner filters by tumbler prefix."""
         runner = CliRunner()
@@ -2475,6 +2517,7 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         assert "%" in result.output
 
+    @pytest.mark.t2_tenant
     def test_suggest_links_no_candidates(self, initialized_catalog, catalog_env):
         """When no code-RDR pairs match, report zero suggestions."""
         runner = CliRunner()
@@ -2483,6 +2526,7 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         assert "0" in result.output or "No suggestions" in result.output
 
+    @pytest.mark.t2_tenant
     def test_suggest_links_finds_unlinked_pair(self, initialized_catalog, catalog_env):
         """Finds a code-RDR pair by module name overlap that has no existing link."""
         runner = CliRunner()
@@ -2497,6 +2541,7 @@ class TestVerifyCommand:
         # Should find the chunker → RDR pair
         assert "chunker" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_suggest_links_skips_already_linked(self, initialized_catalog, catalog_env):
         """Already-linked pairs are not suggested again."""
         runner = CliRunner()
@@ -2512,6 +2557,7 @@ class TestVerifyCommand:
         assert "chunker" not in result.output.lower() or "0" in result.output
 
 
+@pytest.mark.t2_tenant
 class TestLinkDensity:
     """Tests for `nx catalog link-density --by-collection` (RDR-097 P1.4)."""
 
@@ -2602,6 +2648,7 @@ class TestLinkDensity:
                 break
 
 
+@pytest.mark.t2_tenant
 class TestLinkGenerate:
     """Tests for `nx catalog link-generate` deprecation alias (nexus-2297).
 
@@ -2647,6 +2694,7 @@ class TestLinkGenerate:
 class TestLinkGenerateDeprecation:
     """nexus-2297: alias must emit the deprecation warning on stderr."""
 
+    @pytest.mark.t2_tenant
     def test_link_generate_alias_emits_deprecation_warning(
         self, initialized_catalog, catalog_env,
     ):
@@ -2659,6 +2707,7 @@ class TestLinkGenerateDeprecation:
         assert "generate-links" in result.output
 
 
+@pytest.mark.t2_tenant
 class TestAgentIntegration:
     """Tests for agent-facing discovery commands: links-for-file, session-summary."""
 
@@ -2763,6 +2812,7 @@ class TestAgentIntegration:
         assert "Link graph: 1 links active." in result.output, result.output
 
 
+@pytest.mark.t2_tenant
 class TestGcCommand:
     """Tests for `nx catalog gc` — remove orphan entries with miss_count >= 2."""
 
@@ -3219,6 +3269,7 @@ class TestWhh61MigrationCarve:
         assert result.exit_code != 0
         assert "no content-type prefix" in result.output
 
+    @pytest.mark.t2_tenant
     def test_migrate_fallback_registers_target_with_the_values_it_rendered_from(self):
         """nexus-ft04v.27: the registration loop must pass the SAME
         content_type/owner_id/embedding_model/model_version it did before

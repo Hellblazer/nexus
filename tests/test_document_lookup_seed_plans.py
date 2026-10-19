@@ -124,6 +124,7 @@ class TestDocumentDiscoverySeedPlansExist:
             )
 
 
+@pytest.mark.t2_tenant
 class TestDocumentDiscoveryPlanMatchReroute:
     """The load-bearing assertion: real cosine match + real classify."""
 
@@ -188,6 +189,7 @@ _SYNTHESIS_PHRASINGS = [
 ]
 
 
+@pytest.mark.t2_tenant
 class TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions:
     """Negative guard (nexus-h33x8.6 critic, T2 substantive-critique-
     h33x8.6-a3-a1-2026-08-19): a synthesis-shaped question ("compare X
@@ -253,6 +255,7 @@ class TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions:
             )
 
 
+@pytest.mark.t2_tenant
 class TestSingleQueryFastPathLiveThroughNxAnswer:
     """nexus-nyry9.5 (RDR-196 .r5): close the gap between "plan_match
     classifies as single_query" (proved above) and "nx_answer's Step 2

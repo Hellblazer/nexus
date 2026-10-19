@@ -272,6 +272,7 @@ def _cli_rows(bge_scored: bool, voy_scored: bool):
     ]
 
 
+@pytest.mark.t2_tenant
 def test_cli_both_groups_scored_merge_by_rerank_score(runner, cloud_env):  # noqa: F811
     res = _invoke(
         runner, _cli_t3(), _fake_retrieval(_cli_rows(True, True)), _CLI_ARGS,
@@ -282,6 +283,7 @@ def test_cli_both_groups_scored_merge_by_rerank_score(runner, cloud_env):  # noq
     assert [i["id"] for i in json.loads(res.stdout)] == ["v-hi", "v-mid", "b-rel"]
 
 
+@pytest.mark.t2_tenant
 def test_cli_one_group_degraded_falls_back_to_calibrated_order_with_the_warning(
     runner, cloud_env,  # noqa: F811
 ):
@@ -298,6 +300,7 @@ def test_cli_one_group_degraded_falls_back_to_calibrated_order_with_the_warning(
     assert [i["id"] for i in json.loads(res.stdout)] == ["b-rel", "v-mid", "v-hi"]
 
 
+@pytest.mark.t2_tenant
 def test_cli_unscored_tail_without_a_degrade_still_trails_the_scored_rows(
     runner, cloud_env,  # noqa: F811
 ):
@@ -350,11 +353,13 @@ def _mcp_search(query: str, rows: list[SearchResult], degraded: dict[str, dict])
         mcp_infra.inject_t3(None)
 
 
+@pytest.mark.t2_tenant
 def test_mcp_both_groups_scored_merge_by_rerank_score() -> None:
     out = _mcp_search("hf29s mcp both scored", _mcp_rows(True, True), {})
     assert out["ids"] == ["v-hi", "v-mid", "b-rel"]
 
 
+@pytest.mark.t2_tenant
 def test_mcp_one_group_degraded_falls_back_to_calibrated_order_with_the_note() -> None:
     out = _mcp_search(
         "hf29s mcp one degraded", _mcp_rows(False, True),
@@ -403,6 +408,7 @@ class _ModeT3:
         return client
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "mode, voyage_filtered, bge_filtered",
     [
@@ -424,6 +430,7 @@ def test_threshold_follows_the_collection_model_not_the_engine_mode(
     assert {"voy-near", "bge-near"} <= ids
 
 
+@pytest.mark.t2_tenant
 def test_an_explicit_threshold_override_still_applies_to_every_family(monkeypatch):
     t3 = _ModeT3.make(monkeypatch, "onnx-local")
     results = search_cross_corpus(

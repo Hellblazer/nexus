@@ -112,6 +112,7 @@ def _stub_t2_cascade(counts: dict[str, int] | None = None):
 # ── Catalog.rename_collection ───────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCatalogRename:
     def _seed(self, tmp_path: Path):
         # nexus-i711w terminal deletion: seeds through ActiveCatalog (live
@@ -316,6 +317,7 @@ class TestRenameCLI:
 # ── DocumentAspects.rename_collection (nexus-gp20) ─────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDocumentAspectsRename:
     """RDR-108 Phase 1d: ``document_aspects.collection`` is a denorm cache;
     rename_collection keeps it in sync with the T3 collection rename.
@@ -466,6 +468,7 @@ class TestCascadeOrchestration:
     per-store routing coverage: tests/test_t2_rename_cascade_service_mode.py).
     """
 
+    @pytest.mark.t2_tenant
     def test_successful_cascade_updates_all_legs(self, tmp_path: Path) -> None:
         from nexus.db.t2 import T2Database
 
@@ -534,6 +537,7 @@ class TestDocumentAspectsCollisionDefense:
     against Postgres through the engine-backed store.
     """
 
+    @pytest.mark.t2_tenant
     def test_pk_collision_source_side_wins(self, tmp_path: Path) -> None:
         """Pre-existing (new_collection, source_path) row is deleted before
         UPDATE so the UNIQUE (tenant, collection, source_path) natural key
@@ -605,6 +609,7 @@ class TestRemapCollectionReferences:
     guarding on target existence (the cross-model migrate already populated the
     target; the source is intentionally retained for re-runnability)."""
 
+    @pytest.mark.t2_tenant
     def test_repoints_t2_references_no_t3_rename(
         self, tmp_path: Path, env_creds,
     ) -> None:
@@ -629,6 +634,7 @@ class TestRemapCollectionReferences:
         t2db.rename_collection_cascade.assert_called_once_with(old=src, new=tgt)
         assert counts["chash"] == 2
 
+    @pytest.mark.t2_tenant
     def test_repoints_all_t2_cascade_tables(
         self, tmp_path: Path, env_creds,
     ) -> None:

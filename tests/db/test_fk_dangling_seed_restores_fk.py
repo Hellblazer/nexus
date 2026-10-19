@@ -24,6 +24,7 @@ import subprocess
 from pathlib import Path
 
 from tests._catalog_fixture_ops import ActiveCatalog, fk_dropped_for_dangling_seed
+import pytest
 
 _CONVALIDATED_SQL = (
     "SELECT con.convalidated FROM pg_constraint con "
@@ -54,6 +55,7 @@ def _psql_scalar(sql: str) -> str:
     return proc.stdout.strip()
 
 
+@pytest.mark.t2_tenant
 def test_seed_leaves_a_dangling_row_and_a_not_valid_fk_within_the_test() -> None:
     """Non-vacuity half: inside the seeding test the dangling row exists and
     the FK is NOT VALID. Without this the restore check below could pass on

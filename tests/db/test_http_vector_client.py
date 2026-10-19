@@ -137,6 +137,7 @@ class TestUpsertChunks:
         client.upsert_chunks("col", [], [])
         assert posted == []
 
+    @pytest.mark.t2_tenant
     def test_posts_to_upsert_chunks_endpoint_with_default_metadata(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
@@ -156,6 +157,7 @@ class TestUpsertChunks:
         # nexus-rvfwj: the upsert path alone gets the long CCE-batch timeout.
         assert timeout == 600
 
+    @pytest.mark.t2_tenant
     def test_embeddings_seam_b_behavior(self, monkeypatch):
         """Seam B: upsert_chunks_with_embeddings discards the caller's
         embeddings (server embeds server-side); upsert_chunks omits the
@@ -953,6 +955,7 @@ class TestFindIdsByTitle:
     AttributeError in service mode. Mirrors ids_for_source's where-filter
     pagination pattern (nexus-vhyua)."""
 
+    @pytest.mark.t2_tenant
     def test_paginates_collects_and_handles_no_matches(self, monkeypatch):
         # Two pages (300 then 2) -> single flat id list; second short page ends it.
         pages = [
@@ -1586,6 +1589,7 @@ class TestTaxonomyServiceModeGuard:
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
+    @pytest.mark.t2_tenant
     def test_taxonomy_assign_batch_hook_no_ops_cleanly_in_service_mode(
         self, monkeypatch
     ):
@@ -1913,6 +1917,7 @@ class TestEmbeddingFetchServiceModeRegression:
         assert failed == {1}
 
 
+@pytest.mark.t2_tenant
 class TestUpsertSkipExisting:
     """RDR-181 bead nexus-f0r8p.5: skip_existing is now a deprecation shim.
 
@@ -1979,6 +1984,7 @@ class TestUpsertSkipExisting:
         assert upserts[0]["ids"] == ["a", "b"]
 
 
+@pytest.mark.t2_tenant
 class TestSkipExistingDeprecationNotice:
     """RDR-181 bead nexus-f0r8p.5: skip_existing (kwarg or the
     NX_UPSERT_SKIP_EXISTING=1 env alias) fires a one-time structlog
@@ -2083,6 +2089,7 @@ class TestSkipExistingDeprecationNotice:
         ), f"expected http_vector_skip_existing_deprecated WARNING, got: {[(r.levelname, r.msg) for r in caplog.records]}"
 
 
+@pytest.mark.t2_tenant
 class TestForceReEmbed:
     """RDR-181 bead nexus-f0r8p.3: plumbing-only — thread force_re_embed onto
     the wire and map the deprecated NX_UPSERT_SKIP_EXISTING=0 escape to it.
@@ -2199,6 +2206,7 @@ class TestPostTypedErrorDetail:
             fp=io.BytesIO(body),
         )
 
+    @pytest.mark.t2_tenant
     def test_422_body_detail_and_fields_reach_the_message(self, monkeypatch):
         import json as _json
         import nexus.db.http_vector_client as hv
@@ -2262,6 +2270,7 @@ class TestUnregisteredCollectionMessage:
         assert "does not exist here" in text and "nx collection list" in text
         assert "/v1/catalog/collections/upsert" not in text
 
+    @pytest.mark.t2_tenant
     def test_the_write_retry_detector_still_recognises_it(self, monkeypatch):
         from nexus.corpus import _looks_like_stale_registration_error
 
@@ -2292,6 +2301,7 @@ class TestUnregisteredCollectionMessage:
             hv._get("/v1/vectors/x")
         assert exc.value.reason == "unregistered_collection"
 
+    @pytest.mark.t2_tenant
     def test_the_write_retry_detector_keys_on_the_reason(self, monkeypatch):
         from nexus.corpus import _looks_like_stale_registration_error
 
@@ -2310,6 +2320,7 @@ class TestUnregisteredCollectionMessage:
         assert exc.value.reason is None
         assert "'knowledge__nope__model-ctx__v1' is not registered" in str(exc.value)
 
+    @pytest.mark.t2_tenant
     def test_a_different_reason_is_not_rewritten_even_if_the_words_appear(self, monkeypatch):
         body = (b'{"error":"collection \'x\' is not registered here","reason":"something_else",'
                 b'"collection":"x"}')
@@ -2319,6 +2330,7 @@ class TestUnregisteredCollectionMessage:
         assert "does not exist here" not in str(exc.value)
         assert exc.value.reason == "something_else"
 
+    @pytest.mark.t2_tenant
     def test_another_422_is_untouched(self, monkeypatch):
         hv = self._raise(monkeypatch, body=b'{"error":"names a different model"}')
         with pytest.raises(VectorServiceError) as exc:
@@ -2390,6 +2402,7 @@ class TestManagedFailureReframe:
         assert exc.value.code == 401
         assert "NX_SERVICE_TOKEN" not in str(exc.value)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("err", ["urlerror", "connection", "timeout"])
     def test_connection_error_local_unchanged(self, monkeypatch, err):
         # NX_SERVICE_URL unset → local/lease topology → original error propagates
@@ -2717,6 +2730,7 @@ class TestEmbedWrite504BackoffFloor:
 # ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────
 
 
+@pytest.mark.t2_tenant
 def test_per_collection_chunk_cap_values(monkeypatch):
     """nexus-w3hzw (pre-v7.4.0) keyed the cap on the SERVING embedder family:
     unknown/voyage keeps the conservative timeout-derived split (64 CCE / 300

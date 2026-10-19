@@ -25,6 +25,8 @@ import pytest
 from nexus.commands.index import _CatalogBackedRegistry
 from nexus.corpus import effective_embedding_model_for_writes
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _adapter(tmp_path: Path) -> tuple[_CatalogBackedRegistry, MagicMock]:
     cat = MagicMock()

@@ -28,6 +28,7 @@ def _throwaway():
     return make_t3(_client=InMemoryVectorClient(), _ef_override=MagicMock())
 
 
+@pytest.mark.t2_tenant
 def test_preview_upsert_writes_into_an_in_memory_store() -> None:
     from nexus.doc_indexer import _preview_upsert
 

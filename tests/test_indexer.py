@@ -797,6 +797,7 @@ def test_since_head_run_with_nothing_stored_at_excluded_paths_skips_the_sweep(tm
     assert any("no deletions in delta" in p for p in phases), phases
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main
@@ -1970,6 +1971,7 @@ def _assert_int(r): assert isinstance(r, int) and not isinstance(r, bool)
 # ("signal") crossed with the kind-triple, so all 9 original signals keep
 # independent node ids ([code-int_not_bool], [code-zero_when_skipped], ...)
 # while the runner/kwargs boilerplate still collapses to one body.
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "runner,content_bytes,model,positive_kwargs,expected_positive",
     [

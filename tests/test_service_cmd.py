@@ -276,6 +276,7 @@ def test_probe_success_prints_capabilities(monkeypatch) -> None:
     assert "voyage" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_probe_failure_fails_loud(monkeypatch) -> None:
     from nexus.db import managed_endpoint as me
 

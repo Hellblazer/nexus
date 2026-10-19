@@ -197,6 +197,7 @@ def test_unattributed_upsert_is_refused(store):
     assert not posted
 
 
+@pytest.mark.t2_tenant
 def test_attributed_upsert_is_quiet(store):
     s, posted = store
     with capture_logs() as cap:
@@ -205,6 +206,7 @@ def test_attributed_upsert_is_quiet(store):
     assert not [e for e in cap if e.get("event") == "document_aspects_upsert_unattributed"]
 
 
+@pytest.mark.t2_tenant
 def test_upsert_rejected_by_the_engine_propagates_not_swallows(store, monkeypatch):
     """A stamped doc_id the catalog no longer has trips fk-001 engine-side;
     the store must let that surface (the worker routes it to retry/fail,

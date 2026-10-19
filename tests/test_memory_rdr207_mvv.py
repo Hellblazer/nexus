@@ -13,6 +13,9 @@ from __future__ import annotations
 from nexus.db.t2 import T2Database
 from nexus.memory_rollup import RollupGroup, rollup
 from tests._t2_fixture_ops import backdate_memory
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 PROJECT = "mvv-207"
 #: A content token no other row carries, so a search hit can only be this row.

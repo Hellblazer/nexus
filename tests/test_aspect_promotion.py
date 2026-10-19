@@ -175,6 +175,7 @@ class TestPromotionVerbRetired:
 # ── Audit-log read path (SQLite substrate) ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestHistoryReadPath:
     def test_empty_when_never_promoted(self, db_with_papers: Path) -> None:
         """A migrated T2 that never promoted anything has an empty log."""
@@ -224,6 +225,7 @@ class TestHistoryReadPath:
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCLI:
     def test_promote_invocation_prints_recipe_and_exits_two(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,

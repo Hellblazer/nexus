@@ -193,6 +193,7 @@ def fake_catalog(tmp_path: Path, monkeypatch):
     return cat, rdr, impl_a, impl_b
 
 
+@pytest.mark.t2_tenant
 def test_traverse_mcp_tool_resolves_purpose_and_calls_graph_many(
     fake_catalog,
 ) -> None:
@@ -217,6 +218,7 @@ def test_traverse_mcp_tool_resolves_purpose_and_calls_graph_many(
     assert "code__test" in result["collections"]
 
 
+@pytest.mark.t2_tenant
 def test_traverse_mcp_tool_accepts_explicit_link_types(
     fake_catalog,
 ) -> None:
@@ -235,6 +237,7 @@ def test_traverse_mcp_tool_accepts_explicit_link_types(
     assert str(impl_b) not in result["tumblers"]
 
 
+@pytest.mark.t2_tenant
 def test_traverse_mcp_tool_rejects_link_types_and_purpose_together(
     fake_catalog,
 ) -> None:

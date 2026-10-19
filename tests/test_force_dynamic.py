@@ -75,6 +75,7 @@ def _plan_run_success():
     return result
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.asyncio
 async def test_default_calls_plan_match() -> None:
     """force_dynamic=False (default): plan_match is called once."""

@@ -21,6 +21,8 @@ from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 # nexus-aqbrk: this pairs a LOCAL T3Database with the catalog's
 # document_chunks manifest — span resolution joins the two. Pointing the
 # catalog half at the service while the T3 half stays in-process is the

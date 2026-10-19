@@ -533,6 +533,7 @@ def test_vector_service_transport_failure_still_reports_unreachable(
     assert "authentication" not in line.detail.lower()
 
 
+@pytest.mark.t2_tenant
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:
     """RDR-144 P5a integration: when the user chose bge-768 but the [local]
     extra is missing (EF resolves to 384), `_check_t3_local` emits the
@@ -565,6 +566,7 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     assert "bge-768" in joined and "384" in joined
 
 
+@pytest.mark.t2_tenant
 def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatch) -> None:
     """nexus-ybw87: a --service install (pg_credentials present) embeds T3
     server-side in the Java service, so the PYTHON local-embedder advisory is
@@ -686,6 +688,7 @@ class TestManagedServiceProbeCheck:
         assert len(res) == 1 and res[0].ok is True
         assert "1.0-SNAPSHOT" in res[0].detail
 
+    @pytest.mark.t2_tenant
     def test_incompatible_is_soft_warn(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_URL", "https://x")
         from nexus.db import managed_endpoint as me
@@ -699,6 +702,7 @@ class TestManagedServiceProbeCheck:
         assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
         assert "0.9.0" in res[0].detail
 
+    @pytest.mark.t2_tenant
     def test_unreachable_is_soft_warn_not_double_fatal(self, monkeypatch):
         # reachability fatal is _check_vector_service's domain — stay soft here
         monkeypatch.setenv("NX_SERVICE_URL", "https://x")
@@ -712,6 +716,7 @@ class TestManagedServiceProbeCheck:
         assert len(res) == 1 and res[0].ok is False and res[0].warn is True and res[0].fatal is False
 
 
+@pytest.mark.t2_tenant
 def test_run_health_checks_survives_unresolvable_catalog_endpoint(monkeypatch, tmp_path) -> None:
     """nexus-<bead> regression: run_health_checks()'s OWN make_catalog_reader()
     call (feeding _check_catalog, distinct from _check_git_hooks' already-

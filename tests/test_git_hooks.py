@@ -758,6 +758,7 @@ class TestUpdateAll:
 # ── doctor stanza-drift check ──────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDoctorStanzaDrift:
     """nexus-mkj6u: nx doctor surfaces drift between installed stanza and
     current template, with a fix suggestion pointing at ``nx hooks update``."""
@@ -882,6 +883,7 @@ class TestDoctorStanzaDrift:
 # ── doctor git-hooks scope filter (nexus-jds59) ─────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDoctorGitHooksScope:
     """nexus-jds59: an automation harness (a sandbox shakedown)
     can restrict the stanza-drift walk to repos registered under a given
@@ -1016,6 +1018,7 @@ class TestDoctorDeadOwnerRendering:
         registry_path = cfg / "repos.json"
         registry_path.write_text(json.dumps({"repos": {str(repo_path): {}}}))
 
+    @pytest.mark.t2_tenant
     def test_vanished_owner_root_is_not_rendered_ok(self, tmp_path, monkeypatch):
         # Deliberately never created — mirrors the bench-index sandbox /
         # probe-checkout population that produced the S3 evidence. No
@@ -1039,6 +1042,7 @@ class TestDoctorDeadOwnerRendering:
         assert r.fatal is False, "a dead owner must not flip nx doctor's exit code"
         assert "no longer exist" in r.detail
 
+    @pytest.mark.t2_tenant
     def test_vanished_legacy_only_owner_suggests_removing_from_registry(
         self, tmp_path, monkeypatch
     ):
@@ -1151,6 +1155,7 @@ class TestDoctorDeadOwnerRendering:
             f"engine confirmed to lack the route: {r.fix_suggestions}"
         )
 
+    @pytest.mark.t2_tenant
     def test_exists_probe_raising_os_error_degrades_instead_of_crashing(
         self, tmp_path, monkeypatch
     ):
@@ -1186,6 +1191,7 @@ class TestDoctorDeadOwnerRendering:
         assert "could not check" in r.detail
         assert "simulated probe failure" in r.detail
 
+    @pytest.mark.t2_tenant
     def test_doctor_exit_code_unaffected_by_dead_owner(self, tmp_path, monkeypatch):
         """RDR-129 B4: a soft warning never flips nx doctor's failed flag —
         the bead is explicit that exit semantics for healthy owners (and,
@@ -1198,6 +1204,7 @@ class TestDoctorDeadOwnerRendering:
         _, failed = format_health_for_cli(results, local_mode=True)
         assert failed is False
 
+    @pytest.mark.t2_tenant
     def test_other_probe_failure_also_downgraded_honestly(self, tmp_path, monkeypatch):
         """A probe failure that is NOT a vanished root (e.g. a permission
         error, or any other exception surfaced by the git subprocess calls)
@@ -1256,6 +1263,7 @@ class TestDoctorDeadOwnerRendering:
             "--execute deactivate --no-dry-run --confirm" in s for s in r.fix_suggestions
         ), r.fix_suggestions
 
+    @pytest.mark.t2_tenant
     def test_legacy_only_non_repository_is_not_pointed_at_census(
         self, tmp_path, monkeypatch
     ):
@@ -1265,6 +1273,7 @@ class TestDoctorDeadOwnerRendering:
         assert "could not check" in r.detail
         assert not any("census" in s for s in (r.fix_suggestions or [])), r.fix_suggestions
 
+    @pytest.mark.t2_tenant
     def test_healthy_owner_still_renders_ok(self, runner, fake_repo, monkeypatch, tmp_path):
         """Kill control: a real, still-installed repo must be untouched by
         this fix — the honest-rendering change must not regress the happy

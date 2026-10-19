@@ -38,6 +38,8 @@ from nexus.catalog.multi_batch_write import (
 from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 from tests._module_seam import module_time
 
+pytestmark = pytest.mark.t2_tenant
+
 _COLLECTION = "docs__mbw-unit__bge-base-en-v15-768__v1"
 _DOC = "1.1.1"
 

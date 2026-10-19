@@ -11,6 +11,8 @@ from nexus.cli import main
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import backdate_memory, memory_row
 
+pytestmark = pytest.mark.t2_tenant
+
 # ── T2 database layer ───────────────────────────────────────────────────────
 
 

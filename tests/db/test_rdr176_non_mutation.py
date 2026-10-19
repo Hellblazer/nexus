@@ -37,6 +37,8 @@ from nexus.db.t2 import T2Database
 
 from tests._t2_fixture_ops import bootstrap_migration_source
 
+pytestmark = pytest.mark.t2_tenant
+
 #: The legacy version we stamp the seeded source DB to. Strictly below the
 #: current ``expected_t2_schema_version()`` (5.10.7 at authoring time) so the
 #: DB is "pending" and current code's bootstrap path would migrate + re-stamp

@@ -31,6 +31,8 @@ from nexus.corpus import _write_intent_embedding_model
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
 # embedding profile per (tenant, content_type) on first write — an explicit
 # "voyage-context-3" literal here conflicts with the box's real (bge)

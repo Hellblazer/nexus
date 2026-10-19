@@ -54,6 +54,7 @@ def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
     return ids
 
 
+@pytest.mark.t2_tenant
 class TestGenerateContextL1:
     """Core L1 cache generation from taxonomy topics."""
 
@@ -565,6 +566,7 @@ class TestSessionHookInjection:
 class TestRefreshContextL1:
     """Convenience wrapper that opens T2 and delegates."""
 
+    @pytest.mark.t2_tenant
     def test_refresh(self, tmp_path: Path) -> None:
         """refresh_context_l1 opens DB, generates, returns path."""
         from nexus.context import refresh_context_l1
@@ -601,6 +603,7 @@ class TestServiceModeL1(object):
             assert parent_id is None
             return list(self._rows)
 
+    @pytest.mark.t2_tenant
     def test_service_handle_generates_l1(self, tmp_path: Path) -> None:
         from nexus.context import generate_context_l1
 
@@ -620,6 +623,7 @@ class TestServiceModeL1(object):
         fake = self._FakeHttpTaxonomy([])
         assert generate_context_l1(fake, output_path=tmp_path / "l1.md") is None
 
+    @pytest.mark.t2_tenant
     def test_service_rows_sorted_client_side(self, tmp_path: Path) -> None:
         """Top-N selection depends on doc_count DESC ordering — the client
         must not trust wire ordering."""
@@ -634,6 +638,7 @@ class TestServiceModeL1(object):
         assert "T7" in text  # highest doc_count survives the top-5 cut
         assert "T1" not in text and "T2" not in text  # lowest two cut
 
+    @pytest.mark.t2_tenant
     def test_prefix_grouping_pinned_for_dunder_free_and_quarantine_names(
         self, tmp_path: Path,
     ) -> None:

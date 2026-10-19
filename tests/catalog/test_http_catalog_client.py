@@ -938,6 +938,7 @@ def start_fake_server() -> tuple[HTTPServer, str]:
 # ── _resolve_config tests ─────────────────────────────────────────────────────
 
 class TestResolveConfig:
+    @pytest.mark.t2_tenant
     def test_error_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Missing port
         monkeypatch.delenv("NX_SERVICE_PORT", raising=False)

@@ -38,6 +38,8 @@ from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.test_taxonomy import _seed_chunk
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture()
 def db(tmp_path: Path) -> Any:

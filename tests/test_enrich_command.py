@@ -39,6 +39,7 @@ def test_enrich_empty_collection(mock_bib: MagicMock, mock_t3_factory: MagicMock
     mock_bib.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
@@ -69,6 +70,7 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
     mock_bib.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.retry._vector_with_retry")
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
@@ -117,6 +119,7 @@ def test_enrich_updates_metadata(
     assert "enriched 2 chunks across 1 titles" in result.output
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
@@ -144,6 +147,7 @@ def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory
     assert "1 titles had no Semantic Scholar match" in result.output
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
@@ -179,6 +183,7 @@ def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) ->
 # ── nexus-57mk: --source flag + auto fallback + OpenAlex backend ────────────
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher_openalex.enrich")
 def test_enrich_source_openalex_routes_to_openalex_backend(
@@ -222,6 +227,7 @@ def test_enrich_source_openalex_routes_to_openalex_backend(
     assert "bib_semantic_scholar_id" not in metas[0]
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher.enrich")
@@ -261,6 +267,7 @@ def test_enrich_source_auto_falls_back_to_openalex_without_s2_key(
     mock_oa.assert_called_once_with("Paper Auto")
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.db.make_t3")
@@ -316,6 +323,7 @@ def test_enrich_openalex_prefers_doi_over_title_search(
     assert "via DOI/arXiv ID" in result.output
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.bib_enricher_openalex.enrich_by_arxiv_id")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
@@ -366,6 +374,7 @@ def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
     assert "via DOI/arXiv ID" in result.output
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
 @patch("nexus.bib_enricher_openalex.enrich")
@@ -442,6 +451,7 @@ def _backfill_catalog_env(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
+@pytest.mark.t2_tenant
 class TestBackfillCatalog:
     """nexus-9l2lg Task 4: ``nx enrich bib COLLECTION --backfill-catalog``
     re-derives the catalog bib_* write from already-enriched T3 chunk
@@ -681,6 +691,7 @@ def test_enrich_bare_subject_resolves_to_conformant_collection(
     assert resolved in result.output
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.retry._vector_with_retry")
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")

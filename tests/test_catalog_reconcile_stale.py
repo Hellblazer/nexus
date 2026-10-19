@@ -254,6 +254,7 @@ def _patch(monkeypatch, cat, t3, writer=None):
 
 
 class TestClassification:
+    @pytest.mark.t2_tenant
     def test_classify_all_classes(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         report, unreadable = reconcile_stale_mod._classify(cat, t3)
@@ -303,6 +304,7 @@ class TestClassification:
         vanished_has_row = next(r for r in report["vanished_has_manifest"] if r["tumbler"] == "1.10.2")
         assert vanished_has_row["chunk_count"] == 3
 
+    @pytest.mark.t2_tenant
     def test_per_collection_breakdown(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
         report, _ = reconcile_stale_mod._classify(cat, t3)
@@ -325,6 +327,7 @@ class TestClassification:
             {"collection": "knowledge__notes", "count": 1},
         ]
 
+    @pytest.mark.t2_tenant
     def test_rdr145_exempt_predicate_requires_knowledge_prefix_and_empty_paths(self):
         exempt = _FakeEntry(
             "2.1.1", "Note", physical_collection="knowledge__x", chunk_count=0,
@@ -340,6 +343,7 @@ class TestClassification:
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_wrong_prefix) == "unclassified"
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_has_path) == "unclassified"
 
+    @pytest.mark.t2_tenant
     def test_store_put_signature_reason_predicate(self):
         """nexus-0y0gk critique fix-round: unit-level pin of
         ``_store_put_signature_reason`` in isolation, independent of the
@@ -434,6 +438,7 @@ class TestClassification:
             == "knowledge_single_chunk_no_path"
         )
 
+    @pytest.mark.t2_tenant
     def test_post_sdp0u_store_put_doc_classifies_store_put_origin_not_exempt(self, tmp_path):
         """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4), UPDATED
         by the nexus-0y0gk critique fix-round: a post-fix ``store_put``
@@ -469,6 +474,7 @@ class TestClassification:
         assert {r["tumbler"] for r in store_put_origin} == {"5.1.1"}
         assert store_put_origin[0]["reason"] == "chroma_uri"
 
+    @pytest.mark.t2_tenant
     def test_dishonest_never_appears_in_any_action_list(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
         report, _ = reconcile_stale_mod._classify(cat, t3)
@@ -480,6 +486,7 @@ class TestClassification:
         )
         assert dishonest_tumblers.isdisjoint({r["tumbler"] for r in action_lists})
 
+    @pytest.mark.t2_tenant
     def test_dishonest_bucket_origin_covers_all_four_provenance_outcomes(self, tmp_path):
         """nexus-0y0gk (critique fix-round): the 3n7pr triage splits the
         dishonest population (chunk_count > 0, empty manifest) by origin --
@@ -568,6 +575,7 @@ class TestClassification:
         assert file_backed_row["origin"] == "reindex_candidate"
         assert file_backed_row["resolved_path"].endswith("src/present.py")
 
+    @pytest.mark.t2_tenant
     def test_unresolvable_provenance_never_appears_in_any_action_list(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
         report, _ = reconcile_stale_mod._classify(cat, t3)
@@ -579,6 +587,7 @@ class TestClassification:
         )
         assert unresolvable_tumblers.isdisjoint({r["tumbler"] for r in action_lists})
 
+    @pytest.mark.t2_tenant
     def test_nexus_6ims_resolution_uses_owner_root_not_cwd(self, tmp_path, monkeypatch):
         """Running from an unrelated cwd must not change classification."""
         cat, t3 = _mixed_cat(tmp_path)
@@ -660,6 +669,7 @@ class TestZeroContentByDesign:
         t3 = _FakeT3({"code__zc"})
         return cat, t3
 
+    @pytest.mark.t2_tenant
     def test_zero_byte_and_binary_classify_zero_content_by_design(self, tmp_path):
         cat, t3 = self._cat(tmp_path)
         report, unreadable = reconcile_stale_mod._classify(cat, t3)
@@ -672,6 +682,7 @@ class TestZeroContentByDesign:
         # never moved into the new bucket.
         assert {r["tumbler"] for r in report["zero_count_reindex_candidate"]} == {"1.60.3"}
 
+    @pytest.mark.t2_tenant
     def test_zero_content_rows_carry_resolved_path_and_manifest_len_zero(self, tmp_path):
         cat, t3 = self._cat(tmp_path)
         report, _ = reconcile_stale_mod._classify(cat, t3)
@@ -701,6 +712,7 @@ class TestZeroContentByDesign:
         # guessed into zero_content_by_design.
         assert _is_zero_content_by_design(missing) is False
 
+    @pytest.mark.t2_tenant
     def test_json_shape_includes_zero_content_by_design(self, tmp_path, monkeypatch):
         cat, t3 = self._cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -719,6 +731,7 @@ class TestZeroContentByDesign:
         # bucket (killing the nexus-cotmr round-1 exemption error).
         assert data["summary"]["total_docs"] == 3
 
+    @pytest.mark.t2_tenant
     def test_human_report_honest_wording_not_a_suppression(self, tmp_path, monkeypatch):
         cat, t3 = self._cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -733,6 +746,7 @@ class TestZeroContentByDesign:
         assert "tombstone" in lower
         assert "2 zero-content-by-design" in result.output
 
+    @pytest.mark.t2_tenant
     def test_tombstone_zero_content_dry_run_default_never_constructs_writer(
         self, tmp_path, monkeypatch,
     ):
@@ -747,6 +761,7 @@ class TestZeroContentByDesign:
         assert result.exit_code == 0, result.output
         assert "dry-run" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_tombstone_zero_content_confirmed_deletes_exact_set(self, tmp_path, monkeypatch):
         cat, t3 = self._cat(tmp_path)
         writer = _FakeWriter()
@@ -831,6 +846,7 @@ class TestIsWorktreeOrTempdirPath:
 
 
 class TestJsonOutput:
+    @pytest.mark.t2_tenant
     def test_json_shape(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -917,6 +933,7 @@ class TestJsonOutput:
 # ── Human report content ──────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestHumanReport:
     def test_vanished_chunk_count_visible_in_human_report(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
@@ -989,6 +1006,7 @@ class TestHumanReport:
 
 
 class TestGates:
+    @pytest.mark.t2_tenant
     def test_report_mode_never_constructs_writer(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -998,6 +1016,7 @@ class TestGates:
 
         assert result.exit_code == 0, result.output
 
+    @pytest.mark.t2_tenant
     def test_execute_dry_run_default_never_constructs_writer(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -1008,6 +1027,7 @@ class TestGates:
         assert result.exit_code == 0, result.output
         assert "dry-run" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_no_dry_run_without_confirm_is_report_only(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
@@ -1020,6 +1040,7 @@ class TestGates:
         assert result.exit_code == 0, result.output
         assert "--confirm" in result.output
 
+    @pytest.mark.t2_tenant
     def test_execute_recount_confirmed_resyncs_exact_set(self, tmp_path, monkeypatch):
         cat, t3 = _mixed_cat(tmp_path)
         writer = _FakeWriter()
@@ -1036,6 +1057,7 @@ class TestGates:
         assert writer.closed
         assert "nx catalog verify" in result.output
 
+    @pytest.mark.t2_tenant
     def test_execute_tombstone_vanished_confirmed_deletes_exact_empty_manifest_set(
         self, tmp_path, monkeypatch,
     ):
@@ -1058,6 +1080,7 @@ class TestGates:
         assert "1.10.2" not in deleted_strs
         assert "skipped" not in result.output.lower()  # no invariant violation to skip here
 
+    @pytest.mark.t2_tenant
     def test_execute_tombstone_orphaned_confirmed_deletes_exact_orphaned_set(
         self, tmp_path, monkeypatch,
     ):

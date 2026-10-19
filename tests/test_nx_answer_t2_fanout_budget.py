@@ -44,6 +44,8 @@ import pytest
 
 from nexus.db.storage_mode import T2_FACADE_STORES
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _instrument_t2_construction(monkeypatch) -> list[int]:
     """Wrap ``T2Database.__init__`` to COUNT constructions without faking

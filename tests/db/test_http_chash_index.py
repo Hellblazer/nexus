@@ -387,6 +387,7 @@ class TestDistinctCollections:
 
 
 class TestRenameCollection:
+    @pytest.mark.t2_tenant
     def test_rename_collection_repoints_rows(self, store):
         store.upsert(chash="c1", collection="old_col")
         store.upsert(chash="c2", collection="old_col")
@@ -395,6 +396,7 @@ class TestRenameCollection:
         with _STORE_LOCK:
             assert all(k[1] == "new_col" for k in _STORE)
 
+    @pytest.mark.t2_tenant
     def test_rename_collection_no_op_on_absent(self, store):
         assert store.rename_collection(old="no_such", new="target") == 0
 

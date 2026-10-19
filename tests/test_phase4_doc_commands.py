@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 from tests.conftest import make_vector_test_client
+import pytest
 
 
 # ── Shared seed helper ───────────────────────────────────────────────────────
@@ -243,6 +244,7 @@ class TestCheckExtensionsResolvesChashToDocId:
 # ── 4.3: nx doc render --expand-citations ────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRenderExpandCitations:
     def test_expand_citations_emits_footnote_block(self, tmp_path: Path):
         from nexus.commands.doc import render_cmd

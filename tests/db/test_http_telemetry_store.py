@@ -1860,6 +1860,7 @@ class TestGetRelevanceStatsAgainstRealEngine:
     ``tests/db/test_telemetry_retention_marker.py`` use for their own
     real-engine round trips."""
 
+    @pytest.mark.t2_tenant
     def test_relevance_stats_roundtrips_through_the_real_store(self, tmp_path):
         from nexus.db.t2 import T2Database
 

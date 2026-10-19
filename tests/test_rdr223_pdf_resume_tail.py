@@ -114,6 +114,7 @@ def stamp(monkeypatch):
     return calls
 
 
+@pytest.mark.t2_tenant
 def test_a_finished_upload_under_its_own_fence_is_stamped_without_a_writer(db, writer, fence, stamp) -> None:
     _leave_a_finished_upload(db, writer)
 
@@ -125,6 +126,7 @@ def test_a_finished_upload_under_its_own_fence_is_stamped_without_a_writer(db, w
     assert db.get_pipeline_state(_H) is None, "the buffer is cleaned up after the stamp"
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "state,fence_hash",
     [("complete", "other-bytes"), ("indexing", "other-bytes"), ("failed", _H), (None, "")],

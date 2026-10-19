@@ -171,6 +171,7 @@ class TestSessionCollisionRegression:
     from the now-clobbered file.
     """
 
+    @pytest.mark.t2_tenant
     def test_two_session_starts_race_the_flat_file_first_session_still_wins(
         self, tmp_path, monkeypatch
     ):

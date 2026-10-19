@@ -117,6 +117,7 @@ class _MismatchedModeT3:
 # ── the mismatch itself raises the named error ──────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_single_mismatched_collection_raises_named_error(cloud_mode: None) -> None:
     bad = "knowledge__seam-b-test__voyage-context-3__v1"
     t3 = _MismatchedModeT3({}, mismatched={bad})
@@ -136,6 +137,7 @@ def test_single_mismatched_collection_raises_named_error(cloud_mode: None) -> No
     assert bad in excinfo.value.mismatches
 
 
+@pytest.mark.t2_tenant
 def test_partial_mismatch_across_a_multi_collection_search_still_raises(cloud_mode: None) -> None:
     """The exact silent-empty-result shape the bead closes: one OTHER
     targeted collection is perfectly healthy, but the mismatch must still

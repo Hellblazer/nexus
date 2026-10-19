@@ -22,6 +22,8 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.types import SearchResult
 from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
+pytestmark = pytest.mark.t2_tenant
+
 _CLOUD_ENV = {
     "CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "v",
     "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d",

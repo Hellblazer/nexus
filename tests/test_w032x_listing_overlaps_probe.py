@@ -102,6 +102,7 @@ def test_client_built_before_the_probe_still_gets_the_probe_findings(
     assert client._embedding_mode_memo == "voyage"
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.usefixtures("cloud_mode")
 def test_failed_probe_raises_and_drops_the_prefetch(monkeypatch, stats) -> None:
     def failing_probe(*_a, **_k):

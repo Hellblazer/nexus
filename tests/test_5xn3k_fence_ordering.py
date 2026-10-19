@@ -205,6 +205,7 @@ def _drive_index_document(tmp_path: Path, seq: list, fence: _RecordingFenceWrite
     return n, hooks, register_calls
 
 
+@pytest.mark.t2_tenant
 def test_index_document_register_and_begin_precede_first_write(tmp_path) -> None:
     """The hoist (bead .4): doc_id resolution AND the fence begin must both
     land before the first write request — the fence needs a doc_id before
@@ -222,6 +223,7 @@ def test_index_document_register_and_begin_precede_first_write(tmp_path) -> None
     assert ops.index("register") < ops.index("begin") < ops.index("write"), seq
 
 
+@pytest.mark.t2_tenant
 def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> None:
     """Hash-once MUST: begin carries the file's actual sha256 — the same
     value the staleness gate and chunk metadata use — never a recompute."""
@@ -239,6 +241,7 @@ def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> No
     assert fence.begin_calls[0]["collection"] == COLLECTION
 
 
+@pytest.mark.t2_tenant
 def test_index_document_completion_is_its_own_request_after_the_hooks(tmp_path) -> None:
     """RDR-223 (nexus-z0o2p.13, decision D2): a document that fits one request is one
     write_manifest_many carrying its chunks and the sweep, and the completion stamp is its own
@@ -289,6 +292,7 @@ def test_index_document_no_catalog_identity_fails_the_run(tmp_path) -> None:
     assert [op for op, *_ in seq] == ["register"]
 
 
+@pytest.mark.t2_tenant
 def test_index_document_fresh_skip_never_registers(tmp_path) -> None:
     """Hoist-position control: a fresh-skip must NOT register a doc_id —
     _doc_id_for_path's read-only property on the staleness path is
@@ -365,6 +369,7 @@ def _drive_incremental(tmp_path: Path, seq: list, fence: _RecordingFenceWriter, 
     return total, hooks, t3
 
 
+@pytest.mark.t2_tenant
 def test_incremental_begin_before_first_write_complete_after_last_write(tmp_path) -> None:
     """n=130 forces TWO batches (_INCREMENTAL_BATCH_SIZE=128) so this pins
     the multi-batch shape, not a degenerate single-batch coincidence."""
@@ -396,6 +401,7 @@ def test_incremental_begin_before_first_write_complete_after_last_write(tmp_path
     assert all(c["manifest_complete"] is None for c in hooks.batch_calls)
 
 
+@pytest.mark.t2_tenant
 def test_incremental_failure_fails_fence_and_propagates(tmp_path) -> None:
     seq: list = []
     fence = _RecordingFenceWriter(seq, write_raises=RuntimeError("incremental write exploded"))
@@ -474,6 +480,7 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.pipeline_stages._POLL_INTERVAL", 0.01)
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_begin_before_first_write_complete_after_last_manifest(db) -> None:
     seq: list = []
     fence = _RecordingFenceWriter(seq, complete_result={
@@ -496,6 +503,7 @@ def test_pipeline_begin_before_first_write_complete_after_last_manifest(db) -> N
     assert all(not c["complete"] for c in fence.write_calls)
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_hash_once_between_begin_and_complete(db) -> None:
     seq: list = []
     fence = _RecordingFenceWriter(seq, complete_result={})
@@ -504,6 +512,7 @@ def test_pipeline_hash_once_between_begin_and_complete(db) -> None:
     assert fence.complete_calls[0]["content_hash"] == "e" * 64
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_failure_fails_fence_and_propagates_first_exc(db) -> None:
     seq: list = []
     fence = _RecordingFenceWriter(seq, write_raises=RuntimeError("upload exploded"))
@@ -515,6 +524,7 @@ def test_pipeline_failure_fails_fence_and_propagates_first_exc(db) -> None:
     assert fence.complete_calls == []
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_zero_chunks_routes_fail_never_complete_zero(db) -> None:
     """MUST (amendment 2026-08-02): a content-bearing document whose run
     produced zero chunks is a FAILURE — /fail, never /complete(0), which
@@ -527,6 +537,7 @@ def test_pipeline_zero_chunks_routes_fail_never_complete_zero(db) -> None:
     assert fence.fail_calls, "zero-chunk run must hit /index-run/fail"
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_verify_refused_propagates(db) -> None:
     """The engine's 409 refusal (typed IndexRunVerifyRefused) is the
     load-bearing fail-closed signal — it must propagate, never be swallowed
@@ -540,6 +551,7 @@ def test_pipeline_verify_refused_propagates(db) -> None:
         _run_pipeline(db, seq, fence)
 
 
+@pytest.mark.t2_tenant
 def test_pipeline_none_sentinel_is_a_failure_not_a_silent_success(db) -> None:
     """complete_index_run -> None (an engine with no fence route): the writer refuses to call the
     document stamped (RDR-223 Phase 1 ships in one engine cut, so this is a broken deploy, not a
@@ -669,6 +681,7 @@ def _client_with_response(response):
     return client, posts
 
 
+@pytest.mark.t2_tenant
 def test_client_sends_complete_map_and_parses_refusals() -> None:
     rows = [{"chash": "a" * 64, "position": 0}]
     client, posts = _client_with_response({
@@ -686,6 +699,7 @@ def test_client_sends_complete_map_and_parses_refusals() -> None:
     assert result["failed_doc_ids"] == []
 
 
+@pytest.mark.t2_tenant
 def test_client_omits_complete_key_when_none() -> None:
     rows = [{"chash": "a" * 64, "position": 0}]
     client, posts = _client_with_response({"failed_doc_ids": []})
@@ -696,6 +710,7 @@ def test_client_omits_complete_key_when_none() -> None:
     assert result["complete_refused_count"] == 0
 
 
+@pytest.mark.t2_tenant
 def test_client_pages_complete_entries_with_their_docs() -> None:
     """Paged posts must carry only the complete entries whose docs are in
     that page — a stamp request for a doc the page never wrote would verify

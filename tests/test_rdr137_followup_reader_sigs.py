@@ -89,6 +89,7 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
+@pytest.mark.t2_tenant
 class TestSig6FromCatalogDeterministicOrdering:
     def test_two_knowledge_collections_stable_winner(
         self, cat: Catalog, repo: Path,
@@ -169,6 +170,7 @@ class TestSig6FromCatalogDeterministicOrdering:
 
 
 class TestSig8DiffFieldsCatalogMissingEvent:
+    @pytest.mark.t2_tenant
     def test_catalog_empty_field_with_registry_value_emits_event(
         self, cat: Catalog, repo: Path, tmp_path: Path,
     ) -> None:

@@ -55,6 +55,8 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 
+pytestmark = pytest.mark.t2_tenant
+
 # ── shared fixtures ──────────────────────────────────────────────────────────
 
 

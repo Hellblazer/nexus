@@ -308,6 +308,7 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
     assert settled.ok is True, settled.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_real_sweep_carries_the_setup_row_and_settles_it_after_every_row_is_known(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

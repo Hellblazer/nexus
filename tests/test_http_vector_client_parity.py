@@ -795,6 +795,7 @@ class TestPutBehavior:
 # ── Behavior: upsert_chunks_with_embeddings collection_name kwarg ─────────────
 
 
+@pytest.mark.t2_tenant
 class TestUpsertChunksWithEmbeddingsKwarg:
     """The collection_name= kwarg form used by code_indexer, prose_indexer, exporter."""
 
@@ -849,6 +850,7 @@ class TestUpsertChunksWithEmbeddingsKwarg:
         assert calls[0]["collection"] == "code__nexus__minilm-l6-v2-384__v1"
 
 
+@pytest.mark.t2_tenant
 class TestUpsertChunksOversizedDropAndWarn:
     """nexus-xzyr3 fold-in round 2 (dev-suite-reds-2026-09-05-wave-fold):
     a document over ``QUOTAS.MAX_DOCUMENT_BYTES`` (16384) must NOT be
@@ -1186,6 +1188,7 @@ class TestExpire:
         )
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
+    @pytest.mark.t2_tenant
     def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):
         """Neutral model token on purpose (RDR-109 mode lint): the code__
         collection below is included only to prove it is EXCLUDED from
@@ -1232,6 +1235,7 @@ class TestExpire:
         deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
         assert deletes == [{"collection": self._KNOWLEDGE, "ids": ["expired1"]}]
 
+    @pytest.mark.t2_tenant
     def test_expire_paginates_and_accumulates_before_deleting(self, monkeypatch):
         posted = []
 

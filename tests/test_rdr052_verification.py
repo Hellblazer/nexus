@@ -79,6 +79,7 @@ class TestPathRouting:
     for the surviving (service-mode) combined-query path lives in
     tests/test_query_repoint.py."""
 
+    @pytest.mark.t2_tenant
     def test_subtree_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         t3.put(collection="code__nexus", content="tree sitter chunking", title="ts-chunk")
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
@@ -86,6 +87,7 @@ class TestPathRouting:
         assert result.startswith("Error:")
         assert "HttpVectorClient-backed" in result
 
+    @pytest.mark.t2_tenant
     def test_follow_links_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         t3.put(collection="knowledge__delos", content="schema data exchange", title="delos-chunk")
         t3.put(collection="knowledge__transformers", content="attention heads layers", title="trans-chunk")
@@ -93,11 +95,13 @@ class TestPathRouting:
         assert result.startswith("Error:")
         assert "HttpVectorClient-backed" in result
 
+    @pytest.mark.t2_tenant
     def test_no_catalog_params_backward_compat(self, t3):
         t3.put(collection="knowledge__test", content="vector database embeddings", title="vec-chunk")
         result = query(question="vector database", corpus="knowledge__test")
         assert not result.startswith("Error:")
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("kw", [
         {"author": "NonexistentPerson"},
         {"subtree": "9.9"},
@@ -107,6 +111,7 @@ class TestPathRouting:
         assert result.startswith("Error:")
         assert "HttpVectorClient-backed" in result
 
+    @pytest.mark.t2_tenant
     def test_subtree_document_level_returns_error(self, t3, catalog):
         result = query(question="anything", subtree="1.1.42")
         assert "document-level address" in result
@@ -119,6 +124,7 @@ class TestPathRouting:
         assert "catalog not initialized" in result.lower()
 
 
+@pytest.mark.t2_tenant
 class TestReferenceQuestions:
     """RDR-156 P4.2c (nexus-2bqpn): same non-service ``t3`` fixture as
     ``TestPathRouting`` above — catalog params now loud-reject rather than
@@ -148,6 +154,7 @@ class TestReferenceQuestions:
 # ── Templates and Plans ─────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestPlanTemplates:
     def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
         # RDR-092 Phase 0a: 12 YAML builtins (9 RDR-078 + 3 RDR-092
@@ -177,6 +184,7 @@ class TestPlanTemplates:
         db.close()
 
 
+@pytest.mark.t2_tenant
 class TestPlanTTL:
     @pytest.mark.parametrize("ttl,expected_ttl", [(30, 30), (None, None)])
     def test_save_plan_ttl(self, tmp_path, ttl, expected_ttl):
@@ -199,6 +207,7 @@ class TestPlanTTL:
         db.close()
 
 
+@pytest.mark.t2_tenant
 class TestPlanTTLEnforcement:
     @staticmethod
     def _save_backdated(db, query: str, *, days_old: int, ttl: int | None):
@@ -238,6 +247,7 @@ class TestPlanTTLEnforcement:
 
 
 class TestFollowLinksFallback:
+    @pytest.mark.t2_tenant
     def test_follow_links_no_seed_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         """RDR-156 P4.2c (nexus-2bqpn): this used to pin the dance's
         no-seed-found fallback to broad search (never a catalog-filter
@@ -253,6 +263,7 @@ class TestFollowLinksFallback:
         assert "No documents found matching catalog filters" not in result
 
 
+@pytest.mark.t2_tenant
 class TestTemplateRetrieval:
     def test_builtin_template_retrievable_by_query(self, tmp_path, monkeypatch):
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
@@ -328,6 +339,7 @@ class TestTumblerHierarchy:
         result = Tumbler.lca(Tumbler.parse(a), Tumbler.parse(b))
         assert result == (Tumbler.parse(expected) if expected else None)
 
+    @pytest.mark.t2_tenant
     def test_resolve_chunk_ghost_element(self, tmp_path):
         # nexus-i711w: runs against the live catalog (fresh per-test tenant),
         # so the deterministic first-owner/first-doc tumblers still hold.
@@ -341,6 +353,7 @@ class TestTumblerHierarchy:
         assert result["chunk_index"] == 3
         assert result["physical_collection"] == "code__nexus"
 
+    @pytest.mark.t2_tenant
     def test_resolve_chunk_out_of_range(self, tmp_path):
         from tests._catalog_fixture_ops import ActiveCatalog
         cat = ActiveCatalog()
@@ -352,6 +365,7 @@ class TestTumblerHierarchy:
         with pytest.raises(ValueError, match="non-negative"):
             Tumbler.parse("1.-1.42")
 
+    @pytest.mark.t2_tenant
     def test_descendants_any_depth(self, tmp_path):
         from tests._catalog_fixture_ops import ActiveCatalog
         cat = ActiveCatalog()

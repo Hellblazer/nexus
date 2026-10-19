@@ -246,6 +246,7 @@ GRACE_CASES: list[tuple[str, GraceCase, bool]] = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(("setup", "usable"), [(c[1], c[2]) for c in GRACE_CASES], ids=[c[0] for c in GRACE_CASES])
 def test_a_lease_past_its_ttl_is_judged_the_same_when_the_port_answers(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, notice: ModuleType,
@@ -291,6 +292,7 @@ def test_the_owner_check_wants_a_positive_integer_pid(endpoint: ModuleType) -> N
     assert endpoint._stale_owner_alive({**base}, 25.0, 10.0) is False, "no payload at all"
 
 
+@pytest.mark.t2_tenant
 def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType,
 ) -> None:
@@ -308,6 +310,7 @@ def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
     assert setup_tools.usable_service() is False
 
 
+@pytest.mark.t2_tenant
 def test_the_setup_process_does_not_share_the_wedged_owner_difference(
     monkeypatch: pytest.MonkeyPatch, nx_setup: ModuleType,
 ) -> None:
@@ -367,6 +370,7 @@ CASES += [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(("setup", "usable"), [(c[1], c[2]) for c in CASES], ids=[c[0] for c in CASES])
 def test_the_plugin_and_the_real_server_give_the_same_answer(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, notice: ModuleType,
@@ -389,6 +393,7 @@ def test_the_case_table_covers_each_leg_and_none() -> None:
     assert len({c[0] for c in CASES}) == len(CASES)
 
 
+@pytest.mark.t2_tenant
 def test_the_old_resolver_still_disagrees_on_a_saved_address_with_no_token(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType,
 ) -> None:

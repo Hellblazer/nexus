@@ -16,6 +16,7 @@ Four fixes validated here:
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+import pytest
 
 InvalidArgumentError = ValueError  # RDR-155 P4b P3: the substrate-neutral bad-argument type (was chromadb.errors.InvalidArgumentError)
 
@@ -140,6 +141,7 @@ class TestFix1SearchClientSideEmbed:
 class TestFix2WriteClientSideEmbed:
     """GUARD test: local-mode upsert must pass embeddings= to avoid server-side mismatch."""
 
+    @pytest.mark.t2_tenant
     def test_local_mode_upsert_chunks_passes_embeddings(self) -> None:
         """Fix 2 GUARD: upsert_chunks in local mode must supply embeddings."""
         fake_ef = _make_fake_ef(dim=384)
@@ -167,6 +169,7 @@ class TestFix2WriteClientSideEmbed:
         assert upsert_kwargs["embeddings"] is not None
         assert len(upsert_kwargs["embeddings"]) == 1
 
+    @pytest.mark.t2_tenant
     def test_local_mode_ef_called_during_upsert_chunks(self) -> None:
         """Fix 2: the EF is invoked for the documents during upsert_chunks."""
         fake_ef = MagicMock(name="ef")
@@ -211,6 +214,7 @@ class TestFix2WriteClientSideEmbed:
         # Mock EF should NOT be invoked for document embedding in cloud mode
         mock_ef.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_local_mode_upsert_respects_batch_size(self) -> None:
         """Fix 2: batching still works -- >300 docs must be split across multiple upsert calls."""
         n = 310

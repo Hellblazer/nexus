@@ -57,6 +57,7 @@ def test_hybrid_score_weights(vector_norm: float, frecency_norm: float, expected
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_hybrid_no_code_corpus_warning():
     """apply_hybrid_scoring records that no code__ collection is in scope.
 
@@ -1043,6 +1044,7 @@ class TestPerCollectionErrorIsolation:
         with pytest.raises(VectorServiceError, match="all 1 collections failed"):
             search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
 
+    @pytest.mark.t2_tenant
     def test_all_collections_dimension_mismatched_raises_named_error_not_generic(self):
         """fix round 2, point 2: the SAME all-failed shape, but with the
         dimension-mismatch class's canned message (the default
@@ -1174,6 +1176,7 @@ class TestDimensionMismatchLoggingQuieted:
         assert matches
         assert matches[0]["log_level"] == "warning"
 
+    @pytest.mark.t2_tenant
     def test_all_targeted_collections_dimension_mismatched_raises_named_error(self):
         """fix round 2, point 2: when the dimension-mismatch class consumes
         EVERY targeted collection (not a fraction), the call raises
@@ -1468,6 +1471,7 @@ class TestThresholdGateServiceMode:
         monkeypatch.setattr(client.__class__, "supports_per_collection_search", False)
         return client
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize(
         "mode, set_irrelevant_voyage_key, expected_ids",
         [

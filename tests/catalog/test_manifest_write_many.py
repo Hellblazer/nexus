@@ -37,6 +37,7 @@ def _client() -> HttpCatalogClient:
     return HttpCatalogClient.__new__(HttpCatalogClient)
 
 
+@pytest.mark.t2_tenant
 class TestWriteManifestMany:
     def test_single_post_and_row_shape(self, monkeypatch) -> None:
         c = _client()
@@ -174,6 +175,7 @@ class TestWriteManifestManyCombined:
                 collection="",
             )
 
+    @pytest.mark.t2_tenant
     def test_combined_wire_shape(self, monkeypatch) -> None:
         c = _client()
         posts: list[dict] = []
@@ -200,6 +202,7 @@ class TestWriteManifestManyCombined:
         assert body["force_re_embed"] is True
         assert result["chunks_written"] == 1
 
+    @pytest.mark.t2_tenant
     def test_ack_echo_raises_when_chunks_written_absent(self, monkeypatch) -> None:
         # design memo §5.2: the ONLY runtime capability signal — an old
         # engine silently drops the unknown `chunks` field with no error,
@@ -219,6 +222,7 @@ class TestWriteManifestManyCombined:
                 collection="code__nexus-1-1__model-code__v1",
             )
 
+    @pytest.mark.t2_tenant
     def test_no_chunks_sent_never_checks_ack(self, monkeypatch) -> None:
         # A call that never sends `chunks` must not raise even though the
         # response also lacks `chunks_written` — that key is only
@@ -235,6 +239,7 @@ class TestWriteManifestManyCombined:
         )
         assert "chunks_written" not in result
 
+    @pytest.mark.t2_tenant
     def test_sweep_fields_forwarded(self, monkeypatch) -> None:
         c = _client()
         monkeypatch.setattr(
@@ -311,6 +316,7 @@ class TestWriteManifestManyReachesGatewayRetryFloor:
         assert sleeps == [mod._EMBED_WRITE_504_BACKOFF_FLOOR_S]
 
 
+@pytest.mark.t2_tenant
 class TestWriteManifestManyCombinedTimeout:
     """nexus-y9t08: the combined write (``chunks=`` present) performs a
     SYNCHRONOUS server-side embed inside the request. The v7.5.0 regression
@@ -383,6 +389,7 @@ class TestWriteManifestManyCombinedTimeout:
         assert "timeout" not in calls[0]
 
 
+@pytest.mark.t2_tenant
 class TestCombinedWriteReadTimeoutNotRetried:
     """nexus-y9t08 CRITICAL 1 (post-127f2dbc correction): the 127f2dbc
     comment claimed the retained retry-on-timeout "matches the OLD path's

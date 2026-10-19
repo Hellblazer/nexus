@@ -47,6 +47,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROBE_DIR = REPO_ROOT / "service" / "smoke-probes"
@@ -107,6 +108,7 @@ def _assert_probe_ok(result: subprocess.CompletedProcess[str]) -> None:
 class TestT1RealClientProbe:
     """service/smoke-probes/t1_real_client.py against the engine substrate."""
 
+    @pytest.mark.t2_tenant
     def test_t1_probe_reports_ok(self) -> None:
         assert _T1_PROBE.is_file(), f"probe file missing: {_T1_PROBE}"
         result = _run_probe(
@@ -122,6 +124,7 @@ class TestT1RealClientProbe:
 class TestT2RealClientProbe:
     """service/smoke-probes/t2_real_client.py against the engine substrate."""
 
+    @pytest.mark.t2_tenant
     def test_t2_probe_reports_ok(self) -> None:
         assert _T2_PROBE.is_file(), f"probe file missing: {_T2_PROBE}"
         result = _run_probe(
@@ -137,6 +140,7 @@ class TestTuplesRealClientProbe:
     over the RDR-205/RDR-206 /v1/tuples surface, through the same real
     HttpTupleStore client native-smoke.sh's tuples block runs."""
 
+    @pytest.mark.t2_tenant
     def test_tuples_probe_reports_ok(self) -> None:
         assert _TUPLES_PROBE.is_file(), f"probe file missing: {_TUPLES_PROBE}"
         result = _run_probe(_TUPLES_PROBE, extra_env={})

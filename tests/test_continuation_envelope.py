@@ -199,6 +199,7 @@ class TestShapeBIdsAutoHydrationFidelity:
     goldens above — the ``"ids" in args`` branch calls ``store_get_many``
     and substitutes the operator's positional content arg)."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_extract_via_ids_hydration_byte_identical(self, monkeypatch):
         steps = [

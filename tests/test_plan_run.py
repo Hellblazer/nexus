@@ -469,6 +469,7 @@ async def test_run_resolves_step_ref_for_list_field() -> None:
     assert disp.calls[1] == ("extract", {"ids": ["a", "b", "c"]})
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.asyncio
 async def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     """Non-retrieval MCP tools return str (human-readable). The runner
@@ -494,6 +495,7 @@ async def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     assert isinstance(result["text"], str)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.asyncio
 async def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() -> None:
     """RDR-079 P1: search and query are auto-promoted to structured=True
@@ -1605,6 +1607,7 @@ class TestHydrateInputsTranslation:
         assert tool == f"operator_{op}"
         assert args["items"] == already_json
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize(
         "op, extra_kwarg",
         [
@@ -1636,6 +1639,7 @@ class TestHydrateInputsTranslation:
         assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
         assert args[key] == value
 
+    @pytest.mark.t2_tenant
     def test_groupby_truncation_metadata_attached_when_cap_fires(self):
         """RDR-093 S-1 fix: when ``_OPERATOR_MAX_INPUTS=100`` cap fires
         for a groupby step, the runner stashes truncation metadata
@@ -1670,6 +1674,7 @@ class TestHydrateInputsTranslation:
         loaded = json.loads(args["items"])
         assert len(loaded) == _OPERATOR_MAX_INPUTS
 
+    @pytest.mark.t2_tenant
     def test_groupby_no_truncation_metadata_when_below_cap(self):
         """When input is below the cap, no truncation metadata is
         attached. Runner-side wrapping is opt-in via the metadata
@@ -1690,6 +1695,7 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_groupby"
         assert "_truncation_metadata" not in args
 
+    @pytest.mark.t2_tenant
     def test_truncation_metadata_attaches_to_all_operators(self):
         """nexus-3j6b: the truncation-metadata mechanism originally
         scoped to operator_groupby (RDR-093 S-1) is generalised to
@@ -1733,6 +1739,7 @@ class TestHydrateInputsTranslation:
                 f"contract"
             )
 
+    @pytest.mark.t2_tenant
     def test_filter_truncation_metadata_attached_when_cap_fires(self):
         """nexus-3j6b acceptance criterion: filter must surface
         truncation metadata. Tracks the same shape as groupby's
@@ -1758,6 +1765,7 @@ class TestHydrateInputsTranslation:
             "kept_count": _OPERATOR_MAX_INPUTS,
         }
 
+    @pytest.mark.t2_tenant
     def test_extract_truncation_metadata_attached_when_cap_fires(self):
         """nexus-3j6b acceptance criterion: extract must surface
         truncation metadata. Extract uses the catch-all `inputs`
@@ -2255,6 +2263,7 @@ class TestZeroEvidenceShortCircuit:
     compare's "No comparison performed", the actual live q12 symptom).
     """
 
+    @pytest.mark.t2_tenant
     def test_ids_branch_sets_marker_when_all_empty(self):
         from unittest.mock import patch
 
@@ -2268,6 +2277,7 @@ class TestZeroEvidenceShortCircuit:
         assert "_zero_evidence_text" in args
         assert args["_zero_evidence_text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
 
+    @pytest.mark.t2_tenant
     def test_ids_branch_no_marker_when_some_content(self):
         from unittest.mock import patch
 
@@ -2292,6 +2302,7 @@ class TestZeroEvidenceShortCircuit:
         _, args = _hydrate_operator_args("compare", {"inputs": ["a", ""]})
         assert "_zero_evidence_text" not in args
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_ids_branch_all_empty_short_circuits_before_dispatch(self):
         from unittest.mock import patch
@@ -3190,6 +3201,7 @@ def test_describe_step_groupby_mirrors_standalone_prompt_invariants() -> None:
         )
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.asyncio
 async def test_default_dispatcher_groupby_truncation_pop_and_merge(monkeypatch) -> None:
     """RDR-093 Phase 1 follow-up (code-review S-1): end-to-end test
@@ -4999,6 +5011,7 @@ class TestHydrationCarriesDisplayTruncationMarker:
 
         monkeypatch.setattr(mcp_core, "store_get_many", fake_store_get_many)
 
+    @pytest.mark.t2_tenant
     def test_ids_branch_summarize_content_carries_marker(self, monkeypatch):
         from nexus.plans.runner import _hydrate_operator_args
 
@@ -5008,6 +5021,7 @@ class TestHydrationCarriesDisplayTruncationMarker:
         assert "TRUNCATED FOR DISPLAY" in args["content"]
         assert "NOT a defect" in args["content"]
 
+    @pytest.mark.t2_tenant
     def test_ids_branch_marker_rides_inside_json_items(self, monkeypatch):
         """rank/compare/filter receive a JSON list; the marker must ride
         inside the item string, where the model reads it."""
@@ -5033,6 +5047,7 @@ class TestHydrationCarriesDisplayTruncationMarker:
         _, args = _hydrate_operator_args("compare", {"inputs": [marked], "focus": "f"})
         assert "TRUNCATED FOR DISPLAY" in json.loads(args["items"])[0]
 
+    @pytest.mark.t2_tenant
     def test_short_document_is_not_marked(self, monkeypatch):
         """Marking an intact document would teach the model to discount a
         real truncation it should report."""

@@ -652,6 +652,7 @@ def _make_doc_indexer_db():
     return db, col
 
 
+@pytest.mark.t2_tenant
 def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
     """In service mode, _index_document must NOT attempt any non-service
     embed path — the service embeds server-side. Instead it hands the
@@ -697,6 +698,7 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
         )
 
 
+@pytest.mark.t2_tenant
 def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
     """In service mode, _index_document must hand its chunks to the combined
     chunk+owner write (RDR-223) rather than upsert them separately."""
@@ -734,6 +736,7 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
         assert not db.upsert_chunks_with_embeddings.called
 
 
+@pytest.mark.t2_tenant
 def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monkeypatch):
     """CLI deployment path: _index_document with t3=None in service mode must NOT
     raise CredentialsMissingError even when no Voyage/Chroma creds are set.

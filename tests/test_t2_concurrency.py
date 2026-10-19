@@ -25,6 +25,9 @@ import numpy as np
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id as _cid
 from tests.conftest import make_vector_test_client
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 # ── Cross-domain parallelism ─────────────────────────────────────────────────

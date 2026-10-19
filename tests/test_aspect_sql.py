@@ -190,6 +190,7 @@ class TestInfer:
 # ── try_filter ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestFilter:
     def test_filter_scalar_column_explicit_field(self, env: Path) -> None:
         items = _items("/papers/paxos.pdf", "/papers/raft.pdf",
@@ -363,6 +364,7 @@ class TestFilter:
 # ── RDR-096 P2.3 dual-read ──────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDualRead:
     """RDR-096 P2.3: operator SQL fast paths read identity via
     ``COALESCE(source_uri, 'file://' || source_path) AS source_identity``.
@@ -419,6 +421,7 @@ class TestDualRead:
 # ── try_groupby ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestGroupby:
     def test_groupby_extras_venue(self, env: Path) -> None:
         items = _items("/papers/paxos.pdf", "/papers/raft.pdf",
@@ -499,6 +502,7 @@ class TestGroupby:
 # ── try_aggregate ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestAggregate:
     def _groups_payload(self) -> str:
         """Build a groups JSON shape matching what operator_groupby
@@ -705,6 +709,7 @@ class TestAggregate:
 # ── Items shape gating ──────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestItemShapes:
     def test_filter_plain_text_items_falls_through(self, env: Path) -> None:
         result = aspect_sql.try_filter(

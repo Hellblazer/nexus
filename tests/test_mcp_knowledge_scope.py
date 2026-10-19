@@ -54,6 +54,7 @@ def test_the_store_scope_is_the_search_scope(scope) -> None:
     assert core._read_scope(t3, "knowledge") == [ALPHA, BETA]
 
 
+@pytest.mark.t2_tenant
 def test_store_get_by_id_with_the_default_finds_a_note_in_any_knowledge_collection(scope) -> None:
     _, ids = scope
     out = store_get(ids["b"])
@@ -61,6 +62,7 @@ def test_store_get_by_id_with_the_default_finds_a_note_in_any_knowledge_collecti
     assert f"Collection: {BETA}" in out
 
 
+@pytest.mark.t2_tenant
 def test_store_get_by_a_unique_title_with_the_default(scope) -> None:
     out = store_get("beta-note")
     assert "Beta note about vector clocks." in out, out

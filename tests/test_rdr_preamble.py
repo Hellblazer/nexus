@@ -412,6 +412,7 @@ _COMPANION_RESOLVER_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case, files, lookups", _COMPANION_RESOLVER_CASES,
                          ids=[c[0] for c in _COMPANION_RESOLVER_CASES])
 def test_resolver_skips_companions(rdr_env, case, files, lookups):
@@ -440,6 +441,7 @@ _COMPANION_SET_STATUS_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case, files, number, inspected, exit_code, status_text",
                          _COMPANION_SET_STATUS_CASES,
                          ids=[c[0] for c in _COMPANION_SET_STATUS_CASES])
@@ -492,6 +494,7 @@ _LIST_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_LIST_CASES))
 def test_rdr_list(rdr_env, case):
     """T2-seeded, file-fallback (empty T2) and missing-directory paths."""
@@ -518,6 +521,7 @@ _CREATE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_CREATE_CASES))
 def test_rdr_create(rdr_env, case):
     _write_files(rdr_env, case["files"])
@@ -542,6 +546,7 @@ _USAGE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("subcommand, has", _USAGE_CASES, ids=[c[0] for c in _USAGE_CASES])
 def test_no_argument_prints_usage(rdr_env, subcommand, has):
     _write_rdr(rdr_env["rdr_dir"], "rdr-001-hello-world.md", _HELLO)
@@ -576,6 +581,7 @@ _GATE_STRUCTURE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_GATE_STRUCTURE_CASES))
 def test_rdr_gate_section_and_gap_structure(rdr_env, case):
     _write_rdr(rdr_env["rdr_dir"], case["file"], case["fm"], body=case["body"])
@@ -616,6 +622,7 @@ _PLAN_GRAMMAR_BOUNDARY_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case, rdr_id, body, warns, grandfathered", _PLAN_GRAMMAR_BOUNDARY_CASES,
                          ids=[c[0] for c in _PLAN_GRAMMAR_BOUNDARY_CASES])
 def test_rdr_gate_plan_grammar_warning_boundary(rdr_env, case, rdr_id, body, warns, grandfathered):
@@ -722,6 +729,7 @@ _ACCEPT_STATUS_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_ACCEPT_STATUS_CASES))
 def test_rdr_accept_by_status(rdr_env, case):
     _write_rdr(
@@ -734,6 +742,7 @@ def test_rdr_accept_by_status(rdr_env, case):
     _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"])
 
 
+@pytest.mark.t2_tenant
 def test_rdr_accept_brief_names_the_disposition_rules(rdr_env):
     """The printed accept brief carries the residual rules: residuals recorded
     by a round-3+ gate are dispositioned at accept (nexus-g7zgw.2); a residual
@@ -767,6 +776,7 @@ def test_rdr_accept_brief_names_the_disposition_rules(rdr_env):
     assert _disposition_clause(skill) == _disposition_clause(out)
 
 
+@pytest.mark.t2_tenant
 def test_rdr_accept_preamble_opens_no_t2_client(rdr_env, monkeypatch) -> None:
     """nexus-yjf5l.8 / .18: preamble_rdr_accept prints instructions only; it
     never opens a T2 client itself, directly OR through a helper it calls. The
@@ -784,6 +794,7 @@ def test_rdr_accept_preamble_opens_no_t2_client(rdr_env, monkeypatch) -> None:
     assert "Planning Handoff" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_blank_status_key_is_an_empty_status_not_a_crash(rdr_env, monkeypatch):
     """nexus-u1jxt.10: ``status:`` with no value made rdr-accept (no id)
     die with AttributeError on ``None.lower()``."""
@@ -840,6 +851,7 @@ _RESEARCH_CONTEXT_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_RESEARCH_CONTEXT_CASES))
 def test_rdr_research_context(rdr_env, monkeypatch, case):
     _write_files(rdr_env, case["files"])
@@ -929,6 +941,7 @@ _AUDIT_MODE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case, argv, has", _AUDIT_MODE_CASES, ids=[c[0] for c in _AUDIT_MODE_CASES])
 def test_rdr_audit_modes(rdr_env, case, argv, has):
     result = _preamble(*argv)
@@ -936,6 +949,7 @@ def test_rdr_audit_modes(rdr_env, case, argv, has):
     _assert_output(case, result.output, has=has)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("env_root_holds_a_decoy", [False, True],
                          ids=["scans_the_checkout_it_runs_in", "current_checkout_beats_a_valid_env_root"])
 def test_rdr_audit_target_is_the_current_checkout(rdr_env, monkeypatch, env_root_holds_a_decoy):
@@ -1000,6 +1014,7 @@ _HEALTH_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_HEALTH_CASES))
 def test_rdr_audit_gate_loop_health(rdr_env, monkeypatch, case):
     if case["entries"] is None:
@@ -1127,6 +1142,7 @@ _REGATE_STATE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_REGATE_STATE_CASES))
 def test_regate_block_by_prior_gate_state(rdr_env, monkeypatch, case):
     sha = _git_commit_rdr(rdr_env, _REGATE_BODY, "gated")
@@ -1137,6 +1153,7 @@ def test_regate_block_by_prior_gate_state(rdr_env, monkeypatch, case):
     _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"], ordered=case["ordered"])
 
 
+@pytest.mark.t2_tenant
 def test_regate_with_an_unreachable_t2_is_a_named_note(rdr_env, monkeypatch):
     _write_regate_rdr(rdr_env)
     _use_t2(monkeypatch, client=_Boom())
@@ -1171,6 +1188,7 @@ _RECORDED_RESIDUAL_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_RECORDED_RESIDUAL_CASES))
 def test_recorded_residual_is_exempt_from_the_survivor_sweep(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1212,6 +1230,7 @@ _UNMATCHED_RESIDUAL_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case, residual, critique, expected", _UNMATCHED_RESIDUAL_CASES,
                          ids=[c[0] for c in _UNMATCHED_RESIDUAL_CASES])
 def test_unmatched_residual_is_named(rdr_env, monkeypatch, case, residual, critique, expected):
@@ -1289,6 +1308,7 @@ _RETIREMENT_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_RETIREMENT_CASES))
 def test_regate_retirement_from_the_sweep(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1345,6 +1365,7 @@ _SECOND_CRITIQUE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_SECOND_CRITIQUE_CASES))
 def test_regate_second_critique_note(rdr_env, monkeypatch, case):
     _write_regate_rdr(rdr_env)
@@ -1425,6 +1446,7 @@ _ROUND_PREAMBLE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_ROUND_PREAMBLE_CASES))
 def test_gate_round_number_in_the_preamble(rdr_env, monkeypatch, case):
     sha = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
@@ -1472,6 +1494,7 @@ _FIX_CHECK_FLAG_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_FIX_CHECK_FLAG_CASES))
 def test_fix_check_flags(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1506,6 +1529,7 @@ _FIX_CHECK_SCENARIOS = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_FIX_CHECK_SCENARIOS))
 def test_fix_check_section_by_git_state(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1521,6 +1545,7 @@ def test_fix_check_section_by_git_state(rdr_env, monkeypatch, case):
     _assert_output(name, out, has=fmt(case["has"]), lacks=fmt(case["lacks"]))
 
 
+@pytest.mark.t2_tenant
 def test_fix_check_git_log_failure_never_yields_a_fake_sha(rdr_env):
     """code review [24866] Important 3: a failed `git log` must not print `HEAD`
     as the tip sha the T2 title is keyed on."""
@@ -1578,6 +1603,7 @@ _FIX_STATE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_FIX_STATE_CASES))
 def test_rdr_fix_by_gate_state(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1639,6 +1665,7 @@ _FIX_SPLIT_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_FIX_SPLIT_CASES))
 def test_rdr_fix_round_three_splits_ship_blockers_from_residuals(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1884,6 +1911,7 @@ _VERDICT_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", _table(_VERDICT_CASES))
 def test_rdr_verdict_outcome(rdr_env, monkeypatch, case):
     name = case["name"]
@@ -1898,6 +1926,7 @@ def test_rdr_verdict_outcome(rdr_env, monkeypatch, case):
         assert out.count(needle) == n, f"[{name}] {needle!r} appears {out.count(needle)} times, want {n}:\n{out}"
 
 
+@pytest.mark.t2_tenant
 def test_already_gated_critique_is_named_as_a_recomputation(rdr_env, monkeypatch):
     """Critique [24898] Critical 2: the round is the next gate's; say so when
     the critique is already the recorded one."""
@@ -1914,6 +1943,7 @@ def test_already_gated_critique_is_named_as_a_recomputation(rdr_env, monkeypatch
     assert "assumes this critique is the new" in out
 
 
+@pytest.mark.t2_tenant
 def test_prior_chain_names_each_rounds_own_critique_never_the_upserted_latest_id(rdr_env, monkeypatch):
     """nexus-yjf5l.13: the real ``205-gate-latest`` record's ``prior:`` chain had
     four entries all reading ``[25098]``, the record's OWN T2 id, because
@@ -1963,6 +1993,7 @@ def test_prior_chain_names_each_rounds_own_critique_never_the_upserted_latest_id
     assert prior_line3.count(f"[{crit2_id}]") == 1, prior_line3
 
 
+@pytest.mark.t2_tenant
 def test_verdict_prints_the_one_line_revision_history_form(rdr_env, monkeypatch):
     """nexus-yjf5l.12: a gate round appends ONE Revision History line (date,
     round, outcome, critical and significant counts, ship-blockers, the gated
