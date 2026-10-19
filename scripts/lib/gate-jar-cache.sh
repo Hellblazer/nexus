@@ -94,10 +94,11 @@
 # says "at this time the jar was verified to be the one for this tree's build
 # inputs"; the jar's own mtime wins when something rewrote the jar later.
 #
-# WHAT A HIT STILL WRITES. No jar bytes. It copies the checkout's git index
-# (~0.5 MB) into a throwaway file to compute the key, rewrites that copy once
-# more (update-index --cacheinfo for the normalized release.properties), and
-# writes the 41-byte marker.
+# WHAT A HIT STILL WRITES. No jar bytes. It stages the key paths into an EMPTY
+# throwaway index (a few KB) to compute the key, rewrites that index once more
+# (update-index --cacheinfo for the normalized release.properties), and writes
+# the 41-byte marker. The index starts empty on purpose: the key must hash file
+# CONTENTS, never trust git's cached stat (see gate_jar_cache_key).
 #
 # `git add` writes the staged blobs into the repo's object store as ordinary
 # unreachable loose objects on a key computation; `git gc` / `git prune` reap
@@ -136,20 +137,22 @@ gate_jar_cache_key() {
     local idx listing p
     local -a paths=()
     for p in "${GATE_JAR_KEY_PATHS[@]}"; do
-        if [[ -e "$repo/$p" ]] || git -C "$repo" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+        # On disk only: the index starts empty, so a tracked path deleted from the
+        # worktree has nothing to stage and simply stays out of the key.
+        if [[ -e "$repo/$p" ]]; then
             paths+=("$p")
         fi
     done
     [[ ${#paths[@]} -gt 0 ]] || { echo "gate_jar_cache_key: none of ${GATE_JAR_KEY_PATHS[*]} exist in $repo" >&2; return 1; }
     idx="$(mktemp "${TMPDIR:-/tmp}/gate-jar-index.XXXXXX")"
-    # Start from the checkout's own index so `add -A` only re-hashes what
-    # changed; a missing index (fresh clone) just makes it slower.
-    # -p keeps the index file's mtime: git's racy-index check re-hashes an entry
-    # whose file mtime is not older than the index's own mtime. A plain cp gave
-    # the copy "now", so a same-size edit made in the same second as the last
-    # index write kept its cached stat and was never re-hashed (a stale key;
-    # seen on CI as ".mvn edit did not move the key", -Xmx1g -> -Xmx2g).
-    cp -p "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+    # An EMPTY index (git creates the file), never a copy of the checkout's:
+    # from a copy, `add -A` skips any entry whose cached stat still matches, so
+    # a same-size edit in the same second as the last index write, or one whose
+    # mtime was restored (touch -r, rsync -t, a cache restore), kept its old blob
+    # and the key went stale, i.e. a wrong cached jar could be reused (CI:
+    # ".mvn edit did not move the key", -Xmx1g -> -Xmx2g). Hashing every key path
+    # costs tens of ms (~370 files, ~9 MB); their blobs mostly exist already.
+    rm -f "$idx"
     if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- "${paths[@]}" >/dev/null 2>&1; then
         rm -f "$idx"
         echo "gate_jar_cache_key: could not stage ${paths[*]} into a throwaway index" >&2

@@ -120,6 +120,21 @@ for i in $(seq 1 40); do
   [[ "$ka" != "$kz" ]] || racy_misses=$((racy_misses + 1))
 done
 [[ $racy_misses -eq 0 ]] && ok "a same-size edit right after a commit moves the key (40/40 under core.checkStat=minimal, racy-index safe)" || bad "a same-size edit right after a commit kept the key in $racy_misses of 40 rounds (racy index)"
+# A same-size edit whose mtime is then RESTORED (touch -r, rsync -t, a cache
+# restore) is not racy: only content hashing sees it. Deterministic.
+r4="$WORKDIR/restored"; mkdir -p "$r4/service/src/main" "$r4/service/.mvn"
+git -C "$r4" init -q; git -C "$r4" config user.email t@t; git -C "$r4" config user.name t
+echo 'class A {}' > "$r4/service/src/main/A.java"; echo '<project/>' > "$r4/service/pom.xml"
+echo '-Xmx1g' > "$r4/service/.mvn/jvm.config"
+# An mtime well before the commit's index write, so the entry is NOT racy.
+: > "$r4/ref"
+python3 -c 'import os,sys,time; t=time.time()-60; [os.utime(f,(t,t)) for f in sys.argv[1:]]' "$r4/service/.mvn/jvm.config" "$r4/ref"
+git -C "$r4" add service && git -C "$r4" commit -qm base
+sleep 2
+kr0="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.checkStat GIT_CONFIG_VALUE_0=minimal gate_jar_cache_key "$r4" 0.1.0 "")"
+echo '-Xmx2g' > "$r4/service/.mvn/jvm.config"; touch -r "$r4/ref" "$r4/service/.mvn/jvm.config"
+kr1="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.checkStat GIT_CONFIG_VALUE_0=minimal gate_jar_cache_key "$r4" 0.1.0 "")"
+[[ -n "$kr0" && "$kr0" != "$kr1" ]] && ok "a same-size edit with its old mtime restored moves the key (content, not stat)" || bad "a same-size edit with a restored mtime kept the key (the key trusted cached stat)"
 git -C "$repo2" checkout -q -- service/.mvn/jvm.config
 echo '# changed' >> "$repo2/service/mvnw"
 kx="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
