@@ -821,11 +821,11 @@ class RawSqlGateTest {
      * over the catalog views, {@code Meta} for table existence), plus the
      * {@code DO $$ CREATE ROLE nexus_svc}-then-hand-rolled-Liquibase pairs in
      * the files touched onto {@code PgContainerHelper.applyProductSchema}
-     * (role-001 creates the role). Kept raw by decision: the pgjdbc
-     * plan-cache probe in {@code PgSessionStatementTimeoutIntegrationTest}
-     * (the test IS about reusing one JDBC PreparedStatement 8x; converted by
-     * the nexus-cbo4a 2026-10-19 review fold-in through {@code
-     * ResultQuery#keepStatement(true)}) and the {@code DO $$ ... LOOP} DDL blocks in
+     * (role-001 creates the role). Batch 7 kept raw the pgjdbc plan-cache
+     * probe in {@code PgSessionStatementTimeoutIntegrationTest} (the test is
+     * about reusing one JDBC PreparedStatement 8x); the nexus-cbo4a
+     * 2026-10-19 review fold-in later converted it through {@code
+     * ResultQuery#keepStatement(true)}. Still kept raw: the {@code DO $$ ... LOOP} DDL blocks in
      * {@code SharedCluster}/{@code Taxonomy011ForeignOwnedDiagViewTest}
      * (role/ownership DDL, not reads). Batch 7 also left the ~40 single-site
      * {@code DO $$ CREATE ROLE nexus_svc} bootstraps in files with no other
