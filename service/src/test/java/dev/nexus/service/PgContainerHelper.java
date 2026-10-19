@@ -74,10 +74,10 @@ public final class PgContainerHelper {
 
     /**
      * tmpfs cap for {@link #PGDATA}. Measured live containers on chas held 19 to 171 MB
-     * (most of it WAL before the max_wal_size=64MB setting below, a soft target); a cluster that outgrows this fails
+     * (most of it WAL before the max_wal_size=64MB setting below, a soft target). 1 GB was too tight: on CI the shared per-fork cluster hit ENOSPC in ChashVectorConcurrencyTest (72k concurrent vector re-upserts on top of the fork's other databases, run 39193706997), so the cap is 2 GB; a cluster that outgrows this fails
      * with "No space left on device" instead of eating host memory.
      */
-    public static final String TMPFS_SIZE = "1g";
+    public static final String TMPFS_SIZE = "2g";
 
     /**
      * Container memory limit (swap included). tmpfs pages are charged to the
@@ -86,7 +86,7 @@ public final class PgContainerHelper {
      * this limit is what bounds each one, and the pool reserves limit times the most
      * containers a run holds.
      */
-    public static final long MEMORY_LIMIT_BYTES = 1536L * 1024 * 1024;
+    public static final long MEMORY_LIMIT_BYTES = 2560L * 1024 * 1024;
 
     static long tmpfsSizeBytes() {
         return gibibytes(TMPFS_SIZE);
@@ -159,7 +159,7 @@ public final class PgContainerHelper {
 
     /**
      * {@link #newContainer(DockerImageName)} with a larger tmpfs and memory limit, for a
-     * test that loads more than the default 1 GB holds (the opt-in recall run). The
+     * test that loads more than the default 2 GB holds (the opt-in recall run). The
      * limit must exceed the tmpfs size, because tmpfs pages are charged to the container.
      */
     public static PostgreSQLContainer<?> newContainer(DockerImageName image, String tmpfsSize, long memoryBytes) {

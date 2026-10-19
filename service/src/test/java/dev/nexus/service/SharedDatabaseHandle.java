@@ -42,7 +42,7 @@ import java.util.Properties;
  * thrown: a leaked per-class database is a footprint residual for the remainder
  * of this fork's run, not a suite-correctness problem, so it must not fail an
  * otherwise-passing test's teardown. Since nexus-xynce that footprint is tmpfs
- * RAM counted against the cluster's 1 GB cap (a clone of the template is about
+ * RAM counted against the cluster's 2 GB cap (a clone of the template is about
  * 14 MB to start), so a class should still stop its handle.
  */
 final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandle> {
