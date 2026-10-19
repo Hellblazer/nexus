@@ -109,6 +109,63 @@ else
     bad "lease still held after mvnw-leased.sh exited"
 fi
 
+# ── Test 1b: --lab-run <class> takes the lease FIRST, then runs mvnw under
+# lab-run (nexus-iqmih). Waiting for the lease inside a lab grant held pool
+# cores and memory while a single holder built; outside it, the wait costs
+# nothing. The stub lab-run records its args, whether the lease was already
+# held when it started, and runs the command it was given.
+echo "Test 1b: --lab-run <class> acquires the lease, then runs mvnw under lab-run"
+stubbin="$WORKDIR/stubbin"
+mkdir -p "$stubbin"
+cat > "$stubbin/lab-run" <<STUB
+#!/usr/bin/env bash
+{
+    echo "LABRUN_ARGS=\$*"
+    if [[ -f "$leasedir/pid" ]]; then echo "LEASE_HELD_AT_START=yes"; else echo "LEASE_HELD_AT_START=no"; fi
+} > "\$LABRUN_STUB_MARKER"
+[[ "\$1" == "-c" && "\$3" == "--" ]] || exit 64
+shift 3
+exec "\$@"
+STUB
+chmod +x "$stubbin/lab-run"
+marker1b="$WORKDIR/stub-invocation-1b.txt"
+labmarker="$WORKDIR/labrun-invocation.txt"
+rm -f "$marker1b" "$labmarker"
+PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$labmarker" MVNW_STUB_MARKER="$marker1b" \
+    "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test -Dtest=Foo
+rc1b=$?
+if [[ $rc1b -eq 0 ]]; then ok "wrapper exited 0 under --lab-run"; else bad "wrapper exited $rc1b under --lab-run"; fi
+labcontent="$(cat "$labmarker" 2>/dev/null)"
+if [[ "$labcontent" == *"LABRUN_ARGS=-c lab-m -- ./mvnw -q test -Dtest=Foo"* ]]; then
+    ok "lab-run got the class and ./mvnw with the args untouched"
+else
+    bad "lab-run args mismatch: ${labcontent:-<lab-run never invoked>}"
+fi
+if [[ "$labcontent" == *"LEASE_HELD_AT_START=yes"* ]]; then
+    ok "the lease was already held when lab-run started (lease before grant)"
+else
+    bad "lab-run started without the lease held: $labcontent"
+fi
+if [[ "$(cat "$marker1b" 2>/dev/null)" == *"ARGS=-q test -Dtest=Foo"* ]]; then
+    ok "mvnw ran inside lab-run with the args untouched"
+else
+    bad "mvnw was not run inside lab-run"
+fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released after the --lab-run build"; else bad "lease still held after the --lab-run build"; fi
+
+echo "Test 1c: --lab-run with no lab-run on PATH fails loud and takes no lease"
+marker1c="$WORKDIR/stub-invocation-1c.txt"
+rm -f "$marker1c"
+out1c="$(PATH="/usr/bin:/bin" MVNW_STUB_MARKER="$marker1c" "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test 2>&1)"
+rc1c=$?
+if [[ $rc1c -eq 127 ]]; then ok "rc 127 when lab-run is missing"; else bad "rc $rc1c (expected 127): $out1c"; fi
+if [[ ! -f "$marker1c" && ! -d "$leasedir" ]]; then ok "no mvnw run, no lease left"; else bad "mvnw ran or the lease was left held"; fi
+
+echo "Test 1d: --lab-run without a class is a usage error"
+out1d="$(MVNW_STUB_MARKER="$WORKDIR/unused" "$repo/scripts/mvnw-leased.sh" --lab-run 2>&1)"
+rc1d=$?
+if [[ $rc1d -eq 64 ]]; then ok "rc 64 for --lab-run with no class"; else bad "rc $rc1d (expected 64): $out1d"; fi
+
 # ── Test 2: refuses (rc 75) and never invokes mvnw when the lease is held ─
 echo "Test 2: mvnw-leased.sh refuses when the lease is already held"
 bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_acquire service || exit 9; sleep 10" &
@@ -129,6 +186,11 @@ else
     rc2=$?
     if [[ $rc2 -eq 75 ]]; then ok "wrapper refused with rc 75"; else bad "wrapper returned rc $rc2 (expected 75): $out2"; fi
     if [[ ! -f "$marker2" ]]; then ok "fake mvnw was never invoked while lease was held"; else bad "fake mvnw ran despite the lease being held"; fi
+    # nexus-iqmih: inside a lab-run grant (LAB_CPUS set), waiting on a live
+    # holder is named on stderr; outside one it is not.
+    out2w="$(LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    if [[ "$out2w" == *"inside a lab-run grant holds its cores"* ]]; then ok "inside a grant, a held lease is warned about"; else bad "no inside-grant warning: $out2w"; fi
+    if [[ "$out2" != *"inside a lab-run grant"* ]]; then ok "outside a grant, no warning"; else bad "warned outside a grant: $out2"; fi
 fi
 kill -9 "$holder_pid" 2>/dev/null
 wait "$holder_pid" 2>/dev/null

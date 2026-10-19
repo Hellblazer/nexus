@@ -5,7 +5,11 @@
 # same time (see scripts/lib/build-lease.sh for the mechanism and the
 # incident that motivated it).
 #
-# usage: scripts/mvnw-leased.sh [mvnw args...]
+# usage: scripts/mvnw-leased.sh [--lab-run <class>] [mvnw args...]
+#
+# On a lab pool host (chas, qwent) pass --lab-run <class> rather than
+# wrapping this script in lab-run: the lease is then taken before the pool
+# grant, so a build waiting its turn holds no cores (nexus-iqmih).
 #
 # A live holder is WAITED FOR (nexus-g6xpa): the lease is shared by every
 # worktree of this repo (see scripts/lib/build-lease.sh § LEASE LOCATION),
@@ -49,6 +53,32 @@ set -m
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=./lib/build-lease.sh disable=SC1091
 source "$repo_root/scripts/lib/build-lease.sh"
+
+# --lab-run <class> (nexus-iqmih): run the build as `lab-run -c <class> --
+# ./mvnw ...` AFTER taking the lease. The other order, `lab-run -- this
+# script`, waits for the lease inside the pool grant: on chas two lab-m
+# grants sat idle behind one lease holder while other requests queued
+# behind them. Waiting here, outside any grant, holds no cores or memory.
+lab_class=""
+if [[ "${1:-}" == "--lab-run" ]]; then
+    if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+        echo "mvnw-leased.sh: --lab-run needs a class (lab-s, lab-m, lab-l, ...)" >&2
+        exit 64
+    fi
+    lab_class="$2"
+    shift 2
+    if ! command -v lab-run >/dev/null 2>&1; then
+        echo "mvnw-leased.sh: --lab-run $lab_class given but lab-run is not on PATH" >&2
+        exit 127
+    fi
+elif [[ -n "${LAB_CPUS:-}" ]]; then
+    # Already inside a lab-run grant: a wait for the lease from here holds
+    # the grant's cores. Say so once; the build still runs.
+    holder_pid="$(cat "$(_build_lease_dir service)/pid" 2>/dev/null || true)"
+    if [[ -n "$holder_pid" ]] && _build_lease_pid_alive "$holder_pid"; then
+        echo "mvnw-leased.sh: WARNING: waiting for the build lease (held by pid $holder_pid) inside a lab-run grant holds its cores; run 'scripts/mvnw-leased.sh --lab-run <class> ...' outside lab-run instead" >&2
+    fi
+fi
 
 build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
 
@@ -100,7 +130,11 @@ trap '_forward_signal INT' INT
 trap '_forward_signal TERM' TERM
 
 cd "$repo_root/service"
-./mvnw "$@" &
+if [[ -n "$lab_class" ]]; then
+    lab-run -c "$lab_class" -- ./mvnw "$@" &
+else
+    ./mvnw "$@" &
+fi
 child_pid=$!
 child_pgid="$child_pid"
 build_lease_track_pid service "$child_pgid"
