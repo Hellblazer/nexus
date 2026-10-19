@@ -1,0 +1,29 @@
+# DDL statements one full run of each suite may execute (nexus-sz651, epic nexus-aca0q).
+#
+# Reduce-only: scripts/ddl_ratchet.py fails a run whose measured count is above `ceiling`.
+# Lower a ceiling in the commit that lowers the count; raising one needs a reviewed reason in
+# that commit's message. The count is the sum of every bucket the suite's reports carry
+# (python: migration + tests; java: shared_migration + shared_tests + dedicated), measured as
+# tests/_ddl_counter.py and service/src/test/java/dev/nexus/service/DdlLogParser.java define it.
+#
+# `basis` is the parallelism the ceiling was measured at: pytest-xdist workers for python_unit
+# (each worker boots and migrates its own cluster), surefire forks for the java suites (each fork
+# migrates its own template). A run at another width is not comparable, so the check refuses it
+# rather than passing or failing it on a number it cannot compare.
+#
+# "measure" means no full-run measurement exists yet. The check then FAILS and prints the count it
+# just measured; the first full run (the pool restart Sam is waiting on) supplies the numbers,
+# and the follow-up commit replaces each "measure" with an integer. A ceiling nobody set must not
+# pass a run.
+
+[python_unit]
+ceiling = "measure"
+basis = "measure"
+
+[java_main]
+ceiling = "measure"
+basis = "measure"
+
+[java_integration]
+ceiling = "measure"
+basis = "measure"
