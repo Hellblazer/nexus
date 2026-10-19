@@ -96,6 +96,24 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
     // nexus-sz651: DDL-per-run counting. The log is read once, at stop() or JVM exit.
     private volatile boolean ddlShared;
     private volatile String ddlOwner = "unknown";
+    // False when the counter was switched off (-Dnexus.ddl.count=false) as this container was built:
+    // it then carries none of the counter's settings, so it is neither registered nor read.
+    private volatile boolean ddlCounted = true;
+
+    /** Whether this container was built with the counter's settings (see {@link DdlCounts#enabled()}). */
+    FailFastPostgreSQLContainer ddlCounted(boolean counted) {
+        this.ddlCounted = counted;
+        return this;
+    }
+
+    boolean ddlCounted() {
+        return ddlCounted;
+    }
+
+    /** The wait strategy this container will start with (a test reads it; the field is protected). */
+    org.testcontainers.containers.wait.strategy.WaitStrategy ddlWaitStrategy() {
+        return getWaitStrategy();
+    }
 
     /** This container is the per-fork shared cluster (its logs split at the template's ready mark). */
     FailFastPostgreSQLContainer ddlSharedCluster() {
@@ -119,7 +137,9 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
     @Override
     public void start() {
         super.start();
-        DdlCounts.register(this);
+        if (ddlCounted) {
+            DdlCounts.register(this);
+        }
     }
 
     @Override

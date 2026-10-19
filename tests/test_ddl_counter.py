@@ -458,3 +458,86 @@ def test_a_session_that_never_booted_a_substrate_prints_nothing(pytester, monkey
     result.assert_outcomes(passed=1)
     assert not re.search(r"^ddl:", result.stdout.str(), re.MULTILINE)
     assert not (tmp_path / "ddl-report" / ddl.REPORT_NAME).exists()
+
+
+# ── the off switch (nexus-3cwsw) ─────────────────────────────────────────────
+
+
+def test_the_off_switch_defaults_on_and_parses_strictly() -> None:
+    assert ddl.enabled({}) is True
+    assert ddl.enabled({ddl.COUNT_ENV: "1"}) is True
+    assert ddl.enabled({ddl.COUNT_ENV: "0"}) is False
+    for typo in ("", "off", "false", "no", "00"):
+        with pytest.raises(ValueError, match=ddl.COUNT_ENV):
+            ddl.enabled({ddl.COUNT_ENV: typo})  # a typo must not leave the counter silently on
+
+
+def test_log_conf_is_empty_with_the_counter_off(monkeypatch) -> None:
+    monkeypatch.delenv(ddl.COUNT_ENV, raising=False)
+    assert ddl.log_conf() == ddl.LOG_CONF != ""
+    monkeypatch.setenv(ddl.COUNT_ENV, "0")
+    assert ddl.log_conf() == ""
+
+
+def test_a_session_with_the_counter_off_prints_and_writes_nothing(pytester, monkeypatch, tmp_path) -> None:
+    """The positive control is test_a_serial_run_prints_and_writes_the_counts: same fake substrate,
+    same plugin, counter on. With NX_DDL_COUNT=0 the plugin is not registered at all."""
+    monkeypatch.setenv(ddl.COUNT_ENV, "0")
+    result = _fake_substrate_run(pytester, monkeypatch, tmp_path=tmp_path, args=(), subprocess=False)
+    result.assert_outcomes(passed=8)
+    assert not re.search(r"^ddl:", result.stdout.str(), re.MULTILINE)
+    assert not (tmp_path / "ddl-report").exists()
+    assert not any(tmp_path.rglob(ddl.REPORT_NAME))
+
+
+_GATED_NAMES = frozenset({"PROBE_SQL", "mark_sql", "LOG_CONF"})
+
+
+def _ungated_counter_uses(source: str) -> tuple[list[int], int]:
+    """Lines where ``source`` uses a counter piece (the probe SQL, a mark, the raw logging lines) outside
+    an ``if ddl_count_enabled():`` body, and how many uses it found in all."""
+    import ast  # noqa: PLC0415
+
+    def is_guard(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.If) and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Name) and node.test.func.id == "ddl_count_enabled"
+        )
+
+    ungated: list[int] = []
+    total = 0
+
+    def walk(node: ast.AST, guarded: bool) -> None:
+        nonlocal total
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return
+        if isinstance(node, ast.Name) and node.id in _GATED_NAMES:
+            total += 1
+            if not guarded:
+                ungated.append(node.lineno)
+        for field, value in ast.iter_fields(node):
+            children = value if isinstance(value, list) else [value]
+            for child in children:
+                if isinstance(child, ast.AST):
+                    walk(child, guarded or (is_guard(node) and field == "body"))
+
+    walk(ast.parse(source), False)
+    return ungated, total
+
+
+def test_the_substrate_uses_the_probe_and_marks_only_behind_the_switch() -> None:
+    source = (REPO_ROOT / "tests" / "_engine_substrate.py").read_text()
+    ungated, total = _ungated_counter_uses(source)
+    assert total == 3, f"expected PROBE_SQL once and mark_sql twice, found {total} uses"  # non-vacuity
+    assert ungated == [], f"counter pieces used outside `if ddl_count_enabled():` at lines {ungated}"
+    assert "log_conf()" in source and "LOG_CONF" not in source.replace("log_conf", "")  # the conf goes via the gated helper
+
+
+def test_the_switch_check_sees_an_unguarded_use() -> None:
+    """Revert-failing control: take the substrate source, drop the guard from the probe install, and the check reds."""
+    source = (REPO_ROOT / "tests" / "_engine_substrate.py").read_text()
+    assert source.count("        if ddl_count_enabled():\n            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)") == 1
+    broken = source.replace("        if ddl_count_enabled():\n            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)",
+                            "        if True:\n            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)")
+    ungated, _ = _ungated_counter_uses(broken)
+    assert len(ungated) >= 1

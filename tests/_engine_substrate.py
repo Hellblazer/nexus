@@ -102,7 +102,8 @@ from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests._child_process import kill_group, popen_in_group, stop_group
-from tests._ddl_counter import LOG_CONF, PROBE_SQL, READY_LABEL, START_LABEL, mark_sql
+from tests._ddl_counter import PROBE_SQL, READY_LABEL, START_LABEL, log_conf, mark_sql
+from tests._ddl_counter import enabled as ddl_count_enabled
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -1932,7 +1933,7 @@ def _boot() -> dict:
             f.write(wal_cap_conf(cluster_parent))
             f.write(dsm_conf(cluster_parent))
             # nexus-sz651: DDL-per-run counting reads this cluster's pg.log (tests/_ddl_counter.py).
-            f.write(LOG_CONF)
+            f.write(log_conf())
         pg_log = os.path.join(pgdata, "pg.log")
         for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
             # A lost race leaves its failure in pg.log; start each attempt on a clean log
@@ -2038,14 +2039,16 @@ def _boot() -> dict:
             )
         # nexus-sz651: before the engine migrates, so its DDL (and every nested leaf a
         # tenant mint creates) reaches pg.log through the event trigger.
-        _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)
-        # Everything in pg.log before this mark is boot (the bootstrap and the probe's own
-        # install, never counted); the engine's migration is after it. Best effort: a missing
-        # mark leaves the run unmeasured, which the ratchet refuses, but must not fail the boot.
-        try:
-            _psql_command(bin_dir, pg_port, pg_user, mark_sql(START_LABEL))
-        except RuntimeError as exc:
-            warnings.warn(f"nexus test substrate: DDL start mark failed: {exc}", stacklevel=2)
+        # NX_DDL_COUNT=0 (nexus-3cwsw) skips the probe and both marks, the logging lines above and the plugin.
+        if ddl_count_enabled():
+            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)
+            # Everything in pg.log before this mark is boot (the bootstrap and the probe's own
+            # install, never counted); the engine's migration is after it. Best effort: a missing
+            # mark leaves the run unmeasured, which the ratchet refuses, but must not fail the boot.
+            try:
+                _psql_command(bin_dir, pg_port, pg_user, mark_sql(START_LABEL))
+            except RuntimeError as exc:
+                warnings.warn(f"nexus test substrate: DDL start mark failed: {exc}", stacklevel=2)
     except BaseException:
         _kill_pg()
         raise
@@ -2129,10 +2132,11 @@ def _boot() -> dict:
 
     # nexus-sz651: everything in pg.log before this line is boot and migration, everything
     # after it is the tests' own DDL. Best effort: a failed mark must not fail the boot.
-    try:
-        _psql_command(bin_dir, pg_port, pg_user, mark_sql(READY_LABEL))
-    except RuntimeError as exc:
-        warnings.warn(f"nexus test substrate: DDL ready mark failed: {exc}", stacklevel=2)
+    if ddl_count_enabled():
+        try:
+            _psql_command(bin_dir, pg_port, pg_user, mark_sql(READY_LABEL))
+        except RuntimeError as exc:
+            warnings.warn(f"nexus test substrate: DDL ready mark failed: {exc}", stacklevel=2)
 
     state = {
         "base_url": f"http://127.0.0.1:{svc_port}",

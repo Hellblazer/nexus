@@ -79,13 +79,17 @@ import time
 import tomllib
 import uuid
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+#: ``NX_DDL_COUNT=0`` turns the counter fully off (nexus-3cwsw): the substrate adds no logging
+#: settings, installs no probe, logs no marks, and the plugin registers nothing, prints nothing
+#: and writes no report, so a run can be compared with one at the same sha. Unset or ``1``: on.
+COUNT_ENV = "NX_DDL_COUNT"
 REPORT_DIR_ENV = "NX_DDL_REPORT_DIR"
 RUN_ID_ENV = "NX_DDL_RUN_ID"
 REPORT_NAME = "nx-ddl-report.json"
@@ -141,6 +145,22 @@ END
 $probe$;
 CREATE EVENT TRIGGER nx_ddl_probe ON ddl_command_end EXECUTE FUNCTION nx_ddl_probe.fire();
 """
+
+
+def enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the counter is on (``NX_DDL_COUNT``). Strict: anything but unset, ``1`` or ``0`` raises,
+    because a typo that left the counter on would make an A/B run compare nothing."""
+    value = (os.environ if environ is None else environ).get(COUNT_ENV)
+    if value is None or value == "1":
+        return True
+    if value == "0":
+        return False
+    raise ValueError(f"{COUNT_ENV} must be 0 or 1, got {value!r}")
+
+
+def log_conf() -> str:
+    """The postgresql.conf lines the counter adds: ``LOG_CONF``, or nothing with the counter off."""
+    return LOG_CONF if enabled() else ""
 
 
 def mark_sql(label: str) -> str:
@@ -730,6 +750,8 @@ class _Recorder:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    if not enabled():
+        return
     rec = _Recorder(config)
     config.stash[_STASH] = rec
     config.pluginmanager.register(rec, "nx-ddl-counter")

@@ -70,6 +70,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class DdlCounts {
 
+    /**
+     * {@code -Dnexus.ddl.count=false} turns the counter fully off (nexus-3cwsw), so a run can be compared with
+     * one at the same sha. Off: {@link PgContainerHelper#newContainer} adds none of the counter's settings and
+     * this class touches no container, connection or file. Default (unset or {@code true}): on. Anything else
+     * fails loud, because a typo that left the counter on would make the comparison a comparison of nothing.
+     */
+    static final String COUNT_PROPERTY = "nexus.ddl.count";
     static final String DIR_PROPERTY = "nexus.ddl.dir";
     static final String SUITE_PROPERTY = "nexus.ddl.suite";
     static final String RUN_PROPERTY = "nexus.ddl.run";
@@ -82,13 +89,30 @@ final class DdlCounts {
     private static final String RUN = sanitize(System.getProperty(RUN_PROPERTY, "none"));
     private static final String FILE_STEM = "ddl-" + sanitize(SUITE) + "-" + RUN + "-"
         + ProcessHandle.current().pid() + "-" + System.nanoTime();
-    private static final CgroupIo CGROUP_START = CgroupIo.read();
+    private static final CgroupIo CGROUP_START = enabled() ? CgroupIo.read() : null;
 
     static {
-        Runtime.getRuntime().addShutdownHook(new Thread(DdlCounts::onJvmExit, "ddl-counts-exit"));
+        if (enabled()) {
+            Runtime.getRuntime().addShutdownHook(new Thread(DdlCounts::onJvmExit, "ddl-counts-exit"));
+        }
     }
 
     private DdlCounts() {}
+
+    /** Whether the counter is on for this JVM ({@link #COUNT_PROPERTY}); read on every call, so a test can flip it. */
+    static boolean enabled() {
+        return enabled(System.getProperty(COUNT_PROPERTY));
+    }
+
+    static boolean enabled(String value) {
+        if (value == null || value.equals("true")) {
+            return true;
+        }
+        if (value.equals("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException("-D" + COUNT_PROPERTY + " must be true or false, got '" + value + "'");
+    }
 
     private static String sanitize(String s) {
         return s.replaceAll("[^A-Za-z0-9_.-]", "-");
@@ -122,6 +146,9 @@ final class DdlCounts {
      * unmeasured run; it must never fail the bootstrap or a test's teardown.
      */
     static boolean mark(Connection connection, String label) {
+        if (!enabled()) {
+            return false;
+        }
         try {
             DSL.using(connection, SQLDialect.POSTGRES).select(
                 DSL.function(DSL.name("nx_ddl_probe", "mark"), Object.class, DSL.val(label))).fetch();
@@ -139,6 +166,9 @@ final class DdlCounts {
 
     /** Log the {@code end} mark on a live container, on its own short-lived connection. */
     static boolean markEnd(FailFastPostgreSQLContainer c) {
+        if (!enabled()) {
+            return false;
+        }
         Properties props = new Properties();
         props.setProperty("user", c.getUsername());
         props.setProperty("password", c.getPassword());
@@ -160,6 +190,9 @@ final class DdlCounts {
      * of the interval. The probe's marks read the same pointer.
      */
     static long walBytes(Connection connection) {
+        if (!enabled()) {
+            return -1;
+        }
         try {
             BigDecimal v = DSL.using(connection, SQLDialect.POSTGRES).select(
                 DSL.function("pg_wal_lsn_diff", BigDecimal.class,
@@ -206,6 +239,9 @@ final class DdlCounts {
     }
 
     static void register(FailFastPostgreSQLContainer c) {
+        if (!enabled()) {
+            return;
+        }
         LIVE.add(c);
         // A fork killed before it stops anything still leaves a file saying a container was unread.
         flush();
@@ -213,11 +249,17 @@ final class DdlCounts {
 
     /** A shared-cluster database handed to {@code owner}'s class; {@code startLsn} is -1 when unread. */
     static void noteDatabase(String dbName, String owner, boolean empty, long startLsn) {
+        if (!enabled()) {
+            return;
+        }
         GLOBAL.noteDatabase(dbName, owner, empty, startLsn);
     }
 
     /** The shared database {@code dbName} is dropped; {@code endLsn} is -1 when unread. */
     static void noteRelease(String dbName, long endLsn) {
+        if (!enabled()) {
+            return;
+        }
         GLOBAL.noteRelease(dbName, endLsn);
     }
 
@@ -243,7 +285,7 @@ final class DdlCounts {
      * {@code log_errors}, so {@code stop()} can always go on to stop it.
      */
     static void record(FailFastPostgreSQLContainer c) {
-        if (!LIVE.remove(c)) {
+        if (!enabled() || !LIVE.remove(c)) {
             return;
         }
         try {
@@ -439,6 +481,9 @@ final class DdlCounts {
 
     /** Rewrite this fork's file; cheap, so it runs after every container start and stop. */
     static void flush() {
+        if (!enabled()) {
+            return;
+        }
         Path dir = Path.of(System.getProperty(DIR_PROPERTY, DEFAULT_DIR));
         try {
             Files.createDirectories(dir);

@@ -96,6 +96,11 @@
              invocations in service-ci.yml) cannot be summed into each other. The profile below sets
              "integration" whenever -Dgroups=integration is given; CI also passes it explicitly. -->
         <nexus.ddl.suite>main</nexus.ddl.suite>
+
+        <!-- nexus-3cwsw: -Dnexus.ddl.count=false turns the counter fully off (no log_statement, probe, event
+             trigger, marks, collector, count files), so a run can be compared with one at the same sha.
+             Default on. Anything but true/false fails the first container build. -->
+        <nexus.ddl.count>true</nexus.ddl.count>
     </properties>
 
     <dependencies>
@@ -376,6 +381,7 @@
                     <systemPropertyVariables>
                         <nexus.ddl.suite>${nexus.ddl.suite}</nexus.ddl.suite>
                         <nexus.ddl.run>${maven.build.timestamp}</nexus.ddl.run>
+                        <nexus.ddl.count>${nexus.ddl.count}</nexus.ddl.count>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

@@ -198,7 +198,7 @@ final class SharedCluster {
                 st.execute("CREATE DATABASE \"" + dbName + "\" " + templateClause);
             }
         }
-        if (empty) {
+        if (empty && DdlCounts.enabled()) {
             // A template0 database carries no event trigger, so its nested DDL (a function's EXECUTE)
             // would go uncounted. nexus-sz651.
             installDdlProbe(c, dbName);

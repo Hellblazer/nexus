@@ -340,6 +340,16 @@ tolerance band (`bytes_tolerance`), WAL varying a little; ceilings stay `"measur
 (the Maven build timestamp); the ratchet reads one suite of one run. Exit codes: 0 ok, 10 above a
 ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
 
+The counter turns fully off for a same-sha A/B (nexus-3cwsw): `-Dnexus.ddl.count=false` for Java,
+`NX_DDL_COUNT=0` for pytest (default on; any other value fails loud). Off adds none of the counter's
+settings to a container or cluster (no `log_statement`, collector, probe, event trigger, marks, WAL
+reads), uses the library's default ready wait, and writes no count file or report; on Java the server
+log is then Docker's log again, so `PgContainerHelper.serverLog` falls back to `getLogs()`.
+`DdlCountSwitchTest` and `test_ddl_counter.py` pin each piece. A ratchet run has nothing to read from
+an off run, by design.
+`scripts/diag/container_io_sampler.sh -- <command>` (no root) reads each docker container's cgroup `wbytes`
+plus dockerd's, containerd's and journald's while the command runs, to see who writes to the host disk.
+
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
 `pg_ctl_start` / `initdb` sites a static scan of `tests/` and `scripts/` finds (plus the jOOQ code
 generator); docker-run and e2e shell clusters are not scanned, so the list is not every start site.

@@ -29,7 +29,9 @@ import org.testcontainers.utility.MountableFile;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -182,27 +184,19 @@ public final class PgContainerHelper {
         if (memoryBytes <= gibibytes(tmpfsSize)) {
             throw new IllegalArgumentException("memory limit " + memoryBytes + " must exceed tmpfs " + tmpfsSize);
         }
-        return new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
-            .ddlOwner(DdlCounts.callerClass())
-            .withDatabaseName(DATABASE)
-            .withUsername(USERNAME)
-            .withPassword(PASSWORD)
-            .withUrlParam("sslmode", "disable")
-            .withStartupAttempts(3)
-            // nexus-xynce: PGDATA on a capped tmpfs, nothing a throwaway cluster
-            // needs to survive a crash written durably, pg_wal held near 64 MB
-            // (max_wal_size is a soft target; the tmpfs size is the hard bound).
-            .withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))
-            .withCommand("postgres",
-                "-c", "fsync=off",
-                "-c", "synchronous_commit=off",
-                "-c", "full_page_writes=off",
-                "-c", "max_wal_size=64MB",
-                "-c", "min_wal_size=32MB",
-                "-c", "wal_keep_size=0",
-                // The smaller max_wal_size checkpoints every ~25 MB of WAL; do not log each one.
-                "-c", "log_checkpoints=off",
-                "-c", "checkpoint_warning=0",
+        boolean counted = DdlCounts.enabled();
+        List<String> command = new ArrayList<>(List.of("postgres",
+            "-c", "fsync=off",
+            "-c", "synchronous_commit=off",
+            "-c", "full_page_writes=off",
+            "-c", "max_wal_size=64MB",
+            "-c", "min_wal_size=32MB",
+            "-c", "wal_keep_size=0",
+            // The smaller max_wal_size checkpoints every ~25 MB of WAL; do not log each one.
+            "-c", "log_checkpoints=off",
+            "-c", "checkpoint_warning=0"));
+        if (counted) {
+            command.addAll(List.of(
                 // nexus-sz651: count DDL per run (DdlLogParser). log_statement=ddl logs the
                 // top-level statements; the event trigger the init script installs logs every
                 // DDL command, including the ones a function runs through EXECUTE.
@@ -218,14 +212,22 @@ public final class PgContainerHelper {
                 "-c", "log_filename=postgresql.log",
                 "-c", "log_rotation_age=0",
                 "-c", "log_rotation_size=0",
-                "-c", "log_truncate_on_rotation=off")
-            // The image's init runs a temp server on a unix socket only; pg_isready on TCP passes only for
-            // the real server, once init is done. (The default wait reads Docker's log for the ready line.)
-            .waitingFor(Wait.forSuccessfulCommand("pg_isready -h 127.0.0.1 -p 5432 -q")
-                .withStartupTimeout(Duration.ofSeconds(120)))
-            .withCopyFileToContainer(
-                MountableFile.forClasspathResource("ddl/nx-ddl-probe.sql"),
-                "/docker-entrypoint-initdb.d/00-nx-ddl-probe.sql")
+                "-c", "log_truncate_on_rotation=off"));
+        }
+        FailFastPostgreSQLContainer container = new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
+            .ddlCounted(counted)
+            .ddlOwner(DdlCounts.callerClass());
+        container
+            .withDatabaseName(DATABASE)
+            .withUsername(USERNAME)
+            .withPassword(PASSWORD)
+            .withUrlParam("sslmode", "disable")
+            .withStartupAttempts(3)
+            // nexus-xynce: PGDATA on a capped tmpfs, nothing a throwaway cluster
+            // needs to survive a crash written durably, pg_wal held near 64 MB
+            // (max_wal_size is a soft target; the tmpfs size is the hard bound).
+            .withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))
+            .withCommand(command.toArray(new String[0]))
             .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
                 .withMemory(memoryBytes)
                 .withMemorySwap(memoryBytes))
@@ -235,6 +237,18 @@ public final class PgContainerHelper {
             // nexus-7xfh7: which test class asked for this boot, so `docker events` can rank call sites:
             // docker events --filter label=dev.nexus.test.run=<id> --format '{{index .Actor.Attributes "dev.nexus.test.caller"}}'
             .withLabel("dev.nexus.test.caller", callerClass());
+        if (counted) {
+            // The image's init runs a temp server on a unix socket only; pg_isready on TCP passes only for
+            // the real server, once init is done. (The default wait reads Docker's log for the ready line,
+            // which the collector moved into the file.) Counter off: the default wait stays.
+            container
+                .waitingFor(Wait.forSuccessfulCommand("pg_isready -h 127.0.0.1 -p 5432 -q")
+                    .withStartupTimeout(Duration.ofSeconds(120)))
+                .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("ddl/nx-ddl-probe.sql"),
+                    "/docker-entrypoint-initdb.d/00-nx-ddl-probe.sql");
+        }
+        return container;
     }
 
     /** Reads of the server log wait this long for one {@code docker exec} before abandoning it and trying again. */
@@ -255,6 +269,9 @@ public final class PgContainerHelper {
      * {@link #SERVER_LOG_READ_TIMEOUT} and the read is tried again, so a stuck exec cannot hang a suite.
      */
     public static String serverLog(PostgreSQLContainer<?> c) {
+        if (c instanceof FailFastPostgreSQLContainer f && !f.ddlCounted()) {
+            return c.getLogs(); // counter off: no collector, the server log is Docker's log again
+        }
         return retryingRead(() -> {
             org.testcontainers.containers.Container.ExecResult r = c.execInContainer("cat", SERVER_LOG_FILE);
             if (r.getExitCode() != 0) {
