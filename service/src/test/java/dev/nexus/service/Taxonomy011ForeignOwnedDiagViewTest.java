@@ -239,9 +239,9 @@ class Taxonomy011ForeignOwnedDiagViewTest {
      * Kept raw (nexus-cbo4a batch 8): executes the text of taxonomy-011-1 exactly as the product changelog
      * authors it ({@link #extractChangesetSql} reads it from the XML; there is no SQL string in Java), as
      * the admin role on a connection of its own. The tests exist to run that one changeset's statements
-     * while a foreign-owned view is present and the changeset is not yet journalled, which a Liquibase run
-     * of the file cannot do: it would skip the changeset the superuser's walk already recorded, and the
-     * admin role cannot write the superuser-owned databasechangelog.
+     * while a foreign-owned view is present, as the admin role, and see that one body fail or succeed. A
+     * Liquibase run of the product file cannot isolate it: the changeset sits among sibling changesets in
+     * the same file, and running the file (even with a bookkeeping table of the test's own) runs those too.
      */
     private static void replay(Connection admin, String sql) throws java.sql.SQLException {
         try (var st = admin.createStatement()) {

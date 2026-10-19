@@ -1582,7 +1582,7 @@ class RawSqlGateTest {
     // nexus_test.catalog_snapshot() (db.changelog-test-objects.xml, test-objects-catalog-snapshot), called as one typed
     // DSL.function. Kept raw, with the reason: Taxonomy011ForeignOwnedDiagViewTest 3 -> 1 (the three replays of
     // taxonomy-011-1's own changeset text, read from the product XML, now share one replay(admin, sql); the test needs that
-    // exact text run as the admin role while the changeset is not journalled, which a Liquibase run cannot do),
+    // one body run as the admin role, which a Liquibase run of the product file cannot isolate from its sibling changesets),
     // SchemaRollbackRoundTripIntegrationTest 2 -> 1 (grants-nexus-diag-1's body replayed verbatim), ArbiterCompletenessTest 1
     // (only the deliberately invalid statement stays raw, rawFailure's one caller: two ON CONFLICT clauses in one INSERT, a 42601
     // syntax error jOOQ cannot build; the 11 valid callers are typed jOOQ through failure(), which unwraps the DataAccessException
