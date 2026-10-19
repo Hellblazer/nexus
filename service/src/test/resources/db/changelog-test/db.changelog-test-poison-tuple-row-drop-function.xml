@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: drops the poison-row function db.changelog-test-poison-tuple-row-install.xml created, in
+    Liquibase XML instead of a Java SQL string (Sam's rule, nexus-zrcj7). IF EXISTS, so it is safe in a finally
+    block after a failed install. Run after db.changelog-test-poison-tuple-row-drop-trigger.xml (the trigger
+    depends on the function). Run by that test directly; runAlways, bookkeeping in
+    its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="poison-tuple-row-drop-function" author="nexus-cbo4a" runAlways="true">
+        <sql>DROP FUNCTION IF EXISTS nexus_test_poison_tuple_row()</sql>
+    </changeSet>
+</databaseChangeLog>

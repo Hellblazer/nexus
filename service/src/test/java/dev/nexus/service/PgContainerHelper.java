@@ -849,6 +849,23 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Gives {@code role} what the scratch tests need on the t1 schema (nexus-cbo4a): USAGE on the schema,
+     * through {@code db.changelog-test-t1-schema-usage.xml} (jOOQ has no GRANT ON SCHEMA), then SELECT,
+     * INSERT, UPDATE and DELETE on {@code t1.scratch} through jOOQ. {@link #bootstrapServiceRole} covers
+     * only nexus/staging, so this is the one place t1 is granted. Leaves {@code su} autoCommit.
+     */
+    public static void grantT1ScratchTo(Connection su, String role) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-t1-schema-usage.xml",
+            "databasechangelog_test_t1_schema_usage", Map.of("role", role));
+        DSL.using(su, SQLDialect.POSTGRES)
+            .grant(DSL.privilege("SELECT"), DSL.privilege("INSERT"),
+                   DSL.privilege("UPDATE"), DSL.privilege("DELETE"))
+            .on(dev.nexus.service.jooq.t1.Tables.SCRATCH)
+            .to(DSL.role(role))
+            .execute();
+    }
+
+    /**
      * Run one DDL statement on a superuser connection through a test changelog (nexus-wbfpw.48), for the
      * statements jOOQ has no typed form for (RLS policies, ALTER TABLE ... ROW LEVEL SECURITY, CREATE ROLE
      * with attributes). Same mechanism as {@link #grantRoleMembership}: its own bookkeeping table, runAlways.

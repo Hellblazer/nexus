@@ -475,7 +475,8 @@ class CatalogManifestSweepRepositoryTest {
             su.setAutoCommit(true);
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
             // nexus.chunks -- a single REVOKE now covers what three did.
-            su.createStatement().execute("REVOKE DELETE ON nexus.chunks FROM " + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("DELETE")).on(CHUNKS).from(DSL.role(SVC_ROLE)).execute();
         }
         try {
             var result = writeManifestManySeeded(TENANT_A, List.of(
@@ -510,7 +511,8 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("GRANT DELETE ON nexus.chunks TO " + SVC_ROLE);
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("DELETE")).on(CHUNKS).to(DSL.role(SVC_ROLE)).execute();
             }
         }
     }
@@ -695,11 +697,11 @@ class CatalogManifestSweepRepositoryTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("REVOKE SELECT ON nexus.catalog_document_chunks FROM " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT (tenant_id, doc_id, \"position\", chunk_index, line_start, "
-                + "line_end, char_start, char_end, collection, embedding_model) ON nexus.catalog_document_chunks TO "
-                + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).from(DSL.role(SVC_ROLE)).execute();
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                "db/changelog-test/db.changelog-test-manifest-chunks-column-select.xml",
+                "databasechangelog_test_manifest_chunks_column_select", Map.of("role", SVC_ROLE));
         }
         // Only the operation under test runs with the column revoked — every
         // verification read below (including this test's own getManifest
@@ -715,8 +717,8 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "GRANT SELECT ON nexus.catalog_document_chunks TO " + SVC_ROLE);
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).to(DSL.role(SVC_ROLE)).execute();
             }
         }
 
@@ -935,12 +937,9 @@ class CatalogManifestSweepRepositoryTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION test_slow_sweep_delete() RETURNS trigger AS $$ "
-                + "BEGIN PERFORM pg_sleep(6); RETURN OLD; END; $$ LANGUAGE plpgsql");
-            su.createStatement().execute(
-                "CREATE TRIGGER test_slow_sweep_delete_trigger BEFORE DELETE ON nexus.chunks "
-                + "FOR EACH ROW EXECUTE FUNCTION test_slow_sweep_delete()");
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                "db/changelog-test/db.changelog-test-slow-sweep-delete-install.xml",
+                "databasechangelog_test_slow_sweep_delete_install", Map.of());
         }
         try {
             var result = writeManifestManySeeded(TENANT_A, List.of(
@@ -964,9 +963,9 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks");
-                su.createStatement().execute("DROP FUNCTION IF EXISTS test_slow_sweep_delete()");
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                    "db/changelog-test/db.changelog-test-slow-sweep-delete-drop.xml",
+                    "databasechangelog_test_slow_sweep_delete_drop", Map.of());
             }
         }
     }

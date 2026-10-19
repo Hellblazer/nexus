@@ -14,7 +14,6 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.List;
 
@@ -111,14 +110,16 @@ class UpdatedAtTriggerTest {
                 .set(TOPICS.REVIEW_STATUS, "pending")
                 .set(TOPICS.UPDATED_AT, OLD_TS)
                 .execute();
-            su.createStatement().execute(
-                "UPDATE nexus.topics SET label = 'uat-topic-renamed' "
-                + "WHERE tenant_id = '" + TENANT + "' AND label = 'uat-topic'");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT updated_at FROM nexus.topics WHERE tenant_id = '" + TENANT + "' "
-                + "AND label = 'uat-topic-renamed'");
-            assertThat(rs.next()).isTrue();
-            var updatedAt = rs.getObject("updated_at", java.time.OffsetDateTime.class).toInstant();
+            DSL.using(su, SQLDialect.POSTGRES).update(TOPICS)
+                .set(TOPICS.LABEL, "uat-topic-renamed")
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.LABEL.eq("uat-topic")))
+                .execute();
+            OffsetDateTime stamped = DSL.using(su, SQLDialect.POSTGRES).select(TOPICS.UPDATED_AT)
+                .from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.LABEL.eq("uat-topic-renamed")))
+                .fetchOne(TOPICS.UPDATED_AT);
+            assertThat(stamped).isNotNull();
+            var updatedAt = stamped.toInstant();
             assertThat(updatedAt)
                 .as("BEFORE UPDATE trigger must move updated_at off the seeded 2020 value")
                 .isAfter(java.time.OffsetDateTime.parse("2020-01-02T00:00:00+00:00").toInstant());
@@ -156,14 +157,20 @@ class UpdatedAtTriggerTest {
                 .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p1")
                 .execute();
             // Partial UPDATE to salient_sentences (the path that bypasses extracted_at).
-            su.createStatement().execute(
-                "UPDATE nexus.document_aspects SET salient_sentences = '\"after\"' "
-                + "WHERE tenant_id = '" + TENANT + "' AND collection = 'c' AND source_path = 'p1'");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT updated_at FROM nexus.document_aspects "
-                + "WHERE tenant_id = '" + TENANT + "' AND collection = 'c' AND source_path = 'p1'");
-            assertThat(rs.next()).isTrue();
-            var updatedAt = rs.getObject("updated_at", java.time.OffsetDateTime.class).toInstant();
+            DSL.using(su, SQLDialect.POSTGRES).update(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, JSONB.valueOf("\"after\""))
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)
+                    .and(DOCUMENT_ASPECTS.COLLECTION.eq("c"))
+                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("p1")))
+                .execute();
+            OffsetDateTime stamped = DSL.using(su, SQLDialect.POSTGRES).select(DOCUMENT_ASPECTS.UPDATED_AT)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)
+                    .and(DOCUMENT_ASPECTS.COLLECTION.eq("c"))
+                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("p1")))
+                .fetchOne(DOCUMENT_ASPECTS.UPDATED_AT);
+            assertThat(stamped).isNotNull();
+            var updatedAt = stamped.toInstant();
             assertThat(updatedAt)
                 .as("partial UPDATE to salient_sentences must move updated_at")
                 .isAfter(java.time.OffsetDateTime.parse("2020-01-02T00:00:00+00:00").toInstant());

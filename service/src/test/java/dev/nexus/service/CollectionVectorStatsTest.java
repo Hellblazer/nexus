@@ -327,9 +327,7 @@ class CollectionVectorStatsTest {
 
         // Direction 2: tombstone the doc — the owned chunk is excluded too
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, true);
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
             .as("doc tombstoned → chunk_count must drop to exactly 0 " +
@@ -338,9 +336,7 @@ class CollectionVectorStatsTest {
 
         // Direction 3: restore — count returns
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, false);
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
             .as("doc restored → chunk_count must return to exactly 1")
@@ -455,9 +451,7 @@ class CollectionVectorStatsTest {
         // tombstoned and the manifest-less chunk is never live).
         String docId = "cvs-tomb-doc-1";
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, true);
             long raw = rawChunkCount(su, 384, TENANT_A, COLL_A_TOMB);
             assertThat(raw)
                 .as("CONTROL: raw count still sees both chunks (chunks tables have no tombstone)")
@@ -469,9 +463,7 @@ class CollectionVectorStatsTest {
         } finally {
             // restore for any later-ordered assertions
             try (Connection su = pg.createConnection("")) {
-                su.createStatement().execute(
-                    "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
-                    " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+                setTombstone(su, docId, false);
             }
         }
     }
@@ -567,6 +559,17 @@ class CollectionVectorStatsTest {
             .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
+    }
+
+    /**
+     * Tombstone ({@code tombstoned}) or restore the {@link #TENANT_A} catalog document {@code tumbler}
+     * by setting or clearing {@code deleted_at}, on {@code su}'s own autoCommit.
+     */
+    private static void setTombstone(Connection su, String tumbler, boolean tombstoned) {
+        DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? DSL.currentOffsetDateTime() : DSL.inline((OffsetDateTime) null))
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
             .execute();
     }
 

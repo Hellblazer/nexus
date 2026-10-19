@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: removes the slow BEFORE DELETE trigger and its function that
+    db.changelog-test-slow-sweep-delete-install.xml put on nexus.chunks, in Liquibase XML instead of Java SQL
+    strings (Sam's rule, nexus-zrcj7). Both statements are IF EXISTS, so the drop is safe in a finally block
+    after a failed install. Run by that test directly; runAlways, bookkeeping in
+    its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="slow-sweep-delete-drop-trigger" author="nexus-cbo4a" runAlways="true">
+        <sql>DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks</sql>
+    </changeSet>
+
+    <changeSet id="slow-sweep-delete-drop-function" author="nexus-cbo4a" runAlways="true">
+        <sql>DROP FUNCTION IF EXISTS test_slow_sweep_delete()</sql>
+    </changeSet>
+</databaseChangeLog>

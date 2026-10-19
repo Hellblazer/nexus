@@ -70,9 +70,7 @@ class ScratchRepositoryTest {
             // No session search_path is set (Sam's directive, nexus-zrcj7): the
             // production ScratchRepository queries t1.scratch via the generated,
             // schema-qualified jOOQ SCRATCH table.
-            su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            PgContainerHelper.grantT1ScratchTo(su, SVC_ROLE);
         }
 
         svcDs = buildSvcDs();
