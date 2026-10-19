@@ -665,7 +665,7 @@ jobs:
         # Replaces the per-job `uv sync` on the pool: the dependencies are built ONCE per
         # (uv.lock, python, platform, groups) under $NX_LAB_CACHE_ROOT (labrun), read-only and
         # precompiled, and each job layers a thin venv with the project editable on it, under
-        # $RUNNER_WORKSPACE (tmpfs). Removes ~105 MB/shard of NVMe writes, 71 MB of it ext4
+        # $RUNNER_WORKSPACE (tmpfs). Inferred (replay of the old uv_sync + teardown steps; to be measured on the first pool run, nexus-dvk18) to remove ~105 MB/shard of NVMe writes, 71 MB of it ext4
         # metadata outside the job's cgroup (replay on nexus-aca0q). Contract and design:
         # the header of scripts/ci_shared_venv.sh. It never fails the job: on any problem it
         # reports used=false and the steps below run their own uv sync. It is used only when
