@@ -14,7 +14,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -100,13 +99,12 @@ class Catalog013RlsReplayTest {
             // include of the master changelog, run as superuser in step 1) creates it
             // before the runAlways grants changeset needs it (nexus-cbo4a batch 9).
             // The replay role below stays hand-built: it is the point of this test.
-            exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '"
-                + ADMIN_PASS + "' NOSUPERUSER NOBYPASSRLS");
+            PgContainerHelper.createLoginRole(su, ADMIN_ROLE, ADMIN_PASS, false);
             // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
             // visibility: granting pg_monitor onward to nexus_svc needs the grantor to
             // hold pg_monitor WITH ADMIN OPTION (or be superuser). Same DBA-bootstrap
             // mirror as GrantsSvcForeignOwnedRelationTest and the other replay fixtures.
-            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
+            PgContainerHelper.grantRoleWithAdminOption(su, "pg_monitor", ADMIN_ROLE);
 
             // 1. Full changelog as superuser — post-RDR-180 schema (bytea).
             liquibaseUpdate(pg.getJdbcUrl(),
@@ -138,22 +136,19 @@ class Catalog013RlsReplayTest {
             PgContainerHelper.readdChashOctetChecksNotValid(su);
 
             // 3. Production-shaped ownership for the replay role.
-            exec(su, "GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);
-            exec(su,
-                "DO $$ DECLARE r record; BEGIN "
-                + "  FOR r IN SELECT schemaname, tablename FROM pg_tables "
-                + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-                + "    EXECUTE format('ALTER TABLE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-                + "                   r.schemaname, r.tablename); "
-                + "  END LOOP; "
-                + "  FOR r IN SELECT schemaname, sequencename FROM pg_sequences "
-                + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-                + "    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-                + "                   r.schemaname, r.sequencename); "
-                + "  END LOOP; "
-                + "END $$");
-            exec(su, "GRANT ALL ON TABLE public.databasechangelog, "
-                + "public.databasechangeloglock TO " + ADMIN_ROLE);
+            // db.changelog-test-product-schema-owner.xml: USAGE/CREATE on the schemas, then ownership of
+            // every nexus/t1 table and sequence.
+            PgContainerHelper.handProductSchemaTo(su, ADMIN_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .grant(DSL.privilege("ALL"))
+                .on(DSL.table(DSL.name("public", "databasechangelog")))
+                .to(DSL.role(ADMIN_ROLE))
+                .execute();
+            DSL.using(su, SQLDialect.POSTGRES)
+                .grant(DSL.privilege("ALL"))
+                .on(DSL.table(DSL.name("public", "databasechangeloglock")))
+                .to(DSL.role(ADMIN_ROLE))
+                .execute();
 
             String url = pg.getJdbcUrl();
             try (Connection admin = DriverManager.getConnection(url, ADMIN_ROLE, ADMIN_PASS)) {
@@ -249,11 +244,5 @@ class Catalog013RlsReplayTest {
                 PgContainerHelper.collectionModel(seed, tenant, collection))
             .execute();
         PgContainerHelper.readdCatalogChunksFkNotValid(c);
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
     }
 }

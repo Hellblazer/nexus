@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 8: SharedDatabaseHandle's teardown of an exclusive role (nexus-7xfh7), in Liquibase XML
+    instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ has
+    neither DROP ROLE nor REVOKE <role> ... GRANTED BY.
+
+    A role cannot be dropped while it is the GRANTOR of a role membership (PostgreSQL 16+ records the grantor as
+    a dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one. So revoke every
+    membership ${role} granted, then drop it. Run on the control connection, after the role's database is
+    dropped, through PgContainerHelper#dropRoleRevokingGrants; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="drop-exclusive-role" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE m record;
+BEGIN
+    FOR m IN SELECT g.rolname AS granted, u.rolname AS member
+               FROM pg_auth_members a
+               JOIN pg_roles g ON g.oid = a.roleid
+               JOIN pg_roles u ON u.oid = a.member
+               JOIN pg_roles o ON o.oid = a.grantor
+              WHERE o.rolname = '${role}' LOOP
+        EXECUTE format('REVOKE %I FROM %I GRANTED BY %I', m.granted, m.member, '${role}');
+    END LOOP;
+    EXECUTE format('DROP ROLE IF EXISTS %I', '${role}');
+END
+$$;
+        </sql>
+    </changeSet>
+</databaseChangeLog>

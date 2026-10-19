@@ -922,6 +922,70 @@ public final class PgContainerHelper {
     }
 
     /**
+     * {@code CREATE ROLE role LOGIN PASSWORD password NOSUPERUSER NOCREATEDB NOCREATEROLE [NO]BYPASSRLS}
+     * (nexus-cbo4a batch 8), through {@code db.changelog-test-login-role.xml}: jOOQ has no CREATE ROLE. A role that
+     * already exists fails, as the bare statement did. Role name and password are fixed test literals; both must be
+     * plain lowercase identifiers. Leaves {@code su} autoCommit.
+     */
+    public static void createLoginRole(Connection su, String role, String password, boolean bypassRls) throws Exception {
+        requireTestIdentifier(role);
+        requireTestIdentifier(password);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-login-role.xml",
+            "databasechangelog_test_login_role", Map.of(
+                "role", role, "pass", password, "rlsAttr", bypassRls ? "BYPASSRLS" : "NOBYPASSRLS"));
+    }
+
+    /**
+     * {@code GRANT grantedRole TO memberRole WITH ADMIN OPTION} (nexus-cbo4a batch 8), through
+     * {@code db.changelog-test-role-admin-option.xml}: jOOQ's grant is an object-privilege grant, not a role
+     * membership. {@link #grantRoleMembership} is the INHERIT form. Leaves {@code su} autoCommit.
+     */
+    public static void grantRoleWithAdminOption(Connection su, String grantedRole, String memberRole) throws Exception {
+        requireTestIdentifier(grantedRole);
+        requireTestIdentifier(memberRole);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-admin-option.xml",
+            "databasechangelog_test_role_admin_option", Map.of("grantedRole", grantedRole, "memberRole", memberRole));
+    }
+
+    /**
+     * Production-shaped ownership of a migrated product schema (nexus-cbo4a batch 8), through
+     * {@code db.changelog-test-product-schema-owner.xml}: {@code role} gets USAGE and CREATE on nexus, t1 and public
+     * and becomes the owner of every nexus/t1 table and sequence. Call after the superuser's walk. Leaves
+     * {@code su} autoCommit.
+     */
+    public static void handProductSchemaTo(Connection su, String role) throws Exception {
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-product-schema-owner.xml",
+            "databasechangelog_test_product_schema_owner", Map.of("role", role));
+    }
+
+    /**
+     * {@code ALTER TABLE table SET SCHEMA schema} (nexus-cbo4a batch 8), through
+     * {@code db.changelog-test-table-schema.xml}: jOOQ has no SET SCHEMA for a table. Run it on a connection of the
+     * table's owner; {@code table} is a jOOQ {@link Table}, rendered quoted and schema-qualified, and {@code schema}
+     * a plain test identifier other than {@code public}. The bookkeeping tables land in the connection's current
+     * schema under a name that is not {@code databasechangelog}. Leaves {@code conn} autoCommit.
+     */
+    public static void setTableSchema(Connection conn, Table<?> table, String schema) throws Exception {
+        requireTestIdentifier(schema);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-schema.xml",
+            "databasechangelog_test_table_schema",
+            Map.of("table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "schema", schema));
+    }
+
+    /**
+     * Revoke every role membership {@code role} granted, then {@code DROP ROLE IF EXISTS role} (nexus-cbo4a batch 8),
+     * through {@code db.changelog-test-drop-exclusive-role.xml}: jOOQ has neither DROP ROLE nor REVOKE ... GRANTED BY.
+     * {@code SharedDatabaseHandle}'s teardown of an exclusive role; {@code admin} is the control connection, and the
+     * role's database must already be gone. Leaves {@code admin} autoCommit.
+     */
+    static void dropRoleRevokingGrants(Connection admin, String role) throws Exception {
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-drop-exclusive-role.xml",
+            "databasechangelog_test_drop_role", Map.of("role", role));
+    }
+
+    /**
      * Run one DDL statement on a superuser connection through a test changelog (nexus-wbfpw.48), for the
      * statements jOOQ has no typed form for (RLS policies, ALTER TABLE ... ROW LEVEL SECURITY, CREATE ROLE
      * with attributes). Same mechanism as {@link #grantRoleMembership}: its own bookkeeping table, runAlways.

@@ -911,128 +911,13 @@ class RawSqlGateTest {
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 6), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10; FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 10 -> 8; nexus-cbo4a 2026-10-19 octet-CHECK drop/re-add: 8 -> 6
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; review fold-in: 4 -> 3 (twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS); nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 3 -> 2
-        // nexus-cbo4a pre-walk bootstrap fold: 16 -> 2. The admin/svc role, grant, extension and
-        // relocation-helper bootstrap is PgContainerHelper.bootstrapNonSuperuserOwner now. What stays raw:
-        // the exec() wrapper's own execute(sql) and the one CREATE ROLE nexus_diag ... BYPASSRLS call
-        // (cluster-level DDL with no typed form, and not part of the shared bootstrap).
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 2),
-        // nexus-cbo4a pre-walk bootstrap fold: 18 -> 5. Provisioning is bootstrapNonSuperuserOwner(...,
-        // monitorAdminOption=false, svcInherits=false) now. What stays raw: the exec() wrapper's execute(sql),
-        // the GRANT pg_monitor ... WITH ADMIN OPTION the second test replays because that exact statement is
-        // the test's subject, and the three pg_ls_waldir()/SET ROLE probes (table-valued function in FROM).
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 5),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
         Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 3), // nexus-cbo4a 2026-10-18: 13 -> 10, three GRANT EXECUTE sites onto grantExecuteOnFunction; nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 10 -> 6; vector seeds 6 -> 3
-        // nexus-0ty8z fix round: +1, PristineCloneSkipTest.snapshot, one UNION ALL over the catalogs (pg_get_indexdef,
-        // pg_get_constraintdef, format() across pg_class/pg_proc/pg_policy/...), which have no typed jOOQ form. Its other
-        // reads and its REVOKE are jOOQ.
-        Map.entry("dev/nexus/service/PristineCloneSkipTest.java", 1),
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
-        // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
-        // worktree-agent-ae864db44cc9fe82c). An earlier design pinned this
-        // entry at 128 via a throwaway-role/REASSIGN-OWNED-BY dance at 8
-        // bootstrap sites; that mechanism was deleted before merge (a
-        // pre-existing install has no relocator role to REASSIGN from --
-        // see search-path-001-relocate-vector-extensions.xml's header).
-        // The shipped mechanism instead consolidated all 8 sites' bootstrap
-        // into ONE shared helper (plain CREATE EXTENSION x2 as the superuser,
-        // plus installing the SECURITY DEFINER
-        // nexus.ensure_vector_extensions_relocated() / _unrelocated() pair
-        // search-path-001's own guard calls mid-walk), which is why the
-        // ceiling then was LOWER than the pre-batch baseline despite the new
-        // SECURITY DEFINER function bodies' own raw SQL. That helper is gone:
-        // the same statements now live in db.changelog-test-nonsuper-owner.xml
-        // and run through PgContainerHelper#bootstrapNonSuperuserOwner. Round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated
-        // IMPORTANT 1): 79 -> 81 (REVOKE EXECUTE ... FROM PUBLIC hardening
-        // on both SECURITY DEFINER mirrors, closing the gap between this
-        // and Python's own relocate_vector_extensions_to_nexus_schema,
-        // which has carried the REVOKE since commit 7d04c40cf).
-        // nexus-cbo4a batch 12: 81 -> 50. Converted databasechangelog reads (typed
-        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class) --
-        // Liquibase's own bookkeeping table, no jOOQ codegen), nexus.memory INSERT/
-        // SELECT (generated MEMORY table), the mid-ladder DROP CONSTRAINT/[NO] FORCE
-        // ROW LEVEL SECURITY/ADD CONSTRAINT NOT VALID/VALIDATE CONSTRAINT sites onto
-        // PgContainerHelper's typed DDL helpers (dropConstraint/setForceRls/
-        // addFkNotValid/addFkNotValidComposite3/validateConstraint) against either
-        // the generated table or, for the per-dim 384 chunk table and chash_index (dropped at HEAD),
-        // DSL.table(DSL.name("nexus", "<table>")) -- these dedicated-container
-        // aged-box tests never call applyProductSchema, so PgContainerHelper#
-        // installTestObjects (new this batch, hoisted out of applyProductSchema)
-        // installs the nexus_test.* functions those helpers need, via the MIGRATING
-        // role's own connection (not su) so databasechangelog stays owned by
-        // whichever role's Liquibase run creates it -- installing via su would leave
-        // it superuser-owned and the migrating role's own product-changelog walk
-        // would then hit "permission denied for table databasechangelog". VALIDATE
-        // CONSTRAINT conversions switch their expected exception from PSQLException
-        // to org.jooq.exception.DataAccessException (a jOOQ Routine call wraps the
-        // underlying PSQLException), same as batch 10's review fold-in. Seed INSERTs
-        // onto generated jOOQ tables (CATALOG_DOCUMENTS/CATALOG_DOCUMENT_CHUNKS/
-        // CHUNKS/CATALOG_COLLECTIONS). changesetExecType onto the same
-        // databasechangelog schema-agnostic form.
-        //
-        // Formerly kept raw: one chunks seed INSERT (test 13, lateUpgradingDeployment...)
-        // whose bare, UNQUALIFIED ::vector cast VectorBinding cannot render (it always
-        // renders the schema-qualified ::nexus.vector). nexus-cbo4a 2026-10-18 vector
-        // seeds converted it onto the generated CHUNKS table with the embedding bound as
-        // a real[]; pgvector's real[] -> vector ASSIGNMENT cast is looked up by type oid,
-        // so it resolves with the extension still in `public`. The 9-site vector-extensions bootstrap and
-        // the 5-site admin/svc role bootstrap (bootstrap() plus the aged-box tests)
-        // that the lines below count are PgContainerHelper#bootstrapNonSuperuserOwner
-        // now; the nexus-jl08t lines below are the ceiling ledger as it stood when
-        // they were written.
-        // nexus-jl08t: 50 -> 56. Test 18 (the "aged database" reexecuted_changesets
-        // pin) adds a NINTH occurrence of this file's own documented 5-site
-        // admin/svc role bootstrap against a dedicated container (same class as
-        // bootstrap() plus the 7 existing aged-box tests, unchanged shape --
-        // CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH
-        // ADMIN OPTION, no jOOQ typed-DSL form), plus one new raw
-        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
-        // (rewinding tuples-003-3's CHECK constraint before re-running it -- DDL,
-        // no jOOQ typed form). The test's own databasechangelog DELETE and its
-        // dateExecutedFor/SELECT read both go through the existing typed
-        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class)
-        // idiom this file already uses for that table, so neither adds a site.
-        // nexus-jl08t follow-up (duplicate-row rework): test 18 was renamed to
-        // reexecutedChangesets_onAgedDatabaseWithDuplicateHistory_countsExactlyTheRunAlwaysSet
-        // and its seeding/assertions rewritten (production's duplicate-row shape,
-        // not a dateexecuted future-stamp), but Phase A/C's raw SQL footprint is
-        // BYTE-IDENTICAL to what earned the 50 -> 56 bump above -- the new
-        // duplicateChangelogRow/captureLogs helpers and every new assertion are
-        // typed jOOQ, so the ceiling stayed at 56, not reduced and not raised again.
-        // nexus-jl08t fix round (code review, T2 [25638] finding 3): 56 -> 55. The
-        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
-        // site called out above DOES have a jOOQ typed-DSL form after all --
-        // dsl(conn).alterTable(TUPLES).dropConstraintIfExists("chk_tuples_body_size")
-        // .execute(), matching this repo's own established pattern (e.g.
-        // CollectionRegistryFkTest/CollectionRegistryFkExtraTest's identical
-        // alterTable(...).dropConstraintIfExists(...) calls) -- converted. The
-        // NINTH admin/svc bootstrap occurrence (5 sites: CREATE ROLE / GRANT CREATE
-        // ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION) still has no
-        // jOOQ form and stays raw, so the ceiling drops by exactly the one
-        // converted site: 56 -> 55.
-        // nexus-jl08t round 3 (test 19, the real counts-unavailable test the
-        // round-2 review found missing): reuses the shared bootstrap()/adminDs
-        // fixture (it is @Order(19), guaranteed to run last) instead of a
-        // dedicated container, so it needs no throwaway role/schema bootstrap
-        // at all, and its REVOKE SELECT ON databasechangelog (the test's
-        // real-SQL-failure seam) is typed jOOQ (dsl(conn).revoke(...).on(...)
-        // .from(DSL.role(...))) -- the same revoke/grant shape
-        // ScratchSchemaLiquibaseTest and StagingPromoteOpsIntegrationTest
-        // already use. Net raw-SQL count for this file: unchanged, still 55.
-        // nexus-q81g7: 55 -> 52. The new role-named-for-a-schema tests share ONE
-        // multi-statement bootstrapRole helper (1 site), and the jl08t aged-box
-        // test's own 5-statement role bootstrap now calls it too (-5 +1 +1 ALTER).
-        // nexus-cbo4a pre-walk bootstrap fold: 52 -> 2. All eight admin/svc role bootstraps and the
-        // bootstrapVectorExtensionsForFreshWalk block (bootstrap() plus the seven aged-box tests and
-        // bootstrapRole) are PgContainerHelper.bootstrapNonSuperuserOwner now. What stayed raw was the
-        // test 13 chunks seed INSERT (converted 2026-10-18, see above) and the jl08t ALTER.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 1), // nexus-cbo4a 2026-10-18 vector seeds: 2 -> 1
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1060,7 +945,11 @@ class RawSqlGateTest {
         // role block and the post-rollback helper reinstall are PgContainerHelper.bootstrapNonSuperuserOwner
         // now (the reinstall is the same idempotent call). Of the two sites left, one is the CREATE ROLE
         // nexus_diag bootstrap (cluster-level DDL, no typed form) and one the grants-nexus-diag-1 body replay.
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 2),
+        // nexus-cbo4a batch 8: 2 -> 1. The CREATE ROLE nexus_diag is PgContainerHelper.createLoginRole
+        // (db.changelog-test-login-role.xml). What stays raw is the one execute(sql) that replays
+        // grants-nexus-diag-1's own <sql> body verbatim (extractChangesetSql): a re-expression would no longer be the
+        // SAME statement Liquibase executes.
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 1),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-8zoyp seed-coverage follow-up: 104 -> 111 (seedTupleConsumedBodyCleanupRows'
@@ -1075,16 +964,15 @@ class RawSqlGateTest {
         // nexus-0ty8z fix round: 4 -> 5, SharedCluster.dropDatabase, the one DROP DATABASE ... WITH (FORCE) (no typed jOOQ form
         // for FORCE); SharedDatabaseHandle's own copy of the statement moved here, so the total does not move.
         Map.entry("dev/nexus/service/SharedCluster.java", 5),
-        // nexus-7xfh7: +1, the DO block that revokes what an exclusive role granted and drops it at stop (DROP ROLE and
-        // REVOKE ... GRANTED BY have no typed jOOQ form). nexus-0ty8z fix round: 2 -> 1, the DROP DATABASE is
-        // SharedCluster.dropDatabase now.
-        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7; nexus-cbo4a 2026-10-19 octet-CHECK / topic_assignments DDL: 7 -> 1 (the 1 left replays taxonomy-010-1's own changeset SQL, read from the product changelog)
         // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
         // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
         // changeset SQL, read from the product changelog and executed as the admin role: no string in Java, but
         // the gate counts the execute(...) call.
-        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 3),
+        // nexus-cbo4a batch 8: 3 -> 1. The three replays of taxonomy-011-1's own changeset SQL share one
+        // replay(admin, sql) helper; its execute(sql) is the one left (the SQL is read from the product changelog,
+        // no string in Java; the test needs that exact text run as the admin role, which Liquibase cannot do).
+        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 1),
         // nexus-f3yxx (as first written): seedFixtures' raw chunk/centroid INSERTs (2),
         // plan-shape's raw hnsw-off session-var SETs for the second role bootstrap (2),
         // the recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
@@ -1678,7 +1566,26 @@ class RawSqlGateTest {
     // PgSessionEfSearchReadbackIntegrationTest loses its defensive CREATE EXTENSION IF NOT EXISTS vector (a no-op on the cloned
     // migrated template; the vector cast that follows fails loudly if the extension were absent), so
     // ExtensionBootstrapSiteConformanceTest.SANCTIONED_JAVA_FILES is now empty.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 77;
+    // nexus-cbo4a 2026-10-19 batch 8, 77 -> 58 (26 -> 20 files; six entries removed, two lowered): the role, grant and replay
+    // shapes. New test changelogs, each behind a validated PgContainerHelper wrapper (requireTestIdentifier) and run through
+    // runSuperuserTestChangelog: db.changelog-test-login-role.xml (createLoginRole, CREATE ROLE ... LOGIN, BYPASSRLS or not:
+    // Catalog013RlsReplayTest, GrantsNexusDiagViewAccessIntegrationTest, SchemaRollbackRoundTripIntegrationTest's nexus_diag),
+    // -role-admin-option.xml (grantRoleWithAdminOption, GRANT pg_monitor TO r WITH ADMIN OPTION, which jOOQ cannot express:
+    // GrantsPgMonitorTest and Catalog013RlsReplayTest), -product-schema-owner.xml (handProductSchemaTo, the schema USAGE/CREATE
+    // grants and the OWNER TO loop over nexus/t1; the databasechangelog table grants beside it are jOOQ), -table-schema.xml
+    // (setTableSchema, ALTER TABLE ... SET SCHEMA, SchemaMigratorIntegrationTest's split-history fixture, run as the table's
+    // owner) and -drop-exclusive-role.xml (dropRoleRevokingGrants, SharedDatabaseHandle's REVOKE ... GRANTED BY / DROP ROLE
+    // teardown, one Liquibase run per role on the control connection; its catch now takes any Exception, since the run can
+    // fail with a LiquibaseException). GrantsPgMonitorTest's pg_ls_waldir() probes are a select-list DSL.function (the SRF
+    // expands to one row per WAL segment; the EXECUTE check fires at the call either way) and SET ROLE is the "role" GUC
+    // through ctx.set. PristineCloneSkipTest's catalog UNION ALL moved verbatim into the test function
+    // nexus_test.catalog_snapshot() (db.changelog-test-objects.xml, test-objects-catalog-snapshot), called as one typed
+    // DSL.function. Kept raw, with the reason: Taxonomy011ForeignOwnedDiagViewTest 3 -> 1 (the three replays of
+    // taxonomy-011-1's own changeset text, read from the product XML, now share one replay(admin, sql); the test needs that
+    // exact text run as the admin role while the changeset is not journalled, which a Liquibase run cannot do),
+    // SchemaRollbackRoundTripIntegrationTest 2 -> 1 (grants-nexus-diag-1's body replayed verbatim), ArbiterCompletenessTest 1
+    // (rawFailure hands PostgreSQL's own grammar a statement jOOQ cannot build: two ON CONFLICT clauses in one INSERT).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 58;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 8: GRANT ${grantedRole} TO ${memberRole} WITH ADMIN OPTION, in Liquibase XML instead of a
+    Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's GRANT is an
+    object-privilege grant; it has no role-membership form.
+
+    The DBA bootstrap grants-004-monitor-wal-visibility needs from its migrating role (pg_provision.py's
+    GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION): granting a role onward requires the grantor to hold it
+    WITH ADMIN OPTION or be superuser. Run through PgContainerHelper#grantRoleWithAdminOption, which validates
+    both names; runAlways, bookkeeping in its own table. PgContainerHelper#grantRoleMembership is the INHERIT
+    flavour of the same statement.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-admin-option" author="nexus-cbo4a" runAlways="true">
+        <sql>GRANT ${grantedRole} TO ${memberRole} WITH ADMIN OPTION</sql>
+    </changeSet>
+</databaseChangeLog>

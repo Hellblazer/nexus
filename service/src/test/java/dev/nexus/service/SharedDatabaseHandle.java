@@ -13,7 +13,6 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
 /**
  * A {@link PostgreSQLContainer}-shaped HANDLE onto one database inside an
@@ -157,23 +156,15 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
         // After the database: a role cannot be dropped while it holds privileges in a live one.
         // Nor while it is the GRANTOR of a role membership (PostgreSQL 16+ records the grantor as a
         // dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one.
-        // Revoke what it granted, then drop it.
-        try (Connection admin = SharedCluster.controlConnection(delegate);
-             var st = admin.createStatement()) {
+        // Revoke what it granted, then drop it (db.changelog-test-drop-exclusive-role.xml, nexus-cbo4a batch 8).
+        // Role names are validated plain identifiers (SharedCluster.createDatabase). The changelog run can fail with
+        // a Liquibase exception as well as an SQLException, so the catch below takes both.
+        try (Connection admin = SharedCluster.controlConnection(delegate)) {
             admin.setAutoCommit(true);
-            // Role names are validated plain identifiers (SharedCluster.createDatabase).
-            String names = exclusiveRoles.stream().map(r -> "'" + r + "'").collect(Collectors.joining(","));
-            st.execute("DO $$ DECLARE r text; m record; BEGIN "
-                + "  FOREACH r IN ARRAY ARRAY[" + names + "] LOOP "
-                + "    FOR m IN SELECT g.rolname AS granted, u.rolname AS member FROM pg_auth_members a "
-                + "             JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member "
-                + "             JOIN pg_roles o ON o.oid = a.grantor WHERE o.rolname = r LOOP "
-                + "      EXECUTE format('REVOKE %I FROM %I GRANTED BY %I', m.granted, m.member, r); "
-                + "    END LOOP; "
-                + "    EXECUTE format('DROP ROLE IF EXISTS %I', r); "
-                + "  END LOOP; "
-                + "END $$");
-        } catch (SQLException e) {
+            for (String role : exclusiveRoles) {
+                PgContainerHelper.dropRoleRevokingGrants(admin, role);
+            }
+        } catch (Exception e) {
             LOG.error("nexus-7xfh7: {} could not drop its exclusive role(s) {} on the shared cluster; every later "
                 + "class that declares one of them fails at acquire until this is fixed", holder, exclusiveRoles, e);
             throw new IllegalStateException("nexus-7xfh7: " + holder + " leaked exclusive role(s) " + exclusiveRoles

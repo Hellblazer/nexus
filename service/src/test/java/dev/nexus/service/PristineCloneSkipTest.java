@@ -10,14 +10,11 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
-import java.util.LinkedHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -47,104 +44,19 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class PristineCloneSkipTest {
 
-    /** Snapshot sections, each a query returning one text column per row. System schemas are excluded. */
-    private static final String NOT_SYSTEM = "n.nspname NOT IN ('pg_catalog','information_schema') "
-        + "AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'";
-
-    private static final Map<String, String> SECTIONS = new LinkedHashMap<>();
-
-    static {
-        SECTIONS.put("relation",
-            "SELECT format('%s.%s kind=%s owner=%s acl=%s opts=%s rls=%s/%s persist=%s part=%s',"
-                + " n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), c.relacl, c.reloptions,"
-                + " c.relrowsecurity, c.relforcerowsecurity, c.relpersistence, c.relispartition)"
-                + " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE " + NOT_SYSTEM);
-        SECTIONS.put("columnacl",
-            "SELECT format('%s.%s.%s %s', n.nspname, c.relname, a.attname, a.attacl)"
-                + " FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid"
-                + " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.attacl IS NOT NULL AND " + NOT_SYSTEM);
-        SECTIONS.put("function",
-            "SELECT format('%s.%s(%s) owner=%s acl=%s cfg=%s secdef=%s vol=%s kind=%s body=%s',"
-                + " n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner),"
-                + " p.proacl, p.proconfig, p.prosecdef, p.provolatile, p.prokind, md5(p.prosrc))"
-                + " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE " + NOT_SYSTEM);
-        SECTIONS.put("schema",
-            "SELECT format('%s owner=%s acl=%s', n.nspname, pg_get_userbyid(n.nspowner), n.nspacl)"
-                + " FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'");
-        SECTIONS.put("defaultacl",
-            "SELECT format('role=%s ns=%s type=%s acl=%s', pg_get_userbyid(defaclrole),"
-                + " coalesce(defaclnamespace::regnamespace::text, '-'), defaclobjtype, defaclacl) FROM pg_default_acl");
-        SECTIONS.put("policy",
-            "SELECT format('%s on %s cmd=%s permissive=%s roles=%s using=%s check=%s', polname, polrelid::regclass,"
-                + " polcmd, polpermissive, (SELECT string_agg(CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r) END,"
-                + " ',' ORDER BY r) FROM unnest(polroles) r), pg_get_expr(polqual, polrelid),"
-                + " pg_get_expr(polwithcheck, polrelid)) FROM pg_policy");
-        SECTIONS.put("constraint",
-            "SELECT format('%s on %s %s validated=%s', conname, conrelid::regclass, pg_get_constraintdef(oid),"
-                + " convalidated) FROM pg_constraint WHERE connamespace NOT IN"
-                + " ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)");
-        SECTIONS.put("index",
-            "SELECT format('%s valid=%s ready=%s', pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisready)"
-                + " FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid"
-                + " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE " + NOT_SYSTEM);
-        SECTIONS.put("trigger",
-            "SELECT format('%s on %s %s enabled=%s', tgname, tgrelid::regclass, pg_get_triggerdef(oid), tgenabled)"
-                + " FROM pg_trigger WHERE NOT tgisinternal");
-        SECTIONS.put("eventtrigger",
-            "SELECT format('%s event=%s owner=%s enabled=%s fn=%s tags=%s', evtname, evtevent,"
-                + " pg_get_userbyid(evtowner), evtenabled, evtfoid::regproc, evttags) FROM pg_event_trigger");
-        SECTIONS.put("extension",
-            "SELECT format('%s %s ns=%s', extname, extversion, extnamespace::regnamespace) FROM pg_extension");
-        SECTIONS.put("sequence",
-            "SELECT format('%s.%s owner=%s type=%s start=%s inc=%s max=%s min=%s cache=%s cycle=%s last=%s',"
-                + " schemaname, sequencename, sequenceowner, data_type, start_value, increment_by, max_value,"
-                + " min_value, cache_size, cycle, last_value) FROM pg_sequences");
-        SECTIONS.put("view",
-            "SELECT format('%s.%s owner=%s def=%s', schemaname, viewname, viewowner, md5(definition))"
-                + " FROM pg_views WHERE schemaname NOT IN ('pg_catalog','information_schema')");
-        SECTIONS.put("matview",
-            "SELECT format('%s.%s owner=%s def=%s', schemaname, matviewname, matviewowner, md5(definition))"
-                + " FROM pg_matviews");
-        SECTIONS.put("database",
-            "SELECT format('owner=%s acl=%s connlimit=%s', pg_get_userbyid(datdba), datacl, datconnlimit)"
-                + " FROM pg_database WHERE datname = current_database()");
-        SECTIONS.put("databasesetting",
-            "SELECT format('role=%s cfg=%s', CASE WHEN setrole = 0 THEN '-' ELSE pg_get_userbyid(setrole) END, setconfig)"
-                + " FROM pg_db_role_setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())");
-        SECTIONS.put("role",
-            "SELECT format('%s super=%s inherit=%s createrole=%s createdb=%s login=%s repl=%s bypassrls=%s conn=%s cfg=%s',"
-                + " rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,"
-                + " rolbypassrls, rolconnlimit, rolconfig) FROM pg_roles");
-        SECTIONS.put("membership",
-            "SELECT format('%s in %s admin=%s', pg_get_userbyid(member), pg_get_userbyid(roleid), admin_option)"
-                + " FROM pg_auth_members");
-        // The journal without the columns a runAlways rerun rewrites (EXECTYPE, DATEEXECUTED, ORDEREXECUTED).
-        SECTIONS.put("journal",
-            "SELECT format('%s|%s|%s|%s', id, author, filename, md5sum) FROM public.databasechangelog");
-    }
-
     /**
-     * One entry per catalog row, prefixed with its section, sorted. One statement: the catalog reads below have
-     * no typed jOOQ form (pg_get_indexdef, pg_get_constraintdef, format() over several catalogs), so this is the
-     * one raw statement of the class, counted in RawSqlGateTest's ceiling.
+     * One entry per catalog row, prefixed with its section, sorted. The nineteen catalog reads (relations, column
+     * ACLs, functions, schemas, default ACLs, policies, constraints, indexes, triggers, event triggers, extensions,
+     * sequences, views, materialized views, the database, its settings, roles, memberships and the journal) have no
+     * typed jOOQ form (pg_get_indexdef, pg_get_constraintdef, format() over several catalogs), so they live in the
+     * test function {@code nexus_test.catalog_snapshot()} (db.changelog-test-objects.xml, nexus-cbo4a batch 8), which
+     * every clone carries; this is one typed call of it. The function lists itself in the function section like any
+     * other nexus_test function, so a before and after snapshot still compare equal.
      */
     static List<String> snapshot(Connection c) throws SQLException {
-        StringBuilder union = new StringBuilder();
-        for (var section : SECTIONS.entrySet()) {
-            if (union.length() > 0) {
-                union.append(" UNION ALL ");
-            }
-            union.append("SELECT '").append(section.getKey()).append(": ' || t FROM (")
-                .append(section.getValue()).append(") s(t)");
-        }
-        String sql = union.toString();
-        TreeSet<String> rows = new TreeSet<>();
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                rows.add(rs.getString(1));
-            }
-        }
-        return new ArrayList<>(rows);
+        return new ArrayList<>(new TreeSet<>(jooq(c)
+            .select(DSL.function(DSL.name("nexus_test", "catalog_snapshot"), String.class))
+            .fetch(0, String.class)));
     }
 
     /** Rows in either list but not both, marked {@code -} (only in a) or {@code +} (only in b). */

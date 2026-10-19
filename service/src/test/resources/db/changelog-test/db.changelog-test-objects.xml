@@ -521,4 +521,128 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.lock_table(text, text)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-catalog-snapshot" author="nexus-cbo4a">
+        <comment>nexus_test.catalog_snapshot(): one text row per catalog entry, prefixed with its section (nexus-cbo4a
+        batch 8), for PristineCloneSkipTest, which diffs a clone's catalog before and after applyProductSchema. The
+        nineteen catalog reads (relations with owner, ACL, reloptions and RLS flags, column ACLs, functions with a body
+        hash, schemas, default ACLs, policies, constraints, indexes, triggers, event triggers, extensions, sequences,
+        views, materialized views, the database ACL and settings, roles, memberships, and the changelog journal minus the
+        columns a rerun rewrites) have no typed jOOQ form: pg_get_indexdef, pg_get_constraintdef and format() over several
+        catalogs. They moved here verbatim from that test's Java strings. System schemas are excluded. STABLE and
+        SECURITY INVOKER; it reads catalogs only and lists itself in the function section like any other nexus_test
+        function, so a before and after snapshot still compare equal.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.catalog_snapshot() RETURNS SETOF text
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $$
+SELECT 'relation: ' || t FROM (
+    SELECT format('%s.%s kind=%s owner=%s acl=%s opts=%s rls=%s/%s persist=%s part=%s',
+        n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), c.relacl, c.reloptions,
+        c.relrowsecurity, c.relforcerowsecurity, c.relpersistence, c.relispartition)
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'columnacl: ' || t FROM (
+    SELECT format('%s.%s.%s %s', n.nspname, c.relname, a.attname, a.attacl)
+        FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.attacl IS NOT NULL AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'function: ' || t FROM (
+    SELECT format('%s.%s(%s) owner=%s acl=%s cfg=%s secdef=%s vol=%s kind=%s body=%s',
+        n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner),
+        p.proacl, p.proconfig, p.prosecdef, p.provolatile, p.prokind, md5(p.prosrc))
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'schema: ' || t FROM (
+    SELECT format('%s owner=%s acl=%s', n.nspname, pg_get_userbyid(n.nspowner), n.nspacl)
+        FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'defaultacl: ' || t FROM (
+    SELECT format('role=%s ns=%s type=%s acl=%s', pg_get_userbyid(defaclrole),
+        coalesce(defaclnamespace::regnamespace::text, '-'), defaclobjtype, defaclacl) FROM pg_default_acl
+) s(t)
+UNION ALL
+SELECT 'policy: ' || t FROM (
+    SELECT format('%s on %s cmd=%s permissive=%s roles=%s using=%s check=%s', polname, polrelid::regclass,
+        polcmd, polpermissive, (SELECT string_agg(CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r) END,
+        ',' ORDER BY r) FROM unnest(polroles) r), pg_get_expr(polqual, polrelid),
+        pg_get_expr(polwithcheck, polrelid)) FROM pg_policy
+) s(t)
+UNION ALL
+SELECT 'constraint: ' || t FROM (
+    SELECT format('%s on %s %s validated=%s', conname, conrelid::regclass, pg_get_constraintdef(oid),
+        convalidated) FROM pg_constraint WHERE connamespace NOT IN
+        ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+) s(t)
+UNION ALL
+SELECT 'index: ' || t FROM (
+    SELECT format('%s valid=%s ready=%s', pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisready)
+        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'trigger: ' || t FROM (
+    SELECT format('%s on %s %s enabled=%s', tgname, tgrelid::regclass, pg_get_triggerdef(oid), tgenabled)
+        FROM pg_trigger WHERE NOT tgisinternal
+) s(t)
+UNION ALL
+SELECT 'eventtrigger: ' || t FROM (
+    SELECT format('%s event=%s owner=%s enabled=%s fn=%s tags=%s', evtname, evtevent,
+        pg_get_userbyid(evtowner), evtenabled, evtfoid::regproc, evttags) FROM pg_event_trigger
+) s(t)
+UNION ALL
+SELECT 'extension: ' || t FROM (
+    SELECT format('%s %s ns=%s', extname, extversion, extnamespace::regnamespace) FROM pg_extension
+) s(t)
+UNION ALL
+SELECT 'sequence: ' || t FROM (
+    SELECT format('%s.%s owner=%s type=%s start=%s inc=%s max=%s min=%s cache=%s cycle=%s last=%s',
+        schemaname, sequencename, sequenceowner, data_type, start_value, increment_by, max_value,
+        min_value, cache_size, cycle, last_value) FROM pg_sequences
+) s(t)
+UNION ALL
+SELECT 'view: ' || t FROM (
+    SELECT format('%s.%s owner=%s def=%s', schemaname, viewname, viewowner, md5(definition))
+        FROM pg_views WHERE schemaname NOT IN ('pg_catalog','information_schema')
+) s(t)
+UNION ALL
+SELECT 'matview: ' || t FROM (
+    SELECT format('%s.%s owner=%s def=%s', schemaname, matviewname, matviewowner, md5(definition))
+        FROM pg_matviews
+) s(t)
+UNION ALL
+SELECT 'database: ' || t FROM (
+    SELECT format('owner=%s acl=%s connlimit=%s', pg_get_userbyid(datdba), datacl, datconnlimit)
+        FROM pg_database WHERE datname = current_database()
+) s(t)
+UNION ALL
+SELECT 'databasesetting: ' || t FROM (
+    SELECT format('role=%s cfg=%s', CASE WHEN setrole = 0 THEN '-' ELSE pg_get_userbyid(setrole) END, setconfig)
+        FROM pg_db_role_setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+) s(t)
+UNION ALL
+SELECT 'role: ' || t FROM (
+    SELECT format('%s super=%s inherit=%s createrole=%s createdb=%s login=%s repl=%s bypassrls=%s conn=%s cfg=%s',
+        rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
+        rolbypassrls, rolconnlimit, rolconfig) FROM pg_roles
+) s(t)
+UNION ALL
+SELECT 'membership: ' || t FROM (
+    SELECT format('%s in %s admin=%s', pg_get_userbyid(member), pg_get_userbyid(roleid), admin_option)
+        FROM pg_auth_members
+) s(t)
+UNION ALL
+SELECT 'journal: ' || t FROM (
+    SELECT format('%s|%s|%s|%s', id, author, filename, md5sum) FROM public.databasechangelog
+) s(t);
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.catalog_snapshot()</rollback>
+    </changeSet>
+
 </databaseChangeLog>

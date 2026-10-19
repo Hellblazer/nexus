@@ -16,7 +16,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -313,8 +312,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
 
         // nexus_diag is superuser-created in production (BYPASSRLS
         // requires superuser, nexus-vounk) — never by Liquibase.
-        exec(su, "CREATE ROLE " + DIAG_ROLE + " LOGIN PASSWORD '" + DIAG_PASS
-            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+        PgContainerHelper.createLoginRole(su, DIAG_ROLE, DIAG_PASS, true);
 
         liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
         liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
@@ -345,11 +343,5 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             .selectCount()
             .from(DSL.table(DSL.name(schema, table)))
             .fetchOne(0, Long.class);
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
     }
 }

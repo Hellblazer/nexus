@@ -434,13 +434,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // BYPASSRLS is why this role is superuser-created and never
                 // created by the changelog (nexus-vounk): a policy-subject
                 // session with no nexus.tenant GUC counts ZERO rows.
-                // SANCTIONED RAW: CREATE ROLE is cluster-level DDL with no jOOQ typed-DSL
-                // form (same category as role-001-1's own declared-irreversible role
-                // bootstrap). nexus_diag is deliberately not part of the shared
+                // CREATE ROLE has no jOOQ typed-DSL form: db.changelog-test-login-role.xml.
+                // nexus_diag is deliberately not part of the shared
                 // bootstrapNonSuperuserOwner provisioning.
-                su.createStatement().execute(
-                    "CREATE ROLE nexus_diag LOGIN PASSWORD 'nexus_diag_pass' "
-                        + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+                PgContainerHelper.createLoginRole(su, "nexus_diag", "nexus_diag_pass", true);
             }
             try (HikariDataSource ds = newAdminPool(pg, "nexus-admin-era-transition")) {
                 // ── A single fresh migrate() now lands DIRECTLY in view

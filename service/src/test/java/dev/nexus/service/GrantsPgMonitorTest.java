@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import liquibase.Contexts;
@@ -13,8 +14,6 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -101,9 +100,10 @@ class GrantsPgMonitorTest {
             provisionAdminAndSvcRoles(su);
             // THE FIX: pg_provision.py's bootstrap step, replayed by hand here
             // (a real DBA would run this once per docs/configuration.md).
-            // GRANT <role> TO <role> is role-MEMBERSHIP grant, a different statement
-            // from GrantOnStep's object-privilege grant; no typed jOOQ form; raw.
-            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
+            // GRANT <role> TO <role> is a role-MEMBERSHIP grant, a different statement from
+            // GrantOnStep's object-privilege grant with no typed jOOQ form: a test changelog
+            // (db.changelog-test-role-admin-option.xml).
+            PgContainerHelper.grantRoleWithAdminOption(su, "pg_monitor", ADMIN_ROLE);
 
             liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
 
@@ -123,32 +123,24 @@ class GrantsPgMonitorTest {
                 // plain session -- falsify the naive expectation before proving
                 // the supported path (nexus-bb5c8's decision of record:
                 // src/nexus/db/svc_monitor.py issues SET ROLE unconditionally).
-                // pg_ls_waldir() is a zero-arg set-returning function called in FROM
-                // position; jOOQ's DSL.table(Field<?>) is UNNEST (array-to-table), not
-                // a table-valued-function call (confirmed by reading DSL.java's own
-                // source: "public static Table<?> table(Field<?> cursor) { return
-                // unnest(cursor); }") -- no typed form found for this call shape; raw.
-                try (Statement st = svcConn.createStatement()) {
-                    assertThatThrownBy(() -> st.executeQuery("SELECT count(*) FROM pg_ls_waldir()"))
-                        .as("pg_ls_waldir() must be permission-denied on a plain NOINHERIT "
-                            + "nexus_svc session -- pg_monitor membership alone is not usable "
-                            + "privilege without SET ROLE")
-                        .isInstanceOf(Exception.class)
-                        .hasMessageContaining("permission denied");
-                }
+                // pg_ls_waldir() is a zero-arg set-returning function. jOOQ's DSL.table(Field<?>)
+                // is UNNEST (array-to-table), not a table-valued-function call, so it is called
+                // in the select list, where PostgreSQL expands the set into one row per WAL
+                // segment. The EXECUTE check fires when the function is called either way.
+                DSLContext svc = DSL.using(svcConn, SQLDialect.POSTGRES);
+                assertThatThrownBy(() -> walSegments(svc))
+                    .as("pg_ls_waldir() must be permission-denied on a plain NOINHERIT "
+                        + "nexus_svc session -- pg_monitor membership alone is not usable "
+                        + "privilege without SET ROLE")
+                    .isInstanceOf(Exception.class)
+                    .hasMessageContaining("permission denied");
 
-                // SET ROLE has no typed jOOQ DSL form; raw.
-                try (Statement st = svcConn.createStatement()) {
-                    st.execute("SET ROLE pg_monitor");
-                }
-                try (Statement st = svcConn.createStatement();
-                     ResultSet rs = st.executeQuery("SELECT count(*) FROM pg_ls_waldir()")) {
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1))
-                        .as("pg_ls_waldir() must be callable as nexus_svc after SET ROLE "
-                            + "pg_monitor and return at least the current WAL segment")
-                        .isGreaterThanOrEqualTo(1L);
-                }
+                // SET ROLE is the "role" GUC.
+                svc.set(DSL.name("role"), DSL.inline("pg_monitor")).execute();
+                assertThat(walSegments(svc))
+                    .as("pg_ls_waldir() must be callable as nexus_svc after SET ROLE "
+                        + "pg_monitor and return at least the current WAL segment")
+                    .isGreaterThanOrEqualTo(1);
             }
         }
     }
@@ -200,9 +192,8 @@ class GrantsPgMonitorTest {
         return !flags.inherit();
     }
 
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
+    /** Rows {@code pg_ls_waldir()} returns, one per WAL segment file. */
+    private static int walSegments(DSLContext ctx) {
+        return ctx.select(DSL.function("pg_ls_waldir", Object.class)).fetch().size();
     }
 }

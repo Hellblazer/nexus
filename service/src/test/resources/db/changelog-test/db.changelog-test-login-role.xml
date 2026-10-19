@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 8: CREATE ROLE ${role} LOGIN PASSWORD ..., in Liquibase XML instead of a Java SQL string (Sam's
+    rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no CREATE ROLE.
+
+    A cluster-global LOGIN role for a test that replays the changelog under a role of its own shape: NOSUPERUSER
+    NOCREATEDB NOCREATEROLE, and ${rlsAttr} = NOBYPASSRLS (the replay/owner role) or BYPASSRLS (production's
+    nexus_diag, which only a superuser can create, so never the changelog). Not guarded by IF NOT EXISTS: a role
+    that is already there is the same collision the bare CREATE ROLE it replaces raised. Run through
+    PgContainerHelper#createLoginRole, which validates ${role} and ${pass} as plain identifiers; runAlways,
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="login-role" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE ROLE ${role} LOGIN PASSWORD '${pass}' NOSUPERUSER NOCREATEDB NOCREATEROLE ${rlsAttr}</sql>
+    </changeSet>
+</databaseChangeLog>

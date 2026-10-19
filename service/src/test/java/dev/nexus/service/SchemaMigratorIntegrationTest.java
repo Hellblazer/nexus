@@ -1915,11 +1915,11 @@ class SchemaMigratorIntegrationTest {
             try (var ds = roleDataSource(c, role, pass, 2)) {
                 SchemaMigrator.migrate(ds);
                 try (Connection conn = ds.getConnection()) {
-                    // SANCTIONED RAW: reproduces the split a role named for a
-                    // schema produced in the field; a one-off relocation of
-                    // Liquibase's own table has no typed jOOQ form.
-                    conn.createStatement().execute(
-                        "ALTER TABLE public.databasechangelog SET SCHEMA nexus");
+                    // Reproduces the split a role named for a schema produced in the field.
+                    // ALTER TABLE ... SET SCHEMA has no typed jOOQ form:
+                    // db.changelog-test-table-schema.xml, run as the table's owner (this role).
+                    PgContainerHelper.setTableSchema(conn,
+                        DSL.table(DSL.name("public", "databasechangelog")), "nexus");
                 }
             }
             try (var ds = roleDataSource(c, role, pass, 2)) {
