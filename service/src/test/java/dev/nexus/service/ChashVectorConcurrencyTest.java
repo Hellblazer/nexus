@@ -177,7 +177,13 @@ class ChashVectorConcurrencyTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // Its 2,400 upserts grow the cluster by about 750 MB (measured on chas 2026-10-19: 815 MB peak
+        // on a 1 GB tmpfs, alone). On the per-fork shared cluster that leaves no headroom: a little
+        // residue from earlier classes, or WAL timing, fills the tmpfs ("could not extend file ... No
+        // space left on device"), the connection the teardown needs then fails too, and every later
+        // class in the fork errors at acquire (seen twice, nexus-7xfh7). So it takes a larger container
+        // of its own, as ChashProbePlanShapeTest does for the same reason (nexus-xynce).
+        pg = PgContainerHelper.startDedicated("2g", 3L * 1024 * 1024 * 1024);
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);

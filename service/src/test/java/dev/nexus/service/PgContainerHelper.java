@@ -267,8 +267,11 @@ public final class PgContainerHelper {
      *       is cluster-wide.</li>
      *   <li>{@code TenantPartitionCreationTs1MeasurementIntegrationTest} -- a latency measurement that
      *       creates and drops ~2,500 leaves per run; it wants an idle server and a lock table of its own.</li>
-     *   <li>{@code ChashProbePlanShapeTest}, {@code ChunkLiveOwnersRecallExtendedIntegrationTest} -- a
-     *       sized container ({@link #startDedicated(String, long)}).</li>
+     *   <li>{@code ChashProbePlanShapeTest}, {@code ChashVectorConcurrencyTest},
+     *       {@code ChunkLiveOwnersRecallExtendedIntegrationTest} -- a sized container
+     *       ({@link #startDedicated(String, long)}): they outgrow, or come within a few percent of, the
+     *       default 1 GB tmpfs, and a full tmpfs on the shared cluster also blocks the teardown connection, so every
+     *       later class in the fork errors at acquire.</li>
      *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
      *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>
