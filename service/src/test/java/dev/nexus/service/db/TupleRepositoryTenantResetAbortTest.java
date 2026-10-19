@@ -315,7 +315,7 @@ class TupleRepositoryTenantResetAbortTest {
     }
 
     @Test
-    void anRdAbortedAndInterruptedThrowsInsteadOfRunningItsFinalQuery() {
+    void anRdAbortedAndInterruptedThrowsTenantResetException() {
         String tenant = "reset-rd-intr-" + UUID.randomUUID();
         String to = "agent-rd-intr-" + UUID.randomUUID();
         TupleRepository waiter = repo();
@@ -328,7 +328,7 @@ class TupleRepositoryTenantResetAbortTest {
     }
 
     @Test
-    void anInAbortedAndInterruptedThrowsAndLeavesTheTuple() {
+    void anInAbortedAndInterruptedThrowsTenantResetException() {
         String tenant = "reset-in-intr-" + UUID.randomUUID();
         String to = "agent-in-intr-" + UUID.randomUUID();
         TupleRepository waiter = repo();
@@ -344,7 +344,7 @@ class TupleRepositoryTenantResetAbortTest {
     }
 
     @Test
-    void aWaitAnyAbortedAndInterruptedThrowsInsteadOfRunningItsFinalQuery() {
+    void aWaitAnyAbortedAndInterruptedThrowsTenantResetException() {
         String tenant = "reset-wait-intr-" + UUID.randomUUID();
         String to = "agent-wait-intr-" + UUID.randomUUID();
         TupleRepository waiter = repo();
