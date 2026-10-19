@@ -71,6 +71,12 @@ mode and never changes the exit status. At start-up a canary
 constructs each guarded class and checks the ``Thread``/``Popen`` patches, so a
 run that finds nothing is a run that could have found something.
 
+Ratchet (nexus-zv8i7): with ``NX_STORAGE_TOUCH_SWEEP=1`` the share of tests that
+minted a tenant (``provisioned_per_test`` in the summary) is checked against
+``tests/storage_touch_ceiling.toml`` (``check_provisioned_ceiling``). Marks only
+get added and nothing flags one that is no longer needed, so without a ceiling
+the saving erodes one module mark at a time.
+
 The guard is active under the default substrate and ``optin``; under ``none`` and
 ``per-test`` it installs nothing and records nothing. Two things are unconditional:
 ``_reset_vector_lease_cache`` (``http_vector_client`` caches a discovered lease
@@ -112,6 +118,7 @@ import os
 import subprocess
 import sys
 import threading
+import tomllib
 import uuid
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
@@ -141,7 +148,18 @@ GUARD_PID_ENV = "NX_STORAGE_TOUCH_GUARD_PID"
 RUN_ID_ENV = "NX_STORAGE_TOUCH_RUN_ID"
 EXEMPT_MARKER = "expects_unresolvable_endpoint"
 TENANT_MARKER = "t2_tenant"
+#: The fixtures that provision the tenant. A finding whose test already requests
+#: one of them was ordered wrong (nexus-0lo4l), not missing a request.
+TENANT_FIXTURES = frozenset({"t2_tenant", "t2_service_env"})
 REPORT_NAME = "nx-storage-touch-report.json"
+#: The committed ceiling on the share of tests that mint a tenant (nexus-zv8i7),
+#: checked only when ``NX_STORAGE_TOUCH_SWEEP=1``. The file and the section are
+#: overridable so a nested session in a test can use its own.
+DEFAULT_CEILING_FILE = Path(__file__).resolve().parent / "storage_touch_ceiling.toml"
+DEFAULT_CEILING_SUITE = "python_unit"
+CEILING_FILE_ENV = "NX_STORAGE_TOUCH_CEILING_FILE"
+CEILING_SUITE_ENV = "NX_STORAGE_TOUCH_CEILING_SUITE"
+CEILING_UNSET = "measure"
 SHIM_DIR = Path(__file__).resolve().parent / "_storage_touch_shim"
 
 #: (module, class) pairs whose construction is a storage touch. The shim's
@@ -201,6 +219,10 @@ class Finding:
     phases: list[str] = field(default_factory=list)
     error_types: list[str] = field(default_factory=list)
     fixtures: list[str] = field(default_factory=list)
+    #: The tenant fixtures (``TENANT_FIXTURES``) in the test's fixture closure.
+    #: Non-empty on a finding means the test asked for a tenant and the touch
+    #: still came first (nexus-0lo4l).
+    requested_tenant: list[str] = field(default_factory=list)
     origin: str | None = None
     count: int = 0
     dropped_events: int = 0
@@ -540,6 +562,7 @@ def _finding_of(rec: dict) -> Finding | None:
         phases=sorted({t["phase"] for t in bad}),
         error_types=sorted({t["error_type"] for t in bad}),
         fixtures=sorted({t["fixture"] for t in bad if t["fixture"]}),
+        requested_tenant=list(rec.get("requested_tenant", [])),
         origin=next((t["origin"] for t in bad if t["origin"]), None),
         count=rec["unprov_events"],
         dropped_events=rec["dropped_events"],
@@ -989,6 +1012,7 @@ class Guard:
                 "children": self.children, "spawned": self.spawned, "guard_errors": errors,
                 "dropped_events": self.dropped_events, "dropped_peeks": self.dropped_peeks,
                 "touches": list(self.sigs.values()),
+                "requested_tenant": sorted(TENANT_FIXTURES.intersection(getattr(item, "fixturenames", ()))),
                 "soft_peeks": [
                     {"kind": k, "site": s, "phase": ph, "origin": o, "count": n}
                     for (k, s, ph, o), n in sorted(self.peeks.items(), key=lambda kv: tuple(map(str, kv[0])))
@@ -1144,6 +1168,13 @@ class Guard:
                 f"without a tenant, and xfail turns the teardown failure into an expected one: {shown}. "
                 "Mark them t2_tenant so they xfail for their own reason."
             )
+        if self.sweep:
+            ratchet, lines = check_provisioned_ceiling(
+                c, suite=os.environ.get(CEILING_SUITE_ENV) or DEFAULT_CEILING_SUITE,
+                path=Path(os.environ.get(CEILING_FILE_ENV) or DEFAULT_CEILING_FILE),
+            )
+            report["provisioned_ratchet"] = ratchet
+            problems += lines
         return problems
 
     def _warnings(self, report: dict) -> list[str]:
@@ -1227,7 +1258,8 @@ class Guard:
             f"stale_exemptions={c['stale_exemptions']} touch_events={c['touch_events']} "
             f"skipped={c['skipped']} failed={c['failed']} children_seen={c['children_seen']} children_spawned={c['children_spawned']} "
             f"late_child_touches={late_child} late_thread_touches={late_thread} "
-            f"guard_errors={c['guard_errors']} collected={report['collected']} recorded={report['recorded']}"
+            f"guard_errors={c['guard_errors']} collected={report['collected']} recorded={report['recorded']} "
+            f"provisioned_per_test={c['provisioned'] / c['tests'] if c['tests'] else 0.0:.6f}"
         )
         worst = sorted(
             ((name, m) for name, m in report["modules"].items() if m["touched"] or m["thread_touched"]),
@@ -1270,6 +1302,60 @@ class Guard:
         tr.write_line(f"storage-touch report: {path}")
 
 
+def check_provisioned_ceiling(counts: dict, *, suite: str, path: Path) -> tuple[dict, list[str]]:
+    """Ratchet the share of tests that minted a tenant against the committed
+    ceiling (nexus-zv8i7). Returns the ``provisioned_ratchet`` report entry and
+    the problem lines (empty when the share is within the ceiling).
+
+    The metric is ``provisioned / tests``, intensive like the DDL ratchet's, so
+    it does not move with how CI splits the suite into shards. The ceiling is
+    the WORST share any shard measured; it may be exceeded by ``tolerance``
+    (relative, in the same section) before the run fails, because a shard's
+    composition shifts a little between runs. It is reduce-only: lower it in the
+    commit that lowers the share, raise it only with a reviewed reason in that
+    commit's message. ``"measure"`` means nobody has measured it yet: the run
+    fails and prints the number to commit (a ceiling nobody set must not pass a
+    run, the nexus-moht0 doctrine). Every unreadable file, section or value is a
+    failed check, never a pass."""
+    tests, provisioned = counts["tests"], counts["provisioned"]
+    share = provisioned / tests if tests else 0.0
+    entry: dict = {
+        "suite": suite, "file": str(path), "provisioned": provisioned, "tests": tests,
+        "provisioned_per_test": round(share, 6), "ceiling": None, "tolerance": None, "limit": None, "status": "ok",
+    }
+    head = f"provisioned ratchet [{suite}] in {path.name}"
+    if not tests:
+        return entry, []  # an empty run is the sweep-shape checks' to name
+    try:
+        section = tomllib.loads(path.read_text(encoding="utf-8"))[suite]
+        ceiling, tolerance = section["provisioned_per_test"], section["tolerance"]
+        if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance < 0:
+            raise ValueError(f"tolerance must be a number >= 0, got {tolerance!r}")
+    except (OSError, KeyError, ValueError) as exc:  # tomllib.TOMLDecodeError is a ValueError
+        entry["status"] = "unreadable"
+        return entry, [f"{head}: cannot read the ceiling ({type(exc).__name__}: {exc}); a ratchet that cannot be read passes nothing"]
+    entry["ceiling"], entry["tolerance"] = ceiling, tolerance
+    measured = f"{share:.6f} ({provisioned} of {tests} tests minted a tenant)"
+    if ceiling == CEILING_UNSET:
+        entry["status"] = "unset"
+        return entry, [
+            f"{head}: no ceiling set; measured provisioned_per_test={measured}. Set provisioned_per_test to the "
+            "worst value any shard measured; a ceiling nobody set does not pass a run."
+        ]
+    if isinstance(ceiling, bool) or not isinstance(ceiling, (int, float)) or not 0 < ceiling <= 1:
+        entry["status"] = "unreadable"
+        return entry, [f"{head}: provisioned_per_test must be \"{CEILING_UNSET}\" or a number in (0, 1], got {ceiling!r}"]
+    entry["limit"] = limit = round(ceiling * (1 + tolerance), 6)
+    if share > limit:
+        entry["status"] = "over"
+        return entry, [
+            f"{head}: provisioned_per_test={measured} is above the ceiling {ceiling} (+{tolerance:.0%} tolerance = {limit}). "
+            "The tenant saving is eroding: drop the t2_tenant marks the tests no longer need, or raise the ceiling "
+            "in a reviewed commit that says why."
+        ]
+    return entry, []
+
+
 def _split_current_test(value: str) -> tuple[str, str]:
     """``PYTEST_CURRENT_TEST`` is ``<nodeid> (<phase>)``."""
     head, sep, tail = value.rpartition(" (")
@@ -1306,9 +1392,32 @@ def _describe(f: Finding) -> str:
     return (
         f"{f.nodeid}: reached storage without a tenant "
         f"({', '.join(f.error_types)} constructed{on_thread} in {'/'.join(f.phases)}{fixture}{where}). "
-        f"Request the t2_tenant fixture (or mark it {TENANT_MARKER}), or mark "
-        f"it {EXEMPT_MARKER} if raising is the point.\n  "
+        f"{_advice(f)}\n  "
         + "\n  ".join(f.stack)
+    )
+
+
+def _advice(f: Finding) -> str:
+    """What to do about a finding. A test that already requests a tenant fixture
+    does not lack the request: another fixture touched storage outside the
+    tenant's lifetime (set up in parameter order, torn down in reverse), so only
+    the marker, which provisions the tenant before every other fixture, fixes it
+    (nexus-0lo4l)."""
+    when = None
+    if f.requested_tenant:
+        if "setup" in f.phases:
+            when = "the fixture above ran after the touch (fixtures are set up in parameter order, so the tenant did not exist yet)"
+        elif "teardown" in f.phases:
+            when = "the tenant was already torn down when the touch happened (fixtures are torn down in reverse order)"
+    if when is not None:
+        return (
+            f"The test already requests {' and '.join(f.requested_tenant)}, but {when}. Put "
+            f"@pytest.mark.{TENANT_MARKER} on the test: the marker provisions the tenant before any other "
+            f"fixture. Or mark it {EXEMPT_MARKER} if raising is the point."
+        )
+    return (
+        f"Request the t2_tenant fixture (or mark it {TENANT_MARKER}), or mark "
+        f"it {EXEMPT_MARKER} if raising is the point."
     )
 
 

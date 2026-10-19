@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from tests._storage_touch_guard import CHILD_LOG_ENV, REPORT_DIR_ENV, SHIM_DIR
-from tests.test_storage_touch_guard import REPO_ROOT, _CONFTEST, _TOUCH, _report, _run
+from tests.test_storage_touch_guard import (
+    REPO_ROOT, _CONFTEST, _TOUCH, _report, _run, _set_ceiling, assert_session_failed_for,
+)
 
 
 # ── a report a person can annotate from ──────────────────────────────────────
@@ -833,6 +835,7 @@ def test_a_killed_worker_loses_nothing_and_fail_mode_says_so(pytester, monkeypat
     monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
     monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "fail")
     pytester.makeconftest(_CONFTEST)
+    _set_ceiling(pytester, monkeypatch)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner='''
 import os
@@ -853,16 +856,14 @@ def test_d_after():
     result = pytester.runpytest_subprocess(
         "-p", "tests._storage_touch_guard", "-p", "no:cacheprovider", "-n", "1", "-q",
     )
-    out = result.stdout.str()
     report = _report(result)
     assert report["workers_started"] == 2 and report["workers"] == 1, report["workers_started"]
     assert len(report["recovered_files"]) == 1
     c = report["counts"]
     # a_provisioned and b_clean survived the kill on disk; d_after ran on the replacement
     assert c["tests"] == 3 and c["provisioned"] == 1, c
-    assert result.ret != 0
     # the vacuity verdict itself, not just any failure (the crash fails a test too)
-    assert "vacuous sweep: workers reported 1 of 2 started" in out, out
+    assert_session_failed_for(result, "vacuous sweep: workers reported 1 of 2 started")
     assert "workers reported 1 of 2 started" in report["vacuity"][0], report["vacuity"]
     assert [v for v in report["vacuity"] if "workers reported" in v] == [
         "vacuous sweep: workers reported 1 of 2 started"
@@ -879,6 +880,7 @@ def test_fail_mode_accepts_a_whole_xdist_sweep(pytester, monkeypatch, tmp_path) 
     monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
     monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "fail")
     pytester.makeconftest(_CONFTEST)
+    _set_ceiling(pytester, monkeypatch)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner='''
 import pytest
@@ -909,9 +911,7 @@ def test_clean(i):
 def test_fail_mode_refuses_a_vacuous_sweep(pytester, monkeypatch) -> None:
     result = _run(pytester, monkeypatch, "def test_nothing():\n    pass\n", mode="fail")
     out = result.stdout.str()
-    assert result.ret != 0
-    assert "vacuous sweep: provisioned=0" in out
-    assert "vacuous sweep: touch_events=0" in out
+    assert_session_failed_for(result, "vacuous sweep: provisioned=0", "vacuous sweep: touch_events=0")
     assert "vacuous sweep: clean_unprovisioned" not in out  # this one examined a clean test
 
 
@@ -1038,7 +1038,7 @@ def test_provisioned(t2_tenant):
     assert _report(result)["vacuity"] == []
     # the same run, asked for the whole-run shape, is refused: the checks still exist
     result = _run(pytester, monkeypatch, body, mode="fail", sweep=True)
-    assert result.ret != 0 and "vacuous sweep: clean_unprovisioned=0" in result.stdout.str()
+    assert_session_failed_for(result, "vacuous sweep: clean_unprovisioned=0")
 
 
 def test_the_start_up_canary_refuses_a_session_whose_recorder_is_unreachable(pytester, monkeypatch) -> None:
@@ -1184,8 +1184,7 @@ def test_hides_its_child():
     c = _report(result)["counts"]
     assert (c["children_spawned"], c["children_seen"]) == (1, 0)
     result = _run(pytester, monkeypatch, hidden, mode="fail", sweep=True)
-    assert result.ret != 0
-    assert "1 Python child(ren) were spawned but the shim saw none" in result.stdout.str()
+    assert_session_failed_for(result, "1 Python child(ren) were spawned but the shim saw none")
     # control: the same spawn with the environment intact reaches the shim
     result = _run(pytester, monkeypatch, '''
 import subprocess, sys
@@ -1272,11 +1271,127 @@ def test_xfails_untouched():
     # which the xfail turned into an expected failure as well
     result.assert_outcomes(xfailed=4)
     out = result.stdout.str()
-    assert result.ret != 0
-    assert "storage touch swallowed by xfail: 1 xfailed test(s)" in out
-    assert "test_inner.py::test_xfails_after_a_touch" in out
+    assert_session_failed_for(
+        result, "storage touch swallowed by xfail: 1 xfailed test(s)", "test_inner.py::test_xfails_after_a_touch",
+    )
     assert "test_xfails_with_a_tenant" not in out.split("swallowed by xfail")[1].split("storage-touch report")[0]
     assert _report(result)["xfail_touches"] == ["test_inner.py::test_xfails_after_a_touch"]
     # report mode says the same and keeps the exit status
     result = _run(pytester, monkeypatch, body, mode="report")
     assert result.ret == 0 and "storage touch swallowed by xfail" in result.stdout.str()
+
+
+# ── the tenant saving is ratcheted (nexus-zv8i7) ─────────────────────────────
+
+_RATCHET_BODY = '''
+from helpers import touch_storage_and_swallow
+
+def test_provisioned(t2_tenant):
+    touch_storage_and_swallow()
+
+def test_clean():
+    pass
+'''  # 1 of 2 tests minted a tenant: provisioned_per_test = 0.5, and the sweep shape is satisfied
+
+
+def _ceiling_file(tmp_path: Path, value: str, *, tolerance: float = 0.0, suite: str = "python_unit") -> Path:
+    path = tmp_path / "ceiling.toml"
+    path.write_text(f"[{suite}]\nprovisioned_per_test = {value}\ntolerance = {tolerance}\n")
+    return path
+
+
+def test_the_share_of_provisioned_tests_is_compared_with_the_ceiling(tmp_path: Path) -> None:
+    from tests._storage_touch_guard import check_provisioned_ceiling
+
+    counts = {"tests": 200, "provisioned": 20}  # 0.1
+    def check(value: str, tolerance: float = 0.0):
+        return check_provisioned_ceiling(counts, suite="python_unit", path=_ceiling_file(tmp_path, value, tolerance=tolerance))
+
+    entry, lines = check("0.1")
+    assert lines == [] and entry["status"] == "ok" and entry["provisioned_per_test"] == 0.1
+    entry, lines = check("0.09")
+    assert entry["status"] == "over" and len(lines) == 1
+    assert "provisioned_per_test=0.100000 (20 of 200 tests minted a tenant) is above the ceiling 0.09" in lines[0]
+    # the tolerance is relative: 0.09 * 1.2 = 0.108 admits 0.1, 0.09 * 1.05 = 0.0945 does not
+    assert check("0.09", 0.2)[1] == [] and check("0.09", 0.2)[0]["limit"] == 0.108
+    assert check("0.09", 0.05)[0]["status"] == "over"
+    entry, lines = check('"measure"')
+    assert entry["status"] == "unset" and "no ceiling set; measured provisioned_per_test=0.100000" in lines[0]
+    # a ratchet that cannot be read passes nothing
+    for bad in ("0", "1.5", "-0.1", '"later"', "true"):
+        entry, lines = check(bad)
+        assert entry["status"] == "unreadable" and lines, bad
+    assert check_provisioned_ceiling(counts, suite="docs_readers", path=_ceiling_file(tmp_path, "0.5"))[0]["status"] == "unreadable"
+    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "absent.toml")[0]["status"] == "unreadable"
+    (tmp_path / "broken.toml").write_text("[python_unit\n")
+    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "broken.toml")[0]["status"] == "unreadable"
+    (tmp_path / "notol.toml").write_text("[python_unit]\nprovisioned_per_test = 0.5\n")
+    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "notol.toml")[0]["status"] == "unreadable"
+    # an empty run is the sweep-shape checks' to name, not the ratchet's
+    assert check_provisioned_ceiling({"tests": 0, "provisioned": 0}, suite="python_unit", path=tmp_path / "absent.toml")[1] == []
+
+
+def test_a_sweep_above_the_ceiling_fails_for_the_ratchet_and_nothing_else(pytester, monkeypatch) -> None:
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling="0.25")
+    result.assert_outcomes(passed=2)
+    assert_session_failed_for(
+        result, "provisioned ratchet [python_unit] in storage_touch_ceiling.toml",
+        "provisioned_per_test=0.500000 (1 of 2 tests minted a tenant) is above the ceiling 0.25",
+    )
+    report = _report(result)
+    # the sweep shape is satisfied, so the ratchet is the ONLY thing that failed the session
+    assert len(report["vacuity"]) == 1 and report["vacuity"][0].startswith("provisioned ratchet"), report["vacuity"]
+    assert report["provisioned_ratchet"]["status"] == "over"
+    assert "provisioned_per_test=0.500000" in result.stdout.str()
+
+
+def test_a_sweep_within_the_ceiling_and_its_tolerance_passes(pytester, monkeypatch) -> None:
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling="0.5")
+    result.assert_outcomes(passed=2)
+    assert result.ret == 0, result.stdout.str()
+    report = _report(result)
+    assert report["vacuity"] == [] and report["provisioned_ratchet"]["status"] == "ok"
+    # 0.45 * (1 + 0.2) = 0.54 admits 0.5
+    _set_ceiling(pytester, monkeypatch, "0.45", tolerance=0.2)
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling=None)
+    assert result.ret == 0, result.stdout.str()
+    assert _report(result)["provisioned_ratchet"]["limit"] == 0.54
+
+
+def test_an_unset_ceiling_fails_a_sweep_and_prints_the_number_to_commit(pytester, monkeypatch) -> None:
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling='"measure"')
+    assert_session_failed_for(result, "no ceiling set; measured provisioned_per_test=0.500000 (1 of 2 tests minted a tenant)")
+    assert _report(result)["provisioned_ratchet"]["status"] == "unset"
+
+
+def test_the_ratchet_is_asked_of_a_whole_run_only_and_report_mode_never_fails_on_it(pytester, monkeypatch) -> None:
+    # a scoped run says nothing about the share
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", sweep=False, ceiling="0.1")
+    result.assert_outcomes(passed=2)
+    assert result.ret == 0 and "provisioned ratchet" not in result.stdout.str()
+    assert "provisioned_ratchet" not in _report(result)
+    # report mode prints the verdict and keeps the exit status
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="report", ceiling="0.1")
+    assert result.ret == 0 and "is above the ceiling 0.1" in result.stdout.str()
+    assert _report(result)["provisioned_ratchet"]["status"] == "over"
+
+
+def test_the_committed_ceiling_is_the_default_and_is_well_formed(pytester, monkeypatch) -> None:
+    import tomllib
+
+    from tests._storage_touch_guard import DEFAULT_CEILING_FILE
+
+    assert DEFAULT_CEILING_FILE == REPO_ROOT / "tests" / "storage_touch_ceiling.toml"
+    sections = tomllib.loads(DEFAULT_CEILING_FILE.read_text())
+    assert {"python_unit", "docs_readers"} <= sections.keys()
+    for name, section in sections.items():
+        value = section["provisioned_per_test"]
+        assert value == "measure" or (not isinstance(value, bool) and isinstance(value, (int, float)) and 0 < value <= 1), name
+        assert isinstance(section["tolerance"], (int, float)) and section["tolerance"] >= 0, name
+    # with no override a sweep reads that file and the python_unit section
+    monkeypatch.delenv("NX_STORAGE_TOUCH_CEILING_FILE", raising=False)
+    monkeypatch.delenv("NX_STORAGE_TOUCH_CEILING_SUITE", raising=False)
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="report", ceiling=None)
+    entry = _report(result)["provisioned_ratchet"]
+    assert entry["file"] == str(DEFAULT_CEILING_FILE) and entry["suite"] == "python_unit"
+    assert entry["status"] != "unreadable", entry

@@ -9,6 +9,7 @@ fixed order, so the cases do not depend on how the outer run is split.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -27,6 +28,12 @@ from tests import _storage_touch_guard as guard
 
 @pytest.fixture
 def t2_tenant():
+    with guard.tenant_active():
+        yield "tenant"
+
+
+@pytest.fixture
+def t2_service_env():
     with guard.tenant_active():
         yield "tenant"
 '''
@@ -49,14 +56,32 @@ def touch_t1_and_swallow():
 '''
 
 
+def _set_ceiling(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
+                 value: str = "1.0", *, tolerance: float = 0.0, suite: str = "python_unit") -> Path:
+    """Point the nested session's provisioned-share ratchet (nexus-zv8i7) at a
+    ceiling file of its own. ``value`` is a TOML literal (``0.1`` or ``"measure"``).
+    Without this a sweep session would read the committed ceiling, which is
+    ``"measure"`` until a full run supplies the number, and fail every sweep test."""
+    path = pytester.path / "storage_touch_ceiling.toml"
+    path.write_text(f"[{suite}]\nprovisioned_per_test = {value}\ntolerance = {tolerance}\n")
+    monkeypatch.setenv("NX_STORAGE_TOUCH_CEILING_FILE", str(path))
+    monkeypatch.setenv("NX_STORAGE_TOUCH_CEILING_SUITE", suite)
+    return path
+
+
 def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
          *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = (),
          extra: dict[str, str] | None = None, substrate: str | None = "",
-         sweep: bool = True):
+         sweep: bool = True, ceiling: str | None = "1.0"):
     """Run ``body`` in a nested session. ``substrate`` names ``NX_TEST_T2_SUBSTRATE``
     (None leaves it unset: the default); by default ``optin`` picks ``optin`` and
     not ``optin`` picks ``per-test``, the escape hatch the guard is inert under.
-    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks."""
+    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks.
+    ``ceiling`` is the provisioned-share ceiling those checks compare with (a TOML
+    literal; the default 1.0 can never be exceeded, so a test that is not about
+    the ratchet is not decided by it)."""
+    if ceiling is not None:
+        _set_ceiling(pytester, monkeypatch, ceiling)
     if substrate == "":
         substrate = "optin" if optin else "per-test"
     if substrate is None:
@@ -79,6 +104,22 @@ def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
     return pytester.runpytest_inprocess(
         "-p", "tests._storage_touch_guard", "-p", "no:cacheprovider", "-q", *args,
     )
+
+
+def assert_session_failed_for(result: pytest.RunResult, *reasons: str) -> None:
+    """The nested session ended non-zero AND printed every ``reason``.
+
+    A bare ``ret != 0`` proves nothing under the default ``sweep=True``: a body
+    with no provisioned or no clean test fails on 'vacuous sweep: provisioned=0'
+    whatever the rule under test did (nexus-j002k: the late-touch tests passed
+    on that for a whole phase). ``tests/test_storage_touch_guard.py::
+    test_no_fail_mode_test_asserts_a_bare_nonzero_exit`` keeps the bare form out
+    of both guard test files. At least one reason is required."""
+    assert reasons, "name what the session must have failed for"
+    assert result.ret != 0, result.stdout.str()
+    out = result.stdout.str() + result.stderr.str()
+    for reason in reasons:
+        assert reason in out, (reason, out)
 
 
 def _report(result: pytest.RunResult) -> dict:
@@ -179,6 +220,70 @@ def test_tenant_set_up_after_the_touching_fixture(seeded, t2_tenant):
     # the fixture ran before the tenant existed, so even this test is named
     assert by_id["test_tenant_set_up_after_the_touching_fixture"]["phases"] == ["setup"]
     assert any("touch_storage_and_swallow" in line for line in by_id["test_uses_the_fixture"]["stack"])
+
+
+def _messages(out: str, test: str) -> list[str]:
+    """Every output line that carries the guard's message for ``test``."""
+    return [line for line in out.splitlines() if f"{test}: reached storage without a tenant" in line]
+
+
+def test_a_test_that_already_requests_the_tenant_is_told_to_mark_it(pytester, monkeypatch) -> None:
+    """nexus-0lo4l: ``def test_x(db, t2_service_env)`` has the request; the fixture
+    before it touched storage first. 'Request the fixture' is wrong advice there:
+    only the marker (tenant first) fixes it. A test that never asked still gets
+    the old advice, and a touch after the tenant was torn down says so."""
+    result = _run(pytester, monkeypatch, '''
+import pytest
+from helpers import touch_storage_and_swallow
+
+@pytest.fixture
+def seeded():
+    touch_storage_and_swallow()
+    return 1
+
+@pytest.fixture
+def leaky():
+    yield 1
+    touch_storage_and_swallow()
+
+def test_asks_for_the_service_env_too_late(seeded, t2_service_env):
+    assert seeded == 1
+
+def test_asks_for_the_tenant_too_late(seeded, t2_tenant):
+    assert seeded == 1
+
+def test_never_asked(seeded):
+    assert seeded == 1
+
+def test_tenant_is_gone_before_the_teardown_touch(leaky, t2_tenant):
+    assert leaky == 1
+''')
+    result.assert_outcomes(passed=4, errors=4)
+    out = result.stdout.str()
+    for test, asked in (("test_asks_for_the_service_env_too_late", "t2_service_env"),
+                        ("test_asks_for_the_tenant_too_late", "t2_tenant")):
+        lines = _messages(out, test)
+        assert lines, test
+        assert any(
+            f"The test already requests {asked}, but the fixture above ran after the touch" in line
+            and "Put @pytest.mark.t2_tenant on the test" in line
+            for line in lines
+        ), lines
+        assert not any("Request the t2_tenant fixture" in line for line in lines), lines
+    never = _messages(out, "test_never_asked")
+    assert never and all("already requests" not in line for line in never), never
+    assert any("Request the t2_tenant fixture (or mark it t2_tenant)" in line for line in never), never
+    teardown = _messages(out, "test_tenant_is_gone_before_the_teardown_touch")
+    assert any(
+        "the tenant was already torn down when the touch happened" in line
+        and "Put @pytest.mark.t2_tenant on the test" in line
+        for line in teardown
+    ), teardown
+    by_id = {f["nodeid"].split("::")[-1]: f for f in _report(result)["findings"]}
+    assert by_id["test_asks_for_the_service_env_too_late"]["requested_tenant"] == ["t2_service_env"]
+    assert by_id["test_asks_for_the_tenant_too_late"]["requested_tenant"] == ["t2_tenant"]
+    assert by_id["test_never_asked"]["requested_tenant"] == []
+    assert by_id["test_tenant_is_gone_before_the_teardown_touch"]["phases"] == ["teardown"]
 
 
 def test_report_mode_names_without_failing_the_test(pytester, monkeypatch) -> None:
@@ -295,6 +400,101 @@ def test_2_sees_no_lease():
     assert http_vector_client._lease_cache is None
 ''', optin=False)
     result.assert_outcomes(passed=2)
+
+
+# ── a non-zero exit proves nothing on its own (nexus-j002k) ──────────────────
+
+_GUARD_TEST_FILES = ("test_storage_touch_guard.py", "test_storage_touch_guard_report.py")
+_HELPER = "assert_session_failed_for"
+#: Comparisons of ``.ret`` that are not an equality: 'it failed', not 'it failed with this'.
+_LOOSE_OPS = (ast.NotEq, ast.Gt, ast.GtE, ast.Lt, ast.LtE, ast.In, ast.NotIn, ast.IsNot)
+
+
+def _is_ret(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "ret"
+
+
+def _loose_exit_asserts(source: str) -> tuple[list[str], int]:
+    """(``<test>:<line>`` of every assert on a ``.ret`` that is not an equality,
+    calls of the helper) in ``source``. The helper's own body is exempt. An
+    ``.ret == 0`` and an exact ``.ret == 4`` are specific and pass."""
+    flagged: list[str] = []
+    calls = 0
+    for fn in ast.walk(ast.parse(source)):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == _HELPER:
+                calls += 1
+        if fn.name == _HELPER:
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Assert):
+                continue
+            parts = node.test.values if isinstance(node.test, ast.BoolOp) else [node.test]
+            for part in parts:
+                loose = (
+                    _is_ret(part)  # assert result.ret
+                    or (isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not) and _is_ret(part.operand))
+                    or (
+                        isinstance(part, ast.Compare)
+                        and any(_is_ret(n) for n in (part.left, *part.comparators))
+                        and any(isinstance(op, _LOOSE_OPS) for op in part.ops)
+                    )
+                )
+                if loose:
+                    flagged.append(f"{fn.name}:{node.lineno}")
+    return flagged, calls
+
+
+def test_no_fail_mode_test_asserts_a_bare_nonzero_exit() -> None:
+    """The late-touch tests of the phase-4 fix round asserted ``ret != 0`` under the
+    default ``sweep=True`` and passed on 'vacuous sweep: provisioned=0' for a
+    whole phase. Every assertion that a nested session FAILED goes through
+    ``assert_session_failed_for``, which also asserts what it failed for."""
+    flagged: list[str] = []
+    total_calls = 0
+    for name in _GUARD_TEST_FILES:
+        found, calls = _loose_exit_asserts((Path(__file__).resolve().parent / name).read_text())
+        flagged += [f"{name}::{where}" for where in found]
+        total_calls += calls
+    assert not flagged, f"assert the reason the session failed, with {_HELPER}: {flagged}"
+    # non-vacuity: the scan found the tests that assert a failing session
+    assert total_calls >= 6, total_calls
+
+
+def test_the_exit_scan_flags_a_bare_failure_and_passes_a_specific_one() -> None:
+    """Positive control for the scan above."""
+    loose = [
+        "def test_a(result):\n    assert result.ret != 0\n",
+        "def test_b(result):\n    assert result.ret\n",
+        "def test_c(result):\n    assert result.ret != 0 and 'x' in result.stdout.str()\n",
+        "def test_d(result):\n    assert result.ret > 0\n",
+        "def test_e(result):\n    assert not result.ret\n",
+    ]
+    for source in loose:
+        assert _loose_exit_asserts(source)[0], source
+    for source in (
+        "def test_a(result):\n    assert result.ret == 0\n",
+        "def test_b(result):\n    assert result.ret == 4\n",
+        "def test_c(result):\n    assert_session_failed_for(result, 'why')\n",
+    ):
+        assert _loose_exit_asserts(source)[0] == [], source
+    assert _loose_exit_asserts("def test_c(result):\n    assert_session_failed_for(result, 'why')\n")[1] == 1
+
+
+def test_a_failing_session_for_another_reason_is_refused_by_the_helper(pytester, monkeypatch) -> None:
+    """The weakness itself, live: a body with nothing provisioned fails the sweep
+    under the default ``sweep=True`` whatever any other rule does, so a bare
+    ``ret != 0`` passes for it. The helper refuses it unless the reason it names
+    is the one printed."""
+    result = _run(pytester, monkeypatch, "def test_nothing():\n    pass\n", mode="fail")
+    assert result.ret == pytest.ExitCode.TESTS_FAILED  # a bare "it failed" check passes ...
+    assert_session_failed_for(result, "vacuous sweep: provisioned=0")
+    with pytest.raises(AssertionError):  # ... and says nothing about a late touch
+        assert_session_failed_for(result, "late storage touch")
+    with pytest.raises(AssertionError):
+        assert_session_failed_for(result)
 
 
 def test_every_marker_the_default_addopts_deselect_is_uncensused() -> None:

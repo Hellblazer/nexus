@@ -287,7 +287,17 @@ deselects them, so no census has said which of them touch storage.
   for every test, the guard off. Kept for one release; `none` still provisions nothing.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
-  some touch event); set it on a full-suite run, not a scoped one.
+  some touch event) and the ratchet below; set it on a full-suite run, not a scoped one.
+- **The saving is ratcheted** (nexus-zv8i7): with `NX_STORAGE_TOUCH_SWEEP=1` the share of tests that
+  minted a tenant (`provisioned_per_test` in the guard summary line) must not exceed the ceiling in
+  `tests/storage_touch_ceiling.toml` by more than its relative `tolerance` (5%). Ceilings are
+  reduce-only; `"measure"` (no full run has set it yet) fails the run and prints the number to commit.
+  Set `NX_STORAGE_TOUCH_CEILING_SUITE=docs_readers` for the docs-readers leg. Marks only get added, so
+  when the share rises, drop marks a test no longer needs before raising the ceiling.
+- A guard test that asserts a nested session FAILED goes through `assert_session_failed_for(result,
+  "<reason>")` (`tests/test_storage_touch_guard.py`), never a bare `ret != 0`: under the default
+  `sweep=True` a body with no provisioned test fails on 'vacuous sweep: provisioned=0' whatever the rule
+  under test did (nexus-j002k). A lint in that file enforces it.
 - **Seeding the marks from a census:** run the whole suite as `NX_STORAGE_TOUCH_GUARD_MODE=report
   NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_REPORT_DIR=<dir>`, then
   `uv run python scripts/annotate_t2_tenant.py <dir>` (a dry run) and `--apply`. It marks a module

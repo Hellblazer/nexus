@@ -1,0 +1,34 @@
+# What share of a test run may mint a tenant (nexus-zv8i7, epic nexus-aca0q).
+#
+# Since the opt-in flip (nexus-j23ni) a test mints a tenant only when it asks for one. Marks only
+# get added and nothing flags a mark that is no longer needed, so the saving erodes one module mark
+# at a time. The storage-touch guard (tests/_storage_touch_guard.py, check_provisioned_ceiling)
+# compares the run's `provisioned_per_test` (tests that minted a tenant / tests recorded, printed
+# in the guard summary line) with the section below and fails the session when it is higher.
+#
+# The check runs only with NX_STORAGE_TOUCH_SWEEP=1, the whole-run mode a full-suite run sets; a
+# scoped run says nothing about the share. CI does not set it yet, so a sharded CI run is not
+# ratcheted until a leg exports it (the sections below are per-shard values for that).
+#
+# The metric is INTENSIVE (a share, not a count), so it does not move with how CI splits the suite.
+# A section's ceiling is the WORST share any shard of that suite measured. `tolerance` is relative:
+# the run passes up to ceiling * (1 + tolerance), because a shard's composition shifts a little
+# between runs (the split follows test durations). Ceilings are reduce-only: lower one in the commit
+# that lowers the share; raising one needs a reviewed reason in that commit's message.
+#
+# "measure" means no full-run measurement exists yet. The check then fails the session and prints
+# the number it measured. A ceiling nobody set must not pass a run. Known measurements, chas lab-m,
+# 55c082c63, NX_STORAGE_TOUCH_SWEEP=1 (2 of 6 shards; the worst of the six is not known):
+#   shard1 409 of 5692 = 0.0719, shard4 868 of 5615 = 0.1546, docs-readers 581 of 1561 = 0.3722.
+# The follow-up commit after the next full chas run replaces each "measure" with the worst shard's
+# `provisioned_per_test`.
+
+[python_unit]
+provisioned_per_test = "measure"
+tolerance = 0.05
+
+# The docs-readers CI leg runs a different selection (lint-marked docs files under the default
+# substrate), so it has its own ceiling; set NX_STORAGE_TOUCH_CEILING_SUITE=docs_readers for it.
+[docs_readers]
+provisioned_per_test = "measure"
+tolerance = 0.05
