@@ -636,8 +636,10 @@ class TestEveryIntegrationClusterGetsTheConf:
     least as many conf calls as cluster-making calls (one conf call cannot cover
     two clusters)."""
 
-    #: This file exercises the helper with fakes; _child_process defines it.
-    _NOT_FIXTURES = {"_child_process.py", "test_integration_pg_cluster.py"}
+    #: This file exercises the helper with fakes; _child_process defines it; the cluster-sites lint
+    #: names it inside source strings it feeds its own scanner (nexus-szyun), which that lint's
+    #: provenance scan covers for every real caller.
+    _NOT_FIXTURES = {"_child_process.py", "test_integration_pg_cluster.py", "test_ddl_uncounted_clusters_lint.py"}
 
     def test_every_caller_appends_the_conf(self) -> None:
         counts: dict[str, tuple[int, int]] = {}
