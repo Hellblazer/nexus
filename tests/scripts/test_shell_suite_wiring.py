@@ -159,7 +159,9 @@ SUITES = [
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).
     _Suite("tests/e2e/lib/lock_test.sh", 30),
-    _Suite("tests/e2e/lib/harness_lock_test.sh", 35),
+    # 32: 35 until nexus-boz84 dropped the per-harness wall-clock assertion (3 harnesses,
+    # one assertion each); the output checks still prove no harness body ran.
+    _Suite("tests/e2e/lib/harness_lock_test.sh", 32),
     # 16, not the 19 this suite reports on macOS: its Test F only runs its
     # 3 assertions under the stock macOS /bin/bash 3.2 (the guard's actual
     # target); on any host whose /bin/bash is already 4+ -- every Linux CI
