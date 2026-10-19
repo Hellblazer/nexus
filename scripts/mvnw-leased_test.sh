@@ -43,7 +43,7 @@ skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
 # environment property. TERM is subject to the same rule: build-lease_test.sh's
 # Test 4 failed in CI (5588beead) when its suite started with TERM ignored or
 # blocked, so that test now resets TERM for its holder. Test 4 here sends TERM
-# too: the pytest wrapper (tests/scripts/test_shell_suite_wiring.py _run_suite)
+# too: the pytest wrapper (test_shell_suite_wiring.py, via tests/_sigterm_guard.py)
 # starts this suite with TERM at its default and unblocked, and tests/conftest.py
 # names any test that leaves TERM ignored or blocked (nexus-yqzpw); a direct run
 # from a shell that ignores TERM has neither and would fail Test 4.
