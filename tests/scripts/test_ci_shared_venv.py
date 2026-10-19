@@ -756,7 +756,10 @@ def test_empty_uv_env_values_are_what_the_workflow_must_never_pass() -> None:
     env = _clean_env()
     res = subprocess.run(["uv", "run", "--no-project", "python", "-c", "pass"], env={**env, "UV_NO_SYNC": ""},
                          capture_output=True, text=True)
-    assert res.returncode != 0 and "not a boolean" in res.stderr, "uv now accepts an empty UV_NO_SYNC; relax the rule"
+    # uv words the refusal differently across versions ("not a boolean", "expected a boolish value").
+    assert res.returncode != 0 and ("not a boolean" in res.stderr or "boolish" in res.stderr), (
+        "uv now accepts an empty UV_NO_SYNC; relax the rule"
+    )
     res = subprocess.run(["uv", "run", "--no-project", "python", "-c", "pass"], env={**env, "UV_NO_SYNC": "0"},
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
