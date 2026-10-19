@@ -359,6 +359,40 @@ class TestSweepReapsKilledIntegrationClusters:
         pm.wait(timeout=5)
         engine.wait(timeout=5)
 
+    def test_a_postmaster_still_exiting_when_its_stop_returns_is_waited_for_then_reaped(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        """A signal is asynchronous: on Linux a SIGKILLed pid reads ``R`` for ~100 us after ``kill()`` returns.
+        The survivor guard waits for the exit (to its settle bound) instead of probing once, so a postmaster that
+        is still on its way out is not counted as a survivor (nexus-0ajjm: a single probe kept the dir on chas)."""
+        from nexus.daemon import service_registry as sr
+
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        pm = _sleeper(owned_children, str(pgdata))
+        (pgdata / "postmaster.pid").write_text(f"{pm.pid}\n{pgdata}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[pgdata])
+        stopped: list[int] = []
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda pid, *_a, **_k: stopped.append(pid))
+        probes: list[int] = []
+        real_pid_running = sr.pid_running
+
+        def _exits_on_the_third_probe(pid: int) -> bool:
+            if pid != pm.pid:
+                return real_pid_running(pid)
+            probes.append(pid)
+            return len(probes) < 3
+
+        monkeypatch.setattr(sr, "pid_running", _exits_on_the_third_probe)
+
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert stopped == [pm.pid]
+        assert len(probes) == 3, "the guard must keep probing until the pid stops running"
+        assert result.reaped == [str(pgdata)] and result.errors == []
+        assert not pgdata.exists() and not rec.exists()
+
     def test_a_live_owner_is_never_touched(self, tmp_path, monkeypatch, owned_children) -> None:
         root = tmp_path / "nexus-test-pg-1000"
         pgdata = root / "nexus_inttest_pg_abc"
@@ -634,6 +668,7 @@ class TestSweepReadsANestedProvisionPgdata:
         (nested / "postmaster.pid").write_text(f"{pm.pid}\n")
         rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
         monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: None)  # the stop did nothing
+        monkeypatch.setattr(sub, "_SURVIVOR_SETTLE_S", 0.3)  # a real survivor is waited for; keep the wait short
 
         with pytest.warns(UserWarning, match="still running"):
             result = sub.sweep_stale_substrate_clusters(tmp_root=root)
@@ -655,6 +690,7 @@ class TestSweepReadsANestedProvisionPgdata:
         (pgdata / "postmaster.pid").write_text(f"{pm.pid}\n{pgdata}\n")
         rec = _write_record(root, owner=_dead_pid(), pgdatas=[pgdata])
         monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: None)  # the stop did nothing
+        monkeypatch.setattr(sub, "_SURVIVOR_SETTLE_S", 0.3)  # a real survivor is waited for; keep the wait short
 
         with pytest.warns(UserWarning, match="still running"):
             result = sub.sweep_stale_substrate_clusters(tmp_root=root)

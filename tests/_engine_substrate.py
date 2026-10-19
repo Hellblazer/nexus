@@ -2402,6 +2402,12 @@ def _owner_pgdata_refusal(d: Path, root: Path) -> str | None:
 #: record names.
 _NESTED_PGDATA = "postgres"
 
+#: How long the owner-record sweep waits for a stopped postmaster to stop RUNNING before it counts it as a
+#: survivor and keeps its dir. A signal is asynchronous: on Linux a SIGKILLed pid still reads ``R`` in
+#: ``/proc/<pid>/stat`` for about 100 us after ``kill()`` returns, so a single probe right after the stop
+#: kept dirs whose postmaster was already dying (nexus-0ajjm, seen on chas).
+_SURVIVOR_SETTLE_S: float = 5.0
+
 
 def _owner_pgdata_candidates(d: Path) -> list[Path]:
     """The directories under a recorded cluster dir that can hold a ``postmaster.pid``: *d* itself (a cluster
@@ -2411,7 +2417,7 @@ def _owner_pgdata_candidates(d: Path) -> list[Path]:
 
 
 def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
-    from nexus.daemon.service_registry import pid_running  # noqa: PLC0415 — deferred: keep this module's import light
+    from nexus.daemon.service_registry import wait_for_exit  # noqa: PLC0415 — deferred: keep this module's import light
 
     untrusted = _owner_record_untrusted(rec, result)
     if untrusted is None or untrusted:
@@ -2496,7 +2502,9 @@ def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
             _kill_postmaster_leg(pid, pgdata)
     # A postmaster that survived its stop keeps its dir: removing the tree under it is the hazard this sweep
     # exists to avoid (and it would take a nested <dir>/postgres with it). The record stays for the next sweep.
-    survivors = {pm_dir[pgdata]: pid for pid, pgdata in postmasters if pid_running(pid)}
+    # A stop is confirmed by the exit, never by the signal: wait (zombie-aware) up to the settle bound.
+    still_running = set(wait_for_exit([pid for pid, _ in postmasters], timeout_s=_SURVIVOR_SETTLE_S))
+    survivors = {pm_dir[pgdata]: pid for pid, pgdata in postmasters if pid in still_running}
     for d in dirs:
         if d in survivors:
             continue
