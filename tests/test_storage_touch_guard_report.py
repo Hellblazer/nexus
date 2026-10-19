@@ -474,6 +474,9 @@ def test_an_internal_error_is_counted_and_swallowed(pytester, monkeypatch) -> No
 
     monkeypatch.setattr(g, "_short_stack", boom)
     monkeypatch.setattr(g, "_peek_consumer", boom)
+    # the outer test may carry its own tenant (under per-test), which makes the peek read both variables
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     result = _run(pytester, monkeypatch, '''
 from helpers import touch_storage_and_swallow
 from nexus.mcp_infra import _service_t2_is_env_pinned
@@ -752,8 +755,19 @@ def test_a_process_that_hosts_a_guard_leaves_no_child_lines_even_at_exit(tmp_pat
 # ── durability and non-vacuity ───────────────────────────────────────────────
 
 
+def _as_a_top_level_session(monkeypatch) -> None:
+    """Drop what an OUTER guarded session exported, so the nested session under test
+    reads like an operator's own run and honours the report directory it is given
+    (a nested one ignores that variable: it cannot tell the operator's from the outer's)."""
+    from tests._storage_touch_guard import GUARD_PID_ENV, RUN_ID_ENV
+
+    for name in (RUN_ID_ENV, GUARD_PID_ENV, CHILD_LOG_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_each_test_is_flushed_to_the_jsonl_before_the_next_one_starts(pytester, monkeypatch, tmp_path) -> None:
     report_dir = tmp_path / "report-dir"
+    _as_a_top_level_session(monkeypatch)
     monkeypatch.setenv(REPORT_DIR_ENV, str(report_dir))
     result = _run(pytester, monkeypatch, f'''
 from pathlib import Path
@@ -911,3 +925,274 @@ def test_clean():
     pass
 ''', mode="report")
     assert result.ret == 0 and _report(result)["vacuity"] == []
+
+
+# ── the default flip (nexus-j23ni phase 4) ───────────────────────────────────
+
+
+def _outer_guard_env(monkeypatch, outer: Path) -> None:
+    """What an outer guarded session has exported into its tests' environment."""
+    from tests._storage_touch_guard import GUARD_PID_ENV, RUN_ID_ENV
+
+    outer.mkdir(exist_ok=True)
+    monkeypatch.setenv(REPORT_DIR_ENV, str(outer))
+    monkeypatch.setenv(RUN_ID_ENV, "outerrun0")
+    monkeypatch.setenv(GUARD_PID_ENV, str(os.getpid()))
+    monkeypatch.setenv(CHILD_LOG_ENV, str(outer / "children.jsonl"))
+
+
+def test_a_nested_session_never_writes_into_the_outer_sessions_report_dir(pytester, monkeypatch, tmp_path) -> None:
+    """The census of 2026-10-18 lost its merged report to a pytester session that
+    inherited the operator's report directory and wrote its own report there."""
+    outer = tmp_path / "outer-report"
+    _outer_guard_env(monkeypatch, outer)
+    result = _run(pytester, monkeypatch, '''
+from helpers import touch_storage_and_swallow
+
+def test_touches():
+    touch_storage_and_swallow()
+''', mode="report")
+    result.assert_outcomes(passed=1)
+    mine = Path(re.search(r"storage-touch report: (\S+)", result.stdout.str()).group(1))
+    assert mine.exists() and mine.parent != outer
+    assert list(mine.parent.glob("nx-storage-touch-tests-*.jsonl")), "its own books are where its report is"
+    assert [p.name for p in outer.iterdir()] == [], "nothing of the nested session reached the outer directory"
+    assert os.environ[REPORT_DIR_ENV] == str(outer), "and the outer environment is put back"
+
+
+def test_a_nested_xdist_session_keeps_its_workers_and_its_report_together(pytester, monkeypatch, tmp_path) -> None:
+    pytest.importorskip("xdist")
+    outer = tmp_path / "outer-report"
+    _outer_guard_env(monkeypatch, outer)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(REPO_ROOT), *filter(None, [os.environ.get("PYTHONPATH")])]))
+    monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
+    monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "report")
+    pytester.makeconftest(_CONFTEST)
+    pytester.makepyfile(helpers=_TOUCH)
+    pytester.makepyfile(test_inner='''
+import pytest
+from helpers import touch_storage_and_swallow
+
+@pytest.mark.parametrize("i", range(4))
+def test_touches(i):
+    touch_storage_and_swallow()
+''')
+    result = pytester.runpytest_subprocess(
+        "-p", "tests._storage_touch_guard", "-p", "no:cacheprovider", "-n", "2", "-q",
+    )
+    result.assert_outcomes(passed=4)
+    report = _report(result)
+    assert report["workers"] == 2 and report["recovered_files"] == []
+    assert report["counts"]["tests"] == 4 and report["counts"]["touched_unprovisioned"] == 4
+    # a real outer shim may log that this child started (children.jsonl); no report or per-test file lands there
+    assert [p.name for p in outer.iterdir() if p.name.startswith("nx-storage-touch-")] == []
+
+
+def test_a_scoped_run_is_not_vacuous_for_lacking_a_clean_test(pytester, monkeypatch) -> None:
+    """The shape of a WHOLE run is asked only when ``NX_STORAGE_TOUCH_SWEEP=1``: a
+    narrow run of provisioned tests has no clean one and still exits zero."""
+    body = '''
+from helpers import touch_storage_and_swallow
+
+def test_provisioned(t2_tenant):
+    touch_storage_and_swallow()
+'''
+    result = _run(pytester, monkeypatch, body, mode="fail", sweep=False)
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0 and "vacuous sweep" not in result.stdout.str()
+    assert _report(result)["vacuity"] == []
+    # the same run, asked for the whole-run shape, is refused: the checks still exist
+    result = _run(pytester, monkeypatch, body, mode="fail", sweep=True)
+    assert result.ret != 0 and "vacuous sweep: clean_unprovisioned=0" in result.stdout.str()
+
+
+def test_the_start_up_canary_refuses_a_session_whose_recorder_is_unreachable(pytester, monkeypatch) -> None:
+    """A run that finds nothing must be a run that could have found something."""
+    from tests import _storage_touch_guard as g
+
+    monkeypatch.setattr(g, "_record_touch", lambda error_type: None)
+    result = _run(pytester, monkeypatch, "def test_x():\n    pass\n", mode="report")
+    assert result.ret == 4
+    assert "storage-touch guard cannot see itself" in result.stderr.str() + result.stdout.str()
+
+
+@pytest.mark.parametrize("substrate", ["optin", "per-test"])
+def test_thread_and_popen_patches_live_only_while_an_optin_session_runs(pytester, monkeypatch, substrate) -> None:
+    """``Thread.__init__`` and ``Popen.__init__`` are patched by the guard and by
+    nothing else: present for the session, restored after it, and left alone by
+    the escape hatch."""
+    import subprocess
+    import threading
+
+    before = (threading.Thread.__init__, subprocess.Popen.__init__)
+    outer_patched = (
+        getattr(before[0], "_nx_storage_touch_thread", False), getattr(before[1], "_nx_storage_touch_popen", False)
+    )
+    monkeypatch.setenv("EXPECT_PATCHED", "1" if substrate == "optin" else "")
+    monkeypatch.setenv("EXPECT_OUTER", json.dumps(outer_patched))
+    result = _run(pytester, monkeypatch, '''
+import json, os, subprocess, threading
+
+def test_patches():
+    now = (
+        getattr(threading.Thread.__init__, "_nx_storage_touch_thread", False),
+        getattr(subprocess.Popen.__init__, "_nx_storage_touch_popen", False),
+    )
+    if os.environ["EXPECT_PATCHED"]:
+        assert now == (True, True)
+    else:
+        assert now == tuple(json.loads(os.environ["EXPECT_OUTER"])), "the escape hatch added nothing"
+''', mode="report", substrate=substrate)
+    result.assert_outcomes(passed=1)
+    assert (threading.Thread.__init__, subprocess.Popen.__init__) == before
+
+
+def test_a_late_thread_touch_fails_a_fail_mode_session_and_names_its_owner(pytester, monkeypatch) -> None:
+    pytester.makepyfile(leak='''
+import threading
+from helpers import touch_storage_and_swallow
+
+GO = threading.Event()
+DONE = threading.Event()
+
+def _run():
+    GO.wait(30)
+    touch_storage_and_swallow()
+    DONE.set()
+
+THREADS = []
+
+def start():
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    THREADS.append(t)
+''')
+    body = '''
+import leak
+
+def test_1_leaks_a_thread():
+    leak.start()
+
+def test_2_lets_it_touch():
+    leak.GO.set()
+    assert leak.DONE.wait(30)
+    leak.THREADS[0].join()
+'''
+    result = _run(pytester, monkeypatch, body, mode="fail")
+    result.assert_outcomes(passed=2)  # both tests pass: the finding is the session's
+    out = result.stdout.str()
+    assert result.ret != 0
+    assert "late storage touch: 1 construction(s) after their test finished" in out
+    assert "test_inner.py::test_1_leaks_a_thread" in out
+    # report mode prints the same line and keeps the exit status
+    result = _run(pytester, monkeypatch, body, mode="report")
+    assert result.ret == 0 and "late storage touch: 1 construction(s)" in result.stdout.str()
+
+
+def test_a_late_child_touch_fails_a_fail_mode_session(pytester, monkeypatch, tmp_path) -> None:
+    trigger = tmp_path / "go"
+    pytester.makepyfile(late_child=f'''
+import subprocess, sys
+from pathlib import Path
+
+CODE = (
+    "import os, time\\n"
+    "while not os.path.exists({str(trigger)!r}):\\n"
+    "    time.sleep(0.05)\\n"
+    "from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\\n"
+    "E('late')\\n"
+)
+PROCS = []
+
+def spawn():
+    PROCS.append(subprocess.Popen([sys.executable, "-c", CODE]))
+
+def release_and_wait():
+    Path({str(trigger)!r}).touch()
+    assert PROCS[0].wait(timeout=120) == 0
+''')
+    result = _run(pytester, monkeypatch, '''
+import late_child
+
+def test_1_spawns_and_returns():
+    late_child.spawn()
+
+def test_2_releases_it():
+    late_child.release_and_wait()
+''', mode="fail")
+    result.assert_outcomes(passed=2)
+    assert result.ret != 0
+    assert "late storage touch" in result.stdout.str() and "test_1_spawns_and_returns" in result.stdout.str()
+
+
+def test_python_children_that_never_reach_the_shim_are_a_vacuity_problem(pytester, monkeypatch) -> None:
+    """A child that scrubs PYTHONPATH loads no shim. Spawning Python children
+    while seeing none is the signature of an unexamined run."""
+    hidden = '''
+import os, subprocess, sys
+
+def test_hides_its_child():
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    subprocess.run([sys.executable, "-c", "pass"], env=env, check=True, timeout=120)
+'''
+    result = _run(pytester, monkeypatch, hidden, mode="fail", sweep=False)
+    result.assert_outcomes(passed=1)
+    assert result.ret != 0
+    assert "1 Python child(ren) were spawned but the shim saw none" in result.stdout.str()
+    c = _report(result)["counts"]
+    assert (c["children_spawned"], c["children_seen"]) == (1, 0)
+    # control: the same spawn with the environment intact reaches the shim
+    result = _run(pytester, monkeypatch, '''
+import subprocess, sys
+
+def test_spawns_openly():
+    subprocess.run([sys.executable, "-c", "pass"], check=True, timeout=120)
+''', mode="fail", sweep=False)
+    assert result.ret == 0
+    c = _report(result)["counts"]
+    assert (c["children_spawned"], c["children_seen"]) == (1, 1)
+    # and a child that is not a Python process is not counted as spawned
+    result = _run(pytester, monkeypatch, '''
+import subprocess
+
+def test_spawns_a_shell():
+    subprocess.run(["sh", "-c", "exit 0"], check=True, timeout=120)
+''', mode="fail", sweep=False)
+    assert result.ret == 0 and _report(result)["counts"]["children_spawned"] == 0
+
+
+def test_which_commands_count_as_a_python_child(tmp_path: Path) -> None:
+    from tests._storage_touch_guard import _is_python_command
+
+    assert _is_python_command([sys.executable, "-c", "pass"])
+    assert _is_python_command(["python3", "-m", "pytest"]) and _is_python_command(["/usr/bin/python3.12"])
+    assert _is_python_command(["nx", "store", "put"]) and _is_python_command([Path("/opt/bin/uv"), "run"])
+    assert not _is_python_command(["git", "status"])
+    assert not _is_python_command("python -c pass"), "a shell string is not parsed"
+    assert not _is_python_command([]) and not _is_python_command(None)
+
+
+def test_uninstall_puts_thread_and_popen_back_in_a_fresh_process() -> None:
+    """The nested-session case above cannot show the RESTORE when the outer run already
+    holds the patches (the nested install only takes a reference). A fresh interpreter has
+    no outer: install, see both patches, uninstall, see the very same originals back."""
+    import subprocess
+
+    code = (
+        "import subprocess, threading\n"
+        "from tests import _storage_touch_guard as g\n"
+        "t0, p0 = threading.Thread.__init__, subprocess.Popen.__init__\n"
+        "assert not getattr(t0, '_nx_storage_touch_thread', False)\n"
+        "assert not getattr(p0, '_nx_storage_touch_popen', False)\n"
+        "g._install()\n"
+        "assert getattr(threading.Thread.__init__, '_nx_storage_touch_thread', False)\n"
+        "assert getattr(subprocess.Popen.__init__, '_nx_storage_touch_popen', False)\n"
+        "g._uninstall()\n"
+        "assert threading.Thread.__init__ is t0 and subprocess.Popen.__init__ is p0\n"
+        "print('restored')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", CHILD_LOG_ENV}}
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert out.returncode == 0 and out.stdout.strip() == "restored", out.stdout + out.stderr

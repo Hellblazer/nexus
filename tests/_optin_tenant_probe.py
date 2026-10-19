@@ -3,9 +3,10 @@
 
 Not collected by the suite (the file name matches no ``python_files`` pattern):
 the end-to-end test passes this path to a child pytest that runs under
-``NX_TEST_T2_SUBSTRATE=optin`` with THIS repo's real ``tests/conftest.py``, so
-the cases assert the opt-in fixtures' real behaviour. Under any other mode the
-"unprovisioned" cases would fail by design: every test has a tenant there.
+``NX_TEST_T2_SUBSTRATE=optin`` (the default substrate) with THIS repo's real
+``tests/conftest.py``, so the cases assert the opt-in fixtures' real behaviour.
+Under ``per-test`` the "unprovisioned" cases would fail by design: every test
+has a tenant there.
 """
 import os
 
@@ -49,3 +50,11 @@ def test_cloud_mode_still_wins_over_the_posture_pin(cloud_mode, t2_tenant):
     from nexus.config import is_local_mode
 
     assert not is_local_mode()
+
+
+@pytest.mark.integration
+def test_an_integration_marked_test_keeps_the_per_test_tenant():
+    # The census never ran integration/slow tests (the default addopts deselect
+    # them), so they keep a tenant per test until one is taken with them selected.
+    assert os.environ["NX_SERVICE_URL"] and os.environ["NX_SERVICE_TOKEN"] and os.environ["NX_T1_SESSION"]
+    assert os.environ["NX_LOCAL"] == "1"

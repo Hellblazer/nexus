@@ -213,6 +213,40 @@ stamping. After **any** pull/rebase that touches `service/`, rebuild with
 client probe hard-rejects it). Symptom of forgetting: the entire suite errors
 instantly at setup (thousands of `E`s in seconds).
 
+## The tenant is opt-in (nexus-j23ni, 2026-10)
+
+A test gets a minted tenant (and the engine behind it) only when it asks: a
+`t2_tenant` / `t2_service_env` parameter, or `@pytest.mark.t2_tenant` on the test,
+its class or its module (`pytestmark = pytest.mark.t2_tenant`). A test that asks for
+nothing mints nothing: `NX_SERVICE_URL`/`NX_SERVICE_TOKEN` are unset, `NX_LOCAL=1`,
+and no T1 session exists. Each tenant is about 112 DDL statements, so an unneeded one
+is the cost this removes.
+
+**A test that reaches storage without a tenant fails at teardown, naming itself**
+(`tests/_storage_touch_guard.py`, fail mode by default), even when the code under test
+catches the error and carries on. Fix it with the mark, or with
+`@pytest.mark.expects_unresolvable_endpoint` when raising `ServiceEndpointUnresolvableError`
+is the point (a resolver-subject test; it is reported stale when it never does). Put the
+mark on the TEST, not only on a fixture parameter: `def test_x(db, t2_service_env)` still
+touches storage in `db` before the tenant exists, and only the mark makes the autouse pin run first.
+A test that spawns a thread or child which touches storage after the test finished fails the
+session (join it inside the test).
+
+Tests marked `integration` or `slow` keep a tenant per test: the default selection
+deselects them, so no census has said which of them touch storage.
+
+- `NX_TEST_T2_SUBSTRATE=per-test` (older spelling `engine`) is the escape hatch: a tenant
+  for every test, the guard off. Kept for one release; `none` still provisions nothing.
+- `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
+  `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
+  some touch event); set it on a full-suite run, not a scoped one.
+- **Seeding the marks from a census:** run the whole suite as `NX_STORAGE_TOUCH_GUARD_MODE=report
+  NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_REPORT_DIR=<dir>`, then
+  `uv run python scripts/annotate_t2_tenant.py <dir>` (a dry run) and `--apply`. It marks a module
+  when 90% of its otherwise-tenantless tests need one, a class when all of them do, else the test,
+  and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
+  environment fails with a `KeyError` the guard cannot see).
+
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
 The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and

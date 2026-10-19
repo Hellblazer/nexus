@@ -51,12 +51,26 @@ def touch_t1_and_swallow():
 
 def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
          *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = (),
-         extra: dict[str, str] | None = None):
-    if optin:
-        monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
-    else:
+         extra: dict[str, str] | None = None, substrate: str | None = "",
+         sweep: bool = True):
+    """Run ``body`` in a nested session. ``substrate`` names ``NX_TEST_T2_SUBSTRATE``
+    (None leaves it unset: the default); by default ``optin`` picks ``optin`` and
+    not ``optin`` picks ``per-test``, the escape hatch the guard is inert under.
+    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks."""
+    if substrate == "":
+        substrate = "optin" if optin else "per-test"
+    if substrate is None:
         monkeypatch.delenv("NX_TEST_T2_SUBSTRATE", raising=False)
-    monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", mode)
+    else:
+        monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", substrate)
+    if sweep:
+        monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP", "1")
+    else:
+        monkeypatch.delenv("NX_STORAGE_TOUCH_SWEEP", raising=False)
+    if mode:
+        monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", mode)
+    else:
+        monkeypatch.delenv("NX_STORAGE_TOUCH_GUARD_MODE", raising=False)
     pytester.makeconftest(_CONFTEST)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner=body)
@@ -182,21 +196,56 @@ def test_swallows():
     assert "touched_unprovisioned=1" in result.stdout.str()
 
 
-# It constructs the error itself; under an optin outer run that outer guard sees it.
+# It constructs the error itself; under the default (optin) outer run that outer guard sees it.
 @pytest.mark.expects_unresolvable_endpoint
-def test_the_guard_is_inert_outside_optin(pytester, monkeypatch) -> None:
+@pytest.mark.parametrize("substrate", ["per-test", "engine", "none"])
+def test_the_guard_is_inert_outside_optin(pytester, monkeypatch, substrate) -> None:
+    """``per-test`` (the escape hatch), its older spelling ``engine`` and ``none``
+    all leave the guard uninstalled: nothing patched, nothing reported."""
     from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
 
     before = ServiceEndpointUnresolvableError.__init__
+    refs = _refs()
+    result = _run(pytester, monkeypatch, f'''
+from tests import _storage_touch_guard as g
+from helpers import touch_storage_and_swallow
+
+def test_swallows():
+    assert g._patch_refs == {refs}, "the guard installed nothing in this session"
+    touch_storage_and_swallow()
+''', substrate=substrate)
+    result.assert_outcomes(passed=1)
+    assert "storage-touch" not in result.stdout.str()
+    assert ServiceEndpointUnresolvableError.__init__ is before
+
+
+def _refs() -> int:
+    from tests import _storage_touch_guard as g
+
+    return g._patch_refs
+
+
+def test_an_unset_substrate_is_the_opt_in_guard_in_fail_mode(pytester, monkeypatch) -> None:
+    """The flip: no variable at all runs the guard, and a touch fails the test."""
     result = _run(pytester, monkeypatch, '''
 from helpers import touch_storage_and_swallow
 
 def test_swallows():
     touch_storage_and_swallow()
-''', optin=False)
-    result.assert_outcomes(passed=1)
-    assert "storage-touch" not in result.stdout.str()
-    assert ServiceEndpointUnresolvableError.__init__ is before
+
+def test_clean():
+    pass
+''', substrate=None, mode="")
+    result.assert_outcomes(passed=2, errors=1)
+    out = result.stdout.str()
+    assert "test_swallows: reached storage without a tenant" in out
+    assert _report(result)["mode"] == "fail"
+
+
+def test_a_value_that_is_not_a_substrate_is_a_usage_error(pytester, monkeypatch) -> None:
+    result = _run(pytester, monkeypatch, "def test_x():\n    pass\n", substrate="enigne")
+    assert result.ret == 4
+    assert "'enigne' is not a substrate" in result.stderr.str() + result.stdout.str()
 
 
 def test_the_class_patch_is_removed_when_the_session_ends(pytester, monkeypatch) -> None:
@@ -253,7 +302,10 @@ def test_optin_counts_as_a_session_that_may_boot_the_engine() -> None:
 
     saved = os.environ.get("NX_TEST_T2_SUBSTRATE")
     try:
-        for value, expected in (("optin", True), ("none", False), (None, True), ("sqlite", False)):
+        for value, expected in (
+            ("optin", True), ("none", False), (None, True), ("sqlite", False),
+            ("per-test", True), ("engine", True),
+        ):
             if value is None:
                 os.environ.pop("NX_TEST_T2_SUBSTRATE", None)
             else:

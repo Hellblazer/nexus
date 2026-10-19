@@ -52,23 +52,25 @@ def test_the_real_conftest_provisions_by_marker_and_by_parameter_only(tmp_path: 
     env["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "build-lease")
     env.pop("NX_BUILD_LEASE_WAIT", None)
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", _PROBE, "-q", "-p", "no:cacheprovider", "-p", "no:xdist"],
+        # `-m` after the addopts' own: the integration-marked probe case must be selected
+        [sys.executable, "-m", "pytest", _PROBE, "-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-m", "not lint"],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600,
     )
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out[-4000:]
-    assert re.search(r"\b6 passed\b", out), out[-4000:]
+    assert re.search(r"\b7 passed\b", out), out[-4000:]
 
     m = re.search(r"storage-touch report: (\S+)", out)
     assert m, out[-4000:]
     report = json.loads(Path(m.group(1)).read_text())
     c = report["counts"]
-    # marker, parameter, t2_service_env and cloud_mode+parameter get a tenant; exactly one test
-    # touches storage without one; exactly one touches nothing.
-    assert (c["tests"], c["provisioned"], c["touched_unprovisioned"], c["clean_unprovisioned"]) == (6, 4, 1, 1), c
+    # marker, parameter, t2_service_env, cloud_mode+parameter and the integration-marked case
+    # (which keeps the per-test tenant) get a tenant; exactly one test touches storage without
+    # one; exactly one touches nothing.
+    assert (c["tests"], c["provisioned"], c["touched_unprovisioned"], c["clean_unprovisioned"]) == (7, 5, 1, 1), c
     assert [f["nodeid"].split("::")[-1] for f in report["findings"]] == [
         "test_an_unprovisioned_storage_touch_is_recorded"
     ]
     # the report is annotatable: per-module rollup, and the origin names the probe's own frame
-    assert report["modules"][_PROBE]["tests"] == 6 and report["modules"][_PROBE]["touched"] == 1
+    assert report["modules"][_PROBE]["tests"] == 7 and report["modules"][_PROBE]["touched"] == 1
     assert report["findings"][0]["origin"].startswith(f"{_PROBE}:"), report["findings"][0]["origin"]

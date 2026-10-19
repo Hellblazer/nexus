@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Storage-touch guard for the opt-in test tenant (nexus-j23ni).
 
-The suite mints a tenant for every test (``_pin_t2_substrate``). The opt-in
-mode (``NX_TEST_T2_SUBSTRATE=optin``) mints one only for tests that ask for it
-(the ``t2_tenant`` fixture or marker), and this module is what keeps that safe:
-a test that reaches storage WITHOUT a tenant must be named, even when the code
-under test catches the error and carries on.
+A test gets a minted tenant only when it asks for one (the ``t2_tenant`` /
+``t2_service_env`` fixture or the ``t2_tenant`` marker). That is the default
+substrate (``NX_TEST_T2_SUBSTRATE`` unset, or ``optin``); ``per-test`` is the
+escape hatch that mints for every test, and ``none`` mints nothing. This module is
+what keeps the default safe: a test that reaches storage WITHOUT a tenant must be
+named, even when the code under test catches the error and carries on.
 
 How it sees a touch: with no endpoint resolvable, every storage client raises a
 guarded error (``GUARDED`` below: the resolver's not-resolvable type, the
@@ -17,7 +18,8 @@ construction, the test id, the phase (setup / call / teardown), the fixture
 being set up, the origin frame (outermost frame under ``tests/`` or the item's
 file) and a short stack. A construction on another thread is recorded against
 the running test with source ``thread`` and is a finding like any other (its
-own ``thread_touched`` bucket). ``threading.Thread.__init__`` is patched to
+own ``thread_touched`` bucket). ``subprocess.Popen.__init__`` is patched to count
+the Python children a test starts (``children_spawned``). ``threading.Thread.__init__`` is patched to
 record the test running when each thread was created: a thread a FINISHED test
 leaked is listed in ``late_thread_touches`` under its owner, never charged to
 the test that happens to be running (a thread with no recorded owner, created
@@ -43,7 +45,7 @@ origin. A test that peeked and touched nothing else is ``peek_only``, its own
 bucket and not clean; the list per site names those tests. Peeks never fail a
 test.
 
-Child processes: under optin the guard puts ``tests/_storage_touch_shim`` on
+Child processes: with the guard active it puts ``tests/_storage_touch_shim`` on
 ``PYTHONPATH`` (its ``sitecustomize`` installs the same class patches in every
 child Python process and appends each construction to
 ``NX_STORAGE_TOUCH_CHILD_LOG``, attributed through ``PYTEST_CURRENT_TEST``).
@@ -53,18 +55,30 @@ The parent folds the lines into the test that spawned the child: touches
 touch: reported uncapped, printed in the terminal summary, and the owning module
 is marked.
 
-``NX_STORAGE_TOUCH_GUARD_MODE`` is ``report`` (default: findings go to a report,
-the test is untouched) or ``fail`` (the teardown raises, naming the test, and
-the session ends non-zero if the sweep was vacuous: no provisioned test, no
-clean test, no touch event, fewer workers reported than started, fewer tests
-recorded than collected, or a guard error). Report mode computes and prints the
-same verdict (``vacuity`` in the report) without changing the exit status. The guard
-is active ONLY under ``NX_TEST_T2_SUBSTRATE=optin``; in every other mode it
-installs nothing and records nothing. Two things are unconditional:
+``NX_STORAGE_TOUCH_GUARD_MODE`` is ``fail`` (default: the teardown raises, naming
+the test) or ``report`` (findings go to a report, the test is untouched). Either
+way the session verdict (``vacuity`` in the report, printed in the summary) lists
+what makes the sweep untrustworthy, and in fail mode the session ends non-zero on
+it: fewer workers reported than started, fewer tests recorded than collected, a
+guard error, Python children spawned but none seen by the shim, and a storage
+touch AFTER its test finished (a thread or child the test leaked: the test itself
+already passed, so the session carries the finding). The whole-run shape (some
+test provisioned, some clean, some touch event) is asked only when
+``NX_STORAGE_TOUCH_SWEEP=1``, which a full-suite run sets; a scoped run of three
+provisioned tests is not vacuous for having no clean one. At start-up a canary
+constructs each guarded class and checks the ``Thread``/``Popen`` patches, so a
+run that finds nothing is a run that could have found something.
+
+The guard is active under the default substrate and ``optin``; under ``none`` and
+``per-test`` it installs nothing and records nothing. Two things are unconditional:
 ``_reset_vector_lease_cache`` (``http_vector_client`` caches a discovered lease
-process-wide), and, under optin only, the ``http_vector_client`` singleton
+process-wide), and, with the guard active, the ``http_vector_client`` singleton
 reset (a warm ``embedding_mode`` memo would hide a touch, a cold failed probe
 would poison the next provisioned test).
+
+A session started inside a test of a guarded one (a pytester run, a child pytest) is
+``nested``: it keeps its own books and report directory and never writes into the
+outer session's ``NX_STORAGE_TOUCH_REPORT_DIR``.
 
 Durability: each process appends ONE JSON line per finished test to
 ``nx-storage-touch-tests-<run>-<pid>-<id>.jsonl`` under
@@ -93,6 +107,7 @@ import functools
 import inspect
 import json
 import os
+import subprocess
 import sys
 import threading
 import uuid
@@ -102,8 +117,22 @@ from pathlib import Path
 
 import pytest
 
+SUBSTRATE_ENV = "NX_TEST_T2_SUBSTRATE"
 OPTIN_VALUE = "optin"
+#: The escape hatch of the 2026-10 default flip (nexus-j23ni): every test mints
+#: its own tenant, as the suite did before. ``engine`` is the older spelling
+#: tests/containers documents; it always meant the same thing.
+PER_TEST_VALUE = "per-test"
+PER_TEST_VALUES = frozenset({PER_TEST_VALUE, "engine"})
+#: Values that provision nothing (``none``) or name the two tenant modes, and the
+#: retired ones the conftest refuses by name. Anything else is a typo.
+KNOWN_VALUES = frozenset({"none", OPTIN_VALUE}) | PER_TEST_VALUES
+RETIRED_VALUES = frozenset({"sqlite"})
 MODE_ENV = "NX_STORAGE_TOUCH_GUARD_MODE"
+#: ``1`` asks the sweep-shape checks of a WHOLE run (some test provisioned, some
+#: test clean, some touch event): a scoped run of three provisioned tests has no
+#: clean one and is not vacuous. The census and the full-suite proof set it.
+SWEEP_ENV = "NX_STORAGE_TOUCH_SWEEP"
 REPORT_DIR_ENV = "NX_STORAGE_TOUCH_REPORT_DIR"
 CHILD_LOG_ENV = "NX_STORAGE_TOUCH_CHILD_LOG"
 GUARD_PID_ENV = "NX_STORAGE_TOUCH_GUARD_PID"
@@ -125,6 +154,10 @@ GUARDED: tuple[tuple[str, str], ...] = (
 )
 _PEEK_CREDENTIALS = frozenset({"service_url", "service_token"})
 
+#: Variables an outer guard exports; one already present at configure time means
+#: this session runs inside a guarded one.
+_INHERITED_ENV = (RUN_ID_ENV, GUARD_PID_ENV, CHILD_LOG_ENV)
+
 _WORKEROUTPUT_KEY = "nx_storage_touch_report"
 _JSONL_GLOB = "nx-storage-touch-tests-{run}-*.jsonl"
 _STACK_FRAMES = 6
@@ -137,9 +170,22 @@ _OWNER_ATTR = "_nx_storage_touch_owner"  # set on every Thread: the test running
 _PEEK_HELPER_FILES = ("db/service_endpoint.py", "db/http_vector_client.py", "config.py")
 
 
+def substrate_value() -> str | None:
+    """``NX_TEST_T2_SUBSTRATE`` as set, or None when unset or empty (the default)."""
+    return os.environ.get(SUBSTRATE_ENV) or None
+
+
 def optin_selected() -> bool:
-    """True when this session runs the opt-in tenant mode."""
-    return os.environ.get("NX_TEST_T2_SUBSTRATE") == OPTIN_VALUE
+    """True when this session runs the opt-in tenant mode: the DEFAULT (variable
+    unset) and an explicit ``optin``. ``none`` provisions nothing and
+    ``per-test`` is the escape hatch back to a tenant for every test; the guard
+    is inert under both."""
+    return substrate_value() in (None, OPTIN_VALUE)
+
+
+def per_test_selected() -> bool:
+    """True when every test mints its own tenant (the pre-flip behaviour)."""
+    return substrate_value() in PER_TEST_VALUES
 
 
 class StorageTouchError(AssertionError):
@@ -175,6 +221,7 @@ class Counts:
     failed: int = 0
     foreign_thread_events: int = 0
     children_seen: int = 0
+    children_spawned: int = 0  # Python children the parent started; seen < spawned means the shim missed some
     guard_errors: int = 0
 
 
@@ -275,6 +322,9 @@ def _record_touch(error_type: str) -> None:
     guard = _guards[-1] if _guards else None
     if guard is None:
         return
+    if guard.canary_active:  # the start-up self-test: counted, never recorded
+        guard.canary_hits += 1
+        return
     try:
         guard.record(error_type)
     except Exception:  # noqa: BLE001 — a recorder must never break the code under test
@@ -365,6 +415,43 @@ def _rebind(old: object, new: object) -> None:
 
 
 _thread_init: list[object] = []  # [the original Thread.__init__] while installed
+_popen_init: list[object] = []  # [the original subprocess.Popen.__init__] while installed
+_PYTHON_LAUNCHERS = frozenset({"nx", "uv", "pytest", "py.test", "pip", "pipx"})
+
+
+def _is_python_command(cmd: object) -> bool:
+    """True when ``cmd`` (a Popen ``args``) starts a Python process: the
+    interpreter itself, or one of the console scripts the suite spawns. A shell
+    string is not parsed (the first word of ``sh -c`` says nothing), so those
+    children are not counted as spawned."""
+    if isinstance(cmd, (str, bytes)) or not cmd:
+        return False
+    try:
+        first = os.fspath(cmd[0])  # type: ignore[index]
+    except (TypeError, IndexError, KeyError):
+        return False
+    if isinstance(first, bytes):
+        first = os.fsdecode(first)
+    base = os.path.basename(first).lower()
+    return base.startswith("python") or base in _PYTHON_LAUNCHERS or _real(first) == _real(sys.executable)
+
+
+def _make_popen_init(original):
+    @functools.wraps(original)
+    def __init__(self, *args, **kwargs):  # noqa: N807 — replacing __init__ by name
+        try:
+            guard = _guards[-1] if _guards else None
+            if guard is not None and guard.item is not None and not guard.canary_active:
+                cmd = args[0] if args else kwargs.get("args")
+                if _is_python_command(cmd):
+                    with guard._lock:
+                        guard.spawned += 1
+        except Exception:  # noqa: BLE001 — see _record_touch
+            pass
+        original(self, *args, **kwargs)
+
+    __init__._nx_storage_touch_popen = True  # type: ignore[attr-defined]
+    return __init__
 
 
 def _make_thread_init(original):
@@ -396,6 +483,8 @@ def _install() -> None:
                 _rebind(original, wrapper)
             _thread_init.append(threading.Thread.__init__)
             threading.Thread.__init__ = _make_thread_init(threading.Thread.__init__)  # type: ignore[method-assign]
+            _popen_init.append(subprocess.Popen.__init__)
+            subprocess.Popen.__init__ = _make_popen_init(subprocess.Popen.__init__)  # type: ignore[method-assign]
         _patch_refs += 1
 
 
@@ -415,6 +504,8 @@ def _uninstall() -> None:
             _peek_wrappers.clear()
             if _thread_init:
                 threading.Thread.__init__ = _thread_init.pop()  # type: ignore[method-assign]
+            if _popen_init:
+                subprocess.Popen.__init__ = _popen_init.pop()  # type: ignore[method-assign]
 
 
 # ── records and roll-up ──────────────────────────────────────────────────────
@@ -504,6 +595,7 @@ def _rollup(records: list[dict]) -> dict:
         counts.touch_events += rec["events"]
         counts.foreign_thread_events += rec.get("thread_events", 0)
         counts.children_seen += rec.get("children", 0)
+        counts.children_spawned += rec.get("spawned", 0)
         counts.guard_errors += rec.get("guard_errors", 0)
         counts.provisioned += rec["provisioned"]
         counts.exempt += rec["exempt"]
@@ -606,6 +698,16 @@ class Guard:
         self.mode = mode
         self.config = config
         self.is_worker = hasattr(config, "workerinput")
+        #: A session started INSIDE a test of another guarded session (a pytester
+        #: run, a child pytest): the outer one's exports are in its environment
+        #: and it is not one of that session's xdist workers. It keeps its own
+        #: books and its own report directory, so it can never overwrite the
+        #: outer session's report (the census of 2026-10-18 lost its merged
+        #: report to exactly this).
+        self.nested = not self.is_worker and any(os.environ.get(v) for v in _INHERITED_ENV)
+        self.sweep = os.environ.get(SWEEP_ENV) == "1"
+        self.canary_active = False
+        self.canary_hits = 0
         self.guard_id = uuid.uuid4().hex[:8]
         self.run_id = (os.environ.get(RUN_ID_ENV) if self.is_worker else None) or uuid.uuid4().hex[:8]
         self._saved_env: dict[str, str | None] = {}
@@ -642,6 +744,7 @@ class Guard:
         self.thread_events = 0
         self.thread_unprov = 0
         self.children = 0
+        self.spawned = 0
         self.sigs: dict[tuple, dict] = {}
         self.dropped_events = 0
         self.peeks: dict[tuple[str, str, str, str | None], int] = {}
@@ -808,7 +911,7 @@ class Guard:
     def _ensure_paths(self) -> None:
         if self._dir is not None:
             return
-        configured = os.environ.get(REPORT_DIR_ENV)
+        configured = None if self.nested else os.environ.get(REPORT_DIR_ENV)
         self._dir = Path(configured) if configured else _basetemp(self.config)
         self._dir.mkdir(parents=True, exist_ok=True)
         stem = f"{self.run_id}-{os.getpid()}-{self.guard_id}"
@@ -827,6 +930,10 @@ class Guard:
         self._set_env(RUN_ID_ENV, self.run_id)
         self._set_env(GUARD_PID_ENV, str(os.getpid()))
         self._set_env(CHILD_LOG_ENV, str(self._child_log))
+        if self.nested:
+            # this session's own workers must find THIS controller's directory, not
+            # the outer operator's: they fall back to their basetemp under ours
+            self._set_env(REPORT_DIR_ENV, None)
         existing = os.environ.get("PYTHONPATH")
         self._set_env("PYTHONPATH", os.pathsep.join([str(SHIM_DIR), *([existing] if existing else [])]))
 
@@ -868,7 +975,7 @@ class Guard:
                 "provisioned": self.ever_provisioned, "exempt": exempt,
                 "events": self.events, "unprov_events": self.unprov_events,
                 "thread_events": self.thread_events, "thread_unprov_events": self.thread_unprov,
-                "children": self.children, "guard_errors": errors,
+                "children": self.children, "spawned": self.spawned, "guard_errors": errors,
                 "dropped_events": self.dropped_events, "dropped_peeks": self.dropped_peeks,
                 "touches": list(self.sigs.values()),
                 "soft_peeks": [
@@ -984,12 +1091,22 @@ class Guard:
         return report
 
     def _vacuity(self, report: dict) -> list[str]:
+        """Everything that makes the sweep's verdict untrustworthy or the run
+        unclean, as lines. Always checked: every worker reported, the recorder
+        raised nothing, every collected test was recorded, children that were
+        spawned reached the shim, and nothing touched storage after its test
+        finished. The shape of the WHOLE run (some test provisioned, some clean,
+        some touch event) is asked only when ``NX_STORAGE_TOUCH_SWEEP=1``: a
+        scoped run of three provisioned tests is not vacuous for having no
+        clean one, and the start-up canary already proved the recorder fires."""
         c = report["counts"]
-        problems = [
-            f"vacuous sweep: {name}=0 (must be > 0)"
-            for name in ("provisioned", "clean_unprovisioned", "touch_events")
-            if not c[name]
-        ]
+        problems = []
+        if self.sweep:
+            problems += [
+                f"vacuous sweep: {name}=0 (must be > 0)"
+                for name in ("provisioned", "clean_unprovisioned", "touch_events")
+                if not c[name]
+            ]
         if report["workers"] != report["workers_started"]:
             problems.append(
                 f"vacuous sweep: workers reported {report['workers']} of {report['workers_started']} started"
@@ -1002,7 +1119,52 @@ class Guard:
             problems.append(
                 f"vacuous sweep: recorded {report['recorded']} of {report['collected']} collected tests"
             )
+        if c["children_spawned"] and not c["children_seen"]:
+            problems.append(
+                f"vacuous sweep: {c['children_spawned']} Python child(ren) were spawned but the shim saw none "
+                "(PYTHONPATH scrubbed, or the shim could not load): child touches are unexamined"
+            )
+        late = report["late_child_touches"] + report["late_thread_touches"]
+        if late:
+            owners = sorted({r["nodeid"] for r in late})
+            shown = ", ".join(owners[:5]) + (f", ... {len(owners) - 5} more" if len(owners) > 5 else "")
+            problems.append(
+                f"late storage touch: {sum(r.get('n', 1) for r in late)} construction(s) after their test finished, "
+                f"from {len(owners)} test(s) that leaked a thread or child: {shown}. "
+                "Join the thread or wait for the child inside the test."
+            )
         return problems
+
+    def run_canary(self) -> None:
+        """Prove, at session start, that the patches are in and the recorder is
+        reachable, so a run with no touch to report is not a run that could not
+        have seen one. Raises ``pytest.UsageError`` when it cannot see itself."""
+        self.canary_hits = 0
+        self.canary_active = True
+        classes = _guarded_classes()
+        # This process hosts a guard from here on: the child shim (this session may
+        # itself be a child of a guarded one) must not log the canary as a touch.
+        saved_owner = os.environ.get(GUARD_PID_ENV)
+        os.environ[GUARD_PID_ENV] = str(os.getpid())
+        try:
+            for cls in classes:
+                with contextlib.suppress(Exception):
+                    cls("storage-touch guard canary")
+        finally:
+            self.canary_active = False
+            if saved_owner is None:
+                os.environ.pop(GUARD_PID_ENV, None)
+            else:
+                os.environ[GUARD_PID_ENV] = saved_owner
+        missing = []
+        if self.canary_hits != len(classes):
+            missing.append(f"{len(classes) - self.canary_hits} of {len(classes)} guarded error classes did not reach the recorder")
+        if not getattr(threading.Thread.__init__, "_nx_storage_touch_thread", False):
+            missing.append("threading.Thread.__init__ is not patched")
+        if not getattr(subprocess.Popen.__init__, "_nx_storage_touch_popen", False):
+            missing.append("subprocess.Popen.__init__ is not patched")
+        if missing:
+            raise pytest.UsageError("storage-touch guard cannot see itself: " + "; ".join(missing))
 
     def pytest_sessionfinish(self, session):
         config = session.config
@@ -1036,7 +1198,7 @@ class Guard:
             f"touched_unprovisioned={c['touched_unprovisioned']} thread_touched={c['thread_touched']} "
             f"peek_only={c['peek_only']} clean_unprovisioned={c['clean_unprovisioned']} exempt={c['exempt']} "
             f"stale_exemptions={c['stale_exemptions']} touch_events={c['touch_events']} "
-            f"skipped={c['skipped']} failed={c['failed']} children_seen={c['children_seen']} "
+            f"skipped={c['skipped']} failed={c['failed']} children_seen={c['children_seen']} children_spawned={c['children_spawned']} "
             f"late_child_touches={late_child} late_thread_touches={late_thread} "
             f"guard_errors={c['guard_errors']} collected={report['collected']} recorded={report['recorded']}"
         )
@@ -1137,9 +1299,16 @@ def pytest_configure(config: pytest.Config) -> None:
         f"{TENANT_MARKER}: provision the opt-in test tenant for this test or module "
         "(NX_TEST_T2_SUBSTRATE=optin; a no-op in the default mode) (nexus-j23ni)",
     )
+    value = substrate_value()
+    if value is not None and value not in KNOWN_VALUES and value not in RETIRED_VALUES:
+        raise pytest.UsageError(
+            f"{SUBSTRATE_ENV}={value!r} is not a substrate: use 'none' (provision nothing), 'optin' "
+            f"(the default: a tenant only for tests that ask for one) or '{PER_TEST_VALUE}' "
+            "(a tenant for every test, the escape hatch)"
+        )
     if not optin_selected():
         return
-    mode = os.environ.get(MODE_ENV, "report")
+    mode = os.environ.get(MODE_ENV, "fail")
     if mode not in ("report", "fail"):
         raise pytest.UsageError(f"{MODE_ENV} must be 'report' or 'fail', got {mode!r}")
     guard = Guard(mode, config)
@@ -1148,8 +1317,18 @@ def pytest_configure(config: pytest.Config) -> None:
     # The run id travels to xdist workers through the environment; a worker reads it.
     if not guard.is_worker:
         guard._set_env(RUN_ID_ENV, guard.run_id)
+        if guard.nested:
+            # before any xdist worker is spawned: its workers must not inherit the
+            # OUTER session's report directory (they fall back to their basetemp,
+            # under this controller's)
+            guard._set_env(REPORT_DIR_ENV, None)
     _guards.append(guard)
     _install()
+    try:
+        guard.run_canary()
+    except BaseException:
+        pytest_unconfigure(config)  # pytest does not unconfigure a session that failed to configure
+        raise
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
