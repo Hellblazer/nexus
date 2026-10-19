@@ -74,6 +74,7 @@ def test_an_old_format_mark_with_no_figures_still_splits_the_ddl() -> None:
         "GRANT SET ON PARAMETER work_mem TO r", "GRANT CREATE ON TABLESPACE pg_default TO r",
         "COMMENT ON DATABASE d IS 'x'", "COMMENT ON ROLE r IS 'x'", "CLUSTER t USING i",
         "REASSIGN OWNED BY a TO b", "ALTER ROLE r SET work_mem='5MB'", "DROP ROLE r", "ALTER SYSTEM SET work_mem='6MB'",
+        "CREATE USER bob", "ALTER USER bob SET work_mem='1MB'", "DROP USER bob",
     ],
 )
 def test_statements_that_fire_no_event_hold_no_claim_over_a_later_nested_event(sql: str) -> None:
@@ -90,6 +91,9 @@ def test_statements_that_fire_no_event_hold_no_claim_over_a_later_nested_event(s
         "GRANT SELECT ON t TO r", "REVOKE SELECT ON t FROM r", "GRANT USAGE ON SCHEMA public TO r",
         "GRANT ALL ON ALL TABLES IN SCHEMA public TO r", "COMMENT ON TABLE t IS 'x'",
         "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO r", "DROP OWNED BY r", "CREATE TABLE a (id int)",
+        # nexus-mvr3t: per-database, so it fires the event; it starts with USER but is not the shared-object USER
+        "CREATE USER MAPPING FOR bob SERVER s", "ALTER USER MAPPING FOR bob SERVER s OPTIONS (SET user 'x')",
+        "DROP USER MAPPING IF EXISTS FOR bob SERVER s", "create   user   mapping for bob server s",
     ],
 )
 def test_statements_that_do_fire_an_event_are_still_one_command(sql: str) -> None:
@@ -339,9 +343,11 @@ def test_the_uncounted_cluster_count_is_the_allowlists_sum(tmp_path: Path) -> No
     assert isinstance(ddl.uncounted_cluster_count(), int)  # the committed file
 
 
-def test_a_dead_workers_file_is_recovered_from_the_default_layout(tmp_path: Path) -> None:
+def test_a_dead_workers_file_is_recovered_from_the_default_layout(tmp_path: Path, monkeypatch) -> None:
     """Without NX_DDL_REPORT_DIR a worker's basetemp is the controller's /popen-gwN, so its file lands
-    there, not in the controller's directory."""
+    there, not in the controller's directory. CI exports NX_DDL_REPORT_DIR for the whole shard (nexus-ekp7w),
+    which would send this test to a directory it did not fill, so it unsets the variable."""
+    monkeypatch.delenv(ddl.REPORT_DIR_ENV, raising=False)
     class _Factory:
         def getbasetemp(self) -> Path:
             return tmp_path
@@ -450,14 +456,20 @@ def test_it(i):
     assert files == ["popen-gw0", "popen-gw1"]
 
 
-def test_a_session_that_never_booted_a_substrate_prints_nothing(pytester, monkeypatch, tmp_path) -> None:
+def test_a_session_that_never_booted_a_substrate_prints_nothing_but_still_reports_its_tests(
+    pytester, monkeypatch, tmp_path,
+) -> None:
+    """The substrate boots lazily, so a shard of tests that never touch it is legitimate. It prints no line,
+    but its report is written (nexus-2rhif): ``ddl_ratchet.py fan-in`` needs the shard to add up the run, and a
+    missing file would read as a missing shard."""
     monkeypatch.setenv("NX_DDL_REPORT_DIR", str(tmp_path / "ddl-report"))
     monkeypatch.setattr(ddl, "substrate_log_text", lambda: None)
     pytester.makepyfile(test_inner="def test_it():\n    pass\n")
     result = pytester.runpytest_inprocess("-p", "tests._ddl_counter", "-p", "no:cacheprovider", "-q")
     result.assert_outcomes(passed=1)
     assert not re.search(r"^ddl:", result.stdout.str(), re.MULTILINE)
-    assert not (tmp_path / "ddl-report" / ddl.REPORT_NAME).exists()
+    report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
+    assert (report["workers_booted"], report["tests_run"], report["workers_lost"]) == (0, 1, 0)
 
 
 # ── the off switch (nexus-3cwsw) ─────────────────────────────────────────────
@@ -541,3 +553,47 @@ def test_the_switch_check_sees_an_unguarded_use() -> None:
                             "        if True:\n            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)")
     ungated, _ = _ungated_counter_uses(broken)
     assert len(ungated) >= 1
+
+
+class _Node:
+    def __init__(self, workeroutput) -> None:
+        if workeroutput is not None:
+            self.workeroutput = workeroutput
+
+
+def test_a_node_that_goes_down_without_a_report_is_a_lost_worker(tmp_path: Path) -> None:
+    """nexus-mvr3t: a worker killed before sessionfinish writes no file and hands nothing over, so the
+    file-based recovery cannot see it. xdist reports the node down all the same."""
+    class _Config:
+        _tmp_path_factory = type("F", (), {"getbasetemp": lambda self: tmp_path})()
+
+    rec = ddl._Recorder(_Config())  # type: ignore[arg-type]
+    rec.pytest_testnodedown(_Node({ddl._WORKEROUTPUT_KEY: {"pid": 1}}), None)
+    assert (rec.lost, len(rec.reported)) == (0, 1)
+    rec.pytest_testnodedown(_Node({}), None)        # a worker that finished without our payload
+    rec.pytest_testnodedown(_Node(None), "crashed")  # no workeroutput at all: it died
+    assert (rec.lost, len(rec.reported)) == (2, 1)
+
+
+def test_a_killed_xdist_worker_is_counted_as_lost_in_the_report(pytester, monkeypatch, tmp_path) -> None:
+    pytest.importorskip("xdist")
+    monkeypatch.setenv("NX_TEST_FAKE_PG_LOG", str(GOLDEN_LOG))
+    monkeypatch.setenv("NX_DDL_REPORT_DIR", str(tmp_path / "ddl-report"))
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join([str(REPO_ROOT), *filter(None, [os.environ.get("PYTHONPATH")])]),
+    )
+    pytester.makeconftest(_FAKE_SUBSTRATE_CONFTEST)
+    pytester.makepyfile(test_inner="""
+import os, pytest
+
+@pytest.mark.parametrize("i", range(8))
+def test_it(i):
+    if i == 3:
+        os._exit(1)  # the OS killing a worker: no sessionfinish, no report
+""")
+    result = pytester.runpytest_subprocess("-p", "tests._ddl_counter", "-p", "no:cacheprovider", "-q", "-n", "2")
+    result.assert_outcomes(passed=7, failed=1)
+    result.stdout.fnmatch_lines(["*LOST 1 worker(s) that died before reporting*"])
+    report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
+    assert report["workers_lost"] == 1
+    assert report["workers_booted"] >= 2  # the survivor and the replacement both reported

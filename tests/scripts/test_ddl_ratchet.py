@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-sz651: ``scripts/ddl_ratchet.py`` fails a run that wrote more bytes (or ran more DDL) than its
 committed ceiling, compares only numbers that do not move with how the work was split, and refuses a
-measurement that proves nothing."""
+measurement that proves nothing.
+
+nexus-2rhif: the python gate is the fan-in over every shard, in numbers that survive a different shard
+split, a different ``-n`` and a worker that never booted the substrate; one shard's ``check`` is advisory.
+nexus-mvr3t: a measured 0 on a booted cluster, and a worker lost before it reported, are exit 12."""
 from __future__ import annotations
 
 import importlib.util
@@ -24,11 +28,13 @@ def _tally(total: int) -> dict:
 
 
 def _py_report(tmp_path: Path, *, name="nx-ddl-report.json", migration_ddl=2000, tests_ddl=3000, workers=2,
-               tests_run=40, wal_migration=200_000, wal_tests=400_000, ready=None, wal_complete=True) -> Path:
+               tests_run=40, wal_migration=200_000, wal_tests=400_000, ready=None, wal_complete=True, lost=0,
+               booted=None) -> Path:
     path = tmp_path / name
+    booted = workers if booted is None else booted
     path.write_text(json.dumps({
-        "workers": workers, "workers_booted": workers, "tests_run": tests_run,
-        "workers_ready_mark_seen": workers if ready is None else ready,
+        "workers": workers, "workers_booted": booted, "tests_run": tests_run, "workers_lost": lost,
+        "workers_ready_mark_seen": booted if ready is None else ready,
         "buckets": {"boot": _tally(6), "migration": _tally(migration_ddl), "tests": _tally(tests_ddl)},
         "total": _tally(migration_ddl + tests_ddl),
         "wal": {
@@ -36,7 +42,7 @@ def _py_report(tmp_path: Path, *, name="nx-ddl-report.json", migration_ddl=2000,
             "tests_bytes": wal_tests if wal_complete else None,
             "total_bytes": wal_migration + wal_tests if wal_complete else None,
             "dbsize_growth_bytes": 1,
-            "workers_complete": workers if wal_complete else 0,
+            "workers_complete": booted if wal_complete else 0,
         },
         "uncounted_cluster_start_sites": 59,
     }))
@@ -91,21 +97,35 @@ def _jv_ceilings(tmp_path, suite="java_main", **overrides) -> Path:
 
 def test_the_committed_ceiling_file_names_every_suite_and_metric() -> None:
     committed = tomllib.loads((_REPO / "tests" / "ddl_ceiling.toml").read_text())
-    assert set(committed) == {*ratchet.SUITES, ratchet.TOTAL_SECTION}
+    assert set(committed) == set(ratchet.SUITES)
     shape = {
         "python_unit": ratchet.PYTHON_METRICS,
         "java_main": ratchet.JAVA_METRICS,
         "java_integration": ratchet.JAVA_METRICS,
-        ratchet.TOTAL_SECTION: (*ratchet.TOTAL_METRICS, *ratchet.TOTAL_BASIS),
     }
     for section, entry in committed.items():
-        assert set(entry) == {"bytes_tolerance", "ddl_tolerance", *shape[section]}, section
-        assert entry["bytes_tolerance"] >= 0 and entry["ddl_tolerance"] >= 0
-        # "measure" until a full run supplies the number, then a positive number; the file does not
-        # pin which, so committing the measured ceilings is not a test change.
+        own = {f"{name}_tolerance" for name in shape[section]}
+        assert {"bytes_tolerance", "ddl_tolerance", *shape[section]} <= set(entry) <= {
+            "bytes_tolerance", "ddl_tolerance", *shape[section], *own}, section
+        assert all(isinstance(v, (int, float)) and v >= 0 for k, v in entry.items() if k.endswith("_tolerance")), section
+        # "measure" until a full run supplies the number, then a positive number; a Java section may still be
+        # "measure" (see the test below), so committing its measured ceilings is not a test change.
         for name in shape[section]:
             value = entry[name]
             assert value == ratchet.MEASURE or (isinstance(value, (int, float)) and value > 0), (section, name, value)
+
+
+def test_the_python_gate_has_real_ceilings_and_a_ceiling_never_sits_on_a_zero() -> None:
+    """nexus-ekp7w: the ratchet held no line while every ceiling read "measure" (exit 11 never reaches
+    a number). The python section gates CI through the fan-in, so every metric of it is a number. The Java
+    sections are advisory in CI until nexus-0ty8z's DDL cut lands; each is either all numbers or all "measure"."""
+    committed = tomllib.loads((_REPO / "tests" / "ddl_ceiling.toml").read_text())
+    py = committed["python_unit"]
+    for name in ratchet.PYTHON_METRICS:
+        assert isinstance(py[name], (int, float)) and py[name] > 0, f"python_unit.{name} is {py[name]!r}"
+    for section in ("java_main", "java_integration"):
+        kinds = {committed[section][name] == ratchet.MEASURE for name in ratchet.JAVA_METRICS}
+        assert len(kinds) == 1, f"{section} is half set; set all four from one run"
 
 
 def test_the_exit_codes_are_distinct_from_argparse_and_from_a_crash() -> None:
@@ -148,6 +168,23 @@ def test_bytes_pass_inside_the_tolerance_band_and_fail_outside_it(tmp_path) -> N
     code, message = ratchet.check("python_unit", _py_report(tmp_path), _py_ceilings(tmp_path, wal_bytes_per_test=9500))
     assert code == ratchet.EXIT_OVER
     assert "wal_bytes_per_test" in message and "+5% band" in message
+
+
+def test_a_metric_can_carry_its_own_tolerance(tmp_path) -> None:
+    """The migration's DDL per worker is exactly the changelog's, so it keeps a 0 band beside a ratio that has 5%."""
+    # _py_report measures ddl_per_test 75 and migration_ddl_per_worker 1000
+    wide = {"ddl_tolerance": 0.05, "migration_ddl_per_worker_tolerance": 0.0}
+    path = tmp_path / "c.toml"
+    path.write_text("[python_unit]\nbytes_tolerance = 0.05\n" + "".join(f"{k} = {v}\n" for k, v in {**PY, **wide}.items())
+                    .replace("ddl_per_test = 75", "ddl_per_test = 72").replace("migration_ddl_per_worker = 1000", "migration_ddl_per_worker = 999"))
+    code, message = ratchet.check("python_unit", _py_report(tmp_path), path)
+    assert code == ratchet.EXIT_OVER, message  # 75 > 72 * 1.05 is false (75.6), so only the migration (1000 > 999 * 1.0) is over
+    assert "migration_ddl_per_worker" in message and "ddl_per_test" not in message.split("ABOVE:")[1]
+
+
+def test_a_bad_own_tolerance_is_not_comparable(tmp_path) -> None:
+    ceilings = _py_ceilings(tmp_path, ddl_per_test_tolerance=-1)
+    assert ratchet.check("python_unit", _py_report(tmp_path), ceilings)[0] == ratchet.EXIT_NOT_COMPARABLE
 
 
 def test_ddl_has_no_band_by_default_so_one_statement_per_test_over_fails(tmp_path) -> None:
@@ -200,57 +237,142 @@ def test_a_ceiling_file_missing_a_metric_is_not_a_pass(tmp_path) -> None:
     assert "ddl_per_test" in message or "ddl_tolerance" in message or "no '" in message
 
 
-# ── fan-in: the full-run total ───────────────────────────────────────────────
-
-
-def _total_ceilings(tmp_path, **overrides) -> Path:
-    entries = {"wal_bytes": 1_200_000, "ddl": 15_000, "workers": 6, "shards": 3, **overrides}
-    return _ceilings(tmp_path, ratchet.TOTAL_SECTION, bytes_tolerance=0.05, ddl_tolerance=0.0, **entries)
+# ── fan-in: the gate, on the whole run ───────────────────────────────────────
 
 
 def _shards(tmp_path, n=3, **kwargs) -> list[Path]:
+    """n identical shards, each what `_py_report()` measures: 40 tests, 2 workers, 600k WAL, 5000 DDL."""
     return [_py_report(tmp_path, name=f"shard{i}.json", **kwargs) for i in range(n)]
 
 
-def test_fan_in_sums_the_shards_and_compares_the_total(tmp_path) -> None:
-    # each shard: 600k WAL, 5000 DDL, 2 workers
-    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _total_ceilings(tmp_path, wal_bytes=1_800_000, ddl=15_000))
+def _unbooted_shard(tmp_path, name="lazy.json", tests_run=40) -> Path:
+    """A shard whose tests never touched the substrate (it boots lazily): tests ran, no worker booted, no cluster."""
+    return _py_report(tmp_path, name=name, workers=2, booted=0, tests_run=tests_run, migration_ddl=0, tests_ddl=0,
+                      wal_migration=0, wal_tests=0)
+
+
+def test_fan_in_sums_the_shards_and_judges_the_run_in_numbers_that_do_not_depend_on_its_split(tmp_path) -> None:
+    # 3 shards x (40 tests, 2 workers, 600k WAL, 5000 DDL) = 120 tests, 6 workers: the metrics `_py_report` is built for.
+    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _py_ceilings(tmp_path))
     assert code == ratchet.EXIT_OK, message
-    assert "wal_bytes=1800000" in message and "ddl=15000" in message
+    for shown in ("wal_bytes_per_test=10000", "ddl_per_test=75", "migration_ddl_per_worker=1000", "total_ddl=15000",
+                  "total_wal_bytes=1800000", "workers_booted=6", "tests=120", "shards=3"):
+        assert shown in message, shown
 
 
-def test_fan_in_over_the_total_fails(tmp_path) -> None:
-    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _total_ceilings(tmp_path, wal_bytes=1_800_000, ddl=14_999))
+def test_fan_in_over_a_ceiling_fails(tmp_path) -> None:
+    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _py_ceilings(tmp_path, ddl_per_test=74))
     assert code == ratchet.EXIT_OVER, message
+    assert "ddl_per_test" in message
+
+
+def test_the_gate_is_the_whole_run_so_a_shard_that_looks_heavy_alone_does_not_flap_it(tmp_path) -> None:
+    """nexus-2rhif: a shard's intensive numbers move with its mix. Shard A is the heavy mix (150 DDL a test),
+    shard B the light one (30): alone, A is over the ceiling; together they are 50 a test, under it."""
+    heavy = _py_report(tmp_path, name="heavy.json", tests_run=20, tests_ddl=3000)
+    light = _py_report(tmp_path, name="light.json", tests_run=100, tests_ddl=3000)
+    ceilings = _py_ceilings(tmp_path)
+    assert ratchet.check("python_unit", heavy, ceilings)[0] == ratchet.EXIT_OVER
+    code, message = ratchet.check_fan_in("python_unit", [heavy, light], 2, ceilings)
+    assert code == ratchet.EXIT_OK, message
+    # and the same two shards in the other order, or split another way, are the same run
+    assert ratchet.check_fan_in("python_unit", [light, heavy], 2, ceilings)[0] == ratchet.EXIT_OK
+
+
+def test_a_regression_in_one_light_shard_is_caught_by_the_whole_run(tmp_path) -> None:
+    """The other side of the same design: no shard is a place to regress freely. Each shard alone is under
+    the ceiling; one of them doubles its DDL and the run goes over."""
+    ok = _shards(tmp_path, n=2)
+    doubled = _py_report(tmp_path, name="doubled.json", tests_ddl=3000 * 3)
+    ceilings = _py_ceilings(tmp_path, ddl_per_test=80)
+    assert ratchet.check("python_unit", doubled, ceilings)[0] == ratchet.EXIT_OVER
+    code, message = ratchet.check_fan_in("python_unit", [*ok, doubled], 3, ceilings)
+    assert code == ratchet.EXIT_OVER, message
+    assert "ddl_per_test" in message
+
+
+def test_fan_in_does_not_depend_on_how_many_workers_ran_or_booted(tmp_path) -> None:
+    """nexus-2rhif: the pool runs a shard at -n 4, a hosted runner serially, and a worker may never boot.
+    Per-worker migration and per-test numbers are the same at every width, so none of it is a refusal."""
+    serial = _py_report(tmp_path, name="serial.json", workers=1, migration_ddl=1000, wal_migration=100_000)
+    wide = _py_report(tmp_path, name="wide.json", workers=8, tests_run=40, migration_ddl=8000, wal_migration=800_000)
+    code, message = ratchet.check_fan_in("python_unit", [serial, wide], 2, _py_ceilings(tmp_path))
+    assert code == ratchet.EXIT_OK, message
+    assert "workers_booted=9" in message
+
+
+def test_a_shard_that_booted_no_substrate_is_part_of_the_run_not_a_refusal(tmp_path) -> None:
+    """The substrate boots lazily: a shard of tests that never touch it is legitimate. Its tests count toward
+    the run (they cost nothing), and the per-shard check on it alone still says it measured nothing."""
+    lazy = _unbooted_shard(tmp_path)
+    booted = _shards(tmp_path, n=2)
+    code, message = ratchet.check_fan_in("python_unit", [*booted, lazy], 3, _py_ceilings(tmp_path))
+    assert code == ratchet.EXIT_OK, message
+    assert "tests=120" in message and "workers_booted=4" in message
+    assert ratchet.check("python_unit", lazy, _py_ceilings(tmp_path))[0] == ratchet.EXIT_NOT_COMPARABLE
+
+
+def test_a_run_in_which_no_shard_booted_a_substrate_proves_nothing(tmp_path) -> None:
+    lazy = [_unbooted_shard(tmp_path, name=f"lazy{i}.json") for i in range(3)]
+    code, message = ratchet.check_fan_in("python_unit", lazy, 3, _py_ceilings(tmp_path))
+    assert code == ratchet.EXIT_NOT_COMPARABLE
+    assert "no worker of any shard booted" in message
 
 
 def test_fan_in_refuses_a_missing_shard(tmp_path) -> None:
-    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path, n=2), 3, _total_ceilings(tmp_path))
+    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path, n=2), 3, _py_ceilings(tmp_path))
     assert code == ratchet.EXIT_NOT_COMPARABLE
     assert "2 shard report(s) given, 3 expected" in message
 
 
-def test_fan_in_refuses_a_total_measured_at_another_width(tmp_path) -> None:
-    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _total_ceilings(tmp_path, workers=12))
-    assert code == ratchet.EXIT_NOT_COMPARABLE
-    assert "6 workers" in message and "measured at 12" in message
-
-
-def test_fan_in_with_an_unset_total_prints_the_numbers_including_the_basis(tmp_path) -> None:
-    ceilings = _total_ceilings(tmp_path, wal_bytes="measure", ddl="measure", workers="measure", shards="measure")
+def test_fan_in_with_unset_ceilings_prints_the_numbers_to_commit(tmp_path) -> None:
+    ceilings = _py_ceilings(tmp_path, **{name: "measure" for name in ratchet.PYTHON_METRICS})
     code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, ceilings)
     assert code == ratchet.EXIT_UNSET
-    for line in ("wal_bytes = 1800000", "ddl = 15000", "workers = 6", "shards = 3"):
+    for line in ("wal_bytes_per_test = 10000", "ddl_per_test = 75", "migration_wal_bytes_per_worker = 100000",
+                 "migration_ddl_per_worker = 1000"):
         assert line in message
 
 
 def test_fan_in_with_one_unmeasured_shard_is_not_a_total(tmp_path) -> None:
     reports = [*_shards(tmp_path, n=2), _py_report(tmp_path, name="bad.json", wal_complete=False)]
-    assert ratchet.check_fan_in("python_unit", reports, 3, _total_ceilings(tmp_path))[0] == ratchet.EXIT_NOT_COMPARABLE
+    assert ratchet.check_fan_in("python_unit", reports, 3, _py_ceilings(tmp_path))[0] == ratchet.EXIT_NOT_COMPARABLE
 
 
 def test_fan_in_is_for_python_only(tmp_path) -> None:
-    assert ratchet.check_fan_in("java_main", _shards(tmp_path), 3, _total_ceilings(tmp_path))[0] == ratchet.EXIT_NOT_COMPARABLE
+    assert ratchet.check_fan_in("java_main", _shards(tmp_path), 3, _py_ceilings(tmp_path))[0] == ratchet.EXIT_NOT_COMPARABLE
+
+
+# ── nexus-mvr3t: a run that proves nothing is exit 12 ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"tests_ddl": 0}, {"migration_ddl": 0}, {"wal_tests": 0}, {"wal_migration": 0}],
+    ids=["tests ddl 0", "migration ddl 0", "tests wal 0", "migration wal 0"],
+)
+def test_a_measured_zero_on_a_booted_cluster_is_not_a_pass(tmp_path, kwargs) -> None:
+    """A booted cluster migrated a schema, so a 0 is a counter that saw nothing. Before this it read as
+    'below the ceiling' and passed."""
+    # a ceiling sitting far above a 0 would have called this 'below' and passed
+    ceilings = _py_ceilings(tmp_path, **dict.fromkeys(PY, 10**9))
+    code, message = ratchet.check("python_unit", _py_report(tmp_path, **kwargs), ceilings)
+    assert code == ratchet.EXIT_NOT_COMPARABLE, message
+    assert "measured 0" in message
+    code, message = ratchet.check_fan_in("python_unit", [_py_report(tmp_path, name="a.json", **kwargs)], 1, ceilings)
+    assert code == ratchet.EXIT_NOT_COMPARABLE, message
+
+
+def test_a_worker_lost_before_it_reported_is_not_a_pass(tmp_path) -> None:
+    """A worker the OS killed before sessionfinish leaves no file: its DDL and WAL are in no figure."""
+    ceilings = _py_ceilings(tmp_path, **dict.fromkeys(PY, 10**9))
+    code, message = ratchet.check("python_unit", _py_report(tmp_path, lost=1), ceilings)
+    assert code == ratchet.EXIT_NOT_COMPARABLE
+    assert "1 xdist worker(s) ended without handing over a report" in message
+    shards = [*_shards(tmp_path, n=2), _py_report(tmp_path, name="lost.json", lost=1)]
+    code, message = ratchet.check_fan_in("python_unit", shards, 3, ceilings)
+    assert code == ratchet.EXIT_NOT_COMPARABLE
+    assert "lost.json" in message
 
 
 # ── java: one suite, one run, per fork ───────────────────────────────────────
@@ -316,6 +438,10 @@ def test_the_shared_empty_bucket_counts_toward_the_java_other_total(tmp_path) ->
         ("a container without the WAL marks", lambda d: _java_fork(d, "ddl-main-r1-1.json", incomplete=1)),
         ("only dedicated containers", lambda d: _java_fork(d, "ddl-main-r1-1.json", shared=0)),
         ("only another suite", lambda d: _java_fork(d, "ddl-integration-r1-1.json", suite="integration")),
+        ("a booted cluster that counted no DDL", lambda d: _java_fork(
+            d, "ddl-main-r1-1.json", mig_ddl=0, tests_ddl=0, empty_ddl=0, dedicated_ddl=0)),
+        ("a booted cluster that logged no WAL", lambda d: _java_fork(
+            d, "ddl-main-r1-1.json", tests_bytes=0, dedicated_bytes=0)),
     ],
 )
 def test_a_java_measurement_that_proves_nothing_is_not_a_pass(tmp_path, case, build) -> None:
@@ -335,12 +461,46 @@ def test_the_cli_exit_status_is_the_check_status(tmp_path, capsys) -> None:
     assert "ABOVE" in capsys.readouterr().out
 
 
+def test_advisory_prints_the_verdict_and_exits_zero(tmp_path, capsys) -> None:
+    """nexus-2rhif: one shard's verdict is advisory; it must still say what it found, so the log reads it."""
+    ceilings = _py_ceilings(tmp_path, ddl_per_test=1)
+    report = str(_py_report(tmp_path))
+    status = ratchet.main(["check", "--suite", "python_unit", "--report", report, "--ceilings", str(ceilings), "--advisory"])
+    out = capsys.readouterr().out
+    assert status == ratchet.EXIT_OK
+    assert "ABOVE" in out and "ADVISORY: this would exit 10" in out
+    # a passing run says nothing extra, and the flag does not turn a bad report into a clean one's output
+    ok = ratchet.main(["check", "--suite", "python_unit", "--report", report, "--ceilings", str(_py_ceilings(tmp_path)), "--advisory"])
+    assert ok == ratchet.EXIT_OK and "ADVISORY" not in capsys.readouterr().out
+
+
+def test_advisory_covers_a_ceiling_still_set_to_measure_and_a_report_that_proves_nothing(tmp_path, capsys) -> None:
+    """The Java steps run --advisory while their ceilings are 'measure' (exit 11) and the run must not be red for it."""
+    d = tmp_path / "ddl-counts"
+    _java_fork(d, "ddl-main-r1-1.json")
+    unset = _jv_ceilings(tmp_path, **dict.fromkeys(JV, "measure"))
+    args = ["check", "--suite", "java_main", "--report", str(d), "--run", "r1", "--ceilings", str(unset)]
+    assert ratchet.main(args) == ratchet.EXIT_UNSET
+    capsys.readouterr()
+    assert ratchet.main([*args, "--advisory"]) == ratchet.EXIT_OK
+    out = capsys.readouterr().out
+    assert "migration_ddl_per_fork = 2000" in out and "ADVISORY: this would exit 11" in out
+    assert ratchet.main(["check", "--suite", "java_main", "--report", str(tmp_path / "nowhere"), "--ceilings", str(unset), "--advisory"]) == ratchet.EXIT_OK
+
+
 def test_the_cli_fan_in(tmp_path, capsys) -> None:
     reports = [str(p) for p in _shards(tmp_path)]
     status = ratchet.main(["fan-in", "--suite", "python_unit", "--report", *reports, "--shards", "3",
-                           "--ceilings", str(_total_ceilings(tmp_path, wal_bytes=1_800_000))])
+                           "--ceilings", str(_py_ceilings(tmp_path))])
     assert status == ratchet.EXIT_OK
     assert "python_unit fan-in" in capsys.readouterr().out
+
+
+def test_fan_in_has_no_advisory_switch() -> None:
+    """The gate cannot be turned into a printout from the command line."""
+    with pytest.raises(SystemExit) as exc:
+        ratchet.main(["fan-in", "--suite", "python_unit", "--report", "x", "--shards", "1", "--advisory"])
+    assert exc.value.code == 2
 
 
 def test_a_java_check_reports_the_uncounted_cluster_start_sites_next_to_its_ceilings(tmp_path) -> None:

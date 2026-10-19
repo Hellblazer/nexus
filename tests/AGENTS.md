@@ -405,16 +405,29 @@ tmpfs), and everything that reads the server log (`DdlCounts`, the `auto_explain
 holds only the postmaster's first lines. Because the collector also takes the "ready to accept connections"
 line off Docker's log, the container waits on a `pg_isready` TCP probe. `PgServerLogTest` pins all three.
 
-The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so a shard's width or test
-count does not move them: bytes and DDL per test, and the migration's bytes and DDL per worker
-(Python); the migration's bytes and DDL per fork plus the totals of everything else (Java).
-`scripts/ddl_ratchet.py check --suite <name> --report <path>` compares one shard or one Java run
-with them; `fan-in --shards N` sums N shard reports for the full-run total. Bytes carry a
-tolerance band (`bytes_tolerance`), WAL varying a little; ceilings stay `"measure"` (the check exits
-11 and prints the numbers) until a full run sets them. Java runs are told apart by
-`-Dnexus.ddl.suite=main|integration` (the pom sets it; CI passes it) and `-Dnexus.ddl.run`
-(the Maven build timestamp); the ratchet reads one suite of one run. Exit codes: 0 ok, 10 above a
-ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
+The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so how the work is split does
+not move them: bytes and DDL per test and the migration's bytes and DDL per booted worker (Python); the
+migration's bytes and DDL per fork plus the totals of everything else (Java).
+**The Python gate is the fan-in over the whole run** (nexus-ekp7w, nexus-2rhif):
+`scripts/ddl_ratchet.py fan-in --suite python_unit --shards N --report <every shard's report>` sums the
+shards and judges those four numbers over the sum, so it does not flap with which tests the split gave a
+shard, with `-n` (a pool shard runs 4 workers, a hosted one 1) or with a shard whose workers never booted
+the substrate (it boots lazily; such a shard still writes its report, with `workers_booted: 0`).
+`check --suite python_unit --report <one shard's report> --advisory` prints the same comparison for one
+shard and always exits 0. In `ci.yml` each 3.12 `test` shard exports `NX_DDL_REPORT_DIR`, runs the advisory
+check and uploads the report; `pytest-gate` downloads all of them and runs the fan-in. The Java steps of
+`service-ci.yml` pass `-Dnexus.ddl.run=<run id>-<suite>` to mvn and the same id to `check --run`, so the
+persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
+exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and
+`tests/scripts/test_ddl_ratchet_wiring.py` fails the commit that sets them and leaves the flag on.
+Bytes carry a tolerance band (`bytes_tolerance`), WAL varying a little; a `"measure"` ceiling makes the check
+exit 11 and print the numbers to commit. Java runs are told apart by `-Dnexus.ddl.suite=main|integration`
+(the pom sets it; CI passes it) and the run id (`-Dnexus.ddl.run`, default the Maven build timestamp).
+Exit codes: 0 ok, 10 above a ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
+12 includes a measured 0 on a booted cluster (the counter saw nothing) and `workers_lost > 0`: an xdist
+worker killed before its `sessionfinish` leaves no file, so the controller counts the node going down
+without a report and the report says so, where file recovery covers only a worker that wrote its file and
+did not hand it over.
 
 The counter turns fully off for a same-sha A/B (nexus-3cwsw): `-Dnexus.ddl.count=false` for Java,
 `NX_DDL_COUNT=0` for pytest (default on; any other value fails loud). Off adds none of the counter's

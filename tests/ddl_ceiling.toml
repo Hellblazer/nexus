@@ -9,40 +9,53 @@
 # is the source of truth for disk writes. The `*ddl*` metrics are the DDL statement counts that
 # explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are reduce-only:
 # lower one in the commit that lowers the number, raising one needs a reviewed reason in that
-# commit's message. A set ceiling is the WORST value any shard (or run) measured.
+# commit's message. A set ceiling is the WORST value measured.
 #
 # Every metric is INTENSIVE, so it does not move with how the work is split across shards or forks:
-#   python_unit    one pytest shard's report: bytes and DDL per test (the tests' own time) and the
-#                  migration's bytes and DDL per xdist worker (each worker boots and migrates its own cluster)
+#   python_unit    the GATE is `ddl_ratchet.py fan-in`, which sums every shard's report and judges the whole
+#                  run: bytes and DDL per test over all tests, and the migration's bytes and DDL per booted
+#                  xdist worker (each worker boots and migrates its own cluster). None of the four moves with
+#                  the shard split, with -n, or with a worker that never booted a substrate. One shard's
+#                  `check` compares the same four against these same numbers and is ADVISORY (a shard's mix
+#                  is not the run's), so it never fails a job.
 #   java_*         one mvn run of one suite: the migration's bytes and DDL per fork (each fork migrates
 #                  one template), and the rest (clones, dedicated containers, the tests' own work) as totals
-#   python_unit_total   ONLY `ddl_ratchet.py fan-in`, which sums N shard reports. A full-run total depends on
-#                  the width it was measured at, so it carries its `workers` (booted, summed over shards)
-#                  and `shards` and a run at another width is refused rather than compared.
 #
-# Tolerance bands: WAL varies a little between runs (autovacuum, full-page images), so a bytes
-# metric passes up to ceiling * (1 + bytes_tolerance); a DDL metric up to ceiling * (1 + ddl_tolerance).
+# Tolerance bands: a bytes metric passes up to ceiling * (1 + bytes_tolerance), a DDL metric up to
+# ceiling * (1 + ddl_tolerance), and `<metric>_tolerance` overrides either for one metric.
 #
-# "measure" means no full-run measurement exists yet. The check then prints the numbers it just
-# measured and exits 11 (not 0): the first full run (the pool restart Sam is waiting on) supplies
-# them, and the follow-up commit replaces each "measure" with the number. A ceiling nobody set must
-# not pass a run.
+# HOW THE PYTHON NUMBERS WERE MEASURED (2026-10-19, nexus-ekp7w), and what they are not:
+#   * DDL is deterministic. Three repeat runs of tests/db (2283 tests, -n 4, macOS laptop) gave 31881 test
+#     DDL and 8404 migration DDL every time (spread 0.000%), and 31881 again at -n 8 and on chas at
+#     -n auto; the migration is 2101 DDL per worker on both hosts. So the migration keeps tolerance 0.
+#   * ddl_per_test and wal_bytes_per_test are over the WHOLE suite, which is denser than tests/db: one
+#     full run on the laptop (tests/ -n 4, 30235 tests) gave 19.0132 DDL and 130065 WAL bytes per test
+#     against tests/db's 13.9645 and 90826. ddl_tolerance 0.05 is the allowance for a ratio that moves a
+#     little with the test set (Linux runs a few tests macOS skips), not a measured variance.
+#   * WAL is NOT comparable between hosts: the same tests/db run wrote 90.8 KB a test on the laptop and
+#     163 KiB on chas (Linux), and the migration 6.83 MB against 11.0 MB per worker. Repeat variance on one
+#     host is small (tests-phase WAL spread 0.50% over three runs, 0.8% between -n 4 and -n 8; migration
+#     0.001%). CI is Linux, so the two bytes ceilings are the chas figures: the migration per worker is
+#     chas's measured 168 MiB over its 16 workers (33616 migration DDL / 2101); wal_bytes_per_test is chas's tests/db figure times the
+#     laptop's full-run to tests/db ratio (1.43), which is an ESTIMATE of Linux full-run bytes, rounded up.
+#     bytes_tolerance 0.10 is the margin for that estimate (not repeat variance). Replace both bytes
+#     ceilings with the first Linux fan-in's measurement (it prints them); lowering a ceiling needs no
+#     reason, raising one does.
+#
+# "measure" means no measurement exists yet. The check then prints the numbers it just measured and exits
+# 11 (not 0), and a ceiling nobody set must not pass a run. The Java sections are still "measure": their
+# CI steps are --advisory until the Java DDL cut (nexus-0ty8z) lands, because a ceiling set before it
+# would be set at the number that cut removes. Set all four of a Java section together, from one run,
+# and drop --advisory from its step in service-ci.yml in the same commit (a lint checks they agree).
 
 [python_unit]
-bytes_tolerance = 0.05
-ddl_tolerance = 0.0
-wal_bytes_per_test = "measure"
-ddl_per_test = "measure"
-migration_wal_bytes_per_worker = "measure"
-migration_ddl_per_worker = "measure"
-
-[python_unit_total]
-bytes_tolerance = 0.05
-ddl_tolerance = 0.0
-wal_bytes = "measure"
-ddl = "measure"
-workers = "measure"
-shards = "measure"
+bytes_tolerance = 0.10
+ddl_tolerance = 0.05
+wal_bytes_per_test = 240000
+ddl_per_test = 19.02
+migration_wal_bytes_per_worker = 11010048
+migration_ddl_per_worker = 2101
+migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
 bytes_tolerance = 0.05

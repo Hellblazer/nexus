@@ -276,7 +276,18 @@ jobs:
       # 16 GB) runs the local default of 4 forks (nexus-480wm).
       - name: Run Java test suite
         working-directory: service
-        run: ./mvnw -q test -Dnexus.ddl.suite=main -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+        run: ./mvnw -q test -Dnexus.ddl.suite=main "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-main" -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+
+      # nexus-ekp7w: the bytes-written and DDL ratchet for this suite. ADVISORY until the Java
+      # ceilings in tests/ddl_ceiling.toml are numbers: they are still "measure", pending the
+      # Java DDL cut (nexus-0ty8z), because a ceiling set before it would be set at the number
+      # that cut removes. Without --advisory this step exits 11 on "measure" and 10 above a
+      # ceiling. The day the ceilings are set, delete the flag in this step and the next in
+      # the same commit (tests/scripts/test_ddl_ratchet_wiring.py names that day's check).
+      # --run is the id mvn was given above, so the persistent pool workspace's older
+      # service/target/ddl-counts files are never read.
+      - name: DDL/bytes ratchet, Java main suite (advisory until its ceilings are set)
+        run: python3 scripts/ddl_ratchet.py check --suite java_main --report service/target/ddl-counts --run "${NX_TEST_RUN_ID}-main" --advisory
 
       # RDR-224 review (nexus-f9bgu.29/.32): tests/fixtures/native_jar_listings.txt is the
       # evidence the native-resource tests and OrtTempSweep's LOADED_LIBS pin are built on.
@@ -301,7 +312,11 @@ jobs:
       # wrong for the CI runner), across the classes carrying the tag (15 at 2026-10-12).
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
-        run: ./mvnw -q test -Dnexus.ddl.suite=integration -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+        run: ./mvnw -q test -Dnexus.ddl.suite=integration "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-integration" -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+
+      # nexus-ekp7w: the same ratchet for the integration group; advisory for the same reason.
+      - name: DDL/bytes ratchet, Java integration group (advisory until its ceilings are set)
+        run: python3 scripts/ddl_ratchet.py check --suite java_integration --report service/target/ddl-counts --run "${NX_TEST_RUN_ID}-integration" --advisory
 
       # Non-vacuity for the step above: it fails loud on a red test, but a
       # selector that stops matching exits 0 having run NOTHING, which is the

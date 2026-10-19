@@ -96,6 +96,10 @@
              invocations in service-ci.yml) cannot be summed into each other. The profile below sets
              "integration" whenever -Dgroups=integration is given; CI also passes it explicitly. -->
         <nexus.ddl.suite>main</nexus.ddl.suite>
+        <!-- nexus-ekp7w: the run id the same way. The default is the build timestamp, which differs between
+             invocations; CI gives mvn its own id for the run and the same id to the run option of
+             scripts/ddl_ratchet.py, so a persistent workspace's older runs cannot be mixed in. -->
+        <nexus.ddl.run>${maven.build.timestamp}</nexus.ddl.run>
 
         <!-- nexus-3cwsw: -Dnexus.ddl.count=false turns the counter fully off (no log_statement, probe, event
              trigger, marks, collector, count files), so a run can be compared with one at the same sha.
@@ -376,11 +380,11 @@
                          boundary, not by test-framework bookkeeping. -->
                     <forkCount>${nexus.test.forks}</forkCount>
                     <reuseForks>true</reuseForks>
-                    <!-- nexus-sz651: the counter's suite and run id. maven.build.timestamp is the same
-                         for every fork of one mvn invocation and differs between invocations. -->
+                    <!-- nexus-sz651: the counter's suite and run id. The default run id, maven.build.timestamp, is the same
+                         for every fork of one mvn invocation and differs between invocations (nexus-ekp7w: or CI names it). -->
                     <systemPropertyVariables>
                         <nexus.ddl.suite>${nexus.ddl.suite}</nexus.ddl.suite>
-                        <nexus.ddl.run>${maven.build.timestamp}</nexus.ddl.run>
+                        <nexus.ddl.run>${nexus.ddl.run}</nexus.ddl.run>
                         <nexus.ddl.count>${nexus.ddl.count}</nexus.ddl.count>
                     </systemPropertyVariables>
                 </configuration>

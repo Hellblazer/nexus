@@ -60,7 +60,9 @@ A pytest plugin (registered from ``tests/conftest.py``), shaped like
 file and hands it to the controller through ``workeroutput``; the controller
 merges them, prints ``ddl: migration=<n> tests=<n> per_test=<x>`` and writes
 ``nx-ddl-report.json`` under ``NX_DDL_REPORT_DIR`` (default: the controller's
-basetemp). Clusters other than the substrate's (``throwaway_pg_cluster``, a
+basetemp). A worker the OS killed before its ``sessionfinish`` leaves no file and hands over nothing;
+the controller sees it only as an xdist node going down without a report, counts it as
+``workers_lost`` and ``ddl_ratchet.py`` refuses the report. Clusters other than the substrate's (``throwaway_pg_cluster``, a
 test's own engine) are not counted; ``tests/ddl_uncounted_clusters.toml`` lists the start sites a
 static scan of ``tests/`` and ``scripts/`` finds (docker-run and e2e shell clusters are not scanned),
 and the terminal line prints how many there are. That figure is a census of call sites, printed on
@@ -181,11 +183,13 @@ _CREATE_MODIFIERS = frozenset({"OR", "REPLACE", "UNIQUE", "TEMP", "TEMPORARY", "
 #: claim the next event of their backend (measured on PG 17.5, 2026-10-19): shared-object DDL
 #: (databases, roles, tablespaces), the trigger itself, ``ALTER SYSTEM``, ``REASSIGN OWNED``,
 #: ``CLUSTER``, ``COMMENT ON`` a shared object, ``GRANT``/``REVOKE`` of a role membership (no
-#: ``ON``) or on a database, tablespace or parameter. ``REINDEX`` is the opposite case: it fires
+#: ``ON``) or on a database, tablespace or parameter. ``CREATE``/``ALTER``/``DROP USER MAPPING`` is
+#: NOT in that family despite starting with ``USER``: it is per-database and fires the event
+#: (nexus-mvr3t), hence the ``(?!\s+MAPPING\b)``. ``REINDEX`` is the opposite case: it fires
 #: the event but ``log_statement = 'ddl'`` does not log it, so it is counted once, as nested.
 #: The two ``(?:(?!\bON\b).)*`` clauses stop at the first ``ON`` keyword.
 _NO_EVENT = re.compile(
-    r"^(?:CREATE|ALTER|DROP)\s+(?:DATABASE|ROLE|USER|GROUP|TABLESPACE|EVENT\s+TRIGGER)\b"
+    r"^(?:CREATE|ALTER|DROP)\s+(?:DATABASE|ROLE|USER(?!\s+MAPPING\b)|GROUP|TABLESPACE|EVENT\s+TRIGGER)\b"
     r"|^ALTER\s+SYSTEM\b"
     r"|^REASSIGN\s+OWNED\b"
     r"|^CLUSTER\b"
@@ -671,6 +675,9 @@ class _Recorder:
         self.windows: list[tuple[float, float, str]] = []
         self._open: dict[str, float] = {}
         self.reported: list[dict[str, Any]] = []
+        #: Workers xdist reported down that handed over no report: killed before ``sessionfinish``
+        #: (nexus-mvr3t). Such a worker leaves no file either, since the file is written in the same hook.
+        self.lost = 0
         self.run_id = os.environ.get(RUN_ID_ENV) or uuid.uuid4().hex[:8]
         self.cgroup_start = cgroup_io_wbytes() if not hasattr(config, "workerinput") else None
 
@@ -687,6 +694,8 @@ class _Recorder:
         payload = (getattr(node, "workeroutput", None) or {}).get(_WORKEROUTPUT_KEY)
         if payload:
             self.reported.append(payload)
+        else:
+            self.lost += 1
 
     def own_report(self) -> dict[str, Any]:
         return worker_report(
@@ -732,21 +741,33 @@ class _Recorder:
         return found
 
     def pytest_terminal_summary(self, terminalreporter, exitstatus, config):
-        if hasattr(config, "workerinput") or not self.reported:
+        if hasattr(config, "workerinput") or not (self.reported or self.lost):
             return
         recovered = self.recovered()
         merged = merge_reports([*self.reported, *recovered])
         merged["recovered_workers"] = len(recovered)
-        if not merged["workers_booted"]:
-            return
+        # A worker that wrote its file and died before handing it over is in ``recovered``, so it is not lost.
+        merged["workers_lost"] = max(0, self.lost - len(recovered))
         merged["cgroup_io"] = cgroup_io_delta(self.cgroup_start, cgroup_io_wbytes())
         merged["uncounted_cluster_start_sites"] = uncounted_cluster_count()
+        # The report is written even when no worker booted a substrate: the substrate boots lazily, so a
+        # shard of tests that never touch it is legitimate, and ``ddl_ratchet.py fan-in`` needs that
+        # shard's test count and its (absent) clusters to add up the run.
         path = self.report_dir() / REPORT_NAME
         path.write_text(json.dumps(merged, indent=1))
-        lost = f" RECOVERED {len(recovered)} worker file(s) no worker handed over;" if recovered else ""
+        note = f" RECOVERED {len(recovered)} worker file(s) no worker handed over;" if recovered else ""
+        if merged["workers_lost"]:
+            note += (
+                f" LOST {merged['workers_lost']} worker(s) that died before reporting (their DDL and WAL are "
+                "not counted; ddl_ratchet.py refuses this report);"
+            )
+        if not merged["workers_booted"]:
+            if merged["workers_lost"]:
+                terminalreporter.write_line(f"ddl: no substrate counted (report: {_summary_report_path(path)}){note}")
+            return
         terminalreporter.write_line(
             f"{summary_line(merged, uncounted=merged['uncounted_cluster_start_sites'])} "
-            f"(report: {_summary_report_path(path)}){lost}"
+            f"(report: {_summary_report_path(path)}){note}"
         )
 
 

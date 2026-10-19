@@ -850,6 +850,11 @@ jobs:
         # refuses, the summary line says why and this directory is used as is.
         run: |
           set -euo pipefail
+          # nexus-ekp7w: the DDL counter writes this shard's nx-ddl-report.json here (a
+          # persistent pool workspace must not carry a previous run's), and the steps below
+          # compare it (advisory) and hand it to the fan-in in pytest-gate.
+          export NX_DDL_REPORT_DIR="$RUNNER_TEMP/ddl-report"
+          rm -rf "$NX_DDL_REPORT_DIR"
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
             mkdir -p "$TMPDIR"
@@ -886,6 +891,29 @@ jobs:
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
             || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+
+      # nexus-ekp7w / nexus-2rhif: the DDL and bytes-written ratchet. THE GATE IS NOT HERE.
+      # One shard's bytes per test and DDL per test move with which tests the split gave it
+      # (a 15% heavier mix tripped a per-shard ceiling with no code change), so this step only
+      # prints how the shard compares and exits 0 (--advisory). The run's verdict is the
+      # fan-in over all shards in `pytest-gate`, which reads the report uploaded next.
+      # 3.12 only: the 3.13 legs (PRs to main) are a second copy of the same suite, and the
+      # fan-in expects exactly one report per shard. A shard whose report is missing fails
+      # the upload (if-no-files-found), never reads as a clean one.
+      - name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)
+        if: success() && matrix.python-version == '3.12'
+        run: python3 scripts/ddl_ratchet.py check --suite python_unit --report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory
+
+      - name: Upload this shard's DDL report (read by the fan-in in pytest-gate)
+        if: success() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ddl-report-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ddl-report/nx-ddl-report.json
+          retention-days: 3
+          if-no-files-found: error
+          # A re-run of all jobs keeps the first attempt's artifacts under the same names.
+          overwrite: true
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
@@ -1623,6 +1651,36 @@ jobs:
           esac
 
           echo "pytest-gate: PASS"
+
+      # nexus-ekp7w / nexus-2rhif: THE DDL AND BYTES-WRITTEN GATE. It runs only after the verdict
+      # above passed, so it sees a green shard matrix, and only when the shards ran (code=true).
+      # Fan-in sums every shard's report and judges the whole run against tests/ddl_ceiling.toml:
+      # bytes and DDL per test over all tests, and the migration's per booted worker, which do not
+      # move with the shard split, with -n (the pool runs 4 workers a shard, a hosted runner one)
+      # or with workers that never booted a substrate. `--shards` is the matrix length
+      # (tests/scripts/test_ddl_ratchet_wiring.py keeps them equal), and a missing report, a
+      # worker that died before reporting, or a measured 0 is exit 12, a failure, never a pass.
+      # Ceilings are reduce-only: lower one in the commit that lowers the number.
+      - name: Check out the ratchet and its ceilings
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ddl_ratchet.py
+            tests/ddl_ceiling.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch every shard's DDL report
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: ddl-report-shard-*
+          path: ddl-reports
+
+      - name: DDL/bytes ratchet over the whole run (the gate)
+        if: needs.changes.outputs.code == 'true'
+        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a
