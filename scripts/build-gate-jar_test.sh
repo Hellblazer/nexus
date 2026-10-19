@@ -461,15 +461,46 @@ rm -f "$repo/service/src/main/T1.java" "$repo/service/src/main/T2.java" "$repo/s
 
 echo "Test 16 (nexus-0a1hw review): a signal to the script stops Maven and its children and leaves no tmpfs directory"
 echo 'class U {}' > "$repo/service/src/main/U.java"
+# exited_within <pid> <tenths>: 0 once <pid> (a child of this shell) has exited, 1 if it
+# still runs after <tenths> x 0.1 s. A zombie counts as exited: kill -0 succeeds on one.
+exited_within() {
+    local p="$1" n="$2" st i
+    for ((i = 0; i < n; i++)); do
+        st="$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ')" || st=""
+        [[ -z "$st" || "$st" == Z* ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
 for sig16 in TERM HUP; do
     rm -rf "$repo/service/target"
     hp="$WORKDIR/hang.pid.$sig16"; hk="$WORKDIR/hang.kid.$sig16"; rm -f "$hp" "$hk"
-    (cd "$repo" && MVNW_HANG=1 MVNW_HANG_PID="$hp" MVNW_HANG_KID="$hk" NX_BUILD_TMPFS="$shm" exec scripts/build-gate-jar.sh >"$WORKDIR/hang.out.$sig16" 2>&1) &
+    # The script is started with the signal under test at its DEFAULT disposition. A
+    # non-interactive bash cannot trap a signal that was ignored when it started, so
+    # under nohup (or any launcher that ignores HUP) build-gate-jar.sh's HUP trap is a
+    # no-op, the HUP is dropped, and the build runs on: correct for nohup, and a hang of
+    # this case on chas (nexus-0a1hw, 2026-10-19). perl leaves every other disposition alone.
+    (cd "$repo" && MVNW_HANG=1 MVNW_HANG_PID="$hp" MVNW_HANG_KID="$hk" NX_BUILD_TMPFS="$shm" \
+        exec perl -e '$SIG{$ARGV[0]} = "DEFAULT"; shift; exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n"' \
+        "$sig16" scripts/build-gate-jar.sh >"$WORKDIR/hang.out.$sig16" 2>&1) &
     spid=$!
     for _ in $(seq 1 100); do [[ -s "$hk" ]] && break; sleep 0.1; done
     [[ -s "$hk" && -n "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "[$sig16] the build is running in a tmpfs directory" || bad "[$sig16] stub never started"
     mpid="$(cat "$hp" 2>/dev/null)"; kid="$(cat "$hk" 2>/dev/null)"
     kill "-$sig16" "$spid" 2>/dev/null
+    # Bounded: stop_child needs at most ~8.5 s (5 s for the leader, 3 s for the group).
+    # A script still running after 20 s is a FAILURE recorded here, then killed, never
+    # a hang of the suite.
+    hung16=0
+    if exited_within "$spid" 200; then
+        ok "[$sig16] the script exits within 20 s of the signal"
+    else
+        hung16=1
+        bad "[$sig16] the script was still running 20 s after SIG$sig16 (hung; killed): $(cat "$WORKDIR/hang.out.$sig16")"
+        kill -KILL "$spid" 2>/dev/null
+        [[ -n "$mpid" ]] && kill -KILL -- "-$mpid" "$mpid" 2>/dev/null
+        [[ -n "$kid" ]] && kill -KILL "$kid" 2>/dev/null
+    fi
     rc16=0; wait "$spid" 2>/dev/null || rc16=$?
     sleep 0.5
     [[ $rc16 -ne 0 ]] && ok "[$sig16] the script exits non-zero ($rc16)" || bad "[$sig16] exited 0"
@@ -478,6 +509,11 @@ for sig16 in TERM HUP; do
     { [[ -n "$kid" ]] && ! kill -0 "$kid" 2>/dev/null; } && ok "[$sig16] and so is its child" || { bad "[$sig16] the Maven child survived (pid $kid)"; kill -9 "$kid" "$mpid" 2>/dev/null; }
     [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "[$sig16] release.properties restored" || bad "[$sig16] props dirty"
     [[ ! -d "$repo/.git/nexus-build-lease/service" ]] && ok "[$sig16] the lease is released" || bad "[$sig16] lease still held"
+    if (( hung16 )); then
+        # A killed script ran no EXIT trap: undo what it left so the later cases run clean.
+        git -C "$repo" checkout -q -- "$props_rel"
+        rm -rf "$repo/.git/nexus-build-lease/service" "$shm/nexus-build-$(id -u)"/b.*
+    fi
 done
 rm -f "$repo/service/src/main/U.java"
 

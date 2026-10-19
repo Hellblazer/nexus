@@ -137,7 +137,11 @@ build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh 
 trap 'build_lease_release service' EXIT
 # A signal ends the script through its EXIT trap (which stops the build's process
 # group, removes the tmpfs directory, restores the stamp and releases the lease)
-# instead of leaving a running Maven behind.
+# instead of leaving a running Maven behind. A signal that was IGNORED when this
+# script started (HUP under nohup or a launcher that ignores it) cannot be trapped
+# by a non-interactive bash: its trap below is a no-op, the signal stays ignored
+# here and in Maven, and the build runs on. That is what nohup asks for; stop such
+# a run with TERM (nexus-0a1hw).
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
