@@ -254,8 +254,9 @@ measurement.
   graphs are fine at `ef_search` 600" and is acted on by hand in Phase 1.
 - [ ] **A2.** Vacuum graph repair does not degrade recall at `ef_search` 600 on
   real vectors (P02 says not at 400 or more, on synthetic data). **Status**:
-  Unverified. **Method**: the canary runs after each advance of a leaf's
-  `last_autovacuum`, so Phase 1 yields before-and-after pairs on the cloud.
+  Unverified. **Method**: the canary runs after each vacuum of a leaf that had
+  deletes or non-HOT updates to reap, so Phase 1 yields before-and-after pairs on
+  the cloud.
 - [ ] **A3.** Index bytes per row is a usable bloat signal: pure ingest keeps it
   under 1.4 times the fresh-build figure, and deletes push it up. **Status**:
   Unverified and, per the proposal, uncalibrated: pgvector reuses deleted slots
@@ -464,8 +465,14 @@ reason `no_queries`.
 
 When it runs, on the lock holder's pass after drops, builds and REINDEXes:
 after each build or REINDEX of the index; when its leaf's `last_autovacuum`
-(or `last_vacuum`) advanced since this engine last looked, at most once per
-index per 6 hours; and when its last run on this engine is older than 24 hours.
+(or `last_vacuum`) advanced since this engine last looked AND the leaf's deletes
+or non-HOT updates (`n_tup_del`, `n_tup_upd - n_tup_hot_upd`) advanced over the
+same interval, at most once per index per 6 hours; and when its last run on this
+engine is older than 24 hours. The second condition matters because nexus-s9wav
+sets `autovacuum_vacuum_insert_scale_factor` 0.05 on every leaf, so
+`last_autovacuum` now also advances on insert-only vacuums that reap nothing and
+repair no graph; keying on the timestamp alone would run the canary on ingest,
+which this design holds perturbs nothing.
 The first observation of a leaf after a boot records the timestamp and does
 not trigger. A run that cannot happen yet (too few queries) is held as pending
 in memory and runs on the first pass that has the queries.
