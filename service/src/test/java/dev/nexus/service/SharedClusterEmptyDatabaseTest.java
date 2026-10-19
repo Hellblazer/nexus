@@ -321,7 +321,7 @@ class SharedClusterEmptyDatabaseTest {
         assertThat(DdlCounts.markEnd(cluster)).as("the end mark can be logged on a live cluster").isTrue();
         DdlLogParser.Parsed parsed = null;
         for (int attempt = 0; attempt < 30; attempt++) {
-            parsed = DdlLogParser.parse(cluster.getLogs());
+            parsed = DdlLogParser.parse(PgContainerHelper.serverLog(cluster));
             if (parsed.marks().contains(DdlLogParser.END_LABEL)) {
                 break;
             }
@@ -342,7 +342,7 @@ class SharedClusterEmptyDatabaseTest {
     private static List<DdlLogParser.Entry> ddlEntriesOf(String db, boolean expectSome) throws Exception {
         List<DdlLogParser.Entry> mine = List.of();
         for (int attempt = 0; attempt < 20; attempt++) {
-            mine = DdlLogParser.parse(clusterOf().getLogs()).entries().stream()
+            mine = DdlLogParser.parse(PgContainerHelper.serverLog(clusterOf())).entries().stream()
                 .filter(e -> e.db().equals(db)).toList();
             if (!expectSome || mine.stream().anyMatch(DdlLogParser.Entry::nested)) {
                 return mine;

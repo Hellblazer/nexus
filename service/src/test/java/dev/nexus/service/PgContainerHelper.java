@@ -22,11 +22,13 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -73,6 +75,18 @@ public final class PgContainerHelper {
      * 50 MB/s to chas's NVMe (measured 2026-10-19).
      */
     public static final String PGDATA = "/var/lib/postgresql/data";
+
+    /**
+     * nexus-sz651: the server log's directory, inside the tmpfs {@link #PGDATA}. The DDL counter needs
+     * every DDL statement logged ({@code log_statement=ddl} plus the event trigger's {@code RAISE LOG},
+     * about 462k lines in a main run). Left on stderr, Docker stores them as json-file logs under
+     * /var/lib/docker on the host's disk: 1.63 GB written against 0.48 GB without the counter (chas
+     * NVMe sampler). {@code logging_collector} takes them off stderr into this directory, which is RAM.
+     */
+    public static final String SERVER_LOG_DIR = PGDATA + "/nx-log";
+
+    /** The one server log file (fixed name, no rotation), so the temp server of the image's init and the real one append to it. */
+    public static final String SERVER_LOG_FILE = SERVER_LOG_DIR + "/postgresql.log";
 
     /**
      * tmpfs cap for {@link #PGDATA}. Measured live containers on chas held 19 to 171 MB
@@ -194,7 +208,21 @@ public final class PgContainerHelper {
                 // DDL command, including the ones a function runs through EXECUTE.
                 "-c", "log_statement=ddl",
                 "-c", "log_line_prefix=%m [%p] db=%d ",
-                "-c", "log_timezone=UTC")
+                "-c", "log_timezone=UTC",
+                // ... and keep all of it off Docker's log driver (SERVER_LOG_DIR). One fixed file, never
+                // rotated or truncated, so an offset into it stays valid. The collector sends the
+                // "ready to accept connections" line to the file too, so the wait below is a probe.
+                "-c", "logging_collector=on",
+                "-c", "log_destination=stderr",
+                "-c", "log_directory=" + SERVER_LOG_DIR,
+                "-c", "log_filename=postgresql.log",
+                "-c", "log_rotation_age=0",
+                "-c", "log_rotation_size=0",
+                "-c", "log_truncate_on_rotation=off")
+            // The image's init runs a temp server on a unix socket only; pg_isready on TCP passes only for
+            // the real server, once init is done. (The default wait reads Docker's log for the ready line.)
+            .waitingFor(Wait.forSuccessfulCommand("pg_isready -h 127.0.0.1 -p 5432 -q")
+                .withStartupTimeout(Duration.ofSeconds(120)))
             .withCopyFileToContainer(
                 MountableFile.forClasspathResource("ddl/nx-ddl-probe.sql"),
                 "/docker-entrypoint-initdb.d/00-nx-ddl-probe.sql")
@@ -207,6 +235,60 @@ public final class PgContainerHelper {
             // nexus-7xfh7: which test class asked for this boot, so `docker events` can rank call sites:
             // docker events --filter label=dev.nexus.test.run=<id> --format '{{index .Actor.Attributes "dev.nexus.test.caller"}}'
             .withLabel("dev.nexus.test.caller", callerClass());
+    }
+
+    /** Reads of the server log wait this long for one {@code docker exec} before abandoning it and trying again. */
+    static final Duration SERVER_LOG_READ_TIMEOUT = Duration.ofSeconds(60);
+
+    private static final java.util.concurrent.ExecutorService LOG_READERS = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "nx-server-log-read");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * The container's whole server log, read from {@link #SERVER_LOG_FILE} in the container (nexus-sz651).
+     * Not {@code container.getLogs()}: that is Docker's log, which carries only the postmaster's first
+     * lines now. The file only grows, so a length taken from one read is a valid offset for the next.
+     * Throws when the file cannot be read. One {@code docker exec} that never returns (seen once, in a
+     * 10-class run on colima: the exec's stream never closed) is abandoned after
+     * {@link #SERVER_LOG_READ_TIMEOUT} and the read is tried again, so a stuck exec cannot hang a suite.
+     */
+    public static String serverLog(PostgreSQLContainer<?> c) {
+        return retryingRead(() -> {
+            org.testcontainers.containers.Container.ExecResult r = c.execInContainer("cat", SERVER_LOG_FILE);
+            if (r.getExitCode() != 0) {
+                throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE + " exited "
+                    + r.getExitCode() + ": " + r.getStderr());
+            }
+            return r.getStdout();
+        }, SERVER_LOG_READ_TIMEOUT, 3);
+    }
+
+    /** Run {@code read} on a daemon thread, giving each of {@code attempts} tries {@code timeout}. */
+    static String retryingRead(java.util.concurrent.Callable<String> read, Duration timeout, int attempts) {
+        for (int attempt = 1; ; attempt++) {
+            java.util.concurrent.Future<String> f = LOG_READERS.submit(read);
+            try {
+                return f.get(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                f.cancel(true);
+                if (attempt >= attempts) {
+                    throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE + " timed out "
+                        + attempts + " times, " + timeout + " each", e);
+                }
+            } catch (InterruptedException e) {
+                f.cancel(true);
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("nexus-sz651: interrupted reading " + SERVER_LOG_FILE, e);
+            } catch (java.util.concurrent.ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE, cause);
+            }
+        }
     }
 
     /** First stack frame outside the container plumbing: the test class that caused a boot. */
@@ -274,7 +356,7 @@ public final class PgContainerHelper {
      *       edges on {@code nexus_svc} and the owner ({@code grantRoleMembership}), which would leak
      *       into every later class on a shared cluster.</li>
      *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
-     *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@code getLogs()}); a shared
+     *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@link #serverLog}); a shared
      *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
      *       is cluster-wide.</li>
      *   <li>{@code TenantPartitionCreationTs1MeasurementIntegrationTest} -- a latency measurement that
@@ -639,7 +721,7 @@ public final class PgContainerHelper {
      * Make {@link #SVC_USERNAME}'s NEW sessions log every statement's plan, statements nested in a
      * function included, to the server log (see {@code db.changelog-test-auto-explain.xml}). Open a fresh
      * pool after this; existing pooled connections keep their old settings. Read the plans back with
-     * {@code container.getLogs()}.
+     * {@link #serverLog}: the server log is a file in the container (nexus-sz651), not Docker's log.
      */
     public static void enableAutoExplainForService(Connection su) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-auto-explain.xml",

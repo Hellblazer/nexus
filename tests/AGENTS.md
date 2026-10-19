@@ -273,6 +273,14 @@ tests' bytes over the test count. `tests/_ddl_counter.py` explains the DDL signa
 `EXECUTE`, which is every tenant mint and drop) and the counting rule. The probe's own install is
 the `boot` bucket and is never counted. The Java twin is `DdlLogParser`/`DdlCounts` (per-fork files
 in `service/target/ddl-counts/`, named by suite and run; per class bytes where the class is known).
+The Java counter's DDL log never goes through Docker's log driver (json-file logs sit under
+`/var/lib/docker` on the host disk: with the log on stderr the main suite wrote 1.63 GB against 0.48 GB
+without the counter). The engine test containers run `logging_collector=on` and write one unrotated
+file, `PgContainerHelper.SERVER_LOG_FILE` (`<PGDATA>/nx-log/postgresql.log`, on the data directory's
+tmpfs), and everything that reads the server log (`DdlCounts`, the `auto_explain` readers) calls
+`PgContainerHelper.serverLog(container)`, which `cat`s that file; `container.getLogs()` is Docker's log and
+holds only the postmaster's first lines. Because the collector also takes the "ready to accept connections"
+line off Docker's log, the container waits on a `pg_isready` TCP probe. `PgServerLogTest` pins all three.
 
 The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so a shard's width or test
 count does not move them: bytes and DDL per test, and the migration's bytes and DDL per worker

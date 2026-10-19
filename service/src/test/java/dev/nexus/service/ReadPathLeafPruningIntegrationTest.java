@@ -323,13 +323,13 @@ class ReadPathLeafPruningIntegrationTest {
      * everything the call ran is.
      */
     <T> Seen observe(Supplier<T> call) throws Exception {
-        int from = pg.getLogs().length();
+        int from = PgContainerHelper.serverLog(pg).length();
         call.get();
         String mark = "rp-sentinel-" + sentinel.incrementAndGet();
         probeScope.withTenant(TA, ctx -> ctx.fetch(DSL.select(DSL.inline(mark))).size());
         String delta = null;
         for (int attempt = 0; attempt < 200 && delta == null; attempt++) {
-            String logs = pg.getLogs();
+            String logs = PgContainerHelper.serverLog(pg);
             int at = logs.indexOf(mark, from);
             if (at >= 0) {
                 delta = logs.substring(from, at);

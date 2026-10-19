@@ -52,9 +52,11 @@ import java.util.concurrent.TimeUnit;
  * <p><b>LOAD-BEARING INVARIANT</b> (nexus-soqa8 substantive-critic critique, T2
  * {@code nexus/nexus-soqa8-critique-2026-08-06} [21531]): failing fast on the FIRST
  * classified attempt is safe only because {@link PostgreSQLContainer#waitUntilContainerStarted()}
- * OVERRIDES {@code JdbcDatabaseContainer}'s connect-loop wait entirely, gating on a
- * {@code LogMessageWaitStrategy} ("database system is ready to accept connections",
- * required twice) instead. Postgres's {@code initdb} finalizes the superuser role and
+ * OVERRIDES {@code JdbcDatabaseContainer}'s connect-loop wait entirely, gating on the wait
+ * strategy {@link PgContainerHelper#newContainer} sets instead (since nexus-sz651 a {@code pg_isready}
+ * probe on TCP, which the init's unix-socket-only temp server never passes; the server log is a file now
+ * and no longer carries the "ready to accept connections" line on Docker's log, where the earlier
+ * {@code LogMessageWaitStrategy} read it). Postgres's {@code initdb} finalizes the superuser role and
  * credentials synchronously, before either ready line — so by the time {@code start()}
  * returns and ANY application code makes its first {@code createConnection} call, the
  * server side of the auth handshake is already fixed; a classified failure at attempt 1

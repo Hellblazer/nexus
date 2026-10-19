@@ -28,7 +28,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Bytes written and DDL statements per test run for the engine suite (nexus-sz651): this fork's
- * containers' logs, counted and written to {@code target/ddl-counts/*.json} when a container
+ * containers' server logs, read from the file in each container ({@link PgContainerHelper#serverLog}),
+ * never from Docker's log (its json-file store is on the host's disk, which the counter must not write to), counted and written to {@code target/ddl-counts/*.json} when a container
  * starts, when it stops and when the JVM exits. {@code scripts/ddl_ratchet.py} reads the files of
  * ONE run of ONE suite.
  *
@@ -222,7 +223,7 @@ final class DdlCounts {
 
     /** Wait briefly for the {@code end} mark to reach the container log (the log stream lags a moment). */
     private static String logsWithEndMark(FailFastPostgreSQLContainer c, boolean marked) {
-        String log = c.getLogs();
+        String log = PgContainerHelper.serverLog(c);
         long deadline = System.nanoTime() + 3_000_000_000L;
         while (marked && !log.contains(DdlLogParser.MARK_PREFIX + DdlLogParser.END_LABEL) && System.nanoTime() < deadline) {
             try {
@@ -231,7 +232,7 @@ final class DdlCounts {
                 Thread.currentThread().interrupt();
                 break;
             }
-            log = c.getLogs();
+            log = PgContainerHelper.serverLog(c);
         }
         return log;
     }
