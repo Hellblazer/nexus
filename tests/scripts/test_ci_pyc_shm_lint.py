@@ -218,6 +218,13 @@ def shared_venv_problems(spec: dict, script_text: str) -> list[str]:
     for needle in ("LAB_WS", "LAB_DISK_DIR", "GITHUB_OUTPUT", "--no-install-project", "--compile-bytecode"):
         if needle not in script_text:
             problems.append(f"scripts/ci_shared_venv.sh lost {needle!r}")
+    # F1 gate: without a tmpfs workspace F5 would drop F3 (the prefix step is skipped whenever F5 is used)
+    # and leave the thin venv and the project's pyc on NVMe
+    if not re.search(r'(?m)^\[ "\$\{LAB_WS:-\}" = tmpfs \] \|\| fallback ', script_text):
+        problems.append("scripts/ci_shared_venv.sh must fall back unless LAB_WS=tmpfs (F5 without F1 loses F3's saving)")
+    # the interpreter of the shared entry must never be started: it may live under another job's RUNNER_TEMP
+    if re.search(r'"\$shared/bin/python"', script_text):
+        problems.append("scripts/ci_shared_venv.sh starts the shared entry's own interpreter (it can be gone)")
     return problems
 
 
@@ -267,6 +274,18 @@ def test_each_f5_wiring_break_is_caught(mutate, expect) -> None:  # noqa: ANN001
 def test_a_script_that_writes_github_env_is_caught() -> None:
     text = _SCRIPT.read_text(encoding="utf-8") + '\necho "UV_PROJECT_ENVIRONMENT=x" >> "$GITHUB_ENV"\n'
     assert any("writes GITHUB_ENV" in p for p in shared_venv_problems(_ci_test_job(), text))
+
+
+def test_a_script_without_the_tmpfs_gate_is_caught() -> None:
+    text = _SCRIPT.read_text(encoding="utf-8")
+    gate = '[ "${LAB_WS:-}" = tmpfs ] || fallback '
+    assert gate in text
+    assert any("unless LAB_WS=tmpfs" in p for p in shared_venv_problems(_ci_test_job(), text.replace(gate, ': ')))
+
+
+def test_a_script_that_starts_the_shared_interpreter_is_caught() -> None:
+    text = _SCRIPT.read_text(encoding="utf-8") + '\n"$shared/bin/python" -I -c pass\n'
+    assert any("shared entry's own interpreter" in p for p in shared_venv_problems(_ci_test_job(), text))
 
 
 def test_a_script_without_the_f1_fallback_is_caught() -> None:

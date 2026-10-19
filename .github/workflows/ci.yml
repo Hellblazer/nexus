@@ -668,7 +668,10 @@ jobs:
         # $RUNNER_WORKSPACE (tmpfs). Removes ~105 MB/shard of NVMe writes, 71 MB of it ext4
         # metadata outside the job's cgroup (replay on nexus-aca0q). Contract and design:
         # the header of scripts/ci_shared_venv.sh. It never fails the job: on any problem it
-        # reports used=false and the steps below run their own uv sync.
+        # reports used=false and the steps below run their own uv sync. It is used only when
+        # LAB_WS=tmpfs (labrun F1): without the tmpfs workspace the thin venv and the project's
+        # pyc would sit on NVMe and F3 (skipped whenever F5 is used) would be lost, so such a job
+        # gets used=false and F3 runs.
         # Its `venv` output is what UV_PROJECT_ENVIRONMENT must be in the steps that run uv: the
         # thin venv when used, else (labrun F1, LAB_WS=tmpfs) a venv on disk under $LAB_DISK_DIR,
         # so a fallback sync does not copy ~1.3 GB into the tmpfs. It is set per step, never

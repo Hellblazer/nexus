@@ -10,11 +10,14 @@ build backend lives in the package directory, so nothing is downloaded: the fixt
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,7 +25,9 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script; the pool is Linux")
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "scripts" / "ci_shared_venv.sh"
+# NX_CI_SHARED_VENV_SCRIPT points the suite at another copy of the script (red/green comparisons
+# against an older revision); unset, it is the repo's.
+SCRIPT = Path(os.environ.get("NX_CI_SHARED_VENV_SCRIPT") or REPO / "scripts" / "ci_shared_venv.sh")
 
 # A PEP 517/660 backend small enough to read in one go: wheels hold the package files, the
 # console scripts from [project.scripts], and one optional .pth line (to prove that a .pth file
@@ -135,6 +140,13 @@ def _uv_env(cache: Path) -> dict[str, str]:
     return env
 
 
+def _clean_env() -> dict[str, str]:
+    """The inherited environment minus everything uv reads (UV_*, VIRTUAL_ENV): a suite run through
+    the thin venv itself (UV_PROJECT_ENVIRONMENT=<thin>, UV_NO_SYNC=1) must not change what any
+    subprocess here sees. Each test then sets only what it means to."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(("UV_", "VIRTUAL_ENV"))}
+
+
 class Job:
     """One CI job's view: a project checkout, a workspace, GITHUB_ENV/OUTPUT files, a lab root."""
 
@@ -144,6 +156,8 @@ class Job:
         self.project = self.dir / "fxproj"
         self.workspace = self.dir / "ws"
         self.workspace.mkdir()
+        self.disk = self.dir / "labdisk"          # labrun F1's LAB_DISK_DIR
+        self.disk.mkdir()
         self.github_env = self.dir / "github_env"
         self.github_output = self.dir / "github_output"
         self.github_env.touch()
@@ -153,7 +167,12 @@ class Job:
                         GITHUB_OUTPUT=str(self.github_output))
         if root is not None:
             self.env["NX_LAB_CACHE_ROOT"] = str(root)
-        self.env["NX_SHARED_VENV_WAIT"] = "0"
+        # F5 is for tmpfs-workspace jobs only (labrun F1)
+        self.env.update(LAB_WS="tmpfs", LAB_DISK_DIR=str(self.disk))
+        # waiting/heartbeat knobs: a quick poll, a 1 s heartbeat, and a dead-after that a loaded test
+        # host cannot reach by accident (planted dead locks are an hour old)
+        self.env.update(NX_SHARED_VENV_WAIT="0", NX_SHARED_VENV_HEARTBEAT="1", NX_SHARED_VENV_DEAD="20",
+                        NX_SHARED_VENV_POLL="1")
 
     def run(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.project, env=env or self.env,
@@ -182,7 +201,7 @@ def lab_root(tmp_path: Path):  # noqa: ANN201
     root.mkdir()
     yield root
     # published entries are read-only by design; pytest's own tmp cleanup cannot delete them
-    subprocess.run(["chmod", "-R", "u+w", str(root)], check=False)
+    subprocess.run(["chmod", "-R", "u+w", str(root)], check=False, env=_clean_env())
 
 
 @pytest.fixture
@@ -190,14 +209,27 @@ def job(tmp_path: Path, project_template: Path, lab_root: Path) -> Job:
     return Job(tmp_path, project_template, "job0", lab_root)
 
 
+def _venvs(root: Path) -> Path:
+    return root / "nexus" / "venvs"
+
+
 def entries(root: Path) -> list[Path]:
-    venvs = root / "nexus" / "venvs"
-    return sorted(p for p in venvs.iterdir() if not p.name.startswith(".tmp.")) if venvs.is_dir() else []
+    """Published entries: every directory whose name is not a script-private dot name."""
+    venvs = _venvs(root)
+    return sorted(p for p in venvs.iterdir() if not p.name.startswith(".")) if venvs.is_dir() else []
+
+
+def _dots(root: Path, prefix: str) -> list[Path]:
+    venvs = _venvs(root)
+    return sorted(p for p in venvs.iterdir() if p.name.startswith(prefix)) if venvs.is_dir() else []
 
 
 def tmp_dirs(root: Path) -> list[Path]:
-    venvs = root / "nexus" / "venvs"
-    return sorted(p for p in venvs.iterdir() if p.name.startswith(".tmp.")) if venvs.is_dir() else []
+    return _dots(root, ".tmp.")
+
+
+def lock_dirs(root: Path) -> list[Path]:
+    return _dots(root, ".lock.")
 
 
 def tree_state(path: Path) -> dict[str, tuple[int, int, int]]:
@@ -304,41 +336,225 @@ def test_uv_run_in_the_thin_venv_does_not_install_anything(job: Job, lab_root: P
     assert stable(after) == stable(before), "uv run changed the thin venv"
 
 
-def test_two_concurrent_builders_end_on_one_published_entry(tmp_path: Path, project_template: Path, lab_root: Path) -> None:
-    jobs = [Job(tmp_path, project_template, f"c{i}", lab_root) for i in range(3)]
-    procs = [subprocess.Popen(["bash", str(SCRIPT)], cwd=j.project, env=j.env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True) for j in jobs]
-    outs = [p.communicate(timeout=300)[0] for p in procs]
-    assert [p.returncode for p in procs] == [0, 0, 0], outs
+def _build_count(outs: list[str]) -> int:
+    return sum(len(re.findall(r"(?m)^building shared venv ", o)) for o in outs)
+
+
+def _spawn(job: "Job", env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+    return subprocess.Popen(["bash", str(SCRIPT)], cwd=job.project, env=env or job.env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+
+
+def _prime(tmp_path: Path, template: Path, lab_root: Path) -> tuple[str, Path]:
+    """Build the fixture's entry once, then move it out of sight: returns (key, the hidden entry)."""
+    probe = Job(tmp_path, template, "probe", lab_root)
+    res = probe.run()
+    assert res.returncode == 0 and probe.used, res.stdout + res.stderr
     [entry] = entries(lab_root)
-    assert tmp_dirs(lab_root) == [], "a loser left partial state behind"
+    hidden = lab_root / "nexus" / "hidden"
+    entry.rename(hidden)
+    return entry.name, hidden
+
+
+def _plant_lock(lab_root: Path, key: str, *, age_s: float, owner: str = "ghost.1.1", tmp: Path | None = None) -> Path:
+    lock = _venvs(lab_root) / f".lock.{key}"
+    lock.mkdir()
+    (lock / "owner").write_text(owner + "\n")
+    hb = lock / "heartbeat"
+    hb.touch()
+    if tmp is not None:
+        (lock / "tmp").write_text(str(tmp) + "\n")
+    then = time.time() - age_s
+    os.utime(hb, (then, then))
+    os.utime(lock, (then, then))
+    return lock
+
+
+class Beat(threading.Thread):
+    """A live lock holder's heartbeat: refreshes ``<lock>/heartbeat`` until stopped."""
+
+    def __init__(self, lock: Path) -> None:
+        super().__init__(daemon=True)
+        self.lock = lock
+        self._stop_evt = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_evt.is_set():
+            try:
+                (self.lock / "heartbeat").touch()
+            except OSError:
+                pass
+            self._stop_evt.wait(0.3)
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        self.join(5)
+
+
+def test_concurrent_jobs_result_in_exactly_one_build(tmp_path: Path, project_template: Path, lab_root: Path) -> None:
+    jobs = [Job(tmp_path, project_template, f"c{i}", lab_root) for i in range(4)]
+    for j in jobs:
+        j.env["NX_SHARED_VENV_WAIT"] = "300"
+    procs = [_spawn(j) for j in jobs]
+    outs = [p.communicate(timeout=300)[0] for p in procs]
+    assert [p.returncode for p in procs] == [0, 0, 0, 0], outs
+    [entry] = entries(lab_root)
+    assert tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == [], "a job left partial state behind"
     for j in jobs:
         assert j.used and j.outputs["key"] == entry.name
-        res = subprocess.run([str(j.thin / "bin" / "fxdep-tool")], capture_output=True, text=True)
+        res = subprocess.run([str(j.thin / "bin" / "fxdep-tool")], capture_output=True, text=True, env=_clean_env())
         assert res.stdout.strip() == "fxdep ok"
-    # exactly one process published
+    # ONE build, not one winner among several builders
+    assert _build_count(outs) == 1, outs
     assert sum("published shared venv" in o for o in outs) == 1, outs
+
+
+def test_waiters_retake_the_lock_when_the_holder_never_publishes(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """A holder that fails without publishing frees the lock: three waiters must not all build."""
+    key, hidden = _prime(tmp_path, project_template, lab_root)
+    lock = _plant_lock(lab_root, key, age_s=0)
+    beat = Beat(lock)
+    beat.start()
+    jobs = [Job(tmp_path, project_template, f"w{i}", lab_root) for i in range(3)]
+    for j in jobs:
+        j.env["NX_SHARED_VENV_WAIT"] = "300"
+    procs = [_spawn(j) for j in jobs]
+    time.sleep(3)
+    assert all(p.poll() is None for p in procs), "a waiter did not wait for the live lock"
+    beat.stop()
+    shutil.rmtree(lock)                      # the holder failed and released
+    outs = [p.communicate(timeout=300)[0] for p in procs]
+    assert [p.returncode for p in procs] == [0, 0, 0], outs
+    assert all(j.used for j in jobs)
+    assert _build_count(outs) == 1, outs
+    [entry] = entries(lab_root)
+    assert entry.name == key
+    assert lock_dirs(lab_root) == [] and tmp_dirs(lab_root) == []
+
+
+def test_a_live_lock_is_waited_for_and_its_entry_is_taken(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    key, hidden = _prime(tmp_path, project_template, lab_root)
+    lock = _plant_lock(lab_root, key, age_s=0)
+    beat = Beat(lock)
+    beat.start()
+    waiter = Job(tmp_path, project_template, "waiter", lab_root)
+    waiter.env["NX_SHARED_VENV_WAIT"] = "60"
+    proc = _spawn(waiter)
+    time.sleep(3)
+    assert proc.poll() is None, "the waiter did not wait for a live holder"
+    hidden.rename(_venvs(lab_root) / key)       # the holder publishes ...
+    beat.stop()
+    shutil.rmtree(lock)                         # ... and releases
+    out = proc.communicate(timeout=120)[0]
+    assert proc.returncode == 0, out
+    assert "waiting up to 60s" in out, out
+    assert _build_count([out]) == 0 and "taking it over" not in out, out
+    assert waiter.used and waiter.outputs["key"] == key
+
+
+def test_a_dead_lock_is_taken_over_without_waiting_out_the_limit(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    key, hidden = _prime(tmp_path, project_template, lab_root)
+    subprocess.run(["chmod", "-R", "u+w", str(hidden)], check=True, env=_clean_env())
+    shutil.rmtree(hidden)                       # nothing published: the dead holder never finished
+    ghost_tmp = _venvs(lab_root) / f".tmp.{key}.ghost.AAAAAA"
+    (ghost_tmp / "venv").mkdir(parents=True)
+    (ghost_tmp / "venv" / "partial").write_text("x")
+    _plant_lock(lab_root, key, age_s=3600, tmp=ghost_tmp)
+    waiter = Job(tmp_path, project_template, "waiter", lab_root)
+    waiter.env["NX_SHARED_VENV_WAIT"] = "300"
+    t0 = time.monotonic()
+    res = waiter.run()
+    elapsed = time.monotonic() - t0
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert elapsed < 120, f"took {elapsed:.0f}s: waited on a dead lock"
+    assert "taking it over" in res.stdout, res.stdout
+    assert not ghost_tmp.exists(), "the dead builder's tmp dir was left behind"
+    assert lock_dirs(lab_root) == [] and _dots(lab_root, ".lock-dead.") == []
+    assert waiter.used and [e.name for e in entries(lab_root)] == [key]
+
+
+def test_a_sigkilled_builder_goes_stale_and_the_next_job_takes_over(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """End to end ghost builder: a `uv sync` that never returns, the script SIGKILLed past every trap."""
+    real_uv = shutil.which("uv")
+    assert real_uv
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    stop = tmp_path / "stop-the-fake-sync"
+    shim = shim_dir / "uv"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = sync ]; then\n'
+        f"  while [ ! -e {stop} ]; do sleep 0.2; done\n"
+        "  exit 1\n"
+        "fi\n"
+        f'exec {real_uv} "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    ghost = Job(tmp_path, project_template, "ghost", lab_root)
+    proc = _spawn(ghost, {**ghost.env, "PATH": f"{shim_dir}:{os.environ['PATH']}"})
+    try:
+        deadline = time.monotonic() + 120
+        locks: list[Path] = []
+        while time.monotonic() < deadline and not (locks := lock_dirs(lab_root)):
+            time.sleep(0.2)
+        assert locks, "the builder never took the lock"
+        [lock] = locks
+        # the heartbeat is refreshed while it builds
+        seen = set()
+        for _ in range(12):
+            seen.add((lock / "heartbeat").stat().st_mtime_ns)
+            time.sleep(0.5)
+        assert len(seen) >= 2, "the build lock's heartbeat was not refreshed"
+        assert tmp_dirs(lab_root), "the builder's tmp dir should exist mid-build"
+        proc.kill()                                  # SIGKILL: no trap runs
+        proc.wait(timeout=30)
+        time.sleep(3.5)                              # the orphan heartbeat loop must notice
+        last = (lock / "heartbeat").stat().st_mtime_ns
+        time.sleep(2.5)
+        assert (lock / "heartbeat").stat().st_mtime_ns == last, "the heartbeat outlived its SIGKILLed builder"
+        assert lock.exists() and tmp_dirs(lab_root), "the ghost's state should still be there"
+    finally:
+        stop.touch()
+        if proc.poll() is None:
+            proc.kill()
+    nxt = Job(tmp_path, project_template, "next", lab_root)
+    nxt.env.update(NX_SHARED_VENV_WAIT="300", NX_SHARED_VENV_DEAD="3")
+    res = nxt.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "taking it over" in res.stdout, res.stdout
+    assert nxt.used
+    assert tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == [], "the ghost's tmp dir or lock survived"
 
 
 def test_a_builder_that_loses_the_publish_race_uses_the_winner_and_cleans_up(
     tmp_path: Path, project_template: Path, lab_root: Path
 ) -> None:
-    """Deterministic: a `uv` shim runs a complete second job to publication before the outer
-    builder's `uv sync` returns, so the outer rename finds its target taken."""
+    """Deterministic: a `uv` shim takes the outer builder's lock away (as a take-over of a merely slow
+    holder would) and runs a complete second job to publication before the outer `uv sync` returns,
+    so the outer rename finds its target taken."""
     real_uv = shutil.which("uv")
     assert real_uv
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     marker = tmp_path / "raced"
     inner = Job(tmp_path, project_template, "inner", lab_root)
-    inner_env = " ".join(f"{k}={v!r}" for k, v in inner.env.items() if k in
-                         ("NX_LAB_CACHE_ROOT", "RUNNER_WORKSPACE", "GITHUB_ENV", "GITHUB_OUTPUT", "UV_CACHE_DIR",
-                          "UV_OFFLINE", "UV_PYTHON", "UV_PYTHON_DOWNLOADS", "NX_SHARED_VENV_WAIT"))
+    inner_env = " ".join(f"{k}={v!r}" for k, v in inner.env.items()
+                         if k.startswith(("NX_", "UV_", "LAB_", "RUNNER_", "GITHUB_")))
     shim = shim_dir / "uv"
     shim.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = sync ] && [ ! -e {marker} ]; then\n'
         f"  : > {marker}\n"
+        f"  rm -rf {_venvs(lab_root)}/.lock.*\n"
         f"  (cd {inner.project} && env {inner_env} bash {SCRIPT}) >&2 || exit 99\n"
         "fi\n"
         f'exec {real_uv} "$@"\n',
@@ -352,37 +568,11 @@ def test_a_builder_that_loses_the_publish_race_uses_the_winner_and_cleans_up(
     assert marker.exists(), "the shim never ran the inner builder"
     assert "lost the publish race" in res.stdout, res.stdout
     [entry] = entries(lab_root)
-    assert tmp_dirs(lab_root) == []
+    assert tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == []
     assert outer.used and inner.used
     assert outer.outputs["key"] == inner.outputs["key"] == entry.name
-    res = subprocess.run([str(outer.thin / "bin" / "fxdep-tool")], capture_output=True, text=True)
+    res = subprocess.run([str(outer.thin / "bin" / "fxdep-tool")], capture_output=True, text=True, env=_clean_env())
     assert res.stdout.strip() == "fxdep ok"
-
-
-def test_a_waiter_takes_the_entry_a_concurrent_builder_publishes(
-    tmp_path: Path, project_template: Path, lab_root: Path
-) -> None:
-    """A fresh .tmp.<key>.* dir means someone is building; with a wait allowed we take their result."""
-    probe = Job(tmp_path, project_template, "probe", lab_root)
-    assert probe.run().returncode == 0
-    [entry] = entries(lab_root)
-    # hide the entry, plant a "builder in progress", then publish it back after a moment
-    hidden = lab_root / "nexus" / "hidden"
-    entry.rename(hidden)
-    busy = lab_root / "nexus" / "venvs" / f".tmp.{entry.name}.otherhost.1"
-    busy.mkdir()
-    waiter = Job(tmp_path, project_template, "waiter", lab_root)
-    waiter.env["NX_SHARED_VENV_WAIT"] = "60"
-    proc = subprocess.Popen(["bash", str(SCRIPT)], cwd=waiter.project, env=waiter.env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
-    import time
-    time.sleep(2)
-    hidden.rename(entry)
-    out = proc.communicate(timeout=120)[0]
-    assert proc.returncode == 0, out
-    assert "waiting up to 60s" in out and "(groups:" not in out, out
-    assert waiter.used
-    busy.rmdir()
 
 
 @pytest.mark.parametrize("variant", ["unset", "missing", "unwritable", "no-workspace", "no-lock", "no-uv"])
@@ -413,7 +603,7 @@ def test_fallbacks_exit_zero_having_done_nothing(job: Job, lab_root: Path, tmp_p
         assert res.returncode == 0, res.stdout + res.stderr
         assert "uv is not on PATH" in res.stdout
         assert job.env_untouched() and not job.used
-        assert job.outputs["venv"] == str(job.project / ".venv")
+        assert job.outputs["venv"] == str(job.disk / "venv")
         return
     try:
         res = job.run(env=env)
@@ -423,9 +613,9 @@ def test_fallbacks_exit_zero_having_done_nothing(job: Job, lab_root: Path, tmp_p
     assert "shared venv not used" in res.stdout, res.stdout
     assert job.env_untouched(), "a fallback must not touch GITHUB_ENV"
     assert not job.used
-    assert job.outputs["venv"] == str(job.project / ".venv")
+    assert job.outputs["venv"] == str(job.disk / "venv")
     assert not job.thin.exists()
-    assert entries(lab_root) == [] and tmp_dirs(lab_root) == []
+    assert entries(lab_root) == [] and tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == []
 
 
 def test_a_failed_build_falls_back_and_leaves_no_partial_state(job: Job, lab_root: Path) -> None:
@@ -438,25 +628,93 @@ def test_a_failed_build_falls_back_and_leaves_no_partial_state(job: Job, lab_roo
     assert not job.thin.exists()
 
 
-def test_key_depends_on_lock_python_and_groups(tmp_path: Path, project_template: Path, lab_root: Path) -> None:
-    a = Job(tmp_path, project_template, "ka", lab_root)
-    assert a.run("--group", "dev").returncode == 0
-    b = Job(tmp_path, project_template, "kb", lab_root)
-    assert b.run().returncode == 0                       # default group is dev: same key
-    assert len(entries(lab_root)) == 1
-    c = Job(tmp_path, project_template, "kc", lab_root)
-    # a different group set is a different entry; fxproj defines no `extra` group, so uv refuses it
-    # and the job falls back, publishing nothing. The key change itself is what is under test: the
-    # build was attempted under a new key (the failure message names no entry), not served the old one.
-    res = c.run("--group", "nonexistent")
-    assert res.returncode == 0
+def _key_of(stdout: str) -> str:
+    """The key a run used or tried to build, from its log (a failed build prints no entry)."""
+    m = re.search(r"building shared venv ([0-9a-f]{32}) |shared venv ([0-9a-f]{32}): reusing", stdout)
+    assert m, stdout
+    return m.group(1) or m.group(2)
+
+
+def _uv_probe_shim(tmp_path: Path) -> Path:
+    """A `uv` that rewrites the interpreter probe's python-version / platform lines from
+    FAKE_PYVER / FAKE_PLATFORM, so a test can vary the two inputs it has no second interpreter for."""
+    real_uv = shutil.which("uv")
+    assert real_uv
+    shim_dir = tmp_path / "probe-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "uv"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = run ] && [[ " $* " == *" --no-project "* ]]; then\n'
+        f'  out="$({real_uv} "$@")" || exit $?\n'
+        '  printf \'%s\\n\' "$out" | awk -v pv="${FAKE_PYVER:-}" -v pl="${FAKE_PLATFORM:-}" '
+        "'NR==2 && pv != \"\" {print pv; next} NR==3 && pl != \"\" {print pl; next} {print}'\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec {real_uv} "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return shim_dir
+
+
+def test_key_depends_on_dependencies_python_platform_and_groups_but_not_the_root_version(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    shim_dir = _uv_probe_shim(tmp_path)
+
+    def run(name: str, *args: str, extra: dict[str, str] | None = None, edit=None) -> tuple[Job, subprocess.CompletedProcess[str]]:  # noqa: ANN001
+        j = Job(tmp_path, project_template, name, lab_root)
+        if edit is not None:
+            lock = j.project / "uv.lock"
+            lock.write_text(edit(lock.read_text()))
+        env = {**j.env, "PATH": f"{shim_dir}:{os.environ['PATH']}", **(extra or {})}
+        res = j.run(*args, env=env)
+        assert res.returncode == 0, res.stdout + res.stderr
+        return j, res
+
+    base, res = run("base", "--group", "dev")
+    base_key = _key_of(res.stdout)
+    assert base.used and [e.name for e in entries(lab_root)] == [base_key]
+
+    # the default group set is dev: same key, served from the entry
+    _, res = run("default-groups")
+    assert _key_of(res.stdout) == base_key and "reusing the published entry" in res.stdout
+
+    # a release bump: only the root project's own version line moves in uv.lock
+    def bump_root(text: str) -> str:
+        out = re.sub(r'(name = "fxproj"\nversion = )"0\.1\.0"', r'\1"0.2.0"', text)
+        assert out != text, "the fixture lock has no fxproj version line to bump"
+        return out
+
+    j, res = run("root-version", edit=bump_root)
+    assert _key_of(res.stdout) == base_key and "reusing the published entry" in res.stdout
+    assert "0.2.0" in (j.project / "uv.lock").read_text()
+
+    # python and platform are inputs of the key
+    _, res = run("pyver", extra={"FAKE_PYVER": "3.99.1"})
+    py_key = _key_of(res.stdout)
+    _, res = run("platform", extra={"FAKE_PLATFORM": "fakeos-1-x86_64"})
+    plat_key = _key_of(res.stdout)
+    assert len({base_key, py_key, plat_key}) == 3, (base_key, py_key, plat_key)
+
+    # a change to a dependency's own lock entry is a new key; the build may or may not succeed offline
+    # (the lock then disagrees with the path source), the key is what is under test
+    def bump_dep(text: str) -> str:
+        out = re.sub(r'(name = "fxdep"\nversion = )"0\.1\.0"', r'\1"0.1.1"', text)
+        assert out != text, "the fixture lock has no fxdep version line to bump"
+        return out
+
+    _, res = run("dep", edit=bump_dep)
+    dep_key = _key_of(res.stdout)
+    assert dep_key not in {base_key, py_key, plat_key}
     assert "reusing the published entry" not in res.stdout
-    assert not c.used
-    d = Job(tmp_path, project_template, "kd", lab_root)
-    (d.project / "uv.lock").write_text((d.project / "uv.lock").read_text() + "\n# changed\n")
-    res = d.run()
-    assert res.returncode == 0 and "reusing the published entry" not in res.stdout
-    assert len(entries(lab_root)) == 2, "a different uv.lock must publish a different key"
+
+    # a different group set is a different key; fxproj defines no `nonexistent` group, so uv refuses
+    # it and the job falls back, publishing nothing under the new key
+    j, res = run("groups", "--group", "nonexistent")
+    assert not j.used and _key_of(res.stdout) not in {base_key, py_key, plat_key, dep_key}
+    assert "reusing the published entry" not in res.stdout
 
 
 def test_a_tmpfs_workspace_job_that_falls_back_syncs_into_the_disk_dir(job: Job, tmp_path: Path) -> None:
@@ -475,6 +733,7 @@ def test_a_tmpfs_workspace_job_that_falls_back_syncs_into_the_disk_dir(job: Job,
 def test_a_tmpfs_job_without_a_usable_disk_dir_warns_and_uses_the_default(job: Job, tmp_path: Path, disk: str) -> None:
     env = {**job.env, "LAB_WS": "tmpfs"}
     env.pop("NX_LAB_CACHE_ROOT")
+    env.pop("LAB_DISK_DIR")
     if disk == "missing":
         env["LAB_DISK_DIR"] = str(tmp_path / "gone")
     res = job.run(env=env)
@@ -494,10 +753,282 @@ def test_a_tmpfs_job_that_uses_the_shared_venv_gets_the_thin_venv_not_the_disk_d
 
 def test_empty_uv_env_values_are_what_the_workflow_must_never_pass() -> None:
     """The reason `venv` is never empty and the workflow passes UV_NO_SYNC=0, not an empty string."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("UV_")}
+    env = _clean_env()
     res = subprocess.run(["uv", "run", "--no-project", "python", "-c", "pass"], env={**env, "UV_NO_SYNC": ""},
                          capture_output=True, text=True)
     assert res.returncode != 0 and "not a boolean" in res.stderr, "uv now accepts an empty UV_NO_SYNC; relax the rule"
     res = subprocess.run(["uv", "run", "--no-project", "python", "-c", "pass"], env={**env, "UV_NO_SYNC": "0"},
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+# ---- the step never fails the shard (nexus-dvk18 fix round) -----------------------------------
+
+
+def _path_shim(tmp_path: Path, name: str, body: str) -> dict[str, str]:
+    """An env whose PATH starts with a one-command shim directory; ``body`` is the shim's sh text."""
+    shim_dir = tmp_path / f"shim-{name}"
+    shim_dir.mkdir(exist_ok=True)
+    shim = shim_dir / name
+    shim.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    shim.chmod(0o755)
+    return {"PATH": f"{shim_dir}:{os.environ['PATH']}"}
+
+
+def _assert_fell_back_cleanly(job: Job, res: subprocess.CompletedProcess[str], lab_root: Path) -> None:
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not job.used and job.outputs == {"used": "false", "venv": str(job.disk / "venv")}, job.outputs
+    assert job.env_untouched()
+    assert not job.thin.exists()
+    assert entries(lab_root) == [] and lock_dirs(lab_root) == []
+
+
+def test_an_unwritable_venvs_dir_after_the_preconditions_pass_still_exits_zero(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    """The preconditions check -w on venvs/; it can still turn unwritable (quota, remount) before the build."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions; the CI pool user is not root")
+    real_uv = shutil.which("uv")
+    assert real_uv
+    venvs = _venvs(lab_root)
+    shim = _path_shim(tmp_path, "uv",
+                      f'if [ "$1" = run ]; then {real_uv} "$@"; rc=$?; chmod 500 {venvs}; exit $rc; fi\n'
+                      f'exec {real_uv} "$@"\n')
+    try:
+        res = job.run(env={**job.env, **shim})
+    finally:
+        venvs.chmod(0o700)
+    _assert_fell_back_cleanly(job, res, lab_root)
+    assert "::warning::" in res.stdout, res.stdout
+
+
+def test_a_failing_mktemp_falls_back_and_never_touches_another_builders_dir(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    other = _venvs(lab_root) / ".tmp.0123456789abcdef0123456789abcdef.otherhost.AAAAAA"
+    (other / "venv").mkdir(parents=True)
+    (other / "venv" / "partial").write_text("another builder's work")
+    shim = _path_shim(tmp_path, "mktemp", "exit 1\n")
+    res = job.run(env={**job.env, **shim})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not job.used and job.outputs["venv"] == str(job.disk / "venv")
+    assert "cannot create a build directory" in res.stdout, res.stdout
+    assert (other / "venv" / "partial").read_text() == "another builder's work"
+    assert lock_dirs(lab_root) == [] and not job.thin.exists()
+
+
+def test_a_failing_chmod_of_the_built_venv_falls_back_and_leaves_nothing(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    real_chmod = shutil.which("chmod")
+    assert real_chmod
+    shim = _path_shim(tmp_path, "chmod", f'[ "$1 $2" = "-R a-w" ] && exit 1\nexec {real_chmod} "$@"\n')
+    res = job.run(env={**job.env, **shim})
+    _assert_fell_back_cleanly(job, res, lab_root)
+    assert tmp_dirs(lab_root) == []
+    assert "cannot make" in res.stdout, res.stdout
+
+
+# ---- F1 gate ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ws", ["unset", "disk"])
+def test_f5_is_used_only_when_the_workspace_is_tmpfs(job: Job, lab_root: Path, ws: str) -> None:
+    env = dict(job.env)
+    env.pop("LAB_WS")
+    env.pop("LAB_DISK_DIR")
+    if ws == "disk":
+        env["LAB_WS"] = "disk"
+    res = job.run(env=env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "LAB_WS is not tmpfs" in res.stdout, res.stdout
+    assert job.outputs == {"used": "false", "venv": str(job.project / ".venv")}
+    assert entries(lab_root) == [] and lock_dirs(lab_root) == [] and not job.thin.exists()
+
+
+# ---- entry health ----------------------------------------------------------------------------
+
+
+def _make_debris_entry(lab_root: Path, key: str) -> Path:
+    debris = _venvs(lab_root) / key
+    (debris / "venv" / "lib").mkdir(parents=True)
+    (debris / "venv" / "lib" / "half").write_text("an interrupted prune")
+    (debris / "venv" / "lib" / "half").chmod(0o444)
+    (debris / "venv" / "lib").chmod(0o555)
+    return debris
+
+
+def test_a_key_dir_without_complete_is_debris_removed_and_rebuilt(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    key, hidden = _prime(tmp_path, project_template, lab_root)
+    subprocess.run(["chmod", "-R", "u+w", str(hidden)], check=True, env=_clean_env())
+    shutil.rmtree(hidden)
+    _make_debris_entry(lab_root, key)
+    job = Job(tmp_path, project_template, "heal", lab_root)
+    res = job.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "removing incomplete entry" in res.stdout, res.stdout
+    assert job.used and job.outputs["key"] == key
+    [entry] = entries(lab_root)
+    assert (entry / "COMPLETE").read_text().strip() == key and not (entry / "venv" / "lib" / "half").exists()
+    assert lock_dirs(lab_root) == [] and tmp_dirs(lab_root) == []
+
+
+def _unhealthy(entry: Path) -> None:
+    """Strip the dependency metadata from an entry's site-packages: a half-pruned tree."""
+    subprocess.run(["chmod", "-R", "u+w", str(entry)], check=True, env=_clean_env())
+    for d in (entry / "venv").rglob("*.dist-info"):
+        shutil.rmtree(d)
+
+
+def test_an_entry_that_fails_validation_is_renamed_aside_once_and_rebuilt(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    first = Job(tmp_path, project_template, "first", lab_root)
+    assert first.run().returncode == 0
+    [entry] = entries(lab_root)
+    key = entry.name
+    _unhealthy(entry)
+    os.utime(entry / "last-used", (0, 0))
+    second = Job(tmp_path, project_template, "second", lab_root)
+    res = second.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "failed validation" in res.stdout and "rebuilding once" in res.stdout, res.stdout
+    [aside] = _dots(lab_root, f".gone.{key}.")
+    # last-used is touched BEFORE validating, so a concurrent prune sees the aside entry as young
+    assert (aside / "last-used").stat().st_mtime > time.time() - 600
+    assert second.used and second.outputs["key"] == key
+    [entry] = entries(lab_root)
+    assert list((entry / "venv").rglob("*.dist-info")), "the rebuilt entry has no dependencies"
+    assert _build_count([res.stdout]) == 1
+
+
+def test_an_entry_that_is_unhealthy_after_its_rebuild_falls_back_instead_of_looping(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    real_uv = shutil.which("uv")
+    assert real_uv
+    # a `uv sync` that builds an empty venv: every build is unhealthy
+    shim = _path_shim(tmp_path, "uv",
+                      'if [ "$1" = sync ]; then\n'
+                      f'  exec {real_uv} venv --quiet --python "$UV_PYTHON" "$UV_PROJECT_ENVIRONMENT"\n'
+                      "fi\n"
+                      f'exec {real_uv} "$@"\n')
+    res = job.run(env={**job.env, **shim})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not job.used and job.outputs["venv"] == str(job.disk / "venv")
+    assert "unhealthy as well" in res.stdout, res.stdout
+    assert _build_count([res.stdout]) == 2, "one rebuild, then the fallback"
+    assert len(_dots(lab_root, ".gone.")) == 1 and lock_dirs(lab_root) == [] and not job.thin.exists()
+
+
+def test_a_shared_entry_whose_base_interpreter_is_gone_is_still_used(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """setup-uv installs the base python under a per-job RUNNER_TEMP; a later job finds the entry's
+    bin/python dangling. The thin venv does not need it."""
+    first = Job(tmp_path, project_template, "first", lab_root)
+    assert first.run().returncode == 0
+    [entry] = entries(lab_root)
+    bindir = entry / "venv" / "bin"
+    bindir.chmod(0o755)
+    gone = []
+    for p in bindir.iterdir():
+        if p.is_symlink() and p.name.startswith("python"):
+            p.unlink()
+            p.symlink_to(tmp_path / "no-such-runner-temp" / "python")
+            gone.append(p.name)
+    bindir.chmod(0o555)
+    assert gone, "the fixture entry has no python symlink to break"
+    second = Job(tmp_path, project_template, "second", lab_root)
+    res = second.run("--smoke-import", "fxproj")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "reusing the published entry" in res.stdout and second.used, res.stdout
+    assert second.outputs["key"] == entry.name
+    out = subprocess.run([str(second.thin / "bin" / "python"), "-c", "import fxdep, fxdev; print(fxdep.__file__)"],
+                         capture_output=True, text=True, env={**second.env, "PYTHONPATH": ""}, check=True).stdout
+    assert out.startswith(str(entry / "venv")), out
+    res = subprocess.run([str(second.thin / "bin" / "fxdep-tool")], capture_output=True, text=True, env=_clean_env())
+    assert res.stdout.strip() == "fxdep ok", res
+
+
+def test_non_script_executables_of_the_shared_bin_are_linked_into_the_thin_bin(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """ruff (dev group) is a native binary: no shebang to rewrite, but `uv run ruff` must find it."""
+    first = Job(tmp_path, project_template, "first", lab_root)
+    assert first.run().returncode == 0
+    [entry] = entries(lab_root)
+    bindir = entry / "venv" / "bin"
+    true_bin = shutil.which("true")
+    assert true_bin
+    bindir.chmod(0o755)
+    native = bindir / "fxnative"
+    shutil.copy(true_bin, native)
+    native.chmod(0o755)
+    bindir.chmod(0o555)
+    second = Job(tmp_path, project_template, "second", lab_root)
+    assert second.run().returncode == 0 and second.used
+    link = second.thin / "bin" / "fxnative"
+    assert link.is_symlink() and link.resolve() == native.resolve()
+    assert subprocess.run([str(link)], check=False, env=_clean_env()).returncode == 0
+    # scripts are still copied and rewritten, not linked
+    assert not (second.thin / "bin" / "fxdep-tool").is_symlink()
+    # every executable of the shared bin (python and activate scripts aside) landed in the thin bin
+    missing = [p.name for p in bindir.iterdir()
+               if p.is_file() and not p.is_symlink() and not p.name.lower().startswith(("activate", "python", "deactivate"))
+               and not (second.thin / "bin" / p.name).exists()]
+    assert missing == []
+
+
+# ---- stale sweep -----------------------------------------------------------------------------
+
+
+def test_the_12h_sweep_removes_old_debris_and_spares_live_state(job: Job, lab_root: Path) -> None:
+    venvs = _venvs(lab_root)
+    venvs.mkdir(parents=True)
+    thirteen_h = time.time() - 13 * 3600
+    old_names = [".tmp.aaaa.host.AAAAAA", ".gone.bbbb.1700000000", ".lock.cccc", ".lock-dead.dddd.me"]
+    live_names = [".tmp.eeee.host.BBBBBB", ".gone.ffff.1700000001", ".lock.gggg", ".lock-dead.hhhh.me"]
+    for n in old_names + live_names:
+        (venvs / n / "venv" / "sub").mkdir(parents=True)
+        (venvs / n / "venv" / "sub" / "f").write_text("x")
+        (venvs / n / "venv" / "sub" / "f").chmod(0o444)
+        (venvs / n / "venv" / "sub").chmod(0o555)      # a published-style read-only tree
+    old_entry = venvs / ("0" * 32)                    # a published entry idle for a month: the sweep is not prune
+    old_entry.mkdir()
+    (old_entry / "COMPLETE").write_text("0" * 32 + "\n")
+    eleven_h = time.time() - 11 * 3600                # just inside the window: a long build's, spared
+    for n in old_names:
+        os.utime(venvs / n, (thirteen_h, thirteen_h))
+    for n in live_names[:2]:
+        os.utime(venvs / n, (eleven_h, eleven_h))
+    os.utime(old_entry, (thirteen_h - 30 * 86400,) * 2)
+    res = job.run()                                   # a cold build runs the sweep
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert job.used
+    for n in old_names:
+        assert not (venvs / n).exists(), f"{n} is older than 12 h and should have been swept"
+    for n in live_names:
+        assert (venvs / n).exists(), f"{n} is young and may be a live builder's: it must be spared"
+    assert old_entry.exists(), "the sweep must never touch a published entry"
+
+
+def test_the_exit_trap_is_a_catch_all_for_a_command_nothing_guards(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """Every step the script knows can fail is routed to warn_fallback; this fails one that is not
+    (`date` in the move-aside name, reached only for an unhealthy entry) and still expects exit 0,
+    used=false, the fallback venv, and nothing left behind."""
+    first = Job(tmp_path, project_template, "first", lab_root)
+    assert first.run().returncode == 0
+    [entry] = entries(lab_root)
+    _unhealthy(entry)
+    second = Job(tmp_path, project_template, "second", lab_root)
+    res = second.run(env={**second.env, **_path_shim(tmp_path, "date", "exit 1\n")})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert second.outputs == {"used": "false", "venv": str(second.disk / "venv")}, second.outputs
+    assert "ended early" in res.stdout, res.stdout
+    assert second.env_untouched() and not second.thin.exists() and lock_dirs(lab_root) == []

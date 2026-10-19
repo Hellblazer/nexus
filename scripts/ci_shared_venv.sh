@@ -10,11 +10,33 @@
 #
 # CONTRACT v1 with labrun (bead nexus-dvk18 comments; labrun owns root creation and prune):
 #   $NX_LAB_CACHE_ROOT/nexus/venvs/<key>/{venv/, COMPLETE, BUILD_PATH, last-used}
-#   key = sha256(uv.lock bytes, python full version, platform tag, dependency groups, recipe)[:32]
+#   key = sha256(uv.lock bytes with the root project's own version blanked, python full version,
+#         platform tag, dependency groups, recipe)[:32]. A release bump (the root package's
+#         `version = ...` line in uv.lock, once a day or so) therefore keeps the key.
 # A published entry is immutable (venv/ is chmod a-w) except `last-used`, which every reuse
-# touches; labrun's weekly prune evicts on it (it must `chmod -R u+w` before `rm -rf`).
-# Builders work in `.tmp.<key>.<host>.<pid>/` and rename it to `<key>/` in one step. BUILD_PATH
+# touches BEFORE it validates the entry; labrun's weekly prune evicts on it (it must
+# `chmod -R u+w` before `rm -rf`, and should rename the entry aside first).
+# Builders work in `.tmp.<key>.<host>.<random>/` and rename it to `<key>/` in one step. BUILD_PATH
 # (our addition, inside the entry) records where venv/ was built, for the script rewrite below.
+# Other names under venvs/ that belong to this script (labrun's prune must leave them alone while
+# they are young): `.lock.<key>/` (the build lock, see below), `.lock-dead.*` (a taken-over lock),
+# `.gone.<key>.<ts>/` (an entry that failed validation, renamed aside once). Anything of the
+# `.tmp.*`, `.gone.*`, `.lock.*` and `.lock-dead.*` families older than 12 h is debris; the next
+# cold build removes it.
+#
+# BUILD LOCK: one builder per key. `mkdir .lock.<key>` is the atomic claim; the holder writes
+# `owner` and refreshes `heartbeat` every NX_SHARED_VENV_HEARTBEAT seconds (15) from a background
+# loop that exits when the script does, SIGKILL included. Waiters judge liveness by the heartbeat
+# age: older than NX_SHARED_VENV_DEAD seconds (60) the holder is dead, and a waiter renames the lock
+# aside, removes it and the dead builder's tmp dir, and takes the lock itself. After every wait the
+# waiter re-checks the entry and re-takes the lock, so a failed builder costs one rebuild, never N.
+# The wait is bounded by NX_SHARED_VENV_WAIT (600 s); past it the job falls back to its own sync.
+#
+# THE SHARED INTERPRETER IS NEVER STARTED. The entry's bin/python is a symlink to the builder's
+# base interpreter, which setup-uv installs under a per-job RUNNER_TEMP (UV_PYTHON_INSTALL_DIR is
+# always set), so for a later job it may be gone. The thin venv is made with THIS job's interpreter;
+# the shared site-packages path is the thin venv's own purelib/platlib path (relative to its prefix)
+# applied to the entry's venv/, and the entry is validated through the thin venv's python.
 #
 # PER JOB: a thin venv at $RUNNER_WORKSPACE/nx-thin-venv (labrun mounts tmpfs at $work/_work;
 # RUNNER_TEMP and TMPDIR stay on disk). It has the same interpreter as the shared entry, a .pth
@@ -40,13 +62,20 @@
 # With used=true the steps also set UV_NO_SYNC=1: the shared packages are invisible to uv's
 # site-packages scan, so a bare `uv run` would otherwise install every dependency into the thin venv.
 #
-# FALLBACK: NX_LAB_CACHE_ROOT unset, missing or unwritable, no RUNNER_WORKSPACE, no uv, or any
-# failure before the outputs: exit 0 with used=false and the fallback venv, so the workflow's
-# normal `uv sync` path runs. A failure is announced with ::warning:: and never fails the job.
+# F1 GATE: F5 is used only when LAB_WS=tmpfs (labrun F1). Its saving is the thin venv and the
+# project's bytecode landing in RAM; on a class without a tmpfs workspace the thin venv would sit
+# on NVMe and the workflow's F3 bytecode prefix (skipped whenever F5 is used) would be lost, so the
+# job gets used=false and F3 runs.
+#
+# FALLBACK: LAB_WS is not tmpfs, NX_LAB_CACHE_ROOT unset, missing or unwritable, no
+# RUNNER_WORKSPACE, no uv, or ANY failure before the outputs (an EXIT trap writes used=false and
+# the fallback venv when nothing was written yet): exit 0, so the workflow's normal `uv sync` path
+# runs. A failure is announced with ::warning:: and never fails the job (a signal keeps its status).
 #
 # USAGE: scripts/ci_shared_venv.sh [--group NAME]... [--smoke-import MODULE]   (run at the repo root)
 #   --group defaults to `dev`. Test seams: NX_THIN_VENV_PARENT (instead of RUNNER_WORKSPACE),
-#   NX_SHARED_VENV_WAIT (seconds to wait for another builder of the same key; default 600).
+#   NX_SHARED_VENV_WAIT (seconds to wait for another builder of the same key; default 600),
+#   NX_SHARED_VENV_HEARTBEAT (15), NX_SHARED_VENV_DEAD (60), NX_SHARED_VENV_POLL (5).
 set -euo pipefail
 
 # Everything that decides the shared venv's content, besides uv.lock and the interpreter.
@@ -64,10 +93,22 @@ while [ "$#" -gt 0 ]; do
 done
 [ "${#groups[@]}" -gt 0 ] || groups=(dev)
 
+
 repo="$(pwd -P)"
 tmp=""        # this process's build directory, until it is published or removed
 thin=""       # this job's thin venv, removed again on any failure before the outputs
+keep_thin=0   # set once the outputs say used=true
 published=0
+emitted=0     # set by emit_output: the EXIT trap writes the fallback outputs while it is still 0
+held=0        # this process holds the build lock
+hb_pid=""     # the lock's heartbeat loop
+lockdir=""
+me=""
+entry=""
+hb_interval="${NX_SHARED_VENV_HEARTBEAT:-15}"
+dead_after="${NX_SHARED_VENV_DEAD:-60}"
+poll="${NX_SHARED_VENV_POLL:-5}"
+wait_limit="${NX_SHARED_VENV_WAIT:-600}"
 
 # Where a job that does NOT use the shared venv syncs its own (see OUTPUTS above).
 fallback_venv() {
@@ -82,6 +123,7 @@ fallback_venv() {
 
 # emit_output used venv [key]
 emit_output() {
+  emitted=1
   local lines=("used=$1" "venv=$2")
   [ -z "${3:-}" ] || lines+=("key=$3")
   if [ -n "${GITHUB_OUTPUT:-}" ]; then printf '%s\n' "${lines[@]}" >> "$GITHUB_OUTPUT" || true
@@ -95,27 +137,53 @@ remove_tree() {
   rm -rf -- "$1" 2>/dev/null || echo "::notice::ci_shared_venv: could not remove $1"
 }
 
+release_lock() {
+  [ "$held" -eq 1 ] || return 0
+  held=0
+  if [ -n "$hb_pid" ]; then
+    kill "$hb_pid" 2>/dev/null || true
+    wait "$hb_pid" 2>/dev/null || true
+    hb_pid=""
+  fi
+  # Only our own lock: after a take-over the path may belong to someone else.
+  if [ "$(cat "$lockdir/owner" 2>/dev/null || true)" = "$me" ]; then remove_tree "$lockdir"; fi
+}
+
+# The catch-all. Every path out of the script runs this: it drops the lock, the half-built tmp dir
+# and (unless the outputs said used=true) the thin venv, and if no output was written yet it writes
+# used=false plus the fallback venv, so no failure in the lines above can fail the shard. A job
+# cancelled by a signal (status >= 128) keeps its status.
 cleanup() {
+  local rc=$?
+  trap - EXIT
+  release_lock
   if [ "$published" -eq 0 ]; then remove_tree "$tmp"; fi
-  [ -z "$thin" ] || remove_tree "$thin"
+  if [ "$keep_thin" -ne 1 ]; then remove_tree "$thin"; fi
+  if [ "$emitted" -eq 0 ]; then
+    echo "::warning::shared venv step ended early (status $rc); the job runs its own uv sync"
+    emit_output false "$(fallback_venv)"
+    if [ "$rc" -lt 128 ]; then exit 0; fi
+  fi
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT HUP
 
-# Fall back: leave nothing behind, change no env, let the workflow run its own uv sync.
+# Fall back: leave nothing behind (the EXIT trap removes it), change no env, let the workflow run
+# its own uv sync.
 fallback() {
   echo "::notice::shared venv not used: $1; the job runs its own uv sync"
-  [ -z "$thin" ] || { remove_tree "$thin"; thin=""; }
   emit_output false "$(fallback_venv)"
   exit 0
 }
 warn_fallback() {
   echo "::warning::shared venv failed ($1); the job runs its own uv sync"
-  [ -z "$thin" ] || { remove_tree "$thin"; thin=""; }
   emit_output false "$(fallback_venv)"
   exit 0
 }
 
 # ---- preconditions -------------------------------------------------------------------------
+[ "${LAB_WS:-}" = tmpfs ] || fallback "LAB_WS is not tmpfs (F5 needs the tmpfs workspace of labrun F1; F3 bytecode applies instead)"
 root="${NX_LAB_CACHE_ROOT:-}"
 [ -n "$root" ] || fallback "NX_LAB_CACHE_ROOT is unset"
 [ -d "$root" ] || fallback "NX_LAB_CACHE_ROOT=$root is not a directory"
@@ -141,12 +209,23 @@ print(sysconfig.get_platform())
 { read -r py && read -r pyver && read -r platform; } <<<"$probe" || warn_fallback "unreadable interpreter probe"
 [ -x "$py" ] || warn_fallback "interpreter $py is not executable"
 
+# The root project's own `version = ...` line is blanked first: the build uses
+# --no-install-project, so a release bump does not change the entry, and it must not change the key.
 key="$("$py" -I - "$repo/uv.lock" "$pyver" "$platform" "$RECIPE" "${groups[@]}" <<'PY'
-import hashlib, sys
+import hashlib, re, sys
+
 lock, pyver, platform, recipe, *groups = sys.argv[1:]
+with open(lock, encoding="utf-8") as f:
+    text = f.read()
+root_source = re.compile(r'(?m)^source = \{ (?:editable|virtual) = "\." \}$')
+blocks = re.split(r"(?m)^(?=\[\[package\]\]$)", text)
+blocks = [
+    re.sub(r'(?m)^version = ".*"$', 'version = ""', b, count=1)
+    if b.startswith("[[package]]") and root_source.search(b) else b
+    for b in blocks
+]
 h = hashlib.sha256()
-with open(lock, "rb") as f:
-    h.update(f.read())
+h.update("".join(blocks).encode("utf-8"))
 for part in (pyver, platform, recipe, ",".join(sorted(groups))):
     h.update(b"\0" + part.encode())
 print(h.hexdigest()[:32])
@@ -154,36 +233,100 @@ PY
 )" || warn_fallback "cannot compute the key"
 [ "${#key}" -eq 32 ] || warn_fallback "bad key '$key'"
 entry="$venvs/$key"
+shared="$entry/venv"
+lockdir="$venvs/.lock.$key"
+host="$(hostname -s 2>/dev/null || echo host)"; host="${host//[^A-Za-z0-9-]/_}"
+me="$host.$$.$RANDOM$RANDOM"
 
 entry_complete() {
   [ -f "$entry/COMPLETE" ] && [ "$(cat "$entry/COMPLETE" 2>/dev/null)" = "$key" ]
 }
 
-# ---- build (only on a miss) ----------------------------------------------------------------
-build_entry() {
-  local host
-  host="$(hostname -s 2>/dev/null || echo host)"; host="${host//[^A-Za-z0-9-]/_}"
-  tmp="$venvs/.tmp.$key.$host.$$"
+# ---- build lock ----------------------------------------------------------------------------
+# Seconds since the lock was last refreshed (its heartbeat file, or the directory itself in the
+# moment between mkdir and the first heartbeat); status 3 when it is gone.
+lock_age() {
+  "$py" -I -c '
+import os, sys, time
+newest = None
+for p in (os.path.join(sys.argv[1], "heartbeat"), sys.argv[1]):
+    try:
+        m = os.stat(p).st_mtime
+    except OSError:
+        continue
+    newest = m if newest is None else max(newest, m)
+if newest is None:
+    sys.exit(3)
+print(max(0, int(time.time() - newest)))
+' "$1"
+}
 
-  # Another job building this very key: wait for its entry instead of repeating a multi-GB write
-  # (six shards of a python version start together after a lock change). Bounded, then build anyway.
-  local waited=0 limit="${NX_SHARED_VENV_WAIT:-600}" other
-  while [ "$waited" -lt "$limit" ]; do
-    other="$(find "$venvs" -maxdepth 1 -type d -name ".tmp.$key.*" -mmin -30 ! -name "${tmp##*/}" 2>/dev/null || true)"
-    [ -n "$other" ] || break
-    entry_complete && return 0
-    [ "$waited" -gt 0 ] || echo "another job is building shared venv $key; waiting up to ${limit}s"
-    sleep 5; waited=$((waited + 5))
-  done
-  entry_complete && return 0
+hold_lock() {
+  held=1
+  touch -- "$lockdir/heartbeat" 2>/dev/null || warn_fallback "cannot write into the build lock $lockdir"
+  printf '%s\n' "$me" > "$lockdir/owner" 2>/dev/null || warn_fallback "cannot write into the build lock $lockdir"
+  # The heartbeat loop dies with this script (kill -0 on its pid), so a SIGKILLed builder's lock
+  # goes stale instead of being refreshed for ever. One-second sleeps: a killed loop leaves at most
+  # one behind.
+  (
+    n=0
+    while kill -0 "$$" 2>/dev/null; do
+      sleep 1
+      n=$((n + 1))
+      if [ "$n" -ge "$hb_interval" ]; then
+        n=0
+        [ "$(cat "$lockdir/owner" 2>/dev/null || true)" = "$me" ] || exit 0
+        touch -- "$lockdir/heartbeat" 2>/dev/null || exit 0
+      fi
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  hb_pid=$!
+}
 
-  # Stale builders' leftovers (crashed past their trap): this user's, untouched for 12 h.
-  find "$venvs" -maxdepth 1 -type d -name '.tmp.*' -user "$(id -u)" -mmin +720 2>/dev/null |
+# The holder stopped refreshing the lock: move it aside (atomic; one waiter wins), remove it and the
+# dead builder's tmp dir. The caller loops and races for the fresh lock with everyone else.
+take_over_lock() {
+  local gone="$venvs/.lock-dead.$key.$me" owner age deadtmp
+  owner="$(cat "$lockdir/owner" 2>/dev/null || echo unknown)"
+  mv -- "$lockdir" "$gone" 2>/dev/null || return 0      # someone else was first
+  age="$(lock_age "$gone" 2>/dev/null || echo 0)"
+  if [ "$age" -le "$dead_after" ]; then
+    # We caught a lock that was refreshed or re-taken between our look and the move: put it back.
+    [ -e "$lockdir" ] || mv -- "$gone" "$lockdir" 2>/dev/null || true
+    return 0
+  fi
+  echo "::notice::build lock for $key is dead (no heartbeat for ${age}s, owner $owner); taking it over"
+  deadtmp="$(cat "$gone/tmp" 2>/dev/null || true)"
+  case "$deadtmp" in "$venvs"/.tmp."$key".*) remove_tree "$deadtmp" ;; esac
+  remove_tree "$gone"
+}
+
+# 0: we hold the lock. 1: someone else does (or just took it over); the caller waits and re-checks.
+acquire_lock() {
+  if mkdir -- "$lockdir" 2>/dev/null; then hold_lock; return 0; fi
+  [ -d "$lockdir" ] || warn_fallback "cannot create the build lock $lockdir"
+  local age
+  age="$(lock_age "$lockdir" 2>/dev/null)" || return 1  # released since the mkdir
+  if [ "$age" -gt "$dead_after" ]; then take_over_lock; fi
+  return 1
+}
+
+# Debris of crashed builders and failed entries, this user's, untouched for 12 h.
+sweep_stale() {
+  find "$venvs" -maxdepth 1 -type d \
+    \( -name '.tmp.*' -o -name '.gone.*' -o -name '.lock.*' -o -name '.lock-dead.*' \) \
+    -user "$(id -u)" -mmin +720 2>/dev/null |
     while read -r stale; do remove_tree "$stale"; done || true
+}
 
+# ---- build (only on a miss) ----------------------------------------------------------------
+do_build() {
+  local t g gargs=()
+  t="$(mktemp -d "$venvs/.tmp.$key.$host.XXXXXX" 2>/dev/null)" || warn_fallback "cannot create a build directory under $venvs"
+  tmp="$t"
+  chmod 755 "$tmp" 2>/dev/null || true
+  printf '%s\n' "$tmp" > "$lockdir/tmp" 2>/dev/null || true   # a taker-over removes a dead builder's tmp
   echo "building shared venv $key in $tmp (groups: ${groups[*]}, python $pyver, $platform)"
-  mkdir -- "$tmp"
-  local gargs=() g
   for g in "${groups[@]}"; do gargs+=(--group "$g"); done
   # Copy, never hardlink: chmod a-w below would otherwise strip write permission from the uv
   # wheel cache's own inodes.
@@ -191,12 +334,13 @@ build_entry() {
     uv sync --frozen --no-install-project --compile-bytecode "${gargs[@]}" --python "$py" \
     || warn_fallback "uv sync failed"
   "$tmp/venv/bin/python" -I -c 'pass' || warn_fallback "the built venv does not start"
-  printf '%s\n' "$tmp/venv" > "$tmp/BUILD_PATH"
-  chmod -R a-w "$tmp/venv"
-  printf '%s\n' "$key" > "$tmp/COMPLETE"          # last: a dir with COMPLETE is a whole entry
+  printf '%s\n' "$tmp/venv" > "$tmp/BUILD_PATH" || warn_fallback "cannot write $tmp/BUILD_PATH"
+  chmod -R a-w "$tmp/venv" || warn_fallback "cannot make $tmp/venv read-only"
+  printf '%s\n' "$key" > "$tmp/COMPLETE" || warn_fallback "cannot write $tmp/COMPLETE"   # last: COMPLETE marks a whole entry
 
-  # Atomic publish. os.rename onto a non-empty directory fails, so a lost race cannot nest our
-  # tmp inside the winner's entry (BSD `mv` would).
+  # Atomic publish. os.rename onto a non-empty directory fails, so a lost race (only possible
+  # after a take-over of a lock that was merely slow) cannot nest our tmp inside the winner's entry
+  # (BSD `mv` would).
   if "$py" -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp" "$entry" 2>/dev/null; then
     published=1; tmp=""
     echo "published shared venv $key"
@@ -208,38 +352,84 @@ build_entry() {
   fi
 }
 
-if entry_complete; then
-  echo "shared venv $key: reusing the published entry"
-else
-  build_entry
-fi
-entry_complete || warn_fallback "entry $entry is not complete"
-shared="$entry/venv"
-"$shared/bin/python" -I -c 'pass' 2>/dev/null \
-  || warn_fallback "the published entry's interpreter does not start (was its base python removed?)"
-touch -- "$entry/last-used" 2>/dev/null || echo "::notice::could not touch $entry/last-used"
+build_entry() {
+  local start=$SECONDS announced=0
+  while :; do
+    entry_complete && return 0
+    if acquire_lock; then
+      # Published between our check and the lock?
+      if entry_complete; then release_lock; return 0; fi
+      if [ -e "$entry" ]; then   # a <key> dir without COMPLETE (interrupted prune): debris
+        echo "::notice::removing incomplete entry $entry"
+        remove_tree "$entry"
+      fi
+      sweep_stale
+      do_build
+      release_lock
+      return 0
+    fi
+    if [ $((SECONDS - start)) -ge "$wait_limit" ]; then
+      fallback "another job holds the build lock for $key and ${wait_limit}s passed"
+    fi
+    if [ "$announced" -eq 0 ]; then
+      echo "another job is building shared venv $key; waiting up to ${wait_limit}s"
+      announced=1
+    fi
+    sleep "$poll"
+  done
+}
 
-# ---- thin venv -----------------------------------------------------------------------------
+# ---- thin venv (made first: its layout tells where the shared site-packages are) -------------
 thin="$thin_parent/nx-thin-venv"
 remove_tree "$thin"
 uv venv --no-project --quiet --python "$py" "$thin" || warn_fallback "uv venv failed"
+layout="$("$thin/bin/python" -I -c '
+import os, sys, sysconfig
+p = sysconfig.get_paths()
+for k in ("purelib", "platlib"):
+    print(os.path.relpath(p[k], sys.prefix))
+')" || warn_fallback "cannot read the thin venv layout"
+{ read -r purelib_rel && read -r platlib_rel; } <<<"$layout" || warn_fallback "unreadable thin venv layout"
 
-"$thin/bin/python" -I - "$thin" "$shared" "$entry/BUILD_PATH" <<'PY' || warn_fallback "cannot layer the shared site-packages"
-import os, shutil, subprocess, sys, sysconfig
+# Entry health that does not depend on the project or on any interpreter: the recorded build path
+# and a populated site-packages. (The entry's own bin/python is NOT started; see the header.)
+entry_healthy() {
+  [ -s "$entry/BUILD_PATH" ] && [ -d "$shared/$purelib_rel" ] && compgen -G "$shared/$purelib_rel/*.dist-info" >/dev/null
+}
 
-thin, shared, build_path_file = sys.argv[1:]
+attempt=1
+while :; do
+  if entry_complete; then
+    echo "shared venv $key: reusing the published entry"
+  else
+    build_entry
+  fi
+  entry_complete || warn_fallback "entry $entry is not complete"
+  # Before validating, so a concurrent prune sees a young entry.
+  touch -- "$entry/last-used" 2>/dev/null || echo "::notice::could not touch $entry/last-used"
+  if entry_healthy; then break; fi
+  [ "$attempt" -eq 1 ] || warn_fallback "the rebuilt entry $entry is unhealthy as well"
+  attempt=2
+  aside="$venvs/.gone.$key.$(date +%s)"
+  echo "::warning::shared venv entry $key failed validation; moving it to ${aside##*/} and rebuilding once"
+  "$py" -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$entry" "$aside" 2>/dev/null \
+    || echo "::notice::could not move $entry aside (another job did?)"
+  touch -- "$aside" 2>/dev/null || true       # young, so the 12 h sweep leaves it to its readers
+done
+
+"$thin/bin/python" -I - "$thin" "$shared" "$entry/BUILD_PATH" "$purelib_rel" "$platlib_rel" <<'PY' || warn_fallback "cannot layer the shared site-packages"
+import os, stat, sys, sysconfig
+
+thin, shared, build_path_file, *rels = sys.argv[1:]
 thin_sp = sysconfig.get_paths()["purelib"]
-out = subprocess.run(
-    [os.path.join(shared, "bin", "python"), "-I", "-c",
-     "import sysconfig; p = sysconfig.get_paths(); print(p['purelib']); print(p['platlib'])"],
-    check=True, capture_output=True, text=True,
-).stdout.split()
-shared_sps = list(dict.fromkeys(out))
+shared_sps = [p for p in dict.fromkeys(os.path.join(shared, r) for r in rels) if os.path.isdir(p)]
+assert shared_sps, rels
 with open(os.path.join(thin_sp, "nx_shared_venv.pth"), "w") as f:
     f.write("import site; " + "; ".join(f"site.addsitedir({p!r})" for p in shared_sps) + "\n")
 
 # The shared venv was built under a tmp path and renamed, so its console scripts carry a dead
-# shebang. Give the thin venv its own copies pointing at the thin interpreter.
+# shebang. Give the thin venv its own copies pointing at the thin interpreter. Executables that are
+# not scripts (ruff is a native binary) have nothing to rewrite: link them.
 with open(build_path_file) as f:
     build_venv = f.read().strip()
 src_bin = os.path.join(shared, "bin")
@@ -250,16 +440,18 @@ for name in sorted(os.listdir(src_bin)):
         continue
     if name.lower().startswith(("activate", "python", "deactivate")):
         continue
-    with open(src, "rb") as f:
-        data = f.read()
-    if not data.startswith(b"#!"):
-        continue
     dst = os.path.join(dst_bin, name)
-    if os.path.exists(dst):
+    if os.path.lexists(dst):
         continue
-    with open(dst, "wb") as f:
-        f.write(data.replace(build_venv.encode(), thin.encode()))
-    os.chmod(dst, 0o755)
+    with open(src, "rb") as f:
+        is_script = f.read(2) == b"#!"
+        data = f.read() if is_script else b""
+    if is_script:
+        with open(dst, "wb") as f:
+            f.write((b"#!" + data).replace(build_venv.encode(), thin.encode()))
+        os.chmod(dst, 0o755)
+    elif os.stat(src).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        os.symlink(src, dst)
 PY
 
 # The project, editable, with no dependency resolution: the shared tree already satisfies them.
@@ -274,5 +466,5 @@ fi
 
 # ---- outputs (the point of no return: nothing below can fail the fallback) ----------------
 emit_output true "$thin" "$key"
-trap - EXIT          # the thin venv stays; the tmp dir is already published or removed
+keep_thin=1          # the thin venv stays; the tmp dir is already published or removed
 echo "thin venv $thin layered on shared venv $key"
