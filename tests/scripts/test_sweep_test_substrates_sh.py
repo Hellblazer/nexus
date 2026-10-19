@@ -27,8 +27,20 @@ from pathlib import Path
 
 import pytest
 
+from tests import _tmp_root as tr
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "sweep-test-substrates.sh"
+
+
+@pytest.fixture(autouse=True)
+def _outer_run_marks_a_real_tempdir(tmp_path, monkeypatch) -> None:
+    """What a lab-run grant gives every test process: NX_TEST_TMP_ORIG naming a tempdir
+    that is not the one a test builds. Set here so a script run that inherits it looks
+    in the wrong place on a laptop too (nexus-g2f0p)."""
+    decoy = tmp_path / "outer-real-tempdir"
+    decoy.mkdir()
+    monkeypatch.setenv(tr.ORIG_ENV, str(decoy))
 
 
 def _dead_pid() -> int:
@@ -48,12 +60,12 @@ def _run_script(
     # NX_TEST_PG_SHM_DIR keeps the sweep off the box's real /dev/shm root
     # (nexus-me3gm), where a concurrent session's live clusters would otherwise
     # show up in this test's counts.
-    # Not the outer run's NX_TEST_TMP_ORIG: inside a lab-run grant it names the box's
-    # real tempdir and wins over TMPDIR, so the sweep would look there instead of at
-    # fake_tmpdir (nexus-kyujr). An operator's shell never has it.
+    # child_env_with_tmpdir drops the outer run's NX_TEST_TMP_ORIG: inside a lab-run grant
+    # it names the box's real tempdir and wins over TMPDIR, so the sweep would look there
+    # instead of at fake_tmpdir (nexus-kyujr). _outer_run_marks_a_real_tempdir below sets
+    # it for every test here, so dropping it matters outside a grant too (nexus-g2f0p).
     env = {
-        **{k: v for k, v in os.environ.items() if k != "NX_TEST_TMP_ORIG"},
-        "TMPDIR": str(fake_tmpdir),
+        **tr.child_env_with_tmpdir(os.environ, fake_tmpdir),
         "NX_TEST_PG_ROOT": pg_root,
         # The sweep also reads the tmpfs root regardless of NX_TEST_PG_ROOT;
         # point that at a directory that does not exist.

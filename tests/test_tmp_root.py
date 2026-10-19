@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -474,6 +475,45 @@ class TestPlugin:
         plug.pytest_unconfigure(_config(factory_basetemp=None))
         assert list(orig.iterdir()) == []
 
+    def test_reports_are_harvested_when_the_run_root_has_a_symlinked_component(self, tmp_path) -> None:
+        """pytest's tmp_path factory hands back a RESOLVED basetemp; the run dir is the
+        path the plugin built from the root it was given. With a symlink in that path
+        (macOS ``/tmp``, a tmpfs reached through a link) comparing the two unresolved
+        dropped every report without a word (nexus-g2f0p)."""
+        real = tmp_path / "real-shm"
+        real.mkdir()
+        link = tmp_path / "shm"
+        link.symlink_to(real, target_is_directory=True)
+        plug, _env = _plugin(tmp_path)  # NX_TEST_TMP_SHM_DIR is tmp_path/"shm", the link
+        plug.pytest_configure(_config())
+        assert plug.run is not None and plug.run.is_relative_to(link) and not plug.run.is_relative_to(real)
+        user = plug.run / "p" / "pytest-of-u"
+        (user / "pytest-0").mkdir(parents=True)
+        (user / "pytest-0" / "nx-ddl-report.json").write_text('{"a": 1}')
+        orig = tmp_path / "orig"
+        orig.mkdir()
+        plug._orig_tempdir = orig
+        resolved_bt = (user / "pytest-0").resolve()
+        assert resolved_bt != user / "pytest-0"  # the fixture is a real symlinked layout
+        plug.pytest_unconfigure(_config(factory_basetemp=resolved_bt))
+        home = orig / f"nexus-test-reports-{sub._current_uid()}" / plug.run.name
+        assert [f.name for f in home.iterdir()] == ["nx-ddl-report.json"]
+
+    def test_the_harvest_reads_the_basetemp_pytest_itself_hands_out(
+        self, tmp_path, request, tmp_path_factory,
+    ) -> None:
+        """Every other harvest test stands a SimpleNamespace in for the config. The plugin
+        reads ``config._tmp_path_factory._basetemp``, a private attribute: this one runs the
+        real hook against the real config so a pytest that renames it fails here, not by
+        silently harvesting nothing (nexus-g2f0p)."""
+        real_bt = tmp_path_factory.getbasetemp()
+        assert request.config._tmp_path_factory._basetemp == real_bt
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        plug.pytest_unconfigure(request.config)
+        assert plug._basetemp == real_bt
+        assert real_bt.is_dir()  # the plugin only read it; the run dir it removed is its own
+
     def test_only_the_newest_three_report_runs_are_kept(self, tmp_path) -> None:
         orig = tmp_path / "orig"
         homes = []
@@ -572,6 +612,48 @@ _FAILED = [
     "tests/test_y.py::test_other_failure",
     "tests/test_z.py::test_serial_failure",
 ]
+
+
+class TestChildEnvWithTmpdir:
+    """A child that gets its own TMPDIR must not inherit the outer run's
+    NX_TEST_TMP_ORIG: inside a lab-run grant it names the box's real tempdir and wins over
+    TMPDIR (nexus-kyujr). One helper, not a comprehension pasted at every site."""
+
+    def test_it_sets_tmpdir_and_drops_the_original_tempdir_marker(self, tmp_path) -> None:
+        base = {"PATH": "/bin", "TMPDIR": "/run/t", tr.ORIG_ENV: "/real/tmp", "KEEP": "1"}
+        env = tr.child_env_with_tmpdir(base, tmp_path)
+        assert env == {"PATH": "/bin", "TMPDIR": str(tmp_path), "KEEP": "1"}
+        assert base[tr.ORIG_ENV] == "/real/tmp"  # the caller's mapping is not touched
+
+    def test_it_adds_nothing_when_there_was_no_marker(self, tmp_path) -> None:
+        assert tr.child_env_with_tmpdir({"A": "b"}, tmp_path) == {"A": "b", "TMPDIR": str(tmp_path)}
+
+    def test_no_test_spells_the_marker_filter_itself(self) -> None:
+        """The helper is the one place the filter lives; a pasted copy is how the rule
+        went stale in three files (nexus-g2f0p). Non-vacuity: the scan must have read
+        the test tree."""
+        pat = re.compile(r"!=\s*[\"']" + re.escape(tr.ORIG_ENV) + r"[\"']")
+        tests_dir = REPO_ROOT / "tests"
+        scanned, offenders = 0, []
+        for f in tests_dir.rglob("*.py"):
+            if f.name == "_tmp_root.py":
+                continue
+            scanned += 1
+            if pat.search(f.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(str(f.relative_to(REPO_ROOT)))
+        assert scanned > 100, f"scanned only {scanned} files; the lint saw nothing"
+        assert not offenders, f"use tests._tmp_root.child_env_with_tmpdir, not a copy of its filter: {offenders}"
+
+    def test_a_child_that_re_resolves_its_tempdir_sees_the_given_one_even_with_a_marker_outside(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv(tr.ORIG_ENV, str(tmp_path / "decoy"))
+        out = subprocess.run(
+            [sys.executable, "-c", "import tests._engine_substrate as s; print(s._original_tempdir())"],
+            env={**tr.child_env_with_tmpdir(os.environ, tmp_path), "PYTHONPATH": str(REPO_ROOT)},
+            capture_output=True, text=True, check=True, cwd=REPO_ROOT,
+        ).stdout.strip()
+        assert out == str(tmp_path)
 
 
 class TestFailureEvidence:

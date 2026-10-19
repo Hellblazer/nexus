@@ -83,7 +83,14 @@ and any cluster whose root decided on DISK (`pg_cluster_parent()` is None means 
 tempdir, never the run's tmpfs). The start-of-run daemon drain also scans the original
 tempdir's `pytest-of-<user>`, so what a disk-mode or killed run stranded there is still reaped.
 What does NOT follow: the ONNX native cache (`NX_ORT_NATIVE_DIR`, pinned to the real home on
-purpose). The summary ends with one line,
+purpose).
+A test that hands a child process its own `TMPDIR` builds the child's env with
+`tests._tmp_root.child_env_with_tmpdir(os.environ, <dir>)`, never a hand-written
+`{k: v ... if k != "NX_TEST_TMP_ORIG"}`: inside a grant the outer run's `NX_TEST_TMP_ORIG`
+wins over `TMPDIR`, and the filter is the part everyone forgets because a laptop never has the
+variable (a lint in `tests/test_tmp_root.py` rejects the pasted copy). A test that pins
+"follows `NX_TEST_TMP_ORIG`" or "drops it" sets it to a tmp_path decoy with `monkeypatch`
+instead of relying on the ambient environment, so reverting the fix fails off a grant too. The summary ends with one line,
 `nexus test tmp: basetemp and TMPDIR on tmpfs <run>, N MiB at the end of the run, removed at
 exit; nx-* reports are copied to <dir>`, or `... on disk <tempdir> because: <reason>`
 (not inside a grant, not Linux, noexec, low room, ...; a Linux grant that could not use

@@ -558,6 +558,23 @@ def copy_failure_evidence(
     return notes
 
 
+# --- child processes ---------------------------------------------------------------
+
+
+def child_env_with_tmpdir(base_env: Mapping[str, str], tmpdir: Path | str) -> dict[str, str]:
+    """A copy of *base_env* for a child that gets its own ``TMPDIR``.
+
+    Drops :data:`ORIG_ENV` (``NX_TEST_TMP_ORIG``): inside a lab-run grant the outer run
+    sets it to the box's real tempdir and ``tests._engine_substrate._original_tempdir``
+    prefers it to ``TMPDIR``, so a child that inherits it ignores the ``TMPDIR`` it was
+    given (nexus-kyujr). An operator's shell never has the variable, which is why a
+    test that forgets this passes on a laptop and fails in a grant. Use this wherever a
+    test hands a subprocess a moved ``TMPDIR``; do not spell the filter again."""
+    env = {k: v for k, v in base_env.items() if k != ORIG_ENV}
+    env["TMPDIR"] = str(tmpdir)
+    return env
+
+
 # --- the pytest plugin -----------------------------------------------------------
 
 
@@ -698,7 +715,10 @@ class TmpRootPlugin:
         if self.run is None or bt is None or not bt.is_dir() or bt.is_symlink():
             return []
         try:
-            bt.relative_to(self.run / "p")
+            # pytest's factory hands back a RESOLVED basetemp; the run dir is the path
+            # the plugin built, which can hold a symlink (nexus-g2f0p). Compare like
+            # with like, or a link silently drops every report.
+            bt.resolve().relative_to((self.run / "p").resolve())
         except ValueError:
             return []  # a --basetemp outside the run dir is not removed, so not harvested
         return [f for f in bt.glob("nx-*") if f.is_file()]

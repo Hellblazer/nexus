@@ -179,14 +179,19 @@ class TestPgDataTempdirRouting:
         path = Path(cp.pg_data_tempdir("nexus_foo_pg_"))
         assert path.parent == root and path.name.startswith("nexus_foo_pg_")
 
-    def test_no_chosen_root_means_the_tempdir(self, monkeypatch) -> None:
+    def test_no_chosen_root_means_the_tempdir(self, tmp_path, monkeypatch) -> None:
         # The ORIGINAL tempdir: inside a lab-run grant TMPDIR is the run's tmpfs and a
         # cluster whose root decided on disk must not land in RAM (nexus-kyujr). Outside a
-        # grant the two are the same directory.
+        # grant the two are the same directory, so name a different one explicitly: a
+        # revert to tempfile.gettempdir() then fails on a laptop too (nexus-g2f0p).
+        orig = tmp_path / "orig"
+        orig.mkdir()
+        monkeypatch.setenv(sub._TMP_ORIG_ENV, str(orig))
+        assert Path(tempfile.gettempdir()) != orig
         monkeypatch.setattr(sub, "pg_cluster_parent", lambda: None)
         path = Path(cp.pg_data_tempdir("nexus_foo_pg_"))
         try:
-            assert path.parent == sub._original_tempdir()
+            assert path.parent == orig
         finally:
             path.rmdir()
 
