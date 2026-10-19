@@ -399,7 +399,7 @@ client singleton and lease cache) are cleared on every lease.
   token, or needs a tenant whose partition leaves have never held data. The tenant it gets is the old per-test mint.
 - A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A
   writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so
-  it shows up only as an unexplained failure in that test. That residual belongs to the A/B failure-set diff
+  it shows up, if at all, only as an unexplained failure in that test (a stray row the test never reads changes nothing visible). That residual belongs to the A/B failure-set diff
   (nexus-7zloy); fix the writer, never the census.
 - The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W leaf_dead_tup=D
   leaf_live_tup=L leaf_bytes=B`; the last three are `pg_stat` dead/live tuples and bytes over the pool tenants' chunk
