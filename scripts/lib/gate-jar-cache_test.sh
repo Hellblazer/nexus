@@ -148,7 +148,8 @@ cp "$repo/service/src/main/A.java" "$WORKDIR/wt/service/src/main/A.java"
 kw="$(gate_jar_cache_key "$WORKDIR/wt" 0.1.0 "")"
 [[ "$kw" == "$k3" ]] && ok "worktree with identical service/ content computes the same key" || bad "worktree key differs: $kw vs $k3"
 gate_jar_cache_lookup "$WORKDIR/wt" "$k3" >/dev/null && ok "worktree hits the primary's cache entry" || bad "worktree missed the shared cache"
-echo 'not a zip' > "$hit/jar"
+# (a torn write is a NEW inode; the entry's jar is a read-only link shared with built.jar)
+rm -f "$hit/jar"; echo 'not a zip' > "$hit/jar"
 gate_jar_cache_lookup "$repo" "$k3" >/dev/null 2>&1 && bad "corrupt entry served" || ok "corrupt entry is a miss"
 [[ ! -d "$hit" ]] && ok "corrupt entry removed" || bad "corrupt entry still present"
 
@@ -227,6 +228,90 @@ NX_JOOQ_CACHE="$jr2" JOOQ_CACHE_KEEP=1 gate_jar_cache_prune_jooq "$repo"
 in_place="$(grep -E "/main-h[0-9]+$" "$rm_log" || true)"
 if [[ -n "$in_place" ]]; then bad "jooq prune deleted an entry in place: $in_place"; else ok "jooq prune never rm'd an entry under its own name"; fi
 unset -f rm
+
+echo "Test 7 (nexus-k6zxp): a store links the jar into the entry, read-only, and a second store writes nothing"
+r7="$WORKDIR/root7"; export NX_GATE_JAR_CACHE="$r7"
+j7="$WORKDIR/j7.jar"; _fake_jar "$j7"
+gate_jar_cache_store "$repo" k7 "$j7" "ref-7" && ok "store rc 0" || bad "store failed"
+[[ "$j7" -ef "$r7/k7/jar" ]] && ok "the entry's jar is the built jar's own inode (no 131 MB copy)" || bad "entry jar is a copy, not a link"
+[[ ! -w "$r7/k7/jar" || "$(id -u)" == 0 ]] && ok "the entry's jar is read-only" || bad "entry jar is writable"
+[[ "$(cat "$(dirname "$j7")/.gate-jar-key")" == k7 ]] && ok "the key is recorded beside the built jar" || bad "no key marker beside the built jar"
+ino7="$(ls -i "$r7/k7/jar" | awk '{print $1}')"
+j7b="$WORKDIR/j7b.jar"; python3 - "$j7b" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+    zf.writestr("payload", "a different jar")
+PY
+gate_jar_cache_store "$repo" k7 "$j7b" "ref-7b" && ok "second store rc 0" || bad "second store failed"
+[[ "$(ls -i "$r7/k7/jar" | awk '{print $1}')" == "$ino7" && "$(cat "$r7/k7/build_ref")" == "ref-7" ]] \
+    && ok "a store of a key whose entry verifies writes nothing" || bad "second store replaced a verified entry"
+[[ -z "$(ls -A "$r7" | grep -E '^\.staging|\.old')" ]] && ok "and leaves no staging directory" || bad "leftovers: $(ls -A "$r7")"
+printf '' > "$r7/k7/build_ref"
+gate_jar_cache_store "$repo" k7 "$j7b" "ref-7c"
+[[ "$(cat "$r7/k7/build_ref")" == "ref-7c" ]] && ok "an entry with an EMPTY build_ref does not verify and is repaired by the next store" || bad "empty-build_ref entry survived a store"
+NX_GATE_JAR_CACHE="$r7" gate_jar_cache_lookup "$repo" k7 >/dev/null && ok "the repaired entry hits" || bad "repaired entry misses"
+
+echo "Test 7b: store falls back to a copy when linking fails (a different filesystem)"
+ln() { return 1; }
+j7c="$WORKDIR/j7c.jar"; _fake_jar "$j7c"
+gate_jar_cache_store "$repo" k7c "$j7c" "ref-7c2" && ok "store rc 0 with ln failing" || bad "store failed without ln"
+unset -f ln
+[[ -f "$r7/k7c/jar" && ! "$j7c" -ef "$r7/k7c/jar" ]] && cmp -s "$j7c" "$r7/k7c/jar" && ok "the entry holds an independent byte-equal copy" || bad "no copy after a failed link"
+[[ -w "$j7c" ]] && ok "the built jar stays writable when it is not shared" || bad "built jar lost its write bit"
+
+echo "Test 8 (nexus-k6zxp): install links, skips when the target already holds the key's jar, and verifies"
+t8="$WORKDIR/t8"; mkdir -p "$t8"; dest="$t8/nexus.jar"; entry="$r7/k7"
+gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == link ]] && ok "first install links" || bad "first install: placed=$_GATE_JAR_PLACED"
+[[ "$dest" -ef "$entry/jar" ]] && ok "target is the entry's inode" || bad "target is not the entry's inode"
+[[ "$(cat "$t8/.gate-jar-key")" == k7 ]] && ok "key recorded beside the target" || bad "no key marker"
+ino8="$(ls -i "$dest" | awk '{print $1}')"
+touch -t 202001010000 "$dest"; ref8="$WORKDIR/ref8"; touch -t 202101010000 "$ref8"
+gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == kept ]] && ok "second install keeps the target (no copy, no link)" || bad "second install: placed=$_GATE_JAR_PLACED"
+[[ "$(ls -i "$dest" | awk '{print $1}')" == "$ino8" ]] && ok "the target's inode is unchanged" || bad "target was replaced"
+[[ "$dest" -nt "$ref8" ]] && ok "a kept target's mtime is refreshed (the freshness gate compares it to the sources)" || bad "kept target is stale"
+# a marker is never trusted alone: a different jar under the same marker is replaced
+rm -f "$dest"; cp "$j7" "$dest"; chmod u+w "$dest"
+! cmp -s "$dest" "$entry/jar" || bad "test setup: the stand-in jar equals the entry"
+gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == link ]] && cmp -s "$dest" "$entry/jar" && ok "a jar that differs from the entry is replaced despite the marker" || bad "marker alone was trusted (placed=$_GATE_JAR_PLACED)"
+# a byte-equal independent copy under the marker is kept, not rewritten
+rm -f "$dest"; cp "$entry/jar" "$dest"; chmod u+w "$dest"
+gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == kept ]] && ok "a byte-equal copy is kept" || bad "byte-equal copy was rewritten (placed=$_GATE_JAR_PLACED)"
+# a marker for another key is not a match
+printf 'other\n' > "$t8/.gate-jar-key"
+gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" != kept ]] && ok "a marker naming another key is not a match" || bad "foreign marker matched"
+# ln failing: copy fallback is independent and writable
+rm -f "$dest" "$t8/.gate-jar-key"
+ln() { return 1; }
+gate_jar_cache_install k7 "$entry" "$dest"; unset -f ln
+[[ "$_GATE_JAR_PLACED" == copy || "$_GATE_JAR_PLACED" == clone ]] && [[ ! "$dest" -ef "$entry/jar" ]] && cmp -s "$dest" "$entry/jar" && ok "ln failing: an independent byte-equal $_GATE_JAR_PLACED" || bad "no fallback copy (placed=$_GATE_JAR_PLACED)"
+[[ -w "$dest" ]] && ok "the fallback copy is writable" || bad "fallback copy is read-only"
+
+echo "Test 9 (nexus-k6zxp): unshare breaks the link before an in-place rewrite, so the entry's bytes survive"
+rm -f "$dest" "$t8/.gate-jar-key"; gate_jar_cache_install k7 "$entry" "$dest"
+sum9="$(shasum -a 256 "$entry/jar" | cut -c1-64)"
+gate_jar_cache_unshare "$dest"
+[[ ! -e "$dest" && ! -e "$t8/.gate-jar-key" ]] && ok "a shared target jar (and its marker) is unlinked" || bad "shared target survived unshare"
+[[ -f "$entry/jar" && "$(shasum -a 256 "$entry/jar" | cut -c1-64)" == "$sum9" ]] && ok "the entry is untouched by the unshare" || bad "entry changed"
+cp "$entry/jar" "$dest"; chmod u+w "$dest"
+gate_jar_cache_unshare "$dest"
+[[ -f "$dest" ]] && ok "a private writable jar is left alone" || bad "private jar was removed"
+# the in-place writer the jar plugin is: it truncates the existing inode
+rm -f "$dest"; gate_jar_cache_install k7 "$entry" "$dest"
+chmod u+w "$dest"        # the worst case: a writer that does not respect the mode
+: > "$dest"
+[[ ! -s "$entry/jar" ]] && ok "control: WITHOUT unshare an in-place rewrite does reach the entry through the link" || bad "control failed: the link was not shared"
+rm -rf "$r7/k7"
+gate_jar_cache_store "$repo" k7 "$j7b" "ref-9"
+rm -f "$dest" "$t8/.gate-jar-key"; gate_jar_cache_install k7 "$r7/k7" "$dest"
+sum9="$(shasum -a 256 "$r7/k7/jar" | cut -c1-64)"
+gate_jar_cache_unshare "$dest"; chmod u+w "$dest" 2>/dev/null; python3 - "$dest" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+PY
+[[ "$(shasum -a 256 "$r7/k7/jar" | cut -c1-64)" == "$sum9" ]] && ok "WITH unshare the same in-place rewrite leaves the entry's bytes alone" || bad "entry was altered through the link"
+unset NX_GATE_JAR_CACHE
 
 echo
 echo "gate-jar-cache_test.sh: $PASS passed, $FAIL failed"

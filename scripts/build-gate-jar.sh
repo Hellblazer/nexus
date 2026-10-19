@@ -69,8 +69,9 @@
 # untracked non-ignored files, via a throwaway index; src/test, docs and
 # scripts under service/ are NOT part of it, nexus-fkhd3) -- plus the
 # stamped release_version; a hit
-# copies the cached jar into service/target and prints the build_ref that
-# jar carries, a miss builds and stores. "Never rebuild deterministic
+# links the cached jar into service/target (copying only where linking fails,
+# and not at all when service/target already holds it; nexus-k6zxp) and prints
+# the build_ref that jar carries, a miss builds and stores. "Never rebuild deterministic
 # artifacts" (.claude/rules/ci-and-runners.md § CI Cost Discipline), applied to the dev box. A hit
 # therefore REUSES a build_ref: the per-run-unique guarantee below holds per
 # distinct build-input content, not per invocation — a caller that captured the
@@ -145,21 +146,25 @@ if ! cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"; then
     echo "gate jar cache disabled for this run: the key could not be computed" >&2
     cache_key=""
 fi
+target_jar="$repo_root/service/target/$jar_name"
 if [[ -n "$cache_key" ]] && cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
     mkdir -p "$repo_root/service/target"
-    # Copy, then re-verify the COPY: an entry pruned or damaged between the
+    # Install, then re-verify the RESULT: an entry pruned or damaged between the
     # lookup's check and this read must become a rebuild, not a bad jar.
-    if cp "$cached/jar" "$repo_root/service/target/$jar_name" 2>/dev/null \
-        && hit_ref="$(cat "$cached/build_ref" 2>/dev/null)" && [[ -n "$hit_ref" ]] \
-        && _gate_jar_cache_jar_ok "$repo_root/service/target/$jar_name"; then
+    # gate_jar_cache_install writes nothing when service/target already holds
+    # this key's jar, links the entry's jar in otherwise, and copies only where
+    # linking fails (nexus-k6zxp).
+    if hit_ref="$(cat "$cached/build_ref" 2>/dev/null)" && [[ -n "$hit_ref" ]] \
+        && gate_jar_cache_install "$cache_key" "$cached" "$target_jar" \
+        && _gate_jar_cache_jar_ok "$target_jar"; then
         echo "stamped release_version=$ver"
         echo "stamped build_ref=$hit_ref"
-        echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached)"
-        echo "built $repo_root/service/target/$jar_name"
+        echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached; jar $_GATE_JAR_PLACED)"
+        echo "built $target_jar"
         build_lease_release service
         exit 0
     fi
-    rm -f "$repo_root/service/target/$jar_name"
+    rm -f "$target_jar" "$repo_root/service/target/.gate-jar-key"
     echo "gate jar cache entry $cached could not be used whole; building" >&2
 fi
 echo "gate jar cache MISS key=${cache_key:-none} — building"
@@ -187,6 +192,12 @@ echo "stamped build_ref=$build_ref"
 # vs this script's byte-snapshot trap), and the gate must hold the expected
 # value in its own process for the smoke-leg compare. Intentional
 # duplication of the <sha>+<epoch>-<pid> shape — keep the two in step.
+
+# The jar plugin rewrites an existing service/target jar IN PLACE, and a cache
+# hit or store leaves that path hard-linked to the cache entry: unlink a shared
+# (or read-only) jar first so the build writes a new inode and the entry's bytes
+# stay what they were (nexus-k6zxp).
+gate_jar_cache_unshare "$repo_root/service/target/$jar_name"
 
 cd "$repo_root/service"
 ./mvnw -q package -DskipTests "$@"

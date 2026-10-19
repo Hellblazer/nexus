@@ -39,6 +39,9 @@ cat > "$repo/service/mvnw" <<'STUB'
 echo run >> "$MVNW_COUNT"
 [[ "${MVNW_FAIL:-0}" == 1 ]] && exit 1
 mkdir -p target
+# Worst case for a hard-linked jar: a writer that rewrites the existing inode in
+# place and does not respect its read-only mode (root, or a plugin that chmods).
+chmod u+w target/nexus-service-1.0-SNAPSHOT.jar 2>/dev/null || true
 python3 - "$PWD/target/nexus-service-1.0-SNAPSHOT.jar" "$PWD/src/main/resources/META-INF/nexus/release.properties" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as zf:
@@ -137,6 +140,55 @@ out5b="$(cd "$repo" && NX_GATE_JAR_CACHE="$WORKDIR/cache-is-a-file/cache" script
 [[ -f "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" ]] && ok "the jar is in service/target" || bad "no jar after the unwritable-cache build"
 [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored" || bad "props dirty after the unwritable-cache build"
 rm -f "$repo/service/src/main/C.java"
+
+# shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
+source "$HERE/lib/gate-jar-cache.sh"
+tjar="$repo/service/target/nexus-service-1.0-SNAPSHOT.jar"
+sha_of() { shasum -a 256 "$1" | cut -c1-64; }
+ino_of() { ls -i "$1" | awk '{print $1}'; }
+
+echo "Test 7 (nexus-k6zxp): a HIT links the cached jar (no copy); a repeat HIT touches nothing; a later MISS leaves the entry's bytes alone"
+key7="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry7="$WORKDIR/cache/$key7"
+[[ -d "$entry7" ]] && ok "the entry for the current inputs exists" || bad "no entry at $entry7"
+cnt7="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out7a="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7a=$?
+[[ $rc7a -eq 0 && "$out7a" == *"HIT"* && "$out7a" == *"jar link"* ]] && ok "HIT installs by link" || bad "no linked HIT (rc $rc7a): $out7a"
+[[ "$tjar" -ef "$entry7/jar" ]] && ok "service/target's jar IS the entry's inode: a HIT wrote no jar bytes" || bad "target jar is a copy"
+[[ "$(cat "$repo/service/target/.gate-jar-key")" == "$key7" ]] && ok "the key is recorded beside the jar" || bad "no key marker"
+[[ -z "$(ls -A "$repo/service/target" | grep -F .gate-jar.tmp)" ]] && ok "no temp jar left in service/target" || bad "temp jar left behind"
+sum7="$(sha_of "$entry7/jar")"; ref7="$(cat "$entry7/build_ref")"; ino7="$(ino_of "$tjar")"
+touch -t 202101010000 "$tjar"; stale7="$WORKDIR/stale7"; touch -t 202101010000 "$stale7"
+out7b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7b=$?
+[[ $rc7b -eq 0 && "$out7b" == *"HIT"* && "$out7b" == *"jar kept"* ]] && ok "a repeat HIT keeps the jar already in service/target" || bad "repeat HIT did not keep it (rc $rc7b): $out7b"
+[[ "$(ino_of "$tjar")" == "$ino7" && "$(sha_of "$entry7/jar")" == "$sum7" ]] && ok "same inode, same bytes after the repeat HIT" || bad "repeat HIT replaced or altered the jar"
+[[ "$tjar" -nt "$stale7" ]] && ok "the kept jar's mtime is refreshed (freshness gate)" || bad "kept jar is stale"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt7" ]] && ok "mvnw not invoked by either HIT" || bad "mvnw ran on a HIT"
+echo 'class D {}' > "$repo/service/src/main/D.java"
+out7c="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7c=$?
+[[ $rc7c -eq 0 && "$out7c" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt7 + 1))" ]] && ok "a changed input MISSES and builds while service/target holds a linked jar" || bad "MISS after a linked HIT failed (rc $rc7c): $out7c"
+[[ "$(sha_of "$entry7/jar")" == "$sum7" && "$(cat "$entry7/build_ref")" == "$ref7" ]] && ok "the MISS build did not alter the old cache entry's bytes" || bad "the old entry was rewritten through the shared inode"
+_gate_jar_cache_entry_complete "$entry7" && ok "the old entry still verifies" || bad "old entry no longer verifies"
+[[ ! "$tjar" -ef "$entry7/jar" ]] && ok "the rebuilt jar is a new inode" || bad "rebuilt jar still shares the old entry's inode"
+rm -f "$repo/service/src/main/D.java"
+out7d="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7d=$?
+[[ $rc7d -eq 0 && "$out7d" == *"HIT"* && "$out7d" == *"stamped build_ref=$ref7"* && "$tjar" -ef "$entry7/jar" ]] && ok "reverting the input HITs the old entry again, byte-for-byte" || bad "old entry not served after the revert (rc $rc7d): $out7d"
+
+echo "Test 8 (nexus-k6zxp): a HIT whose entry has an EMPTY build_ref is a MISS (mvnw runs) and the entry is repaired"
+echo 'class E {}' > "$repo/service/src/main/E.java"
+(cd "$repo" && scripts/build-gate-jar.sh >/dev/null 2>&1)
+key8="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry8="$WORKDIR/cache/$key8"
+[[ -f "$entry8/jar" && -s "$entry8/build_ref" ]] && ok "seeded: a complete entry for this key" || bad "no seeded entry"
+printf '' > "$entry8/build_ref"
+rm -f "$repo/service/target/.gate-jar-key"
+cnt8="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out8="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc8=$?
+[[ $rc8 -eq 0 && "$out8" == *"MISS"* && "$out8" != *"HIT key"* ]] && ok "an entry with no build_ref is not served" || bad "served an entry with an empty build_ref (rc $rc8): $out8"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt8 + 1))" ]] && ok "mvnw was invoked" || bad "mvnw not invoked for the empty-build_ref entry"
+[[ "$out8" == *"could not be used whole"* ]] && ok "the refusal is disclosed" || bad "no 'could not be used whole': $out8"
+[[ -s "$entry8/build_ref" ]] && ok "the entry was repaired with a build_ref" || bad "entry still has an empty build_ref"
+out8b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"
+[[ "$out8b" == *"HIT"* ]] && ok "the repaired entry HITS" || bad "repaired entry does not hit: $out8b"
+rm -f "$repo/service/src/main/E.java"
 
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &

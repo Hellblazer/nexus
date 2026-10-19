@@ -63,6 +63,7 @@ _sigint_delivery_works() {
 repo="$WORKDIR/repo"
 mkdir -p "$repo/scripts/lib" "$repo/service/target" "$repo/service/.build-lease"
 cp "$HERE/lib/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
+cp "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/gate-jar-cache.sh"
 cp "$HERE/mvnw-leased.sh" "$repo/scripts/mvnw-leased.sh"
 chmod +x "$repo/scripts/mvnw-leased.sh"
 
@@ -111,6 +112,24 @@ if [[ ! -d "$leasedir" ]]; then
 else
     bad "lease still held after mvnw-leased.sh exited"
 fi
+
+# ── Test 1a (nexus-k6zxp): a gate-jar cache hit leaves service/target's jar
+# hard-linked to the cache entry, and the jar plugin rewrites an existing jar in
+# place. A goal that reaches `package` must unlink a shared jar first; one that
+# stops short of it must not touch the link.
+echo "Test 1a: a package goal unlinks a cache-shared jar; a test goal leaves the link"
+entry1a="$WORKDIR/cache-entry-jar"; tjar1a="$repo/service/target/nexus-service-1.0-SNAPSHOT.jar"
+echo "cached jar bytes" > "$entry1a"; chmod a-w "$entry1a"
+ln "$entry1a" "$tjar1a"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q test >/dev/null 2>&1
+[[ "$tjar1a" -ef "$entry1a" ]] && ok "a test goal leaves the shared jar linked" || bad "a test goal unlinked the jar"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q package -DskipTests >/dev/null 2>&1
+[[ ! -e "$tjar1a" ]] && ok "a package goal unlinked the shared jar before mvnw ran" || bad "shared jar still in service/target after a package goal"
+[[ "$(cat "$entry1a")" == "cached jar bytes" ]] && ok "the cache entry is intact" || bad "cache entry changed"
+echo "private jar" > "$tjar1a"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q package >/dev/null 2>&1
+[[ -f "$tjar1a" ]] && ok "an unshared writable jar is left for the build to replace" || bad "private jar removed"
+rm -f "$tjar1a" "$entry1a"
 
 # ── Test 1b: --lab-run <class> takes the lease FIRST, then runs mvnw under
 # lab-run (nexus-iqmih). Waiting for the lease inside a lab grant held pool

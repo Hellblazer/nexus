@@ -165,6 +165,22 @@ _forward_signal() {
 trap '_forward_signal INT' INT
 trap '_forward_signal TERM' TERM
 
+# A gate-jar cache hit or store leaves service/target's jar hard-linked to the
+# cache entry (nexus-k6zxp), and maven-jar-plugin rewrites an existing jar IN
+# PLACE: through the link that would corrupt the entry (and on the read-only
+# entry it fails the build). A goal that reaches the package phase therefore
+# unlinks a shared jar first; a goal that stops short of it (compile, test)
+# leaves the jar, and the cache link, alone.
+for _arg in "$@"; do
+    case "$_arg" in
+        package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test)
+            # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
+            source "$repo_root/scripts/lib/gate-jar-cache.sh"
+            gate_jar_cache_unshare "$repo_root/service/target/nexus-service-1.0-SNAPSHOT.jar"
+            break ;;
+    esac
+done
+
 cd "$repo_root/service"
 if [[ -n "$lab_class" ]]; then
     rm -f "$build_pidfile"

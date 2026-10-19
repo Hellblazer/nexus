@@ -4495,6 +4495,7 @@ nexus-k66o5
 nexus-k6bs
 nexus-k6gzp
 nexus-k6q9
+nexus-k6zxp
 nexus-k7te2
 nexus-k7te2.1
 nexus-k80c0

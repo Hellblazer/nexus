@@ -91,7 +91,12 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   does not wait for the build lease: it refuses at once with exit 75 when another
   build holds it (nexus-dfg0q), so the grant never sits idle on a lease. On 75,
   wait and rerun; never fall back to running unwrapped. A `HIT` (the `gate jar
-  cache HIT` line) copies the cached jar and runs no Maven; a `MISS` runs Maven
+  cache HIT` line) runs no Maven and writes no jar bytes: it hard-links the
+  cached jar into `service/target` (`jar link`), or leaves the jar already there
+  (`jar kept`), and copies the 131 MB only where linking fails (`jar copy`,
+  e.g. another filesystem; nexus-k6zxp). The shared inode is why the cache entry
+  is read-only and why `build-gate-jar.sh` and `mvnw-leased.sh` unlink a shared
+  `service/target` jar before a `package`-reaching build; a `MISS` runs Maven
   under the grant. `build-gate-jar.sh --lab-run <class>` (nexus-t6t9f) will take
   the lease before the grant instead.
 - **The suite goes through `scripts/watched_pytest.py`**, never a bare pytest, and
