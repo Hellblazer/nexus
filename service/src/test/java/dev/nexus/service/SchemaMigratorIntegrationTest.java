@@ -2082,9 +2082,10 @@ class SchemaMigratorIntegrationTest {
                 }
                 assertThat(runAlwaysIds)
                     .as("nexus-jl08t: the runAlways set parsed straight from the "
-                        + "changelog XML at HEAD (12: 5 grants-nexus-svc-*, 5 "
-                        + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8)")
-                    .hasSize(12);
+                        + "changelog XML at HEAD (13: 5 grants-nexus-svc-*, 5 "
+                        + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8, "
+                        + "vectors-034-2)")
+                    .hasSize(13);
                 assertThat(runAlwaysIds)
                     .as("nexus-jl08t: production's two duplicated identities must "
                         + "both be in the parsed runAlways set, or this seeding "

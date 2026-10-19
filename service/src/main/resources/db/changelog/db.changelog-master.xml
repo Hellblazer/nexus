@@ -1804,6 +1804,14 @@
     <include file="db/changelog/vectors-033-request-ledger.xml"/>
 
     <!--
+        nexus-s9wav (4lnn1 R1): the four autovacuum reloptions on every nexus.chunks leaf. vectors-034-1 redefines
+        partition_ensure_leaf so new leaves carry them; vectors-034-2 (runAlways) repairs the existing ones on every
+        boot. Function definitions and ALTER TABLE ... SET on leaves; no row DML. After vectors-033 and before the
+        runAlways grants blocks, after the walk (vectors-030) that made the leaves it repairs.
+    -->
+    <include file="db/changelog/vectors-034-chunks-leaf-autovacuum.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

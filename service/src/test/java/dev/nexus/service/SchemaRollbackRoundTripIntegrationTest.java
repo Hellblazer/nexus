@@ -246,6 +246,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static final List<String> RUN_ALWAYS_IDS = List.of(
         "staging-4-svc-grants",
         "taxonomy-011-8",
+        "vectors-034-2",
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
         "grants-003-purge-vacuum-maintain",
