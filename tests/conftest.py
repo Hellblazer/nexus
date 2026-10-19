@@ -32,7 +32,9 @@ from nexus.db.t3 import T3Database
 # neither of which exists there, and its ACTIVE gate is false off macOS anyway.
 import sys as _sys  # noqa: E402
 
-pytest_plugins = ["pytester", "tests._env_restore"]
+# tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
+# guard; inert unless NX_TEST_T2_SUBSTRATE=optin.
+pytest_plugins = ["pytester", "tests._env_restore", "tests._storage_touch_guard"]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
 
