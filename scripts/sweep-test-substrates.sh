@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Manual recovery for stale nexus_t2_substrate_pg_* clusters left behind by
-# finished pytest sessions (nexus-ui654). A heavy multi-agent session can
-# accumulate dozens of these tmpdirs even though the processes themselves
+# finished pytest sessions (nexus-ui654), and for the integration-test clusters
+# recorded in nexus_integration_owner_<pid>.json files (nexus-942h9). A heavy
+# multi-agent session can accumulate dozens of these tmpdirs even though the processes themselves
 # DO reap on clean exit (bead REFINED PICTURE, 2026-08-09) -- the dirs are
 # debris, and ensure_engine()'s own startup sweep (nexus-lgdy1) only runs
 # the NEXT time a pytest process boots a substrate. This script runs that
@@ -52,6 +53,7 @@ import warnings
 # fail-loud-if-unimportable contract: an ImportError here is a real
 # checkout problem, not something to swallow.
 from tests._engine_substrate import (
+    _OWNER_RECORD_GLOB,
     _STRAY_GLOB,
     substrate_pg_roots,
     sweep_stale_substrate_clusters,
@@ -62,6 +64,7 @@ from tests._engine_substrate import (
 for root in substrate_pg_roots():
     print(f"root: {root}")
 print(f"pattern: {_STRAY_GLOB}")
+print(f"pattern: {_OWNER_RECORD_GLOB} (integration clusters, nexus-942h9)")
 
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")

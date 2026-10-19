@@ -156,3 +156,29 @@ class TestSweepsTheTmpfsRoot:
         assert f"root: {pg_root}" in result.stdout
         assert "reaped (dead owner, killed + removed): 1" in result.stdout
         assert not cluster_dir.exists()
+
+
+class TestSweepsAnIntegrationOwnerRecord:
+    def test_dead_owner_integration_cluster_under_the_pg_root_is_reaped(self, tmp_path) -> None:
+        """nexus-942h9: an integration fixture's cluster is named by its own prefix
+        and recorded in nexus_integration_owner_<pid>.json, not matched by the
+        substrate glob; the script must reap it from the root all the same."""
+        fake_tmpdir = tmp_path / "empty_tmp"
+        fake_tmpdir.mkdir()
+        pg_root = tmp_path / "shm_root"
+        cluster_dir = pg_root / "nexus_inttest_pg_scripttest"
+        cluster_dir.mkdir(parents=True)
+        (cluster_dir / "PG_VERSION").write_text("17\n")
+        record = pg_root / "nexus_integration_owner_1.json"
+        record.write_text(json.dumps({
+            "owner_pytest_pid": _dead_pid(), "owner_cmdline": "",
+            "pgdatas": [str(cluster_dir)], "children": [],
+        }))
+
+        result = _run_script(fake_tmpdir, pg_root=str(pg_root))
+
+        assert result.returncode == 0, result.stderr
+        assert "nexus_integration_owner_*.json" in result.stdout
+        assert "reaped (dead owner, killed + removed): 1" in result.stdout
+        assert str(cluster_dir) in result.stdout
+        assert not cluster_dir.exists() and not record.exists()

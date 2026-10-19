@@ -197,6 +197,16 @@ WAL_CAP_CONF = (
     "wal_keep_size = 0\n"
 )
 
+#: fsync-free durability for a throwaway cluster: nothing in a test cluster has to
+#: survive an OS crash (a killed postmaster recovers from the page cache). Shared
+#: by the substrate boot, :func:`throwaway_pg_cluster` and the integration
+#: clusters (:func:`integration_cluster_conf`, nexus-942h9).
+THROWAWAY_FSYNC_CONF = (
+    "fsync = off\n"
+    "synchronous_commit = off\n"
+    "full_page_writes = off\n"
+)
+
 
 def _current_uid() -> str:
     """The service identity (``str(os.getuid())`` on POSIX); every raw ``getuid``
@@ -477,6 +487,183 @@ def substrate_pg_roots(
             seen.add(key)
             unique.append(r)
     return unique
+
+def throwaway_cluster_conf(
+    parent: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """The ``postgresql.conf`` tail for a throwaway cluster created under *parent*:
+    :data:`THROWAWAY_FSYNC_CONF` always, the WAL cap and mmap DSM where
+    :func:`wal_cap_conf` and :func:`dsm_conf` give them (nexus-942h9)."""
+    return (
+        THROWAWAY_FSYNC_CONF
+        + wal_cap_conf(parent, env=env, mounts_text=mounts_text, shm_dir=shm_dir)
+        + dsm_conf(parent, mounts_text=mounts_text, shm_dir=shm_dir)
+    )
+
+
+def integration_cluster_conf(pgdata: str, **kw) -> str:
+    """:func:`throwaway_cluster_conf` for a cluster made by
+    :func:`integration_cluster_dir` (the root is the cluster dir's parent). An
+    integration fixture appends it to ``postgresql.conf`` beside its port line.
+    No integration caller needs durability semantics (nexus-942h9: they stop the
+    cluster with ``pg_ctl stop -m immediate`` at teardown and none reads pg_wal,
+    sets ``wal_level`` or replicates); one that ever does passes
+    ``parent_dir=tempfile.gettempdir()`` to ``pg_data_tempdir`` and skips this."""
+    return throwaway_cluster_conf(str(Path(pgdata).parent), **kw)
+
+
+# ── Integration clusters: owner records (nexus-942h9) ────────────────────────
+#
+# An integration fixture (``tests._child_process.pg_data_tempdir``) makes its
+# cluster dir BEFORE initdb and starts the engine JVM in a different fixture, so
+# the substrate's in-dir sidecar does not fit: initdb refuses a non-empty dir, and
+# the JVM is not known when the dir is made. Instead the process keeps ONE record
+# per chosen root, ``<root>/nexus_integration_owner_<pid>.json``: its identity,
+# every cluster dir it made there, and every engine child it spawned
+# (:func:`record_integration_child`). The sweep reaps a record whose owner is
+# dead, with the same identity checks as the sidecar clusters. Only a cluster in
+# a chosen root (tmpfs or ``NX_TEST_PG_ROOT``) is recorded: on the tempdir it is
+# inert disk debris, as before.
+_OWNER_RECORD_PREFIX = "nexus_integration_owner_"
+_OWNER_RECORD_GLOB = f"{_OWNER_RECORD_PREFIX}*.json"
+_owner_lock = threading.Lock()
+#: root -> this process's record contents (the file is a mirror of this).
+_owner_records: dict[Path, dict] = {}
+_integration_swept = False
+_owner_exit_registered = False
+
+
+def _owner_record_path(root: Path) -> Path:
+    return root / f"{_OWNER_RECORD_PREFIX}{os.getpid()}.json"
+
+
+def _flush_owner_record(root: Path, info: dict) -> None:
+    path = _owner_record_path(root)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(info, indent=2))
+    tmp.replace(path)  # atomic: the sweep never reads a torn record
+
+
+def _load_owner_record(root: Path) -> dict:
+    """This process's record for *root*: fresh, plus whatever an earlier process
+    with the same pid left in the file (its orphans become ours to be reaped)."""
+    from nexus.daemon.service_registry import process_command
+
+    info: dict = {
+        "owner_pytest_pid": os.getpid(),
+        "owner_cmdline": process_command(os.getpid()),
+        "pgdatas": [],
+        "children": [],
+    }
+    try:
+        old = json.loads(_owner_record_path(root).read_text())
+        info["pgdatas"] = [p for p in old.get("pgdatas", []) if isinstance(p, str)]
+        info["children"] = [c for c in old.get("children", []) if isinstance(c, dict)]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return info
+
+
+def register_owned_cluster(root: Path, pgdata: str) -> None:
+    """Record *pgdata* (a cluster dir this process just made under *root*) so the
+    sweep can reap it if this process is killed. Best effort: a record that cannot
+    be written is a warning, never a test failure."""
+    global _owner_exit_registered
+    try:
+        with _owner_lock:
+            info = _owner_records.get(root) or _load_owner_record(root)
+            info["pgdatas"] = [p for p in info["pgdatas"] if Path(p).exists()] + [pgdata]
+            _owner_records[root] = info
+            _flush_owner_record(root, info)
+            if not _owner_exit_registered:
+                _owner_exit_registered = True
+                atexit.register(_drop_finished_owner_records)
+    except OSError as exc:
+        warnings.warn(
+            f"nexus integration clusters: cannot record {pgdata} under {root} ({exc}); "
+            f"a kill of this process will leave it for a manual sweep",
+            stacklevel=3,
+        )
+
+
+def record_integration_child(proc: subprocess.Popen) -> None:
+    """Record an engine child (spawned by the integration fixture) so the sweep can
+    kill it with its cluster. A no-op unless this process recorded a cluster."""
+    from nexus.daemon.service_registry import pid_alive, process_command
+
+    if not _owner_records:
+        return
+    cmdline = process_command(proc.pid)
+    if not cmdline:
+        return
+    with _owner_lock:
+        for root, info in _owner_records.items():
+            info["children"] = [
+                c for c in info["children"] if pid_alive(c.get("pid", 0))
+            ] + [{"pid": proc.pid, "cmdline": cmdline}]
+            try:
+                _flush_owner_record(root, info)
+            except OSError as exc:
+                warnings.warn(
+                    f"nexus integration clusters: cannot record engine pid {proc.pid} "
+                    f"under {root} ({exc})",
+                    stacklevel=2,
+                )
+
+
+def _drop_finished_owner_records() -> None:
+    """At exit: remove each record with no cluster dir left and no live child; a
+    record that still guards something stays for the sweep."""
+    from nexus.daemon.service_registry import pid_alive
+
+    with _owner_lock:
+        for root, info in list(_owner_records.items()):
+            if any(Path(p).exists() for p in info["pgdatas"]):
+                continue
+            if any(pid_alive(c.get("pid", 0)) for c in info["children"]):
+                continue
+            try:
+                _owner_record_path(root).unlink(missing_ok=True)
+            except OSError:
+                continue
+            del _owner_records[root]
+
+
+def _sweep_once_per_process() -> None:
+    """Reap dead owners' integration clusters before this process makes its first:
+    an integration-only run never boots the substrate, whose boot is otherwise the
+    only caller of the sweep. Owner records only -- the substrate's own stray
+    clusters (and their loud legacy warnings) stay the substrate boot's business."""
+    global _integration_swept
+    if _integration_swept:
+        return
+    _integration_swept = True
+    try:
+        sweep_integration_owner_records()
+    except Exception as exc:  # noqa: BLE001 - the sweep must never block a cluster (nexus-lgdy1)
+        warnings.warn(
+            f"nexus integration clusters: session-start sweep failed unexpectedly: {exc}",
+            stacklevel=3,
+        )
+
+
+def integration_cluster_dir(prefix: str) -> str:
+    """A fresh cluster dir for an integration fixture: ``mkdtemp`` under
+    :func:`pg_cluster_parent` (tmpfs on Linux with the substrate's gates and loud
+    fallback, else the tempdir), recorded for the crash sweep when it is in a
+    chosen root."""
+    _sweep_once_per_process()
+    parent = pg_cluster_parent()
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    grant_user_tree_access(path)
+    if parent is not None:
+        register_owned_cluster(Path(parent), path)
+    return path
+
 
 #: Sidecar filename, written INSIDE the pgdata dir so it is glob-scoped by
 #: construction and removed for free whenever the cluster dir is.
@@ -1198,6 +1385,11 @@ def throwaway_pg_cluster(
     hazard is the semaphore plus a fail-loud setup error (nexus-ui654), and
     changing the substrate's boot contract is not this bead's business.
     """
+    # nexus-942h9: the same root and conf as the substrate and the integration
+    # clusters, unless the caller names a parent (the unit tests of this helper do).
+    chosen_root = parent_dir is None
+    if chosen_root:
+        parent_dir = pg_cluster_parent()
     pgdata: Path | None = None
     bin_dir: Path | None = None
     for attempt in range(1, attempts + 1):
@@ -1213,8 +1405,11 @@ def throwaway_pg_cluster(
                     _initdb_cluster(bin_dir, prefix=prefix, parent_dir=parent_dir)
                 )
                 try:
+                    if chosen_root and parent_dir is not None:
+                        register_owned_cluster(Path(parent_dir), str(pgdata))
                     with open(pgdata / "postgresql.conf", "a") as f:
                         f.write("listen_addresses = ''\n")
+                        f.write(throwaway_cluster_conf(str(pgdata.parent)))
                     proc = pg_ctl_start(
                         bin_dir / "pg_ctl", pgdata, pgdata / "pg.log",
                         f"-k {pgdata}", check=False,
@@ -1388,7 +1583,7 @@ def _boot() -> dict:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
-            f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
+            f.write(THROWAWAY_FSYNC_CONF)
             # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster) where
             # the cluster is in RAM or on an explicit root; mmap DSM on tmpfs only.
             f.write(wal_cap_conf(cluster_parent))
@@ -1738,7 +1933,123 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
                     f"{cluster_dir}: {exc}",
                     stacklevel=2,
                 )
+        _sweep_owner_records(root, result)
     return result
+
+
+def sweep_integration_owner_records() -> SweepResult:
+    """:func:`sweep_stale_substrate_clusters` restricted to the integration owner
+    records, under every root the sweep covers."""
+    result = SweepResult()
+    for root in substrate_pg_roots():
+        if root.exists():
+            _sweep_owner_records(root, result)
+    return result
+
+
+def _sweep_owner_records(root: Path, result: SweepResult) -> None:
+    """Reap the integration clusters of dead owners recorded under *root*."""
+    for rec in sorted(root.glob(_OWNER_RECORD_GLOB)):
+        try:
+            _sweep_owner_record(rec, root, result)
+        except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
+            result.errors.append(str(rec))
+            warnings.warn(
+                f"nexus test substrate sweep: error processing {rec}: {exc}",
+                stacklevel=2,
+            )
+
+
+def _identify_postmaster(pid: int, pgdata: Path) -> str:
+    """Like :func:`_identify_leg`, with no recorded cmdline: a postmaster started
+    by ``pg_ctl -D <pgdata>`` carries that unique path in its own command line."""
+    from nexus.daemon.service_registry import pid_alive, process_command
+
+    if not pid_alive(pid):
+        return "dead"
+    actual = process_command(pid)
+    if not actual:
+        return "dead"
+    return "ok" if str(pgdata) in actual else "mismatch"
+
+
+def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
+    try:
+        info = json.loads(rec.read_text())
+        owner_pid = info.get("owner_pytest_pid")
+    except (OSError, ValueError, AttributeError) as exc:
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: unreadable owner record {rec}: {exc} "
+            f"-- leaving it untouched",
+            stacklevel=2,
+        )
+        return
+    if not isinstance(owner_pid, int):
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: owner record {rec} has no valid "
+            f"owner_pytest_pid -- leaving it untouched",
+            stacklevel=2,
+        )
+        return
+    if _owner_is_live(owner_pid, info.get("owner_cmdline", "") or ""):
+        result.live_untouched.append(str(rec))
+        return
+
+    dirs: list[Path] = []
+    for raw in info.get("pgdatas") or []:
+        d = Path(str(raw))
+        if d.parent != root:
+            # rmtree on a path read from JSON: only ever inside the root the
+            # record sits in.
+            result.errors.append(str(rec))
+            warnings.warn(
+                f"nexus test substrate sweep: owner record {rec} names {d}, "
+                f"outside {root} -- leaving it untouched",
+                stacklevel=2,
+            )
+            return
+        if d.is_dir():
+            dirs.append(d)
+
+    engines: list[tuple[int, str]] = []
+    for child in info.get("children") or []:
+        pid = child.get("pid") if isinstance(child, dict) else None
+        if isinstance(pid, int) and pid > 0:
+            engines.append((pid, child.get("cmdline", "") or ""))
+    postmasters: list[tuple[int, Path]] = []
+    for d in dirs:
+        pm = _read_postmaster_pid(str(d))
+        if pm is not None:
+            postmasters.append((pm, d))
+
+    # Identify EVERY leg before signalling any (as _reap_cluster does).
+    engine_status = {pid: _identify_leg(pid, cmd) for pid, cmd in engines}
+    pm_status = {pid: _identify_postmaster(pid, d) for pid, d in postmasters}
+    mismatched = [
+        f"pid {pid}" for pid, st in {**engine_status, **pm_status}.items() if st == "mismatch"
+    ]
+    if mismatched:
+        result.mismatch_refused.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: refusing to reap {rec} -- "
+            f"{', '.join(mismatched)} no longer matches what was recorded "
+            f"(PID-reuse guard); NOTHING was signalled",
+            stacklevel=2,
+        )
+        return
+
+    for pid, _cmd in engines:
+        if engine_status[pid] == "ok":
+            _kill_engine_leg(pid)
+    for pid, d in postmasters:
+        if pm_status[pid] == "ok":
+            _kill_postmaster_leg(pid, d)
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+        result.reaped.append(str(d))
+    rec.unlink(missing_ok=True)
 
 
 def _is_tmpfs_root(root: Path) -> bool:

@@ -48,7 +48,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
-from tests._child_process import java_available, java_executable, pg_data_tempdir
+from tests._child_process import integration_pg_conf, java_available, java_executable, pg_data_tempdir
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -131,7 +131,7 @@ def pg_service():
     """Spin up an ephemeral Postgres 16 instance, bootstrap telemetry schema, yield port."""
     pgport  = _find_free_port()
     tmpdir  = pg_data_tempdir("nx_tel_inttest_")
-    pgdata  = f"{tmpdir}/pgdata"
+    pgdata  = tmpdir  # the dir itself: the sweep finds postmaster.pid at its top level (nexus-942h9)
     pg_user = bootstrap_superuser()
 
     subprocess.run(
@@ -140,6 +140,7 @@ def pg_service():
     )
     with open(f"{pgdata}/postgresql.conf", "a") as f:
         f.write(f"\nport = {pgport}\nlisten_addresses = '127.0.0.1'\n")
+        f.write(integration_pg_conf(pgdata))
 
     pg_ctl_start(str(_PG_CTL), pgdata, f"{tmpdir}/pg.log", f"-p {pgport} -k {pgdata}")
 

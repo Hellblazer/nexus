@@ -205,8 +205,15 @@ def java_available() -> bool:
 
 
 def pg_data_tempdir(prefix: str, *, parent_dir: str | None = None) -> str:
-    """``tempfile.mkdtemp`` for a throwaway PostgreSQL data directory, provisioned the way the
-    product provisions its own (``nexus.db.pg_provision``).
+    """A directory for a throwaway PostgreSQL cluster of an integration fixture,
+    provisioned the way the product provisions its own (``nexus.db.pg_provision``).
+
+    With no *parent_dir* it is created under the substrate's root
+    (``tests._engine_substrate.integration_cluster_dir``): tmpfs on Linux with the
+    same gates and loud fallback, else the tempdir, and recorded so the sweep
+    reaps it if the process is killed (nexus-942h9). The fixture appends
+    :func:`integration_pg_conf` to ``postgresql.conf``. A caller that needs
+    durability semantics, or a place of its own, passes *parent_dir*.
 
     On Windows, ``initdb`` and ``postgres`` drop to a restricted token on which Administrators
     is deny-only, and ``mkdtemp``'s ``0o700`` ACL grants only SYSTEM, Administrators and OWNER
@@ -214,15 +221,29 @@ def pg_data_tempdir(prefix: str, *, parent_dir: str | None = None) -> str:
     ``grant_user_tree_access`` adds an inheritable ACE for the user's own SID. POSIX: plain
     ``mkdtemp``.
     """
+    if parent_dir is None:
+        from tests._engine_substrate import integration_cluster_dir  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+        return integration_cluster_dir(prefix)
     path = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
     grant_user_tree_access(path)
     return path
+
+
+def integration_pg_conf(pgdata: str) -> str:
+    """The ``postgresql.conf`` lines an integration cluster made by
+    :func:`pg_data_tempdir` appends: fsync off, and the WAL cap and mmap DSM when it
+    lives on tmpfs (the substrate's conf, nexus-942h9)."""
+    from tests._engine_substrate import integration_cluster_conf  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    return integration_cluster_conf(pgdata)
 
 
 __all__ = [
     "group_alive",
     "group_popen_kwargs",
     "java_available",
+    "integration_pg_conf",
     "java_executable",
     "kill_group",
     "pg_data_tempdir",

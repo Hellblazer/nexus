@@ -867,6 +867,10 @@ def spawn_service(
         stdout=fh,
         stderr=subprocess.STDOUT,
     )
+    # nexus-942h9: let the sweep kill this engine with its cluster if the owner dies.
+    from tests._engine_substrate import record_integration_child  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    record_integration_child(proc)
     return proc, log_path
 
 

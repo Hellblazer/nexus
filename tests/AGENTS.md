@@ -31,6 +31,17 @@ sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too,
 so a crash-orphaned cluster in RAM is reaped. A nested pytest whose test globs
 its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`.
 
+The `-m integration` fixtures that boot their own cluster (nexus-942h9) use the
+same root and conf: `pg_data_tempdir(prefix)` creates the dir through the root
+chooser and records it in `<root>/nexus_integration_owner_<pid>.json` (with the
+engine JVM, via `spawn_service`), and the fixture appends
+`integration_pg_conf(pgdata)` to `postgresql.conf` (fsync, synchronous_commit and
+full_page_writes off; on tmpfs also the 64 MB WAL cap and mmap DSM). The sweep
+reaps a record whose owner is dead, and runs once before a process's first
+integration cluster. A new fixture must append the conf
+(`tests/test_integration_pg_cluster.py` has a census). A fixture that needs
+durability semantics passes `parent_dir=` to stay on disk; none does today.
+
 **The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
 `_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
 A missing or stale service jar, or a PG bundle for the pinned engine tag that is
