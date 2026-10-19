@@ -7,6 +7,8 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -79,15 +81,16 @@ import java.util.function.BooleanSupplier;
  *       via {@code pg_terminate_backend} before the {@code DROP DATABASE}).</li>
  * </ul>
  *
- * <p><b>What is NOT safe, and therefore opted out</b> (via
- * {@link PgContainerHelper#startDedicated()}, the same "returns a real, independently
- * booted container" shape {@code PgContainerHelper.newContainer()} already gave
- * {@code PgBouncerTenantIsolationTest}): any class whose test IS the migration
- * PROCESS -- fresh-provisioning ownership semantics, changeset-count deltas,
- * execution-order/rollback depth, or a bare (non-idempotent) {@code CREATE ROLE} --
- * rather than just using an already-migrated schema as a fixture. See
- * {@link PgContainerHelper#startDedicated()}'s javadoc for the roster and the
- * per-class reason.
+ * <p><b>What a template clone is NOT, and what a class that needs it takes instead.</b> A class whose
+ * test IS the migration PROCESS -- fresh-provisioning ownership semantics, changeset-count deltas,
+ * execution-order/rollback depth -- cannot start from a database already migrated to HEAD. Until
+ * nexus-7xfh7 each such class booted a container of its own ({@link PgContainerHelper#startDedicated()});
+ * it now takes {@link #acquireEmptyDatabase}, an unmigrated database on this same cluster, because the
+ * database (not the container) is the boundary for schema, ownership, changelog history and every
+ * relation. A bare {@code CREATE ROLE} under a fixed name is declared exclusive there. What still
+ * needs its own container is cluster-level state: role membership and attributes, server settings,
+ * the server log, an image, a network, a size. See {@link PgContainerHelper#startDedicated()}'s javadoc
+ * for the roster and the per-class reason.
  */
 final class SharedCluster {
 
@@ -127,10 +130,48 @@ final class SharedCluster {
      *  A future class that needs both must re-issue its {@code ALTER ROLE} after its
      *  final acquire. */
     static SharedDatabaseHandle acquireDatabase() throws SQLException {
+        return createDatabase("TEMPLATE \"" + TEMPLATE_DB + "\"");
+    }
+
+    /** Allocate a fresh, EMPTY per-class database on this fork's shared cluster
+     *  ({@code CREATE DATABASE ... TEMPLATE template0}): no {@code nexus} schema, no
+     *  relations, only {@code plpgsql}. For a class that is itself the migration
+     *  process (it walks the changelog from nothing, or part of the way, and asserts
+     *  on the result) but needs no CLUSTER-level state of its own: the database is the
+     *  isolation boundary, as it is for {@link #acquireDatabase()}. nexus-7xfh7.
+     *
+     *  <p>What the database boundary does NOT isolate is cluster-wide state: roles,
+     *  role memberships and role-level settings. The role-setting reset runs here
+     *  exactly as in {@link #acquireDatabase()}. A role the class creates must carry a
+     *  name no other class creates (or be created {@code IF NOT EXISTS}). A class that
+     *  must create a role under a name the migration itself fixes ({@code nexus_diag},
+     *  say) declares it in {@code exclusiveRoles}: absent at acquire (an acquire that
+     *  finds it fails loud and names it, so a leak surfaces at the next user instead of
+     *  skewing its result), dropped by {@link SharedDatabaseHandle#stop()} after the
+     *  database goes. The cluster also already holds {@code nexus_svc} and every other
+     *  role the template migration made, which a virgin container would not, so a class
+     *  whose assertion is "this role does not exist yet" stays dedicated. */
+    static SharedDatabaseHandle acquireEmptyDatabase(String... exclusiveRoles) throws SQLException {
+        return createDatabase("TEMPLATE template0", exclusiveRoles);
+    }
+
+    /** The shared cluster's container (booting and migrating the template on first use). */
+    static PostgreSQLContainer<?> container() throws SQLException {
+        return ensureBootstrapped();
+    }
+
+    private static SharedDatabaseHandle createDatabase(String templateClause, String... exclusiveRoles)
+            throws SQLException {
+        for (String role : exclusiveRoles) {
+            if (!role.matches("[a-z_][a-z0-9_]*")) {
+                throw new IllegalArgumentException("exclusive role names are plain lower-case identifiers, got: " + role);
+            }
+        }
         PostgreSQLContainer<?> c = ensureBootstrapped();
         String dbName = "nexus_test_" + DB_COUNTER.incrementAndGet();
         try (Connection admin = controlConnection(c)) {
             admin.setAutoCommit(true);
+            requireRolesAbsent(admin, exclusiveRoles);
             try (var st = admin.createStatement()) {
                 // nexus-tyiht: cluster-wide role-level GUCs (ALTER ROLE ... SET with no
                 // IN DATABASE clause; pg_db_role_setting rows with setdatabase=0) are
@@ -147,10 +188,27 @@ final class SharedCluster {
                     + "    EXECUTE format('ALTER ROLE %I RESET ALL', r.rolname); "
                     + "  END LOOP; "
                     + "END $$");
-                st.execute("CREATE DATABASE \"" + dbName + "\" TEMPLATE \"" + TEMPLATE_DB + "\"");
+                st.execute("CREATE DATABASE \"" + dbName + "\" " + templateClause);
             }
         }
-        return new SharedDatabaseHandle(c, dbName);
+        return new SharedDatabaseHandle(c, dbName, java.util.List.of(exclusiveRoles));
+    }
+
+    /** Fail loud when a role a class declared exclusive is already on the cluster. */
+    private static void requireRolesAbsent(Connection admin, String[] roles) throws SQLException {
+        if (roles.length == 0) {
+            return;
+        }
+        java.util.List<String> present = DSL.using(admin, SQLDialect.POSTGRES)
+            .select(DSL.field(DSL.name("rolname"), String.class))
+            .from(DSL.table(DSL.name("pg_roles")))
+            .where(DSL.field(DSL.name("rolname"), String.class).in(roles))
+            .fetch(0, String.class);
+        if (!present.isEmpty()) {
+            throw new SQLException("nexus-7xfh7: role(s) " + present + " already exist on the shared cluster, but "
+                + "this class declared them exclusive (it creates them itself). Another class created the same "
+                + "name, or an earlier holder's teardown did not drop it; rename the role or fix the leak.");
+        }
     }
 
     /** Raw JDBC connection to {@code dbName} on the shared container, bypassing

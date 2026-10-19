@@ -1123,7 +1123,9 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 3),
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
-        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
+        // nexus-7xfh7: +1, the DO block that revokes what an exclusive role granted and drops it at stop (DROP ROLE and
+        // REVOKE ... GRANTED BY have no typed jOOQ form; the other statement is the DROP DATABASE).
+        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 2),
         // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
         // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
         // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12, all of
@@ -1709,7 +1711,9 @@ class RawSqlGateTest {
     // are off for it, so the operator's index path is not what it tests), its lateral no-row-hazard probe needs
     // the operator for HNSW and moved to nexus_test.lateral_cross_rows_1024, and its pg_proc reads go through
     // PgCatalogProbes.routineConfigAndSource. Still raw there: the two EXPLAIN-the-exact-statement-text calls.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 239;
+    // nexus-7xfh7 2026-10-19: +1 for SharedDatabaseHandle's DO block that revokes and drops a class's exclusive
+    // roles when it releases an empty database on the per-fork cluster (no typed jOOQ form for DO).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 240;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

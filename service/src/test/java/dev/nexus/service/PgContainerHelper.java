@@ -245,52 +245,68 @@ public final class PgContainerHelper {
 
     /**
      * Always boots a genuinely fresh, independently-managed container -- the
-     * explicit opt-out from {@link #start()}'s shared-cluster reuse.
+     * explicit opt-out from {@link #start()}'s shared-cluster reuse and from
+     * {@link #startEmptyDatabase}'s empty database on it.
      *
-     * <p>Required by any class whose test asserts on the migration PROCESS itself
-     * (not just an already-migrated schema's shape) -- ownership of relations
-     * created "from scratch" by a non-superuser admin role, changeset-count deltas
-     * across successive {@code migrate()} calls, rollback depth/order, or a bare
-     * (non-{@code IF NOT EXISTS}) {@code CREATE ROLE} that would collide against a
-     * cluster another class already bootstrapped. Roster, as of nexus-yhmav
-     * (2026-08-09), each confirmed via a hardcoded {@code GRANT CREATE ON DATABASE
-     * postgres} and/or a bare {@code CREATE ROLE} in a repo-wide sweep:
+     * <p>Since nexus-7xfh7 a migration-process class (one that walks the changelog from nothing, or
+     * part of the way, and asserts on the result) takes {@link #startEmptyDatabase}: the database is
+     * the isolation boundary, so it needs no container of its own. A container is still needed when the
+     * test depends on CLUSTER-level state or on how the container is built. The roster, each entry
+     * confirmed against the class:
      * <ul>
-     *   <li>{@code SchemaMigratorIntegrationTest} -- two-phase DBA-then-Liquibase
-     *       provisioning from an unmigrated cluster; "aged box" divergence tests
-     *       that must inject a defect BEFORE a changeset first executes.</li>
-     *   <li>{@code SchemaRollbackRoundTripIntegrationTest} -- rollback-to-zero and
-     *       {@code runAlways}-changeset execution-order assertions that depend on a
-     *       specific, fresh single-pass apply history.</li>
-     *   <li>{@code SchemaUpgradeRehearsalIntegrationTest} -- old-changelog-tree to
-     *       HEAD upgrade rehearsal; asserts changeset counts applied by each leg.</li>
-     *   <li>{@code GrantsSvcForeignOwnedRelationTest} -- GH #1402 replay: the
-     *       non-superuser admin role must OWN every relation it creates, which
-     *       requires it to create them all itself against a virgin database.</li>
-     *   <li>{@code ServiceTokenScopeBackfillTest} -- hand-builds the PRE-003
-     *       {@code nexus.service_tokens} shape and applies ONLY {@code
-     *       service-tokens-003-scope-column.xml} (not the master changelog) to assert
-     *       backfill behavior; a template already migrated to HEAD collides with the
-     *       bare {@code CREATE TABLE} this test uses to reconstruct that pre-migration
-     *       state.</li>
-     *   <li>{@code ServiceIntegrationTest} -- a deliberately minimal "skeleton" harness
-     *       that documents (in its own {@code @BeforeAll} comment) that it does NOT run
-     *       the master changelog; a shared, already-fully-migrated cluster would
-     *       silently contradict that hermeticity premise even where column shapes
-     *       happen to overlap.</li>
+     *   <li>{@code GrantsPgMonitorTest} -- falsifies {@code grants-004} by running it WITHOUT the
+     *       migrating role's {@code pg_monitor ... WITH ADMIN OPTION}; on a shared cluster
+     *       {@code nexus_svc} already holds {@code pg_monitor} from the template migration, so the
+     *       falsification would be vacuous. Role membership is cluster-wide.</li>
+     *   <li>{@code TextGateProbeSingleRoleGuardIntegrationTest} -- asserts role membership
+     *       edges on {@code nexus_svc} and the owner ({@code grantRoleMembership}), which would leak
+     *       into every later class on a shared cluster.</li>
+     *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
+     *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@code getLogs()}); a shared
+     *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
+     *       is cluster-wide.</li>
+     *   <li>{@code TenantPartitionCreationTs1MeasurementIntegrationTest} -- a latency measurement that
+     *       creates and drops ~2,500 leaves per run; it wants an idle server and a lock table of its own.</li>
+     *   <li>{@code ChashProbePlanShapeTest}, {@code ChunkLiveOwnersRecallExtendedIntegrationTest} -- a
+     *       sized container ({@link #startDedicated(String, long)}).</li>
+     *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
+     *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>
-     *
-     * <p>{@code PgBouncerTenantIsolationTest} (network-attached, multi-container)
-     * is ALREADY excluded from shared-cluster reuse without needing this method --
-     * it calls {@link #newContainer()} directly and attaches its own
-     * {@code Network}/{@code withNetworkAliases} before starting, bypassing
-     * {@link #start()} entirely.
+     * Classes that create a cluster-global role under a name the migration fixes ({@code nexus_diag}, say)
+     * no longer need a container: they declare it exclusive in {@link #startEmptyDatabase}.
      */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
         c.start();
         return c;
+    }
+
+    /**
+     * An EMPTY, unmigrated database on the per-fork shared cluster (nexus-7xfh7), in place of
+     * {@link #startDedicated()}'s fresh container boot. For a class that is itself the migration
+     * process (it walks the changelog from nothing, or part of the way, then asserts) yet needs no
+     * cluster-level state of its own. {@code stop()} drops the database.
+     *
+     * <p>Stays {@link #startDedicated()} for: {@code ALTER SYSTEM} or any server setting, a different
+     * image, a network attachment, a sized container, per-method assertions about the cluster itself
+     * (a role's absence, membership or attributes), and the provisioning whose point is a virgin
+     * cluster's ownership. The cluster already holds {@code nexus_svc} and the other roles the template
+     * migration made; roles a class creates need names no other class uses, or are declared in
+     * {@code exclusiveRoles} (absent at acquire, dropped at stop; see
+     * {@link SharedCluster#acquireEmptyDatabase}). With {@code -Dnexus.test.pg.shared=false} this boots a
+     * dedicated container, as {@link #start()} does.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startEmptyDatabase(String... exclusiveRoles) {
+        if ("false".equals(System.getProperty(SHARED_PROPERTY))) {
+            return startDedicated();
+        }
+        try {
+            return SharedCluster.acquireEmptyDatabase(exclusiveRoles);
+        } catch (SQLException e) {
+            throw new IllegalStateException("nexus-7xfh7 shared-cluster empty-database acquire failed: " + e.getMessage(), e);
+        }
     }
 
     /** {@link #startDedicated()} with a larger tmpfs and memory limit (see the sized {@link #newContainer}). */
@@ -464,9 +480,10 @@ public final class PgContainerHelper {
      * (a DDL statement PostgreSQL restricts to the table owner or a superuser),
      * mirroring production's non-superuser {@code nexus_admin} migration identity.
      *
-     * <p><b>ONLY call this against a {@link #startDedicated()} container</b> --
-     * table ownership is global schema state; see the changelog file's own header
-     * for why this cannot share a cluster with unrelated test classes.
+     * <p><b>Call this only against a database no other class reads</b> ({@link #start()}'s clone,
+     * {@link #startEmptyDatabase}, or a dedicated container). Table ownership is database-local, so a
+     * per-class database isolates it; the role itself is cluster-wide, so {@code adminRole} must be a name
+     * no other class uses.
      *
      * <p><b>Call AFTER {@link #applyProductSchema}</b>, same ordering contract as
      * {@link #bootstrapServiceRole}.
@@ -525,8 +542,8 @@ public final class PgContainerHelper {
      * DEFINER function) cannot migrate as the superuser. After this, migrate with
      * {@code SchemaMigrator.migrate} over a pool connected as {@code adminRole}.
      *
-     * <p><b>The precondition is a dedicated, virgin container from {@link #startDedicated()}, before any
-     * product migration.</b> Role creation is idempotent ({@code IF NOT EXISTS}), so a role that already
+     * <p><b>The precondition is a virgin database ({@link #startEmptyDatabase}, or a dedicated container),
+     * before any product migration.</b> Role creation is idempotent ({@code IF NOT EXISTS}), so a role that already
      * exists keeps its attributes: this call does not change them, and nothing in it detects the mismatch.
      * A rerun after a migration with the same parameters is safe (the relocation helpers are reinstalled);
      * {@code SchemaRollbackRoundTripIntegrationTest} does exactly that after a rollback drops the
@@ -549,9 +566,11 @@ public final class PgContainerHelper {
      * {@code GrantsPgMonitorTest}); {@code svcInherits=false} creates {@code nexus_svc} NOINHERIT, as
      * production does.
      *
-     * <p>Same precondition as the three-argument overload: a dedicated virgin container from
-     * {@link #startDedicated()}. A pre-existing role's attributes are NOT changed, so on a container where
-     * {@code nexus_svc} already exists {@code svcInherits} has no effect. A rerun after a migration with the
+     * <p>Same precondition as the three-argument overload: a virgin database ({@link #startEmptyDatabase}) or
+     * a dedicated container. A pre-existing role's attributes are NOT changed, so where {@code nexus_svc}
+     * already exists (every shared cluster: the template migration made it NOINHERIT) {@code svcInherits} has
+     * no effect; a fixture that needs the attribute to take effect, or {@code pg_monitor} not yet granted,
+     * stays on {@link #startDedicated()}. A rerun after a migration with the
      * same parameters is safe (every statement is idempotent), as
      * {@code SchemaRollbackRoundTripIntegrationTest} does after a rollback dropped the {@code nexus} schema.
      */

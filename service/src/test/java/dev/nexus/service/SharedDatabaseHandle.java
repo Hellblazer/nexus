@@ -12,6 +12,7 @@ import org.testcontainers.utility.DockerImageName;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -51,11 +52,18 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
 
     private final PostgreSQLContainer<?> delegate;
     private final String dbName;
+    /** Cluster-wide roles this holder declared exclusive (nexus-7xfh7); dropped after the database. */
+    private final List<String> exclusiveRoles;
 
     SharedDatabaseHandle(PostgreSQLContainer<?> delegate, String dbName) {
+        this(delegate, dbName, List.of());
+    }
+
+    SharedDatabaseHandle(PostgreSQLContainer<?> delegate, String dbName, List<String> exclusiveRoles) {
         super(DockerImageName.parse(PgContainerHelper.IMAGE).asCompatibleSubstituteFor("postgres"));
         this.delegate = delegate;
         this.dbName = dbName;
+        this.exclusiveRoles = List.copyOf(exclusiveRoles);
     }
 
     @Override
@@ -105,8 +113,8 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
             + "independently-startable container. A caller reaching this means it expects a "
             + "genuinely fresh/dedicated container: use PgContainerHelper.newContainer() + start() "
             + "(network-attached / multi-container cases, e.g. PgBouncerTenantIsolationTest) or "
-            + "PgContainerHelper.startDedicated() (migration-PROCESS tests that assert on a pristine "
-            + "un-migrated cluster, e.g. SchemaMigratorIntegrationTest) instead.");
+            + "PgContainerHelper.startEmptyDatabase() (migration-PROCESS tests that assert on a pristine "
+            + "un-migrated database) or PgContainerHelper.startDedicated() (cluster-level state) instead.");
     }
 
     @Override
@@ -116,6 +124,24 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
             PgCatalogProbes.terminateOtherBackends(DSL.using(admin, SQLDialect.POSTGRES), dbName);
             try (var st = admin.createStatement()) {
                 st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\"");
+                // After the database: a role cannot be dropped while it holds privileges in a live one.
+                // Nor while it is the GRANTOR of a role membership (PostgreSQL 16+ records the grantor as a
+                // dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one.
+                // Revoke what it granted, then drop it.
+                if (!exclusiveRoles.isEmpty()) {
+                    // Role names are validated plain identifiers (SharedCluster.createDatabase).
+                    String names = exclusiveRoles.stream().map(r -> "'" + r + "'").collect(java.util.stream.Collectors.joining(","));
+                    st.execute("DO $$ DECLARE r text; m record; BEGIN "
+                        + "  FOREACH r IN ARRAY ARRAY[" + names + "] LOOP "
+                        + "    FOR m IN SELECT g.rolname AS granted, u.rolname AS member FROM pg_auth_members a "
+                        + "             JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member "
+                        + "             JOIN pg_roles o ON o.oid = a.grantor WHERE o.rolname = r LOOP "
+                        + "      EXECUTE format('REVOKE %I FROM %I GRANTED BY %I', m.granted, m.member, r); "
+                        + "    END LOOP; "
+                        + "    EXECUTE format('DROP ROLE IF EXISTS %I', r); "
+                        + "  END LOOP; "
+                        + "END $$");
+                }
             }
         } catch (SQLException e) {
             LOG.warn("best-effort DROP DATABASE \"{}\" failed (nexus-yhmav shared-cluster handle) "
