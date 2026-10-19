@@ -1607,6 +1607,9 @@ class TestJsonMainSweep:
         import json as _json
 
         result = _invoke(runner, mock_reg, extra_args=["--json"])
+        # An empty stdout means the sweep raised before printing: name the exception
+        # (a bare JSONDecodeError on '' hid it in a CI shard, 2026-10-19).
+        assert result.exit_code == 0, (result.output, repr(result.exception))
         _json.loads(result.stdout)  # raises if anything but pure JSON
         assert "Nexus health check:" not in result.stdout
         assert "✓" not in result.stdout
