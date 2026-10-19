@@ -134,6 +134,26 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   remove `service/target/nexus-service-1.0-SNAPSHOT.jar`, or build through
   `mvnw-leased.sh` / `build-gate-jar.sh`); a `MISS` runs Maven under the grant. `build-gate-jar.sh --lab-run <class>` (nexus-t6t9f) will take
   the lease before the grant instead.
+- **A `MISS` builds in tmpfs** (nexus-0a1hw). Inside a grant on Linux with a usable
+  `/dev/shm`, Maven's build directory is a per-build directory under
+  `/dev/shm/nexus-build-<uid>/b.<pid>.<rand>` (`-Dnexus.build.dir`, `service/pom.xml`),
+  removed when the script exits. Only the stamped jar reaches the disk: stored in
+  the cache once per key (one 131 MB copy, since a hard link cannot cross
+  filesystems) and linked into `service/target` as a hit does. The output says
+  `gate jar build directory: /dev/shm/... (tmpfs; ...)` or why it stayed on disk.
+  tmpfs pages are charged to the grant, so the decision needs 1 GiB of free
+  tmpfs and of cgroup headroom (`BUILD_TMPFS_MIN_MIB`); a build killed with 137
+  or "No space left" means the grant was too small: rerun with `NX_BUILD_TMPFS=off`
+  or a bigger class. `service/target` then holds the jar and its marker but no
+  classes, so a following `mvnw-leased.sh test` recompiles and restores the jOOQ
+  trees from the cache. It stays on disk when `NX_JOOQ_CACHE=off` (a fresh
+  directory has no jOOQ stamp and would boot the codegen container). The jlink
+  image, which nothing reads, is skipped on every host. A SIGKILLed build leaves
+  its directory in RAM until the next run sweeps it (dead owner, over 2 hours old);
+  `rm -rf /dev/shm/nexus-build-$(id -u)/b.<deadpid>.*` frees it sooner.
+  `NX_BUILD_TMPFS=off|on|<dir>` overrides. The gate-jar cache itself stays on
+  disk: on tmpfs every hit would copy 131 MB across filesystems instead of
+  linking it.
 - **The suite goes through `scripts/watched_pytest.py`**, never a bare pytest, and
   you read its status file instead of sleeping and guessing. `uv sync` sits inside
   the grant because it is incremental against the kept `.venv`.

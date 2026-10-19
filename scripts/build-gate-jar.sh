@@ -79,6 +79,19 @@
 # disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
 # scripts/lib/gate-jar-cache.sh.
 #
+# BUILD DIRECTORY (nexus-0a1hw). A miss used to write ~0.5 GB to the lab hosts'
+# NVMe: Maven's whole build directory (classes, the 131 MB shaded jar, the 83 MB
+# jlink image) for a jar the cache then holds once. On a lab host (Linux, inside a
+# lab-run grant, a usable /dev/shm) the build now goes to a per-build tmpfs
+# directory (-Dnexus.build.dir, service/pom.xml) that is removed on exit, and only
+# the stamped jar reaches the disk: stored in the cache once per key, then linked
+# into service/target as on a hit. Anywhere else (macOS, a laptop, outside a grant)
+# the build stays in service/target. NX_BUILD_TMPFS=off|on|<dir> overrides; see
+# scripts/lib/build-tmpfs.sh. The jlink image, which nothing reads, is skipped on
+# every host (-Dnexus.jlink.skip=true). service/target then holds the jar and its
+# marker but no classes: a later `mvnw-leased.sh test` recompiles (and restores the
+# jOOQ trees from the shared cache).
+#
 #   usage: scripts/build-gate-jar.sh [extra mvn args...]
 
 set -euo pipefail
@@ -92,6 +105,14 @@ source "$repo_root/scripts/lib/build-lease.sh"
 source "$repo_root/scripts/lib/release-props-lease.sh"
 # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
 source "$repo_root/scripts/lib/gate-jar-cache.sh"
+# shellcheck source=./lib/build-tmpfs.sh disable=SC1091
+source "$repo_root/scripts/lib/build-tmpfs.sh"
+# This script owns where the build writes (it must find the jar it built): a
+# caller's own -Dnexus.build.dir would send the jar somewhere it does not look.
+if [[ " $* " == *" -Dnexus.build.dir"* ]]; then
+    echo "build-gate-jar.sh: do not pass -Dnexus.build.dir; set NX_BUILD_TMPFS=off|on|<dir> instead (nexus-0a1hw)" >&2
+    exit 64
+fi
 # Inside a lab-run grant a hand run refuses at once instead of waiting
 # (build_lease_caller_wait, nexus-dfg0q).
 build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh "$@" || {
@@ -178,7 +199,7 @@ cp "$props" "$backup"
 # release-looking JAR. release_props_restore_and_release always restores
 # first and releases second, so no other process can ever observe a freed
 # lease while this file is still stamped.
-trap 'release_props_restore_and_release "$props" "$backup" service' EXIT
+trap 'build_tmpfs_cleanup; release_props_restore_and_release "$props" "$backup" service' EXIT
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"
@@ -196,20 +217,66 @@ echo "stamped build_ref=$build_ref"
 # The jar plugin rewrites an existing service/target jar IN PLACE, and a cache
 # hit or store leaves that path hard-linked to the cache entry: unlink a shared
 # (or read-only) jar first so the build writes a new inode and the entry's bytes
-# stay what they were (nexus-k6zxp).
-gate_jar_cache_unshare "$repo_root/service/target/$jar_name"
+# stay what they were (nexus-k6zxp). Done on the tmpfs path too, though the build
+# no longer touches this path: a failed build must not leave an older jar that
+# looks current.
+gate_jar_cache_unshare "$target_jar"
+
+# Where Maven writes (nexus-0a1hw): a per-build tmpfs directory on a lab host,
+# else service/target. Removed by the EXIT trap above.
+build_tmpfs_prepare
+mvn_extra=(-Dnexus.jlink.skip=true)
+if [[ -n "$BUILD_TMPFS_DIR" ]]; then
+    mvn_extra+=("-Dnexus.build.dir=$BUILD_TMPFS_DIR")
+    build_dir="$BUILD_TMPFS_DIR"
+    echo "gate jar build directory: $build_dir (tmpfs; $BUILD_TMPFS_WHY)"
+else
+    build_dir="$repo_root/service/target"
+    echo "gate jar build directory: service/target ($BUILD_TMPFS_WHY)"
+fi
 
 cd "$repo_root/service"
-./mvnw -q package -DskipTests "$@"
+rc=0
+./mvnw -q package -DskipTests "${mvn_extra[@]}" "$@" || rc=$?
+if [[ $rc -ne 0 ]]; then
+    [[ -z "$BUILD_TMPFS_DIR" ]] || echo "build-gate-jar.sh: the build failed (rc $rc) in $BUILD_TMPFS_DIR; rc 137 or a 'No space left' means the grant's memory held too little for a tmpfs build: rerun with NX_BUILD_TMPFS=off to build on disk" >&2
+    exit "$rc"
+fi
 
-built_jar="$repo_root/service/target/$jar_name"
+built_jar="$build_dir/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }
-if [[ -n "$cache_key" ]]; then
-    # Best-effort: the store warns and returns 0 on a cache that cannot be written.
-    gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref" \
-        || echo "gate jar cache not written; continuing without it" >&2
+if [[ -z "$BUILD_TMPFS_DIR" ]]; then
+    if [[ -n "$cache_key" ]]; then
+        # Best-effort: the store warns and returns 0 on a cache that cannot be written.
+        gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref" \
+            || echo "gate jar cache not written; continuing without it" >&2
+    fi
+else
+    # The jar was built off the disk. Store it (one copy, across filesystems, per
+    # key) and link the entry into service/target as a hit does; the entry must be
+    # the jar THIS run built, whose build_ref was printed above, else (a peer
+    # stored the same key first, or no cache) put a private copy there.
+    mkdir -p "$repo_root/service/target"
+    placed=""
+    if [[ -n "$cache_key" ]]; then
+        gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref" \
+            || echo "gate jar cache not written; continuing without it" >&2
+        if cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")" \
+            && gate_jar_cache_install "$cache_key" "$cached" "$target_jar" \
+            && _gate_jar_cache_jar_ok "$target_jar" "$build_ref"; then
+            placed="$_GATE_JAR_PLACED"
+        fi
+    fi
+    if [[ -z "$placed" ]]; then
+        rm -f "$target_jar" "$repo_root/service/target/.gate-jar-key"
+        tmp_jar="$repo_root/service/target/.gate-jar.tmp.$$"
+        _gate_jar_cache_place "$built_jar" "$tmp_jar" && mv -f "$tmp_jar" "$target_jar" \
+            || { rm -f "$tmp_jar"; echo "build-gate-jar.sh: could not place the built jar at $target_jar" >&2; exit 1; }
+        placed="$_GATE_JAR_PLACED (private)"
+    fi
+    echo "gate jar placed in service/target ($placed); the build directory goes away on exit"
 fi
 # The build just (re)published the jOOQ generated trees to the shared cache
 # (service/pom.xml, nexus-fkhd3); keep it bounded.
 gate_jar_cache_prune_jooq "$repo_root"
-echo "built $built_jar"
+echo "built $target_jar"

@@ -105,6 +105,21 @@
              trigger, marks, collector, count files), so a run can be compared with one at the same sha.
              Default on. Anything but true/false fails the first container build. -->
         <nexus.ddl.count>true</nexus.ddl.count>
+
+        <!-- nexus-0a1hw: where this build writes (project.build.directory). The default is the
+             usual ${project.basedir}/target and an IDE, a bare mvn and every CI job keep it.
+             scripts/build-gate-jar.sh passes -Dnexus.build.dir=<tmpfs dir> on a lab host
+             (scripts/lib/build-tmpfs.sh): a gate-jar miss wrote ~0.5 GB to the NVMe there
+             (classes, the shaded jar, the jlink image) for a jar the gate-jar cache then holds
+             once. Everything below that names ${project.build.directory} follows. Nothing
+             outside scripts/ should set it: tools that read service/target (the surefire and
+             DDL-count readers, local-service-gate.sh's classes check) look there. -->
+        <nexus.build.dir>${project.basedir}/target</nexus.build.dir>
+
+        <!-- nexus-0a1hw: -Dnexus.jlink.skip=true skips the jlink image (jlink-image execution,
+             package phase). Nothing in the repo reads it; build-gate-jar.sh skips it, which saves
+             ~83 MB of writes per miss on any host. -->
+        <nexus.jlink.skip>false</nexus.jlink.skip>
     </properties>
 
     <dependencies>
@@ -243,6 +258,7 @@
     </dependencies>
 
     <build>
+        <directory>${nexus.build.dir}</directory>
         <!-- nexus-8cz4z: the Java language server (Eclipse JDT.LS via m2e)
              imports this pom and, without this mapping, executes the jOOQ
              codegen mojos at import time. Each needs a live PostgreSQL and
@@ -1676,6 +1692,7 @@
                         <phase>package</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
+                            <skip>${nexus.jlink.skip}</skip>
                             <target>
                                 <!-- Remove stale image so jlink won't refuse to overwrite -->
                                 <delete dir="${jlink.output}" quiet="true"/>

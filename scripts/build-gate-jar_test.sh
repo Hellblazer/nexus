@@ -26,23 +26,32 @@ repo="$WORKDIR/repo"
 props_rel="service/src/main/resources/META-INF/nexus/release.properties"
 mkdir -p "$repo/scripts/lib" "$repo/service/src/main/resources/META-INF/nexus" "$repo/src/nexus"
 cp "$HERE/build-gate-jar.sh" "$repo/scripts/"
-cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/"
+cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$HERE/lib/build-tmpfs.sh" "$repo/scripts/lib/"
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' > "$repo/src/nexus/engine_version.py"
 echo 'class A {}' > "$repo/service/src/main/A.java"
 printf 'service/target/\nservice/.build-lease/\n' > "$repo/.gitignore"
 # Fake mvnw: MVNW_FAIL=1 fails; otherwise writes a real jar whose payload
-# is the stamped release.properties it saw, and counts its invocations.
+# is the stamped release.properties it saw, and counts its invocations. It
+# writes where -Dnexus.build.dir says (default ./target, as the real pom does),
+# next to a classes/ file standing in for the rest of a build directory, and
+# records its arguments and build directory in $MVNW_ARGS / $MVNW_BUILDDIR.
 cat > "$repo/service/mvnw" <<'STUB'
 #!/usr/bin/env bash
 echo run >> "$MVNW_COUNT"
+echo "$*" >> "$MVNW_ARGS"
+bd=target
+for a in "$@"; do case "$a" in -Dnexus.build.dir=*) bd="${a#-Dnexus.build.dir=}" ;; esac; done
+case "$bd" in /*) ;; *) bd="$PWD/$bd" ;; esac
+echo "$bd" >> "$MVNW_BUILDDIR"
 [[ "${MVNW_FAIL:-0}" == 1 ]] && exit 1
-mkdir -p target
+mkdir -p "$bd/classes"
+echo junk > "$bd/classes/Junk.class"
 # Worst case for a hard-linked jar: a writer that rewrites the existing inode in
 # place and does not respect its read-only mode (root, or a plugin that chmods).
-chmod u+w target/nexus-service-1.0-SNAPSHOT.jar 2>/dev/null || true
-python3 - "$PWD/target/nexus-service-1.0-SNAPSHOT.jar" "$PWD/src/main/resources/META-INF/nexus/release.properties" <<'PY'
+chmod u+w "$bd/nexus-service-1.0-SNAPSHOT.jar" 2>/dev/null || true
+python3 - "$bd/nexus-service-1.0-SNAPSHOT.jar" "$PWD/src/main/resources/META-INF/nexus/release.properties" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as zf:
     zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
@@ -53,6 +62,10 @@ chmod +x "$repo/service/mvnw"
 git -C "$repo" init -q && git -C "$repo" config user.email t@t && git -C "$repo" config user.name t
 git -C "$repo" add -A && git -C "$repo" commit -qm base
 export MVNW_COUNT="$WORKDIR/count"; : > "$MVNW_COUNT"
+export MVNW_ARGS="$WORKDIR/mvnw-args"; : > "$MVNW_ARGS"
+export MVNW_BUILDDIR="$WORKDIR/mvnw-builddir"; : > "$MVNW_BUILDDIR"
+# A host's own settings must not steer the build-directory decision under test.
+unset NX_BUILD_TMPFS BUILD_TMPFS_SHM BUILD_TMPFS_OS BUILD_TMPFS_MIN_MIB BUILD_TMPFS_PROC_CGROUP BUILD_TMPFS_CGROUP_ROOT NX_JOOQ_CACHE
 export NX_GATE_JAR_CACHE="$WORKDIR/cache"
 
 echo "Test 1: a failing build restores release.properties and stores nothing"
@@ -253,6 +266,75 @@ p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decod
 assert f"build_ref={sys.argv[2]}\n" in p, p
 PY
 rm -f "$repo/service/src/main/H.java"
+
+echo "Test 11 (nexus-0a1hw): on a lab host the build directory is tmpfs and only the stamped jar reaches service/target"
+shm="$WORKDIR/shm"; mkdir -p "$shm"
+export BUILD_TMPFS_MIN_MIB=1
+last_builddir() { tail -n 1 "$MVNW_BUILDDIR"; }
+last_args() { tail -n 1 "$MVNW_ARGS"; }
+echo 'class J {}' > "$repo/service/src/main/J.java"
+rm -rf "$repo/service/target"
+cnt11="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out11="$(cd "$repo" && NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc11=$?
+[[ $rc11 -eq 0 && "$out11" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt11 + 1))" ]] && ok "a miss builds once" || bad "tmpfs miss (rc $rc11): $out11"
+[[ "$(last_builddir)" == "$shm/nexus-build-$(id -u)/b."* ]] && ok "Maven was told to build under the tmpfs root ($(last_builddir))" || bad "build dir was $(last_builddir)"
+[[ "$(last_args)" == *"-Dnexus.build.dir=$shm/"* && "$(last_args)" == *"-Dnexus.jlink.skip=true"* && "$(last_args)" == *"-DskipTests"* ]] && ok "the build got -Dnexus.build.dir, -Dnexus.jlink.skip=true and -DskipTests" || bad "build args: $(last_args)"
+[[ "$out11" == *"gate jar build directory: $shm/"*"(tmpfs;"* ]] && ok "the output says where it built" || bad "no build-directory line: $out11"
+key11="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry11="$WORKDIR/cache/$key11"
+ref11="$(printf '%s\n' "$out11" | sed -n 's/^stamped build_ref=//p')"
+[[ -f "$tjar" && "$tjar" -ef "$entry11/jar" ]] && ok "service/target holds the cache entry's jar (a link, not a second copy)" || bad "target jar is not the entry's"
+[[ "$(cat "$repo/service/target/.gate-jar-key")" == "$key11" ]] && ok "the key marker is in service/target" || bad "no key marker in service/target"
+[[ ! -e "$repo/service/target/classes" && "$(find "$repo/service/target" -mindepth 1 -maxdepth 1 ! -name nexus-service-1.0-SNAPSHOT.jar ! -name .gate-jar-key | wc -l | tr -d ' ')" == 0 ]] && ok "service/target holds only the jar and its marker: no classes, no build output" || bad "build output reached service/target: $(ls -A "$repo/service/target")"
+[[ -z "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "the tmpfs build directory is gone after the run" || bad "tmpfs directory left behind: $(ls -A "$shm/nexus-build-$(id -u)")"
+python3 - "$tjar" "$ref11" <<'PY' && ok "the jar carries the build_ref this run printed" || bad "jar build_ref differs from the printed one"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert f"build_ref={sys.argv[2]}\n" in p, p
+PY
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored" || bad "props dirty"
+cnt11b="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+rm -f "$tjar" "$repo/service/target/.gate-jar-key"
+out11b="$(cd "$repo" && NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"
+[[ "$out11b" == *"HIT"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt11b" && "$out11b" != *"build directory"* ]] && ok "the next run HITS the stored entry and makes no build directory" || bad "hit after a tmpfs build: $out11b"
+
+echo "Test 11b (nexus-0a1hw): with no cache the jar still lands in service/target, as a private copy"
+echo 'class K {}' > "$repo/service/src/main/K.java"
+rm -rf "$repo/service/target"
+out11c="$(cd "$repo" && NX_GATE_JAR_CACHE=off NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc11c=$?
+ref11c="$(printf '%s\n' "$out11c" | sed -n 's/^stamped build_ref=//p')"
+[[ $rc11c -eq 0 && -f "$tjar" && "$(last_builddir)" == "$shm/"* ]] && ok "cache off: built in tmpfs, jar placed in service/target" || bad "cache-off tmpfs build (rc $rc11c): $out11c"
+python3 - "$tjar" "$ref11c" <<'PY' && ok "the placed jar carries this run's build_ref" || bad "placed jar has another build_ref"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert f"build_ref={sys.argv[2]}\n" in p, p
+PY
+[[ ! -e "$repo/service/target/.gate-jar-key" && ! -e "$repo/service/target/classes" ]] && ok "no key marker (nothing cached) and no build output in service/target" || bad "unexpected files: $(ls -A "$repo/service/target")"
+[[ -z "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "tmpfs directory removed" || bad "tmpfs directory left behind"
+echo 'class L {}' > "$repo/service/src/main/L.java"
+rm -rf "$repo/service/target"
+out11d="$(cd "$repo" && NX_GATE_JAR_CACHE="$WORKDIR/cache-is-a-file/cache" NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc11d=$?
+[[ $rc11d -eq 0 && -f "$tjar" && "$out11d" == *"not written"* ]] && ok "an unwritable cache: the build exits 0, warns, and the jar is placed" || bad "unwritable cache with tmpfs (rc $rc11d): $out11d"
+
+echo "Test 11c (nexus-0a1hw): a failed tmpfs build cleans up, restores the stamp and says how to build on disk"
+echo 'class M {}' > "$repo/service/src/main/M.java"
+out11e="$(cd "$repo" && MVNW_FAIL=1 NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc11e=$?
+[[ $rc11e -ne 0 && "$out11e" == *"NX_BUILD_TMPFS=off"* ]] && ok "failure exits non-zero and names NX_BUILD_TMPFS=off" || bad "failed tmpfs build (rc $rc11e): $out11e"
+[[ -z "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "the tmpfs directory is removed on failure" || bad "tmpfs directory left after a failed build"
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after the failure" || bad "props dirty after a failed tmpfs build"
+
+echo "Test 11d (nexus-0a1hw): the default build directory is unchanged outside a lab host; a caller cannot set its own"
+svc_target="$(cd "$repo/service" && pwd)/target"   # the stub reports the shell's normalized $PWD
+out11f="$(cd "$repo" && BUILD_TMPFS_OS=Linux scripts/build-gate-jar.sh 2>&1)"; rc11f=$?
+[[ $rc11f -eq 0 && "$(last_builddir)" == "$svc_target" && "$(last_args)" != *"-Dnexus.build.dir"* ]] && ok "no NX_BUILD_TMPFS, no grant: Maven builds in service/target with no -Dnexus.build.dir" || bad "default build dir $(last_builddir); args $(last_args)"
+[[ "$out11f" == *"gate jar build directory: service/target (not inside a lab-run grant"* ]] && ok "and says why" || bad "default output: $out11f"
+[[ "$(last_args)" == *"-Dnexus.jlink.skip=true"* ]] && ok "the unused jlink image is skipped on every host" || bad "jlink not skipped: $(last_args)"
+echo 'class N {}' > "$repo/service/src/main/N.java"
+(cd "$repo" && NX_BUILD_TMPFS=off LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 scripts/build-gate-jar.sh >/dev/null 2>&1); rc11g=$?
+[[ $rc11g -eq 0 && "$(last_builddir)" == "$svc_target" ]] && ok "NX_BUILD_TMPFS=off keeps service/target inside a grant" || bad "off inside a grant (rc $rc11g): dir $(last_builddir)"
+cnt11h="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out11h="$(cd "$repo" && scripts/build-gate-jar.sh -Dnexus.build.dir=/elsewhere 2>&1)"; rc11h=$?
+[[ $rc11h -eq 64 && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt11h" ]] && ok "a caller's own -Dnexus.build.dir is refused (64) before anything runs" || bad "caller build dir (rc $rc11h): $out11h"
+rm -f "$repo/service/src/main/J.java" "$repo/service/src/main/K.java" "$repo/service/src/main/L.java" "$repo/service/src/main/M.java" "$repo/service/src/main/N.java"
 
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &

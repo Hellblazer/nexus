@@ -94,6 +94,13 @@
 # says "at this time the jar was verified to be the one for this tree's build
 # inputs"; the jar's own mtime wins when something rewrote the jar later.
 #
+# BUILT OFF THE DISK (nexus-0a1hw). On a lab host build-gate-jar.sh builds into a
+# tmpfs directory (scripts/lib/build-tmpfs.sh), so the jar it stores is on another
+# filesystem: the store COPIES it into the entry (a link cannot cross filesystems),
+# once per key, and the install then links the entry into service/target as a hit
+# does. The cache stays on disk on purpose: on tmpfs every hit would copy the jar
+# across filesystems instead of linking it, and a reboot would empty it.
+#
 # WHAT A HIT STILL WRITES. No jar bytes. It copies the checkout's git index
 # (~0.5 MB) into a throwaway file to compute the key, rewrites that copy once
 # more (update-index --cacheinfo for the normalized release.properties), and
