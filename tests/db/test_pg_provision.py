@@ -1695,6 +1695,8 @@ CREATE TABLE IF NOT EXISTS nexus.memory (
 ALTER TABLE nexus.memory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE nexus.memory FORCE ROW LEVEL SECURITY;
 
+-- Re-runnable: e2e_migrated and the DDL test can both apply this to one cluster.
+DROP POLICY IF EXISTS tenant_isolation ON nexus.memory;
 CREATE POLICY tenant_isolation ON nexus.memory
     USING      (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
@@ -1706,6 +1708,13 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO nexus_svc;
 """
 
 _TENANT = "gmiaf31-e2e-tenant"
+
+_SVC_INSERT_SQL = (
+    f"SET LOCAL nexus.tenant = '{_TENANT}'; "
+    f"INSERT INTO nexus.memory (tenant_id, project, title, content) "
+    f"VALUES ('{_TENANT}', 'e2e-proj', 'e2e-title', 'e2e-body')"
+    f" ON CONFLICT DO NOTHING"
+)
 
 
 def _psql_as(bins: PgBinaries, port: int, user: str, password: str, db: str, sql: str) -> str:
@@ -1738,6 +1747,24 @@ def e2e_provisioned(bins: PgBinaries) -> tuple[ProvisionResult, Path]:
             yield result, config_dir
     finally:
         _remove_cluster(bins, config_dir)
+
+
+@pytest.fixture(scope="module")
+def e2e_migrated(e2e_provisioned, bins: PgBinaries) -> tuple[ProvisionResult, Path]:
+    """``e2e_provisioned`` with both DDL blocks applied AS nexus_admin and one row inserted AS nexus_svc.
+
+    The nexus_svc tests take this rather than relying on the DDL tests having run first on the same
+    cluster. xdist's load scheduling can put a class's tests on different workers, each building its own
+    module-scoped cluster; ``-n 4`` over the five provision files on chas ran the DDL tests on one worker
+    and the two SELECT tests on another, whose cluster had provision's ``nexus`` schema and no
+    ``GRANT USAGE`` to nexus_svc: "permission denied for schema nexus" (nexus-0ajjm). The DDL is
+    idempotent, so the DDL tests still run it themselves in any order."""
+    result, config_dir = e2e_provisioned
+    creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+    for ddl in (_LIQUIBASE_TRACKING_DDL, _APP_SCHEMA_DDL):
+        _psql_as(bins, result.port, "nexus_admin", creds["NX_DB_ADMIN_PASS"], NEXUS_DB_NAME, ddl)
+    _psql_as(bins, result.port, "nexus_svc", creds["NX_DB_PASS"], NEXUS_DB_NAME, _SVC_INSERT_SQL)
+    return e2e_provisioned
 
 
 class TestEndToEndProvisionMigrateDML:
@@ -1776,23 +1803,16 @@ class TestEndToEndProvisionMigrateDML:
         _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
                  _APP_SCHEMA_DDL)
 
-    def test_nexus_svc_insert_under_rls(self, e2e_provisioned, bins):
+    def test_nexus_svc_insert_under_rls(self, e2e_migrated, bins):
         """nexus_svc can INSERT rows when the tenant GUC is stamped."""
-        result, config_dir = e2e_provisioned
+        result, config_dir = e2e_migrated
         creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
         svc_pass = creds["NX_DB_PASS"]
+        _psql_as(bins, result.port, "nexus_svc", svc_pass, NEXUS_DB_NAME, _SVC_INSERT_SQL)
 
-        sql = (
-            f"SET LOCAL nexus.tenant = '{_TENANT}'; "
-            f"INSERT INTO nexus.memory (tenant_id, project, title, content) "
-            f"VALUES ('{_TENANT}', 'e2e-proj', 'e2e-title', 'e2e-body')"
-            f" ON CONFLICT DO NOTHING"
-        )
-        _psql_as(bins, result.port, "nexus_svc", svc_pass, NEXUS_DB_NAME, sql)
-
-    def test_nexus_svc_select_under_rls_sees_own_rows(self, e2e_provisioned, bins):
+    def test_nexus_svc_select_under_rls_sees_own_rows(self, e2e_migrated, bins):
         """nexus_svc SELECT with GUC returns its own rows."""
-        result, config_dir = e2e_provisioned
+        result, config_dir = e2e_migrated
         creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
         svc_pass = creds["NX_DB_PASS"]
 
@@ -1808,9 +1828,9 @@ class TestEndToEndProvisionMigrateDML:
             f"nexus_svc should see its own row under RLS, got count={count_line[-1]}"
         )
 
-    def test_nexus_svc_no_guc_sees_zero_rows(self, e2e_provisioned, bins):
+    def test_nexus_svc_no_guc_sees_zero_rows(self, e2e_migrated, bins):
         """nexus_svc without GUC sees zero rows (RLS fail-closed)."""
-        result, config_dir = e2e_provisioned
+        result, config_dir = e2e_migrated
         creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
         svc_pass = creds["NX_DB_PASS"]
 
