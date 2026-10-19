@@ -27,14 +27,13 @@ from __future__ import annotations
 import getpass
 import socket
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from nexus._install.layout_core import exe_name
-from tests._child_process import integration_pg_conf, pg_data_tempdir
+from tests._child_process import integration_pg_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
 
 _PG_BIN = pg_bin_dir()
@@ -58,15 +57,6 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _teardown_cluster(bins, pgdata: Path) -> None:
-    """Stop the cluster, then remove its dir (pg_data_tempdir is not pytest-managed)."""
-    subprocess.run(
-        [str(bins.pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    shutil.rmtree(pgdata, ignore_errors=True)
-
-
 @pytest.fixture(scope="module")
 def svc_monitor_cluster(request):
     """Scratch cluster with nexus_svc EXPLICITLY NOINHERIT + pg_monitor
@@ -87,7 +77,7 @@ def svc_monitor_cluster(request):
     # postmaster.pid at its top level (nexus-942h9). pytest's tmp_path_factory would
     # put the cluster on disk; this lands on the run's tmpfs root on Linux (nexus-szyun).
     pgdata = Path(pg_data_tempdir("nexus_svcmon_pg_"))
-    request.addfinalizer(lambda: _teardown_cluster(bins, pgdata))
+    request.addfinalizer(lambda: stop_and_remove_cluster(bins.pg_ctl, pgdata))
     port = _free_port()
     os_user = getpass.getuser()
 

@@ -657,3 +657,45 @@ class TestEveryIntegrationClusterGetsTheConf:
     def test_the_comment_stripper_ignores_a_call_named_in_a_comment(self) -> None:
         assert "integration_pg_conf(" not in _code_only("x = 1  # integration_pg_conf(p)\n")
         assert "integration_pg_conf(" in _code_only("c = integration_pg_conf(p)\n")
+
+
+class TestStopAndRemoveCluster:
+    """The teardown of a ``pg_data_tempdir`` cluster removes the directory even when ``pg_ctl stop`` hangs
+    (nexus-szyun): a ``TimeoutExpired`` that escaped before the ``rmtree`` left the dir on the run's shared
+    tmpfs root, holding RAM until the crash sweep."""
+
+    def test_it_stops_then_removes_the_dir(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        (pgdata / "base").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        def fake_stop(argv: list[str], **kw: object) -> None:
+            assert pgdata.is_dir(), "the dir must still exist while pg_ctl stop runs"
+            assert kw["timeout"] == 30 and kw["check"] is False
+            calls.append(argv)
+
+        cp.stop_and_remove_cluster("pg_ctl", pgdata, run=fake_stop)
+        assert calls == [["pg_ctl", "-D", str(pgdata), "stop", "-m", "immediate"]]
+        assert not pgdata.exists()
+
+    def test_a_stop_that_times_out_still_removes_the_dir_and_still_raises(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        (pgdata / "base").mkdir(parents=True)
+
+        def hung_stop(argv: list[str], **kw: object) -> None:
+            raise subprocess.TimeoutExpired(argv, 30)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            cp.stop_and_remove_cluster("pg_ctl", pgdata, run=hung_stop)
+        assert not pgdata.exists(), "a hung pg_ctl stop left the cluster dir on the shared tmpfs root"
+
+    def test_a_pg_ctl_that_cannot_launch_still_removes_the_dir(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        pgdata.mkdir()
+
+        def missing(argv: list[str], **kw: object) -> None:
+            raise FileNotFoundError(argv[0])
+
+        with pytest.raises(FileNotFoundError):
+            cp.stop_and_remove_cluster("pg_ctl", pgdata, run=missing)
+        assert not pgdata.exists()

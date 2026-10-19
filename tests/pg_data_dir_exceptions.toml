@@ -3,8 +3,10 @@
 # enforce this file against the tree in both directions. A cluster made under tmp_path, tmp_path_factory or
 # mkdtemp writes its data and WAL to the CI host's disk instead of the run's tmpfs root; every file with an
 # initdb / pg_ctl_start site is either proven to use the helper, or listed here with the reason it cannot.
+# The tables may only shrink: tests/_ddl_cluster_sites.py::NOT_A_CLUSTER_CEILING and DISK_REQUIRED_CEILING
+# pin today's counts. Every disk_required reason names the bead that drains it.
 
-# The file names initdb or pg_ctl_start but never runs a postmaster: no data dir exists to place.
+# The file names initdb, pg_ctl_start, _init_cluster or provision() but never runs a postmaster: no data dir exists to place.
 [not_a_cluster]
 "tests/db/test_no_host_pg_fallback.py" = "builds a stub bundle of empty files in tmp_path to test binary discovery; initdb is looked up, never run"
 "tests/db/test_pg_provision_binary_discovery.py" = "binary-discovery unit tests over empty stub files; initdb is looked up, never run"
@@ -12,15 +14,19 @@
 "tests/db/test_pg_auth_unit.py" = "pg_provision._run is faked and the bin dir is stub files; _init_cluster is called with tmp_path paths but no initdb or postmaster runs"
 "tests/db/test_pg_windows_start.py" = "pg_provision._run is faked and the bin dir is stub files; _init_cluster is called with a tmp_path path but no initdb or postmaster runs"
 "tests/test_pg_ctl_start.py" = "drives tests._pg_ctl.pg_ctl_start against a fake pg_ctl shell script in tmp_path; no postmaster starts"
+"tests/daemon/test_service_status_clarity.py" = "calls pg_provision.provision(tmp_path / 'cfg') with discover_pg_binaries, check_pgvector_available and _init_cluster patched; the pre-flight raises before any cluster work"
+"tests/db/test_pg_provision_root_guard.py" = "provision(config_dir=tmp_path) is stopped by a faked root-user guard or a tripwire before bootstrap_superuser; no initdb or postmaster runs"
+"tests/test_smart_app_control.py" = "provision(config_dir=tmp_path) is refused by a faked Smart App Control probe before the bundle is touched; no initdb or postmaster runs"
 
 # Real clusters that stay on disk. Reason shared by the provision()-driven group:
 #   pg_provision.provision(config_dir) puts the cluster at <config_dir>/postgres, one level under the directory
 #   the test supplies, and writes credentials beside it. The owner-record sweep reads postmaster.pid only at the
 #   top of a recorded dir, so recording config_dir would let a crash sweep rmtree it under a live orphan
-#   postmaster. These move once the sweep understands a nested pgdata (tests/_engine_substrate.py).
+#   postmaster. These move once the sweep understands a nested pgdata (nexus-0ajjm, tests/_engine_substrate.py).
+#   provision() on a pg_data_tempdir() dir is NOT the way out: the lint rejects it until nexus-0ajjm lands.
 [disk_required]
-"tests/db/test_pg_provision.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata, so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_provision_ca3_bundle.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata, so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_bundle_relocation.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the relocated bundle is copied beside it; the owner-record sweep cannot reap a nested pgdata, so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_scram_auth.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the tests re-provision the same config_dir; the owner-record sweep cannot reap a nested pgdata, so config_dir stays on tmp_path"
-"tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the supervisor under test reads config_dir; the owner-record sweep cannot reap a nested pgdata, so config_dir stays on tmp_path_factory"
+"tests/db/test_pg_provision.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
+"tests/db/test_pg_provision_ca3_bundle.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
+"tests/db/test_pg_bundle_relocation.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
+"tests/db/test_pg_scram_auth.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the tests re-provision the same config_dir; the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path"
+"tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the supervisor under test reads config_dir; the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"

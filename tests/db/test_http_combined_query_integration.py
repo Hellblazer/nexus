@@ -206,6 +206,9 @@ def pg_instance():
             "-e", f"POSTGRES_USER={pg_user}",
             "-e", f"POSTGRES_PASSWORD={pg_pass}",
             "-p", f"{pg_port}:5432",
+            # nexus-szyun: PGDATA on a capped tmpfs, as the Java suites do (PgContainerHelper.PGDATA), so a
+            # throwaway cluster never writes WAL to the docker data-root of whatever host runs this.
+            "--tmpfs", "/var/lib/postgresql/data:rw,size=2g",
             "pgvector/pgvector:pg17",
         ],
         check=True, capture_output=True,

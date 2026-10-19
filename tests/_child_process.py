@@ -230,6 +230,26 @@ def pg_data_tempdir(prefix: str, *, parent_dir: str | None = None) -> str:
     return path
 
 
+def stop_and_remove_cluster(
+    pg_ctl: str | os.PathLike[str],
+    pgdata: str | os.PathLike[str],
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Teardown of a cluster made by :func:`pg_data_tempdir`: ``pg_ctl stop -m immediate``, then remove
+    the directory. The removal is in a ``finally``: a ``pg_ctl`` that hangs past its 30 s timeout
+    (``TimeoutExpired``) or cannot be launched must not leave the directory on the run's shared tmpfs
+    root, where it holds RAM until the crash sweep (nexus-szyun). The exception still propagates, so a
+    stuck postmaster is a loud teardown error, not a silent one."""
+    try:
+        run(
+            [str(pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    finally:
+        shutil.rmtree(pgdata, ignore_errors=True)
+
+
 def integration_pg_conf(pgdata: str) -> str:
     """The ``postgresql.conf`` lines an integration cluster made by
     :func:`pg_data_tempdir` appends: fsync off, and the WAL cap and mmap DSM when it
@@ -249,5 +269,6 @@ __all__ = [
     "pg_data_tempdir",
     "pid_alive",
     "popen_in_group",
+    "stop_and_remove_cluster",
     "stop_group",
 ]
