@@ -774,7 +774,11 @@ def test_the_documented_gaps_are_real_gaps(box: Box) -> None:
         # sparse-checkout set may also add extensions.worktreeConfig once; that
         # shared-config key is a legitimate detection, the worktree-local part is not.
         assert "config.worktree" not in text, (why, text)
-        assert "index" not in text.lower(), (why, text)
+        # The box's own path is in the report; hellmini's tmp dir is tmp.noindex.
+        named = text
+        for root in {str(box.root.resolve()), str(box.root)}:
+            named = named.replace(root, "<box>")
+        assert "index" not in named.lower(), (why, text)
     hooks_sub = box.git_dir / "hooks" / "sub"
     hooks_sub.mkdir()
     (hooks_sub / "inner").write_text("1")
