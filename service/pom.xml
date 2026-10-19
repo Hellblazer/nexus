@@ -260,6 +260,16 @@
                                     </pluginExecutionFilter>
                                     <action><ignore /></action>
                                 </pluginExecution>
+                                <!-- nexus-bnc56: the codegen skip steps (jooq-inputs, jooq-stamp-*). -->
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.apache.maven.plugins</groupId>
+                                        <artifactId>maven-antrun-plugin</artifactId>
+                                        <versionRange>[1.0,)</versionRange>
+                                        <goals><goal>run</goal></goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore /></action>
+                                </pluginExecution>
                             </pluginExecutions>
                         </lifecycleMappingMetadata>
                     </configuration>
@@ -407,6 +417,7 @@
                         </goals>
                         <phase>generate-sources</phase>
                         <configuration>
+                            <skip>${nexus.jooq.main.skip}</skip>
                             <database>
                                 <type>POSTGRES</type>
                                 <containerImage>pgvector/pgvector:pg17</containerImage>
@@ -489,6 +500,7 @@
                         </goals>
                         <phase>generate-test-sources</phase>
                         <configuration>
+                            <skip>${nexus.jooq.test.skip}</skip>
                             <database>
                                 <type>POSTGRES</type>
                                 <containerImage>pgvector/pgvector:pg17</containerImage>
@@ -633,7 +645,134 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-antrun-plugin</artifactId>
                 <version>3.1.0</version>
+                <configuration>
+                    <!-- nexus-bnc56: the jooq-inputs execution below sets nexus.jooq.*.skip
+                         for the codegen plugin; the properties must leave the Ant project. -->
+                    <exportAntProperties>true</exportAntProperties>
+                </configuration>
                 <executions>
+                    <!-- nexus-bnc56: do not boot the codegen container when the generated sources
+                         are current. testcontainers-jooq-codegen-maven-plugin 0.0.4 (the newest ever
+                         published) boots pgvector/pgvector:pg17 per execution and exposes no tmpfs,
+                         memory or command setting, so PGDATA sits on Docker's overlay (the host disk)
+                         with no memory cap, twice per Maven invocation, outside PgContainerHelper.
+                         This step hashes what the generation reads (this pom, which holds the jOOQ
+                         config, plus the changelog tree each execution applies) and compares it with
+                         the stamp the jooq-stamp-* steps write after a successful generation. A
+                         match with the generated .java files still on disk sets the plugin's skip.
+                         `mvn clean`, any changelog or pom edit, or -Dnexus.jooq.regenerate=true
+                         regenerates; CI starts from a clean checkout, so it always does. The
+                         hash cannot see the floating pg17 image tag; -Dnexus.jooq.regenerate=true
+                         is the answer to that. tests/test_service_jooq_codegen_skip_lint.py pins
+                         the wiring. -Pprebuilt-jooq unbinds all three steps. -->
+                    <execution>
+                        <id>jooq-inputs</id>
+                        <phase>initialize</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <property name="nexus.jooq.stamp.dir" value="${project.build.directory}/jooq-stamps"/>
+                                <mkdir dir="${nexus.jooq.stamp.dir}"/>
+
+                                <!-- main: hash, then decide. -->
+                                <fileset id="nexus.jooq.main.inputs" dir="${project.basedir}">
+                                    <include name="pom.xml"/>
+                                        <include name="src/main/resources/db/**"/>
+                                </fileset>
+                                <pathconvert property="nexus.jooq.main.names" pathsep="&#10;" dirsep="/">
+                                    <sort>
+                                        <fileset refid="nexus.jooq.main.inputs"/>
+                                        <name/>
+                                    </sort>
+                                    <map from="${project.basedir}/" to=""/>
+                                </pathconvert>
+                                <echo file="${nexus.jooq.stamp.dir}/main.names" message="${nexus.jooq.main.names}"/>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-sums">
+                                    <union>
+                                        <sort>
+                                            <fileset refid="nexus.jooq.main.inputs"/>
+                                            <name/>
+                                        </sort>
+                                        <file file="${nexus.jooq.stamp.dir}/main.names"/>
+                                    </union>
+                                </checksum>
+                                <loadfile property="nexus.jooq.main.stamp"
+                                          srcFile="${nexus.jooq.stamp.dir}/main.sha256" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <condition property="nexus.jooq.main.skip" value="true" else="false">
+                                    <and>
+                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                        <equals arg1="${nexus.jooq.main.stamp}" arg2="${nexus.jooq.main.hash}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.dir}" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+
+                                <!-- test: hash, then decide. -->
+                                <fileset id="nexus.jooq.test.inputs" dir="${project.basedir}">
+                                    <include name="pom.xml"/>
+                                        <include name="src/main/resources/db/**"/>
+                                        <include name="src/test/resources/db/**"/>
+                                </fileset>
+                                <pathconvert property="nexus.jooq.test.names" pathsep="&#10;" dirsep="/">
+                                    <sort>
+                                        <fileset refid="nexus.jooq.test.inputs"/>
+                                        <name/>
+                                    </sort>
+                                    <map from="${project.basedir}/" to=""/>
+                                </pathconvert>
+                                <echo file="${nexus.jooq.stamp.dir}/test.names" message="${nexus.jooq.test.names}"/>
+                                <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.hash"
+                                          forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-sums">
+                                    <union>
+                                        <sort>
+                                            <fileset refid="nexus.jooq.test.inputs"/>
+                                            <name/>
+                                        </sort>
+                                        <file file="${nexus.jooq.stamp.dir}/test.names"/>
+                                    </union>
+                                </checksum>
+                                <loadfile property="nexus.jooq.test.stamp"
+                                          srcFile="${nexus.jooq.stamp.dir}/test.sha256" failonerror="false" quiet="true">
+                                    <filterchain><striplinebreaks/></filterchain>
+                                </loadfile>
+                                <condition property="nexus.jooq.test.skip" value="true" else="false">
+                                    <and>
+                                        <not><istrue value="${nexus.jooq.regenerate}"/></not>
+                                        <equals arg1="${nexus.jooq.test.stamp}" arg2="${nexus.jooq.test.hash}"/>
+                                        <resourcecount when="greater" count="0">
+                                            <fileset dir="${jooq.generated.test.dir}" includes="**/*.java"
+                                                     erroronmissingdir="false"/>
+                                        </resourcecount>
+                                    </and>
+                                </condition>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>jooq-stamp-main</id>
+                        <phase>process-sources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <echo file="${project.build.directory}/jooq-stamps/main.sha256" message="${nexus.jooq.main.hash}"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>jooq-stamp-test</id>
+                        <phase>process-test-sources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <echo file="${project.build.directory}/jooq-stamps/test.sha256" message="${nexus.jooq.test.hash}"/>
+                            </target>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>jlink-image</id>
                         <phase>package</phase>
@@ -700,6 +839,26 @@
                                  failed on exactly this, 2026-09-05. -->
                             <execution>
                                 <id>generate-jooq-test-sources</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- nexus-bnc56: the codegen skip steps. A stamp written here would vouch
+                         for sources this checkout never generated. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>jooq-inputs</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>jooq-stamp-main</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>jooq-stamp-test</id>
                                 <phase>none</phase>
                             </execution>
                         </executions>
