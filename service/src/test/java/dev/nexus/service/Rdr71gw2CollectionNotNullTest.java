@@ -595,10 +595,9 @@ class Rdr71gw2CollectionNotNullTest {
         try (Connection holder = DriverManager.getConnection(
                 pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
             holder.setAutoCommit(false);
-            try (Statement st = holder.createStatement()) {
-                // The exact first statement catalog-025-0 opens with.
-                st.execute("LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE");
-            }
+            // The exact first statement catalog-025-0 opens with.
+            PgContainerHelper.lockTable(holder, CATALOG_DOCUMENT_CHUNKS,
+                PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
 
             Future<?> writer = executor.submit(() -> {
                 try (Connection su2 = pg.createConnection("")) {

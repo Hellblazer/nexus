@@ -51,7 +51,7 @@ class ServiceTokenScopeBackfillTest {
         pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // Pre-003 shape, verbatim from service-tokens-001 + 002.
+            // Pre-003 shape from service-tokens-001 + 002 (created_at defaults to current_timestamp, the same as now()).
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             var tokens = DSL.table(DSL.name("nexus", "service_tokens"));
             var label = DSL.field(DSL.name("label"), SQLDataType.CLOB);

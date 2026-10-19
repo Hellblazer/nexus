@@ -121,7 +121,7 @@ class NexusServiceScheduledSweepTest {
 
     /**
      * hygiene-001 follow-on (coordinator scope addition): seeds a
-     * {@code nexus.plans} row directly via raw SQL rather than through
+     * {@code nexus.plans} row directly (jOOQ insert) rather than through
      * {@code PlanRepository} — this test class exercises {@link NexusService}
      * as a black box, mirroring {@link #insertDataToken}. {@code verb} is
      * supplied explicitly because hygiene-001's own changeset (this same
@@ -217,7 +217,7 @@ class NexusServiceScheduledSweepTest {
         // tenant-enumeration SELECT, so this isolates the per-arm bound.
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "SHARE");
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, PgContainerHelper.LockMode.SHARE);
 
             long startedAt = System.nanoTime();
             NexusService.SweepCounts counts =
@@ -294,7 +294,7 @@ class NexusServiceScheduledSweepTest {
 
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "SHARE");
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, PgContainerHelper.LockMode.SHARE);
 
             for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
                 service.runScheduledSweep(now, Duration.ofMillis(500));
@@ -338,7 +338,7 @@ class NexusServiceScheduledSweepTest {
 
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "ACCESS EXCLUSIVE");
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
 
             long startedAt = System.nanoTime();
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->

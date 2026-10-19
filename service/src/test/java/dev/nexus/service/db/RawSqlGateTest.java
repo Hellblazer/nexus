@@ -965,7 +965,7 @@ class RawSqlGateTest {
         // pg_get_constraintdef, format() across pg_class/pg_proc/pg_policy/...), which have no typed jOOQ form. Its other
         // reads and its REVOKE are jOOQ.
         Map.entry("dev/nexus/service/PristineCloneSkipTest.java", 1),
-        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 9), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 20 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 10; nexus-cbo4a 2026-10-19 DROP NOT NULL onto jOOQ: 10 -> 9
+        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 8), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 20 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 10; nexus-cbo4a 2026-10-19 DROP NOT NULL onto jOOQ: 10 -> 9; nexus-cbo4a 2026-10-19 batch 6 LOCK TABLE onto PgContainerHelper.lockTable: 9 -> 8
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
         // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
         // worktree-agent-ae864db44cc9fe82c). An earlier design pinned this
@@ -1153,7 +1153,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
-        Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 1),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
         // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): the ChashProbePlanShapeTest /
         // TaxonomyCentroidAnnPlanShapeTest idiom -- 3 bulk INSERT...SELECT generate_series
@@ -1721,8 +1720,10 @@ class RawSqlGateTest {
     // PgContainerHelper.lockTable (nexus_test.lock_table, test-objects-lock-table). Tk070P6aTtlDaysCountedDeleteTest (2) and
     // Tk070P6bTtlDaysCountedUpdateTest (1) keep the one Statement.execute that replays a changeset's own <sql> text extracted
     // from the product changelog XML (not a Java literal): the point is the driver's SQLWarning chain off that very
-    // statement, which Liquibase's own connection does not expose.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 123;
+    // statement, which Liquibase's own connection does not expose. Review fold-in, 123 -> 121 (49 -> 48 files): the
+    // LOCK TABLE sites in TokenStoreDataTokenSweepTest and Rdr71gw2CollectionNotNullTest go through lockTable, which
+    // now takes a PgContainerHelper.LockMode.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 121;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

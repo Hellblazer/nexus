@@ -652,7 +652,7 @@ class CatalogEngineDefects70Test {
                 List.of(row(0, ch("defects70-eldyi-stampidx-0")))))
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
 
-        // Read indexed_at directly (raw SQL, bypassing the deleted_at read
+        // Read indexed_at directly (superuser jOOQ select, bypassing the deleted_at read
         // filter — getDocument would just return null for a tombstoned row)
         // and confirm it is exactly the pre-tombstone value: untouched by the
         // refused attempt above, proving the whole transaction rolled back

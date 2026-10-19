@@ -325,7 +325,8 @@ class CatalogPurgeTrashTest {
 
     /** Server-captured {@code NOW()} (nexus-ff85q precedent: pin against a SQL-side
      *  instant, never a Java-clock read) — the reference point the boundary test
-     *  backdates {@code deleted_at} relative to. */
+     *  backdates {@code deleted_at} relative to. The 60-day fixtures above may use the
+     *  Java clock only because their margin dwarfs any drift; a boundary never does. */
     private java.time.OffsetDateTime capturedNow() throws Exception {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).select(DSL.currentOffsetDateTime())

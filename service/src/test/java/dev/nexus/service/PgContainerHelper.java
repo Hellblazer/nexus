@@ -1738,13 +1738,22 @@ public final class PgContainerHelper {
      *
      * @param conn  the connection whose transaction takes the lock
      * @param table the generated jOOQ table to lock (e.g. {@code Tables.SERVICE_TOKENS})
-     * @param mode  a PostgreSQL table lock mode, e.g. {@code "SHARE"} or {@code "ACCESS EXCLUSIVE"}
+     * @param mode  the PostgreSQL table lock mode
      */
-    public static void lockTable(Connection conn, Table<?> table, String mode) {
+    public static void lockTable(Connection conn, Table<?> table, LockMode mode) {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         ctx.select(DSL.function(DSL.name("nexus_test", "lock_table"), SQLDataType.BOOLEAN,
-                DSL.val(ctx.render(table)), DSL.val(mode)))
+                DSL.val(ctx.render(table)), DSL.val(mode.name().replace('_', ' '))))
             .fetch();
+    }
+
+    /**
+     * The eight PostgreSQL table lock modes, for {@link #lockTable}; each constant's name with underscores as
+     * spaces is the mode's keyword form, which {@code nexus_test.lock_table} checks again server-side.
+     */
+    public enum LockMode {
+        ACCESS_SHARE, ROW_SHARE, ROW_EXCLUSIVE, SHARE_UPDATE_EXCLUSIVE,
+        SHARE, SHARE_ROW_EXCLUSIVE, EXCLUSIVE, ACCESS_EXCLUSIVE
     }
 
     /**

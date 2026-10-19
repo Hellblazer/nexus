@@ -17,6 +17,9 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="tuples-column-select" author="nexus-cbo4a" runAlways="true">
-        <sql>GRANT SELECT (id, tenant_id, subspace, template, keys, dims, claim_state, claimant, claim_id, lease_until, attempts, consumed_at, consumed_by, expires_at, created_at) ON nexus.tuples TO ${role}</sql>
+        <sql>
+            GRANT SELECT (id, tenant_id, subspace, template, keys, dims, claim_state, claimant, claim_id, lease_until,
+                          attempts, consumed_at, consumed_by, expires_at, created_at) ON nexus.tuples TO ${role}
+        </sql>
     </changeSet>
 </databaseChangeLog>

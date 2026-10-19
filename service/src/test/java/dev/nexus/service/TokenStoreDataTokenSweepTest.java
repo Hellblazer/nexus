@@ -17,7 +17,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -265,13 +264,7 @@ class TokenStoreDataTokenSweepTest {
         // connection: without a statement_timeout the sweep would wait forever.
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            // KEPT RAW (nexus-cbo4a batch 13): jOOQ has no typed LOCK TABLE clause, and
-            // every other LOCK TABLE site in this tree (NexusServiceScheduledSweepTest,
-            // Rdr71gw2CollectionNotNullTest) is raw too -- there is no existing typed
-            // form to fold onto.
-            try (Statement st = blocker.createStatement()) {
-                st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
-            }
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, PgContainerHelper.LockMode.SHARE);
 
             long startedAt = System.nanoTime();
             assertThatThrownBy(() ->

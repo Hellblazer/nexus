@@ -101,7 +101,7 @@ class NexusServiceTupleSweepIsolationTest {
         service = new NexusService(0, TOKEN, svcDs, null, null, null, null, registry);
 
         // One superuser connection (bypasses RLS and the REVOKE below), reused for
-        // every raw-SQL seed/read helper -- autoCommit=true, so each call is its own
+        // every seed/read helper -- autoCommit=true, so each call is its own
         // statement, immediately visible to every other connection.
         suConn = pg.createConnection("");
         su = DSL.using(suConn, SQLDialect.POSTGRES);
