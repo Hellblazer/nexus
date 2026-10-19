@@ -75,6 +75,12 @@ if [ -z "$PGC" ]; then
   if [ -n "${NX_DB_URL:-}" ]; then
     echo "SKIP boot shapes: external NX_DB_URL cannot give each boot a clean database."
     echo "     WARN the cloud shape and the two failure boots are NOT covered by this run."
+    # A gate that skip-passes when its dependency is absent needs a max-skip: a release
+    # leg sets NATIVE_SMOKE_REQUIRE_SHAPES=1 so a skipped shapes block fails the run.
+    if [ "${NATIVE_SMOKE_REQUIRE_SHAPES:-0}" = "1" ]; then
+      echo "FAIL: NATIVE_SMOKE_REQUIRE_SHAPES=1 and the boot shapes were skipped"
+      exit 3
+    fi
     exit 0
   fi
   OWN_PG=1
@@ -82,7 +88,7 @@ if [ -z "$PGC" ]; then
   PGP=$(free_port)
   docker rm -f "$PGC" >/dev/null 2>&1 || true
   docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
-    -e POSTGRES_PASSWORD=nexus -p "${PGP}:5432" pgvector/pgvector:pg17 >/dev/null \
+    -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGP}:5432" pgvector/pgvector:pg17 >/dev/null \
     || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
   for _ in $(seq 1 60); do docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
   docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
@@ -161,6 +167,7 @@ no_log() { ! grep -q -- "$1" "$BOOT_LOG"; }
 exited_in_bound() { [ "$EXIT_TIMEOUT" = "0" ]; }
 exited_with_failure() { [ "$EXIT_RC" != "0" ] && [ "$EXIT_RC" -lt 128 ]; }
 exit_is_143() { [ "$EXIT_RC" = "143" ]; }
+ort_dir_nonempty() { [ "$(find "$BOOT_ORT" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" != "0" ]; }
 ort_dir_empty() { [ "$(find "$BOOT_ORT" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; }
 size_floor_named() {
   has_log 'far below the standard fp32 bge export' && grep -qE 'model at .*model\.onnx is [0-9]+ bytes' "$BOOT_LOG"
@@ -188,7 +195,7 @@ run_cloud_shape() {
   ck "probe saw the voyage key and no bge" 'grep -m1 embedder_presence "$BOOT_LOG"' \
     has_log "event=embedder_presence bge_present=false voyage_key_present=true"
   ck "probe looked in NX_ONNX_MODEL_DIR" 'echo "probe line does not name $BOOT_MODELS"' has_log "path=$BOOT_MODELS/"
-  curl -fsS -H "Authorization: Bearer smoketoken" "http://127.0.0.1:${BOOT_PORT}/version" \
+  curl -fsS -m 15 -H "Authorization: Bearer smoketoken" "http://127.0.0.1:${BOOT_PORT}/version" \
     > "$BOOT_DIR/version.json" 2> "$BOOT_DIR/curl.err"
   ck "GET /version answers" 'cat "$BOOT_DIR/curl.err"' test -s "$BOOT_DIR/version.json"
   ck "/version reports embedding_mode voyage with Voyage models only" 'cat "$BOOT_DIR/version.check"' version_is_voyage_only
@@ -240,6 +247,12 @@ run_truncated_model() {
     ck "never reaches service_ready" 'echo "service_ready was logged"' no_log 'event=service_ready'
     ck "probe reports the truncated model PRESENT (presence is not validity)" 'grep -m1 embedder_presence "$BOOT_LOG"' \
       has_log "event=embedder_presence bge_present=true voyage_key_present=$want_key"
+    # Positive controls for the cloud shape's negative ONNX checks: a boot that DOES reach
+    # applyAtBoot logs the extraction event and fills NX_ORT_NATIVE_DIR. Without these a
+    # renamed event, or a binary that ignores the env var, would pass the cloud shape vacuously.
+    ck "positive control: applyAtBoot logged the extraction" 'grep -m1 ort_native_dir "$BOOT_LOG"' \
+      has_log 'event=ort_native_dir source=extracted'
+    ck "positive control: NX_ORT_NATIVE_DIR was filled" 'find "$BOOT_ORT" -mindepth 1 | head -5' ort_dir_nonempty
     ck "names the size floor (model at <path> is <N> bytes, far below the standard fp32 export)" \
       'echo "size-floor text missing"' size_floor_named
     ck "is not reported as absent (no no_embedder_available)" 'echo "reported as absent"' no_log 'event=no_embedder_available'

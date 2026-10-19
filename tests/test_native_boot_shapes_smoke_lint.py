@@ -200,3 +200,25 @@ def test_external_db_url_without_a_container_skips_loudly_and_leaves_no_scratch(
 def test_shellcheck_clean():
     r = subprocess.run(["shellcheck", str(SHAPES)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
+
+
+def test_the_cloud_shapes_negative_onnx_checks_have_positive_controls() -> None:
+    """The cloud shape asserts NOTHING was extracted; that only means something if a boot that
+    DOES reach applyAtBoot is seen to log the event and fill the directory (review of the
+    P2.2 commit, 2026-10-19)."""
+    text = SHAPES.read_text(encoding="utf-8")
+    assert "positive control: applyAtBoot logged the extraction" in text
+    assert "event=ort_native_dir source=extracted" in text
+    assert "positive control: NX_ORT_NATIVE_DIR was filled" in text
+    assert text.count("ort_dir_nonempty") >= 2
+
+
+def test_a_skipped_shapes_block_can_be_made_a_failure() -> None:
+    text = SHAPES.read_text(encoding="utf-8")
+    assert "NATIVE_SMOKE_REQUIRE_SHAPES" in text
+    assert "exit 3" in text
+
+
+def test_the_throwaway_postgres_binds_loopback_only() -> None:
+    text = SHAPES.read_text(encoding="utf-8")
+    assert '127.0.0.1:${PGP}:5432' in text
