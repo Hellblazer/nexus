@@ -1,29 +1,57 @@
-# DDL statements one full run of each suite may execute (nexus-sz651, epic nexus-aca0q).
+# What one test run may write, in bytes and in DDL statements (nexus-sz651, epic nexus-aca0q).
 #
-# Reduce-only: scripts/ddl_ratchet.py fails a run whose measured count is above `ceiling`.
-# Lower a ceiling in the commit that lowers the count; raising one needs a reviewed reason in
-# that commit's message. The count is the sum of every bucket the suite's reports carry
-# (python: migration + tests; java: shared_migration + shared_tests + shared_empty + dedicated), measured as
-# tests/_ddl_counter.py and service/src/test/java/dev/nexus/service/DdlLogParser.java define it.
+# THE TARGET IS BYTES WRITTEN (disk thrashing). The metrics named `*wal_bytes*` are WAL bytes the
+# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java); on a
+# tmpfs cluster that is churn, not disk. The `*ddl*` metrics are the DDL statement counts that
+# explain them. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are reduce-only:
+# lower one in the commit that lowers the number, raising one needs a reviewed reason in that
+# commit's message. A set ceiling is the WORST value any shard (or run) measured.
 #
-# `basis` is the parallelism the ceiling was measured at: pytest-xdist workers for python_unit
-# (each worker boots and migrates its own cluster), surefire forks for the java suites (each fork
-# migrates its own template). A run at another width is not comparable, so the check refuses it
-# rather than passing or failing it on a number it cannot compare.
+# Every metric is INTENSIVE, so it does not move with how the work is split across shards or forks:
+#   python_unit    one pytest shard's report: bytes and DDL per test (the tests' own time) and the
+#                  migration's bytes and DDL per xdist worker (each worker boots and migrates its own cluster)
+#   java_*         one mvn run of one suite: the migration's bytes and DDL per fork (each fork migrates
+#                  one template), and the rest (clones, dedicated containers, the tests' own work) as totals
+#   python_unit_total   ONLY `ddl_ratchet.py fan-in`, which sums N shard reports. A full-run total depends on
+#                  the width it was measured at, so it carries its `workers` (booted, summed over shards)
+#                  and `shards` and a run at another width is refused rather than compared.
 #
-# "measure" means no full-run measurement exists yet. The check then FAILS and prints the count it
-# just measured; the first full run (the pool restart Sam is waiting on) supplies the numbers,
-# and the follow-up commit replaces each "measure" with an integer. A ceiling nobody set must not
-# pass a run.
+# Tolerance bands: WAL varies a little between runs (autovacuum, full-page images), so a bytes
+# metric passes up to ceiling * (1 + bytes_tolerance); a DDL metric up to ceiling * (1 + ddl_tolerance).
+#
+# "measure" means no full-run measurement exists yet. The check then prints the numbers it just
+# measured and exits 11 (not 0): the first full run (the pool restart Sam is waiting on) supplies
+# them, and the follow-up commit replaces each "measure" with the number. A ceiling nobody set must
+# not pass a run.
 
 [python_unit]
-ceiling = "measure"
-basis = "measure"
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+wal_bytes_per_test = "measure"
+ddl_per_test = "measure"
+migration_wal_bytes_per_worker = "measure"
+migration_ddl_per_worker = "measure"
+
+[python_unit_total]
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+wal_bytes = "measure"
+ddl = "measure"
+workers = "measure"
+shards = "measure"
 
 [java_main]
-ceiling = "measure"
-basis = "measure"
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+migration_wal_bytes_per_fork = "measure"
+migration_ddl_per_fork = "measure"
+other_wal_bytes = "measure"
+other_ddl = "measure"
 
 [java_integration]
-ceiling = "measure"
-basis = "measure"
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+migration_wal_bytes_per_fork = "measure"
+migration_ddl_per_fork = "measure"
+other_wal_bytes = "measure"
+other_ddl = "measure"

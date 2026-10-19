@@ -89,6 +89,13 @@
              bottleneck. -Dnexus.test.forks=1 recovers the old fully-serial
              behavior. -->
         <nexus.test.forks>4</nexus.test.forks>
+
+        <!-- nexus-sz651: which suite this mvn run is, for the bytes/DDL counter (DdlCounts). Each
+             fork writes target/ddl-counts/ddl-<suite>-<run>-*.json and scripts/ddl_ratchet.py reads
+             one suite of one run, so the default run and the @Tag("integration") run (two
+             invocations in service-ci.yml) cannot be summed into each other. The profile below sets
+             "integration" whenever -Dgroups=integration is given; CI also passes it explicitly. -->
+        <nexus.ddl.suite>main</nexus.ddl.suite>
     </properties>
 
     <dependencies>
@@ -364,6 +371,12 @@
                          boundary, not by test-framework bookkeeping. -->
                     <forkCount>${nexus.test.forks}</forkCount>
                     <reuseForks>true</reuseForks>
+                    <!-- nexus-sz651: the counter's suite and run id. maven.build.timestamp is the same
+                         for every fork of one mvn invocation and differs between invocations. -->
+                    <systemPropertyVariables>
+                        <nexus.ddl.suite>${nexus.ddl.suite}</nexus.ddl.suite>
+                        <nexus.ddl.run>${maven.build.timestamp}</nexus.ddl.run>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
 
@@ -1399,6 +1412,20 @@
     </build>
 
     <profiles>
+        <!-- nexus-sz651: -Dgroups=integration selects the second suite (see nexus.ddl.suite above). -->
+        <profile>
+            <id>ddl-suite-integration</id>
+            <activation>
+                <property>
+                    <name>groups</name>
+                    <value>integration</value>
+                </property>
+            </activation>
+            <properties>
+                <nexus.ddl.suite>integration</nexus.ddl.suite>
+            </properties>
+        </profile>
+
         <!-- -Pprebuilt-jooq: compile PRE-GENERATED jOOQ sources instead of running
              the Docker-dependent testcontainers codegen (nexus-f6j31). The
              engine-service-release.yml `jooq-codegen` job runs codegen once on a

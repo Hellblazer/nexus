@@ -276,7 +276,7 @@ jobs:
       # 16 GB) runs the local default of 4 forks (nexus-480wm).
       - name: Run Java test suite
         working-directory: service
-        run: ./mvnw -q test -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+        run: ./mvnw -q test -Dnexus.ddl.suite=main -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # RDR-224 review (nexus-f9bgu.29/.32): tests/fixtures/native_jar_listings.txt is the
       # evidence the native-resource tests and OrtTempSweep's LOADED_LIBS pin are built on.
@@ -301,7 +301,7 @@ jobs:
       # wrong for the CI runner), across the classes carrying the tag (15 at 2026-10-12).
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
-        run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+        run: ./mvnw -q test -Dnexus.ddl.suite=integration -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # Non-vacuity for the step above: it fails loud on a red test, but a
       # selector that stops matching exits 0 having run NOTHING, which is the
