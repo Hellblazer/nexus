@@ -640,7 +640,12 @@ jobs:
       - name: Bytecode to /dev/shm (PYTHONPYCACHEPREFIX, pool only; nexus-m643n)
         # Collection alone writes 116 MB of .pyc per shard to the pool host's NVMe
         # (replay of 2026-10-19, T2 nexus/analysis-ci-startup-bytes-2026-10-19);
-        # with the prefix on /dev/shm the disk write is 23 MB. The prefix redirects
+        # with the prefix on /dev/shm the disk write is 23 MB: about 90 MB per
+        # shard, ~0.5 GB per run, measured for collection only (children run with
+        # python -I ignore the prefix). With labrun F1 (tmpfs workspace, venv on
+        # disk) the in-tree pyc is already in RAM and this still saves the venv's
+        # (~20 MB/shard, inferred); with F5 (nexus-dvk18, read-only shared venv)
+        # the prefix is REQUIRED, since Python cannot write pyc into it. The prefix redirects
         # EVERY import's bytecode, the venv's site-packages included (uv sync does
         # not compile: UV_COMPILE_BYTECODE is unset), and every child process that
         # inherits the job env (engine bootstrap scripts, nested pytest).
@@ -650,7 +655,8 @@ jobs:
         # Per-job directory: run_id + run_attempt + python + shard keeps sibling
         # shards on the shared pool user apart; the last step of the job removes it
         # (if: always()). A job killed past its steps leaves ~50 MB, so this step
-        # also sweeps nx-pyc-* dirs older than 12 h (job timeout is 35 min).
+        # also sweeps this user's nx-pyc-<run>-<attempt>-py<ver>-s<shard> dirs older
+        # than 12 h (job timeout is 35 min, so never a live job's).
         # A runner without a writable /dev/shm (macOS, Windows, GitHub-hosted)
         # keeps the default location: the step is pool-only, and a failed mkdir
         # there degrades to the default with a notice, never a failed job.
@@ -660,11 +666,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-            find /dev/shm -maxdepth 1 -type d -name 'nx-pyc-*' -mmin +720 -exec rm -rf {} + 2>/dev/null || true
-            rm -rf "$NX_PYC_DIR"
-            mkdir -m 0700 "$NX_PYC_DIR"
-            echo "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" >> "$GITHUB_ENV"
-            echo "bytecode prefix: $NX_PYC_DIR"
+            find /dev/shm -maxdepth 1 -type d -user "$(id -u)" -regextype posix-extended \
+              -regex '/dev/shm/nx-pyc-[0-9]+-[0-9]+-py[0-9.]+-s[0-9]+' -mmin +720 \
+              -exec rm -rf {} + 2>/dev/null || true
+            rm -rf "$NX_PYC_DIR" 2>/dev/null || true
+            if mkdir -m 0700 "$NX_PYC_DIR" 2>/dev/null; then
+              echo "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" >> "$GITHUB_ENV"
+              echo "bytecode prefix: $NX_PYC_DIR"
+            else
+              echo "::notice::could not create $NX_PYC_DIR; bytecode stays in the default location"
+            fi
           else
             echo "::notice::no writable /dev/shm on this runner; bytecode stays in the default location"
           fi
@@ -961,7 +972,7 @@ jobs:
         if: always() && runner.environment == 'self-hosted' && runner.os == 'Linux'
         run: |
           case "${PYTHONPYCACHEPREFIX:-}" in
-            /dev/shm/nx-pyc-*) rm -rf -- "$PYTHONPYCACHEPREFIX" ;;
+            /dev/shm/nx-pyc-*) rm -rf -- "$PYTHONPYCACHEPREFIX" || echo "::notice::could not remove $PYTHONPYCACHEPREFIX (a child may still hold it); the next job's 12 h sweep takes it" ;;
             *) echo "no /dev/shm bytecode prefix to remove" ;;
           esac
 

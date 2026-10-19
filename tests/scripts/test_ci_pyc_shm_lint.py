@@ -57,9 +57,11 @@ def prefix_problems(spec: dict) -> list[str]:
     dirs = str(st.get("env", {}).get("NX_PYC_DIR", ""))
     if not dirs.startswith("/dev/shm/"):
         problems.append(f"the prefix directory must sit under /dev/shm/, got {dirs!r}")
-    for part in ("github.run_id", "github.run_attempt", "matrix.shard"):
+    for part in ("github.run_id", "github.run_attempt", "matrix.python-version", "matrix.shard"):
         if part not in dirs:
             problems.append(f"the prefix directory is not unique per job: {part} missing from {dirs!r}")
+    if "mkdir -m 0700" not in run:
+        problems.append("the prefix directory must be created 0700 (private to the job user)")
     if "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" not in run:
         problems.append("the exported prefix is not the per-job NX_PYC_DIR")
     early = [
@@ -108,8 +110,16 @@ def _ci_test_job() -> dict:
             "not unique per job",
         ),
         (lambda s: s["steps"].insert(0, {"run": "uv sync"}), "before the prefix is exported"),
+        (
+            lambda s: [st["env"].update(NX_PYC_DIR=st["env"]["NX_PYC_DIR"].replace("-py${{ matrix.python-version }}", "")) for st in s["steps"] if "NX_PYC_DIR" in st.get("env", {})],
+            "matrix.python-version missing",
+        ),
+        (
+            lambda s: [st.update(run=st["run"].replace("mkdir -m 0700", "mkdir")) for st in s["steps"] if "NX_PYC_DIR" in st.get("env", {})],
+            "created 0700",
+        ),
     ],
-    ids=["no-dir", "not-pool-only", "cleanup-not-always", "cleanup-missing", "not-unique", "uv-before-export"],
+    ids=["no-dir", "not-pool-only", "cleanup-not-always", "cleanup-missing", "not-unique", "uv-before-export", "no-python-version", "not-0700"],
 )
 def test_each_wiring_break_is_caught(mutate, expect) -> None:  # noqa: ANN001
     spec = _ci_test_job()
