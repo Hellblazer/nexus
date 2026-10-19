@@ -276,9 +276,11 @@ def test_tenant_is_gone_before_the_teardown_touch(leaky, t2_tenant):
     teardown = _messages(out, "test_tenant_is_gone_before_the_teardown_touch")
     assert any(
         "the tenant was already torn down when the touch happened" in line
-        and "Put @pytest.mark.t2_tenant on the test" in line
+        and "If a fixture is function-scoped, put @pytest.mark.t2_tenant on the test" in line
+        and "If a fixture is module-, class- or session-scoped, its teardown runs after the function-scoped tenant" in line
         for line in teardown
     ), teardown
+    assert not any("already there" in line for line in teardown), teardown
     by_id = {f["nodeid"].split("::")[-1]: f for f in _report(result)["findings"]}
     assert by_id["test_asks_for_the_service_env_too_late"]["requested_tenant"] == ["t2_service_env"]
     assert by_id["test_asks_for_the_tenant_too_late"]["requested_tenant"] == ["t2_tenant"]
@@ -314,8 +316,17 @@ def test_marked_with_a_function_scoped_touch_is_clean(seeded):
 @pytest.mark.t2_tenant
 def test_marked_with_a_module_scoped_touch_is_named(seeded_for_the_module):
     assert seeded_for_the_module == 1
+
+@pytest.fixture(scope="module")
+def leaky_for_the_module():
+    yield 1
+    touch_storage_and_swallow()
+
+@pytest.mark.t2_tenant
+def test_marked_with_a_module_scoped_teardown_touch_is_named(leaky_for_the_module):
+    assert leaky_for_the_module == 1
 ''')
-    result.assert_outcomes(passed=2, errors=1)
+    result.assert_outcomes(passed=3, errors=2)
     out = result.stdout.str()
     assert not _messages(out, "test_marked_with_a_function_scoped_touch_is_clean")
     lines = _messages(out, "test_marked_with_a_module_scoped_touch_is_named")
@@ -326,8 +337,26 @@ def test_marked_with_a_module_scoped_touch_is_named(seeded_for_the_module):
         for line in lines
     ), lines
     assert not any("Put @pytest.mark.t2_tenant" in line or "Request the t2_tenant fixture" in line for line in lines), lines
-    (finding,) = _report(result)["findings"]
-    assert finding["requested_tenant"] == ["t2_tenant"] and finding["dynamic_tenant"] == ["t2_tenant"]
+    teardown = _messages(out, "test_marked_with_a_module_scoped_teardown_touch_is_named")
+    assert any(
+        "The test already got t2_tenant from its marker" in line
+        and "the tenant was already torn down when the touch happened" in line
+        and "The marker is already there" in line
+        and "If a fixture is module-, class- or session-scoped, its teardown runs after "
+        "the function-scoped tenant is gone" in line
+        and "give that fixture a tenant of its own or a narrower scope" in line
+        and "expects_unresolvable_endpoint" in line
+        for line in teardown
+    ), teardown
+    assert not any("Put @pytest.mark.t2_tenant" in line or "put @pytest.mark.t2_tenant" in line for line in teardown), teardown
+    by_id = {f["nodeid"].split("::")[-1]: f for f in _report(result)["findings"]}
+    assert set(by_id) == {
+        "test_marked_with_a_module_scoped_touch_is_named",
+        "test_marked_with_a_module_scoped_teardown_touch_is_named",
+    }
+    for finding in by_id.values():
+        assert finding["requested_tenant"] == ["t2_tenant"] and finding["dynamic_tenant"] == ["t2_tenant"]
+    assert by_id["test_marked_with_a_module_scoped_teardown_touch_is_named"]["phases"] == ["teardown"]
 
 
 def test_report_mode_names_without_failing_the_test(pytester, monkeypatch) -> None:
@@ -495,26 +524,31 @@ def _is_specific_code(node: ast.AST) -> bool:
     return False
 
 
-def _compare_is_loose(node: ast.Compare, aliases: set[str]) -> bool:
+def _compare_is_loose(node: ast.Compare, aliases: set[str], negated: bool = False) -> bool:
+    """Under ``not`` the polarity flips: ``not r.ret == 0`` accepts every failure, while
+    ``not r.ret != 0`` is the specific ``== 0``."""
+    specific_op = ast.NotEq if negated else ast.Eq
     operands = [node.left, *node.comparators]
     for left, op, right in zip(operands, node.ops, operands[1:]):
         for mine, other in ((left, right), (right, left)):
-            if _is_exit(mine, aliases) and not (isinstance(op, ast.Eq) and _is_specific_code(other)):
+            if _is_exit(mine, aliases) and not (isinstance(op, specific_op) and _is_specific_code(other)):
                 return True
     return False
 
 
-def _is_loose(node: ast.AST, aliases: set[str], bools: set[str]) -> bool:
-    """True when ``node``, read as a condition, passes on 'it failed' without saying why."""
+def _is_loose(node: ast.AST, aliases: set[str], bools: set[str], negated: bool = False) -> bool:
+    """True when ``node``, read as a condition, passes on 'it failed' without saying why.
+    ``negated`` is true under an odd number of ``not``: a specific equality turns loose there."""
     if isinstance(node, ast.BoolOp):
-        return any(_is_loose(v, aliases, bools) for v in node.values)
+        return any(_is_loose(v, aliases, bools, negated) for v in node.values)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return _is_loose(node.operand, aliases, bools)
+        return _is_loose(node.operand, aliases, bools, not negated)
     if isinstance(node, ast.IfExp):
-        return any(_is_loose(n, aliases, bools) for n in (node.test, node.body, node.orelse))
+        return any(_is_loose(n, aliases, bools, negated) for n in (node.test, node.body, node.orelse))
     if isinstance(node, ast.Compare):
-        return _compare_is_loose(node, aliases) or any(
-            _compare_is_loose(c, aliases) for c in ast.walk(node) if isinstance(c, ast.Compare) and c is not node
+        return _compare_is_loose(node, aliases, negated) or any(
+            _compare_is_loose(c, aliases, negated)
+            for c in ast.walk(node) if isinstance(c, ast.Compare) and c is not node
         )
     if _is_exit(node, aliases) or (isinstance(node, ast.Name) and node.id in bools):
         return True  # truthiness of the exit status
@@ -631,6 +665,11 @@ def test_the_exit_scan_flags_a_bare_failure_and_passes_a_specific_one() -> None:
         "def test_s(proc):\n    assert proc.returncode != 0\n",
         "def test_t(proc):\n    assert proc.returncode == 1\n",
         "def test_u(run):\n    rc, out = run()\n    assert rc != 0, out\n",
+        # negation flips which equality is specific: ``not ret == 0`` accepts every failure
+        "def test_nota(result):\n    assert not result.ret == 0\n",
+        "def test_notb(result):\n    assert not (result.ret == 0)\n",
+        "def test_notc(result):\n    assert not result.ret != 1\n",
+        "def test_notd(result):\n    assert not result.ret != 0 and not result.ret == 4\n",
         # nested boolean expressions
         "def test_v(result, a, b):\n    assert (a and b) or result.ret != 0\n",
         "def test_w(result, a):\n    assert a and not (a and result.ret)\n",
@@ -653,6 +692,8 @@ def test_the_exit_scan_flags_a_bare_failure_and_passes_a_specific_one() -> None:
         "def test_j(run):\n    rc, out = run()\n    assert rc == 0, out\n",
         "def test_k(run):\n    rc, out = run()\n    assert_exit_failed_for(rc, out, 'why')\n",
         "def test_l(out):\n    assert 'x' in out and not out.errors\n",
+        "def test_m(result):\n    assert not result.ret != 0\n",
+        "def test_n(result):\n    assert not not result.ret == 0\n",
     ]
     for source in specific:
         assert _loose_exit_asserts(source)[0] == [], source

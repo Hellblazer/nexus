@@ -1368,10 +1368,23 @@ def _advice(f: Finding) -> str:
             f"Or mark it {EXEMPT_MARKER} if raising is the point."
         )
     if f.requested_tenant and "teardown" in f.phases:
+        # a teardown touch usually has no fixture name (the stack is the teardown machinery)
+        source = fixture if f.fixtures else "a fixture"
+        wider = (
+            f"If {source} is module-, class- or session-scoped, its teardown runs after the function-scoped "
+            "tenant is gone whatever the marker does: give that fixture a tenant of its own or a narrower scope."
+        )
+        if f.dynamic_tenant:
+            return (
+                f"The test already got {tenant} from its marker, but the tenant was already torn down when the "
+                f"touch happened. The marker is already there, so adding it again changes nothing. {wider} "
+                f"Or mark the test {EXEMPT_MARKER} if raising is the point."
+            )
         return (
             f"The test already requests {tenant}, but the tenant was already torn down when the touch happened "
-            f"(fixtures are torn down in reverse order). Put @pytest.mark.{TENANT_MARKER} on the test: the "
-            "marker sets the tenant up first among function-scoped fixtures, so it is torn down last. "
+            f"(fixtures are torn down in reverse order). If {source} is function-scoped, put "
+            f"@pytest.mark.{TENANT_MARKER} on the test: the marker sets the tenant up first among "
+            f"function-scoped fixtures, so it is torn down last. {wider} "
             f"Or mark it {EXEMPT_MARKER} if raising is the point."
         )
     if f.requested_tenant:
