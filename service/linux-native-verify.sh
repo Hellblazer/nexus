@@ -19,6 +19,13 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
+# nexus-k6zxp: service/target's jar may be a hard link into the gate-jar cache. This
+# build runs as root in the container, ignores the read-only bit and rewrites the jar
+# in place, which would rewrite the cache entry too: unlink it first.
+# shellcheck source=../scripts/lib/gate-jar-cache.sh
+. "$REPO/scripts/lib/gate-jar-cache.sh"
+gate_jar_cache_unshare "$REPO/service/target/nexus-service-1.0-SNAPSHOT.jar"
+
 docker network create "$NET" >/dev/null
 docker run -d --name "$PG" --network "$NET" \
   -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus \
