@@ -40,8 +40,10 @@ skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
 # or nesting depth. Probing this ONCE, honestly, and skipping the
 # OS-level SIGINT sub-test with a clear reason when it is unavailable, beats
 # either a fabricated pass or a false failure that blames the code for an
-# environment property. TERM is NOT subject to this rule and needs no probe
-# — Test 4 already proves it works end to end.
+# environment property. TERM is subject to the same rule: build-lease_test.sh's
+# Test 4 failed in CI (5588beead) when its suite started with TERM ignored or
+# blocked, so that test now resets TERM for its holder (nexus-yqzpw tracks the
+# source); a TERM-dependent case here would need the same reset or probe.
 #
 # The subshell must signal ITSELF. `$$` inside `( ... )` is the PARENT
 # script's pid, not the subshell's, and until nexus-fd3zf this probe used

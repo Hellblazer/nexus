@@ -484,6 +484,32 @@ class TestAnUnreadableCacheEntryIsRemoved:
         assert not cache.exists()
         assert (parent.stat().st_mode & 0o777) == 0o755, "the user's cache dir keeps its mode"
 
+    def test_a_symlink_in_the_cache_never_changes_its_targets_mode(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside.chmod(0o755)
+        cache = tmp_path / "nexus"
+        cache.mkdir()
+        (cache / "lnk").symlink_to(outside)
+        cache.chmod(0o500)
+        if os.access(cache, os.W_OK):
+            cache.chmod(0o700)
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+        assert outside.is_dir()
+        assert (outside.stat().st_mode & 0o777) == 0o755, "chmod must not follow the link to its target"
+
+    def test_a_read_only_dir_holding_an_empty_dir_is_removed(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "ro" / "empty").mkdir(parents=True)
+        (cache / "ro").chmod(0o500)
+        if os.access(cache / "ro", os.W_OK):
+            (cache / "ro").chmod(0o700)
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+
     def test_an_entry_that_stays_unremovable_is_a_warning_not_a_raise(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1682,7 +1682,7 @@ def sweep_ort_temp_dirs(
     return removed, notes
 
 
-def _force_remove(func, path, exc, *, _retried: set[str] | None = None) -> None:  # type: ignore[no-untyped-def]
+def _force_remove(func, path, exc, *, _retried: set[str] | None = None, _root: str | None = None) -> None:  # type: ignore[no-untyped-def]
     """``rmtree`` onexc: Windows refuses to delete a read-only file, and POSIX
     refuses to enter a directory without r-x, so restore owner access and retry
     once. A second failure on the same path propagates to the caller.
@@ -1704,19 +1704,24 @@ def _force_remove(func, path, exc, *, _retried: set[str] | None = None) -> None:
         raise exc
     retried.add(path)
     parent = os.path.dirname(path)
-    if parent and func is os.unlink:
-        # POSIX: an unlink is refused by the PARENT's mode, not the entry's. Only
-        # here: an unlinked entry's parent is inside the tree, while the cache
-        # root's own parent (the user's cache dir) must keep its mode.
+    inside = _root is not None and os.path.normpath(path) != os.path.normpath(_root)
+    if parent and inside and func in (os.unlink, os.rmdir):
+        # POSIX: an unlink or rmdir is refused by the PARENT's mode, not the
+        # entry's. Only below the root being removed: the root's own parent (the
+        # user's cache dir) must keep its mode.
         try:
             os.chmod(parent, stat.S_IRWXU)
         except OSError:
             pass
-    os.chmod(path, stat.S_IRWXU)
+    is_link = os.path.islink(path)
+    if not is_link:
+        # chmod follows symlinks: a link inside the cache may point anywhere,
+        # and its target is not ours to change.
+        os.chmod(path, stat.S_IRWXU)
     if func is os.rmdir:
         os.rmdir(path)
-    elif os.path.isdir(path) and not os.path.islink(path):
-        shutil.rmtree(path, onexc=lambda f, p, e: _force_remove(f, p, e, _retried=retried))
+    elif os.path.isdir(path) and not is_link:
+        shutil.rmtree(path, onexc=lambda f, p, e: _force_remove(f, p, e, _retried=retried, _root=_root))
     else:
         os.unlink(path)
 
@@ -1731,7 +1736,7 @@ def _remove_model_cache(cache: Path) -> str | None:
         if cache.is_symlink():
             cache.unlink()
         elif cache.is_dir():
-            shutil.rmtree(cache, onexc=_force_remove)
+            shutil.rmtree(cache, onexc=lambda f, p, e: _force_remove(f, p, e, _root=str(cache)))
     except OSError as exc:
         return f"could not remove model cache {cache}: {exc}"
     return None
