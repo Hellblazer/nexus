@@ -699,7 +699,11 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
                 PartitionScratch.createTenantPartitions(dsl(a), "chunks", tenant, true);   // put the tree back
             }
         }
-        assertThat(messages).as("the leaf is counted locked, not fatal").anyMatch(m -> m.contains("40P01: deadlock detected"));
+        // Normally 40P01. If this thread stalls past the heal's 1 s deadlock_timeout before the DROP is issued,
+        // the deadlock check finds no cycle yet and is not re-armed, so the heal ends at the 5 s lock_timeout
+        // (55P03) instead; both are the busy handler, which is what this test pins.
+        assertThat(messages).as("the leaf is counted locked, not fatal")
+            .anyMatch(m -> m.contains("40P01: deadlock detected") || m.contains("55P03"));
         assertThat(messages).anyMatch(m -> m.contains("leaves examined " + total + ", altered 0, already correct " + (total - 1)
             + ", locked 1, vanished 0, foreign-owned 0"));
         System.out.println("S9WAV evidence: concurrent leaf drop: heal completed, " + total + " leaves examined, 1 skipped on 40P01");
