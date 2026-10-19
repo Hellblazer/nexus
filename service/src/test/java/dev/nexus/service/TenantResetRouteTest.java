@@ -245,6 +245,8 @@ class TenantResetRouteTest {
         assertThat(named).as("and exactly the ones the service registered")
             .containsExactlyElementsOf(on.tenantKeyedState().stream().map(s -> s.name()).toList());
         assertThat(new TreeSet<>(named)).as("no evictor is listed twice").hasSameSizeAs(named);
+        assertThat(named.get(0)).as("the token cache goes first, so the old bearer stops working before "
+            + "the tuple evictor's bounded wait").isEqualTo("TokenCache");
         body.get("evicted").forEach(count -> assertThat(count.isInt()).isTrue());
         assertThat(body.has("failed")).isFalse();
     }
