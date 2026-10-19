@@ -166,9 +166,11 @@ _TMPFS_DIR_PREFIX = "nexus-test-pg"
 #: checked against the SMALLER of the tmpfs's free space and the process's cgroup
 #: memory headroom (tmpfs pages are charged to the cgroup, and on a 64 GB box
 #: /dev/shm "free" never runs out first). A cluster's footprint is its data
-#: directory PLUS its WAL, about 100 MB at boot and up to ~150-250 MB after a
-#: busy stretch with the 64 MB WAL cap (measured in nexus-me3gm); the threshold is
-#: a floor for starting, not a budget for 32 workers.
+#: directory PLUS its WAL. Measured on chas (nexus-me3gm, two small T2 test
+#: files, serial): 42 MB at boot, 66 MB at 10 s, 108 MB at 24 s with pg_wal at
+#: its 64 MB cap; the data part keeps growing with the test catalog, so size a
+#: suite as ~100 MB plus growth per worker. The threshold is a floor for
+#: starting, not a budget for 32 workers.
 _TMPFS_MIN_FREE_BYTES = 3 * 1024**3
 
 #: A sidecar-less, postmaster-less cluster dir in the tmpfs root older than this

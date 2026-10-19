@@ -20,6 +20,17 @@ of 32 and passes, so the cap does nothing on a quiet machine and binds only
 when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
 out. Diagnose with `ipcs -m` before suspecting the code.
 
+**Where substrate clusters live** (nexus-me3gm): on Linux with `/dev/shm` mounted
+tmpfs, writable and with 3 GiB free (and 3 GiB of cgroup memory headroom), each
+worker's Postgres cluster is created under `/dev/shm/nexus-test-pg-<uid>` with
+`pg_wal` capped at 64 MB and dynamic shared memory kept inside the cluster dir;
+otherwise (macOS, no tmpfs, low room) it stays under the tempdir, and a Linux
+fallback warns with its reason. `NX_TEST_PG_ROOT=<dir>` picks a root,
+`NX_TEST_PG_ROOT=default` forces the tempdir for new clusters. The stray-cluster
+sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too,
+so a crash-orphaned cluster in RAM is reaped. A nested pytest whose test globs
+its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`.
+
 **The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
 `_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
 A missing or stale service jar, or a PG bundle for the pinned engine tag that is
