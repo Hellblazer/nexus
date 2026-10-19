@@ -637,6 +637,38 @@ jobs:
         # the refs never materialise and the test still saw an empty list.
         # Tag visibility is needed only where the GATE runs — release.yml.
 
+      - name: Bytecode to /dev/shm (PYTHONPYCACHEPREFIX, pool only; nexus-m643n)
+        # Collection alone writes 116 MB of .pyc per shard to the pool host's NVMe
+        # (replay of 2026-10-19, T2 nexus/analysis-ci-startup-bytes-2026-10-19);
+        # with the prefix on /dev/shm the disk write is 23 MB. The prefix redirects
+        # EVERY import's bytecode, the venv's site-packages included (uv sync does
+        # not compile: UV_COMPILE_BYTECODE is unset), and every child process that
+        # inherits the job env (engine bootstrap scripts, nested pytest).
+        # COST: /dev/shm pages are charged to the job's memory cgroup, so the
+        # ~50 MB (up to ~0.1 GB) the prefix holds comes out of the lab-6c18g
+        # grant's 18.4 GB cap (labrun), the same cap tests/_tmp_root.py draws on.
+        # Per-job directory: run_id + run_attempt + python + shard keeps sibling
+        # shards on the shared pool user apart; the last step of the job removes it
+        # (if: always()). A job killed past its steps leaves ~50 MB, so this step
+        # also sweeps nx-pyc-* dirs older than 12 h (job timeout is 35 min).
+        # A runner without a writable /dev/shm (macOS, Windows, GitHub-hosted)
+        # keeps the default location: the step is pool-only, and a failed mkdir
+        # there degrades to the default with a notice, never a failed job.
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        env:
+          NX_PYC_DIR: /dev/shm/nx-pyc-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}-s${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+            find /dev/shm -maxdepth 1 -type d -name 'nx-pyc-*' -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+            rm -rf "$NX_PYC_DIR"
+            mkdir -m 0700 "$NX_PYC_DIR"
+            echo "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" >> "$GITHUB_ENV"
+            echo "bytecode prefix: $NX_PYC_DIR"
+          else
+            echo "::notice::no writable /dev/shm on this runner; bytecode stays in the default location"
+          fi
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -921,6 +953,17 @@ jobs:
           if-no-files-found: error
           # A re-run of all jobs keeps the first attempt's artifacts under the same names.
           overwrite: true
+
+      - name: Remove the bytecode prefix (pool only; nexus-m643n)
+        # Last step, if: always(): the /dev/shm pages are charged to this job's
+        # grant and outlive it otherwise. Removes only a directory this job's
+        # setup step named (nx-pyc-*); with the prefix unset it does nothing.
+        if: always() && runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: |
+          case "${PYTHONPYCACHEPREFIX:-}" in
+            /dev/shm/nx-pyc-*) rm -rf -- "$PYTHONPYCACHEPREFIX" ;;
+            *) echo "no /dev/shm bytecode prefix to remove" ;;
+          esac
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
