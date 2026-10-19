@@ -71,12 +71,15 @@ differ from a GitHub-hosted runner:
   points `TMPDIR` and `PYTEST_DEBUG_TEMPROOT` at it, and deletes it when the run
   ends; a killed run's dir is removed by the next one. The summary line `nexus test
   tmp: basetemp and TMPDIR on tmpfs ...` (or `on disk ... because: <reason>`) says
-  where it went. The data is charged to the grant's memory (a shard measured about
-  230 MB; the 2.5 GiB per worker above covers it). `NX_TEST_TMP_ROOT=default` is the
+  where it went. The data is charged to the grant's memory: one CI shard (one of six)
+  grew `~/tmp` by about 230 MB per RUN, not per worker, and a hand full-suite run would
+  hold about 1.4 GB; neither is measured on tmpfs yet. Of the shard's 442 MiB of NVMe
+  writes, the rest (~215 MiB) is not attributed yet (nexus-ww33u). `NX_TEST_TMP_ROOT=default` is the
   escape; `NX_TEST_TMP_ROOT=<dir>` keeps the tree in `<dir>` for inspecting a failure.
   The DDL and storage-touch `nx-*` reports are copied to
   `<tempdir>/nexus-test-reports-<uid>/<run>` before the removal, and a run that exits
-  non-zero also copies the engine logs and the failed tests' `tmp_path` trees (256 MiB
+  non-zero also copies the per-test engine logs (`nexus-svc-*`; the session engine's own log is not kept)
+  and the failed tests' `tmp_path` trees (256 MiB
   cap) to `<run>/failed/`. The engine JVM gets `-Djava.io.tmpdir=<TMPDIR>` (the JDK
   ignores `TMPDIR`), so its native extraction lands on the same tmpfs; its hs_err report
   goes to the original tempdir. `tests/AGENTS.md` has the full paragraph.

@@ -98,8 +98,8 @@ by default, after the session finishes, so just before the removal the basetemp'
 `nx-*` files are copied to `<original tempdir>/nexus-test-reports-<uid>/<run>` (newest three
 kept); `NX_DDL_REPORT_DIR` / `NX_STORAGE_TOUCH_REPORT_DIR` still put them where you choose, and the
 DDL and storage-touch summary lines print the copy's path, not the tmpfs one. **A run that exits
-non-zero also keeps its failure evidence** in `<report home>/failed/`: the engine logs
-(`nexus-svc-*`), the `tmp_path` trees of the failed tests (matched by name from the failed node
+non-zero also keeps its failure evidence** in `<report home>/failed/`: the per-test engine logs
+(`nexus-svc-*`; the session engine's `engine.log` is removed with its cluster and is not kept), the `tmp_path` trees of the failed tests (matched by name from the failed node
 ids, controller and xdist workers), up to 256 MiB, and `SUMMARY.txt` naming what was kept and what
 the cap skipped; `NX_KEEP_FENCED_HOME=1` also copies the fenced home there, uncapped. The summary
 line says so for a failed run. A passing run keeps only the reports. SIGKILL or SIGTERM of the
