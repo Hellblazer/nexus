@@ -721,7 +721,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // scope for this changeset. Bypass the FK locally for this one
                 // insert so the test can keep proving gc_restore_rereferenced's
                 // own copy-back + delete-from-quarantine behavior.
-                ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("fk_catalog_chunks_chunk").execute();
+                PgContainerHelper.dropCatalogChunksFk(conn);
                 insertManifestRow(ctx, fx.docTumbler(), 1, orphanChash, origin);
                 // Re-added NOT VALID (the existing rows are not re-checked); jOOQ's DDL DSL has no NOT VALID,
                 // so this goes through nexus_test.add_fk_not_valid_composite3, whose model-aware body appends

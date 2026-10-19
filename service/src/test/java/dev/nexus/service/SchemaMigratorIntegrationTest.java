@@ -1541,9 +1541,7 @@ class SchemaMigratorIntegrationTest {
                     // SAME bypass idiom used elsewhere in this suite: drop, insert,
                     // re-add NOT VALID -- reproducing exactly what a genuinely aged
                     // box looks like immediately before its own first VALIDATE.
-                    dsl(su).alterTable(CATALOG_DOCUMENT_CHUNKS)
-                        .dropConstraintIfExists("fk_catalog_chunks_chunk")
-                        .execute();
+                    PgContainerHelper.dropCatalogChunksFk(su);
                     dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
