@@ -5,7 +5,6 @@ import java.time.OffsetDateTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.vectors.DimTables;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -19,7 +18,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
 
@@ -322,11 +320,8 @@ class ChashHandlerRerouteTest {
 
     /** Total chunk rows in the unified table — the no-op invariant. */
     private long chunkRowCount() throws Exception {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME)) {
-            rs.next();
-            return rs.getLong(1);
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS);
         }
     }
 

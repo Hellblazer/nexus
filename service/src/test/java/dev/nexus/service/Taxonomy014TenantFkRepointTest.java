@@ -143,8 +143,9 @@ class Taxonomy014TenantFkRepointTest {
             // so nothing trips taxonomy-014-2's fail-loud anti-join.
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.topics WHERE tenant_id IN ('tenant-a', 'tenant-b')");
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(TOPICS)
+                    .where(TOPICS.TENANT_ID.in("tenant-a", "tenant-b"))
+                    .execute();
             }
 
             try (Connection su = pg.createConnection("")) {

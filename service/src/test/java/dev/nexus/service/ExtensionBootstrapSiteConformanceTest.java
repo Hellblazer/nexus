@@ -117,19 +117,13 @@ class ExtensionBootstrapSiteConformanceTest {
      * already-migrated cluster needs no separate extension bootstrap since
      * {@code vectors-001-baseline.xml}'s own {@code vectors-001-1} already created it.
      *
-     * <p>{@code PgSessionEfSearchReadbackIntegrationTest} is the remaining, different
-     * shape: it never runs Liquibase itself at all (it drives
-     * {@code PgSession#setHnswEfSearch} directly against a shared, already-
-     * migrated {@code PgContainerHelper#start()} cluster), and its bare
-     * {@code CREATE EXTENSION IF NOT EXISTS vector} is a purely DEFENSIVE,
-     * idempotent no-op (the shared cluster's own bootstrap already created
-     * and relocated the extension) that predates this batch — kept as
-     * belt-and-braces so the test does not depend on load ordering relative
-     * to whichever other test class happens to migrate the shared cluster
-     * first within a given surefire fork.
+     * <p>{@code PgSessionEfSearchReadbackIntegrationTest} was the last entry: a bare
+     * {@code CREATE EXTENSION IF NOT EXISTS vector} that was a purely defensive, idempotent no-op
+     * (the cloned, already-migrated cluster of {@code PgContainerHelper#start()} has the extension
+     * from {@code vectors-001-1}). nexus-cbo4a batch 7 removed it with the rest of that test's SQL
+     * strings, so the allowlist is empty; the scan above still fails any new literal.
      */
-    private static final Set<String> SANCTIONED_JAVA_FILES = Set.of(
-        "PgSessionEfSearchReadbackIntegrationTest.java");
+    private static final Set<String> SANCTIONED_JAVA_FILES = Set.of();
 
     @Test
     void createExtensionAppearsOnlyAtSanctionedBootstrapSites() throws IOException, URISyntaxException {
@@ -173,6 +167,7 @@ class ExtensionBootstrapSiteConformanceTest {
     @Test
     void createExtensionInJavaSourcesOnlyAtSanctionedFixtures() throws IOException {
         List<String> violations = new ArrayList<>();
+        int scanned = 0;
 
         // This class's OWN filename is excluded: its positive-case synthetic
         // fixtures (javaStringLiteral_withCreateExtension_flags) deliberately
@@ -194,9 +189,14 @@ class ExtensionBootstrapSiteConformanceTest {
                     }
                     violations.addAll(
                         scanJavaForCreateExtension(filename, Files.readString(file)));
+                    scanned++;
                 }
             }
         }
+
+        // With SANCTIONED_JAVA_FILES empty (nexus-cbo4a batch 7) nothing else shows the walk
+        // reached the tree; a wrong root would otherwise pass with zero files scanned.
+        assertThat(scanned).as("Java source files scanned under src/{main,test}/java").isGreaterThan(100);
 
         assertThat(violations)
             .as("CREATE EXTENSION string literal in a Java source file outside "

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: CREATE ROLE ${role} NOLOGIN, in Liquibase XML instead of a Java SQL string (Sam's rule,
+    nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no CREATE ROLE.
+
+    A bare cluster-global role for a test that needs one to exist (as production's DBA creates nexus_diag
+    before the changelog walks) or to hold a grant or an ownership. Run through
+    PgContainerHelper#createNologinRole; runAlways, bookkeeping in its own table. ${role} is a fixed test
+    literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="nologin-role" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE ROLE ${role} NOLOGIN</sql>
+    </changeSet>
+</databaseChangeLog>

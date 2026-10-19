@@ -151,8 +151,9 @@ class CatalogDocumentCascadeTest {
         // so a superuser DELETE exercises the same constraint the svc-role delete would.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            int n = su.createStatement().executeUpdate(
-                "DELETE FROM nexus.catalog_documents WHERE tenant_id='" + TENANT + "' AND tumbler='hard-doc-1'");
+            int n = DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq("hard-doc-1"))
+                .execute();
             assertThat(n).as("one catalog_documents row hard-deleted").isEqualTo(1);
         }
 
@@ -205,8 +206,9 @@ class CatalogDocumentCascadeTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().executeUpdate(
-                "DELETE FROM nexus.catalog_documents WHERE tenant_id='" + TENANT + "' AND tumbler='" + shared + "'");
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(shared))
+                .execute();
         }
 
         try (Connection su = pg.createConnection("")) {

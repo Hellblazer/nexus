@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: ALTER TABLE ${table} OWNER TO ${owner}, in Liquibase XML instead of a Java SQL string (Sam's
+    rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no OWNER TO.
+
+    For a test that needs a table owned by a role other than the schema owner. Run through
+    PgContainerHelper#alterTableOwner, which renders ${table} from a jOOQ Table; runAlways, bookkeeping in its
+    own table. ${owner} is a fixed test literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="table-owner" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER TABLE ${table} OWNER TO ${owner}</sql>
+    </changeSet>
+</databaseChangeLog>

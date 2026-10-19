@@ -244,9 +244,11 @@ class CatalogPurgeTrashVacuumTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + tenant + "'");
+            // 60 days back against a 30-day threshold: no clock drift can matter.
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                .execute();
         }
 
         // documents_purged == count, chunks_384_stranded == count (each doc's one chunk

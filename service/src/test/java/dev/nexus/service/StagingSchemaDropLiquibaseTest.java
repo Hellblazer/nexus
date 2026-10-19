@@ -169,10 +169,10 @@ class StagingSchemaDropLiquibaseTest {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("nexus_diag")) {
             // nexus_diag exists BEFORE the pre-drop walk, as it does on every production
             // cluster (created by pg_provision/the DBA, never by the changelog). jOOQ's
-            // open-source DSL has no CREATE ROLE, so this is one raw statement.
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            // open-source DSL has no CREATE ROLE, so it goes through a test changelog.
+            try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                st.execute("CREATE ROLE nexus_diag NOLOGIN");
+                PgContainerHelper.createNologinRole(su, "nexus_diag");
             }
 
             migrateUpToDropChangeset(pg);
@@ -190,12 +190,14 @@ class StagingSchemaDropLiquibaseTest {
                 assertThat(ctx.fetchCount(STAGING_FRECENCY) + ctx.fetchCount(STAGING_DOC_CHUNKS))
                     .as("precondition: the aged rows landed, so the drop has data to discard")
                     .isEqualTo(2);
-                try (Statement st = su.createStatement()) {
-                    // What the OLD grants-nexus-diag-3 gave nexus_diag on staging (before nexus-z0o2p.27).
-                    st.execute("GRANT USAGE ON SCHEMA staging TO nexus_diag;"
-                        + " GRANT SELECT ON ALL TABLES IN SCHEMA staging TO nexus_diag;"
-                        + " ALTER DEFAULT PRIVILEGES IN SCHEMA staging GRANT SELECT ON TABLES TO nexus_diag");
+                // What the OLD grants-nexus-diag-3 gave nexus_diag on staging (before nexus-z0o2p.27):
+                // schema USAGE, SELECT on every table (the seven asserted above), and a default ACL.
+                PgContainerHelper.grantSchemaUsage(su, "staging", "nexus_diag");
+                for (String t : STAGING_TABLES) {
+                    ctx.grant(DSL.privilege("SELECT")).on(DSL.table(DSL.name("staging", t)))
+                        .to(DSL.role("nexus_diag")).execute();
                 }
+                PgContainerHelper.grantSchemaDefaultSelectAcl(su, "staging", "nexus_diag");
                 assertThat(stagingDefaultAcls(ctx))
                     .as("precondition: the old default ACL on schema staging is present")
                     .isPositive();
@@ -365,14 +367,10 @@ class StagingSchemaDropLiquibaseTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                try (Statement st = su.createStatement()) {
-                    st.execute("CREATE ROLE ops_dba NOLOGIN");
-                    st.execute("ALTER TABLE staging.relevance_log OWNER TO ops_dba");
-                }
+                PgContainerHelper.createNologinRole(su, "ops_dba");
+                PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("staging", "relevance_log")), "ops_dba");
                 ctx.createTable(DSL.name("staging", "ops_note")).column("note", SQLDataType.CLOB).execute();
-                try (Statement st = su.createStatement()) {
-                    st.execute("ALTER TABLE staging.ops_note OWNER TO ops_dba");
-                }
+                PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("staging", "ops_note")), "ops_dba");
             }
 
             try (Connection owner = ownerConnection(pg)) {
@@ -414,17 +412,20 @@ class StagingSchemaDropLiquibaseTest {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 ctx.insertInto(STAGING_FRECENCY, TENANT_ID, CHUNK_ID).values("t-keep", "feedbeef").execute();
+                PgContainerHelper.createNologinRole(su, "staging_nonowner");
+                PgContainerHelper.grantSchemaUsage(su, "staging", "staging_nonowner");
+                // SET ROLE is the GUC "role"; the value "none" is RESET ROLE.
+                ctx.set(DSL.name("role"), DSL.inline("staging_nonowner")).execute();
                 try (Statement st = su.createStatement()) {
-                    st.execute("CREATE ROLE staging_nonowner NOLOGIN");
-                    st.execute("GRANT USAGE ON SCHEMA staging TO staging_nonowner");
-                    st.execute("SET ROLE staging_nonowner");
                     try {
+                        // The changeset's own body, read from the changelog: raw because the NOTICEs are read
+                        // off this statement's warning chain.
                         st.execute(body); // must not throw: a refused drop is a NOTICE, never an error
                         for (SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) {
                             notices.add(w.getMessage());
                         }
                     } finally {
-                        st.execute("RESET ROLE");
+                        ctx.set(DSL.name("role"), DSL.inline("none")).execute();
                     }
                 }
 

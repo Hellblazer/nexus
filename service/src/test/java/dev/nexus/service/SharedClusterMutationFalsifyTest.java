@@ -102,11 +102,11 @@ class SharedClusterMutationFalsifyTest {
             // The exact offender shape from the ~90 bootstrap sites, with a poison
             // value nothing else in the suite would ever set: a CLUSTER-wide
             // (no IN DATABASE clause) role-level GUC on the shared nexus_svc role.
-            // KEPT RAW: no typed jOOQ DDL form for ALTER ROLE ... SET <guc> TO <value>
-            // (candidate for a nexus_test bootstrap function per the task brief).
-            su.createStatement().execute(
-                "ALTER ROLE " + PgContainerHelper.SVC_USERNAME
-                + " SET search_path TO yhmav_poison_schema, public");
+            // No typed jOOQ DDL form for ALTER ROLE ... SET <guc> TO <value>: a test changelog.
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                "db/changelog-test/db.changelog-test-role-search-path-poison.xml",
+                "databasechangelog_test_role_search_path_poison",
+                java.util.Map.of("role", PgContainerHelper.SVC_USERNAME));
             // Non-vacuity: the cluster-wide pg_db_role_setting row must exist NOW --
             // otherwise Order(4)'s absence assertion proves nothing.
             assertThat(clusterWideRoleSettings(su))

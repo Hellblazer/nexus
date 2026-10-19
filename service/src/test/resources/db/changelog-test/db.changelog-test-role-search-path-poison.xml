@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 7: ALTER ROLE ${role} SET search_path TO yhmav_poison_schema, public, in Liquibase XML
+    instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ has no
+    ALTER ROLE ... SET. The value is fixed here, never a parameter: role-level search_path is retired
+    (nexus-zrcj7), and RawSqlGateTest#testChangelogs_setSearchPathOnlyToThePoisonSchema allows this one
+    file because it plants a poison nothing could rely on.
+
+    SharedClusterMutationFalsifyTest plants a CLUSTER-wide role-level GUC (no IN DATABASE clause) on the
+    shared service role, the offender shape SharedCluster's reset-at-acquire must clear. Run on a superuser
+    connection through PgContainerHelper#runSuperuserTestChangelog; runAlways, bookkeeping in its own table.
+    ${role} is a fixed test literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-search-path-poison" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER ROLE ${role} SET search_path TO yhmav_poison_schema, public</sql>
+    </changeSet>
+</databaseChangeLog>

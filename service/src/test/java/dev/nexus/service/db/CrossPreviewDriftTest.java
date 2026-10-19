@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -10,7 +13,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -115,15 +117,9 @@ class CrossPreviewDriftTest {
     private String prosrc(String functionName) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "SELECT prosrc FROM pg_catalog.pg_proc"
-                    + " WHERE proname = ? AND pronamespace = 'nexus'::regnamespace")) {
-                ps.setString(1, functionName);
-                try (var rs = ps.executeQuery()) {
-                    assertThat(rs.next()).as(functionName + " must exist").isTrue();
-                    return rs.getString(1);
-                }
-            }
+            var found = PgCatalogProbes.routineConfigAndSource(DSL.using(su, SQLDialect.POSTGRES), "nexus", functionName);
+            assertThat(found).as(functionName + " must exist").isNotNull();
+            return found.prosrc();
         }
     }
 

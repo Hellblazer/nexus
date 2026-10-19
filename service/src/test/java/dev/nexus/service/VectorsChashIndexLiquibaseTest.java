@@ -14,7 +14,6 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -253,16 +252,13 @@ class VectorsChashIndexLiquibaseTest {
         // dim-agnostic contract holds for every embedding column.
         try (Connection su = pg.createConnection("")) {
             for (int dim : DIMS) {
-                List<String> collections = new ArrayList<>();
-                try (ResultSet rs = su.createStatement().executeQuery(
-                        "SELECT collection FROM nexus.chunks " +
-                        "WHERE tenant_id = '" + TENANT + "' " +
-                        "  AND chash = decode('" + sharedChashForDim(dim) + "', 'hex') " +
-                        "ORDER BY collection")) {
-                    while (rs.next()) {
-                        collections.add(rs.getString(1));
-                    }
-                }
+                List<String> collections = DSL.using(su, SQLDialect.POSTGRES)
+                    .select(CHUNKS.COLLECTION)
+                    .from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT),
+                           CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(sharedChashForDim(dim))))
+                    .orderBy(CHUNKS.COLLECTION)
+                    .fetch(CHUNKS.COLLECTION);
                 assertThat(collections)
                     .as("chash-only probe (dim %d row) on nexus.chunks must return both collections", dim)
                     .containsExactly(collB(dim), collA(dim));

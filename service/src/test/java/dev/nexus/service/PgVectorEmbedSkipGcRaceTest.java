@@ -5,7 +5,6 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
@@ -18,8 +17,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -290,15 +288,10 @@ class PgVectorEmbedSkipGcRaceTest {
     // ---------------------------------------------------------------------------
 
     private long superuserCount() throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, COLLECTION);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(CHASH_H));
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(COLLECTION),
+                CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(CHASH_H)));
         }
     }
 

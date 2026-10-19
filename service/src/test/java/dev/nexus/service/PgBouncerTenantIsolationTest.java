@@ -19,12 +19,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -156,7 +157,7 @@ class PgBouncerTenantIsolationTest {
     void cleanMemory() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.memory");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(MEMORY).execute();
         }
     }
 
@@ -287,15 +288,14 @@ class PgBouncerTenantIsolationTest {
     /** Read next_retry_at for a row via the superuser connection (bypasses RLS). */
     private OffsetDateTime readNextRetryAt(String tenant, String sourcePath) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            try (var ps = su.prepareStatement(
-                    "SELECT next_retry_at FROM nexus.aspect_extraction_queue "
-                    + "WHERE tenant_id = ? AND source_path = ?")) {
-                ps.setString(1, tenant);
-                ps.setString(2, sourcePath);
-                ResultSet rs = ps.executeQuery();
-                assertThat(rs.next()).as("row must exist for readNextRetryAt").isTrue();
-                return rs.getObject("next_retry_at", OffsetDateTime.class);
-            }
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant),
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath))
+                .fetchAny();
+            assertThat(row).as("row must exist for readNextRetryAt").isNotNull();
+            return row.value1();
         }
     }
 }

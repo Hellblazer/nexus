@@ -866,6 +866,46 @@ public final class PgContainerHelper {
     }
 
     /**
+     * {@code CREATE ROLE role NOLOGIN} (nexus-cbo4a batch 7), through {@code db.changelog-test-nologin-role.xml}:
+     * jOOQ has no CREATE ROLE. Role names are fixed test literals, never input. Leaves {@code su} autoCommit.
+     */
+    public static void createNologinRole(Connection su, String role) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nologin-role.xml",
+            "databasechangelog_test_nologin_role", Map.of("role", role));
+    }
+
+    /**
+     * {@code GRANT USAGE ON SCHEMA schema TO role} (nexus-cbo4a batch 7), through
+     * {@code db.changelog-test-schema-usage.xml}: jOOQ's grant resolves its target to a Table, so it cannot name
+     * a schema. Leaves {@code su} autoCommit.
+     */
+    public static void grantSchemaUsage(Connection su, String schema, String role) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-usage.xml",
+            "databasechangelog_test_schema_usage", Map.of("schema", schema, "role", role));
+    }
+
+    /**
+     * {@code ALTER DEFAULT PRIVILEGES IN SCHEMA schema GRANT SELECT ON TABLES TO role} (nexus-cbo4a batch 7),
+     * through {@code db.changelog-test-schema-default-select-acl.xml}: jOOQ has no ALTER DEFAULT PRIVILEGES.
+     * Leaves {@code su} autoCommit.
+     */
+    public static void grantSchemaDefaultSelectAcl(Connection su, String schema, String role) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-default-select-acl.xml",
+            "databasechangelog_test_schema_default_acl", Map.of("schema", schema, "role", role));
+    }
+
+    /**
+     * {@code ALTER TABLE table OWNER TO owner} (nexus-cbo4a batch 7), through
+     * {@code db.changelog-test-table-owner.xml}: jOOQ has no OWNER TO. {@code table} is a jOOQ {@link Table},
+     * rendered quoted and schema-qualified. Leaves {@code su} autoCommit.
+     */
+    public static void alterTableOwner(Connection su, Table<?> table, String owner) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-table-owner.xml",
+            "databasechangelog_test_table_owner",
+            Map.of("table", DSL.using(su, SQLDialect.POSTGRES).render(table), "owner", owner));
+    }
+
+    /**
      * Run one DDL statement on a superuser connection through a test changelog (nexus-wbfpw.48), for the
      * statements jOOQ has no typed form for (RLS policies, ALTER TABLE ... ROW LEVEL SECURITY, CREATE ROLE
      * with attributes). Same mechanism as {@link #grantRoleMembership}: its own bookkeeping table, runAlways.

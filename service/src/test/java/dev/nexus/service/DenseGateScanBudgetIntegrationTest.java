@@ -8,7 +8,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -23,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -136,7 +136,7 @@ class DenseGateScanBudgetIntegrationTest {
             }
             // RDR-191 Phase 4: idx_chunks_384_embedding -> idx_chunks_embedding_384 on
             // the unified nexus.chunks table.
-            su.createStatement().execute("DROP INDEX nexus.idx_chunks_embedding_384");
+            PgContainerHelper.dropIndex(su, DSL.name("nexus", "idx_chunks_embedding_384"));
             // Noise: random vectors (normalized-ish is irrelevant for cosine
             // ordering realism at this granularity), text that can NEVER pass
             // the gate for QUERY.
@@ -177,9 +177,11 @@ class DenseGateScanBudgetIntegrationTest {
             // segment ... No space left on device" on chas). Session-level, this connection only.
             DSL.using(su, SQLDialect.POSTGRES)
                 .set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
-            su.createStatement().execute(
-                "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "USING hnsw (" + DimTables.embeddingColumn(384) + " nexus.vector_cosine_ops)");
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index.xml",
+                "databasechangelog_test_hnsw_index", Map.of(
+                    "indexName", "idx_chunks_embedding_384",
+                    "tableName", DSL.using(su, SQLDialect.POSTGRES).render(CHUNKS),
+                    "column", CHUNKS.EMBEDDING_384.getName()));
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
@@ -187,11 +189,10 @@ class DenseGateScanBudgetIntegrationTest {
     @Test
     void denseGate_sparseInLargeIndex_mustStillFillNResults() {
         // Sanity: the gate really is dense-branch territory (> 128 matches).
-        Integer gateMatches = scope.withTenant(TENANT, ctx -> ctx.fetchOne(
-            "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
-            + "WHERE collection = '" + COL_TARGET + "' "
-            + "AND (chunk_tsv @@ plainto_tsquery('english', '" + QUERY + "') "
-            + "     OR '" + QUERY + "' OPERATOR(nexus.<%) chunk_text)").get(0, Integer.class));
+        // Counted through the product's own gate probe (the one hybridSearch dispatches on), uncapped.
+        Integer gateMatches = scope.withTenant(TENANT, ctx -> ctx.fetchCount(
+            TEXT_GATE_PROBE_384.call(QUERY, new String[] {COL_TARGET}, null, null, 10_000,
+                "minilm-l6-v2-384", TENANT)));
         assertThat(gateMatches).isGreaterThanOrEqualTo(MATCHING);
 
         probe.arm("dense");

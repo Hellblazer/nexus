@@ -4,6 +4,8 @@ package dev.nexus.service.db;
 import dev.nexus.service.PgCatalogProbes;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.SQLDataType;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -17,7 +19,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -70,11 +71,12 @@ class BackendReaperIntegrationTest {
 
             // A statement that genuinely runs long, started before the reaper fires.
             CompletableFuture<String> outcome = CompletableFuture.supplyAsync(() -> {
-                try (Statement st = ownConn.createStatement()) {
-                    st.execute("SELECT pg_sleep(60)");
+                try {
+                    DSL.using(ownConn, SQLDialect.POSTGRES)
+                        .select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(60))).fetch();
                     return "completed";
-                } catch (SQLException e) {
-                    return e.getSQLState();
+                } catch (DataAccessException e) {
+                    return e.sqlState();
                 }
             });
             int ownPid = awaitActive(own);

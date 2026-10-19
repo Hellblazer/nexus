@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -424,12 +423,11 @@ class CombinedWriteRacedEmbedCounterTest {
     private void deleteChunk(String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, COLLECTION);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            int n = ps.executeUpdate();
+            int n = DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT),
+                       CHUNKS.COLLECTION.eq(COLLECTION),
+                       CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)))
+                .execute();
             assertThat(n).as("the concurrent delete removes exactly one row").isEqualTo(1);
         }
     }

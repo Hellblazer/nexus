@@ -163,10 +163,9 @@ class Rdr71gw2CollectionNotNullTest {
     @AfterEach
     void restoreNotNullInvariant() {
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_document_chunks WHERE collection IS NULL");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection SET NOT NULL");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()).execute();
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).setNotNull().execute();
         } catch (Exception ignored) {
             // best-effort; do not mask the test's own failure
         }
@@ -371,9 +370,10 @@ class Rdr71gw2CollectionNotNullTest {
             dropNotNullForTest(su);
             insertDoc(su, tenant, doc);
             insertManifestRowNull(su, tenant, doc, 0, ch);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             assertThat(collectionOf(su, tenant, doc, 0)).isNull();
 
@@ -409,9 +409,10 @@ class Rdr71gw2CollectionNotNullTest {
             // manifest row is stamped `wrongColl`, which does NOT contain it.
             insertChunk1024(su, tenant, rightColl, ch);
             insertManifestRowStamped(su, tenant, doc, 0, ch, wrongColl);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -443,9 +444,10 @@ class Rdr71gw2CollectionNotNullTest {
             insertDoc(su, tenant, doc);
             insertChunk1024(su, tenant, coll, ch);
             insertManifestRowStamped(su, tenant, doc, 0, ch, coll);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -472,9 +474,11 @@ class Rdr71gw2CollectionNotNullTest {
             dropNotNullForTest(su);
             insertDoc(su, tenant, doc);
             insertManifestRowNull(su, tenant, doc, 0, ch);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 9, deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 9)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -637,11 +641,10 @@ class Rdr71gw2CollectionNotNullTest {
                 .isTrue();
             // Cleanup: restore the invariant so no NULL row from this test
             // leaks into any other test's fleet-wide resolution scan.
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant + "'");
-            assertThatCode(() ->
-                su.createStatement().execute(
-                    "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection SET NOT NULL"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute();
+            assertThatCode(() -> ctx.alterTable(CATALOG_DOCUMENT_CHUNKS)
+                .alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).setNotNull().execute())
                 .doesNotThrowAnyException();
         }
     }

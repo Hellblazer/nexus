@@ -279,9 +279,10 @@ class ManifestVerifyTest {
             // A manifest row with NO chunk — would read as 1 missing if the
             // document were live. It must not, once tombstoned.
             insertManifestRow(su, TENANT, docId, 0, chashMissing, COLLECTION);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .execute();
         }
 
         long[] r = verify(docId);

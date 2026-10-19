@@ -2,6 +2,7 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -13,6 +14,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -30,13 +32,10 @@ class PgSessionEfSearchReadbackIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
+        // start() hands out a clone of the migrated template, where vectors-001-1 has already created the
+        // extension; the test below loads the library in its own backend, and its vector cast fails loudly
+        // if the extension were ever absent.
         pg = PgContainerHelper.start();
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // Load the extension so hnsw.ef_search is the REAL, range-validated
-            // GUC rather than a placeholder set_config would accept blindly.
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        }
     }
 
     @AfterAll
@@ -56,7 +55,7 @@ class PgSessionEfSearchReadbackIntegrationTest {
             // per-backend at library load; without this the set below lands
             // on an unvalidated placeholder (measured: current_setting reads
             // "" after rollback instead of the extension default 40).
-            ctx.resultQuery("SELECT '[1]'::nexus.vector").fetch();
+            ctx.select(DSL.val(Vector.of(new float[] {1f}), CHUNKS.EMBEDDING_384).isNotNull()).fetch();
 
             // Small request: the floor dominates (default 600 — no
             // NX_HNSW_EF_SEARCH in the test env, pinned by the assertion).

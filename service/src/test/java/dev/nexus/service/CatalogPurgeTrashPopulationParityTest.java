@@ -144,8 +144,9 @@ class CatalogPurgeTrashPopulationParityTest {
     void seed() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT + "'");
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
+                .execute();
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
 
@@ -179,12 +180,11 @@ class CatalogPurgeTrashPopulationParityTest {
 
     private long liveTombstoneRowsRemaining() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT
-                + "' AND deleted_at IS NOT NULL AND deleted_at <= NOW() - interval '"
-                + OLDER_THAN_DAYS + " days'");
-            rs.next();
-            return rs.getLong(1);
+            // Java clock: the closest fixture tombstone sits a full day past the threshold.
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT),
+                CATALOG_DOCUMENTS.DELETED_AT.isNotNull(),
+                CATALOG_DOCUMENTS.DELETED_AT.le(OffsetDateTime.now().minusDays(OLDER_THAN_DAYS)));
         }
     }
 
@@ -225,11 +225,12 @@ class CatalogPurgeTrashPopulationParityTest {
         catalogRepo.purgeTrash(TENANT, OLDER_THAN_DAYS);
 
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT tumbler FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT
-                + "' ORDER BY tumbler");
-            var survivors = new java.util.ArrayList<String>();
-            while (rs.next()) survivors.add(rs.getString(1));
+            List<String> survivors = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.TUMBLER)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
+                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                .fetch(CATALOG_DOCUMENTS.TUMBLER);
 
             assertThat(survivors)
                 .as("exactly the live doc and the 10-day-old tombstone survive a 365-day purge; "

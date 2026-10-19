@@ -218,9 +218,10 @@ class ManifestFunctionsTest {
         // Tombstone the document
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .execute();
         }
 
         // document_text must return EMPTY SET for the tombstoned doc

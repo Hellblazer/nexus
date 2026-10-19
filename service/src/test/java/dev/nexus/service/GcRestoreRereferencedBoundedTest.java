@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -418,10 +419,11 @@ class GcRestoreRereferencedBoundedTest {
 
     private String metadataField(String collection, String chashHex, String key) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT metadata->>'" + key + "' FROM nexus.chunks WHERE collection = '" + collection
-                + "' AND chash = decode('" + chashHex + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key))
+                .from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(Chash.fromHex(chashHex).toBytes()))
+                .fetchOne(0, String.class);
         }
     }
 
