@@ -1,0 +1,26 @@
+{
+ "migration": {
+  "total": 9,
+  "toplevel": 7,
+  "nested": 2,
+  "by_kind": {
+   "create_table": 2,
+   "create_index": 2,
+   "drop": 2,
+   "alter": 1,
+   "other": 2
+  }
+ },
+ "tests": {
+  "total": 8,
+  "toplevel": 5,
+  "nested": 3,
+  "by_kind": {
+   "create_table": 2,
+   "create_index": 2,
+   "drop": 1,
+   "alter": 1,
+   "other": 2
+  }
+ }
+}

@@ -1,0 +1,40 @@
+2026-10-19 05:00:00.001 UTC [100] db= LOG:  database system is ready to accept connections
+2026-10-19 05:00:01.000 UTC [200] db=postgres LOG:  statement: CREATE DATABASE nexus_t2_substrate
+2026-10-19 05:00:01.100 UTC [201] db=nexus_t2_substrate LOG:  statement: CREATE SCHEMA nexus
+2026-10-19 05:00:01.101 UTC [201] db=nexus_t2_substrate LOG:  nx_ddl: CREATE SCHEMA
+2026-10-19 05:00:01.101 UTC [201] db=nexus_t2_substrate CONTEXT:  PL/pgSQL function nx_ddl_probe.fire() line 2 at RAISE
+2026-10-19 05:00:01.110 UTC [201] db=nexus_t2_substrate LOG:  statement: 
+	CREATE TABLE nexus.t (id int);
+	
+2026-10-19 05:00:01.111 UTC [201] db=nexus_t2_substrate LOG:  nx_ddl: CREATE TABLE
+2026-10-19 05:00:01.111 UTC [201] db=nexus_t2_substrate CONTEXT:  PL/pgSQL function nx_ddl_probe.fire() line 2 at RAISE
+2026-10-19 05:00:01.120 UTC [201] db=nexus_t2_substrate LOG:  statement: CREATE UNIQUE INDEX i ON nexus.t(id)
+2026-10-19 05:00:01.121 UTC [201] db=nexus_t2_substrate LOG:  nx_ddl: CREATE INDEX
+2026-10-19 05:00:01.200 UTC [202] db=nexus_t2_substrate LOG:  statement: CREATE TABLE nexus.u (a int); CREATE INDEX ON nexus.u(a)
+2026-10-19 05:00:01.201 UTC [202] db=nexus_t2_substrate LOG:  nx_ddl: CREATE TABLE
+2026-10-19 05:00:01.202 UTC [202] db=nexus_t2_substrate LOG:  nx_ddl: CREATE INDEX
+2026-10-19 05:00:01.300 UTC [203] db=nexus_t2_substrate LOG:  statement: ALTER TABLE nexus.t ADD COLUMN c int
+2026-10-19 05:00:01.301 UTC [203] db=nexus_t2_substrate ERROR:  relation "nexus.t" does not exist
+2026-10-19 05:00:01.301 UTC [203] db=nexus_t2_substrate STATEMENT:  ALTER TABLE nexus.t ADD COLUMN c int
+2026-10-19 05:00:01.310 UTC [203] db=nexus_t2_substrate LOG:  nx_ddl: DROP TABLE
+2026-10-19 05:00:01.310 UTC [203] db=nexus_t2_substrate CONTEXT:  SQL statement "DROP TABLE nexus.leaf"
+2026-10-19 05:00:01.400 UTC [204] db=postgres LOG:  statement: DROP ROLE IF EXISTS zz
+2026-10-19 05:00:02.000 UTC [205] db=nexus_t2_substrate LOG:  nx_ddl_mark: ready
+2026-10-19 05:00:02.000 UTC [205] db=nexus_t2_substrate CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-10-19 05:00:02.100 UTC [301] db=nexus_t2_substrate LOG:  nx_ddl: CREATE TABLE
+2026-10-19 05:00:02.100 UTC [301] db=nexus_t2_substrate CONTEXT:  SQL statement "CREATE TABLE nexus.leaf_a PARTITION OF nexus.chunks FOR VALUES IN ('a')"
+2026-10-19 05:00:02.100 UTC [301] db=nexus_t2_substrate STATEMENT:  SELECT nexus.ensure_tenant_partitions($1)
+2026-10-19 05:00:02.101 UTC [301] db=nexus_t2_substrate LOG:  nx_ddl: CREATE TABLE
+2026-10-19 05:00:02.200 UTC [302] db=nexus_t2_substrate LOG:  execute S_1: ALTER TABLE nexus.t ADD COLUMN d int
+2026-10-19 05:00:02.201 UTC [302] db=nexus_t2_substrate LOG:  nx_ddl: ALTER TABLE
+2026-10-19 05:00:02.300 UTC [303] db=postgres LOG:  statement: CREATE DATABASE nexus_test_1 TEMPLATE nexus_template
+2026-10-19 05:00:02.400 UTC [304] db=nexus_test_1 LOG:  statement: GRANT SELECT ON nexus.t TO svc
+2026-10-19 05:00:02.401 UTC [304] db=nexus_test_1 LOG:  nx_ddl: GRANT
+2026-10-19 05:00:02.500 UTC [305] db=nexus_test_1 LOG:  statement: /* tenant drop */ DROP TABLE IF EXISTS x
+2026-10-19 05:00:02.501 UTC [305] db=nexus_test_1 LOG:  nx_ddl: DROP TABLE
+2026-10-19 05:00:02.550 UTC [308] db=nexus_test_1 LOG:  execute <unnamed>/C_1: -- supporting index, tenant-scoped
+	-- more comment
+	CREATE INDEX idx_x ON nexus.t (id)
+2026-10-19 05:00:02.551 UTC [308] db=nexus_test_1 LOG:  nx_ddl: CREATE INDEX
+2026-10-19 05:00:02.600 UTC [306] db=nexus_test_1 LOG:  nx_ddl: CREATE INDEX
+2026-10-19 05:00:02.700 UTC [307] db=nexus_test_1 LOG:  connection authorized: user=svc database=nexus_test_1

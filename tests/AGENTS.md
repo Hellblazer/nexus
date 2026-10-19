@@ -248,6 +248,17 @@ deselects them, so no census has said which of them touch storage.
   and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
   environment fails with a `KeyError` the guard cannot see).
 
+## DDL statements per run (nexus-sz651)
+
+Every run with the engine substrate prints `ddl: migration=<n> tests=<n> per_test=<x>` in the
+terminal summary and writes `nx-ddl-report.json` (under `NX_DDL_REPORT_DIR`, else the
+controller's basetemp). `tests/_ddl_counter.py` explains the two signals (`log_statement=ddl`
+for client statements, an event trigger for the DDL a function runs through `EXECUTE`, which
+is every tenant mint and drop) and the counting rule. The Java twin is
+`DdlLogParser`/`DdlCounts` (per-fork files in `service/target/ddl-counts/`). The ceilings
+live in `tests/ddl_ceiling.toml`; `scripts/ddl_ratchet.py check --suite <name> --report <path>`
+compares a run with its ceiling. Clusters other than the substrate's are not counted.
+
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
 The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and
