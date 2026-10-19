@@ -71,12 +71,19 @@ cluster root's floors), the controller creates
 `nexus-test-pg-<uid>`) before it spawns workers, runs one real script from it, and sets
 `TMPDIR=<run>/t` and `PYTEST_DEBUG_TEMPROOT=<run>/p`. `tempfile`, `tmp_path`, every child
 process, the fenced home and the cluster-log file follow; workers and nested pytest runs
-find `NX_TEST_TMP_SESSION` and decide nothing. The original tempdir stays in
-`NX_TEST_TMP_ORIG` and is what the boot-slot directory and the stray-cluster sweep's disk
-root use (`_engine_substrate._original_tempdir`): a per-run slot directory would split the
-cross-run boot cap. What does NOT follow: the engine JVM's `java.io.tmpdir` (the JDK ignores
-`TMPDIR` on Linux; `/tmp`, hsperfdata and a uid probe file) and the ONNX native cache
-(`NX_ORT_NATIVE_DIR`, pinned to the real home on purpose). The summary ends with one line,
+find `NX_TEST_TMP_SESSION` and decide nothing. The engine JVM follows too: the JDK ignores
+`TMPDIR` on Linux, so every substrate engine launch gets `-Djava.io.tmpdir=<TMPDIR>`
+(`with_substrate_sizing` in `tests/db/_service_fixture.py`; netty and JNA extract natives
+there on each boot). That is safe for the engine's uid probe, which reads `/proc/self/status`
+first and only elsewhere makes one file in that directory. The original tempdir stays in
+`NX_TEST_TMP_ORIG` and is what four things use: the boot-slot directory (a per-run slot
+directory would split the cross-run boot cap), the stray-cluster sweep's disk root, a crashing
+JVM's hs_err report (`-XX:ErrorFile`, `jvm_error_file_arg`: evidence must outlive the run dir),
+and any cluster whose root decided on DISK (`pg_cluster_parent()` is None means the original
+tempdir, never the run's tmpfs). The start-of-run daemon drain also scans the original
+tempdir's `pytest-of-<user>`, so what a disk-mode or killed run stranded there is still reaped.
+What does NOT follow: the ONNX native cache (`NX_ORT_NATIVE_DIR`, pinned to the real home on
+purpose). The summary ends with one line,
 `nexus test tmp: basetemp and TMPDIR on tmpfs <run>, N MiB at the end of the run, removed at
 exit; nx-* reports are copied to <dir>`, or `... on disk <tempdir> because: <reason>`
 (not inside a grant, not Linux, noexec, low room, ...; a Linux grant that could not use
@@ -89,7 +96,14 @@ numbered dir inside the private run dir, so it never keeps a previous run on tmp
 counter and the storage-touch guard write their `nx-*` reports into the controller basetemp
 by default, after the session finishes, so just before the removal the basetemp's top-level
 `nx-*` files are copied to `<original tempdir>/nexus-test-reports-<uid>/<run>` (newest three
-kept); `NX_DDL_REPORT_DIR` / `NX_STORAGE_TOUCH_REPORT_DIR` still put them where you choose. A
+kept); `NX_DDL_REPORT_DIR` / `NX_STORAGE_TOUCH_REPORT_DIR` still put them where you choose, and the
+DDL and storage-touch summary lines print the copy's path, not the tmpfs one. **A run that exits
+non-zero also keeps its failure evidence** in `<report home>/failed/`: the engine logs
+(`nexus-svc-*`), the `tmp_path` trees of the failed tests (matched by name from the failed node
+ids, controller and xdist workers), up to 256 MiB, and `SUMMARY.txt` naming what was kept and what
+the cap skipped; `NX_KEEP_FENCED_HOME=1` also copies the fenced home there, uncapped. The summary
+line says so for a failed run. A passing run keeps only the reports. SIGKILL or SIGTERM of the
+controller keeps nothing (the next run sweeps its dir). A
 killed run leaves one `r*` dir, which the next grant run removes at its start: the owner record
 (pid plus `/proc` start time) says the controller is gone, or a record-less dir is older than
 10 minutes; the dir's `p` tree is first handed to the same scoped daemon reaper the

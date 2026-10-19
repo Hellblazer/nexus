@@ -290,6 +290,32 @@ class TestStaleRootDiscovery:
         found = [p.name for p in stale_pytest_roots(root / "pytest-4" / "gw0")]
         assert found == ["pytest-3"], found
 
+    def test_the_original_tempdirs_roots_are_drained_when_the_basetemp_is_in_a_private_run_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-kyujr: inside a lab-run grant the basetemp is in the run's private
+        tmpfs directory and has no siblings, so what an earlier disk-mode or killed
+        run stranded under the ORIGINAL tempdir's ``pytest-of-<user>`` is reachable
+        only through ``extra_tempdirs``. A live run there is still spared."""
+        run_root = tmp_path / "run" / "p" / "pytest-of-dev"
+        orig_root = tmp_path / "orig" / "pytest-of-dev"
+        for r, names in ((run_root, ("pytest-0",)), (orig_root, ("pytest-4", "pytest-5", "pytest-6"))):
+            r.mkdir(parents=True)
+            for n in names:
+                (r / n).mkdir()
+        (orig_root / "pytest-5" / ".lock").write_text(str(os.getpid()))  # a live concurrent run
+        current = run_root / "pytest-0"
+
+        assert stale_pytest_roots(current) == [], "without the original tempdir nothing is reachable"
+        found = stale_pytest_roots(current, extra_tempdirs=[tmp_path / "orig"])
+        assert found == [orig_root / "pytest-6", orig_root / "pytest-4"], found
+        assert stale_pytest_roots(current, extra_tempdirs=[tmp_path / "nowhere"]) == []
+
+    def test_the_session_drain_passes_the_original_tempdir(self) -> None:
+        src = Path(stale_pytest_roots.__code__.co_filename).read_text()
+        assert 'os.environ.get("NX_TEST_TMP_ORIG")' in src
+        assert "stale_pytest_roots(basetemp, extra_tempdirs=" in src
+
     def test_a_garbage_lock_skips_one_root_not_the_whole_scan(self, tmp_path: Path) -> None:
         """A lock naming a pid too large for kill() raises OverflowError, which
         must read as "not live" for that root rather than empty the scan."""

@@ -12,12 +12,23 @@ variable, and tests read engine stderr.
 
 from __future__ import annotations
 
+import tempfile
+
+import pytest
+
 import tests._engine_substrate as sub
 import tests.db._service_fixture as fx
 from tests.db._service_fixture import jvm_error_file_arg
 
 HEAP = f"-Xmx{fx.SUBSTRATE_ENGINE_HEAP}"
 CPUS = f"-XX:ActiveProcessorCount={fx.SUBSTRATE_ENGINE_CPUS}"
+
+
+@pytest.fixture(autouse=True)
+def _no_moved_tmpdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lab-run grant run sets the tmp-root session variable; these tests state the argv
+    of a run that did not move TMPDIR, and the tests below set it themselves."""
+    monkeypatch.delenv(fx.TMP_SESSION_ENV, raising=False)
 
 
 def _before_jar(argv: list[str], flag: str) -> bool:
@@ -53,3 +64,37 @@ def test_a_native_launch_is_left_alone() -> None:
     native = ["/opt/nexus-service", "-Duser.timezone=UTC"]
     assert fx.with_substrate_sizing(native) == native
 
+
+# ── java.io.tmpdir follows the run's TMPDIR while it is on tmpfs (nexus-kyujr) ──
+
+
+@pytest.mark.parametrize("session", ["tmpfs=/dev/shm/nexus-tmp-1/rabc", "forced=/keep/here"])
+def test_a_moved_tmpdir_becomes_the_engines_java_io_tmpdir_before_jar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, session: str,
+) -> None:
+    monkeypatch.setenv(fx.TMP_SESSION_ENV, session)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    flag = f"-Djava.io.tmpdir={tmp_path}"
+    argv = sub.engine_argv("/usr/bin/java")
+    assert _before_jar(argv, flag), argv
+    out = fx.with_substrate_sizing(["java", jvm_error_file_arg(), "-jar", "a.jar"])
+    assert flag in out and out.index(flag) < out.index("-jar")
+    assert fx.with_substrate_sizing(out) == out, "must not add it twice"
+
+
+@pytest.mark.parametrize("session", [None, "disk=not inside a lab-run grant", "disk="])
+def test_an_unmoved_tmpdir_adds_no_java_io_tmpdir(monkeypatch: pytest.MonkeyPatch, session) -> None:
+    if session is not None:
+        monkeypatch.setenv(fx.TMP_SESSION_ENV, session)
+    assert fx.run_tmpdir_arg() is None
+    assert not any(a.startswith("-Djava.io.tmpdir=") for a in sub.engine_argv("/usr/bin/java"))
+
+
+def test_a_callers_own_java_io_tmpdir_wins_and_a_native_launch_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(fx.TMP_SESSION_ENV, "tmpfs=/dev/shm/nexus-tmp-1/rabc")
+    own = ["java", jvm_error_file_arg(), "-Djava.io.tmpdir=/mine", "-jar", "a.jar"]
+    assert [a for a in fx.with_substrate_sizing(own) if a.startswith("-Djava.io.tmpdir=")] == ["-Djava.io.tmpdir=/mine"]
+    native = ["/opt/nexus-service", "-Duser.timezone=UTC"]
+    assert fx.with_substrate_sizing(native) == native

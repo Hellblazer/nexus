@@ -51,6 +51,13 @@ def installed_plugin(tmp_path_factory) -> Path:
         text=True,
     )
     assert result.returncode == 0, f"git clone failed:\n{result.stderr}"
+    # The pin for the --shared above: a plain local clone also succeeds, and silently
+    # copies (or hard-links) the whole object store. Alternates are what --shared leaves.
+    alternates = clone_root / ".git" / "objects" / "info" / "alternates"
+    assert alternates.is_file(), (
+        f"{alternates} is missing: the clone did not borrow the source's objects, so each "
+        "xdist worker would copy the whole object store into its (tmpfs) tmp_path"
+    )
 
     # Read source dir from marketplace.json (same as Claude Code does).
     # nexus-mkj6u: source is now the git-subdir object form with tag

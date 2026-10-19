@@ -122,6 +122,28 @@ class TestDecision:
         assert d.root is not None
         assert sub._socket_path_fits(d.root / ("r" + "x" * 8) / "t")
 
+    def test_a_root_whose_socket_paths_would_pass_sun_path_is_refused(self) -> None:
+        d = _decide(uid="9" * 100)
+        assert d.root is None and "sun_path" in d.reason and d.expected_tmpfs
+
+    def test_the_seam_skips_the_sun_path_gate(self, tmp_path) -> None:
+        """The seam stands in for /dev/shm on a laptop whose temp paths are long; the gate
+        is for the real thing."""
+        shm = tmp_path / ("s" * 120)
+        shm.mkdir()
+        d = _decide(env={"LAB_CPUS": "4", "NX_TEST_TMP_SHM_DIR": str(shm)})
+        assert d.root is not None
+
+
+class TestEnvSpellings:
+    def test_the_names_the_service_fixture_spells_out_are_the_ones_set(self) -> None:
+        """tests/db/_service_fixture.py cannot import these (it sits below both modules in the
+        import graph), so it repeats them."""
+        from tests.db import _service_fixture as fx
+
+        assert fx.TMP_ORIG_ENV == sub._TMP_ORIG_ENV == tr.ORIG_ENV
+        assert fx.TMP_SESSION_ENV == tr.SESSION_ENV
+
 
 class TestRunDirs:
     def test_layout_privacy_and_owner_record(self, tmp_path) -> None:
@@ -233,6 +255,36 @@ class TestSweep:
             raise RuntimeError("ps failed")
 
         assert tr.sweep_stale_runs(root, drain=boom) == [run]
+
+    def test_a_run_dir_another_user_owns_is_never_touched(self, tmp_path, monkeypatch) -> None:
+        """/dev/shm is shared: a dead-looking run dir that is not ours is left alone, drained
+        by nobody and removed by nobody."""
+        root = tmp_path / "root"
+        run = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
+        drained: list[Path] = []
+        monkeypatch.setattr(sub, "_current_uid", lambda: str(os.getuid() + 1))
+        assert tr.sweep_stale_runs(root, drain=drained.append) == []
+        assert run.is_dir() and drained == []
+        monkeypatch.undo()
+        assert tr.sweep_stale_runs(root) == [run], "the same dir IS swept when it is ours"
+
+    def test_the_conftest_drain_signals_only_daemons_under_the_stale_tree(self, tmp_path, monkeypatch) -> None:
+        """The real ``_drain_stale_tmp_run`` of tests/conftest.py, with ``ps`` and the signal
+        stubbed: a postmaster rooted in the stale ``p`` tree gets SIGQUIT, one outside it and
+        the user's own are never signalled."""
+        from tests import conftest as cf
+
+        stale_p = tmp_path / "shm" / _ROOT / "rdead0000" / "p"
+        (stale_p / "pytest-of-u" / "pytest-0" / "pgdata").mkdir(parents=True)
+        procs = [
+            (31, f"/opt/pg/bin/postgres -D {stale_p.resolve()}/pytest-of-u/pytest-0/pgdata -p 5433"),
+            (32, f"/opt/pg/bin/postgres -D {tmp_path.resolve()}/elsewhere/pgdata -p 5434"),
+            (33, "/usr/local/pgsql/bin/postgres -D /Users/dev/pgdata"),
+        ]
+        killed: list[tuple[int, str]] = []
+        monkeypatch.setattr(cf, "_ps_all", lambda: procs)
+        cf._drain_stale_tmp_run(stale_p, _kill=lambda pid, sig: killed.append((pid, sig)))
+        assert killed == [(31, "QUIT")]
 
 
 def _plugin(tmp_path, env=None, **decide_kw) -> tuple[tr.TmpRootPlugin, dict]:
@@ -409,6 +461,206 @@ class TestPlugin:
         assert reg < src.index("_clamp_xdist_workers(config)\n    _begin_pg_root_session(config)")
 
 
+def _run_tree(tmp_path) -> Path:
+    """A run dir shaped like a finished xdist run that had two failing tests, one passing test
+    and one engine."""
+    run = tr.make_run_dir(tmp_path / "shm" / _ROOT, probe=False)
+    (run / "t" / "nexus-svc-log-abc").mkdir()
+    (run / "t" / "nexus-svc-log-abc" / "engine.log").write_text("engine boom\n")
+    (run / "t" / "unrelated-scratch").mkdir()
+    bt = run / "p" / "pytest-of-u" / "pytest-0"
+    for rel, body in (
+        ("popen-gw0/test_failing_1_2_0", "param evidence"),
+        ("popen-gw1/test_other_failure0", "worker evidence"),
+        ("popen-gw1/test_passing0", "must not be copied"),
+        ("test_serial_failure0", "controller evidence"),
+    ):
+        (bt / rel).mkdir(parents=True)
+        (bt / rel / "data.txt").write_text(body)
+    (run / "p" / "pytest-of-u" / "pytest-current").symlink_to(bt)
+    return run
+
+
+_FAILED = [
+    "tests/test_x.py::TestA::test_failing[1-2]",
+    "tests/test_y.py::test_other_failure",
+    "tests/test_z.py::test_serial_failure",
+]
+
+
+class TestFailureEvidence:
+    def test_the_tmp_dir_name_follows_pytests_own_rule(self) -> None:
+        assert tr._tmp_dir_prefix("a.py::C::test_failing[1-2]") == "test_failing_1_2_"
+        assert tr._tmp_dir_prefix("a.py::test_x[a::b]") == "test_x_a__b_"
+        assert tr._tmp_dir_prefix("a.py::" + "t" * 50) == "t" * 30
+
+    def test_the_failed_tests_dirs_are_found_in_the_controller_and_worker_basetemps(self, tmp_path) -> None:
+        run = _run_tree(tmp_path)
+        found = {d.name for d in tr.failed_tmp_dirs(run / "p", _FAILED)}
+        assert found == {"test_failing_1_2_0", "test_other_failure0", "test_serial_failure0"}
+        assert tr.failed_tmp_dirs(run / "p", []) == []
+
+    def test_engine_logs_and_failed_dirs_are_copied_and_the_rest_is_not(self, tmp_path) -> None:
+        run = _run_tree(tmp_path)
+        dest = tmp_path / "out" / "failed"
+        notes = tr.copy_failure_evidence(run, dest, _FAILED, exitstatus=1)
+        assert (dest / "engine-logs" / "nexus-svc-log-abc" / "engine.log").read_text() == "engine boom\n"
+        assert sorted(p.parent.name for p in dest.glob("tmp_path/**/data.txt")) == [
+            "test_failing_1_2_0", "test_other_failure0", "test_serial_failure0",
+        ], "the passing test's dir is not copied"
+        assert not (dest / "unrelated-scratch").exists()
+        # the worker's dir keeps its place in the tree, so two workers' same-named dirs do not collide
+        assert (dest / "tmp_path" / "pytest-of-u" / "pytest-0" / "popen-gw0" / "test_failing_1_2_0" / "data.txt").is_file()
+        summary = (dest / tr.FAILURE_SUMMARY_FILE).read_text()
+        assert "exit status 1" in summary and "test_serial_failure" in summary and notes
+
+    def test_the_size_cap_skips_and_says_so_and_engine_logs_come_first(self, tmp_path) -> None:
+        run = _run_tree(tmp_path)
+        big = run / "p" / "pytest-of-u" / "pytest-0" / "test_serial_failure0" / "big.bin"
+        big.write_bytes(b"0" * 4096)
+        dest = tmp_path / "out" / "failed"
+        notes = tr.copy_failure_evidence(run, dest, _FAILED, exitstatus=1, cap=2048)
+        assert (dest / "engine-logs" / "nexus-svc-log-abc" / "engine.log").is_file()
+        assert not (dest / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_serial_failure0").exists()
+        assert any("skipped" in n and "test_serial_failure0" in n and "cap" in n for n in notes)
+        assert "skipped" in (dest / tr.FAILURE_SUMMARY_FILE).read_text()
+
+    def test_a_socket_in_a_failed_dir_does_not_stop_the_copy(self, tmp_path, monkeypatch) -> None:
+        import socket
+
+        run = _run_tree(tmp_path)
+        d = run / "p" / "pytest-of-u" / "pytest-0" / "test_serial_failure0"
+        monkeypatch.chdir(d)  # a relative bind: pytest's tmp_path is past sun_path on macOS
+        sock = socket.socket(socket.AF_UNIX)
+        try:
+            sock.bind("s")
+            dest = tmp_path / "out" / "failed"
+            tr.copy_failure_evidence(run, dest, _FAILED, exitstatus=1)
+            copied = dest / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_serial_failure0"
+            assert (copied / "data.txt").is_file() and not (copied / "s").exists()
+        finally:
+            sock.close()
+
+    def test_the_fenced_home_is_copied_only_when_asked_and_ignores_the_cap(self, tmp_path) -> None:
+        run = _run_tree(tmp_path)
+        home = run / "t" / "nx-suite-home-xyz"
+        (home / ".cache").mkdir(parents=True)
+        (home / ".cache" / "blob").write_bytes(b"0" * 8192)
+        (home / ".m2").symlink_to(tmp_path / "real-m2")
+        asked = tmp_path / "asked" / "failed"
+        tr.copy_failure_evidence(run, asked, _FAILED, exitstatus=1, keep_fenced_home=True, cap=16)
+        assert (asked / "fenced-home" / "nx-suite-home-xyz" / ".cache" / "blob").stat().st_size == 8192
+        assert (asked / "fenced-home" / "nx-suite-home-xyz" / ".m2").is_symlink(), "links stay links"
+        not_asked = tmp_path / "not-asked" / "failed"
+        tr.copy_failure_evidence(run, not_asked, _FAILED, exitstatus=1)
+        assert not (not_asked / "fenced-home").exists()
+
+    def _finished_plugin(self, tmp_path, exitstatus, *, env_extra=None):
+        orig = tmp_path / "orig"
+        orig.mkdir(exist_ok=True)
+        plug, env = _plugin(tmp_path, env={
+            "LAB_CPUS": "4", "NX_TEST_TMP_SHM_DIR": str(tmp_path / "shm"), "TMPDIR": str(orig), **(env_extra or {}),
+        })
+        plug.pytest_configure(_config())
+        bt = plug.run / "p" / "pytest-of-u" / "pytest-0"
+        (bt / "test_boom0").mkdir(parents=True)
+        (bt / "test_boom0" / "data.txt").write_text("evidence")
+        (plug.run / "t" / "nexus-svc-log-q").mkdir()
+        (plug.run / "t" / "nexus-svc-log-q" / "engine.log").write_text("log")
+        (plug.run / "t" / "nx-suite-home-q").mkdir()
+        for nodeid, failed in (("t.py::test_boom", True), ("t.py::test_ok", False), ("t.py::test_boom", True)):
+            plug.pytest_runtest_logreport(SimpleNamespace(nodeid=nodeid, failed=failed))
+        plug.pytest_sessionfinish(None, exitstatus)
+        return plug, orig
+
+    def test_a_failed_run_keeps_its_evidence_under_the_report_home_before_the_run_goes(self, tmp_path) -> None:
+        plug, orig = self._finished_plugin(tmp_path, 1)
+        assert plug.failed_nodeids == ["t.py::test_boom"]
+        run = plug.run
+        plug.pytest_unconfigure(_config())
+        failed = plug._report_home() / tr.FAILED_SUBDIR
+        assert not run.exists()
+        assert (failed / "engine-logs" / "nexus-svc-log-q" / "engine.log").read_text() == "log"
+        assert (failed / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_boom0" / "data.txt").read_text() == "evidence"
+        assert "t.py::test_boom" in (failed / tr.FAILURE_SUMMARY_FILE).read_text()
+        assert not (failed / "fenced-home").exists(), "removed unless NX_KEEP_FENCED_HOME is set"
+
+    def test_keep_fenced_home_copies_the_home_out_of_the_run_dir(self, tmp_path) -> None:
+        plug, _orig = self._finished_plugin(tmp_path, 1, env_extra={"NX_KEEP_FENCED_HOME": "1"})
+        plug.pytest_unconfigure(_config())
+        assert (plug._report_home() / tr.FAILED_SUBDIR / "fenced-home" / "nx-suite-home-q").is_dir()
+
+    @pytest.mark.parametrize("exitstatus", [0, 5])
+    def test_a_clean_run_keeps_no_evidence(self, tmp_path, exitstatus) -> None:
+        plug, orig = self._finished_plugin(tmp_path, exitstatus)
+        plug.pytest_unconfigure(_config())
+        assert list(orig.iterdir()) == [], "nothing is written to disk for a passing run with no reports"
+
+    def test_the_summary_line_says_a_failed_run_is_kept_and_where(self, tmp_path) -> None:
+        plug, _orig = self._finished_plugin(tmp_path, 1)
+        line = plug.summary_line()
+        assert "FAILED" in line and str(plug._report_home() / tr.FAILED_SUBDIR) in line and "SUMMARY.txt" in line
+        (tmp_path / "ok").mkdir()
+        ok, _ = self._finished_plugin(tmp_path / "ok", 0)
+        assert "FAILED" not in ok.summary_line()
+
+    def test_the_terminal_summary_hook_learns_the_exit_status_too(self, tmp_path) -> None:
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        written: list[str] = []
+        plug.pytest_terminal_summary(SimpleNamespace(write_line=written.append), 1, _config())
+        assert plug.failed_run and "FAILED" in written[0]
+
+
+class TestKeptReportPath:
+    def _env(self, run: Path) -> dict[str, str]:
+        return {tr.SESSION_ENV: f"tmpfs={run}", tr.ORIG_ENV: "/orig/tmp"}
+
+    def test_a_basetemp_report_is_named_by_its_disk_copy(self, tmp_path) -> None:
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        assert tr.kept_report_path(report, self._env(run)) == (
+            Path("/orig/tmp") / f"nexus-test-reports-{sub._current_uid()}" / "rabc12345" / "nx-ddl-report.json"
+        )
+
+    @pytest.mark.parametrize("rel", [
+        "p/pytest-of-u/pytest-0/popen-gw0/nx-ddl-worker-1.json",  # not top level: never harvested
+        "p/pytest-of-u/pytest-0/test_x0/nx-r.json",
+        "p/pytest-of-u/pytest-0/notnx.json",
+        "t/nx-ddl-report.json",  # TMPDIR, not the pytest root
+    ])
+    def test_what_the_harvest_does_not_copy_is_not_renamed(self, tmp_path, rel) -> None:
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        assert tr.kept_report_path(run / rel, self._env(run)) == run / rel
+
+    def test_outside_a_tmpfs_run_the_path_is_unchanged(self, tmp_path) -> None:
+        p = tmp_path / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        for env in ({}, {tr.SESSION_ENV: "disk=because"}, {tr.SESSION_ENV: f"forced={tmp_path}"}):
+            assert tr.kept_report_path(p, env) == p
+
+    def test_both_report_plugins_print_the_kept_path(self, tmp_path, monkeypatch) -> None:
+        import inspect
+
+        from tests import _ddl_counter as ddl
+        from tests import _storage_touch_guard as guard
+
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-x.json"
+        monkeypatch.setenv(tr.SESSION_ENV, f"tmpfs={run}")
+        monkeypatch.setenv(tr.ORIG_ENV, str(tmp_path / "orig"))
+        want = tr.kept_report_path(report)
+        assert want != report
+        assert ddl._summary_report_path(report) == want and guard._summary_report_path(report) == want
+        assert "(report: {_summary_report_path(path)})" in inspect.getsource(ddl._Recorder.pytest_terminal_summary)
+        assert 'f"storage-touch report: {_summary_report_path(path)}"' in inspect.getsource(guard)
+
+    def test_a_failing_import_falls_back_to_the_given_path(self, tmp_path, monkeypatch) -> None:
+        from tests import _ddl_counter as ddl
+
+        monkeypatch.setitem(sys.modules, "tests._tmp_root", None)  # makes the import raise ImportError
+        assert ddl._summary_report_path(tmp_path / "nx-r.json") == tmp_path / "nx-r.json"
+
+
 # --- end to end: a real nested pytest --------------------------------------------
 
 _SANDBOX_CONFTEST = '''\
@@ -444,6 +696,20 @@ def test_probe(tmp_path):
     if os.environ.get("PROBE_HANG"):
         (out_dir / "hanging").write_text("x")
         time.sleep(120)
+'''
+
+
+_SANDBOX_FAILING_TEST = '''\
+import os
+from pathlib import Path
+
+
+def test_fail(tmp_path):
+    (tmp_path / "marker.txt").write_text("evidence-" + os.environ.get("PYTEST_XDIST_WORKER", "serial"))
+    log_dir = Path(os.environ["TMPDIR"]) / "nexus-svc-log-e2e"
+    log_dir.mkdir(exist_ok=True)
+    (log_dir / "engine.log").write_text("engine went away")
+    assert False, "on purpose"
 '''
 
 
@@ -507,12 +773,15 @@ class TestEndToEnd:
         assert probe["tmp_path"].startswith(str(run / "p") + os.sep)
         assert "pytest-of-" in probe["tmp_path"]
         assert not run.exists() and list(root.iterdir()) == [], "the basetemp is not retained on tmpfs"
+        assert "FAILED" not in r.stdout
         assert f"basetemp and TMPDIR on tmpfs {run}" in r.stdout and "removed at exit" in r.stdout
         orig = tmp_path / "orig-tmp"
         assert [d.name for d in orig.iterdir()] == [f"nexus-test-reports-{sub._current_uid()}"], (
             "the only thing written to the original tempdir is the kept reports"
         )
-        assert (orig / f"nexus-test-reports-{sub._current_uid()}" / run.name / "nx-probe-report.json").is_file()
+        home = orig / f"nexus-test-reports-{sub._current_uid()}" / run.name
+        assert (home / "nx-probe-report.json").is_file()
+        assert not (home / tr.FAILED_SUBDIR).exists(), "a passing run keeps no failure evidence"
 
     def test_xdist_workers_inherit_the_one_decision(self, tmp_path) -> None:
         pytest.importorskip("xdist")
@@ -580,3 +849,33 @@ class TestEndToEnd:
         r = _run_pytest(tmp_path, "-q", "test_probe.py", **_grant_env(tmp_path))
         assert r.returncode == 0, r.stdout + r.stderr
         assert not stale.exists() and list(root.iterdir()) == []
+
+    def _failed_home(self, tmp_path) -> tuple[Path, Path]:
+        reports = tmp_path / "orig-tmp" / f"nexus-test-reports-{sub._current_uid()}"
+        (home,) = list(reports.iterdir())
+        return home, home / tr.FAILED_SUBDIR
+
+    def test_a_failed_serial_run_keeps_the_failed_tests_dir_and_the_engine_log(self, tmp_path) -> None:
+        _sandbox(tmp_path).joinpath("test_fail.py").write_text(_SANDBOX_FAILING_TEST)
+        r = _run_pytest(tmp_path, "-q", "test_fail.py", **_grant_env(tmp_path))
+        assert r.returncode == 1, r.stdout + r.stderr
+        run_dirs = list((tmp_path / "shm" / _ROOT).iterdir())
+        assert run_dirs == [], "the run dir is still removed"
+        home, failed = self._failed_home(tmp_path)
+        markers = list((failed / "tmp_path").glob("**/marker.txt"))
+        assert [m.read_text() for m in markers] == ["evidence-serial"]
+        assert (failed / "engine-logs" / "nexus-svc-log-e2e" / "engine.log").read_text() == "engine went away"
+        assert "test_fail.py::test_fail" in (failed / tr.FAILURE_SUMMARY_FILE).read_text()
+        assert "this run FAILED" in r.stdout and str(failed) in r.stdout
+
+    def test_a_failed_xdist_run_keeps_the_workers_tmp_dir(self, tmp_path) -> None:
+        pytest.importorskip("xdist")
+        proj = _sandbox(tmp_path)
+        proj.joinpath("test_fail.py").write_text(_SANDBOX_FAILING_TEST)
+        proj.joinpath("test_second.py").write_text(_SANDBOX_TEST.replace("test_probe", "test_probe_two"))
+        r = _run_pytest(tmp_path, "-q", "-n", "2", "--dist", "loadfile", **_grant_env(tmp_path))
+        assert r.returncode == 1, r.stdout + r.stderr
+        _home, failed = self._failed_home(tmp_path)
+        (marker,) = list((failed / "tmp_path").glob("**/marker.txt"))
+        assert marker.read_text().startswith("evidence-gw") and "popen-gw" in str(marker)
+        assert (failed / "engine-logs" / "nexus-svc-log-e2e" / "engine.log").is_file()

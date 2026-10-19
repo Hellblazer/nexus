@@ -840,7 +840,14 @@ jobs:
         # data directory and every tmp_path lived in memory and was charged to
         # the job's 18 GB cap. Measured on the first -n 5 run (2026-10-11): 3.3
         # to 4.0 GB of shmem per shard, with one shard pinned at the cap.
-        # $RUNNER_TEMP is on disk and is deleted with the job.
+        # $RUNNER_TEMP is on disk and is deleted with the job. It is the tempdir
+        # the step STARTS with, not the one the tests run on: the pool job has
+        # LAB_CPUS set, so tests/_tmp_root.py (nexus-kyujr) points the controller's
+        # TMPDIR and pytest basetemp at a private /dev/shm directory when the
+        # tmpfs gates pass (charged to the grant, removed at the end of the run),
+        # and keeps this one as the original tempdir (crash reports, the kept
+        # nx-* reports and a failed run's evidence land under it). When a gate
+        # refuses, the summary line says why and this directory is used as is.
         run: |
           set -euo pipefail
           if [ "${{ runner.environment }}" = "self-hosted" ]; then

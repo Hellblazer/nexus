@@ -789,14 +789,32 @@ HikariPool fail-fast. Such a fixture pops every key here
 tests in ``test_xnz0o_commands_integration.py``)."""
 
 
+#: The environment names ``tests/_tmp_root.py`` (nexus-kyujr) sets when it moves ``TMPDIR``
+#: onto a per-run tmpfs directory. They are spelled out here because that module imports
+#: ``tests/_engine_substrate.py``, which imports this one; ``tests/test_tmp_root.py`` pins
+#: that the spellings match.
+TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
+TMP_SESSION_ENV = "NX_TEST_TMP_SESSION"
+
+
+def original_tempdir() -> Path:
+    """The tempdir the run started with: ``TMPDIR`` is the per-run tmpfs directory
+    inside a lab-run grant and that directory is deleted when the run ends, so
+    anything meant to outlive it (a crash report, a cluster on disk) goes here."""
+    return Path(os.environ.get(TMP_ORIG_ENV) or tempfile.gettempdir())
+
+
 def jvm_error_file_arg() -> str:
-    """``-XX:ErrorFile=<run temp dir>/hs_err_%p.log``: where a crashing engine JVM
+    """``-XX:ErrorFile=<original tempdir>/hs_err_%p.log``: where a crashing engine JVM
     writes its hs_err report (nexus-o5xyx.2).
 
     Without it the JVM drops ``hs_err_pid<N>.log`` into its cwd, which for a test
     launched from the repo is the repo. ``%p`` is expanded by the JVM to its own
-    pid, so concurrent engines do not overwrite each other. ``tempfile.gettempdir()``
-    honours ``TMPDIR``, the same root every other test artifact uses.
+    pid, so concurrent engines do not overwrite each other. The ORIGINAL tempdir
+    (:func:`original_tempdir`), not ``tempfile.gettempdir()``: a report is evidence
+    of a crash, and the run's tmpfs ``TMPDIR`` is deleted at the end of the run
+    (nexus-kyujr). The JVM writes the file only when it crashes, so a green run
+    leaves nothing there.
 
     JVM launches ONLY. A GraalVM native image is not a JVM and has no hs_err
     machinery, so this flag does not apply to it and is deliberately not passed to
@@ -804,7 +822,7 @@ def jvm_error_file_arg() -> str:
     an hs_err). ``tests/test_jvm_jar_launch_error_file_lint.py`` fails any
     ``-jar`` launch in tests/ or src/ that omits it.
     """
-    return f"-XX:ErrorFile={Path(tempfile.gettempdir()) / 'hs_err_%p.log'}"
+    return f"-XX:ErrorFile={original_tempdir() / 'hs_err_%p.log'}"
 
 
 def jar_argv(java: str | Path, jar: str | Path) -> list[str]:
@@ -834,8 +852,23 @@ SUBSTRATE_ENGINE_HEAP: str = "2g"
 SUBSTRATE_ENGINE_CPUS: int = 2
 
 
+def run_tmpdir_arg() -> str | None:
+    """``-Djava.io.tmpdir=<TMPDIR>`` while ``tests/_tmp_root.py`` has put ``TMPDIR`` on
+    the run's tmpfs directory (nexus-kyujr), else None. The JDK ignores ``TMPDIR`` on
+    Linux and uses ``/tmp``, where netty and JNA extract native libraries on every engine
+    boot: on the disk this run was moved off. Safe for the two things that care. The
+    engine's uid probe (``OrtNativeDir.processUid``) reads ``/proc/self/status`` first
+    and only on a platform without it creates one file in that directory, which is ours
+    and 0700. The hs_err report has its own explicit ``-XX:ErrorFile=`` on the original
+    tempdir."""
+    if not os.environ.get(TMP_SESSION_ENV, "").startswith(("tmpfs=", "forced=")):
+        return None
+    return f"-Djava.io.tmpdir={tempfile.gettempdir()}"
+
+
 def with_substrate_sizing(cmd: list[str]) -> list[str]:
-    """Insert ``-Xmx`` and ``-XX:ActiveProcessorCount`` just before ``-jar`` when
+    """Insert ``-Xmx`` and ``-XX:ActiveProcessorCount`` (and, while the run's ``TMPDIR``
+    is on tmpfs, ``-Djava.io.tmpdir``; :func:`run_tmpdir_arg`) just before ``-jar`` when
     *cmd* is a JVM launch that does not set them. A caller's own value wins; a
     command without ``-jar`` (a native binary) comes back unchanged."""
     if "-jar" not in cmd:
@@ -845,6 +878,9 @@ def with_substrate_sizing(cmd: list[str]) -> list[str]:
         flags.append(f"-Xmx{SUBSTRATE_ENGINE_HEAP}")
     if not any(str(a).startswith("-XX:ActiveProcessorCount=") for a in cmd):
         flags.append(f"-XX:ActiveProcessorCount={SUBSTRATE_ENGINE_CPUS}")
+    tmp_arg = run_tmpdir_arg()
+    if tmp_arg is not None and not any(str(a).startswith("-Djava.io.tmpdir=") for a in cmd):
+        flags.append(tmp_arg)
     i = cmd.index("-jar")
     return [*cmd[:i], *flags, *cmd[i:]]
 

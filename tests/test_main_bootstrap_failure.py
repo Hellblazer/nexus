@@ -41,7 +41,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -543,7 +542,7 @@ def test_the_engine_spawn_redirects_hs_err_out_of_the_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """hs_err must land in the run's temp dir, not the JVM's cwd (the repo)."""
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("NX_TEST_TMP_ORIG", str(tmp_path))  # where the hs_err report goes (nexus-kyujr)
     argv, _env = _capture_spawn({"pg_port": 1, "pg_user": "u"}, tmp_path, monkeypatch)
     flag = f"-XX:ErrorFile={tmp_path}/hs_err_%p.log"
     assert flag in argv, argv
@@ -571,7 +570,7 @@ def test_the_engine_spawn_gets_the_substrates_onnx_models(
 def test_the_substrate_engine_argv_redirects_hs_err(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("NX_TEST_TMP_ORIG", str(tmp_path))  # where the hs_err report goes (nexus-kyujr)
     argv = engine_argv("/usr/bin/java")
     flag = f"-XX:ErrorFile={tmp_path}/hs_err_%p.log"
     assert flag in argv, argv

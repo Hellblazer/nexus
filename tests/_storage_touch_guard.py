@@ -1296,7 +1296,20 @@ class Guard:
             tr.write_line(problem, red=self.mode == "fail", yellow=self.mode != "fail")
         for warning in self._warned:
             tr.write_line(warning, yellow=True)
-        tr.write_line(f"storage-touch report: {path}")
+        tr.write_line(f"storage-touch report: {_summary_report_path(path)}")
+
+
+def _summary_report_path(path):  # noqa: ANN001, ANN202
+    """The path to PRINT for a report written to *path*: inside a lab-run grant the
+    basetemp is on tmpfs and is deleted after the summary, with the ``nx-*`` reports
+    copied to disk first (``tests/_tmp_root.py``, nexus-kyujr), so the line names the
+    copy that survives. *path* itself outside that case."""
+    try:
+        from tests._tmp_root import kept_report_path  # noqa: PLC0415 — summary-time only; the module imports the substrate
+
+        return kept_report_path(path)
+    except Exception:  # noqa: BLE001 — a summary line is never worth a failure
+        return path
 
 
 def _split_current_test(value: str) -> tuple[str, str]:

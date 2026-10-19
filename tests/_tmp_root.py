@@ -11,11 +11,15 @@ xdist workers through the environment, logged, and fail-safe to disk.
 
 What moves: ``TMPDIR`` (so ``tempfile`` and every child process follow) and
 ``PYTEST_DEBUG_TEMPROOT`` (the root pytest puts ``pytest-of-<user>/pytest-<n>``
-under, which is what ``tmp_path`` and ``tmp_path_factory`` use). What does not: the
-engine JVM's ``java.io.tmpdir`` (the JDK ignores ``TMPDIR`` on Linux and uses
-``/tmp``; it holds hsperfdata and a one-file uid probe) and ONNX Runtime's native
-cache (``NX_ORT_NATIVE_DIR``, pinned to the real home so it is extracted once, not
-per run).
+under, which is what ``tmp_path`` and ``tmp_path_factory`` use). The engine JVM follows
+too: the JDK ignores ``TMPDIR`` on Linux, so ``tests/db/_service_fixture.py``
+(``run_tmpdir_arg``) passes ``-Djava.io.tmpdir=<TMPDIR>`` on every substrate engine launch
+(netty and JNA extract natives there on each boot). What does not move: ONNX Runtime's
+native cache (``NX_ORT_NATIVE_DIR``, pinned to the real home so it is extracted once, not
+per run), a crashing JVM's hs_err report (``-XX:ErrorFile`` names the ORIGINAL tempdir;
+the report is evidence and the run dir is deleted), clusters whose root decided on disk
+(``tests/_engine_substrate.py`` puts them in the original tempdir, never in RAM by
+accident), and the boot-slot directory.
 
 Layout, all owned by the running user::
 
@@ -42,8 +46,19 @@ reports into the controller's basetemp by default, after the session finishes. T
 run dir therefore goes in ``pytest_unconfigure`` (after the terminal summary), and
 just before it the controller basetemp's top-level ``nx-*`` files are copied to
 ``<original tempdir>/nexus-test-reports-<uid>/<run>`` (newest three kept, like
-pytest's basetemp retention). A run that sets ``NX_DDL_REPORT_DIR`` or
-``NX_STORAGE_TOUCH_REPORT_DIR`` keeps writing where it said.
+pytest's basetemp retention); their summary lines print that copy's path
+(:func:`kept_report_path`), not the tmpfs path that is gone by the time anyone reads
+the line. A run that sets ``NX_DDL_REPORT_DIR`` or ``NX_STORAGE_TOUCH_REPORT_DIR``
+keeps writing where it said.
+
+A run that EXITS NON-ZERO also copies its failure evidence into
+``<report home>/failed/`` before the run dir goes (:func:`copy_failure_evidence`): the
+engine logs (``nexus-svc-*``), the ``tmp_path`` trees of the failed tests (found by
+name from the failed node ids, controller and xdist workers alike), up to
+:data:`FAILURE_COPY_CAP_BYTES`, and a ``SUMMARY.txt`` naming what was kept and what the
+cap skipped; ``NX_KEEP_FENCED_HOME`` also copies the fenced home (uncapped: the operator
+asked). A load-dependent failure cannot be reproduced under ``NX_TEST_TMP_ROOT=<dir>``,
+so this is the only record of it. A passing run keeps only the reports.
 
 A run that is killed leaves its ``r*`` directory behind. The next run in a grant
 removes every directory under the same per-uid root whose controller is gone (pid
@@ -59,13 +74,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
 import time
 import warnings
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,6 +114,22 @@ REPORT_KEEP = 3
 _REPORT_DIR_PREFIX = "nexus-test-reports"
 #: The cluster root's floors, reused so the two decisions cannot disagree.
 MIN_FREE_BYTES = sub._TMPFS_MIN_FREE_BYTES
+#: A failed run's evidence (the failed tests' ``tmp_path`` trees and the engine logs)
+#: is copied to disk up to this many bytes; what does not fit is named in SUMMARY.txt.
+FAILURE_COPY_CAP_BYTES = 256 * 1024**2
+#: Sub-directory of the report home that holds a failed run's evidence.
+FAILED_SUBDIR = "failed"
+FAILURE_SUMMARY_FILE = "SUMMARY.txt"
+#: Exit codes that are not a failure: 0 (passed) and 5 (nothing collected).
+_CLEAN_EXITS = (0, 5)
+#: pytest cuts a test's name to this many characters for its ``tmp_path`` directory.
+_TMP_NAME_MAX = 30
+#: Top-level names in the run's ``TMPDIR`` that hold engine evidence: the per-engine
+#: log directories (``spawn_service``) and the run's cluster-root log.
+_ENGINE_EVIDENCE_GLOBS = ("nexus-svc-*", "nexus-pg-roots-*")
+#: The fenced home's name (``tests/_fence_home.py``); kept on request, never capped.
+_FENCED_HOME_GLOB = "nx-suite-home-*"
+_KEEP_FENCED_HOME_ENV = "NX_KEEP_FENCED_HOME"
 
 
 @dataclass(frozen=True)
@@ -335,6 +367,155 @@ def tree_bytes(path: Path) -> int:
     return total
 
 
+def kept_report_path(path: Path | str, env: Mapping[str, str] | None = None) -> Path:
+    """Where a top-level ``nx-*`` report written to *path* will be after the run.
+
+    A report plugin prints its path in the terminal summary, but the run's basetemp
+    is deleted at unconfigure and the report is copied to the report home first
+    (:meth:`TmpRootPlugin._harvest`). Printing the tmpfs path would name a file that
+    is gone by the time anyone reads the line. Anything the harvest does not copy
+    (a report in a directory the operator chose, a run that is not on tmpfs) comes
+    back unchanged."""
+    path = Path(path)
+    env = os.environ if env is None else env
+    session = env.get(SESSION_ENV) or ""
+    if not session.startswith("tmpfs="):
+        return path
+    run = Path(session.removeprefix("tmpfs="))
+    try:
+        rel = path.relative_to(run / "p")
+    except ValueError:
+        return path
+    if len(rel.parts) != 3 or not path.name.startswith("nx-"):
+        return path  # the harvest copies only <p>/pytest-of-<user>/pytest-<n>/nx-*
+    orig = Path(env.get(ORIG_ENV) or tempfile.gettempdir())
+    return orig / f"{_REPORT_DIR_PREFIX}-{sub._current_uid()}" / run.name / path.name
+
+
+def _tmp_dir_prefix(nodeid: str) -> str:
+    """The name pytest's ``tmp_path`` gives the directory of the test *nodeid* names
+    (before the number it appends): the test's own name, non-word characters to ``_``,
+    cut to 30. A parametrize id may contain ``::``, so the name is cut at the first ``[``."""
+    head, bracket, rest = nodeid.partition("[")
+    return re.sub(r"\W", "_", head.rsplit("::", 1)[-1] + bracket + rest)[:_TMP_NAME_MAX]
+
+
+def failed_tmp_dirs(p_root: Path, nodeids: Sequence[str]) -> list[Path]:
+    """The ``tmp_path`` directories under the run's pytest root that belong to the failed
+    tests (a superset: two tests whose names share their first 30 characters share a
+    prefix). Looks at the controller basetemp and at each xdist worker's ``popen-gw*``."""
+    patterns = [re.compile(re.escape(pre) + r"\d+") for pre in {_tmp_dir_prefix(n) for n in nodeids}]
+    if not patterns:
+        return []
+    bases: list[Path] = []
+    for user_dir in sorted(p_root.glob("pytest-of-*")):
+        if user_dir.is_symlink() or not user_dir.is_dir():
+            continue
+        for bt in sorted(user_dir.glob("pytest-*")):
+            if bt.is_symlink() or not bt.is_dir():
+                continue
+            bases.append(bt)
+            bases.extend(w for w in sorted(bt.glob("popen-gw*")) if w.is_dir() and not w.is_symlink())
+    found: list[Path] = []
+    for base in bases:
+        with contextlib.suppress(OSError):
+            found.extend(
+                d for d in sorted(base.iterdir())
+                if d.is_dir() and not d.is_symlink() and any(rx.fullmatch(d.name) for rx in patterns)
+            )
+    return found
+
+
+def _ignore_specials(directory: str, names: list[str]) -> list[str]:
+    """``copytree`` ignore callback: sockets and FIFOs a test left behind cannot be copied."""
+    skip = []
+    for n in names:
+        try:
+            mode = os.lstat(os.path.join(directory, n)).st_mode
+        except OSError:
+            skip.append(n)
+            continue
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+            skip.append(n)
+    return skip
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return path.lstat().st_size if not path.is_dir() else tree_bytes(path)
+    except OSError:
+        return 0
+
+
+def copy_failure_evidence(
+    run: Path,
+    dest: Path,
+    nodeids: Sequence[str],
+    *,
+    exitstatus: int,
+    keep_fenced_home: bool = False,
+    cap: int = FAILURE_COPY_CAP_BYTES,
+) -> list[str]:
+    """Copy what a FAILED run's run directory holds that explains the failure to *dest*,
+    write ``SUMMARY.txt`` there, and return its note lines. Never raises.
+
+    In order, until *cap* bytes: the engine logs and the cluster-root log from the run's
+    ``TMPDIR`` (``nexus-svc-*``, ``nexus-pg-roots-*``), then the ``tmp_path``
+    directories of the failed tests (:func:`failed_tmp_dirs`). The fenced home
+    (``nx-suite-home-*``) is copied, uncapped, only when *keep_fenced_home* says the
+    operator asked for it (``NX_KEEP_FENCED_HOME``). A crashing engine's hs_err report
+    is not here: it is written straight to the original tempdir."""
+    notes: list[str] = []
+    used = 0
+
+    def take(src: Path, rel: Path, *, capped: bool = True) -> None:
+        nonlocal used
+        size = _size_of(src)
+        if capped and used + size > cap:
+            notes.append(f"skipped {rel} ({size // 1024} KiB): over the {cap // 1024**2} MiB cap")
+            return
+        target = dest / rel
+        try:
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, target, symlinks=True, ignore=_ignore_specials, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, target)
+        except (OSError, shutil.Error) as exc:
+            notes.append(f"could not copy {rel}: {exc}")
+            return
+        used += size
+        notes.append(f"kept {rel} ({size // 1024} KiB)")
+
+    with contextlib.suppress(OSError):
+        for pattern in _ENGINE_EVIDENCE_GLOBS:
+            for src in sorted((run / "t").glob(pattern)):
+                if not src.is_symlink():
+                    take(src, Path("engine-logs") / src.name)
+    try:
+        for src in failed_tmp_dirs(run / "p", nodeids):
+            take(src, Path("tmp_path") / src.relative_to(run / "p"))
+    except OSError as exc:
+        notes.append(f"could not list the failed tests' tmp dirs: {exc}")
+    if keep_fenced_home:
+        with contextlib.suppress(OSError):
+            for src in sorted((run / "t").glob(_FENCED_HOME_GLOB)):
+                if not src.is_symlink():
+                    take(src, Path("fenced-home") / src.name, capped=False)
+    elif nodeids or exitstatus:
+        notes.append(f"the fenced home is removed unless {_KEEP_FENCED_HOME_ENV} is set")
+    lines = [
+        f"exit status {exitstatus}; {len(nodeids)} failing test report(s); the run directory {run} is removed after this copy",
+        *(f"  failed: {n}" for n in list(nodeids)[:100]),
+        *(["  ... (list cut at 100)"] if len(nodeids) > 100 else []),
+        *(f"  {n}" for n in notes),
+    ]
+    with contextlib.suppress(OSError):
+        dest.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (dest / FAILURE_SUMMARY_FILE).write_text("\n".join(lines) + "\n")
+    return notes
+
+
 # --- the pytest plugin -----------------------------------------------------------
 
 
@@ -372,6 +553,12 @@ class TmpRootPlugin:
         self.run: Path | None = None
         self.final_bytes: int | None = None
         self.run_removed = False
+        #: The session's exit status (None until the controller's sessionfinish) and the
+        #: node ids that reported a failure; a failed run's evidence is copied from them.
+        self.exitstatus: int | None = None
+        self.failed_nodeids: list[str] = []
+        #: What the failed-run copy kept or skipped (see :func:`copy_failure_evidence`).
+        self.evidence_notes: list[str] = []
         self._orig_tempdir = sub._original_tempdir()
         self._given_basetemp: str | None = None
         self._saved: dict[str, str | None] = {}
@@ -443,25 +630,56 @@ class TmpRootPlugin:
             return None
         return self._orig_tempdir / f"{_REPORT_DIR_PREFIX}-{sub._current_uid()}" / self.run.name
 
-    def _harvest_reports(self) -> int:
-        """Copy the controller basetemp's top-level ``nx-*`` files (the DDL counter's
-        and the storage-touch guard's reports, which default to the basetemp and are
-        written after the session finishes) to the disk report home and keep the
-        newest :data:`REPORT_KEEP` runs there, as pytest keeps basetemps. Never raises."""
-        dest = self._report_home()
-        if dest is None or self.run is None:
-            return 0
-        files = [
+    def pytest_runtest_logreport(self, report) -> None:  # noqa: ANN001
+        """Collect the node ids that failed (the controller sees every worker's reports)."""
+        if self.decided and report.failed and report.nodeid not in self.failed_nodeids:
+            self.failed_nodeids.append(report.nodeid)
+
+    def pytest_sessionfinish(self, session, exitstatus) -> None:  # noqa: ANN001
+        if self.decided:
+            self.exitstatus = int(exitstatus)
+
+    @property
+    def failed_run(self) -> bool:
+        return self.exitstatus is not None and self.exitstatus not in _CLEAN_EXITS
+
+    def _report_files(self) -> list[Path]:
+        if self.run is None:
+            return []
+        return [
             f for pd in (self.run / "p").glob("pytest-of-*") for bt in pd.glob("pytest-*")
             if bt.is_dir() and not bt.is_symlink() for f in bt.glob("nx-*") if f.is_file()
         ]
-        if not files:
+
+    def _harvest(self) -> int:
+        """Copy what must outlive the run to the disk report home and keep the newest
+        :data:`REPORT_KEEP` runs there, as pytest keeps basetemps. Never raises.
+
+        Always: the controller basetemp's top-level ``nx-*`` files (the DDL counter's
+        and the storage-touch guard's reports, which default to the basetemp and are
+        written after the session finishes). On a FAILED run also: the engine logs, the
+        failed tests' ``tmp_path`` trees and a ``SUMMARY.txt`` under ``failed/``
+        (:func:`copy_failure_evidence`), and the fenced home when
+        ``NX_KEEP_FENCED_HOME`` is set. The removal of the run directory would
+        otherwise take the only evidence of a load-dependent failure with it."""
+        dest = self._report_home()
+        if dest is None or self.run is None:
+            return 0
+        files = self._report_files()
+        failed = self.failed_run
+        if not files and not failed:
             return 0
         try:
             _prepare_root(dest.parent)
-            dest.mkdir(mode=0o700)
+            dest.mkdir(mode=0o700, exist_ok=True)
             for f in files:
                 shutil.copy2(f, dest / f.name)
+            if failed:
+                self.evidence_notes = copy_failure_evidence(
+                    self.run, dest / FAILED_SUBDIR, self.failed_nodeids,
+                    exitstatus=int(self.exitstatus or 0),
+                    keep_fenced_home=bool(self._env.get(_KEEP_FENCED_HOME_ENV)),
+                )
             kept = sorted(
                 (d for d in dest.parent.iterdir() if d.is_dir() and not d.is_symlink()),
                 key=lambda d: d.stat().st_mtime, reverse=True,
@@ -475,10 +693,11 @@ class TmpRootPlugin:
 
     def pytest_unconfigure(self, config: pytest.Config) -> None:
         """After the terminal summary (the report plugins write there): copy the
-        reports out, remove the run dir, put the environment back."""
+        reports and, on a failed run, its evidence out, remove the run dir, put the
+        environment back."""
         if not self.decided or self.run is None or self.decision is None or self.decision.forced:
             return
-        self._harvest_reports()
+        self._harvest()
         _rm_tree(self.run)
         env = self._env
         for k, v in self._saved.items():
@@ -505,13 +724,21 @@ class TmpRootPlugin:
             size = tree_bytes(self.run) // 1024**2 if not self.run_removed else None
             self.final_bytes = size if size is not None else self.final_bytes
             how = f", {self.final_bytes} MiB at the end of the run" if self.final_bytes is not None else ""
+            evidence = (
+                f"; this run FAILED, so the engine logs and the failed tests' tmp_path trees "
+                f"(up to {FAILURE_COPY_CAP_BYTES // 1024**2} MiB) are copied to "
+                f"{self._report_home() / FAILED_SUBDIR} (SUMMARY.txt lists them)"
+                if self.failed_run else ""
+            )
             return (
                 f"nexus test tmp: {basetemp} on tmpfs {self.run}{how}, removed at exit; "
-                f"nx-* reports are copied to {self._report_home()}"
+                f"nx-* reports are copied to {self._report_home()}{evidence}"
             )
         return f"nexus test tmp: {basetemp} on disk {self._orig_tempdir} because: {d.reason}"
 
     def pytest_terminal_summary(self, terminalreporter, exitstatus, config) -> None:  # noqa: ANN001
+        if self.decided:
+            self.exitstatus = int(exitstatus)
         line = self.summary_line()
         if line:
             terminalreporter.write_line(line)

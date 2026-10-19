@@ -843,7 +843,9 @@ def integration_cluster_conf(pgdata: str, **kw) -> str:
     No integration caller needs durability semantics (nexus-942h9: they stop the
     cluster with ``pg_ctl stop -m immediate`` at teardown and none reads pg_wal,
     sets ``wal_level`` or replicates); one that ever does passes
-    ``parent_dir=tempfile.gettempdir()`` to ``pg_data_tempdir`` and skips this."""
+    ``parent_dir=<a disk directory of its own>`` to ``pg_data_tempdir`` and skips this
+    (not ``tempfile.gettempdir()``: inside a lab-run grant that is the run's tmpfs,
+    nexus-kyujr)."""
     return throwaway_cluster_conf(str(Path(pgdata).parent), **kw)
 
 
@@ -1006,7 +1008,10 @@ def integration_cluster_dir(prefix: str) -> str:
     chosen root."""
     _sweep_once_per_process()
     parent = pg_cluster_parent()
-    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    # parent None = the cluster root decided on disk: the ORIGINAL tempdir, never the run's
+    # tmpfs TMPDIR (nexus-kyujr), or the disk decision would land in RAM and the sweep
+    # (which looks at the original tempdir) would never see a stranded one.
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent if parent is not None else _original_tempdir())
     if parent is not None:
         # The reserve is a guess about prefixes; this is the real path. Only a
         # chosen root: the tempdir fallback keeps the callers' older behaviour.
@@ -1662,7 +1667,11 @@ def _initdb_cluster(
     *username* names the bootstrap superuser (``initdb -U``); None keeps
     initdb's own default, the OS account name.
     """
-    pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    # parent_dir None = the ORIGINAL tempdir, not the run's tmpfs TMPDIR (nexus-kyujr): see
+    # integration_cluster_dir.
+    pgdata = tempfile.mkdtemp(
+        prefix=prefix, dir=parent_dir if parent_dir is not None else _original_tempdir(),
+    )
     # Windows: the user's own SID gets an inheritable ACE, or initdb's
     # restricted token cannot write the directory under an elevated session
     # (tests._child_process.pg_data_tempdir). A no-op on POSIX.

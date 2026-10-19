@@ -75,9 +75,11 @@ differ from a GitHub-hosted runner:
   230 MB; the 2.5 GiB per worker above covers it). `NX_TEST_TMP_ROOT=default` is the
   escape; `NX_TEST_TMP_ROOT=<dir>` keeps the tree in `<dir>` for inspecting a failure.
   The DDL and storage-touch `nx-*` reports are copied to
-  `<tempdir>/nexus-test-reports-<uid>/<run>` before the removal. The engine JVM's own
-  `java.io.tmpdir` stays on `/tmp` (the JDK ignores `TMPDIR`). `tests/AGENTS.md` has
-  the full paragraph.
+  `<tempdir>/nexus-test-reports-<uid>/<run>` before the removal, and a run that exits
+  non-zero also copies the engine logs and the failed tests' `tmp_path` trees (256 MiB
+  cap) to `<run>/failed/`. The engine JVM gets `-Djava.io.tmpdir=<TMPDIR>` (the JDK
+  ignores `TMPDIR`), so its native extraction lands on the same tmpfs; its hs_err report
+  goes to the original tempdir. `tests/AGENTS.md` has the full paragraph.
   If `SubstrateRootExhausted` trips, the floor is 512 MiB of tmpfs space or cgroup
   headroom after a 45 s wait: read the cause in the exception, the summary line and
   the `cluster_root` events (`--log-level=INFO`), then run fewer workers (`-n` =

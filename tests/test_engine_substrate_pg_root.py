@@ -196,6 +196,54 @@ class TestPgClusterParent:
         assert root.stat().st_mode & 0o777 == 0o700
 
 
+class TestDiskDecisionStaysOffTheRunsTmpfs:
+    """nexus-kyujr: inside a lab-run grant ``TMPDIR`` is a per-run tmpfs directory. A
+    cluster root that decided on DISK (``pg_cluster_parent()`` is None) must land in the
+    ORIGINAL tempdir, where the sweep looks and where the disk decision means disk."""
+
+    @pytest.fixture
+    def moved_tmpdir(self, tmp_path, monkeypatch) -> tuple[Path, Path]:
+        orig, run_t = tmp_path / "orig", tmp_path / "run" / "t"
+        orig.mkdir()
+        run_t.mkdir(parents=True)
+        monkeypatch.setenv("TMPDIR", str(run_t))
+        monkeypatch.setenv(sub._TMP_ORIG_ENV, str(orig))
+        monkeypatch.setenv("NX_TEST_PG_ROOT", "default")  # the cluster root decides: disk
+        monkeypatch.setattr(sub.tempfile, "tempdir", None)  # gettempdir() re-reads TMPDIR
+        monkeypatch.setattr(sub, "_sweep_once_per_process", lambda: None)
+        assert sub.pg_cluster_parent() is None
+        assert Path(sub.tempfile.gettempdir()) == run_t
+        return orig, run_t
+
+    @staticmethod
+    def _fake_initdb(tmp_path: Path) -> Path:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "initdb").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "initdb").chmod(0o755)
+        return bin_dir
+
+    def test_an_integration_cluster_dir_lands_under_the_original_tempdir(self, moved_tmpdir) -> None:
+        orig, run_t = moved_tmpdir
+        path = Path(sub.integration_cluster_dir("kyujr_int_"))
+        assert path.parent == orig and not list(run_t.iterdir())
+
+    def test_a_substrate_initdb_dir_lands_under_the_original_tempdir(self, moved_tmpdir, tmp_path) -> None:
+        orig, run_t = moved_tmpdir
+        path = Path(sub._initdb_cluster(self._fake_initdb(tmp_path), prefix="kyujr_sub_"))
+        assert path.parent == orig and not list(run_t.iterdir())
+
+    def test_a_named_parent_is_still_used_as_given(self, moved_tmpdir, tmp_path) -> None:
+        chosen = tmp_path / "chosen"
+        chosen.mkdir()
+        path = Path(sub._initdb_cluster(self._fake_initdb(tmp_path), prefix="kyujr_c_", parent_dir=str(chosen)))
+        assert path.parent == chosen
+
+    def test_the_sweep_roots_include_the_original_tempdir(self, moved_tmpdir) -> None:
+        orig, _run_t = moved_tmpdir
+        assert orig in sub.substrate_pg_roots(env={"NX_TEST_PG_ROOT": "default"}, system="Darwin")
+
+
 class TestSweepRoots:
     def test_default_is_the_tempdir_when_no_tmpfs_root_exists(self, tmp_path) -> None:
         assert sub.substrate_pg_roots(

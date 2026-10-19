@@ -5,7 +5,7 @@ import unittest.mock
 import warnings
 
 import pytest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import structlog
@@ -4461,12 +4461,13 @@ def _ps_all() -> list[tuple[int, str]]:
 _ps_aspect_workers = _ps_all
 
 
-def _drain_stale_tmp_run(pytest_root: Path) -> None:
+def _drain_stale_tmp_run(pytest_root: Path, *, _kill=None) -> None:
     """The start-of-run drain for a crashed run's private pytest tree
     (``tests/_tmp_root.py``, nexus-kyujr): its basetemp is no sibling of ours, so
-    :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``."""
+    :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``.
+    *_kill* is the reaper's test seam (``(pid, signal_name)``)."""
     snapshot = _ps_all()
-    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot)
+    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
 
 
 def _matches_class(cmd: str, label: str) -> bool:
@@ -4635,7 +4636,7 @@ def _pytest_root_is_live(root: Path) -> bool:
     return True
 
 
-def stale_pytest_roots(basetemp: Path) -> list[Path]:
+def stale_pytest_roots(basetemp: Path, *, extra_tempdirs: Sequence[Path] = ()) -> list[Path]:
     """Sibling pytest session dirs from OTHER, finished runs, newest-first.
 
     pytest lays sessions out as ``<tmp>/pytest-of-<user>/pytest-<n>``. The
@@ -4649,6 +4650,12 @@ def stale_pytest_roots(basetemp: Path) -> list[Path]:
     its session root, so the root is taken from the parent there; without that
     the scan found no ``pytest-of-`` parent and returned nothing on every
     worker, and the drain never ran under ``-n``.
+
+    *extra_tempdirs* (nexus-kyujr): other tempdirs whose ``pytest-of-<user>`` is
+    scanned the same way. Inside a lab-run grant the current basetemp is in the
+    run's private tmpfs directory, which has no siblings, so a run that fell back to
+    disk (or was killed before the move existed) leaves its stranded daemons under
+    the ORIGINAL tempdir's ``pytest-of-<user>`` where only this argument reaches them.
     """
     try:
         current = Path(basetemp).resolve()
@@ -4659,14 +4666,24 @@ def stale_pytest_roots(basetemp: Path) -> list[Path]:
         return []
     if not parent.is_dir() or not parent.name.startswith("pytest-of-"):
         return []
-    try:
-        sibs = [
-            d for d in parent.iterdir()
-            if d.is_dir() and not d.is_symlink() and d.name.startswith("pytest-")
-            and d.resolve() != current and not _pytest_root_is_live(d)
-        ]
-    except Exception:  # noqa: BLE001 -- probe
-        return []
+    parents = [parent]
+    for extra in extra_tempdirs:
+        candidate = Path(extra) / parent.name
+        try:
+            if candidate.is_dir() and candidate.resolve() != parent.resolve():
+                parents.append(candidate)
+        except OSError:
+            continue
+    sibs: list[Path] = []
+    for scan in parents:
+        try:
+            sibs.extend(
+                d for d in scan.iterdir()
+                if d.is_dir() and not d.is_symlink() and d.name.startswith("pytest-")
+                and d.resolve() != current and not _pytest_root_is_live(d)
+            )
+        except Exception:  # noqa: BLE001 -- probe
+            continue
     return sorted(sibs, key=lambda d: d.name, reverse=True)
 
 
@@ -4687,7 +4704,8 @@ def _reap_leaked_test_daemons(tmp_path_factory):
     # and there were 21 stale roots on the dev box when this landed -- 21 process
     # listings before the first test runs. The snapshot going stale mid-scan is
     # harmless: killing an already-exited pid raises, and that is caught.
-    stale_roots = stale_pytest_roots(basetemp)
+    orig_tmp = os.environ.get("NX_TEST_TMP_ORIG")  # tests/_tmp_root.py moved TMPDIR (nexus-kyujr)
+    stale_roots = stale_pytest_roots(basetemp, extra_tempdirs=[Path(orig_tmp)] if orig_tmp else [])
     drained: list[tuple[str, int]] = []
     if stale_roots:
         try:
