@@ -1138,7 +1138,11 @@ class RawSqlGateTest {
         // PgContainerHelper.bootstrapNonSuperuserOwner now; the 5 in the list above are gone).
         Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 9),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7
-        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
+        // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
+        // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
+        // changeset SQL, read from the product changelog and executed as the admin role: no string in Java, but
+        // the gate counts the execute(...) call.
+        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 3),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 11 -> 8; vector seeds 8 -> 7; nexus-cbo4a 2026-10-19 SELECT probes: 7 -> 1
         // nexus-f3yxx (as first written): seedFixtures' raw chunk/centroid INSERTs (2),
         // plan-shape's raw hnsw-off session-var SETs for the second role bootstrap (2),
@@ -1711,7 +1715,8 @@ class RawSqlGateTest {
     // seven files; Catalog013RlsReplayTest keeps its raw pair because it walks the product changelog itself and
     // never installs the nexus_test objects. IndexRunFenceTest's journal count, index_state UPDATEs and advisory
     // lock moved onto jOOQ (qualified-name journal table, generated CATALOG_DOCUMENTS, DSL.function).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 217;
+    // nexus-cbo4a 2026-10-19 Taxonomy011ForeignOwnedDiagViewTest fixture, 217 -> 209: see its entry.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 209;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

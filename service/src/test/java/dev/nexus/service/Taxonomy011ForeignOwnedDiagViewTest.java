@@ -21,6 +21,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -99,8 +100,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
         try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            fullMigrationThenOwnershipReassign(pg, su);
-            resetToTextDocIdWithForeignOwnedView(su);
+            migrateThenSeedForeignOwnedView(pg, su);
 
             String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
@@ -132,8 +132,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
         try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            fullMigrationThenOwnershipReassign(pg, su);
-            resetToTextDocIdWithForeignOwnedView(su);
+            migrateThenSeedForeignOwnedView(pg, su);
 
             String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
@@ -146,7 +145,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
             // THE DEPLOY-WINDOW REMEDY (bead nexus-k1dgb): a superuser drops the
             // foreign-owned view immediately before retrying the migration.
-            su.createStatement().execute("DROP VIEW nexus.diag_chash_conformance");
+            DSL.using(su, SQLDialect.POSTGRES).dropView(DSL.name("nexus", "diag_chash_conformance")).execute();
 
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
@@ -166,14 +165,13 @@ class Taxonomy011ForeignOwnedDiagViewTest {
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /**
-     * Full migration as the container superuser, then production-shaped
-     * ownership reassignment (same technique as {@code Catalog013RlsReplayTest}):
-     * every nexus/t1 table + sequence -> {@link #ADMIN_ROLE}. Deliberately
-     * NOT the diag view -- this loop structurally cannot touch it
-     * (pg_tables/pg_sequences only) -- leaving it superuser-owned: exactly
-     * the "table owner != view owner" shape this bug depends on.
+     * Full migration as the container superuser, then {@code db.changelog-test-diag-view-foreign-owned.xml}
+     * (nexus-cbo4a): production-shaped ownership reassignment of every nexus/t1 table and sequence to
+     * {@link #ADMIN_ROLE}, and the test-only relaxation that reverts {@code topic_assignments.doc_id} to
+     * TEXT so {@code taxonomy-011-1}'s own SQL replays as authored, with the diag view recreated as a
+     * superuser-owned (so foreign-owned) stub. See that file's header for each step's reason.
      */
-    private static void fullMigrationThenOwnershipReassign(
+    private static void migrateThenSeedForeignOwnedView(
             org.testcontainers.containers.PostgreSQLContainer<?> pg, Connection su) throws Exception {
         // DEDICATED connection for the Liquibase run -- Catalog013RlsReplayTest's
         // own javadoc documents this exact trap: Liquibase flips its connection
@@ -187,56 +185,9 @@ class Taxonomy011ForeignOwnedDiagViewTest {
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
 
-        su.createStatement().execute(
-            "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-            + "' NOSUPERUSER NOBYPASSRLS");
-        su.createStatement().execute("GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);
-        su.createStatement().execute(
-            "DO $$ DECLARE r record; BEGIN "
-            + "  FOR r IN SELECT schemaname, tablename FROM pg_tables "
-            + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-            + "    EXECUTE format('ALTER TABLE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-            + "                   r.schemaname, r.tablename); "
-            + "  END LOOP; "
-            + "  FOR r IN SELECT schemaname, sequencename FROM pg_sequences "
-            + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-            + "    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-            + "                   r.schemaname, r.sequencename); "
-            + "  END LOOP; "
-            + "END $$");
-    }
-
-    /**
-     * Test-only relaxation (same technique as {@code
-     * Taxonomy010BackfillDirectIntegrationTest}): drop whatever diag view
-     * exists (from the full migration above, superuser-owned since the
-     * superuser ran taxonomy-011-8 too), revert doc_id back to TEXT so
-     * {@code taxonomy-011-1}'s OWN TEXT-to-bytea SQL can be replayed
-     * exactly as authored, then recreate the diag view as a FOREIGN-owned
-     * stub (same simplification {@code GrantsSvcForeignOwnedRelationTest}
-     * already established: the ownership-check mechanism under test does
-     * not depend on the view's real body, only on it existing and being
-     * owned by a role other than {@link #ADMIN_ROLE}).
-     */
-    private static void resetToTextDocIdWithForeignOwnedView(Connection su) throws Exception {
-        su.createStatement().execute("DROP VIEW IF EXISTS nexus.diag_chash_conformance");
-        // RDR-194 P3d (nexus-tk070.p3d): the full migration above now ALSO runs
-        // taxonomy-012, which ADDs topic_assignments_chunk_fk -- a composite FK
-        // whose (source_collection, doc_id) leg targets nexus.chunks(collection,
-        // chash), bytea. The ALTER below would now hit "foreign key constraint
-        // ... cannot be implemented" (a bytea-vs-TEXT type mismatch on the
-        // referencing column) before ever reaching the foreign-owned-view
-        // scenario this class exists to prove -- same test-only-relaxation
-        // shape as the view drop directly above, and the identical fix
-        // Taxonomy010BackfillDirectIntegrationTest applies for the same
-        // reason: this throwaway database never re-adds the
-        // constraint.
-        su.createStatement().execute(
-            "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
-        su.createStatement().execute(
-            "CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n");
+        PgContainerHelper.runSuperuserTestChangelog(su,
+            "db/changelog-test/db.changelog-test-diag-view-foreign-owned.xml",
+            "databasechangelog_test_diag_view", Map.of("adminRole", ADMIN_ROLE, "adminPass", ADMIN_PASS));
         String owner = PgCatalogProbes.relationOwner(
             DSL.using(su, SQLDialect.POSTGRES), "nexus", "diag_chash_conformance");
         assertThat(owner)
