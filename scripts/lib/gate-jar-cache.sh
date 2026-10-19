@@ -144,7 +144,12 @@ gate_jar_cache_key() {
     idx="$(mktemp "${TMPDIR:-/tmp}/gate-jar-index.XXXXXX")"
     # Start from the checkout's own index so `add -A` only re-hashes what
     # changed; a missing index (fresh clone) just makes it slower.
-    cp "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
+    # -p keeps the index file's mtime: git's racy-index check re-hashes an entry
+    # whose file mtime is not older than the index's own mtime. A plain cp gave
+    # the copy "now", so a same-size edit made in the same second as the last
+    # index write kept its cached stat and was never re-hashed (a stale key;
+    # seen on CI as ".mvn edit did not move the key", -Xmx1g -> -Xmx2g).
+    cp -p "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
     if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- "${paths[@]}" >/dev/null 2>&1; then
         rm -f "$idx"
         echo "gate_jar_cache_key: could not stage ${paths[*]} into a throwaway index" >&2

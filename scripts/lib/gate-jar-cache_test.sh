@@ -102,6 +102,22 @@ git -C "$repo2" checkout -q -- service/pom.xml
 echo '-Xmx2g' > "$repo2/service/.mvn/jvm.config"
 kj="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" != "$kj" ]] && ok "a .mvn/ edit moves the key" || bad ".mvn edit did not move the key"
+
+# Racy-index regression: a same-size edit made in the same second as the commit
+# must still move the key. Repeated so a coarse-timestamp host hits the window.
+racy_misses=0
+for i in $(seq 1 20); do
+  r3="$WORKDIR/racy$i"; mkdir -p "$r3/service/src/main" "$r3/service/.mvn"
+  git -C "$r3" init -q; git -C "$r3" config user.email t@t; git -C "$r3" config user.name t
+  echo 'class A {}' > "$r3/service/src/main/A.java"; echo '<project/>' > "$r3/service/pom.xml"
+  echo '-Xmx1g' > "$r3/service/.mvn/jvm.config"
+  git -C "$r3" add service && git -C "$r3" commit -qm base
+  ka="$(gate_jar_cache_key "$r3" 0.1.0 "")"
+  echo '-Xmx2g' > "$r3/service/.mvn/jvm.config"
+  kz="$(gate_jar_cache_key "$r3" 0.1.0 "")"
+  [[ "$ka" != "$kz" ]] || racy_misses=$((racy_misses + 1))
+done
+[[ $racy_misses -eq 0 ]] && ok "a same-size edit right after a commit moves the key (20/20, racy-index safe)" || bad "a same-size edit right after a commit kept the key in $racy_misses of 20 rounds (racy index)"
 git -C "$repo2" checkout -q -- service/.mvn/jvm.config
 echo '# changed' >> "$repo2/service/mvnw"
 kx="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
