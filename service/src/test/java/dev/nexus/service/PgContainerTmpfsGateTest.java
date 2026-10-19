@@ -109,7 +109,8 @@ class PgContainerTmpfsGateTest {
             .containsEntry(PgContainerHelper.PGDATA, "rw,size=" + PgContainerHelper.TMPFS_SIZE);
         assertThat(String.join(" ", c.getCommandParts()))
             .contains("fsync=off", "synchronous_commit=off", "full_page_writes=off",
-                "max_wal_size=64MB", "min_wal_size=32MB", "wal_keep_size=0");
+                "max_wal_size=64MB", "min_wal_size=32MB", "wal_keep_size=0",
+                "log_checkpoints=off", "checkpoint_warning=0");
         assertThat(PgContainerHelper.MEMORY_LIMIT_BYTES)
             .as("memory limit sits above the tmpfs cap, since tmpfs pages are charged to the container")
             .isGreaterThan(PgContainerHelper.tmpfsSizeBytes());
