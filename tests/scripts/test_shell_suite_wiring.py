@@ -150,11 +150,12 @@ def _bin_bash_is_pre_4() -> bool:
 # used to, loose enough that adding a new assertion to one of these suites
 # never requires touching this file.
 SUITES = [
-    _Suite("scripts/build-gate-jar_test.sh", 97),
+    _Suite("scripts/build-gate-jar_test.sh", 136),
     _Suite("scripts/lib/bare_mvnw_lint_test.sh", 2),
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
-    # nexus-0a1hw: where a gate-jar build's Maven directory lives (tmpfs on a lab host).
-    _Suite("scripts/lib/build-tmpfs_test.sh", 27),
+    # nexus-0a1hw: where a gate-jar build's Maven directory lives (tmpfs on a lab host); 60 after the
+    # fail-safe round (unreadable grant limit, MIN_MIB, jOOQ cache gate, per-user directory, process group).
+    _Suite("scripts/lib/build-tmpfs_test.sh", 60),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
     _Suite("tests/e2e/local_service_gate_guard_test.sh", 9),
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1

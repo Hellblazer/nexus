@@ -109,16 +109,20 @@
         <!-- nexus-0a1hw: where this build writes (project.build.directory). The default is the
              usual ${project.basedir}/target and an IDE, a bare mvn and every CI job keep it.
              scripts/build-gate-jar.sh passes -Dnexus.build.dir=<tmpfs dir> on a lab host
-             (scripts/lib/build-tmpfs.sh): a gate-jar miss wrote ~0.5 GB to the NVMe there
-             (classes, the shaded jar, the jlink image) for a jar the gate-jar cache then holds
-             once. Everything below that names ${project.build.directory} follows. Nothing
-             outside scripts/ should set it: tools that read service/target (the surefire and
-             DDL-count readers, local-service-gate.sh's classes check) look there. -->
+             (scripts/lib/build-tmpfs.sh). That keeps Maven's classes, generated sources and
+             maven-status off the NVMe (~15-35 MiB per gate-jar miss). It does NOT remove the
+             stamped jar (~131 MB), which is still written once per key as the gate-jar cache
+             entry and is the floor, and it does not touch the jOOQ codegen container (~350 MB,
+             only on a jOOQ cache miss). Everything below that names ${project.build.directory}
+             follows. Nothing outside scripts/ should set it: tools that read service/target
+             (the surefire and DDL-count readers, local-service-gate.sh's classes check) look
+             there. -->
         <nexus.build.dir>${project.basedir}/target</nexus.build.dir>
 
         <!-- nexus-0a1hw: -Dnexus.jlink.skip=true skips the jlink image (jlink-image execution,
              package phase). Nothing in the repo reads it; build-gate-jar.sh skips it, which saves
-             ~83 MB of writes per miss on any host. -->
+             ~83 MiB of writes per gate-jar miss on any host: the larger part of what
+             nexus-0a1hw saves. -->
         <nexus.jlink.skip>false</nexus.jlink.skip>
     </properties>
 

@@ -45,7 +45,38 @@ bd=target
 for a in "$@"; do case "$a" in -Dnexus.build.dir=*) bd="${a#-Dnexus.build.dir=}" ;; esac; done
 case "$bd" in /*) ;; *) bd="$PWD/$bd" ;; esac
 echo "$bd" >> "$MVNW_BUILDDIR"
+# A tmpfs build (one given -Dnexus.build.dir) that the grant's memory killed, or that ran out of space.
+case " $* " in *" -Dnexus.build.dir="*)
+    [[ -n "${MVNW_TMPFS_RC:-}" ]] && exit "$MVNW_TMPFS_RC"
+    [[ "${MVNW_TMPFS_ENOSPC:-0}" == 1 ]] && { echo "java.io.IOException: No space left on device" >&2; exit 1; }
+esac
 [[ "${MVNW_FAIL:-0}" == 1 ]] && exit 1
+# A build that never ends and keeps re-creating its build directory, with a child, as a real Maven does.
+if [[ "${MVNW_HANG:-0}" == 1 ]]; then
+    echo $$ > "$MVNW_HANG_PID"
+    sleep 300 &
+    echo $! > "$MVNW_HANG_KID"
+    while :; do mkdir -p "$bd/classes"; sleep 0.2; done
+fi
+# The jOOQ codegen publishing a new entry into the shared cache.
+if [[ -n "${MVNW_CODEGEN_ROOT:-}" ]]; then
+    mkdir -p "$MVNW_CODEGEN_ROOT/main-newhash-prod/generated" "$MVNW_CODEGEN_ROOT/test-newhash-prod/generated"
+    echo 'class G {}' > "$MVNW_CODEGEN_ROOT/main-newhash-prod/generated/G.java"
+    echo digest > "$MVNW_CODEGEN_ROOT/main-newhash-prod/complete"
+fi
+# A peer that stores a complete entry for this key, carrying ANOTHER build_ref, before this run's store.
+if [[ -n "${MVNW_PEER_ENTRY:-}" ]]; then
+    mkdir -p "$MVNW_PEER_ENTRY"
+    rm -f "$MVNW_PEER_ENTRY/jar"
+    python3 - "$MVNW_PEER_ENTRY/jar" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+    zf.writestr("META-INF/nexus/release.properties", "release_version=0.1.107\nbuild_ref=peer+9-9\n")
+PY
+    echo "peer+9-9" > "$MVNW_PEER_ENTRY/build_ref"
+    chmod a-w "$MVNW_PEER_ENTRY/jar"
+fi
 mkdir -p "$bd/classes"
 echo junk > "$bd/classes/Junk.class"
 # Worst case for a hard-linked jar: a writer that rewrites the existing inode in
@@ -65,7 +96,7 @@ export MVNW_COUNT="$WORKDIR/count"; : > "$MVNW_COUNT"
 export MVNW_ARGS="$WORKDIR/mvnw-args"; : > "$MVNW_ARGS"
 export MVNW_BUILDDIR="$WORKDIR/mvnw-builddir"; : > "$MVNW_BUILDDIR"
 # A host's own settings must not steer the build-directory decision under test.
-unset NX_BUILD_TMPFS BUILD_TMPFS_SHM BUILD_TMPFS_OS BUILD_TMPFS_MIN_MIB BUILD_TMPFS_PROC_CGROUP BUILD_TMPFS_CGROUP_ROOT NX_JOOQ_CACHE
+unset NX_BUILD_TMPFS BUILD_TMPFS_SHM BUILD_TMPFS_OS BUILD_TMPFS_MIN_MIB BUILD_TMPFS_PROC_CGROUP BUILD_TMPFS_CGROUP_ROOT BUILD_TMPFS_UID NX_JOOQ_CACHE MVNW_TMPFS_RC MVNW_TMPFS_ENOSPC MVNW_HANG MVNW_CODEGEN_ROOT MVNW_PEER_ENTRY
 export NX_GATE_JAR_CACHE="$WORKDIR/cache"
 
 echo "Test 1: a failing build restores release.properties and stores nothing"
@@ -335,6 +366,120 @@ cnt11h="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
 out11h="$(cd "$repo" && scripts/build-gate-jar.sh -Dnexus.build.dir=/elsewhere 2>&1)"; rc11h=$?
 [[ $rc11h -eq 64 && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt11h" ]] && ok "a caller's own -Dnexus.build.dir is refused (64) before anything runs" || bad "caller build dir (rc $rc11h): $out11h"
 rm -f "$repo/service/src/main/J.java" "$repo/service/src/main/K.java" "$repo/service/src/main/L.java" "$repo/service/src/main/M.java" "$repo/service/src/main/N.java"
+
+echo "Test 12 (nexus-0a1hw review): a peer stores the same key with ANOTHER build_ref before this run's store; the placed jar must be this run's"
+echo 'class P {}' > "$repo/service/src/main/P.java"
+rm -rf "$repo/service/target"
+key12="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry12="$WORKDIR/cache/$key12"
+rm -rf "$entry12"
+out12="$(cd "$repo" && MVNW_PEER_ENTRY="$entry12" NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc12=$?
+ref12="$(printf '%s\n' "$out12" | sed -n 's/^stamped build_ref=//p')"
+[[ $rc12 -eq 0 && "$out12" == *MISS* ]] && ok "the run succeeds" || bad "peer-race run (rc $rc12): $out12"
+[[ "$out12" == *"(private)"* ]] && ok "the output says the jar was placed as a private copy" || bad "no (private): $out12"
+python3 - "$tjar" "$ref12" <<'PY' && ok "service/target's jar carries THIS run's build_ref ($ref12)" || bad "service/target's jar has another build_ref"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert f"build_ref={sys.argv[2]}\n" in p and "peer+9-9" not in p, p
+PY
+python3 - "$entry12/jar" <<'PY' && [[ "$(cat "$entry12/build_ref")" == "peer+9-9" && ! "$tjar" -ef "$entry12/jar" ]] && ok "the peer's entry is untouched: its own jar and build_ref, not linked to service/target" || bad "the peer's entry was altered or linked"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert "build_ref=peer+9-9\n" in p, p
+PY
+[[ ! -e "$repo/service/target/.gate-jar-key" ]] && ok "no key marker claims the peer's entry for this jar" || bad "a key marker was left beside a private jar"
+rm -f "$repo/service/src/main/P.java"
+
+echo "Test 13 (nexus-0a1hw review): a tmpfs build killed for memory (137) or out of space is retried once on disk; any other failure is not"
+for how13 in rc137 enospc; do
+    echo "class Q_$how13 {}" > "$repo/service/src/main/Q_$how13.java"   # a new key each time: a hit would run no build
+    rm -rf "$repo/service/target"
+    cnt13="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+    if [[ "$how13" == rc137 ]]; then
+        out13="$(cd "$repo" && MVNW_TMPFS_RC=137 NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc13=$?
+    else
+        out13="$(cd "$repo" && MVNW_TMPFS_ENOSPC=1 NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc13=$?
+    fi
+    [[ $rc13 -eq 0 ]] && ok "[$how13] the run succeeds after the retry" || bad "[$how13] rc $rc13: $out13"
+    [[ "$out13" == *"retrying once on disk"* ]] && ok "[$how13] the retry is printed" || bad "[$how13] no retry line: $out13"
+    [[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt13 + 2))" && "$(last_builddir)" == "$svc_target" && "$(last_args)" != *"-Dnexus.build.dir"* ]] && ok "[$how13] Maven ran twice, the second time in service/target" || bad "[$how13] count/dir: $(last_builddir) / $(last_args)"
+    [[ -f "$tjar" && -z "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "[$how13] the jar is in service/target and the tmpfs directory is gone" || bad "[$how13] jar or tmpfs leftovers"
+    [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "[$how13] release.properties restored" || bad "[$how13] props dirty"
+done
+echo 'class Q_both {}' > "$repo/service/src/main/Q_both.java"
+rm -rf "$repo/service/target"
+cnt13="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out13b="$(cd "$repo" && MVNW_TMPFS_RC=137 MVNW_FAIL=1 NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc13b=$?
+[[ $rc13b -ne 0 && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt13 + 2))" && "$(printf '%s\n' "$out13b" | grep -c 'retrying once')" == 1 ]] && ok "a disk build that also fails ends the run: one retry, no loop" || bad "double failure (rc $rc13b): $out13b"
+echo 'class Q_plain {}' > "$repo/service/src/main/Q_plain.java"
+cnt13="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out13c="$(cd "$repo" && MVNW_FAIL=1 NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc13c=$?
+[[ $rc13c -ne 0 && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt13 + 1))" && "$out13c" != *"retrying"* ]] && ok "an ordinary failure (rc 1) is not retried" || bad "ordinary failure retried (rc $rc13c): $out13c"
+rm -f "$repo/service/src/main"/Q*.java
+
+echo "Test 14 (nexus-0a1hw review): a tmpfs build that ran the jOOQ codegen says so; an explicit mode warns where auto would refuse"
+jq14="$WORKDIR/jooq14"
+mkdir -p "$jq14/main-old-prod/generated" "$jq14/test-old-prod/generated"
+for k in main test; do echo 'class O {}' > "$jq14/$k-old-prod/generated/O.java"; echo digest > "$jq14/$k-old-prod/complete"; done
+echo 'class R {}' > "$repo/service/src/main/R.java"
+rm -rf "$repo/service/target"
+out14="$(cd "$repo" && NX_JOOQ_CACHE="$jq14" MVNW_CODEGEN_ROOT="$jq14" NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc14=$?
+[[ $rc14 -eq 0 && "$out14" == *"the jOOQ codegen ran in this tmpfs build"* && "$out14" == *"main-newhash-prod"* ]] && ok "a new jOOQ cache entry is reported as a codegen" || bad "no codegen line (rc $rc14): $out14"
+[[ "$out14" != *"warning:"* ]] && ok "a cache that holds entries raises no warning" || bad "unexpected warning: $out14"
+echo 'class R2 {}' > "$repo/service/src/main/R2.java"
+rm -rf "$repo/service/target"
+out14b="$(cd "$repo" && NX_JOOQ_CACHE="$jq14" NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"
+[[ "$out14b" != *"the jOOQ codegen ran"* ]] && ok "no codegen line when the cache did not change" || bad "false codegen line: $out14b"
+echo 'class R3 {}' > "$repo/service/src/main/R3.java"
+rm -rf "$repo/service/target"
+out14c="$(cd "$repo" && NX_JOOQ_CACHE="$WORKDIR/jooq14-missing" NX_BUILD_TMPFS="$shm" scripts/build-gate-jar.sh 2>&1)"; rc14c=$?
+[[ $rc14c -eq 0 && "$out14c" == *"warning: building in tmpfs although"*"jOOQ cache"* && "$(last_builddir)" == "$shm/"* ]] && ok "explicit NX_BUILD_TMPFS=<dir> with no usable cache: tmpfs, with a warning" || bad "explicit warning (rc $rc14c): $out14c"
+rm -f "$repo/service/src/main/R.java" "$repo/service/src/main/R2.java" "$repo/service/src/main/R3.java"
+
+echo "Test 15 (nexus-0a1hw review): auto inside a grant takes tmpfs only when the grant limit is readable and the jOOQ cache can serve"
+okcg="$WORKDIR/okcg"; mkdir -p "$okcg/grant"
+echo max > "$okcg/memory.max"; echo 1 > "$okcg/memory.current"
+echo 107374182400 > "$okcg/grant/memory.max"; echo 1048576 > "$okcg/grant/memory.current"
+printf 'anon 0\nactive_file 0\ninactive_file 0\n' > "$okcg/grant/memory.stat"
+auto() {  # <NX_JOOQ_CACHE> [script args...]
+    local jc="$1"; shift
+    (cd "$repo" && env BUILD_TMPFS_OS=Linux LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 BUILD_TMPFS_SHM="$shm" BUILD_TMPFS_PROC_CGROUP='0::/grant' \
+        BUILD_TMPFS_CGROUP_ROOT="${CGR:-$okcg}" NX_JOOQ_CACHE="$jc" scripts/build-gate-jar.sh "$@" 2>&1)
+}
+echo 'class T1 {}' > "$repo/service/src/main/T1.java"; rm -rf "$repo/service/target"
+out15="$(auto "$jq14")"
+[[ "$out15" == *"gate jar build directory: $shm/"*"(tmpfs;"* ]] && ok "auto: tmpfs when the limit is readable and the cache holds entries" || bad "auto, good: $out15"
+echo 'class T2 {}' > "$repo/service/src/main/T2.java"; rm -rf "$repo/service/target"
+out15b="$(auto "$WORKDIR/jooq15-empty")"
+[[ "$out15b" == *"gate jar build directory: service/target (the jOOQ cache"* && "$(last_builddir)" == "$svc_target" ]] && ok "auto: disk when the jOOQ cache cannot serve" || bad "auto, no cache: $out15b"
+echo 'class T3 {}' > "$repo/service/src/main/T3.java"; rm -rf "$repo/service/target"
+out15c="$(CGR="$WORKDIR/nocg" auto "$jq14")"
+[[ "$out15c" == *"gate jar build directory: service/target (inside a lab-run grant but its memory limit cannot be read"* ]] && ok "auto: disk when the grant's memory limit cannot be read" || bad "auto, no limit: $out15c"
+echo 'class T4 {}' > "$repo/service/src/main/T4.java"; rm -rf "$repo/service/target"
+out15d="$(auto "$jq14" -Dnexus.jooq.cache.dir=off)"
+[[ "$out15d" == *"gate jar build directory: service/target (the jOOQ cache is off"* ]] && ok "auto: disk when the build is given -Dnexus.jooq.cache.dir=off" || bad "auto, -D off: $out15d"
+rm -f "$repo/service/src/main/T1.java" "$repo/service/src/main/T2.java" "$repo/service/src/main/T3.java" "$repo/service/src/main/T4.java"
+
+echo "Test 16 (nexus-0a1hw review): a signal to the script stops Maven and its children and leaves no tmpfs directory"
+echo 'class U {}' > "$repo/service/src/main/U.java"
+for sig16 in TERM HUP; do
+    rm -rf "$repo/service/target"
+    hp="$WORKDIR/hang.pid.$sig16"; hk="$WORKDIR/hang.kid.$sig16"; rm -f "$hp" "$hk"
+    (cd "$repo" && MVNW_HANG=1 MVNW_HANG_PID="$hp" MVNW_HANG_KID="$hk" NX_BUILD_TMPFS="$shm" exec scripts/build-gate-jar.sh >"$WORKDIR/hang.out.$sig16" 2>&1) &
+    spid=$!
+    for _ in $(seq 1 100); do [[ -s "$hk" ]] && break; sleep 0.1; done
+    [[ -s "$hk" && -n "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "[$sig16] the build is running in a tmpfs directory" || bad "[$sig16] stub never started"
+    mpid="$(cat "$hp" 2>/dev/null)"; kid="$(cat "$hk" 2>/dev/null)"
+    kill "-$sig16" "$spid" 2>/dev/null
+    rc16=0; wait "$spid" 2>/dev/null || rc16=$?
+    sleep 0.5
+    [[ $rc16 -ne 0 ]] && ok "[$sig16] the script exits non-zero ($rc16)" || bad "[$sig16] exited 0"
+    [[ -z "$(ls -A "$shm/nexus-build-$(id -u)" 2>/dev/null)" ]] && ok "[$sig16] no tmpfs directory remains (the build did not re-create it)" || bad "[$sig16] tmpfs directory remains (script rc $rc16): $(ls -A "$shm/nexus-build-$(id -u)") / $(cat "$WORKDIR/hang.out.$sig16")"
+    { [[ -n "$mpid" ]] && ! kill -0 "$mpid" 2>/dev/null; } && ok "[$sig16] the Maven stand-in is gone" || bad "[$sig16] the Maven stand-in survived (pid $mpid)"
+    { [[ -n "$kid" ]] && ! kill -0 "$kid" 2>/dev/null; } && ok "[$sig16] and so is its child" || { bad "[$sig16] the Maven child survived (pid $kid)"; kill -9 "$kid" "$mpid" 2>/dev/null; }
+    [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "[$sig16] release.properties restored" || bad "[$sig16] props dirty"
+    [[ ! -d "$repo/.git/nexus-build-lease/service" ]] && ok "[$sig16] the lease is released" || bad "[$sig16] lease still held"
+done
+rm -f "$repo/service/src/main/U.java"
 
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &

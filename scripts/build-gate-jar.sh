@@ -79,18 +79,29 @@
 # disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
 # scripts/lib/gate-jar-cache.sh.
 #
-# BUILD DIRECTORY (nexus-0a1hw). A miss used to write ~0.5 GB to the lab hosts'
-# NVMe: Maven's whole build directory (classes, the 131 MB shaded jar, the 83 MB
-# jlink image) for a jar the cache then holds once. On a lab host (Linux, inside a
-# lab-run grant, a usable /dev/shm) the build now goes to a per-build tmpfs
-# directory (-Dnexus.build.dir, service/pom.xml) that is removed on exit, and only
-# the stamped jar reaches the disk: stored in the cache once per key, then linked
-# into service/target as on a hit. Anywhere else (macOS, a laptop, outside a grant)
-# the build stays in service/target. NX_BUILD_TMPFS=off|on|<dir> overrides; see
-# scripts/lib/build-tmpfs.sh. The jlink image, which nothing reads, is skipped on
-# every host (-Dnexus.jlink.skip=true). service/target then holds the jar and its
-# marker but no classes: a later `mvnw-leased.sh test` recompiles (and restores the
-# jOOQ trees from the shared cache).
+# BUILD DIRECTORY (nexus-0a1hw). A miss used to build entirely in service/target:
+# on chas that was 316 MiB written to the NVMe per miss; on a laptop ~245 MiB (the
+# shaded jar ~131 MB, the jlink image ~83 MB, ~15-35 MiB of other Maven output).
+# Two changes, with different sizes. (1) -Dnexus.jlink.skip=true, on every host,
+# skips the jlink image nothing reads: ~83 MiB, the larger saving. (2) On a lab host
+# (Linux, inside a lab-run grant, a usable /dev/shm, a readable grant memory limit,
+# a jOOQ cache that can serve the build) the build goes to a per-build tmpfs
+# directory (-Dnexus.build.dir, service/pom.xml) removed on exit: ~15-35 MiB of
+# Maven output. What stays: the stamped jar (~131 MB) is still written once per
+# key, as the cache entry, and then linked into service/target as on a hit; that is
+# the floor. The jOOQ codegen on a jOOQ cache MISS (~350 MB in the container
+# overlay) is untouched by either change, so the auto decision stays on disk when
+# the cache cannot serve the build and a tmpfs build that did run the codegen says
+# so. The post-change chas figure comes from the chas proof run, not from this
+# comment. Anywhere else (macOS, a laptop, outside a grant) the build stays in
+# service/target. NX_BUILD_TMPFS=off|on|<dir> overrides; an explicit on or <dir>
+# prints a warning where auto would have refused. A tmpfs build killed for memory
+# (exit 137) or out of space is retried once on disk. The build runs in its own
+# process group, which the exit trap stops before it removes the directory, so a
+# SIGTERM to this script leaves neither a Maven nor a directory behind. See
+# scripts/lib/build-tmpfs.sh. service/target then holds the jar and its marker but
+# no classes: a later `mvnw-leased.sh test` recompiles (and restores the jOOQ trees
+# from the shared cache).
 #
 #   usage: scripts/build-gate-jar.sh [extra mvn args...]
 
@@ -124,6 +135,12 @@ build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh 
 # replaces this once there is a stamp to restore. Without it a failure in
 # the key computation would leak the lease until stale reclaim.
 trap 'build_lease_release service' EXIT
+# A signal ends the script through its EXIT trap (which stops the build's process
+# group, removes the tmpfs directory, restores the stamp and releases the lease)
+# instead of leaving a running Maven behind.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
 
@@ -199,7 +216,7 @@ cp "$props" "$backup"
 # release-looking JAR. release_props_restore_and_release always restores
 # first and releases second, so no other process can ever observe a freed
 # lease while this file is still stamped.
-trap 'build_tmpfs_cleanup; release_props_restore_and_release "$props" "$backup" service' EXIT
+trap 'build_tmpfs_cleanup; rm -f "${mvn_log:-}"; release_props_restore_and_release "$props" "$backup" service' EXIT
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"
@@ -223,13 +240,19 @@ echo "stamped build_ref=$build_ref"
 gate_jar_cache_unshare "$target_jar"
 
 # Where Maven writes (nexus-0a1hw): a per-build tmpfs directory on a lab host,
-# else service/target. Removed by the EXIT trap above.
-build_tmpfs_prepare
+# else service/target. Removed by the EXIT trap above, which first stops the
+# build's process group.
+build_tmpfs_prepare "$repo_root" "$@"
+[[ -z "$BUILD_TMPFS_WARN" ]] || echo "build-gate-jar.sh: warning: building in tmpfs although: $BUILD_TMPFS_WARN" >&2
 mvn_extra=(-Dnexus.jlink.skip=true)
+jooq_before=""
+mvn_log=""
 if [[ -n "$BUILD_TMPFS_DIR" ]]; then
     mvn_extra+=("-Dnexus.build.dir=$BUILD_TMPFS_DIR")
     build_dir="$BUILD_TMPFS_DIR"
     echo "gate jar build directory: $build_dir (tmpfs; $BUILD_TMPFS_WHY)"
+    jooq_before="$(build_tmpfs_jooq_entries "$BUILD_TMPFS_JOOQ_ROOT")"
+    mvn_log="$(mktemp)"
 else
     build_dir="$repo_root/service/target"
     echo "gate jar build directory: service/target ($BUILD_TMPFS_WHY)"
@@ -237,10 +260,34 @@ fi
 
 cd "$repo_root/service"
 rc=0
-./mvnw -q package -DskipTests "${mvn_extra[@]}" "$@" || rc=$?
+build_tmpfs_run "$mvn_log" ./mvnw -q package -DskipTests "${mvn_extra[@]}" "$@" || rc=$?
+if [[ $rc -ne 0 && -n "$BUILD_TMPFS_DIR" ]]; then
+    # A tmpfs build that the grant's memory killed (137) or that ran out of space is
+    # the one failure a disk build avoids: retry once there, say so, and never loop.
+    reason=""
+    if [[ $rc -eq 137 ]]; then reason="exit 137, killed for memory"
+    elif grep -qi 'no space left' "$mvn_log" 2>/dev/null; then reason="out of space (rc $rc)"; fi
+    if [[ -n "$reason" ]]; then
+        echo "build-gate-jar.sh: the tmpfs build failed ($reason) in $BUILD_TMPFS_DIR; retrying once on disk in service/target" >&2
+        build_tmpfs_cleanup
+        mvn_extra=(-Dnexus.jlink.skip=true)
+        build_dir="$repo_root/service/target"
+        BUILD_TMPFS_WHY="retry after a failed tmpfs build"
+        echo "gate jar build directory: service/target ($BUILD_TMPFS_WHY)"
+        rc=0
+        build_tmpfs_run "" ./mvnw -q package -DskipTests "${mvn_extra[@]}" "$@" || rc=$?
+    fi
+fi
 if [[ $rc -ne 0 ]]; then
     [[ -z "$BUILD_TMPFS_DIR" ]] || echo "build-gate-jar.sh: the build failed (rc $rc) in $BUILD_TMPFS_DIR; rc 137 or a 'No space left' means the grant's memory held too little for a tmpfs build: rerun with NX_BUILD_TMPFS=off to build on disk" >&2
     exit "$rc"
+fi
+if [[ -n "$BUILD_TMPFS_DIR" ]]; then
+    # The auto gate cannot see the pom's input hash: say when this build's codegen ran.
+    jooq_after="$(build_tmpfs_jooq_entries "$BUILD_TMPFS_JOOQ_ROOT")"
+    if [[ "$jooq_after" != "$jooq_before" ]]; then
+        echo "build-gate-jar.sh: the jOOQ codegen ran in this tmpfs build (new jOOQ cache entry: $(comm -13 <(printf '%s\n' "$jooq_before") <(printf '%s\n' "$jooq_after") | tr '\n' ' ')); its container writes ~350 MB regardless of the build directory"
+    fi
 fi
 
 built_jar="$build_dir/$jar_name"

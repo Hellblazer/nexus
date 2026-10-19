@@ -134,22 +134,36 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   remove `service/target/nexus-service-1.0-SNAPSHOT.jar`, or build through
   `mvnw-leased.sh` / `build-gate-jar.sh`); a `MISS` runs Maven under the grant. `build-gate-jar.sh --lab-run <class>` (nexus-t6t9f) will take
   the lease before the grant instead.
-- **A `MISS` builds in tmpfs** (nexus-0a1hw). Inside a grant on Linux with a usable
-  `/dev/shm`, Maven's build directory is a per-build directory under
+- **What a `MISS` writes, and the tmpfs build** (nexus-0a1hw). A `MISS` used to write
+  316 MiB to chas's NVMe (device delta with a 35 s writeback tail; jOOQ cache hit, quiet
+  pool); on a laptop about 245 MiB. Two changes, of different size. The jlink image,
+  which nothing reads, is skipped on every host (`-Dnexus.jlink.skip=true`): about
+  83 MiB, the larger saving. Inside a grant on Linux with a usable `/dev/shm`,
+  Maven's build directory is also a per-build directory under
   `/dev/shm/nexus-build-<uid>/b.<pid>.<rand>` (`-Dnexus.build.dir`, `service/pom.xml`),
-  removed when the script exits. Only the stamped jar reaches the disk: stored in
-  the cache once per key (one 131 MB copy, since a hard link cannot cross
-  filesystems) and linked into `service/target` as a hit does. The output says
+  removed when the script exits: about 15 to 35 MiB of Maven output stays off the
+  disk. What remains: the stamped jar (about 131 MB) is still written once per key,
+  as the cache entry (one copy, since a hard link cannot cross filesystems), then
+  linked into `service/target` as a hit does; that is the floor. The jOOQ codegen on a
+  jOOQ cache miss (about 350 MB in the container overlay) is untouched. The post-change
+  chas figure is in bead nexus-0a1hw (the chas proof run), not here. The output says
   `gate jar build directory: /dev/shm/... (tmpfs; ...)` or why it stayed on disk.
-  tmpfs pages are charged to the grant, so the decision needs 1 GiB of free
-  tmpfs and of cgroup headroom (`BUILD_TMPFS_MIN_MIB`); a build killed with 137
-  or "No space left" means the grant was too small: rerun with `NX_BUILD_TMPFS=off`
-  or a bigger class. `service/target` then holds the jar and its marker but no
+  The auto decision falls back to disk whenever it cannot be sure: under 1 GiB of free
+  tmpfs or of cgroup headroom (`BUILD_TMPFS_MIN_MIB`, which must be a whole number);
+  an unreadable grant memory limit; a per-user directory that is a symlink or not
+  ours; a jOOQ cache that is off, unwritable or without a complete `main-*` and
+  `test-*` entry (a fresh directory has no jOOQ stamp, so it would boot the codegen
+  container); `-Dnexus.jooq.cache.dir=off` or `-Dnexus.jooq.regenerate=true` among the
+  arguments. An explicit `NX_BUILD_TMPFS=on|<dir>` goes past the jOOQ and
+  unreadable-limit refusals and prints a warning. The cache check cannot see the
+  pom's input hash, so a tmpfs build that still ran the codegen prints a line saying
+  so. A tmpfs build that exits 137 or reports "No space left" is retried once on disk
+  automatically (the output says so); `NX_BUILD_TMPFS=off` or a bigger class avoids
+  it. `service/target` after a tmpfs build holds the jar and its marker but no
   classes, so a following `mvnw-leased.sh test` recompiles and restores the jOOQ
-  trees from the cache. It stays on disk when `NX_JOOQ_CACHE=off` (a fresh
-  directory has no jOOQ stamp and would boot the codegen container). The jlink
-  image, which nothing reads, is skipped on every host. A SIGKILLed build leaves
-  its directory in RAM until the next run sweeps it (dead owner, over 2 hours old);
+  trees from the cache. A signal to the script stops its Maven (own process group)
+  before the directory is removed. A SIGKILLed script leaves its directory in RAM until
+  the next run sweeps it (dead owner, over 2 hours old);
   `rm -rf /dev/shm/nexus-build-$(id -u)/b.<deadpid>.*` frees it sooner.
   `NX_BUILD_TMPFS=off|on|<dir>` overrides. The gate-jar cache itself stays on
   disk: on tmpfs every hit would copy 131 MB across filesystems instead of
