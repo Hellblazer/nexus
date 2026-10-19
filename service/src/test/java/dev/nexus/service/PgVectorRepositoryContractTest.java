@@ -7,6 +7,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -1887,11 +1888,10 @@ class PgVectorRepositoryContractTest {
     /** Superuser cosine distance between a stored embedding and an expected vector. */
     private double superuserCosineDistance(int dim, String collection, String chash,
                                            float[] expected) throws SQLException {
-        // pgvector's <=> operator is cosine_distance(vector, vector); the schema-qualified function is the
-        // typed spelling (the extension lives in schema nexus).
+        // pgvector's <=> operator is cosine_distance(vector, vector); the generated routine is the typed
+        // spelling (the extension lives in schema nexus).
         var embedding = VectorSeeds.chunkEmbedding(dim);
-        var distance = DSL.function(DSL.name("nexus", "cosine_distance"), Double.class,
-            embedding, DSL.val(Vector.of(expected), embedding));
+        var distance = Routines.cosineDistance1(embedding, DSL.val(Vector.of(expected), embedding));
         try (Connection su = pg.createConnection("")) {
             var rows = DSL.using(su, SQLDialect.POSTGRES).select(distance).from(CHUNKS)
                 .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))

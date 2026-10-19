@@ -225,6 +225,9 @@ class Hygiene001NotNullMigrationRlsTest {
                         assertThat(collACreatedAt)
                             .as("collection A must exist for tenant " + tenant)
                             .isNotEmpty();
+                        assertThat(collACreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT))
+                            .as("collection A's created_at must be backfilled (NOT NULL) for tenant " + tenant)
+                            .isNotNull();
                         assertThat(collACreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT).toInstant()
                                 .equals(OffsetDateTime.parse("2026-01-01T00:00:00+00:00").toInstant()))
                             .as("collection A's created_at must equal the MIN indexed_at "

@@ -404,7 +404,7 @@ class ChashRepositoryTest {
     }
 
     /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
-     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+     *  SQL shape (through jOOQ on that connection), for tests needing manual transaction control. */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);

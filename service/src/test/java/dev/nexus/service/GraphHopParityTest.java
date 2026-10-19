@@ -2,12 +2,15 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.SQLDataType;
 import org.jooq.Table;
@@ -628,18 +631,22 @@ class GraphHopParityTest {
                                    String linkType, int depth, String direction,
                                    String whereJson, int n)
             throws Exception {
-        String sql =
-            "SELECT id FROM nexus.search_graph_hop_" + dim + "(" +
-            queryVecLiteral(dim) + ", " +
-            "ARRAY['" + seed + "']::text[], " +
-            "ARRAY['" + collection + "']::text[], " +
-            sqlText(linkType) + ", " +
-            depth + ", " +
-            sqlText(direction) + ", " +
-            (whereJson == null ? "NULL::jsonb" : "'" + whereJson + "'::jsonb") + ", " +
-            n + ", " + sqlText(collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3")
-            + ", " + sqlText(tenantFor(collection)) + ")";
-        return runIds(conn, sql);
+        String model = collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3";
+        var vec = VectorSeeds.vecXY(dim, 1f, 0f);
+        String[] seeds = {seed};
+        String[] colls = {collection};
+        JSONB where = whereJson == null ? null : JSONB.valueOf(whereJson);
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_GRAPH_HOP_384.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            case 768  -> SEARCH_GRAPH_HOP_768.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            case 1024 -> SEARCH_GRAPH_HOP_1024.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(fn.field("id", String.class)).from(fn).fetch(r -> r.get(0, String.class));
     }
 
     private String explain(String inner) throws Exception {

@@ -264,7 +264,7 @@ class VectorsUnifyChunksIntegrationTest {
             throws Exception {
         var execType = DSL.field(DSL.name("exectype"), String.class);
         var rows = DSL.using(conn, SQLDialect.POSTGRES).select(execType)
-            .from(DSL.table(DSL.name("databasechangelog")))
+            .from(DSL.table(DSL.name("public", "databasechangelog")))
             .where(DSL.field(DSL.name("id"), String.class).eq(id),
                    DSL.field(DSL.name("author"), String.class).eq(author),
                    DSL.field(DSL.name("filename"), String.class).eq(filename))

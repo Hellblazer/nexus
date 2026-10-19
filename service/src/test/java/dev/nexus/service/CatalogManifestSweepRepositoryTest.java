@@ -657,16 +657,16 @@ class CatalogManifestSweepRepositoryTest {
             .execute();
     }
 
-    /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape on a raw
-     *  connection, for tests that need manual transaction control around it. */
+    /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape (through jOOQ on
+     *  that connection), for tests that need manual transaction control around it. */
     private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
         DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
                 DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     /** Hand-drives {@code acquireSweepGateExclusive}'s exact SQL shape
-     *  (lock_timeout + statement_timeout, then the exclusive acquire) on a
-     *  raw connection. */
+     *  (lock_timeout, then the exclusive acquire, through
+     *  jOOQ on that connection). */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);

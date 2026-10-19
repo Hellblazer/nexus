@@ -136,7 +136,7 @@ class ManifestVerifyTest {
     @Test
     void catalog020Changesets_recordedInDatabaseChangeLog() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("databasechangelog")),
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("public", "databasechangelog")),
                     DSL.field(DSL.name("id"), String.class).like("catalog-020-%")))
                 .as("all 5 catalog-020 changesets (columns, index, manifest_verify, " +
                     "manifest_verify_all, grants) must be recorded as applied")

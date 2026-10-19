@@ -6,6 +6,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
@@ -1130,96 +1131,86 @@ class CombinedQueryParityTest {
                                       String contentType, String author, Integer year,
                                       String corpus, String subtree, String whereJson,
                                       int n) throws Exception {
-        String sql =
-            "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", " +
-            "ARRAY['" + collection + "']::text[], " +
-            sqlText(contentType) + ", " +
-            sqlText(author) + ", " +
-            (year == null ? "NULL::int" : year.toString()) + ", " +
-            sqlText(corpus) + ", " +
-            sqlText(subtree) + ", " +
-            (whereJson == null ? "NULL::jsonb" : "'" + whereJson.replace("'", "''") + "'::jsonb") + ", " +
-            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
-        return runIds(conn, sql);
+        return fetchIds(conn, metaFn(dim, collection, contentType, author, year, corpus,
+                                     subtree, whereJson, n));
+    }
+
+    /** The generated {@code search_metadata_scoped_<dim>} table function call for {@code collection}. */
+    private Table<?> metaFn(int dim, String collection, String contentType, String author,
+                            Integer year, String corpus, String subtree, String whereJson, int n) {
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        JSONB where = whereJson == null ? null : JSONB.valueOf(whereJson);
+        return switch (dim) {
+            case 384  -> SEARCH_METADATA_SCOPED_384.call(vec, colls, contentType, author, year, corpus,
+                subtree, where, n, modelFor(collection), tenantFor(collection));
+            case 768  -> SEARCH_METADATA_SCOPED_768.call(vec, colls, contentType, author, year, corpus,
+                subtree, where, n, modelFor(collection), tenantFor(collection));
+            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(vec, colls, contentType, author, year, corpus,
+                subtree, where, n, modelFor(collection), tenantFor(collection));
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
     }
 
     /** Invoke search_topic_scoped_&lt;dim&gt;; returns ids in returned order. */
     private List<String> callTopic(Connection conn, int dim, String collection,
                                    String topicLabel, int n) throws Exception {
-        String sql =
-            "SELECT id FROM nexus.search_topic_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", " +
-            sqlText(topicLabel) + ", " +
-            sqlText(collection) + ", " +
-            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
-        return runIds(conn, sql);
+        return fetchIds(conn, topicFn(dim, collection, topicLabel, n));
+    }
+
+    /** The generated {@code search_topic_scoped_<dim>} table function call for {@code collection}. */
+    private Table<?> topicFn(int dim, String collection, String topicLabel, int n) {
+        Vector vec = queryVec(dim);
+        return switch (dim) {
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, n,
+                modelFor(collection), tenantFor(collection));
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, n,
+                modelFor(collection), tenantFor(collection));
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, n,
+                modelFor(collection), tenantFor(collection));
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
     }
 
     /** EXPLAIN (no ANALYZE) the metadata function with seqscan disabled. */
     private String explainMetaPlan(int dim, String collection, String contentType)
             throws Exception {
-        Vector vec = queryVec(dim);
-        String[] colls = {collection};
-        Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
-            case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
-            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        return explain(fn);
+        return explain(metaFn(dim, collection, contentType, null, null, null, null, null, 10));
     }
 
     /** Invoke search_aspect_scoped_&lt;dim&gt;; returns ids in returned order. */
     private List<String> callAspect(Connection conn, int dim, String collection,
                                     String field, String pattern, Double minConfidence,
                                     int n) throws Exception {
-        String sql =
-            "SELECT id FROM nexus.search_aspect_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", " +
-            "ARRAY['" + collection + "']::text[], " +
-            sqlText(field) + ", " +
-            sqlText(pattern) + ", " +
-            (minConfidence == null ? "NULL::float8" : minConfidence.toString()) + ", " +
-            "NULL::jsonb, " +
-            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
-        return runIds(conn, sql);
+        return fetchIds(conn, aspectFn(dim, collection, field, pattern, minConfidence, n));
+    }
+
+    /** The generated {@code search_aspect_scoped_<dim>} table function call for {@code collection}. */
+    private Table<?> aspectFn(int dim, String collection, String field, String pattern,
+                              Double minConfidence, int n) {
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        return switch (dim) {
+            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
+                vec, colls, field, pattern, minConfidence, null, n, modelFor(collection), tenantFor(collection));
+            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
+                vec, colls, field, pattern, minConfidence, null, n, modelFor(collection), tenantFor(collection));
+            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
+                vec, colls, field, pattern, minConfidence, null, n, modelFor(collection), tenantFor(collection));
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
     }
 
     /** EXPLAIN (no ANALYZE) the aspect-scoped function with seqscan disabled. */
     private String explainAspectPlan(int dim, String collection, String field, String pattern)
             throws Exception {
-        Vector vec = queryVec(dim);
-        String[] colls = {collection};
-        Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
-            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
-            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        return explain(fn);
+        return explain(aspectFn(dim, collection, field, pattern, null, 10));
     }
 
     /** EXPLAIN (no ANALYZE) the topic function with seqscan disabled. */
     private String explainTopicPlan(int dim, String collection, String topicLabel)
             throws Exception {
-        Vector vec = queryVec(dim);
-        Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, 10,
-                modelFor(collection), tenantFor(collection));
-            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, 10,
-                modelFor(collection), tenantFor(collection));
-            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, 10,
-                modelFor(collection), tenantFor(collection));
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        return explain(fn);
+        return explain(topicFn(dim, collection, topicLabel, 10));
     }
 
     /** A length-{@code dim} typed pgvector value with the SAME first-two-components
@@ -1258,6 +1249,12 @@ class CombinedQueryParityTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
         }
+    }
+
+    /** The {@code id} column of a generated table-function call, in returned order. */
+    private static List<String> fetchIds(Connection conn, Table<?> fn) {
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(fn.field("id", String.class)).from(fn).fetch(r -> r.get(0, String.class));
     }
 
     private static List<String> runIds(Connection conn, String sql) throws Exception {
@@ -1347,13 +1344,13 @@ class CombinedQueryParityTest {
             " LIMIT " + topK;
         List<String> topKIds = runIds(conn, topKSql);
         List<String> matched = new ArrayList<>();
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         for (String id : topKIds) {
-            String sql =
-                "SELECT 1 FROM nexus.document_aspects a " +
-                " WHERE a.tenant_id = '" + TENANT_A + "' AND a.doc_id = '" + id + "' " +
-                "   AND a.proposed_method ILIKE '%" + pattern + "%'";
-            try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-                if (rs.next()) matched.add(id);
+            if (ctx.fetchExists(DOCUMENT_ASPECTS,
+                    DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A),
+                    DOCUMENT_ASPECTS.DOC_ID.eq(id),
+                    DOCUMENT_ASPECTS.PROPOSED_METHOD.likeIgnoreCase("%" + pattern + "%"))) {
+                matched.add(id);
             }
         }
         return matched;

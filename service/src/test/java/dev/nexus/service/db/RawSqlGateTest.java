@@ -823,8 +823,9 @@ class RawSqlGateTest {
      * the files touched onto {@code PgContainerHelper.applyProductSchema}
      * (role-001 creates the role). Kept raw by decision: the pgjdbc
      * plan-cache probe in {@code PgSessionStatementTimeoutIntegrationTest}
-     * (the test IS about reusing one JDBC PreparedStatement 8x, which jOOQ
-     * cannot express) and the {@code DO $$ ... LOOP} DDL blocks in
+     * (the test IS about reusing one JDBC PreparedStatement 8x; converted by
+     * the nexus-cbo4a 2026-10-19 review fold-in through {@code
+     * ResultQuery#keepStatement(true)}) and the {@code DO $$ ... LOOP} DDL blocks in
      * {@code SharedCluster}/{@code Taxonomy011ForeignOwnedDiagViewTest}
      * (role/ownership DDL, not reads). Batch 7 also left the ~40 single-site
      * {@code DO $$ CREATE ROLE nexus_svc} bootstraps in files with no other
@@ -931,7 +932,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 11 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 4
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4
+        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; review fold-in: 4 -> 3 (twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS)
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 2 raw-JDBC fixture sites,
         // the same idiom CombinedWriteRepositoryTest's own seedChunk384/
         // chunk384Exists use just below -- seedChunk's chunks INSERT (a
@@ -1193,7 +1194,6 @@ class RawSqlGateTest {
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
         // generated jOOQ DSL only. No entry: actual count is 0.
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 2), // nexus-cbo4a 2026-10-19 SELECT probes: 7 -> 2
         // nexus-f3yxx rework round: topicsLockHeldByAnotherBackend's raw pg_locks
         // probe -- pg_locks.relation = 'X'::regclass and pg_backend_pid() are
         // assembled SQL expressions with no typed jOOQ DSL form, so this is plain
@@ -1686,13 +1686,21 @@ class RawSqlGateTest {
     // nexus-cbo4a 2026-10-19 SELECT probes: 427 -> 278 (-149: row-count, existence and value-read SELECTs in 26
     // files, plus the (Connection, String sql) wrappers they ran through, onto the generated tables, the generated
     // table-valued functions (document_text, manifest_verify, search_metadata_scoped_1024, search_graph_hop_1024)
-    // and PgCatalogProbes; 7 entries reach 0 and are removed outright, 86 -> 79 files). Kept raw:
-    // PgSessionStatementTimeoutIntegrationTest.java's two planCounts sites (they pin pgjdbc's server-side
-    // prepared-statement promotion at the fifth execution of ONE PreparedStatement and read that statement's
-    // pg_prepared_statements row by its text, so the JDBC statement is the thing under test). Not converted in
-    // this pass: the runIds(Connection, String) oracle wrappers of CombinedQueryParityTest.java and
-    // GraphHopParityTest.java with the stitched-path oracle statements their callers assemble as strings.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 278;
+    // and PgCatalogProbes; 7 entries reach 0 and are removed outright, 86 -> 79 files).
+    // nexus-cbo4a 2026-10-19 SELECT probes review fold-in: 278 -> 275 (-3: PgSessionStatementTimeoutIntegrationTest.java
+    // planCounts now holds ONE PreparedStatement through jOOQ ResultQuery#keepStatement(true) and reads
+    // pg_prepared_statements through a typed query, entry removed outright, 79 -> 78 files; CombinedQueryParityTest.java
+    // 4 -> 3, twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS). The production-path calls
+    // of CombinedQueryParityTest.java and GraphHopParityTest.java (callMetaFull, callTopic, callAspect, callGraph) also
+    // moved onto the generated SEARCH_*_<dim>.call(...) table functions; the gate never counted them (it counted only
+    // runIds' own executeQuery(sql)), so its census did not move for that. Still raw in those two files: the
+    // SET enable_* GUC loops, the setDeleted UPDATEs, GraphHopParityTest's hand-written EXPLAIN of the reached-set
+    // join, and runIds(Connection, String) with the oracle SQL strings its callers assemble (stitchedMetaOracle,
+    // stitchedTopicOracle, the top-K query of twoStepAspectOracle, stitchedGraphOracle). Those oracles ORDER BY the
+    // schema-qualified OPERATOR(nexus.<=>), which the jOOQ DSL has no operator for; Routines.cosineDistance1 is the
+    // function spelling of the same distance, but that equality has not been run against this tree, and
+    // stitchedGraphOracle is a WITH RECURSIVE statement. Not converted in this fold-in; the follow-up is a bead.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 275;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -369,10 +369,22 @@ public final class PgCatalogProbes {
             DSL.field(DSL.name("conname"), String.class).eq(conname));
     }
 
-    /** Number of {@code pg_constraint} rows named {@code conname} (schema-agnostic, as the raw probes were). */
+    /**
+     * Number of top-level, locally declared {@code pg_constraint} rows named {@code conname}, schema-agnostic.
+     * Same scope as {@link #constraintValidated}: partition clones (conparentid != 0), inherited CHECKs
+     * (conislocal false) and the {@code *_retired_225} tables' constraints are not counted, so the count answers
+     * "how many constraints of this name did the migration declare", never "how many partitions cloned it".
+     */
     public static int constraintCount(DSLContext ctx, String conname) {
-        return ctx.fetchCount(DSL.table(DSL.name("pg_constraint")),
-            DSL.field(DSL.name("conname"), String.class).eq(conname));
+        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
+        var rel = DSL.table(DSL.name("pg_catalog", "pg_class")).as("r");
+        return ctx.fetchCount(ctx.selectOne()
+            .from(con)
+            .join(rel).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
+            .where(DSL.field(DSL.name("k", "conname"), String.class).eq(conname))
+            .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
+            .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue())
+            .and(DSL.not(DSL.field(DSL.name("r", "relname"), String.class).endsWith("_retired_225"))));
     }
 
     /** {@code pg_constraint.convalidated} for the constraint named {@code conname}, or null. */

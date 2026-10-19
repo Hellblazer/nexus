@@ -4,7 +4,6 @@ package dev.nexus.service.vectors;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
-import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
