@@ -19,12 +19,14 @@
     one with DML grants (PgContainerHelper#bootstrapServiceRole's svcRole is
     deliberately DML-only, never an owner — see that file's own header).
 
-    ONLY safe on a DEDICATED, non-shared container
-    (PgContainerHelper#startDedicated) — reassigning table ownership is
-    global schema state, exactly the class of mutation PgContainerHelper#
-    start's shared-cluster-reuse javadoc names as disqualifying (same
-    reasoning Taxonomy010BackfillDirectIntegrationTest's own header gives for
-    its SET NOT NULL / DROP VIEW mutations).
+    Table ownership is database-local, so run it against a database no other
+    class reads: a per-class database on the shared cluster
+    (PgContainerHelper#start's clone, or #startEmptyDatabase) or a dedicated
+    container (PgContainerHelper#startDedicated). It must not be a mutation
+    of anything cluster-wide (same reasoning
+    Taxonomy010BackfillDirectIntegrationTest's own header gives for its
+    SET NOT NULL / DROP VIEW mutations). The ${adminRole} itself is
+    cluster-wide, so its name must be one no other class uses.
 
     Parameterized by ${adminRole}/${adminPass}; runAlways="true" since a fixed
     changeset id would only ever apply for the first role name a caller ever

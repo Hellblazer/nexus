@@ -106,6 +106,10 @@ final class SharedCluster {
     private static final Object BOOTSTRAP_LOCK = new Object();
     private static final AtomicInteger DB_COUNTER = new AtomicInteger();
 
+    /** Exclusive role name to the class that last declared it (nexus-7xfh7), so a leaked role names its leaker. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> EXCLUSIVE_HOLDERS =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
     /** How long a connect waits for the container's published port to accept a connection.
      *  The observed colima window is milliseconds; 10 s bounds what a permanently refused
      *  port costs each rawConnect (review nexus/review-33prh-code suggestion 1). */
@@ -169,6 +173,7 @@ final class SharedCluster {
         }
         PostgreSQLContainer<?> c = ensureBootstrapped();
         String dbName = "nexus_test_" + DB_COUNTER.incrementAndGet();
+        String holder = PgContainerHelper.callerClass();
         try (Connection admin = controlConnection(c)) {
             admin.setAutoCommit(true);
             requireRolesAbsent(admin, exclusiveRoles);
@@ -191,7 +196,17 @@ final class SharedCluster {
                 st.execute("CREATE DATABASE \"" + dbName + "\" " + templateClause);
             }
         }
-        return new SharedDatabaseHandle(c, dbName, java.util.List.of(exclusiveRoles));
+        for (String role : exclusiveRoles) {
+            EXCLUSIVE_HOLDERS.put(role, holder);
+        }
+        return new SharedDatabaseHandle(c, dbName, java.util.List.of(exclusiveRoles), holder);
+    }
+
+    /** Forget {@code holder} as the holder of {@code roles}, once its teardown dropped them. */
+    static void releaseExclusiveRoles(java.util.List<String> roles, String holder) {
+        for (String role : roles) {
+            EXCLUSIVE_HOLDERS.remove(role, holder);
+        }
     }
 
     /** Fail loud when a role a class declared exclusive is already on the cluster. */
@@ -205,9 +220,16 @@ final class SharedCluster {
             .where(DSL.field(DSL.name("rolname"), String.class).in(roles))
             .fetch(0, String.class);
         if (!present.isEmpty()) {
+            StringBuilder who = new StringBuilder();
+            for (String role : present) {
+                String holder = EXCLUSIVE_HOLDERS.get(role);
+                who.append(who.length() == 0 ? "" : ", ").append(role).append(" <- ")
+                    .append(holder != null ? "last declared exclusive by " + holder
+                        : "not declared exclusive by any class in this fork (another class created it)");
+            }
             throw new SQLException("nexus-7xfh7: role(s) " + present + " already exist on the shared cluster, but "
-                + "this class declared them exclusive (it creates them itself). Another class created the same "
-                + "name, or an earlier holder's teardown did not drop it; rename the role or fix the leak.");
+                + "this class declared them exclusive (it creates them itself) [" + who + "]. Another class created the "
+                + "same name, or an earlier holder's teardown did not drop it; rename the role or fix the leak.");
         }
     }
 

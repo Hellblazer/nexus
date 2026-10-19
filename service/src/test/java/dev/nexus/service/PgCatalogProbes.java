@@ -697,17 +697,6 @@ public final class PgCatalogProbes {
             DSL.field(DSL.name("pid"), Integer.class).eq(pid));
     }
 
-    /** {@code pg_terminate_backend(pid)} for every other backend on {@code datname}. */
-    public static void terminateOtherBackends(DSLContext ctx, String datname) {
-        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
-        Field<Boolean> terminate = DSL.function("pg_terminate_backend", Boolean.class, pid);
-        ctx.select(terminate)
-            .from(DSL.table(DSL.name("pg_stat_activity")))
-            .where(DSL.field(DSL.name("datname"), String.class).eq(datname))
-            .and(pid.ne(DSL.function("pg_backend_pid", Integer.class)))
-            .fetch();
-    }
-
     /** Number of ungranted advisory locks cluster-wide ({@code pg_locks}). */
     public static int advisoryLockWaiters(DSLContext ctx) {
         return ctx.fetchCount(DSL.table(DSL.name("pg_locks")),

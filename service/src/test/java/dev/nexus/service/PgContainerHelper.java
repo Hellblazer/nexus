@@ -15,6 +15,7 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.test.Routines;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Name;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
@@ -198,7 +199,7 @@ public final class PgContainerHelper {
     }
 
     /** First stack frame outside the container plumbing: the test class that caused a boot. */
-    private static String callerClass() {
+    static String callerClass() {
         Set<String> plumbing = Set.of(
             PgContainerHelper.class.getName(), SharedCluster.class.getName(),
             SharedDatabaseHandle.class.getName(), FailFastPostgreSQLContainer.class.getName());
@@ -270,8 +271,8 @@ public final class PgContainerHelper {
      *   <li>{@code ChashProbePlanShapeTest}, {@code ChashVectorConcurrencyTest},
      *       {@code ChunkLiveOwnersRecallExtendedIntegrationTest} -- a sized container
      *       ({@link #startDedicated(String, long)}): they outgrow, or come within a few percent of, the
-     *       default 1 GB tmpfs, and a full tmpfs on the shared cluster also blocks the teardown connection, so every
-     *       later class in the fork errors at acquire.</li>
+     *       default {@link #TMPFS_SIZE} tmpfs, and a full tmpfs on the shared cluster also blocks the teardown
+     *       connection, so every later class in the fork errors at acquire.</li>
      *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
      *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>
@@ -521,7 +522,9 @@ public final class PgContainerHelper {
      * {@code public.databasechangelog}, and a journal in {@code public} would turn that missing-table
      * error into a permission error and the test would pass for the wrong reason.
      *
-     * @param su        superuser connection on a {@link #startDedicated()} container
+     * @param su        superuser connection on a database no other class reads ({@link #startEmptyDatabase},
+     *                  as {@code ServiceIntegrationTest} uses, or a dedicated container); the harness's
+     *                  schema, role and tables are per database, the {@code svc_test} role is cluster-wide
      * @param tokenHash sha256 hex of the harness bearer token
      */
     public static void installRlsProbeHarness(Connection su, String tokenHash) throws Exception {
@@ -551,15 +554,18 @@ public final class PgContainerHelper {
      * A rerun after a migration with the same parameters is safe (the relocation helpers are reinstalled);
      * {@code SchemaRollbackRoundTripIntegrationTest} does exactly that after a rollback drops the
      * {@code nexus} schema. Runs through its own Liquibase bookkeeping tables, so the owner's later product
-     * walk does not find a superuser-owned {@code databasechangelog}. Equivalent to the five-argument
-     * overload with both flags {@code true}.
+     * walk does not find a superuser-owned {@code databasechangelog}. The same provisioning as the five-argument
+     * overload with both flags {@code true}, minus its refusal of a contradicted flag: these defaults make no claim about a
+     * {@code nexus_svc} that already exists.
      *
      * @param su        superuser connection
      * @param adminRole the owner role to create (the production nexus_admin equivalent)
      * @param adminPass its password
      */
     public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass) throws Exception {
-        bootstrapNonSuperuserOwner(su, adminRole, adminPass, true, true);
+        // Not the checked five-argument form: the defaults are not a request about nexus_svc, which a shared
+        // cluster already holds (NOINHERIT) and the fixtures that call this do not depend on.
+        provisionNonSuperuserOwner(su, adminRole, adminPass, true, true);
     }
 
     /**
@@ -569,21 +575,53 @@ public final class PgContainerHelper {
      * {@code GrantsPgMonitorTest}); {@code svcInherits=false} creates {@code nexus_svc} NOINHERIT, as
      * production does.
      *
-     * <p>Same precondition as the three-argument overload: a virgin database ({@link #startEmptyDatabase}) or
-     * a dedicated container. A pre-existing role's attributes are NOT changed, so where {@code nexus_svc}
-     * already exists (every shared cluster: the template migration made it NOINHERIT) {@code svcInherits} has
-     * no effect; a fixture that needs the attribute to take effect, or {@code pg_monitor} not yet granted,
-     * stays on {@link #startDedicated()}. A rerun after a migration with the
+     * <p>A pre-existing role's attributes are NOT changed, so this overload THROWS rather than ignore a flag the
+     * cluster contradicts: where {@code nexus_svc} already exists (every shared cluster: the template migration
+     * made it NOINHERIT and a {@code pg_monitor} member) a different {@code svcInherits}, or
+     * {@code monitorAdminOption=false}, is refused. Such a fixture stays on {@link #startDedicated()}. A rerun
+     * after a migration with the
      * same parameters is safe (every statement is idempotent), as
      * {@code SchemaRollbackRoundTripIntegrationTest} does after a rollback dropped the {@code nexus} schema.
      */
     public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass,
                                                   boolean monitorAdminOption, boolean svcInherits) throws Exception {
+        requireFlagsTakeEffect(DSL.using(su, SQLDialect.POSTGRES), monitorAdminOption, svcInherits);
+        provisionNonSuperuserOwner(su, adminRole, adminPass, monitorAdminOption, svcInherits);
+    }
+
+    private static void provisionNonSuperuserOwner(Connection su, String adminRole, String adminPass,
+                                                   boolean monitorAdminOption, boolean svcInherits) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nonsuper-owner.xml",
             "databasechangelog_test_nonsuper_owner", Map.of(
                 "adminRole", adminRole, "adminPass", adminPass, "svcPass", SVC_PASSWORD,
                 "monitorAdminOption", Boolean.toString(monitorAdminOption),
                 "svcInherit", svcInherits ? "INHERIT" : "NOINHERIT"));
+    }
+
+    /**
+     * The five-argument bootstrap exists for a fixture whose point is a flag. A role that already exists keeps
+     * its attributes ({@code CREATE ROLE ... IF NOT EXISTS}), so on a cluster where {@code nexus_svc} was made
+     * by the template migration (every shared cluster) a flag it contradicts would be dropped without a word,
+     * and a falsification built on it would pass vacuously. Refuse instead.
+     */
+    private static void requireFlagsTakeEffect(DSLContext ctx, boolean monitorAdminOption, boolean svcInherits) {
+        Field<Boolean> inherit = DSL.field(DSL.name("rolinherit"), Boolean.class);
+        Boolean existingInherit = ctx.select(inherit).from(DSL.table(DSL.name("pg_roles")))
+            .where(DSL.field(DSL.name("rolname"), String.class).eq(SVC_USERNAME)).fetchOne(inherit);
+        if (existingInherit == null) {
+            return; // a virgin cluster: the provisioning creates the role with the requested flags
+        }
+        if (existingInherit != svcInherits) {
+            throw new IllegalStateException(SVC_USERNAME + " already exists as "
+                + (existingInherit ? "INHERIT" : "NOINHERIT") + " but " + (svcInherits ? "INHERIT" : "NOINHERIT")
+                + " was requested; the bootstrap cannot change an existing role. Run this fixture on a dedicated "
+                + "container (PgContainerHelper.startDedicated()).");
+        }
+        if (!monitorAdminOption && PgCatalogProbes.hasRole(ctx, SVC_USERNAME, "pg_monitor")) {
+            throw new IllegalStateException(SVC_USERNAME + " already holds pg_monitor, so omitting pg_monitor ... "
+                + "WITH ADMIN OPTION from the owner would not exercise the missing grant (a vacuous falsification). "
+                + "Run this fixture on a dedicated container (PgContainerHelper.startDedicated()).");
+        }
     }
 
     /**

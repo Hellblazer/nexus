@@ -47,7 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * parent and the model partitions carry none; {@link #theParentRefusesStorageParametersItself} pins that premise
  * rather than trusting the docs. {@code taxonomy_centroids} is deliberately untouched.
  *
- * <p>A dedicated container, migrated by a non-superuser owner (production's nexus_admin shape): the leaves are
+ * <p>An empty database on the shared cluster (the event trigger is database-local), migrated by a non-superuser owner (production's nexus_admin shape): the leaves are
  * owned by that role, and a superuser-migrated cluster would prove nothing about who may alter them. The
  * "touches only what needs it" claim is measured with an event trigger that logs every {@code ALTER TABLE} on a
  * chunks leaf, with a control arm (a stripped leaf IS logged) so a trigger that never fires cannot pass.
@@ -76,7 +76,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);
         }

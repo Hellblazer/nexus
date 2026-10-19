@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import org.jooq.impl.DSL;
-import org.jooq.SQLDialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -14,6 +12,8 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * A {@link PostgreSQLContainer}-shaped HANDLE onto one database inside an
@@ -37,14 +37,19 @@ import java.util.Properties;
  * {@link PgContainerHelper#newContainer()} directly, which is untouched by this class.
  *
  * <p><b>{@link #stop()} never stops the shared {@code delegate}</b> -- other test
- * classes in this fork still need it. It best-effort DROPs this handle's own
- * per-class database instead (after terminating any lingering backends -- DROP
- * DATABASE fails while connections remain open). A drop failure is logged, not
- * thrown: a leaked per-class database is a footprint residual for the remainder
- * of this fork's run, not a suite-correctness problem, so it must not fail an
- * otherwise-passing test's teardown. Since nexus-xynce that footprint is tmpfs
- * RAM counted against the cluster's 2 GB cap (a clone of the template is about
- * 14 MB to start), so a class should still stop its handle.
+ * classes in this fork still need it. It DROPs this handle's own per-class
+ * database instead ({@code WITH (FORCE)}, which also ends any lingering backends).
+ * A drop failure is logged, not thrown: a leaked per-class database is a footprint
+ * residual for the remainder of this fork's run, not a suite-correctness problem,
+ * so it must not fail an otherwise-passing test's teardown. Since nexus-xynce that
+ * footprint is tmpfs RAM counted against the cluster's 2 GB cap (a clone of the
+ * template is about 14 MB to start), so a class should still stop its handle.
+ *
+ * <p>The exception is the cluster-wide roles a holder declared exclusive: a leaked
+ * one fails a DIFFERENT class's acquire later, so a failed role cleanup is thrown
+ * from {@code stop()} (and logged at ERROR with the holder's name) to put the red on
+ * the class that leaked. {@code stop()} runs once; a second call does nothing, so it
+ * cannot drop a later holder's role of the same name.
  */
 final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandle> {
 
@@ -54,16 +59,16 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
     private final String dbName;
     /** Cluster-wide roles this holder declared exclusive (nexus-7xfh7); dropped after the database. */
     private final List<String> exclusiveRoles;
+    /** The test class that acquired this handle; named when its exclusive-role cleanup fails. */
+    private final String holder;
+    private final AtomicBoolean stopped = new AtomicBoolean();
 
-    SharedDatabaseHandle(PostgreSQLContainer<?> delegate, String dbName) {
-        this(delegate, dbName, List.of());
-    }
-
-    SharedDatabaseHandle(PostgreSQLContainer<?> delegate, String dbName, List<String> exclusiveRoles) {
+    SharedDatabaseHandle(PostgreSQLContainer<?> delegate, String dbName, List<String> exclusiveRoles, String holder) {
         super(DockerImageName.parse(PgContainerHelper.IMAGE).asCompatibleSubstituteFor("postgres"));
         this.delegate = delegate;
         this.dbName = dbName;
         this.exclusiveRoles = List.copyOf(exclusiveRoles);
+        this.holder = holder;
     }
 
     @Override
@@ -119,34 +124,61 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
 
     @Override
     public void stop() {
-        try (Connection admin = SharedCluster.controlConnection(delegate)) {
+        // Once per handle: a second stop() after a later holder acquired the same exclusive role would
+        // otherwise drop that holder's role out from under it.
+        if (!stopped.compareAndSet(false, true)) {
+            return;
+        }
+        // WITH (FORCE) (PostgreSQL 13+) terminates the remaining backends and drops in one statement, so
+        // there is no terminate-then-drop window for a new connection to slip into.
+        try (Connection admin = SharedCluster.controlConnection(delegate);
+             var st = admin.createStatement()) {
             admin.setAutoCommit(true);
-            PgCatalogProbes.terminateOtherBackends(DSL.using(admin, SQLDialect.POSTGRES), dbName);
-            try (var st = admin.createStatement()) {
-                st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\"");
-                // After the database: a role cannot be dropped while it holds privileges in a live one.
-                // Nor while it is the GRANTOR of a role membership (PostgreSQL 16+ records the grantor as a
-                // dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one.
-                // Revoke what it granted, then drop it.
-                if (!exclusiveRoles.isEmpty()) {
-                    // Role names are validated plain identifiers (SharedCluster.createDatabase).
-                    String names = exclusiveRoles.stream().map(r -> "'" + r + "'").collect(java.util.stream.Collectors.joining(","));
-                    st.execute("DO $$ DECLARE r text; m record; BEGIN "
-                        + "  FOREACH r IN ARRAY ARRAY[" + names + "] LOOP "
-                        + "    FOR m IN SELECT g.rolname AS granted, u.rolname AS member FROM pg_auth_members a "
-                        + "             JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member "
-                        + "             JOIN pg_roles o ON o.oid = a.grantor WHERE o.rolname = r LOOP "
-                        + "      EXECUTE format('REVOKE %I FROM %I GRANTED BY %I', m.granted, m.member, r); "
-                        + "    END LOOP; "
-                        + "    EXECUTE format('DROP ROLE IF EXISTS %I', r); "
-                        + "  END LOOP; "
-                        + "END $$");
-                }
-            }
+            st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\" WITH (FORCE)");
         } catch (SQLException e) {
             LOG.warn("best-effort DROP DATABASE \"{}\" failed (nexus-yhmav shared-cluster handle) "
-                + "-- leaking a per-class database for the remainder of this fork's run, harmless "
-                + "except for disk footprint", dbName, e);
+                + "-- leaking a per-class database for the remainder of this fork's run; if this class declared "
+                + "exclusive roles the role cleanup below will fail too and say so", dbName, e);
         }
+        dropExclusiveRoles();
+    }
+
+    /**
+     * Drop the roles this holder declared exclusive. NOT best-effort: a role left on the cluster fails the
+     * next class that declares it (at {@link SharedCluster#acquireEmptyDatabase}), which is not the class
+     * that leaked it. So a failure here is logged at ERROR with the class and the roles and thrown, which
+     * puts the red on the leaking class's own teardown.
+     */
+    private void dropExclusiveRoles() {
+        if (exclusiveRoles.isEmpty()) {
+            return;
+        }
+        // After the database: a role cannot be dropped while it holds privileges in a live one.
+        // Nor while it is the GRANTOR of a role membership (PostgreSQL 16+ records the grantor as a
+        // dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one.
+        // Revoke what it granted, then drop it.
+        try (Connection admin = SharedCluster.controlConnection(delegate);
+             var st = admin.createStatement()) {
+            admin.setAutoCommit(true);
+            // Role names are validated plain identifiers (SharedCluster.createDatabase).
+            String names = exclusiveRoles.stream().map(r -> "'" + r + "'").collect(Collectors.joining(","));
+            st.execute("DO $$ DECLARE r text; m record; BEGIN "
+                + "  FOREACH r IN ARRAY ARRAY[" + names + "] LOOP "
+                + "    FOR m IN SELECT g.rolname AS granted, u.rolname AS member FROM pg_auth_members a "
+                + "             JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles u ON u.oid = a.member "
+                + "             JOIN pg_roles o ON o.oid = a.grantor WHERE o.rolname = r LOOP "
+                + "      EXECUTE format('REVOKE %I FROM %I GRANTED BY %I', m.granted, m.member, r); "
+                + "    END LOOP; "
+                + "    EXECUTE format('DROP ROLE IF EXISTS %I', r); "
+                + "  END LOOP; "
+                + "END $$");
+        } catch (SQLException e) {
+            LOG.error("nexus-7xfh7: {} could not drop its exclusive role(s) {} on the shared cluster; every later "
+                + "class that declares one of them fails at acquire until this is fixed", holder, exclusiveRoles, e);
+            throw new IllegalStateException("nexus-7xfh7: " + holder + " leaked exclusive role(s) " + exclusiveRoles
+                + " on the shared cluster (DROP ROLE failed: " + e.getMessage() + "). Later classes that declare "
+                + "them will fail at acquire and name this class.", e);
+        }
+        SharedCluster.releaseExclusiveRoles(exclusiveRoles, holder);
     }
 }

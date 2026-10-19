@@ -176,6 +176,96 @@ class SharedClusterEmptyDatabaseTest {
         }
     }
 
+    /**
+     * The cleanup that cannot run must not be silent. The exclusive role owns a schema in ANOTHER database, so
+     * DROP ROLE fails at stop() (PostgreSQL records cross-database ownership as a dependency). The holder's
+     * stop() then has to fail, naming the class and the roles, and the next acquire that declares the role
+     * has to name the holder rather than leave the victim to guess.
+     */
+    @Test
+    void aFailedExclusiveRoleCleanupFailsTheHoldersStopAndTheNextAcquireNamesTheHolder() throws Exception {
+        String stuck = EXCLUSIVE_ROLE + "_stuck";
+        PostgreSQLContainer<?> holder = PgContainerHelper.startEmptyDatabase(stuck);
+        PostgreSQLContainer<?> anchor = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = holder.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + stuck + " NOLOGIN");
+            }
+            try (Connection su = anchor.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su, "CREATE SCHEMA stuck_schema AUTHORIZATION " + stuck);
+            }
+            assertThatThrownBy(holder::stop)
+                .as("the holder's own teardown goes red, not a later class's acquire")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(stuck)
+                .hasMessageContaining("SharedClusterEmptyDatabaseTest");
+            assertThatThrownBy(() -> PgContainerHelper.startEmptyDatabase(stuck))
+                .as("the next declarer is told who leaked it")
+                .hasMessageContaining(stuck)
+                .hasMessageContaining("SharedClusterEmptyDatabaseTest");
+            holder.stop(); // a second stop is a no-op: it neither rethrows nor retries
+        } finally {
+            try (Connection su = anchor.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su, "DROP SCHEMA IF EXISTS stuck_schema");
+                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + stuck);
+            }
+            anchor.stop();
+        }
+    }
+
+    /** A second stop() that runs after a later holder acquired the same exclusive role must not drop that holder's role. */
+    @Test
+    void aSecondStopCannotDropALaterHoldersRole() throws Exception {
+        String role = EXCLUSIVE_ROLE + "_twice";
+        PostgreSQLContainer<?> first = PgContainerHelper.startEmptyDatabase(role);
+        try (Connection su = first.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " NOLOGIN");
+        }
+        first.stop();
+        PostgreSQLContainer<?> second = PgContainerHelper.startEmptyDatabase(role);
+        try {
+            try (Connection su = second.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " NOLOGIN");
+            }
+            first.stop();
+            try (Connection admin = SharedCluster.controlConnection(clusterOf())) {
+                assertThat(roleNames(DSL.using(admin, SQLDialect.POSTGRES)))
+                    .as("the second holder's role survives the first holder's repeated stop()").contains(role);
+            }
+        } finally {
+            second.stop();
+        }
+        try (Connection admin = SharedCluster.controlConnection(clusterOf())) {
+            assertThat(roleNames(DSL.using(admin, SQLDialect.POSTGRES))).doesNotContain(role);
+        }
+    }
+
+    /**
+     * The five-argument bootstrap overload cannot change a role that already exists. On the shared cluster
+     * {@code nexus_svc} exists (NOINHERIT, already a member of pg_monitor from the template migration), so a flag
+     * that asks for the opposite would be silently ignored and a falsification built on it would be vacuous.
+     */
+    @Test
+    void theFiveArgumentBootstrapRefusesFlagsThatThePreexistingServiceRoleDefeats() throws Exception {
+        String admin = EXCLUSIVE_ROLE + "_boot";
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(admin);
+        try (Connection su = pg.createConnection("")) {
+            assertThatThrownBy(() -> PgContainerHelper.bootstrapNonSuperuserOwner(su, admin, "pw", true, true))
+                .as("INHERIT requested, nexus_svc is NOINHERIT")
+                .hasMessageContaining("nexus_svc").hasMessageContaining("INHERIT");
+            assertThatThrownBy(() -> PgContainerHelper.bootstrapNonSuperuserOwner(su, admin, "pw", false, false))
+                .as("no pg_monitor ADMIN OPTION requested, nexus_svc already holds pg_monitor")
+                .hasMessageContaining("pg_monitor");
+            assertThat(roleNames(DSL.using(su, SQLDialect.POSTGRES)))
+                .as("a refused call changed nothing").doesNotContain(admin);
+            // Flags the cluster already satisfies are accepted (pg_monitor ADMIN OPTION, NOINHERIT).
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, admin, "pw", true, false);
+            assertThat(roleNames(DSL.using(su, SQLDialect.POSTGRES))).contains(admin);
+        } finally {
+            pg.stop();
+        }
+    }
+
     /** The shared cluster's container, reached through a throwaway handle (only its host and port are used). */
     private static PostgreSQLContainer<?> clusterOf() throws Exception {
         return SharedCluster.container();

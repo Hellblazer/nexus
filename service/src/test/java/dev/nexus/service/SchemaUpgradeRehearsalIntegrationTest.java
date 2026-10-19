@@ -2335,19 +2335,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * SchemaMigratorIntegrationTest.bootstrap()). role-001-nexus-svc.xml's
      * self-create branch requires CREATEROLE, which the non-superuser
      * {@link #ADMIN_ROLE} deliberately lacks (proving the production
-     * non-superuser owner path) — so nexus_svc must be pre-created here as
-     * superuser, same as production DBA pre-provisioning. role-001-1's IF NOT
-     * EXISTS guard then makes it a no-op during the old leg. The role is also
-     * NOBYPASSRLS (the CREATE ROLE default) — load-bearing for the data leg:
-     * FORCE-RLS policies apply to it even as table owner, exactly as they do
-     * to production's nexus_admin.
+     * non-superuser owner path) — so nexus_svc must exist before the walk, as
+     * production DBA pre-provisioning leaves it. On the per-fork shared cluster
+     * the template migration has already made it, so the bootstrap's
+     * CREATE ROLE IF NOT EXISTS is a no-op and role-001-1's guard is a no-op too.
+     * The role is NOBYPASSRLS (the CREATE ROLE default, which role-001 keeps) — load-bearing
+     * for the data leg: FORCE-RLS policies apply to it even as table owner, exactly as
+     * they do to production's nexus_admin.
      */
     private static void dbaBootstrap(Connection su) throws Exception {
-        // Roles, CREATE grants, pg_monitor WITH ADMIN OPTION (nexus-hzhgl), extensions and the
+        // The admin role, CREATE grants, pg_monitor WITH ADMIN OPTION (nexus-hzhgl), extensions and the
         // SECURITY DEFINER relocation helpers all come from db.changelog-test-nonsuper-owner.xml
-        // (PgContainerHelper#bootstrapNonSuperuserOwner). nexus_svc is created there with the
-        // CREATE ROLE defaults NOSUPERUSER NOBYPASSRLS, which is the load-bearing attribute
-        // described above.
+        // (PgContainerHelper#bootstrapNonSuperuserOwner); nexus_svc is the cluster's existing role.
         PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
     }
 

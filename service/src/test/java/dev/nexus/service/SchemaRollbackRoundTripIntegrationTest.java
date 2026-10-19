@@ -1926,12 +1926,15 @@ class SchemaRollbackRoundTripIntegrationTest {
     // ── Container bootstrap (mirrors SchemaUpgradeRehearsalIntegrationTest) ──
 
     /**
-     * The DBA-side provisioning against a DEDICATED container (never applyProductSchema's
-     * role-001-created nexus_admin): the admin and nexus_svc roles, CREATE on the database
-     * and public, pg_monitor WITH ADMIN OPTION (nexus-hzhgl; GrantsPgMonitorTest is the
-     * falsification proof), the extensions and the SECURITY DEFINER relocation helpers
-     * search-path-001 calls mid-walk. All of it is db.changelog-test-nonsuper-owner.xml, run
-     * as the superuser through PgContainerHelper#bootstrapNonSuperuserOwner.
+     * The DBA-side provisioning against an empty database on the per-fork shared cluster
+     * (PgContainerHelper#startEmptyDatabase; never applyProductSchema's role-001-created
+     * nexus_admin): the admin role, CREATE on the database and public, pg_monitor WITH ADMIN
+     * OPTION for the admin (nexus-hzhgl; GrantsPgMonitorTest is the falsification proof), the
+     * extensions and the SECURITY DEFINER relocation helpers search-path-001 calls mid-walk.
+     * nexus_svc is NOT created here: the cluster already holds it (NOINHERIT, from the template
+     * migration), and CREATE ROLE IF NOT EXISTS leaves it as it is. All of it is
+     * db.changelog-test-nonsuper-owner.xml, run as the superuser through
+     * PgContainerHelper#bootstrapNonSuperuserOwner.
      */
     private static void dbaBootstrap(Connection su) throws Exception {
         PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);

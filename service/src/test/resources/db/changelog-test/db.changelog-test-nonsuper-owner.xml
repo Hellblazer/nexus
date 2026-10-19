@@ -19,10 +19,14 @@
     CREATE on the database and on public, pg_monitor WITH ADMIN OPTION (grants-004 passes it on to nexus_svc),
     both extensions, the nexus schema owned by ${adminRole}, and the SECURITY DEFINER relocation helpers
     search-path-001 calls mid-walk (nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema's
-    shape). Run it against a DEDICATED, virgin container only (PgContainerHelper#startDedicated): schema
-    ownership is global state. Role creation is guarded by IF NOT EXISTS, so a role that already exists
-    keeps its attributes (a different ${svcInherit}, say, is not applied to it) and nothing here detects
-    that; the virgin container is what makes the parameters take effect.
+    shape). Run it against a virgin database: PgContainerHelper#startEmptyDatabase (an empty database on the
+    per-fork shared cluster) or a dedicated container. Schema ownership is database-local, so the database is
+    the boundary; roles are cluster-wide. Role creation is guarded by IF NOT EXISTS, so a role that already
+    exists keeps its attributes, and this changelog cannot detect that. On a shared cluster nexus_svc already
+    exists (NOINHERIT, a pg_monitor member, from the template migration), so ${svcInherit} and
+    ${monitorAdminOption}=false cannot take effect there: the five-argument
+    PgContainerHelper#bootstrapNonSuperuserOwner refuses them, and a fixture that needs them runs on a dedicated
+    container. ${adminRole} must be a name no other class uses, or be declared exclusive.
 
     Run through its own databasechangelog table (PgContainerHelper#bootstrapNonSuperuserOwner sets the
     names): whichever role's Liquibase run creates databasechangelog first OWNS it, and the owner's later
