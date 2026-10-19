@@ -7,7 +7,11 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UniqueRaceRetry;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogOwnersRecord;
+import org.jooq.DSLContext;
+import org.jooq.InsertSetMoreStep;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -18,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
@@ -90,16 +95,30 @@ class ArbiterCompletenessTest {
     }
 
     /**
-     * Run raw SQL as superuser and return the SQLException, or null if it succeeded.
-     *
-     * <p>Kept raw (nexus-cbo4a batch 13): this is a shared harness whose callers hand it
-     * hand-crafted SQL text to prove PostgreSQL's OWN grammar/arbiter behavior across many
-     * ON CONFLICT shapes — bare column list vs ON CONSTRAINT vs a predicate-restated
-     * partial index, and (postgresRefusesTwoConflictTargetsInOneStatement) two ON CONFLICT
-     * clauses in one INSERT, which is a SQL syntax error (42601) jOOQ's fluent insert API
-     * cannot even construct (there is no second {@code .onConflict()} to chain). Re-expressing
-     * this harness's single {@code execute(sql)} in typed DSL would either be impossible for
-     * some callers or would stop testing the raw-SQL surface these tests exist to pin.
+     * Run one typed jOOQ statement as superuser and return the driver's {@link SQLException}, or null if it
+     * succeeded. jOOQ wraps the driver exception in a {@code DataAccessException}; the SQLException is its
+     * cause, which is what {@link SqlConstraints#violated} and {@code getSQLState()} read, so every assertion
+     * sees the same constraint name and SQLSTATE the raw statement produced.
+     */
+    private SQLException failure(Consumer<DSLContext> statement) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            statement.accept(DSL.using(su, SQLDialect.POSTGRES));
+            return null;
+        } catch (DataAccessException e) {
+            for (Throwable t = e; t != null; t = t.getCause()) {
+                if (t instanceof SQLException se) return se;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Run raw SQL as superuser and return the SQLException, or null if it succeeded. Used by exactly ONE
+     * test, {@link #postgresRefusesTwoConflictTargetsInOneStatement}: its statement carries two ON CONFLICT
+     * clauses, a SQL syntax error (42601) that jOOQ's fluent insert API cannot construct (there is no second
+     * {@code .onConflict()} to chain), so the invalid text has to be handed to the server as text. Every
+     * valid statement in this class goes through {@link #failure} (nexus-cbo4a batch 8 review).
      */
     private SQLException rawFailure(String sql) throws Exception {
         try (Connection su = pg.createConnection("")) {
@@ -109,6 +128,18 @@ class ArbiterCompletenessTest {
         } catch (SQLException e) {
             return e;
         }
+    }
+
+    /** An owner insert, repo_hash set only when given (omitted, the column stays NULL as in the raw form). */
+    private static InsertSetMoreStep<CatalogOwnersRecord> ownerInsert(
+            DSLContext ctx, String prefix, String name, String repoHash) {
+        var insert = ctx.insertInto(CATALOG_OWNERS)
+            .set(CATALOG_OWNERS.TENANT_ID, TENANT)
+            .set(CATALOG_OWNERS.TUMBLER_PREFIX, prefix)
+            .set(CATALOG_OWNERS.NAME, name)
+            .set(CATALOG_OWNERS.OWNER_TYPE, "repo")
+            .set(CATALOG_OWNERS.REPO_ROOT, "");
+        return repoHash == null ? insert : insert.set(CATALOG_OWNERS.REPO_HASH, repoHash);
     }
 
     private String ownerNameAt(String prefix) throws Exception {
@@ -163,39 +194,38 @@ class ArbiterCompletenessTest {
                 .execute();
         }
 
-        var pkDup = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-            + "VALUES ('" + TENANT + "', '9000', 'names-other', 'repo', '')");
+        var pkDup = failure(ctx -> ownerInsert(ctx, "9000", "names-other", null).execute());
         assertThat(SqlConstraints.violated(pkDup))
             .as("address key of catalog_owners")
             .isEqualTo("catalog_owners_pk");
 
-        var nameTypeDup = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-            + "VALUES ('" + TENANT + "', '9001', 'names-a', 'repo', '')");
+        var nameTypeDup = failure(ctx -> ownerInsert(ctx, "9001", "names-a", null).execute());
         assertThat(SqlConstraints.violated(nameTypeDup))
             .as("identity key of catalog_owners — nexus-jq53b")
             .isEqualTo("catalog_owners_unique_name_type");
 
-        var repoHashDup = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-            + "VALUES ('" + TENANT + "', '9002', 'names-b', 'repo', 'NAMEHASH', '')");
+        var repoHashDup = failure(ctx -> ownerInsert(ctx, "9002", "names-b", "NAMEHASH").execute());
         assertThat(SqlConstraints.violated(repoHashDup))
             .as("alias key of catalog_owners — nexus-z3ssg")
             .isEqualTo("idx_catalog_owners_repo_hash");
 
         repo.registerDocument(TENANT, "9000", Map.of(
             "title", "n", "source_uri", "file:///names/a.md"));
-        var docPkDup = rawFailure(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-            + "VALUES ('" + TENANT + "', '9000.1', 'dup')");
+        var docPkDup = failure(ctx -> ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "9000.1")
+            .set(CATALOG_DOCUMENTS.TITLE, "dup")
+            .execute());
         assertThat(SqlConstraints.violated(docPkDup))
             .as("address key of catalog_documents — the key nexus-pbawi's arbiter omitted")
             .isEqualTo("catalog_documents_pk");
 
-        var docUriDup = rawFailure(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) "
-            + "VALUES ('" + TENANT + "', '9000.999', 'dup', 'file:///names/a.md')");
+        var docUriDup = failure(ctx -> ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "9000.999")
+            .set(CATALOG_DOCUMENTS.TITLE, "dup")
+            .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///names/a.md")
+            .execute());
         assertThat(SqlConstraints.violated(docUriDup))
             .as("identity key of catalog_documents")
             .isEqualTo("ux_catalog_documents_live_source_uri");
@@ -236,26 +266,26 @@ class ArbiterCompletenessTest {
                 .values(TENANT, "9200", "partial-a", "repo", "PARTIALHASH", "")
                 .execute();
         }
-        var bare = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-            + "VALUES ('" + TENANT + "', '9201', 'partial-b', 'repo', 'PARTIALHASH', '') "
-            + "ON CONFLICT (tenant_id, repo_hash) DO NOTHING");
+        var bare = failure(ctx -> ownerInsert(ctx, "9201", "partial-b", "PARTIALHASH")
+            .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.REPO_HASH)
+            .doNothing()
+            .execute());
         assertThat((Throwable) bare).as("column list alone must not infer a PARTIAL index").isNotNull();
         assertThat(bare.getSQLState()).isEqualTo("42P10");
 
-        var onConstraint = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-            + "VALUES ('" + TENANT + "', '9202', 'partial-c', 'repo', 'PARTIALHASH', '') "
-            + "ON CONFLICT ON CONSTRAINT idx_catalog_owners_repo_hash DO NOTHING");
+        var onConstraint = failure(ctx -> ownerInsert(ctx, "9202", "partial-c", "PARTIALHASH")
+            .onConflictOnConstraint(DSL.name("idx_catalog_owners_repo_hash"))
+            .doNothing()
+            .execute());
         assertThat((Throwable) onConstraint)
             .as("ON CONSTRAINT addresses CONSTRAINTS; this is a bare INDEX")
             .isNotNull();
 
-        var withPredicate = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-            + "VALUES ('" + TENANT + "', '9203', 'partial-d', 'repo', 'PARTIALHASH', '') "
-            + "ON CONFLICT (tenant_id, repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != '' "
-            + "DO NOTHING");
+        var withPredicate = failure(ctx -> ownerInsert(ctx, "9203", "partial-d", "PARTIALHASH")
+            .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.REPO_HASH)
+            .where(CATALOG_OWNERS.REPO_HASH.isNotNull().and(CATALOG_OWNERS.REPO_HASH.ne("")))
+            .doNothing()
+            .execute());
         assertThat((Throwable) withPredicate)
             .as("with the predicate restated the partial index IS arbitrable")
             .isNull();
@@ -647,9 +677,7 @@ class ArbiterCompletenessTest {
                 .values(TENANT, "3000", "race-seed", "repo", "")
                 .execute();
         }
-        SQLException real = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-            + "VALUES ('" + TENANT + "', '3001', 'race-seed', 'repo', '')");
+        SQLException real = failure(ctx -> ownerInsert(ctx, "3001", "race-seed", null).execute());
         assertThat(SqlConstraints.violated(real)).isEqualTo("catalog_owners_unique_name_type");
 
         AtomicInteger attempts = new AtomicInteger();
@@ -666,10 +694,13 @@ class ArbiterCompletenessTest {
     /** A violation of a key NOT in the list must propagate untouched — no blind retrying. */
     @Test
     void uniqueRaceRetry_doesNotRetryAnUnrelatedViolation() throws Exception {
-        SQLException unrelated = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-            + "VALUES ('" + TENANT + "', '3100', 'unrelated-a', 'repo', ''), "
-            + "('" + TENANT + "', '3100', 'unrelated-b', 'repo', '')");
+        // One statement, two rows, the same (tenant_id, tumbler_prefix): the PK fires inside a single VALUES.
+        SQLException unrelated = failure(ctx -> ctx.insertInto(CATALOG_OWNERS,
+                CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_ROOT)
+            .values(TENANT, "3100", "unrelated-a", "repo", "")
+            .values(TENANT, "3100", "unrelated-b", "repo", "")
+            .execute());
         assertThat(SqlConstraints.violated(unrelated)).isEqualTo("catalog_owners_pk");
 
         AtomicInteger attempts = new AtomicInteger();
@@ -702,9 +733,7 @@ class ArbiterCompletenessTest {
                 .values(TENANT, "3200", "race-seed-exhaust", "repo", "")
                 .execute();
         }
-        SQLException stillColliding = rawFailure(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-            + "VALUES ('" + TENANT + "', '3201', 'race-seed-exhaust', 'repo', '')");
+        SQLException stillColliding = failure(ctx -> ownerInsert(ctx, "3201", "race-seed-exhaust", null).execute());
         assertThat(SqlConstraints.violated(stillColliding)).isEqualTo("catalog_owners_unique_name_type");
 
         AtomicInteger attempts = new AtomicInteger();

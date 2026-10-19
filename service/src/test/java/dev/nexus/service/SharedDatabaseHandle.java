@@ -10,6 +10,7 @@ import org.testcontainers.utility.DockerImageName;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -158,19 +159,50 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
         // dependency): a migrating role that ran grants-004's GRANT pg_monitor TO nexus_svc is one.
         // Revoke what it granted, then drop it (db.changelog-test-drop-exclusive-role.xml, nexus-cbo4a batch 8).
         // Role names are validated plain identifiers (SharedCluster.createDatabase). The changelog run can fail with
-        // a Liquibase exception as well as an SQLException, so the catch below takes both.
+        // a Liquibase exception as well as an SQLException, so each catch takes both. A role is released from the
+        // holder table only if its own drop succeeded, and the error names only the roles that did not drop: a
+        // role that is gone must not be reported as leaked, and one that stays must not lose its holder.
+        List<String> dropped = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        Exception first = null;
         try (Connection admin = SharedCluster.controlConnection(delegate)) {
             admin.setAutoCommit(true);
             for (String role : exclusiveRoles) {
-                PgContainerHelper.dropRoleRevokingGrants(admin, role);
+                try {
+                    PgContainerHelper.dropRoleRevokingGrants(admin, role);
+                    dropped.add(role);
+                } catch (Exception e) {
+                    failed.add(role);
+                    if (first == null) {
+                        first = e;
+                    } else {
+                        first.addSuppressed(e);
+                    }
+                }
             }
         } catch (Exception e) {
-            LOG.error("nexus-7xfh7: {} could not drop its exclusive role(s) {} on the shared cluster; every later "
-                + "class that declares one of them fails at acquire until this is fixed", holder, exclusiveRoles, e);
-            throw new IllegalStateException("nexus-7xfh7: " + holder + " leaked exclusive role(s) " + exclusiveRoles
-                + " on the shared cluster (DROP ROLE failed: " + e.getMessage() + "). Later classes that declare "
-                + "them will fail at acquire and name this class.", e);
+            // no control connection (or its close failed): the roles not yet dropped are still on the cluster
+            for (String role : exclusiveRoles) {
+                if (!dropped.contains(role) && !failed.contains(role)) {
+                    failed.add(role);
+                }
+            }
+            if (first == null) {
+                first = e;
+            } else {
+                first.addSuppressed(e);
+            }
         }
-        SharedCluster.releaseExclusiveRoles(exclusiveRoles, holder);
+        SharedCluster.releaseExclusiveRoles(dropped, holder);
+        if (!failed.isEmpty()) {
+            LOG.error("nexus-7xfh7: {} could not drop its exclusive role(s) {} on the shared cluster; every later "
+                + "class that declares one of them fails at acquire until this is fixed", holder, failed, first);
+            throw new IllegalStateException("nexus-7xfh7: " + holder + " leaked exclusive role(s) " + failed
+                + " on the shared cluster (DROP ROLE failed: " + first.getMessage() + "). Later classes that declare "
+                + "them will fail at acquire and name this class.", first);
+        }
+        if (first != null) {
+            LOG.warn("nexus-7xfh7: {} dropped all its exclusive roles, but closing the control connection failed", holder, first);
+        }
     }
 }

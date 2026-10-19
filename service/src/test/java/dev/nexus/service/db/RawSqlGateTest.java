@@ -1584,7 +1584,9 @@ class RawSqlGateTest {
     // taxonomy-011-1's own changeset text, read from the product XML, now share one replay(admin, sql); the test needs that
     // exact text run as the admin role while the changeset is not journalled, which a Liquibase run cannot do),
     // SchemaRollbackRoundTripIntegrationTest 2 -> 1 (grants-nexus-diag-1's body replayed verbatim), ArbiterCompletenessTest 1
-    // (rawFailure hands PostgreSQL's own grammar a statement jOOQ cannot build: two ON CONFLICT clauses in one INSERT).
+    // (only the deliberately invalid statement stays raw, rawFailure's one caller: two ON CONFLICT clauses in one INSERT, a 42601
+    // syntax error jOOQ cannot build; the 11 valid callers are typed jOOQ through failure(), which unwraps the DataAccessException
+    // to the driver's SQLException, so every constraint name and SQLSTATE assertion is unchanged).
     private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 58;
 
     /**

@@ -7,7 +7,7 @@
     NOCREATEDB NOCREATEROLE, and ${rlsAttr} = NOBYPASSRLS (the replay/owner role) or BYPASSRLS (production's
     nexus_diag, which only a superuser can create, so never the changelog). Not guarded by IF NOT EXISTS: a role
     that is already there is the same collision the bare CREATE ROLE it replaces raised. Run through
-    PgContainerHelper#createLoginRole, which validates ${role} and ${pass} as plain identifiers; runAlways,
+    PgContainerHelper#createLoginRole, which validates ${role} as a plain identifier and ${pass} as a quote-free literal; runAlways,
     bookkeeping in its own table.
 -->
 <databaseChangeLog

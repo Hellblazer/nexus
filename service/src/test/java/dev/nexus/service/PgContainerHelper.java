@@ -883,6 +883,17 @@ public final class PgContainerHelper {
     }
 
     /**
+     * The password is substituted into a single-quoted SQL literal: accept only letters, digits and underscore, so no
+     * quote, dollar, brace, backslash or whitespace can end the literal or reach the changelog's property syntax.
+     * The message omits the value: a rejected password must not be echoed into a log.
+     */
+    private static void requireTestPasswordLiteral(String password) {
+        if (password == null || !password.matches("[A-Za-z0-9_]+")) {
+            throw new IllegalArgumentException("not a safe test password literal (letters, digits and underscore only)");
+        }
+    }
+
+    /**
      * {@code GRANT USAGE ON SCHEMA schema TO role} (nexus-cbo4a batch 7), through
      * {@code db.changelog-test-schema-usage.xml}: jOOQ's grant resolves its target to a Table, so it cannot name
      * a schema. Leaves {@code su} autoCommit.
@@ -924,12 +935,13 @@ public final class PgContainerHelper {
     /**
      * {@code CREATE ROLE role LOGIN PASSWORD password NOSUPERUSER NOCREATEDB NOCREATEROLE [NO]BYPASSRLS}
      * (nexus-cbo4a batch 8), through {@code db.changelog-test-login-role.xml}: jOOQ has no CREATE ROLE. A role that
-     * already exists fails, as the bare statement did. Role name and password are fixed test literals; both must be
-     * plain lowercase identifiers. Leaves {@code su} autoCommit.
+     * already exists fails, as the bare statement did. Role name and password are fixed test literals; the role must
+     * be a plain lowercase identifier and the password a quote-free word ({@link #requireTestPasswordLiteral}).
+     * Leaves {@code su} autoCommit.
      */
     public static void createLoginRole(Connection su, String role, String password, boolean bypassRls) throws Exception {
         requireTestIdentifier(role);
-        requireTestIdentifier(password);
+        requireTestPasswordLiteral(password);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-login-role.xml",
             "databasechangelog_test_login_role", Map.of(
                 "role", role, "pass", password, "rlsAttr", bypassRls ? "BYPASSRLS" : "NOBYPASSRLS"));
