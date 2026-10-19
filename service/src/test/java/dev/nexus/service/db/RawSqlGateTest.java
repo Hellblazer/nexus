@@ -976,6 +976,10 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 2
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 1
         Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 3), // nexus-cbo4a 2026-10-18: 13 -> 10, three GRANT EXECUTE sites onto grantExecuteOnFunction; nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 10 -> 6; vector seeds 6 -> 3
+        // nexus-0ty8z fix round: +1, PristineCloneSkipTest.snapshot, one UNION ALL over the catalogs (pg_get_indexdef,
+        // pg_get_constraintdef, format() across pg_class/pg_proc/pg_policy/...), which have no typed jOOQ form. Its other
+        // reads and its REVOKE are jOOQ.
+        Map.entry("dev/nexus/service/PristineCloneSkipTest.java", 1),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 9), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 20 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 10; nexus-cbo4a 2026-10-19 DROP NOT NULL onto jOOQ: 10 -> 9
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 3), // nexus-cbo4a 2026-10-18 vector seeds: 4 -> 3
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
@@ -1121,11 +1125,14 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 1),
         Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 3),
-        Map.entry("dev/nexus/service/SharedCluster.java", 4),
+        // nexus-0ty8z fix round: 4 -> 5, SharedCluster.dropDatabase, the one DROP DATABASE ... WITH (FORCE) (no typed jOOQ form
+        // for FORCE); SharedDatabaseHandle's own copy of the statement moved here, so the total does not move.
+        Map.entry("dev/nexus/service/SharedCluster.java", 5),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
         // nexus-7xfh7: +1, the DO block that revokes what an exclusive role granted and drops it at stop (DROP ROLE and
-        // REVOKE ... GRANTED BY have no typed jOOQ form; the other statement is the DROP DATABASE).
-        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 2),
+        // REVOKE ... GRANTED BY have no typed jOOQ form). nexus-0ty8z fix round: 2 -> 1, the DROP DATABASE is
+        // SharedCluster.dropDatabase now.
+        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
         // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
         // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
         // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12, all of
@@ -1729,7 +1736,9 @@ class RawSqlGateTest {
     // nexus-sz651 2026-10-19: +1 (187 -> 188) for SharedCluster's install of the DDL probe (an event trigger plus two
     // functions, one DO block) into each empty database made from template0, which has none; jOOQ has no
     // typed form for CREATE EVENT TRIGGER or a DO block. The SQL is the probe file's, not a literal.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 188;
+    // nexus-0ty8z fix round: +1 (188 -> 189) for PristineCloneSkipTest's catalog snapshot (see its entry); the DROP DATABASE
+    // moved from SharedDatabaseHandle to SharedCluster.dropDatabase, net zero.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 189;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

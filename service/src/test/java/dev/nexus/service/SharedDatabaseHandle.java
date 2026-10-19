@@ -131,10 +131,9 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
         }
         // WITH (FORCE) (PostgreSQL 13+) terminates the remaining backends and drops in one statement, so
         // there is no terminate-then-drop window for a new connection to slip into.
-        try (Connection admin = SharedCluster.controlConnection(delegate);
-             var st = admin.createStatement()) {
-            admin.setAutoCommit(true);
-            st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\" WITH (FORCE)");
+        SharedCluster.forgetPristine(dbName);
+        try (Connection admin = SharedCluster.controlConnection(delegate)) {
+            SharedCluster.dropDatabase(admin, dbName);
             // nexus-sz651: the cluster's WAL position after this class's last write, for its bytes.
             DdlCounts.noteRelease(dbName, DdlCounts.walBytes(admin));
         } catch (SQLException e) {

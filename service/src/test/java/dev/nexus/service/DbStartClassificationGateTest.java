@@ -41,7 +41,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ul>
  * A class whose subject is not one of these has no row: it takes a clone. A new caller that is not listed fails
  * here, and so does a row whose class stopped calling. The scan reads the test tree, so it is not vacuous when
- * the table is empty: it fails below a floor on files read and on callers found.
+ * the table is empty: it fails below a floor on files read and on callers found. A call is a direct call
+ * ({@code PgContainerHelper.startDedicated()}) or a method reference ({@code PgContainerHelper::startDedicated}).
+ *
+ * <p>What the gate does NOT check: a kind is a label checked only against the vocabulary allowed for its call,
+ * and a reason is free text of at least 25 characters. Neither is checked against what the class does, so a row
+ * can be mislabelled and the gate stays green; the table forces a decision and a place to review it, not
+ * a proof that the decision is right.
  */
 class DbStartClassificationGateTest {
 
@@ -55,17 +61,21 @@ class DbStartClassificationGateTest {
 
     private static final Map<String, Set<String>> KINDS_BY_CALL = Map.of(
         "startEmptyDatabase", Set.of("WALK", "MIGRATOR", "OWNERSHIP", "SKELETON", "INFRA"),
-        "startDedicated", Set.of("CLUSTER_STATE", "SIZED"),
+        "startDedicated", Set.of("CLUSTER_STATE", "SIZED", "INFRA"),
         "newContainer", Set.of("NETWORK", "IMAGE", "INFRA"),
         "clone", Set.of("CLONE", "CLONE_OWNER"));
 
     private static final Pattern CALL = Pattern.compile(
         "\\bPgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer)\\s*\\(");
+    /** A method reference ({@code PgContainerHelper::startDedicated}) hands the entry point to a helper that boots it. */
+    private static final Pattern METHOD_REF = Pattern.compile(
+        "\\bPgContainerHelper\\s*::\\s*(startEmptyDatabase|startDedicated|newContainer)\\b");
     private static final Pattern STATIC_IMPORT = Pattern.compile(
         "import\\s+static\\s+[\\w.]*PgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer|\\*)");
-    private static final Pattern TAKES_CLONE = Pattern.compile("\\bPgContainerHelper\\s*\\.\\s*start\\s*\\(\\s*\\)");
+    private static final Pattern TAKES_CLONE =
+        Pattern.compile("\\bPgContainerHelper\\s*(?:\\.\\s*start\\s*\\(\\s*\\)|::\\s*start\\b)");
     private static final Pattern TAKES_OWNER_CLONE =
-        Pattern.compile("\\bPgContainerHelper\\s*\\.\\s*startMigratedByOwner\\s*\\(\\s*\\)");
+        Pattern.compile("\\bPgContainerHelper\\s*(?:\\.\\s*startMigratedByOwner\\s*\\(\\s*\\)|::\\s*startMigratedByOwner\\b)");
 
     /** Text blocks, string and char literals, line and block comments, dropped in one pass. */
     private static final Pattern NOT_CODE = Pattern.compile(
@@ -80,6 +90,18 @@ class DbStartClassificationGateTest {
 
     static String codeOnly(String src) {
         return NOT_CODE.matcher(src).replaceAll("");
+    }
+
+    /** The {@code "<class> <entry point>"} keys of the direct calls and method references in {@code code}. */
+    static Set<String> callsIn(String clazz, String code) {
+        Set<String> found = new TreeSet<>();
+        for (Pattern p : List.of(CALL, METHOD_REF)) {
+            Matcher m = p.matcher(code);
+            while (m.find()) {
+                found.add(clazz + " " + m.group(1));
+            }
+        }
+        return found;
     }
 
     static List<Row> parse(List<String> lines) {
@@ -160,25 +182,26 @@ class DbStartClassificationGateTest {
             if (STATIC_IMPORT.matcher(code).find()) {
                 staticImports.add(clazz);
             }
-            Matcher m = CALL.matcher(code);
-            while (m.find()) {
-                callers.add(clazz + " " + m.group(1));
-            }
+            callers.addAll(callsIn(clazz, code));
         }
         assertThat(staticImports)
             .as("a static import of an entry point hides the call from this scan; qualify it with PgContainerHelper")
             .isEmpty();
 
-        // Non-vacuity: the scan finds callers of every kind of entry point, in numbers near today's.
+        // Non-vacuity: the scan finds callers of every kind of entry point. Floors are today's live counts
+        // (2026-10-19: 34 startEmptyDatabase, 10 startDedicated, 5 newContainer, 55 rows of which 6 clone rows)
+        // minus a small margin, so losing a handful of callers from the scan fails here.
         assertThat(callers.stream().filter(c -> c.endsWith(" startEmptyDatabase")).count())
-            .as("startEmptyDatabase callers found").isGreaterThanOrEqualTo(25);
+            .as("startEmptyDatabase callers found").isGreaterThanOrEqualTo(32);
         assertThat(callers.stream().filter(c -> c.endsWith(" startDedicated")).count())
             .as("startDedicated callers found").isGreaterThanOrEqualTo(8);
         assertThat(callers.stream().filter(c -> c.endsWith(" newContainer")).count())
-            .as("newContainer callers found").isGreaterThanOrEqualTo(3);
+            .as("newContainer callers found").isGreaterThanOrEqualTo(4);
 
         List<Row> rows = parse(Files.readAllLines(TABLE));
-        assertThat(rows.size()).as("rows in the table").isGreaterThanOrEqualTo(40);
+        assertThat(rows.size()).as("rows in the table").isGreaterThanOrEqualTo(52);
+        assertThat(rows.stream().filter(r -> r.call().equals("clone")).count())
+            .as("clone rows in the table").isGreaterThanOrEqualTo(6);
 
         List<String> problems = new ArrayList<>(diff(rows, callers));
         for (Row r : rows) {
@@ -227,6 +250,19 @@ class DbStartClassificationGateTest {
         List<Row> rows = List.of(
             new Row("A", "newContainer", "IMAGE", "image"), new Row("A", "newContainer", "IMAGE", REASON));
         assertThat(diff(rows, Set.of("A newContainer"))).hasSize(2);
+    }
+
+    @Test
+    void a_method_reference_counts_as_a_call() {
+        String src = """
+            withCount("false", PgContainerHelper::newContainer);
+            withCount(null, PgContainerHelper :: startDedicated);
+            Callable<?> c = PgContainerHelper::startEmptyDatabase;
+            Supplier<?> s = PgContainerHelper::start;
+            """;
+        assertThat(callsIn("X", codeOnly(src))).containsExactly("X newContainer", "X startDedicated", "X startEmptyDatabase");
+        assertThat(TAKES_CLONE.matcher(codeOnly(src)).find()).as("PgContainerHelper::start is a clone").isTrue();
+        assertThat(callsIn("X", codeOnly("var f = PgContainerHelper::startMigratedByOwner; // not an entry point"))).isEmpty();
     }
 
     @Test

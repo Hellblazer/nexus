@@ -440,7 +440,7 @@ public final class PgContainerHelper {
      * For a class whose subject is not the walk but needs production's ownership shape: a SECURITY DEFINER function
      * that must run as a role subject to row-level security, a leaf only its owner may alter. A class that asserts
      * the provisioning or the walk itself (ownership from scratch, a changeset count, a part-way state) stays on
-     * {@link #startEmptyDatabase}; {@code EmptyDatabaseClassificationGateTest} records which is which.
+     * {@link #startEmptyDatabase}; {@code DbStartClassificationGateTest} records which is which.
      *
      * <p>The clone has the owner's relations and grants but not the owner's database-level privilege
      * ({@code CREATE DATABASE ... TEMPLATE} does not copy a database ACL), so the owner provisioning is re-run
@@ -537,15 +537,24 @@ public final class PgContainerHelper {
      * Restoring it here, once, means every caller gets the fix for free instead
      * of re-adding {@code su.setAutoCommit(true)} at each call site.
      *
+     * <p><b>The first call on a clone from {@link #start()} is a no-op</b> (nexus-0ty8z): the clone already is the
+     * migrated template, with its runAlways grants applied and the {@code nexus_test} objects installed. The
+     * skip is per clone and per FIRST CALL, not "untouched": a class that changes the clone before its first call
+     * and counts on this call to heal it must call twice. Any later call, an empty database
+     * ({@link #startEmptyDatabase}), an owner-template clone ({@link #startMigratedByOwner}), a dedicated
+     * container and {@code -Dnexus.test.pg.shared=false} run the changelog. {@code PristineCloneSkipTest} pins it.
+     *
      * @param su superuser connection to run the migration under
      */
     public static void applyProductSchema(Connection su) throws Exception {
         // nexus-0ty8z: the first call on an untouched clone of the shared template has nothing to apply. The
         // template is migrated to HEAD (every runAlways grant applied) and carries the nexus_test objects, and a
         // clone copies all of that. Running the changelog anyway replayed ~150 runAlways statements per class
-        // (a no-op by construction) for no assertion. Only the FIRST call is skipped, and only on a clone made
-        // by SharedCluster.acquireDatabase(): a class that changed the schema and calls this again, an empty
-        // database, a dedicated container, or -Dnexus.test.pg.shared=false all run the changelog as before.
+        // (a no-op by construction) for no assertion. Only the FIRST call per clone is skipped, and only on a
+        // clone made by SharedCluster.acquireDatabase(): a second call, an empty database, an owner-template clone,
+        // a dedicated container, or -Dnexus.test.pg.shared=false all run the changelog as before. The skip is
+        // "first call", NOT "nothing touched yet": a class that changes the clone and then calls this once to
+        // heal it is skipped. PristineCloneSkipTest pins both the premise and these edges.
         if (SharedCluster.takePristine(su.getCatalog())) {
             su.setAutoCommit(true);
             return;

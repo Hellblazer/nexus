@@ -127,7 +127,8 @@ final class SharedCluster {
     /** Clones of {@link #TEMPLATE_DB} that nothing has touched yet (nexus-0ty8z). A clone starts at the
      *  template's state: master changelog at HEAD, test objects installed, every runAlways grant already
      *  applied. {@link #takePristine} hands that fact to the FIRST {@code applyProductSchema} on it, which
-     *  then has nothing to apply; any later call runs the changelog for real. */
+     *  then has nothing to apply; any later call runs the changelog for real. The entry is removed by that call
+     *  or, for a clone that never applies, by {@link SharedDatabaseHandle#stop()}. */
     private static final Set<String> PRISTINE_CLONES = ConcurrentHashMap.newKeySet();
     private static final Object BOOTSTRAP_LOCK = new Object();
     private static final AtomicInteger DB_COUNTER = new AtomicInteger();
@@ -200,9 +201,19 @@ final class SharedCluster {
         return createDatabase(OWNED_CLONE_CLAUSE, false);
     }
 
-    /** True once, for the first caller on a clone nobody has handed out to a changelog run yet. */
+    /** True once per clone: for the first {@code applyProductSchema} on a {@code start()} clone, whatever was done to it before. */
     static boolean takePristine(String dbName) {
         return PRISTINE_CLONES.remove(dbName);
+    }
+
+    /** Whether the clone still holds its unspent first call (PristineCloneSkipTest). */
+    static boolean isPristine(String dbName) {
+        return PRISTINE_CLONES.contains(dbName);
+    }
+
+    /** Forget a dropped database's pristine entry, so a stopped, never-applied clone does not stay in the set. */
+    static void forgetPristine(String dbName) {
+        PRISTINE_CLONES.remove(dbName);
     }
 
     /** The shared cluster's container (booting and migrating the template on first use). */
@@ -443,15 +454,61 @@ final class SharedCluster {
                         PgContainerHelper.installTestObjects(oc);
                     }
                 }
+                Runnable fault = ownedTemplateBuildFault;
+                if (fault != null) {
+                    fault.run();
+                }
                 awaitNoSessions(c, OWNED_TEMPLATE_DB);
             } catch (Exception e) {
-                throw new SQLException("nexus-0ty8z owner-migrated template build failed", e);
+                // A half-built template would make every later owner class die on "already exists" at the
+                // CREATE DATABASE above, hiding this failure behind a worse message. Drop it so the next
+                // acquire rebuilds from nothing.
+                SQLException failure = new SQLException("nexus-0ty8z owner-migrated template build failed", e);
+                try {
+                    dropOwnedTemplate(c);
+                } catch (SQLException dropFailure) {
+                    failure.addSuppressed(dropFailure);
+                    LOG.error("nexus-0ty8z could not drop the half-built {}; every later owner acquire will fail",
+                        OWNED_TEMPLATE_DB, dropFailure);
+                }
+                throw failure;
             }
             OWNED_TEMPLATE_READY = true;
             LOG.info("nexus-0ty8z owner-migrated template built for this fork in {}ms",
                 (System.nanoTime() - start) / 1_000_000);
         }
     }
+
+    /** Drop {@link #OWNED_TEMPLATE_DB} (ending any backend still on it); a no-op when it does not exist. */
+    private static void dropOwnedTemplate(PostgreSQLContainer<?> c) throws SQLException {
+        try (Connection admin = controlConnection(c)) {
+            dropDatabase(admin, OWNED_TEMPLATE_DB);
+        }
+    }
+
+    /**
+     * The one DROP DATABASE statement of this package's per-fork cluster: {@code WITH (FORCE)} (PostgreSQL 13+)
+     * ends the remaining backends and drops in one statement, so there is no terminate-then-drop window for a
+     * new connection to slip into. Autocommit is switched on, as the statement cannot run in a transaction block.
+     */
+    static void dropDatabase(Connection admin, String dbName) throws SQLException {
+        admin.setAutoCommit(true);
+        try (var st = admin.createStatement()) {
+            st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\" WITH (FORCE)");
+        }
+    }
+
+    /** Test seam (SharedClusterOwnedTemplateRetryTest): forget the owner-migrated template, so the next acquire rebuilds it. */
+    static void resetOwnedTemplate() throws SQLException {
+        PostgreSQLContainer<?> c = ensureBootstrapped();
+        synchronized (OWNED_TEMPLATE_LOCK) {
+            dropOwnedTemplate(c);
+            OWNED_TEMPLATE_READY = false;
+        }
+    }
+
+    /** Test seam: runs after the owner walk and before the template is declared ready; null outside the retry test. */
+    static volatile Runnable ownedTemplateBuildFault;
 
     /** Wait (bounded) for every backend on {@code dbName} to be gone: a pool's close returns before its backends exit. */
     private static void awaitNoSessions(PostgreSQLContainer<?> c, String dbName) throws SQLException {

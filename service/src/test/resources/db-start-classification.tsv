@@ -47,6 +47,10 @@ ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; need
 ChunkLiveOwnersRecallExtendedIntegrationTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 4g tmpfs and 6g container
 PgBouncerTenantIsolationTest	newContainer	NETWORK	attaches the Postgres container to a Docker network shared with a PgBouncer container
 PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a different image (plpgsql_check)
+DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)
+DdlCountSwitchTest	startDedicated	INFRA	tests the DDL counter's switch on a dedicated container (its server log goes to Docker when the counter is off)
+DdlCountSwitchTest	startEmptyDatabase	INFRA	tests the DDL counter's switch on an empty database (the probe is installed only when the counter is on)
+PristineCloneSkipTest	startEmptyDatabase	INFRA	tests applyProductSchema's pristine-clone skip; needs an empty database to prove the skip never applies to one
 PgContainerTmpfsGateTest	newContainer	INFRA	tests the container factory's own tmpfs and memory bounds
 FailFastPostgreSQLContainerTest	newContainer	INFRA	tests that the factory returns the fail-fast container
 ChunkLeafAutovacuumReloptionsIntegrationTest	clone	CLONE_OWNER	asserts the state the walk leaves and later boots; the walk is the owner-migrated template's (nexus-0ty8z)

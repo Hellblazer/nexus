@@ -405,7 +405,7 @@ census of call sites, the same on every run whichever tests ran, unweighted by s
 must be read through the counter or listed on purpose.
 
 The Java report has five buckets: `boot` (before the container's `start` mark; the probe's install),
-`shared_migration` (the per-fork template), `shared_tests` (clones and the tests' own DDL),
+`shared_migration` (the per-fork template), `shared_tests` (clones, the tests' own DDL, and each fork's owner-template build, about 2.3k statements, attributed to the first class in that fork that takes an owner clone),
 `shared_empty` (everything logged against a database from `startEmptyDatabase`, the
 migration-process classes' own walks; nexus-7xfh7) and `dedicated` (a container of its own). A
 `template0` database has no event trigger, so `acquireEmptyDatabase` installs the probe into each one
@@ -418,9 +418,15 @@ cloned from a second template built once per fork). A class that calls `startEmp
 `startDedicated` or `newContainer` is listed in
 `service/src/test/resources/db-start-classification.tsv` with a kind and a reason, and
 `DbStartClassificationGateTest` fails on an unlisted caller, a stale row or a kind that does not fit the
-call. The first `PgContainerHelper.applyProductSchema` on an untouched clone is a no-op, because the
-template already holds the walk, its runAlways grants and the `nexus_test` objects; a second call, an empty
-database or `-Dnexus.test.pg.shared=false` runs the changelog.
+call (a direct call or a method reference). The gate checks that a row exists and that its kind is in the
+vocabulary allowed for that call; a kind is a label and a reason is free text, neither is checked against what
+the class does, so the table forces a decision and a place to review it, not a proof of it. The first
+`PgContainerHelper.applyProductSchema` on a clone made by `start()` is a no-op, because the template already
+holds the walk, its runAlways grants and the `nexus_test` objects; a second call, an empty database, an
+owner-template clone or `-Dnexus.test.pg.shared=false` runs the changelog. The skip is "first call per clone",
+not "nothing touched yet": a class that changes the clone and then calls `applyProductSchema` to heal it is
+skipped on that call. `PristineCloneSkipTest` pins the premise (a pristine clone's catalog equals the same
+clone after a real second apply) and the edges.
 
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
