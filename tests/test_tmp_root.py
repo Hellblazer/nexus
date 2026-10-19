@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -246,6 +247,55 @@ class TestSweep:
         (locked / "f").write_text("x")
         locked.chmod(0o500)
         assert tr.sweep_stale_runs(root) == [run] and not run.exists()
+
+    @staticmethod
+    def _unreadable_tree(run: Path) -> None:
+        """What 5588beead's shard 3 met at exit: a tmp_path a test left at 0o200
+        (gc_core's Windows handler chmods to S_IWRITE), plus a 0-mode dir and a
+        0-mode file inside it, and a 0-mode file in a read-only dir."""
+        wonly = run / "p" / "test_the_handler_records_what_0"
+        (wonly / "zero").mkdir(parents=True)
+        (wonly / "zero" / "f").write_text("x")
+        (wonly / "zero" / "f").chmod(0)
+        (wonly / "zero").chmod(0)
+        wonly.chmod(0o200)
+        ro = run / "p" / "ro"
+        ro.mkdir()
+        (ro / "g").write_text("x")
+        (ro / "g").chmod(0)
+        ro.chmod(0o500)
+
+    def test_an_unreadable_tree_is_removed_without_raising(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        probe_run = tr.make_run_dir(root, probe=False)
+        self._unreadable_tree(probe_run)
+        # Non-vacuity: a bare rmtree must hit an error whose func is not a one-path
+        # remover (os.open on the POSIX fd walk, os.scandir elsewhere): the old
+        # handler's func(p) raised TypeError on os.open.
+        seen: list[object] = []
+        shutil.rmtree(probe_run, onexc=lambda func, _p, _e: seen.append(func))
+        if not seen:
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert any(f not in (os.unlink, os.rmdir) for f in seen), seen
+
+        run = tr.make_run_dir(root, probe=False)
+        self._unreadable_tree(run)
+        tr._rm_tree(run)
+        assert not run.exists()
+        tr._rm_tree(probe_run)
+        assert not probe_run.exists()
+
+    def test_a_tree_it_cannot_fully_remove_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        run = tr.make_run_dir(tmp_path / "root", probe=False)
+        self._unreadable_tree(run)
+        def refuse(*_a: object, **_k: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        setattr_in(monkeypatch, tr, "os.chmod", refuse)
+        tr._rm_tree(run)  # must return, not raise or recurse without end
+        monkeypatch.undo()
+        tr._rm_tree(run)
+        assert not run.exists()
 
     def test_a_failing_drain_does_not_stop_the_removal(self, tmp_path) -> None:
         root = tmp_path / "root"

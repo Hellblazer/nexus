@@ -1682,15 +1682,43 @@ def sweep_ort_temp_dirs(
     return removed, notes
 
 
-def _force_remove(func, path, _exc) -> None:  # type: ignore[no-untyped-def]
-    """``rmtree`` onexc: Windows refuses to delete a read-only file, so clear
-    the flag and retry once. A second failure propagates to the caller.
+def _force_remove(func, path, exc, *, _retried: set[str] | None = None) -> None:  # type: ignore[no-untyped-def]
+    """``rmtree`` onexc: Windows refuses to delete a read-only file, and POSIX
+    refuses to enter a directory without r-x, so restore owner access and retry
+    once. A second failure on the same path propagates to the caller.
+
+    The retry never re-calls *func*: the POSIX fd walk passes ``os.open`` (and
+    ``os.scandir``, ``os.lstat``, ``os.path.islink``), which need more than a path,
+    so ``func(path)`` raised TypeError past the caller's ``except OSError``
+    (5588beead, the same handler shape in tests/_tmp_root.py). A directory that
+    could not be entered is removed by one nested rmtree; a failed ``rmdir`` is
+    retried as ``rmdir``; anything else is unlinked.
 
     Not a credential write: the mode only makes the entry deletable (Windows
     reads the write bit alone; S_IRWXU keeps a directory traversable on POSIX).
     """
+    if isinstance(exc, FileNotFoundError):
+        return
+    retried = set() if _retried is None else _retried
+    if path in retried:
+        raise exc
+    retried.add(path)
+    parent = os.path.dirname(path)
+    if parent and func is os.unlink:
+        # POSIX: an unlink is refused by the PARENT's mode, not the entry's. Only
+        # here: an unlinked entry's parent is inside the tree, while the cache
+        # root's own parent (the user's cache dir) must keep its mode.
+        try:
+            os.chmod(parent, stat.S_IRWXU)
+        except OSError:
+            pass
     os.chmod(path, stat.S_IRWXU)
-    func(path)
+    if func is os.rmdir:
+        os.rmdir(path)
+    elif os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, onexc=lambda f, p, e: _force_remove(f, p, e, _retried=retried))
+    else:
+        os.unlink(path)
 
 
 def _remove_model_cache(cache: Path) -> str | None:

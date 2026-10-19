@@ -440,3 +440,61 @@ class TestOneCacheRoot:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
 
         assert omr.nexus_cache_root() == profile / ".cache" / "nexus"
+
+
+# ── an unreadable entry in the model cache is removed, never a TypeError ──────
+#
+# 5588beead: rmtree's POSIX fd walk hands its onexc handler ``os.open`` for a
+# directory it cannot enter, and ``_force_remove`` re-called ``func(path)``,
+# which raised TypeError past ``_remove_model_cache``'s ``except OSError``.
+
+
+def _unreadable_cache(cache: Path) -> None:
+    (cache / "zero" / "inner").mkdir(parents=True)
+    (cache / "zero" / "inner" / "f").write_text("x", encoding="utf-8")
+    (cache / "zero" / "inner").chmod(0)
+    (cache / "zero").chmod(0)
+    (cache / "wonly").mkdir()
+    (cache / "wonly" / "f").write_text("x", encoding="utf-8")
+    (cache / "wonly").chmod(0o200)
+    (cache / "ro").mkdir()
+    (cache / "ro" / "g").write_text("x", encoding="utf-8")
+    (cache / "ro" / "g").chmod(0)
+    (cache / "ro").chmod(0o500)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+class TestAnUnreadableCacheEntryIsRemoved:
+    def test_the_whole_cache_goes_and_its_parent_keeps_its_mode(self, tmp_path: Path) -> None:
+        parent = tmp_path / "dotcache"
+        parent.mkdir()
+        parent.chmod(0o755)
+        probe = parent / "probe"
+        _unreadable_cache(probe)
+        seen: list[object] = []
+        shutil.rmtree(probe, onexc=lambda func, _p, _e: seen.append(func))
+        if not seen:
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert any(f not in (os.unlink, os.rmdir) for f in seen), seen
+        assert installer._remove_model_cache(probe) is None
+
+        cache = parent / "nexus"
+        _unreadable_cache(cache)
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+        assert (parent.stat().st_mode & 0o777) == 0o755, "the user's cache dir keeps its mode"
+
+    def test_an_entry_that_stays_unremovable_is_a_warning_not_a_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = tmp_path / "nexus"
+        _unreadable_cache(cache)
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        setattr_in(monkeypatch, installer, "os.chmod", refuse)
+        warning = installer._remove_model_cache(cache)
+        monkeypatch.undo()
+        assert warning is not None and str(cache) in warning, warning
+        assert installer._remove_model_cache(cache) is None and not cache.exists()

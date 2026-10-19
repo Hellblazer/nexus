@@ -222,15 +222,41 @@ def decide_tmp_root(
 
 
 def _rm_tree(path: Path) -> None:
-    """``rmtree`` that also removes what a test left read-only. Never raises."""
+    """``rmtree`` that also removes what a test left unreadable or read-only. Never raises.
 
-    def _onexc(func, p, _exc) -> None:  # noqa: ANN001 — shutil's callback shape
+    The ``onexc`` handler never re-calls the ``func`` rmtree hands it: on POSIX the
+    fd-based walk passes ``os.open`` (and ``os.scandir``, ``os.lstat``,
+    ``os.path.islink``, ``os.close``), which need more than a path, so ``func(p)``
+    raised TypeError past ``suppress(OSError)`` and crashed pytest_unconfigure after a
+    green run (5588beead CI shard 3: a test left its tmp_path at mode 0o200). It
+    restores owner access on the entry's parent and the entry, then removes the
+    entry itself: a directory through one nested rmtree with this same handler,
+    anything else through ``os.unlink``. Each path is retried once, so an entry this
+    user cannot chmod ends that attempt instead of recursing.
+    """
+    retried: set[str] = set()
+
+    def _onexc(_func, p, exc) -> None:  # noqa: ANN001 — shutil's callback shape
+        if isinstance(exc, FileNotFoundError) or p in retried:
+            return
+        retried.add(p)
         with contextlib.suppress(OSError):
             os.chmod(os.path.dirname(p) or ".", 0o700)
-            os.chmod(p, 0o700)
-            func(p)
+        try:
+            is_dir = stat.S_ISDIR(os.lstat(p).st_mode)
+        except OSError:
+            return
+        with contextlib.suppress(OSError):
+            if is_dir:
+                os.chmod(p, 0o700)
+                shutil.rmtree(p, onexc=_onexc)
+            else:
+                os.unlink(p)
 
-    shutil.rmtree(path, onexc=_onexc)
+    try:
+        shutil.rmtree(path, onexc=_onexc)
+    except Exception as exc:  # noqa: BLE001 — cleanup at exit must never fail a run
+        _log.warning("tmp_root_rm_tree_failed", path=str(path), error=repr(exc))
 
 
 def _process_start(pid: int) -> str | None:

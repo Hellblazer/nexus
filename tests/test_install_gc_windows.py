@@ -210,9 +210,17 @@ class TestWindowsReap:
         def always(_p):
             raise PermissionError(32, "in use")
 
-        handler(always, str(tmp_path), PermissionError(32, "in use"))
+        target = tmp_path / "held"
+        target.mkdir()
+        try:
+            # The handler chmods its path to S_IWRITE (0o200 on POSIX): aim it at a
+            # subdirectory and restore the mode, so the run's tmp cleanup is not left
+            # an unreadable tmp_path (5588beead CI shard 3).
+            handler(always, str(target), PermissionError(32, "in use"))
+        finally:
+            target.chmod(0o700)
         handler(os.rmdir, str(tmp_path / "x"), OSError(39, "not empty"))
-        assert [p for p, _e in failures] == [str(tmp_path), str(tmp_path / "x")]
+        assert [p for p, _e in failures] == [str(target), str(tmp_path / "x")]
 
 
 class TestWindowsLegacyLedger:
