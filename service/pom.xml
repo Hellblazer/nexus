@@ -109,9 +109,11 @@
         <!-- nexus-0a1hw: -Dnexus.jlink.skip=true skips the jlink image (jlink-image execution,
              package phase). Nothing in the repo reads it for the gate jar or any test;
              scripts/build-gate-jar.sh passes it, which saves the image's writes (the image is
-             ~51 MB on disk) on every gate-jar MISS, on any host. Measured on chas 2026-10-19
-             (4 alternating MISS builds, grant nvme wbytes): 228.6 MB without, 179.1 MB with
-             the skip, ~47 MiB (22%) saved per MISS. Default false: an IDE, a bare mvn, CI and the engine
+             ~51 MB on disk) on every gate-jar MISS. Measured on chas only, 2026-10-19 (2 MISS
+             builds per arm, alternating, grant nvme wbytes): 228.7 MB without, 179.1 MB with
+             the skip, ~50 MB (22%) saved per MISS. A stale image from an earlier non-skip build
+             stays in target/ (the skipped execution also skips its delete); nothing reads it.
+             Default false: an IDE, a bare mvn, CI and the engine
              release build keep the image. -->
         <nexus.jlink.skip>false</nexus.jlink.skip>
     </properties>
