@@ -2,12 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import java.util.Random;
+import java.util.HexFormat;
+import org.jooq.Field;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -127,6 +129,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     // ORDER BY <=> LIMIT n query (the whole point of this suite), small enough to build
     // fast under Testcontainers.
     private static final int CHUNKS_PER_DIM = 4_000;
+    /** Filler rows per INSERT statement (6 binds each, well under the 65535-bind limit). */
+    private static final int FILLER_BATCH = 250;
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -179,7 +183,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         // still flaked - about 1 in 3 - when run in the SAME mvn invocation alongside
         // OTHER EXPLAIN-heavy test classes. Root cause: pgvector's HNSW graph build
         // assigns each inserted row's layer via ITS OWN internal randomness, entirely
-        // separate from the SQL-level random()/setseed() this suite's filler-vector
+        // separate from the (then SQL-level random()/setseed(), now Java-side seeded) draw this suite's filler-vector
         // fixture controls (see seedFixtures()'s javadoc) - so the GRAPH's shape, and
         // therefore ef_search's effective recall for a specific borderline row, is not
         // reproducible run to run no matter how high ef_search is set. Confirmed:
@@ -241,7 +245,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     /**
      * Bulk-seeds all three dims directly into {@code nexus.chunks} (superuser, bypasses
-     * RLS — same fast generate_series pattern as {@code ChashProbePlanShapeTest}) so the
+     * RLS — typed batch inserts through the generated table) so the
      * per-dim HNSW indexes carry enough rows for the planner's default cost model to prefer
      * them. Registers each collection so RLS-scoped reads via {@code TENANT} see the rows,
      * and the write is stamped with {@code tenant_id = TENANT} directly (no per-row
@@ -254,49 +258,57 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
      * byte-identical filler points is an adversarial fixture for HNSW: they form one dense
      * clique the graph search can get stuck inside, and {@code
      * searchWithTokens_realCall_findsNearestRowByCorrectDimColumn} measurably missed the
-     * true (distance-0) nearest row in favor of a filler duplicate. {@code CROSS JOIN
-     * LATERAL} over a fresh {@code random()} draw forces genuine per-row evaluation (a
-     * plain, non-lateral subquery would still be computed once), giving each filler row an
-     * independent, well-spread position — realistic relative to actual embeddings and free
-     * of the degenerate-clique recall failure.
+     * true (distance-0) nearest row in favor of a filler duplicate. Each filler row now
+     * draws its own components from one seeded {@code java.util.Random} (nexus-cbo4a
+     * 2026-10-18; the vectors used to come from a {@code CROSS JOIN LATERAL} over SQL
+     * {@code random()}), giving each an independent, well-spread position — realistic
+     * relative to actual embeddings and free of the degenerate-clique recall failure.
      */
     private void seedFixtures() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var st = su.createStatement();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Deterministic filler positions (CLAUDE.md: seeded randomness) — the exact
             // values don't matter, only that they are NOT all identical.
-            st.execute("SELECT setseed(0.42)");
+            Random fillerRandom = new Random(42);
 
             for (int dim : new int[] {1024, 768, 384}) {
                 String coll = dim == 1024 ? COL_1024 : dim == 768 ? COL_768 : COL_384;
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
-                String embCol = DimTables.embeddingColumn(dim);
+                PgContainerHelper.insertCollection(ctx, TENANT, coll);
+                String model = PgContainerHelper.collectionModel(ctx, TENANT, coll);
+                Field<Vector> embField = VectorSeeds.chunkEmbedding(dim);
                 // Filler: CHUNKS_PER_DIM independently-random vectors (never collides with
                 // the single "nearest" row seeded below — see the method javadoc for why
-                // this must be per-row-random rather than one repeated literal).
-                st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
-                    + "SELECT '" + TENANT + "', '" + coll + "', "
-                    + "       decode(md5('planshape-" + dim + "-' || i) || md5('fill-" + dim + "-' || i), 'hex'), "
-                    + "       (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                    + "' AND name = '" + coll + "'), "
-                    + "       'planshape filler chunk ' || i, v.vec "
-                    + "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i "
-                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
-                    + "                    FROM generate_series(1, " + dim + ")) v");
+                // this must be per-row-random rather than one repeated literal). Drawn
+                // Java-side from one seeded Random, components uniform in [-1, 1), and
+                // inserted FILLER_BATCH rows per statement.
+                for (int first = 1; first <= CHUNKS_PER_DIM; first += FILLER_BATCH) {
+                    var ins = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embField);
+                    for (int i = first; i < first + FILLER_BATCH && i <= CHUNKS_PER_DIM; i++) {
+                        float[] f = new float[dim];
+                        for (int k = 0; k < dim; k++) {
+                            f[k] = fillerRandom.nextFloat() * 2f - 1f;
+                        }
+                        ins = ins.values(TENANT, coll,
+                            HexFormat.of().parseHex(md5x2("planshape-" + dim + "-" + i, "fill-" + dim + "-" + i)),
+                            model, "planshape filler chunk " + i, Vector.of(f));
+                    }
+                    ins.execute();
+                }
                 // The single nearest row: unit vector along the first axis (distance 0 from
                 // a query vector pointed the same way) — the target every behavioral
                 // assertion below checks for.
                 String nearestChash = md5x2("planshape-near-" + dim, "target-" + dim);
-                st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
-                    + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + nearestChash + "', 'hex'), "
-                    + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                    + "' AND name = '" + coll + "'), "
-                    + "'planshape nearest target chunk', "
-                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector)");
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, coll)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(nearestChash))
+                    .set(CHUNKS.EMBEDDING_MODEL, model)
+                    .set(CHUNKS.CHUNK_TEXT, "planshape nearest target chunk")
+                    .set(embField, VectorSeeds.vecXY(dim, 1f, 0f))
+                    .execute();
                 if (dim == 1024) {
                     nearestChash1024 = nearestChash;
                     // RDR-192 Step 5 (nexus-wbfpw.10): searchWithTokens now requires a

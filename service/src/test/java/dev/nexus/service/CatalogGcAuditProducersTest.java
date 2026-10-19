@@ -25,6 +25,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -194,21 +195,8 @@ class CatalogGcAuditProducersTest {
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
             for (String c : List.of(dropped)) {
-                var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                    + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setString(3, c);
-                ps.setString(4, TENANT);
-                ps.setString(5, collection);
-                ps.setString(6, "seed text " + c);
-                ps.setString(7, zeroVec);
-                ps.executeUpdate();
+                seedChunk384(su, collection, c);
             }
         }
         repo.upsertDocument(TENANT, Map.of(
@@ -227,20 +215,7 @@ class CatalogGcAuditProducersTest {
         // manifest INSERT below references it).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, kept);
-            ps.setString(4, TENANT);
-            ps.setString(5, collection);
-            ps.setString(6, "seed text " + kept);
-            ps.setString(7, zeroVec);
-            ps.executeUpdate();
+            seedChunk384(su, collection, kept);
         }
 
         // Replace with a manifest dropping `dropped` (unreferenced elsewhere) -- sweep=true.
@@ -301,20 +276,7 @@ class CatalogGcAuditProducersTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, orphan);
-            ps.setString(4, TENANT);
-            ps.setString(5, collection);
-            ps.setString(6, "seed text " + orphan);
-            ps.setString(7, zeroVec);
-            ps.executeUpdate();
+            seedChunk384(su, collection, orphan);
         }
         // No manifest row for `orphan` -- it is unreferenced, so quarantineOrphans moves it
         // once it is older than the grace window (RDR-192 Step 8).
@@ -732,5 +694,19 @@ class CatalogGcAuditProducersTest {
                     .isNull();
             }
         }
+    }
+
+    /** One zero-vector {@code embedding_384} chunk under {@code collection} (registered, model {@code minilm-l6-v2-384}). */
+    private static void seedChunk384(Connection su, String collection, String chashHex) {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+            .set(CHUNKS.CHUNK_TEXT, "seed text " + chashHex)
+            .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 }

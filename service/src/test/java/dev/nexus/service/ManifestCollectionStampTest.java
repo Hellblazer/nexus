@@ -2,7 +2,6 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import java.util.HexFormat;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
@@ -19,6 +18,7 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -85,14 +85,18 @@ class ManifestCollectionStampTest {
         docTumbler = repo.registerDocument(TENANT, "9.1", Map.of(
             "title", "stamp doc", "content_type", "knowledge",
             "physical_collection", COLL));
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COLL + "'), 'alpha text', "
-                + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector)");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            dsl.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLL)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(CH_A))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, COLL))
+                .set(CHUNKS.CHUNK_TEXT, "alpha text")
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .execute();
         }
     }
 
@@ -109,7 +113,7 @@ class ManifestCollectionStampTest {
      * chash's content actually lives when stamping the manifest).
      */
     private void seedChunkContent(String coll, String chash, String text) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             // RDR-225: the stub vector is 1024-wide, so the collection is registered under a 1024-d model.
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -119,12 +123,15 @@ class ManifestCollectionStampTest {
                 // No chunk can exist under a model of another width, so the model is still free to change.
                 PgContainerHelper.insertCollection(dsl, TENANT, coll, "voyage-code-3");
             }
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + coll + "'), '"
-                + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
-                + "ON CONFLICT DO NOTHING");
+            dsl.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, coll)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, coll))
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .onConflictDoNothing()
+                .execute();
         }
     }
 

@@ -28,6 +28,7 @@ import java.sql.Statement;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -473,16 +474,17 @@ class Taxonomy014TenantFkRepointTest {
         // fallback model, and the vector's width must be that model's dimension.
         int dim = 768;
         // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
-        try (Statement st = c.createStatement()) {
-            st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
-                + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + collection + "'), "
-                + "'doc-count-trigger-test chunk', ('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        PgContainerHelper.insertCollection(ctx, tenant, collection);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "doc-count-trigger-test chunk")
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /** A {@code nexus.topic_assignments} row -- {@code doc_id} is bytea (RDR-194

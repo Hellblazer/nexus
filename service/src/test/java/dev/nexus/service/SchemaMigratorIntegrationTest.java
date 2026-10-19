@@ -1360,25 +1360,24 @@ class SchemaMigratorIntegrationTest {
                             CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                         .values(tenant, "o8dil29-doc", "late upgrade doc", collection)
                         .execute();
-                    // SANCTIONED RAW: bare (unqualified) ::vector, deliberately NOT ::nexus.vector.
-                    // This INSERT runs at Phase C, mid-walk, BEFORE catalog-029-0 and therefore
-                    // well before search-path-001 (placed near the end of the changelog)
-                    // has relocated the extension -- it is still in `public` at this exact
-                    // point, resolvable only via the connecting role's default search_path
-                    // (which always includes public). Phase D's full SchemaMigrator.migrate()
-                    // resumes through search-path-001/002 and beyond, so every OTHER
-                    // reference in this file that runs AFTER a full migrate() call is
-                    // correctly qualified as nexus.vector; this one site is the sole
-                    // exception, and is exempt from that qualification for exactly this
-                    // reason (nexus-cbo4a batch 9 item 0 discovery). This is why it cannot
-                    // convert onto the generated CHUNKS.EMBEDDING_384 field: VectorBinding
+                    // The embedding binds as a real[] (VectorSeeds.legacyEmbedding), deliberately NOT
+                    // through the generated CHUNKS.EMBEDDING_1024 field: VectorBinding
                     // (dev.nexus.service.jooq.binding.VectorBinding#sql) ALWAYS renders the
-                    // schema-qualified ::nexus.vector cast, which would silently change what
-                    // this exact statement proves (that a bare cast still resolves here).
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) VALUES "
-                        + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
-                        + "('[" + "0.1,".repeat(1023) + "0.1]')::vector)");   // RDR-225: voyage-context-3 is 1024-wide
+                    // schema-qualified ::nexus.vector cast, and this INSERT runs at Phase C, mid-walk,
+                    // BEFORE catalog-029-0 and therefore well before search-path-001 (placed near the
+                    // end of the changelog) has relocated the extension -- it is still in `public` at
+                    // this exact point (nexus-cbo4a batch 9 item 0 discovery). pgvector's
+                    // real[] -> vector ASSIGNMENT cast is looked up by type oid, so it resolves with the
+                    // extension in `public`. Phase D's full SchemaMigrator.migrate() resumes through
+                    // search-path-001/002 and beyond. RDR-225: voyage-context-3 is 1024-wide.
+                    dsl(su).insertInto(CHUNKS)
+                        .set(CHUNKS.TENANT_ID, tenant)
+                        .set(CHUNKS.COLLECTION, collection)
+                        .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(goodChash))
+                        .set(CHUNKS.CHUNK_TEXT, "good text")
+                        .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("embedding_1024"),
+                            org.jooq.impl.SQLDataType.REAL.array()), VectorSeeds.legacyEmbedding(1024, 0.1f))
+                        .execute();
                     dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,

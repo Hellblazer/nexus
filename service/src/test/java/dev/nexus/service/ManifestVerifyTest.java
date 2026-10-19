@@ -7,7 +7,6 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -19,6 +18,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.HexFormat;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -651,12 +651,15 @@ class ManifestVerifyTest {
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,
                                          String chashHex) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
-            + "' AND name = '" + collection + "'), " +
-            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk text")
+            .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vecXY(1024, 1f, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 }

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service;
 
+import org.jooq.impl.SQLDataType;
+import org.jooq.Field;
+import org.jooq.DSLContext;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.PgSession;
@@ -137,29 +140,15 @@ class DenseGateScanBudgetIntegrationTest {
             // Noise: random vectors (normalized-ish is irrelevant for cosine
             // ordering realism at this granularity), text that can NEVER pass
             // the gate for QUERY.
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") "
-                + "SELECT '" + TENANT + "', '" + COL_NOISE + "', "
-                + "  sha256(convert_to('noise doc ' || g, 'UTF8')), "
-                + "  'minilm-l6-v2-384', "
-                + "  'filler noise document number ' || g, "
-                + "  ('[' || (SELECT string_agg(random()::text, ',') "
-                + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
-                + "FROM generate_series(1, " + NOISE + ") g");
+            insertRandomChunks(DSL.using(su, SQLDialect.POSTGRES), COL_NOISE, "noise doc ",
+                "filler noise document number ", NOISE);
             // Gate-matching rows: text passes the tsv gate; vectors
             // DISPERSED at random through the same space as the noise —
             // real corpus matches are scattered, and an identical-vector
             // cluster would defeat the reproduction (HNSW yields a whole
             // mutual-neighbor cluster the moment the scan touches it).
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") "
-                + "SELECT '" + TENANT + "', '" + COL_TARGET + "', "
-                + "  sha256(convert_to('gpu batch row ' || g, 'UTF8')), "
-                + "  'minilm-l6-v2-384', "
-                + "  'gpu batch scheduling design row ' || g, "
-                + "  ('[' || (SELECT string_agg(random()::text, ',') "
-                + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
-                + "FROM generate_series(1, " + MATCHING + ") g");
+            insertRandomChunks(DSL.using(su, SQLDialect.POSTGRES), COL_TARGET, "gpu batch row ",
+                "gpu batch scheduling design row ", MATCHING);
             // RDR-192 Step 5 (nexus-wbfpw.10): hybridSearch now requires a live
             // own-collection manifest owner -- own every one of the MATCHING rows in
             // bulk (the noise rows never pass the text gate regardless of ownership,
@@ -243,5 +232,33 @@ class DenseGateScanBudgetIntegrationTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /**
+     * {@code count} 384-dim chunks under {@code collection}: chash = sha256 of {@code hashPrefix + g}, text =
+     * {@code textPrefix + g}, and a vector of 384 independent {@code random()} components per row (the
+     * correlated {@code string_agg} subquery, with {@code 384 + (g - g)} to force per-row evaluation). Built
+     * as pgvector text and cast to the generated field's own vector type.
+     */
+    private static void insertRandomChunks(DSLContext ctx, String collection, String hashPrefix,
+                                           String textPrefix, int count) {
+        var series = DSL.generateSeries(1, count).as("s", "g");
+        Field<Integer> g = series.field("g", Integer.class);
+        Field<String> components = DSL.field(ctx.select(DSL.groupConcat(DSL.cast(DSL.rand(), SQLDataType.VARCHAR))
+                .separator(","))
+            .from(DSL.generateSeries(DSL.inline(1), DSL.inline(384).plus(g.minus(g)))));
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(collection, CHUNKS.COLLECTION),
+                    DSL.function("sha256", SQLDataType.BLOB,
+                        DSL.function("convert_to", SQLDataType.BLOB,
+                            DSL.concat(DSL.val(hashPrefix, CHUNKS.CHUNK_TEXT), DSL.cast(g, SQLDataType.VARCHAR)),
+                            DSL.inline("UTF8"))),
+                    DSL.val("minilm-l6-v2-384", CHUNKS.EMBEDDING_MODEL),
+                    DSL.concat(DSL.val(textPrefix, CHUNKS.CHUNK_TEXT), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.cast(DSL.concat(DSL.inline("["), components, DSL.inline("]")),
+                        CHUNKS.EMBEDDING_384.getDataType()))
+                .from(series))
+            .execute();
     }
 }

@@ -106,9 +106,6 @@ class CatalogManifestSweepRepositoryTest {
      * nexus.chunks carries the SAME {@code chunks_chash_octet_check} as
      * catalog_document_chunks, so a wrong-length stub would itself violate that check.
      */
-    private static final String STUB_VECTOR_384 =
-        "[" + "0.1,".repeat(383) + "0.1]";
-
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
             return;
@@ -124,12 +121,15 @@ class CatalogManifestSweepRepositoryTest {
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(ctx, tenant, collection);
             // RDR-225: a chunk carries its collection's model (every collection here is 384-d).
-            return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, chashHex, PgContainerHelper.collectionModel(ctx, tenant, collection),
-                STUB_VECTOR_384);
+            return ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         });
     }
 
@@ -213,21 +213,19 @@ class CatalogManifestSweepRepositoryTest {
             // RDR-225: the tenant needs partition leaves before its first chunk (the upsertCollection
             // above registers the collection but is not the leaf-creating call under every path).
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks
             // (vectors-004-unify-chunks.xml) -- embedding_384 replaces the bare
             // embedding column.
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, PgContainerHelper.collectionModel(
-                DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, collection));
-            ps.setString(5, "seed text " + hexChash);
-            ps.setString(6, zeroVec);
-            ps.executeUpdate();
+            var ctx = DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChash)
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

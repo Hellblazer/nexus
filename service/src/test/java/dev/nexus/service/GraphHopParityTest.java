@@ -213,13 +213,22 @@ class GraphHopParityTest {
         // decoded at the seam.
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // nexus.chunks row before the manifest row below -- chunk insert first.
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
-            "' AND name = '" + COLL_EXPLAIN + "'), 'ex'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // Embedding: [(g % 100) / 100, 1, 0 ... 0], built as pgvector text and cast to the generated
+        // field's own vector type.
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+            .select(ctx.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(COLL_EXPLAIN, CHUNKS.COLLECTION),
+                    DSL.function("decode", SQLDataType.BLOB,
+                        DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
+                        DSL.inline("hex")),
+                    DSL.val(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN), CHUNKS.EMBEDDING_MODEL),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.cast(DSL.concat(DSL.inline("["),
+                            DSL.cast(DSL.cast(g.mod(100), SQLDataType.DOUBLE).div(100.0), SQLDataType.VARCHAR),
+                            DSL.inline(",1"), DSL.repeat(DSL.inline(",0"), 1022), DSL.inline("]")),
+                        CHUNKS.EMBEDDING_1024.getDataType()))
+                .from(series))
+            .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                 CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
@@ -395,9 +404,11 @@ class GraphHopParityTest {
         try (Connection su = pg.createConnection("")) {
             // Stamp metadata on g1's chunk only; g0's stays NULL. Late-order safe:
             // no earlier test passes p_where or reads chunk metadata.
-            su.createStatement().execute(
-                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET metadata = '{\"lang\": \"java\"}'::jsonb " +
-                "WHERE collection = '" + COLL_G + "' AND chash = decode('" + validChash("g1") + "', 'hex')");
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{\"lang\": \"java\"}"))
+                .where(CHUNKS.COLLECTION.eq(COLL_G))
+                .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(validChash("g1"))))
+                .execute();
 
             // NULL where: unfiltered — the pre-catalog-012 behavior is preserved.
             assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out", null, 10))
@@ -730,13 +741,15 @@ class GraphHopParityTest {
             .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
-            tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
-            "' AND name = '" + collection + "'), '" + tumbler + "', " +
-            vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, tumbler)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, (float) x, (float) y))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)

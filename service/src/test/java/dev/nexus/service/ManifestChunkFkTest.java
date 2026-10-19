@@ -24,6 +24,7 @@ import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -237,10 +238,12 @@ class ManifestChunkFkTest {
             // rename path always does before touching any chunk row. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, newCollection);
-            int updated = su.createStatement().executeUpdate(
-                "UPDATE nexus.chunks SET collection = '" + newCollection + "' "
-                + "WHERE tenant_id = '" + TENANT + "' AND collection = '" + oldCollection + "' "
-                + "AND chash = decode('" + chash + "', 'hex')");
+            int updated = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.COLLECTION, newCollection)
+                .where(CHUNKS.TENANT_ID.eq(TENANT))
+                .and(CHUNKS.COLLECTION.eq(oldCollection))
+                .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .execute();
             assertThat(updated).as("the chunk row must exist to rename").isEqualTo(1);
 
             ResultSet rs = su.createStatement().executeQuery(

@@ -157,20 +157,16 @@ class VectorsChashIndexLiquibaseTest {
 
     private void insertChunk(Connection su, int dim, String collection, String chashHex)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") VALUES " +
-            "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-            + "' AND name = '" + collection + "'), " +
-            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::nexus.vector)" +
-            " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-    }
-
-    private static String zeroVec(int dim) {
-        StringBuilder sb = new StringBuilder("'[1");
-        for (int i = 1; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk " + chashHex.substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     private void runLiquibaseUpdate() throws Exception {

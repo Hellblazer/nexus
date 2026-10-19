@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -19,13 +20,13 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -83,13 +84,8 @@ class ChashConformanceReportIntegrationTest {
         }
     }
 
-    private static String vec(int dim) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < dim; i++) {
-            if (i > 0) sb.append(',');
-            sb.append('0');
-        }
-        return sb.append(']').toString();
+    private static Vector vec(int dim) {
+        return Vector.of(new float[dim]);
     }
 
     @BeforeAll
@@ -146,19 +142,14 @@ class ChashConformanceReportIntegrationTest {
     }
 
     private static void insertChunk768(Connection su, String tenant, byte[] chash, String text) {
-        try (PreparedStatement ps = su.prepareStatement(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, COLLECTION);
-            ps.setBytes(3, chash);
-            ps.setString(4, MODEL);
-            ps.setString(5, text);
-            ps.setString(6, vec(768));
-            ps.executeUpdate();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, COLLECTION)
+            .set(CHUNKS.CHASH, chash)
+            .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+            .set(CHUNKS.CHUNK_TEXT, text)
+            .set(CHUNKS.EMBEDDING_768, vec(768))
+            .execute();
     }
 
     private static Map<String, Object> tableRow(List<Map<String, Object>> report, String tableName) {

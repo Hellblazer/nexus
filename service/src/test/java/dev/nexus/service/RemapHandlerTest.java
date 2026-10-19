@@ -20,6 +20,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -588,13 +589,19 @@ class RemapHandlerTest {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             // RDR-225: a chunk carries its collection's model and a 1024-wide vector needs a 1024-dim one.
             final String model = "voyage-context-3";
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, model);
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, collection, model);
+            var unit = VectorSeeds.vecXY(1024, 1f, 0f);
             for (int i = 1; i <= count; i++) {
-                su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-                    "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash(seedPrefix + i) + "', 'hex'), " +
-                    "'" + model + "', 'text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-                    "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, collection)
+                    .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash(seedPrefix + i)))
+                    .set(CHUNKS.EMBEDDING_MODEL, model)
+                    .set(CHUNKS.CHUNK_TEXT, "text")
+                    .set(CHUNKS.EMBEDDING_1024, unit)
+                    .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                    .execute();
             }
         }
     }

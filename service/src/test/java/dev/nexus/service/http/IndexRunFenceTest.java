@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -13,7 +14,6 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,6 +34,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -861,13 +862,16 @@ class IndexRunFenceTest {
     private void insertChunk1024(String chashHex) throws RuntimeException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-                "VALUES ('" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), " +
-                "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COLLECTION + "'), " +
-                "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
+                .set(CHUNKS.CHUNK_TEXT, "chunk text")
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vecXY(1024, 1f, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

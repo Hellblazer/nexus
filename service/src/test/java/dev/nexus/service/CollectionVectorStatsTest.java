@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import java.time.OffsetDateTime;
 import org.jooq.impl.DSL;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -15,9 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
@@ -104,11 +104,11 @@ class CollectionVectorStatsTest {
     private static final String COLL_B_384   = "knowledge__cvs-owner-b__minilm-l6-v2-384__v1";
 
     // ── Deterministic write timestamps (fixed clock — no now() in fixtures) ──
-    private static final String T1 = "2026-01-01T00:00:01+00";
-    private static final String T2 = "2026-01-01T00:00:02+00";
-    private static final String T3 = "2026-01-01T00:00:03+00";
-    private static final String T4 = "2026-02-01T00:00:04+00";
-    private static final String T5 = "2026-02-01T00:00:05+00";
+    private static final OffsetDateTime T1 = OffsetDateTime.parse("2026-01-01T00:00:01Z");
+    private static final OffsetDateTime T2 = OffsetDateTime.parse("2026-01-01T00:00:02Z");
+    private static final OffsetDateTime T3 = OffsetDateTime.parse("2026-01-01T00:00:03Z");
+    private static final OffsetDateTime T4 = OffsetDateTime.parse("2026-02-01T00:00:04Z");
+    private static final OffsetDateTime T5 = OffsetDateTime.parse("2026-02-01T00:00:05Z");
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -624,26 +624,21 @@ class CollectionVectorStatsTest {
      * insert bypasses FORCE RLS.
      */
     private static void insertChunk(Connection su, int dim, String tenantId, String collection,
-                                    String chash, String chunkText, String createdAt)
+                                    String chash, String chunkText, OffsetDateTime createdAt)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId +
-            "' AND name = '" + collection + "'), " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::nexus.vector, " +
-            "'" + createdAt + "'::timestamptz) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-    }
-
-    /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        // The 32-character chash is the bytea's ASCII bytes, exactly as the raw text literal was read into the
+        // bytea column.
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, chunkText)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+            .set(CHUNKS.CREATED_AT, createdAt)
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /**

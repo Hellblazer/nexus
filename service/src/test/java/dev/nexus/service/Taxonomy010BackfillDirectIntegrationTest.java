@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import java.util.HexFormat;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -22,6 +24,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -395,21 +398,16 @@ class Taxonomy010BackfillDirectIntegrationTest {
     /** A fresh {@code nexus.chunks} row -- already bytea, no legacy-width CHECK. */
     private static void seedChunk(Connection c, String tenant, String collection, String chashHex, int dim)
             throws Exception {
-        String embeddingCol = "embedding_" + dim;
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol
-            + ") VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections "
-            + "WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector) "
-            + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setString(3, chashHex);
-            ps.setString(4, tenant);
-            ps.setString(5, collection);
-            ps.setString(6, "direct test chunk " + chashHex.substring(0, 8));
-            ps.setString(7, "[" + "0,".repeat(dim - 1) + "0]");
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "direct test chunk " + chashHex.substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     private static int count(Connection c, String sql) throws Exception {

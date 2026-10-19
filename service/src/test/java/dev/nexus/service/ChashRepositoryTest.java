@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import java.util.HexFormat;
+import java.time.OffsetDateTime;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
@@ -24,6 +26,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -139,20 +142,20 @@ class ChashRepositoryTest {
             }
 
             // Multi-collection chash: 384 + 1024.
-            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("multi"), "2026-07-01 00:00:01+00");
-            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("multi"), "2026-07-01 00:00:02+00");
+            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:01Z"));
+            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:02Z"));
             // Singles per dim table.
-            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("only-384"),  "2026-07-01 00:00:03+00");
-            chunk(su, TENANT_A, 768,  "coll-a-768",  ch("only-768"),  "2026-07-01 00:00:04+00");
-            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("only-1024"), "2026-07-01 00:00:05+00");
+            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("only-384"),  OffsetDateTime.parse("2026-07-01T00:00:03Z"));
+            chunk(su, TENANT_A, 768,  "coll-a-768",  ch("only-768"),  OffsetDateTime.parse("2026-07-01T00:00:04Z"));
+            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("only-1024"), OffsetDateTime.parse("2026-07-01T00:00:05Z"));
             // Rename source: two rows under one collection name, plus a
             // manifest row — the rename must re-home the combined-query join
             // key too (nexus-x6kdz class; .3 critique S2). RDR-225: both rows are 384-d,
             // since a collection has exactly one model (the pre-RDR-225 fixture mixed a 384
             // and a 768 row under one name, the cross-model re-embed history that layout
             // can no longer hold).
-            chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), "2026-07-01 00:00:06+00");
-            chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), "2026-07-01 00:00:07+00");
+            chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), OffsetDateTime.parse("2026-07-01T00:00:06Z"));
+            chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), OffsetDateTime.parse("2026-07-01T00:00:07Z"));
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             seed.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
@@ -174,11 +177,11 @@ class ChashRepositoryTest {
                     PgContainerHelper.collectionModel(seed, TENANT_A, "ren-src"))
                 .execute();
             // Rename collision fixture: same chash on both sides.
-            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   "2026-07-01 00:00:08+00");
-            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), "2026-07-01 00:00:09+00");
-            chunk(su, TENANT_A, 384, "ren-collide-dst", ch("collide"),   "2026-07-01 00:00:10+00");
+            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   OffsetDateTime.parse("2026-07-01T00:00:08Z"));
+            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), OffsetDateTime.parse("2026-07-01T00:00:09Z"));
+            chunk(su, TENANT_A, 384, "ren-collide-dst", ch("collide"),   OffsetDateTime.parse("2026-07-01T00:00:10Z"));
             // Tenant B: same chash value as tenant A's multi — isolation.
-            chunk(su, TENANT_B, 384, "coll-b-384", ch("multi"), "2026-07-01 00:00:11+00");
+            chunk(su, TENANT_B, 384, "coll-b-384", ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:11Z"));
         }
     }
 
@@ -499,21 +502,17 @@ class ChashRepositoryTest {
     // ONE unified nexus.chunks table — dim now selects the embedding_<dim>
     // COLUMN, not the target table.
     private void chunk(Connection su, String tenant, int dim, String collection,
-                       Chash chash, String createdAt) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ", created_at) VALUES " +
-            "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections " +
-            "WHERE tenant_id = '" + tenant + "' AND name = '" + collection + "'), " +
-            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::nexus.vector, " +
-            "TIMESTAMPTZ '" + createdAt + "')");
-    }
-
-    private static String unitVec(int dim) {
-        StringBuilder sb = new StringBuilder("'[1");
-        for (int i = 1; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
+                       Chash chash, OffsetDateTime createdAt) throws Exception {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash.toHex()))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk " + chash.toHex().substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
+            .set(CHUNKS.CREATED_AT, createdAt)
+            .execute();
     }
 
     private int countRows(String sql) {

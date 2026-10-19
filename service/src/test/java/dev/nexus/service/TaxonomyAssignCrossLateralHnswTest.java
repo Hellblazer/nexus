@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.stream.Collectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -390,17 +391,14 @@ class TaxonomyAssignCrossLateralHnswTest {
                 String chash = hexChash("afc-lateral-chunk-" + i);
                 chunkChashes.add(chash);
                 float[] emb = clusteredVectorRaw(rnd, denseCenter, OWN_CLUSTER_SIGMA);
-                try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
-                        + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
-                    ps.setString(1, TENANT);
-                    ps.setString(2, COL_DENSE);
-                    ps.setString(3, chash);
-                    ps.setString(4, PgContainerHelper.collectionModel(ctx, TENANT, COL_DENSE));
-                    ps.setString(5, "lateral incremental-fixture chunk " + i);
-                    ps.setString(6, vectorLiteral(emb));
-                    ps.executeUpdate();
-                }
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, COL_DENSE)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+                    .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COL_DENSE))
+                    .set(CHUNKS.CHUNK_TEXT, "lateral incremental-fixture chunk " + i)
+                    .set(CHUNKS.EMBEDDING_1024, Vector.of(emb))
+                    .execute();
             }
 
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
@@ -979,14 +977,5 @@ class TaxonomyAssignCrossLateralHnswTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
     }
 }

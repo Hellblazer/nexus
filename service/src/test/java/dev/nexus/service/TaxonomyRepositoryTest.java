@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -101,22 +102,20 @@ class TaxonomyRepositoryTest {
         // RDR-225: every collection this class seeds is registered under the 768-wide model (the
         // non-conformant names take the bge-base-en-v15-768 fallback, the conformant ones name it), and
         // the chunk carries its collection's model.
-        StringBuilder zeroVec = new StringBuilder("[");
-        for (int i = 0; i < 768; i++) {
-            if (i > 0) zeroVec.append(',');
-            zeroVec.append('0');
-        }
-        zeroVec.append(']');
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + collection + "'), "
-                + "'seed', '" + zeroVec + "'::nexus.vector) ON CONFLICT DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "seed")
+                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0f))
+                .onConflictDoNothing()
+                .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

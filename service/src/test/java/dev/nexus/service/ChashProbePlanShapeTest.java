@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.SQLDataType;
+import org.jooq.Field;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
@@ -100,6 +103,7 @@ class ChashProbePlanShapeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Statement st = su.createStatement();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // RDR-191 Phase 4 (lane D5): one unified nexus.chunks table now
             // carries all three embedding columns and ONE (tenant_id, chash)
@@ -115,26 +119,36 @@ class ChashProbePlanShapeTest {
                 // RDR-225: each collection carries the one model whose dimension matches its vectors.
                 PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "plan-" + dim,
                     modelFor(dim));
-                st.execute(
-                    "INSERT INTO nexus.chunks" +
-                    " (tenant_id, collection, embedding_model, chash, chunk_text, embedding_" + dim + ") " +
-                    "SELECT '" + TENANT + "', 'plan-" + dim + "', " +
-                    "       '" + modelFor(dim) + "', " +
-                    "       decode(md5('p" + dim + "-' || i) || md5('q" + dim + "-' || i), 'hex'), " +
-                    "       'plan chunk ' || i, v.vec " +
-                    "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i " +
-                    "CROSS JOIN (SELECT ('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector AS vec) v");
+                var series = DSL.generateSeries(1, CHUNKS_PER_DIM).as("s", "i");
+                Field<String> iText = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
+                        CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
+                    .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID),
+                            DSL.val("plan-" + dim, CHUNKS.COLLECTION),
+                            DSL.val(modelFor(dim), CHUNKS.EMBEDDING_MODEL),
+                            DSL.function("decode", SQLDataType.BLOB,
+                                DSL.concat(
+                                    DSL.md5(DSL.concat(DSL.val("p" + dim + "-", CHUNKS.CHUNK_TEXT), iText)),
+                                    DSL.md5(DSL.concat(DSL.val("q" + dim + "-", CHUNKS.CHUNK_TEXT), iText))),
+                                DSL.inline("hex")),
+                            DSL.concat(DSL.inline("plan chunk "), iText),
+                            DSL.val(VectorSeeds.vecXY(dim, 1f, 0f), VectorSeeds.chunkEmbedding(dim)))
+                        .from(series))
+                    .execute();
             }
 
             // A multi-collection sample: one 768-derived chash also lands in
             // the 384-dim collection (chunk text identity, different model).
             // Different collection ('plan-384' vs 'plan-768') means no PK
             // collision on (tenant_id, collection, chash).
-            st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, embedding_model, chash, chunk_text, embedding_384) " +
-                "SELECT '" + TENANT + "', 'plan-384', '" + modelFor(384) + "', " +
-                "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
-                "       ('[1' || repeat(',0', 383) || ']')::nexus.vector");
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, "plan-384")
+                .set(CHUNKS.EMBEDDING_MODEL, modelFor(384))
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(liveChash(768, 42)))
+                .set(CHUNKS.CHUNK_TEXT, "cross-model copy")
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vecXY(384, 1f, 0f))
+                .execute();
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }

@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -65,6 +66,16 @@ class CatalogEngineDefects70Test {
         return m;
     }
 
+    /** RDR-225: a chunk's vector width must be its collection's model's dimension. */
+    private static int dimOf(String model) {
+        return switch (model) {
+            case "minilm-l6-v2-384" -> 384;
+            case "bge-base-en-v15-768" -> 768;
+            case "voyage-code-3", "voyage-context-3", "voyage-3" -> 1024;
+            default -> throw new IllegalArgumentException("unknown embedding model " + model);
+        };
+    }
+
     /**
      * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
      * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
@@ -77,20 +88,6 @@ class CatalogEngineDefects70Test {
      * as catalog_document_chunks, so a wrong-length stub would itself violate that
      * check rather than reaching whatever violation a given test is actually after.
      */
-    private static String stubVector(int dim) {
-        return "[" + "0.1,".repeat(dim - 1) + "0.1]";
-    }
-
-    /** RDR-225: a chunk's vector width must be its collection's model's dimension. */
-    private static int dimOf(String model) {
-        return switch (model) {
-            case "minilm-l6-v2-384" -> 384;
-            case "bge-base-en-v15-768" -> 768;
-            case "voyage-code-3", "voyage-context-3", "voyage-3" -> 1024;
-            default -> throw new IllegalArgumentException("unknown embedding model " + model);
-        };
-    }
-
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
             return;
@@ -109,11 +106,15 @@ class CatalogEngineDefects70Test {
             // (the fixture collections span 1024-d voyage names and model-less names that default to 768-d).
             final String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
             final int dim = dimOf(model);
-            return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, chashHex, model, stubVector(dim));
+            return ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         });
     }
 
@@ -1306,14 +1307,15 @@ class CatalogEngineDefects70Test {
             su.setAutoCommit(true);
             // RDR-225: this tenant holds no service token, so its partition leaves exist only once asked for.
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
-            try (var st = su.createStatement()) {
-                st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024) "
-                    + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), 'voyage-code-3', '"
-                    + text.replace("'", "''") + "', "
-                    + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CHUNKS.EMBEDDING_MODEL, "voyage-code-3")
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

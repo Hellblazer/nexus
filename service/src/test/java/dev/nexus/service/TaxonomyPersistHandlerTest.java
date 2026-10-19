@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -334,14 +335,15 @@ class TaxonomyPersistHandlerTest {
             // dimension is `dim` (these collection names are not conformant, so the helper's name-derived
             // default would be the 768-wide model).
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, model);
-            String embeddingCol = "embedding_" + dim;
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol
-                + ") VALUES " +
-                "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), '" + model
-                + "', 'persist-test chunk', " +
-                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "persist-test chunk")
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

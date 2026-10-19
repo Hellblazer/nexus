@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.VectorSeeds;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
@@ -25,8 +27,9 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -200,18 +203,14 @@ class TaxonomyHandlerAssignFromChashesTest {
         registerCollection(COL);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, COL);
-                ps.setString(3, hexChashValue);
-                ps.setString(4, MODEL);
-                ps.setString(5, "seed text " + hexChashValue);
-                ps.setString(6, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COL)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChashValue))
+                .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
+                .set(VectorSeeds.chunkEmbedding(DIM), Vector.of(emb))
+                .execute();
         }
     }
 
@@ -236,31 +235,18 @@ class TaxonomyHandlerAssignFromChashesTest {
     private void seedCentroid(String collection, long topicId, float[] emb) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids"
-                    // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
-                    // nexus-tk070.p6a follow-on) -- no assertion in this class
-                    // reads the label value.
-                    + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + DIM
-                    + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "seed-centroid-label");
-                ps.setString(5, MODEL);
-                ps.setString(6, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
+            // nexus-tk070.p6a follow-on) -- no assertion in this class
+            // reads the label value.
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT)
+                .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
+                .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)
+                .set(VectorSeeds.centroidEmbedding(DIM), Vector.of(emb))
+                .execute();
         }
-    }
-
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
     }
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {

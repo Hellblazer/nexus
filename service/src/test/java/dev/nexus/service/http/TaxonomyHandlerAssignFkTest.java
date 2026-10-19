@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.VectorSeeds;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
@@ -26,6 +27,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -231,15 +233,19 @@ class TaxonomyHandlerAssignFkTest {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
-            String embeddingCol = "embedding_" + dim;
             // RDR-225: the chunk carries its collection's model, and {@code dim} must be that model's
             // dimension ("coll" is non-conformant, so it registers under the 768-d bge fallback).
-            String model = PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol + ") VALUES " +
-                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), '" + model + "', 'fk-assign-test chunk', " +
-                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "fk-assign-test chunk")
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

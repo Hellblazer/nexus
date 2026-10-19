@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
@@ -18,13 +19,14 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_UNASSIGNED_CHASHES_1024;
@@ -330,28 +332,24 @@ class TaxonomyUnassignedChashesRepositoryTest {
             // Bulk chunks: deterministic 64-hex chash per i (lpad(to_hex(i),64,'0')) --
             // one fixed filler embedding for all rows (correctness of the EMBEDDING
             // VALUE is irrelevant to this read-route test; only non-null matters).
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
-                    + " SELECT ?, ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), '" + MODEL + "', 'text', ?::nexus.vector"
-                    + "   FROM generate_series(1, ?) i")) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, col);
-                ps.setString(3, vectorLiteral(unit(1.0f, 0.0f)));
-                ps.setInt(4, total);
-                ps.executeUpdate();
-            }
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            var series = DSL.generateSeries(1, total).as("s", "i");
+            Field<Integer> i = series.field("i", Integer.class);
+            seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+                .select(seed.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(col, CHUNKS.COLLECTION),
+                        indexChash(i), DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL), DSL.inline("text"),
+                        DSL.val(Vector.of(unit(1.0f, 0.0f)), CHUNKS.EMBEDDING_1024)).from(series))
+                .execute();
 
             // One manifest document, 50,000 catalog_document_chunks positions --
             // the real production shape (one document, many chunk positions).
-            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             seed.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
                 .set(CATALOG_DOCUMENTS.TUMBLER, "unassigned-scale-doc")
                 .set(CATALOG_DOCUMENTS.TITLE, "unassigned-scale-doc")
                 .onConflictDoNothing()
                 .execute();
-            var series = DSL.generateSeries(1, total).as("s", "i");
-            Field<Integer> i = series.field("i", Integer.class);
             seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                     CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
@@ -476,17 +474,14 @@ class TaxonomyUnassignedChashesRepositoryTest {
         registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
-                    + " VALUES (?, ?, decode(?, 'hex'), '" + MODEL + "', ?, ?::nexus.vector)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
+                .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
+                .set(CHUNKS.EMBEDDING_1024, Vector.of(emb))
+                .execute();
         }
     }
 
@@ -504,27 +499,15 @@ class TaxonomyUnassignedChashesRepositoryTest {
             "2026-01-01T00:00:00Z", null);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, embedding_model, label, embedding_1024)"
-                    + " VALUES (?, ?, ?, '" + MODEL + "', ?, ?::nexus.vector)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "seed-centroid-" + label);
-                ps.setString(5, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
+                .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)
+                .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-" + label)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_1024, Vector.of(emb))
+                .execute();
         }
         return topicId;
-    }
-
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
     }
 }

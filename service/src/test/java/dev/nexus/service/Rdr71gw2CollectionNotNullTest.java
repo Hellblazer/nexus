@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
@@ -287,18 +288,37 @@ class Rdr71gw2CollectionNotNullTest {
     private static void insertChunk(Connection su, int dim, String tenantId,
                                      String collection, String chashHex, int vecLen) throws Exception {
         insertCollection(su, tenantId, collection);
-        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this class's
+        // The embedding binds as a real[] (VectorSeeds.LEGACY_EMBEDDING), deliberately NOT through the
+        // generated Vector binding, which renders ::nexus.vector: this class's
         // startAll() stops the migration walk BEFORE vectors-004-1, permanently --
         // it never resumes to a full migrate() call, so search-path-001 (placed even
         // later in the changelog) never runs and the extension is never relocated
         // out of `public` for the lifetime of this test class (nexus-cbo4a batch 9
         // item 0 discovery, same class as SchemaMigratorIntegrationTest's
-        // lateUpgradingDeployment... test).
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
-            + "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-            + "'chunk text', ('[1" + ",0".repeat(vecLen - 1) + "]')::vector) "
-            + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        // lateUpgradingDeployment... test). pgvector's real[] -> vector ASSIGNMENT cast is
+        // looked up by type oid, so it resolves with the extension in `public`.
+        Float[] embedding = VectorSeeds.legacyEmbedding(vecLen, 0f);
+        embedding[0] = 1f;
+        var chunks = DSL.table(DSL.name("nexus", "chunks_" + dim));
+        var tenantCol = DSL.field(DSL.name("tenant_id"), String.class);
+        var collectionCol = DSL.field(DSL.name("collection"), String.class);
+        var chashCol = DSL.field(DSL.name("chash"), byte[].class);
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        byte[] chash = HexFormat.of().parseHex(chashHex);
+        ctx.insertInto(chunks)
+            .set(tenantCol, tenantId)
+            .set(collectionCol, collection)
+            .set(chashCol, chash)
+            .set(DSL.field(DSL.name("chunk_text"), String.class), "chunk text")
+            .set(VectorSeeds.LEGACY_EMBEDDING, embedding)
+            .onConflict(tenantCol, collectionCol, chashCol).doNothing()
+            .execute();
+        // Positive control: ON CONFLICT DO NOTHING would hide a non-insert, and the collection backfill
+        // assertions that read this chunk are vacuous if it is absent.
+        assertThat(ctx.fetchCount(chunks, tenantCol.eq(tenantId).and(collectionCol.eq(collection))
+                .and(chashCol.eq(chash))))
+            .as("legacy chunks_%d seed %s/%s/%s must be present", dim, tenantId, collection, chashHex)
+            .isEqualTo(1);
     }
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,

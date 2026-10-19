@@ -19,7 +19,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Arrays;
 
@@ -151,38 +150,25 @@ class VectorsUnifyCentroidsIntegrationTest {
      * no FK to catalog_collections or to nexus.topics (verified by direct
      * read of taxonomy-002-centroids.xml's own header).
      *
-     * <p>Bare (unqualified) {@code ::vector}, deliberately NOT {@code
-     * ::nexus.vector}: every caller of this helper seeds at the {@code
-     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before
-     * search-path-001 (placed near the changelog's end) has relocated the
-     * extension out of {@code public} (nexus-cbo4a batch 9 item 0
-     * discovery).
-     *
-     * <p>KEPT RAW (nexus-cbo4a batch 13 group D): {@code VectorBinding}
-     * (the generated {@code TAXONOMY_CENTROIDS.EMBEDDING_*} fields' jOOQ
-     * binding) renders the {@code ::nexus.vector} cast UNCONDITIONALLY --
-     * converting this INSERT onto the generated table/binding would
-     * silently change what the statement proves (that a bare cast still
-     * resolves via search_path at this point in the walk), the same
-     * exclusion class batch 12 established for
-     * {@code SchemaMigratorIntegrationTest}'s equivalent bare-cast chunks
-     * seed.
+     * <p>The embedding binds as a {@code real[]} ({@code VectorSeeds.LEGACY_EMBEDDING}), deliberately
+     * NOT through the generated {@code TAXONOMY_CENTROIDS.EMBEDDING_*} fields: their {@code VectorBinding}
+     * renders {@code ::nexus.vector}, and every caller of this helper seeds at the {@code
+     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before search-path-001 (placed near the
+     * changelog's end) has relocated the extension out of {@code public} (nexus-cbo4a batch 9 item 0
+     * discovery). pgvector's {@code real[]} to {@code vector} cast is an ASSIGNMENT cast looked up by
+     * type oid, so it resolves in whichever schema the extension sits (nexus-cbo4a 2026-10-18 vector seeds).
      */
     private static void seedCentroid(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                       long topicId, String label) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids_" + dim
-                        + " (tenant_id, collection, topic_id, embedding, label, doc_count) "
-                        + "VALUES (?, ?, ?, ?::vector, ?, ?)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "[" + "0.01,".repeat(dim - 1) + "0.01]");
-                ps.setString(5, label);
-                ps.setInt(6, 3);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DSL.table(DSL.name("nexus", "taxonomy_centroids_" + dim)))
+                .set(DSL.field(DSL.name("tenant_id"), String.class), tenant)
+                .set(DSL.field(DSL.name("collection"), String.class), collection)
+                .set(DSL.field(DSL.name("topic_id"), Long.class), topicId)
+                .set(VectorSeeds.LEGACY_EMBEDDING, VectorSeeds.legacyEmbedding(dim, 0.01f))
+                .set(DSL.field(DSL.name("label"), String.class), label)
+                .set(DSL.field(DSL.name("doc_count"), Integer.class), 3)
+                .execute();
         }
     }
 

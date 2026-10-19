@@ -317,11 +317,7 @@ class CombinedQueryParityTest {
         // nexus.chunks row before the manifest row below -- chunk insert first.
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that
         // HNSW is exercised, dense in the (x,1) plane.
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), '" + modelOf(su, TENANT_A, COLL_EXPLAIN) + "', 'ex'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        insertBulkChunks(ctx, series, g, g, TENANT_A, "ex", COLL_EXPLAIN, modelOf(su, TENANT_A, COLL_EXPLAIN));
         insertBulkManifest(ctx, series, g, g, TENANT_A, "ex", COLL_EXPLAIN, modelOf(su, TENANT_A, COLL_EXPLAIN));
         // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode(lpad(...), 'hex').
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
@@ -430,11 +426,8 @@ class CombinedQueryParityTest {
         var series = DSL.generateSeries(1, EXPLAIN_ROWS).as("s", "g");
         Field<Integer> g = series.field("g", Integer.class);
         insertBulkDocs(ctx, series, g, TENANT_A, "asx", "asxauthor", COLL_ASPECT_EXPLAIN);
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', decode(lpad((g+1000000)::text, 64, '0'), 'hex'), '" + modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN) + "', 'asx'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        insertBulkChunks(ctx, series, g, g.add(1000000), TENANT_A, "asx", COLL_ASPECT_EXPLAIN,
+            modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN));
         insertBulkManifest(ctx, series, g, g.add(1000000), TENANT_A, "asx", COLL_ASPECT_EXPLAIN,
             modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN));
         // source_uri: document_aspects.source_uri is NOT NULL
@@ -1401,11 +1394,16 @@ class CombinedQueryParityTest {
         insertCatalogDocumentFull(su, tenant, tumbler, collection, "paper", "wa", 2024, "research");
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata)"
-            + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + modelOf(su, tenant, collection) + "', '" + tumbler + "', "
-            + vec2(1024, x, y) + "::nexus.vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
-            + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CHUNKS.EMBEDDING_MODEL, modelOf(su, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, tumbler)
+            .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vecXY(1024, (float) x, (float) y))
+            .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb(metaJson))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
 
@@ -1550,12 +1548,36 @@ class CombinedQueryParityTest {
     private static void insertChunk(Connection su, int dim, String tenantId, String collection,
                                     String chash, String chunkText, double x, double y)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
-            tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + modelOf(su, tenantId, collection) + "', '" +
-            chunkText.replace("'", "''") + "', " + vec2(dim, x, y) + "::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CHUNKS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, chunkText)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, (float) x, (float) y))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
+    }
+
+    /**
+     * One 1024-dim chunk per generate_series row: chash {@code chashN} (padded), text {@code <prefix>N}, embedding
+     * the 2-D direction ((N % 100) / 100, 1) padded with zeros -- varied enough that HNSW is exercised, dense in
+     * the (x,1) plane. The vector is built as pgvector text and cast to the generated field's own vector type.
+     */
+    private static void insertBulkChunks(DSLContext ctx, org.jooq.Table<?> series, Field<Integer> g,
+                                         Field<Integer> chashN, String tenantId, String prefix,
+                                         String collection, String model) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+            .select(ctx.select(DSL.val(tenantId, CHUNKS.TENANT_ID), DSL.val(collection, CHUNKS.COLLECTION),
+                    paddedChash(chashN), DSL.val(model, CHUNKS.EMBEDDING_MODEL),
+                    DSL.concat(DSL.val(prefix, CHUNKS.CHUNK_TEXT), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.cast(DSL.concat(DSL.inline("["),
+                            DSL.cast(DSL.cast(g.mod(100), SQLDataType.DOUBLE).div(100.0), SQLDataType.VARCHAR),
+                            DSL.inline(",1"), DSL.repeat(DSL.inline(",0"), 1022), DSL.inline("]")),
+                        CHUNKS.EMBEDDING_1024.getDataType()))
+                .from(series))
+            .execute();
     }
 
     /** RDR-225: the embedding model {@code collection} is registered under; every chunk-side row carries it. */

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -406,18 +409,15 @@ class CombinedWriteRacedEmbedCounterTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME
-                + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, 'minilm-l6-v2-384', ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, COLLECTION);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, text);
-            ps.setString(5, zeroVec);
-            ps.executeUpdate();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
+                .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

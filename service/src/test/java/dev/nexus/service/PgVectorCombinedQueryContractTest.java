@@ -6,7 +6,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -23,6 +22,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
@@ -365,18 +365,17 @@ class PgVectorCombinedQueryContractTest {
 
     private static void insertChunk(Connection su, String tenant, int dim, String collection,
                                     String chash, String text, double x, double y) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
-            + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), "
-            + modelOf(tenant, collection) + ", '" + text + "', "
-            + vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-    }
-
-    /** RDR-225: SQL for the model {@code collection} is registered under; a chunk and every row that
-     *  references it carry that model. */
-    private static String modelOf(String tenant, String collection) {
-        return "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-            + "' AND name = '" + collection + "')";
+        // RDR-225: a chunk carries the model its collection is registered under.
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, text)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, (float) x, (float) y))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     private static long insertTopic(Connection su, String tenant, String label, String collection)
@@ -388,12 +387,6 @@ class PgVectorCombinedQueryContractTest {
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);
-    }
-
-    private static String vec2(int dim, double x, double y) {
-        StringBuilder sb = new StringBuilder("'[").append(x).append(',').append(y);
-        sb.append(",0".repeat(dim - 2));
-        return sb.append("]'").toString();
     }
 
     /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the

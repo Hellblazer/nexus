@@ -15,9 +15,8 @@ import java.sql.Connection;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -511,12 +510,17 @@ class ManifestFunctionsTest {
      */
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', '"
-            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "', " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        // The 32 ASCII characters are 32 raw bytes: the same value the bytea escape-format text literal produced.
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, chash.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, chunkText)
+            .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /**
@@ -542,16 +546,6 @@ class ManifestFunctionsTest {
             " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
         rs.next();
         return rs.getInt(1);
-    }
-
-    /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::nexus.vector} cast.
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
     }
 
     /**

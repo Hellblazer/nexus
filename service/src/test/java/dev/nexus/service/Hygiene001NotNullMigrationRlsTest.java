@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import org.jooq.impl.SQLDataType;
+import org.jooq.DSLContext;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -22,6 +24,7 @@ import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
@@ -367,19 +370,29 @@ class Hygiene001NotNullMigrationRlsTest {
     private static void seedLegacyChunkAndManifest(Connection su, String tenant, String legacyChash)
             throws Exception {
         String collection = tenant + "__coll__voyage-context-3__v1";
-        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this INSERT
-        // runs at migrateUpTo's TARGET_CHANGESET_ID point, well before search-path-001
-        // (placed near the changelog's end) has relocated the extension -- it is
-        // still in `public` here (nexus-cbo4a batch 9 item 0 discovery, same class as
-        // SchemaMigratorIntegrationTest's lateUpgradingDeployment... test).
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + collection + "', '" + legacyChash + "', "
-            + "'legacy un-rekeyed chunk text', ('[" + "0,".repeat(383) + "0]')::vector)");
+        // The embedding binds as a real[], deliberately NOT through the generated Vector
+        // binding (which renders ::nexus.vector): this INSERT runs at migrateUpTo's
+        // TARGET_CHANGESET_ID point, well before search-path-001 (placed near the
+        // changelog's end) has relocated the extension -- it is still in `public` here
+        // (nexus-cbo4a batch 9 item 0 discovery, same class as SchemaMigratorIntegrationTest's
+        // lateUpgradingDeployment... test). pgvector's real[] -> vector ASSIGNMENT cast is
+        // looked up by type oid, so it resolves in either schema. embedding_model stays
+        // unset (the column is nullable at this walk point).
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         // The 16 ASCII characters become 16 raw bytes, the same value the bytea
-        // escape-format literal produced. chunk_index stays unset: a typed insert
-        // emits only the columns set.
-        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+        // escape-format literal produced.
+        int chunkLanded = ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, legacyChash.getBytes(StandardCharsets.US_ASCII))
+            .set(CHUNKS.CHUNK_TEXT, "legacy un-rekeyed chunk text")
+            .set(DSL.field(DSL.name("embedding_384"), SQLDataType.REAL.array()), VectorSeeds.legacyEmbedding(384, 0f))
+            .execute();
+        // Positive control: the "chunk is gone" assertions after the walk are vacuous unless this
+        // legacy-width row actually landed.
+        assertThat(chunkLanded).as("legacy-width chunks seed for tenant %s must land", tenant).isEqualTo(1);
+        // chunk_index stays unset: a typed insert emits only the columns set.
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tenant + "-doc-1")
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)

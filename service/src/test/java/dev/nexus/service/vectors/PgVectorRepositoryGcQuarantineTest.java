@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
+import org.jooq.exception.DataAccessException;
+import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.impl.DSL;
@@ -328,10 +330,12 @@ class PgVectorRepositoryGcQuarantineTest {
 
     /** nexus-brxnp: backdates one chunk's {@code created_at}, for a non-vacuous "untouched by restore" proof. */
     private void backdateChunk(String collection, String chash, OffsetDateTime to) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            st.execute(
-                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET created_at = '" + to + "' WHERE collection = '"
-                + collection + "' AND chash = decode('" + chash + "', 'hex')");
+        try (var conn = pg.createConnection("")) {
+            DSL.using(conn, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.CREATED_AT, to)
+                .where(CHUNKS.COLLECTION.eq(collection))
+                .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .execute();
         }
     }
 
@@ -430,7 +434,7 @@ class PgVectorRepositoryGcQuarantineTest {
         String originCol = originCol("case3");
         String quarantineCol = quarantineCol("case3");
         // RDR-225: the statement below must fail on chash and nothing else, so the tenant has its partition
-        // leaves and the row names a real model (a missing leaf or model would also be an SQLException).
+        // leaves and the row names a real model (a missing leaf or model would also be a DataAccessException).
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT_A);
         }
@@ -440,13 +444,18 @@ class PgVectorRepositoryGcQuarantineTest {
         // one, so that refusal branch is now structurally dead, not merely
         // untested.
         assertThatThrownBy(() -> {
-            try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-                st.execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                    + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, '" + MODEL + "', 'x', "
-                    + "('[' || repeat('0,', 1023) || '0]')::nexus.vector)");
+            try (var conn = pg.createConnection("")) {
+                DSL.using(conn, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT_A)
+                    .set(CHUNKS.COLLECTION, originCol)
+                    .setNull(CHUNKS.CHASH)
+                    .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0f))
+                    .execute();
             }
-        }).isInstanceOf(SQLException.class);
+        }).isInstanceOfSatisfying(DataAccessException.class, ex ->
+            assertThat(ex.sqlState()).as("not_null_violation on chash").isEqualTo("23502"));
     }
 
     // ── PK COLLISION on re-quarantine: upsert (last-write-wins), never an error ─

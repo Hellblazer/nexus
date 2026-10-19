@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
@@ -14,11 +15,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
@@ -243,20 +245,15 @@ class CrossPreviewRepositoryTest {
         registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setString(3, hexChashValue);
-                ps.setString(4, tenant);
-                ps.setString(5, collection);
-                ps.setString(6, "seed text " + hexChashValue);
-                ps.setString(7, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChashValue))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
+                .set(VectorSeeds.chunkEmbedding(DIM), Vector.of(emb))
+                .execute();
         }
     }
 
@@ -275,29 +272,15 @@ class CrossPreviewRepositoryTest {
     private void seedCentroid(String tenant, String collection, long topicId, float[] emb) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, embedding_model, label, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, ?, (SELECT embedding_model FROM nexus.catalog_collections"
-                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, tenant);
-                ps.setString(5, collection);
-                ps.setString(6, "seed-centroid-label");
-                ps.setString(7, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(TAXONOMY_CENTROIDS)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
+                .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
+                .set(VectorSeeds.centroidEmbedding(DIM), Vector.of(emb))
+                .execute();
         }
-    }
-
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
     }
 }
