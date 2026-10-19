@@ -565,6 +565,34 @@ def wait_for_build_lease(
         waited += _BUILD_LEASE_POLL_S
 
 
+#: Written beside the jar by scripts/lib/gate-jar-cache.sh on every gate-jar
+#: cache install and store (nexus-k6zxp). Its content is the cache key.
+_GATE_JAR_MARKER = ".gate-jar-key"
+
+
+def _jar_freshness_mtime(jar: Path) -> float:
+    """The time to hold against the sources: ``max(jar mtime, marker mtime)``.
+
+    nexus-k6zxp: a gate-jar cache hit hard-links the cached jar into
+    ``service/target``, so every worktree on that key shares one inode and
+    therefore ONE mtime, which is the time the jar was built, not the time THIS
+    worktree last verified it. The install never touches that inode (another
+    worktree's hit would otherwise make this worktree's stale jar look newer than
+    its edited sources). The per-worktree signal is the private marker
+    ``.gate-jar-key`` the install writes beside the jar: "at this time the jar
+    was verified to be the one for this tree's build inputs". A source edited
+    after it reads STALE however many other worktrees hit the same entry since.
+    The jar's own mtime still wins when something rewrote the jar after the
+    marker (a bare ``mvnw package``), and with no marker (a plain build, the CI
+    stamp step) this is the jar mtime alone, as before.
+    """
+    jar_mtime = jar.stat().st_mtime
+    try:
+        return max(jar_mtime, (jar.parent / _GATE_JAR_MARKER).stat().st_mtime)
+    except OSError:
+        return jar_mtime
+
+
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     """Return a skip reason if the shaded service jar is missing, INCOMPLETE
     or STALE, else ``None`` (jar is current and safe to launch).
@@ -589,7 +617,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
             f"service jar not built: {_rel(jar)} "
             "(run: scripts/build-gate-jar.sh)"
         )
-    jar_mtime = jar.stat().st_mtime
+    jar_mtime = _jar_freshness_mtime(jar)
     newest_src = 0.0
     newest_src_path: Path | None = None
     found_any_src = False

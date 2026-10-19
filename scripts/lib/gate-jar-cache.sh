@@ -65,19 +65,39 @@
 # cp --reflink=auto, else cp -c, else plain cp when the filesystems differ).
 # A target that already holds the key's jar (recorded in
 # service/target/.gate-jar-key and verified against the entry: same inode, else
-# byte-equal) is not touched at all, only its mtime is refreshed. A link shares
-# the inode, so two guards keep a build from rewriting the cache entry through
-# it: the entry's jar is made read-only, and every builder this repo owns
-# (build-gate-jar.sh, mvnw-leased.sh) unlinks a shared target jar first --
+# byte-equal) is not touched at all, only its marker is refreshed. A link
+# shares the inode, so two guards keep a build from rewriting the cache entry
+# through it: the entry's jar is made read-only, and every builder this repo
+# owns (build-gate-jar.sh, mvnw-leased.sh, and the two lease-holding bare mvnw
+# callers tests/e2e/local-service-gate.sh and tests/e2e/gc-ab/run-ab.sh, which
+# bare_mvnw_lint_test.sh pins) unlinks a shared target jar first --
 # maven-jar-plugin with forceCreation rewrites the jar IN PLACE (measured
 # 2026-10-19: it truncated the linked entry to the thin jar, and fails on a
 # read-only one, so the unlink is required, not a nicety). A store whose entry
 # already verifies (jar a zip, build_ref non-empty) writes nothing.
 #
-# A hit is verified before use: the cached jar must open as a zip and carry
+# A hit is verified before use: the cached jar must open as a zip, carry
 # META-INF/MANIFEST.MF (the same completeness test
-# tests/db/_service_fixture.py applies), else it is a miss and the entry is
-# discarded.
+# tests/db/_service_fixture.py applies), and, when the entry records a
+# build_ref, carry the same build_ref in its embedded
+# META-INF/nexus/release.properties; otherwise it is a miss and the entry is
+# discarded. The last check catches a jar that was rewritten through a link by
+# a writer the unshare discipline does not cover (root in a container, sudo):
+# it is still a valid zip, but it is not the jar the entry's build_ref names.
+#
+# FRESHNESS IS PER WORKTREE. A linked jar shares one inode, hence one mtime,
+# across every worktree on the key, so install never touches the jar: another
+# worktree's hit would make this one's stale jar look newer than its edited
+# sources. The per-worktree signal is the key marker service/target/
+# .gate-jar-key, written (or re-written) on every install and every store, and
+# tests/db/_service_fixture.py reads max(jar mtime, marker mtime). The marker
+# says "at this time the jar was verified to be the one for this tree's build
+# inputs"; the jar's own mtime wins when something rewrote the jar later.
+#
+# WHAT A HIT STILL WRITES. No jar bytes. It copies the checkout's git index
+# (~0.5 MB) into a throwaway file to compute the key, rewrites that copy once
+# more (update-index --cacheinfo for the normalized release.properties), and
+# writes the 41-byte marker.
 #
 # `git add` writes the staged blobs into the repo's object store as ordinary
 # unreachable loose objects on a key computation; `git gc` / `git prune` reap
@@ -147,19 +167,27 @@ gate_jar_cache_key() {
     printf 'inputs=%s\nrelease_version=%s\nargs=%s\n' "$(printf '%s\n' "$listing" | shasum -a 256 | cut -c1-64)" "$ver" "$args" | shasum -a 256 | cut -c1-40
 }
 
-# _gate_jar_cache_jar_ok <jar> -- the jar opens as a zip and carries a manifest.
+# _gate_jar_cache_jar_ok <jar> [expected-build_ref] -- the jar opens as a zip
+# and carries a manifest; with an expected build_ref (non-empty), its embedded
+# META-INF/nexus/release.properties must name the same build_ref.
 _gate_jar_cache_jar_ok() {
-    python3 - "$1" <<'PY' >/dev/null 2>&1
+    python3 - "$1" "${2:-}" <<'PY' >/dev/null 2>&1
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as zf:
     zf.read("META-INF/MANIFEST.MF")
+    if sys.argv[2]:
+        props = zf.read("META-INF/nexus/release.properties").decode("utf-8", "replace")
+        refs = [l.split("=", 1)[1].strip() for l in props.splitlines() if l.startswith("build_ref=")]
+        if refs != [sys.argv[2]]:
+            sys.exit(1)
 PY
 }
 
 _gate_jar_cache_entry_ok() {
-    local entry="$1"
+    local entry="$1" ref=""
     [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
-    _gate_jar_cache_jar_ok "$entry/jar"
+    ref="$(tr -d '\r\n' < "$entry/build_ref" 2>/dev/null)"
+    _gate_jar_cache_jar_ok "$entry/jar" "$ref"
 }
 
 # _gate_jar_cache_entry_complete <entry> -- entry_ok AND a non-empty build_ref:
@@ -171,9 +199,11 @@ _gate_jar_cache_entry_complete() {
 
 # _gate_jar_cache_place <src> <dst> -- put a copy of <src> at the NEW path <dst>
 # by the cheapest means that works: hard link, then a copy-on-write clone
-# (GNU cp --reflink=auto; macOS cp -c), then a plain copy. Sets
-# _GATE_JAR_PLACED to link|clone|copy. A clone or copy is made writable (a link
-# keeps the entry's read-only mode, shared by inode).
+# (macOS cp -c, which fails where it cannot clone; GNU cp --reflink=auto, which
+# silently falls back to a full copy, so it is reported as clone-or-copy), then
+# a plain copy. Sets _GATE_JAR_PLACED to link|clone|clone-or-copy|copy. A clone
+# or copy is made writable (a link keeps the entry's read-only mode, shared by
+# inode).
 _GATE_JAR_PLACED=""
 _gate_jar_cache_place() {
     local src="$1" dst="$2"
@@ -183,7 +213,7 @@ _gate_jar_cache_place() {
         _GATE_JAR_PLACED="link"; return 0
     fi
     if cp --reflink=auto "$src" "$dst" 2>/dev/null; then
-        _GATE_JAR_PLACED=clone
+        _GATE_JAR_PLACED=clone-or-copy
     elif [[ "$(uname -s 2>/dev/null)" == Darwin ]] && cp -c "$src" "$dst" 2>/dev/null; then
         _GATE_JAR_PLACED=clone
     elif cp "$src" "$dst" 2>/dev/null; then
@@ -212,28 +242,29 @@ gate_jar_cache_target_holds() {
 }
 
 # gate_jar_cache_install <key> <entry> <dest-jar> -- make <dest-jar> the entry's
-# jar. Prints nothing; sets _GATE_JAR_PLACED to kept|link|clone|copy. The new
-# file is built beside <dest-jar> and renamed over it, so a reader never sees a
-# half-written jar. The mtime is refreshed in every case (a hit means "newer
-# than the sources", which the service freshness gate reads), by touch, which
-# writes no data; on a link that is the shared inode, which is harmless.
+# jar. Prints nothing; sets _GATE_JAR_PLACED to kept|link|clone|clone-or-copy|
+# copy. The new file is built beside <dest-jar> and renamed over it, so a reader
+# never sees a half-written jar. The jar itself is never touched afterwards: on
+# a link it is the entry's inode, shared with other worktrees, and its mtime is
+# not ours to move. The per-worktree freshness signal is the key marker, which
+# is (re)written on every install, kept included (see FRESHNESS above).
 gate_jar_cache_install() {
-    local key="$1" entry="$2" dest="$3" tmp
+    local key="$1" entry="$2" dest="$3" tmp marker how
+    marker="$(_gate_jar_cache_marker "$dest")"
     if gate_jar_cache_target_holds "$key" "$entry" "$dest"; then
-        touch "$dest" 2>/dev/null || true
+        printf '%s\n' "$key" > "$marker" 2>/dev/null || true
         _GATE_JAR_PLACED=kept
         return 0
     fi
     tmp="$(dirname "$dest")/.gate-jar.tmp.$$"
     _gate_jar_cache_place "$entry/jar" "$tmp" || return 1
-    local how="$_GATE_JAR_PLACED"
+    how="$_GATE_JAR_PLACED"
     if ! mv -f "$tmp" "$dest" 2>/dev/null; then
         rm -f "$tmp"
         return 1
     fi
     _GATE_JAR_PLACED="$how"
-    touch "$dest" 2>/dev/null || true
-    printf '%s\n' "$key" > "$(_gate_jar_cache_marker "$dest")" 2>/dev/null || true
+    printf '%s\n' "$key" > "$marker" 2>/dev/null || true
     return 0
 }
 
@@ -265,7 +296,7 @@ gate_jar_cache_lookup() {
         printf '%s\n' "$entry"
         return 0
     fi
-    echo "gate_jar_cache_lookup: discarding corrupt cache entry $entry" >&2
+    echo "gate_jar_cache_lookup: discarding unusable cache entry $entry (not a complete jar, or its embedded build_ref differs from the entry's)" >&2
     rm -rf "$entry"
     return 1
 }

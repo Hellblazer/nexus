@@ -129,6 +129,20 @@ MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q packag
 echo "private jar" > "$tjar1a"
 MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q package >/dev/null 2>&1
 [[ -f "$tjar1a" ]] && ok "an unshared writable jar is left for the build to replace" || bad "private jar removed"
+# Every goal that reaches the jar: the phases after package, and the plugin
+# goals that write it directly, bare or prefixed.
+for goal1a in verify install deploy integration-test jar:jar shade:shade \
+        org.apache.maven.plugins:maven-jar-plugin:3.4.1:jar \
+        org.apache.maven.plugins:maven-shade-plugin:3.6.0:shade; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ ! -e "$tjar1a" ]] && ok "goal '$goal1a' unlinked the shared jar" || bad "goal '$goal1a' left the shared jar linked"
+done
+for goal1a in compile test test-compile clean; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ "$tjar1a" -ef "$entry1a" ]] && ok "goal '$goal1a' leaves the shared jar linked" || bad "goal '$goal1a' unlinked the jar"
+done
 rm -f "$tjar1a" "$entry1a"
 
 # ── Test 1b: --lab-run <class> takes the lease FIRST, then runs mvnw under

@@ -46,7 +46,7 @@ python3 - "$PWD/target/nexus-service-1.0-SNAPSHOT.jar" "$PWD/src/main/resources/
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as zf:
     zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-    zf.write(sys.argv[2], "release.properties")
+    zf.write(sys.argv[2], "META-INF/nexus/release.properties")
 PY
 STUB
 chmod +x "$repo/service/mvnw"
@@ -70,7 +70,7 @@ ref2="$(printf '%s\n' "$out2" | sed -n 's/^stamped build_ref=//p')"
 [[ -n "$ref2" ]] && ok "build_ref printed ($ref2)" || bad "no build_ref line"
 python3 - "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" "$ref2" <<'PY' && ok "jar payload carries release_version=0.1.107 and the printed build_ref" || bad "jar payload lacks the stamp"
 import sys, zipfile
-p = zipfile.ZipFile(sys.argv[1]).read("release.properties").decode()
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
 assert "release_version=0.1.107\n" in p and f"build_ref={sys.argv[2]}\n" in p, p
 PY
 [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after a successful build" || bad "props dirty after success"
@@ -84,7 +84,7 @@ out3="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc3=$?
 [[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 2 ]] && ok "mvnw NOT invoked on a hit" || bad "mvnw ran on a hit"
 [[ "$out3" == *"stamped build_ref=$ref2"* ]] && ok "hit reprints the cached build_ref" || bad "hit printed a different build_ref: $out3"
 [[ -f "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" ]] && ok "jar copied into service/target" || bad "no jar after hit"
-if [[ "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" -nt "$repo/service/src/main/A.java" ]]; then ok "copied jar is newer than the sources (freshness gate satisfied)"; else bad "copied jar older than sources"; fi
+if [[ "$repo/service/target/.gate-jar-key" -nt "$repo/service/src/main/A.java" ]]; then ok "the key marker is newer than the sources (the per-worktree freshness signal)"; else bad "key marker older than sources"; fi
 [[ "$out3" == *"built "* ]] && ok "hit prints the built line callers grep for" || bad "no built line on hit"
 
 echo "Test 4: a leftover stamp in release.properties REFUSES (nexus-iexvl guard) instead of silently serving a cache hit"
@@ -146,6 +146,7 @@ source "$HERE/lib/gate-jar-cache.sh"
 tjar="$repo/service/target/nexus-service-1.0-SNAPSHOT.jar"
 sha_of() { shasum -a 256 "$1" | cut -c1-64; }
 ino_of() { ls -i "$1" | awk '{print $1}'; }
+mtime_of() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
 
 echo "Test 7 (nexus-k6zxp): a HIT links the cached jar (no copy); a repeat HIT touches nothing; a later MISS leaves the entry's bytes alone"
 key7="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry7="$WORKDIR/cache/$key7"
@@ -158,10 +159,12 @@ out7a="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7a=$?
 [[ -z "$(ls -A "$repo/service/target" | grep -F .gate-jar.tmp)" ]] && ok "no temp jar left in service/target" || bad "temp jar left behind"
 sum7="$(sha_of "$entry7/jar")"; ref7="$(cat "$entry7/build_ref")"; ino7="$(ino_of "$tjar")"
 touch -t 202101010000 "$tjar"; stale7="$WORKDIR/stale7"; touch -t 202101010000 "$stale7"
+touch -t 202001010000 "$repo/service/target/.gate-jar-key"; jarm7="$(mtime_of "$tjar")"
 out7b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7b=$?
 [[ $rc7b -eq 0 && "$out7b" == *"HIT"* && "$out7b" == *"jar kept"* ]] && ok "a repeat HIT keeps the jar already in service/target" || bad "repeat HIT did not keep it (rc $rc7b): $out7b"
 [[ "$(ino_of "$tjar")" == "$ino7" && "$(sha_of "$entry7/jar")" == "$sum7" ]] && ok "same inode, same bytes after the repeat HIT" || bad "repeat HIT replaced or altered the jar"
-[[ "$tjar" -nt "$stale7" ]] && ok "the kept jar's mtime is refreshed (freshness gate)" || bad "kept jar is stale"
+[[ "$repo/service/target/.gate-jar-key" -nt "$stale7" ]] && ok "the key marker's mtime is refreshed (per-worktree freshness signal)" || bad "marker is stale after a repeat HIT"
+[[ "$(mtime_of "$tjar")" == "$jarm7" ]] && ok "the shared jar's own mtime is NOT touched (another worktree's freshness must not move)" || bad "a HIT touched the shared inode's mtime"
 [[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt7" ]] && ok "mvnw not invoked by either HIT" || bad "mvnw ran on a HIT"
 echo 'class D {}' > "$repo/service/src/main/D.java"
 out7c="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc7c=$?
@@ -189,6 +192,67 @@ out8="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc8=$?
 out8b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"
 [[ "$out8b" == *"HIT"* ]] && ok "the repaired entry HITS" || bad "repaired entry does not hit: $out8b"
 rm -f "$repo/service/src/main/E.java"
+
+echo "Test 9 (nexus-k6zxp): the gate's bare rebuild works after a build-gate-jar.sh hit and after a miss+store"
+# tests/e2e/local-service-gate.sh rebuilds with a bare `./mvnw -q package` while holding the lease. The real jar
+# plugin fails on a read-only jar ("...jar is read-only"); this builder does the same, so the sequence the gate
+# runs (gate_jar_cache_unshare, then the build) is exercised against the state build-gate-jar.sh leaves behind.
+strict9="$WORKDIR/mvnw-strict"
+cat > "$strict9" <<'STUB'
+#!/usr/bin/env bash
+j=target/nexus-service-1.0-SNAPSHOT.jar
+if [[ -e "$j" && ! -w "$j" ]]; then echo "ERROR: jar is read-only: $j" >&2; exit 1; fi
+mkdir -p target
+python3 - "$j" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+PY
+STUB
+chmod +x "$strict9"
+gate_rebuild() { (cd "$repo/service" && "$strict9" >/dev/null 2>&1); }
+for how9 in hit store; do
+    if [[ "$how9" == store ]]; then echo 'class G {}' > "$repo/service/src/main/G.java"; fi
+    out9="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"
+    key9="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry9="$WORKDIR/cache/$key9"
+    [[ ( "$how9" == hit && "$out9" == *"HIT"* ) || ( "$how9" == store && "$out9" == *"MISS"* ) ]] && ok "[$how9] build-gate-jar.sh ran as a $how9" || bad "[$how9] unexpected run: $out9"
+    [[ "$tjar" -ef "$entry9/jar" ]] && ok "[$how9] service/target's jar is shared with the entry" || bad "[$how9] jar not shared"
+    sum9="$(sha_of "$entry9/jar")"
+    if [[ "$(id -u)" != 0 ]]; then
+        gate_rebuild && bad "[$how9] control: a bare rebuild WITHOUT unshare succeeded on a read-only linked jar" || ok "[$how9] control: a bare rebuild without unshare fails, as the real jar plugin does"
+    fi
+    gate_jar_cache_unshare "$tjar"
+    gate_rebuild && ok "[$how9] the gate's sequence (unshare, then rebuild) succeeds" || bad "[$how9] rebuild failed after unshare"
+    [[ "$(sha_of "$entry9/jar")" == "$sum9" ]] && ok "[$how9] the cache entry's bytes are untouched" || bad "[$how9] the entry changed"
+done
+rm -f "$repo/service/src/main/G.java"
+
+echo "Test 10 (nexus-k6zxp): an entry whose jar is valid but carries ANOTHER build_ref is a MISS that discards it"
+echo 'class H {}' > "$repo/service/src/main/H.java"
+(cd "$repo" && scripts/build-gate-jar.sh >/dev/null 2>&1)
+key10="$(gate_jar_cache_key "$repo" 0.1.107 "")"; entry10="$WORKDIR/cache/$key10"
+ref10="$(cat "$entry10/build_ref")"
+[[ -s "$entry10/build_ref" ]] && ok "seeded: a complete entry" || bad "no seeded entry"
+# what root in a container would leave: the entry's inode rewritten into a different, still-valid jar
+rm -f "$tjar" "$repo/service/target/.gate-jar-key" "$entry10/jar"
+python3 - "$entry10/jar" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+    zf.writestr("META-INF/nexus/release.properties", "release_version=0.1.107\nbuild_ref=someone-elses+1-2\n")
+PY
+cnt10="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out10="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc10=$?
+[[ $rc10 -eq 0 && "$out10" == *"MISS"* && "$out10" != *"HIT key"* ]] && ok "the mismatching entry is not served" || bad "served a jar stamped with another build_ref (rc $rc10): $out10"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt10 + 1))" ]] && ok "mvnw rebuilt" || bad "mvnw not invoked"
+[[ "$out10" == *"discarding unusable cache entry"* ]] && ok "the discard is disclosed" || bad "no discard message: $out10"
+new10="$(cat "$entry10/build_ref")"
+[[ "$new10" != "$ref10" && -s "$entry10/jar" ]] && python3 - "$entry10/jar" "$new10" <<'PY' && ok "the entry now holds the rebuilt jar and its own build_ref" || bad "entry not repaired"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert f"build_ref={sys.argv[2]}\n" in p, p
+PY
+rm -f "$repo/service/src/main/H.java"
 
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &

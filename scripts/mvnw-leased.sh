@@ -170,10 +170,13 @@ trap '_forward_signal TERM' TERM
 # PLACE: through the link that would corrupt the entry (and on the read-only
 # entry it fails the build). A goal that reaches the package phase therefore
 # unlinks a shared jar first; a goal that stops short of it (compile, test)
-# leaves the jar, and the cache link, alone.
+# leaves the jar, and the cache link, alone. A plugin goal that writes the jar
+# directly counts too (jar:jar, shade:shade, org.apache.maven.plugins:
+# maven-jar-plugin:3.4.1:jar, ...), as does any phase that runs after package.
 for _arg in "$@"; do
     case "$_arg" in
-        package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test)
+        package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test|\
+        *:jar|*:shade|*jar-plugin*|*shade-plugin*)
             # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
             source "$repo_root/scripts/lib/gate-jar-cache.sh"
             gate_jar_cache_unshare "$repo_root/service/target/nexus-service-1.0-SNAPSHOT.jar"

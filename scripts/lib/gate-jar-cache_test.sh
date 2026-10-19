@@ -31,12 +31,15 @@ echo 'readme' > "$repo/service/README.md"
 echo 'junk' > "$repo/service/target/out.class"
 git -C "$repo" add .gitignore service && git -C "$repo" commit -qm base
 
-_fake_jar() {  # a real zip with a manifest, so the completeness probe passes
-    python3 - "$1" <<'PY'
+_fake_jar() {  # <path> [build_ref]: a real zip with a manifest, so the completeness probe passes;
+    # with a build_ref it carries the stamped META-INF/nexus/release.properties a real gate jar has
+    python3 - "$1" "${2:-}" "${3:-}" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as zf:
     zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-    zf.writestr("payload", sys.argv[1])
+    zf.writestr("payload", sys.argv[3] or sys.argv[1])
+    if sys.argv[2]:
+        zf.writestr("META-INF/nexus/release.properties", "release_version=0.1.0\nbuild_ref=%s\nname=nexus\n" % sys.argv[2])
 PY
 }
 
@@ -133,7 +136,7 @@ ks2="$(gate_jar_cache_key "$repo3" 0.1.0 "")"
 [[ -n "$ks1" && "$ks1" != "$ks2" ]] && ok "renaming a directory whose name has a space moves the key" || bad "space-path rename did not move the key ($ks1 vs $ks2)"
 
 echo "Test 2: store/lookup roundtrip, worktree shares the cache, corrupt entry is a miss"
-jar="$WORKDIR/built.jar"; _fake_jar "$jar"
+jar="$WORKDIR/built.jar"; _fake_jar "$jar" "abc+1"
 gate_jar_cache_store "$repo" "$k3" "$jar" "abc+1" && ok "store rc 0" || bad "store failed"
 hit="$(gate_jar_cache_lookup "$repo" "$k3")" && ok "lookup hit: $hit" || bad "lookup missed after store"
 [[ "$(cat "$hit/build_ref")" == "abc+1" ]] && ok "build_ref round-trips" || bad "build_ref lost"
@@ -231,18 +234,13 @@ unset -f rm
 
 echo "Test 7 (nexus-k6zxp): a store links the jar into the entry, read-only, and a second store writes nothing"
 r7="$WORKDIR/root7"; export NX_GATE_JAR_CACHE="$r7"
-j7="$WORKDIR/j7.jar"; _fake_jar "$j7"
+j7="$WORKDIR/j7.jar"; _fake_jar "$j7" "ref-7"
 gate_jar_cache_store "$repo" k7 "$j7" "ref-7" && ok "store rc 0" || bad "store failed"
 [[ "$j7" -ef "$r7/k7/jar" ]] && ok "the entry's jar is the built jar's own inode (no 131 MB copy)" || bad "entry jar is a copy, not a link"
 [[ ! -w "$r7/k7/jar" || "$(id -u)" == 0 ]] && ok "the entry's jar is read-only" || bad "entry jar is writable"
 [[ "$(cat "$(dirname "$j7")/.gate-jar-key")" == k7 ]] && ok "the key is recorded beside the built jar" || bad "no key marker beside the built jar"
 ino7="$(ls -i "$r7/k7/jar" | awk '{print $1}')"
-j7b="$WORKDIR/j7b.jar"; python3 - "$j7b" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], "w") as zf:
-    zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-    zf.writestr("payload", "a different jar")
-PY
+j7b="$WORKDIR/j7b.jar"; _fake_jar "$j7b" "ref-7c" "a different jar"
 gate_jar_cache_store "$repo" k7 "$j7b" "ref-7b" && ok "second store rc 0" || bad "second store failed"
 [[ "$(ls -i "$r7/k7/jar" | awk '{print $1}')" == "$ino7" && "$(cat "$r7/k7/build_ref")" == "ref-7" ]] \
     && ok "a store of a key whose entry verifies writes nothing" || bad "second store replaced a verified entry"
@@ -254,7 +252,7 @@ NX_GATE_JAR_CACHE="$r7" gate_jar_cache_lookup "$repo" k7 >/dev/null && ok "the r
 
 echo "Test 7b: store falls back to a copy when linking fails (a different filesystem)"
 ln() { return 1; }
-j7c="$WORKDIR/j7c.jar"; _fake_jar "$j7c"
+j7c="$WORKDIR/j7c.jar"; _fake_jar "$j7c" "ref-7c2"
 gate_jar_cache_store "$repo" k7c "$j7c" "ref-7c2" && ok "store rc 0 with ln failing" || bad "store failed without ln"
 unset -f ln
 [[ -f "$r7/k7c/jar" && ! "$j7c" -ef "$r7/k7c/jar" ]] && cmp -s "$j7c" "$r7/k7c/jar" && ok "the entry holds an independent byte-equal copy" || bad "no copy after a failed link"
@@ -267,9 +265,11 @@ gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == link ]] 
 [[ "$(cat "$t8/.gate-jar-key")" == k7 ]] && ok "key recorded beside the target" || bad "no key marker"
 ino8="$(ls -i "$dest" | awk '{print $1}')"
 touch -t 202001010000 "$dest"; ref8="$WORKDIR/ref8"; touch -t 202101010000 "$ref8"
+touch -t 202001010000 "$t8/.gate-jar-key"
 gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" == kept ]] && ok "second install keeps the target (no copy, no link)" || bad "second install: placed=$_GATE_JAR_PLACED"
 [[ "$(ls -i "$dest" | awk '{print $1}')" == "$ino8" ]] && ok "the target's inode is unchanged" || bad "target was replaced"
-[[ "$dest" -nt "$ref8" ]] && ok "a kept target's mtime is refreshed (the freshness gate compares it to the sources)" || bad "kept target is stale"
+[[ "$t8/.gate-jar-key" -nt "$ref8" ]] && ok "a kept target's marker mtime is refreshed (the per-worktree freshness signal)" || bad "kept target's marker is stale"
+[[ "$ref8" -nt "$dest" ]] && ok "and the jar's own mtime, which a link shares with other worktrees, is NOT touched" || bad "install touched the shared jar's mtime"
 # a marker is never trusted alone: a different jar under the same marker is replaced
 rm -f "$dest"; cp "$j7" "$dest"; chmod u+w "$dest"
 ! cmp -s "$dest" "$entry/jar" || bad "test setup: the stand-in jar equals the entry"
@@ -284,8 +284,42 @@ gate_jar_cache_install k7 "$entry" "$dest" && [[ "$_GATE_JAR_PLACED" != kept ]] 
 rm -f "$dest" "$t8/.gate-jar-key"
 ln() { return 1; }
 gate_jar_cache_install k7 "$entry" "$dest"; unset -f ln
-[[ "$_GATE_JAR_PLACED" == copy || "$_GATE_JAR_PLACED" == clone ]] && [[ ! "$dest" -ef "$entry/jar" ]] && cmp -s "$dest" "$entry/jar" && ok "ln failing: an independent byte-equal $_GATE_JAR_PLACED" || bad "no fallback copy (placed=$_GATE_JAR_PLACED)"
+[[ "$_GATE_JAR_PLACED" == copy || "$_GATE_JAR_PLACED" == clone || "$_GATE_JAR_PLACED" == clone-or-copy ]] && [[ ! "$dest" -ef "$entry/jar" ]] && cmp -s "$dest" "$entry/jar" && ok "ln failing: an independent byte-equal $_GATE_JAR_PLACED" || bad "no fallback copy (placed=$_GATE_JAR_PLACED)"
 [[ -w "$dest" ]] && ok "the fallback copy is writable" || bad "fallback copy is read-only"
+
+echo "Test 8b (nexus-k6zxp): a hit verifies the jar's embedded build_ref against the entry's"
+rb="$WORKDIR/rootb"; export NX_GATE_JAR_CACHE="$rb"
+jb1="$WORKDIR/jb1.jar"; _fake_jar "$jb1" "ref-b"
+gate_jar_cache_store "$repo" kb "$jb1" "ref-b"
+gate_jar_cache_lookup "$repo" kb >/dev/null && ok "an entry whose jar carries the entry's build_ref hits" || bad "matching build_ref missed"
+# a VALID zip with a manifest, but stamped with another build_ref: what a root/sudo writer leaves
+rm -f "$rb/kb/jar"; _fake_jar "$rb/kb/jar" "some-other-ref"
+gate_jar_cache_lookup "$repo" kb >/dev/null 2>"$WORKDIR/lookup-b.err" && bad "a jar stamped with a different build_ref was served" || ok "a valid jar stamped with a DIFFERENT build_ref is a miss"
+[[ ! -d "$rb/kb" ]] && ok "and the entry is discarded" || bad "mismatching entry still present"
+grep -q "build_ref differs" "$WORKDIR/lookup-b.err" && ok "the discard is disclosed" || bad "no disclosure: $(cat "$WORKDIR/lookup-b.err")"
+gate_jar_cache_store "$repo" kb "$jb1" "ref-b" && gate_jar_cache_lookup "$repo" kb >/dev/null && ok "the next store repairs it and it hits again" || bad "no repair after the discard"
+# a jar with no release.properties at all cannot prove its build_ref: also a miss
+rm -f "$rb/kb/jar"; _fake_jar "$rb/kb/jar"
+gate_jar_cache_lookup "$repo" kb >/dev/null 2>&1 && bad "a jar with no release.properties was served" || ok "a jar with no embedded build_ref is a miss"
+# a store treats such an entry as incomplete too, instead of leaving it in place
+gate_jar_cache_store "$repo" kb "$jb1" "ref-b"; rm -f "$rb/kb/jar"; _fake_jar "$rb/kb/jar" "wrong"
+gate_jar_cache_store "$repo" kb "$jb1" "ref-b"
+gate_jar_cache_lookup "$repo" kb >/dev/null && ok "a store repairs an entry whose jar is stamped with another build_ref" || bad "store left a mismatching entry"
+export NX_GATE_JAR_CACHE="$r7"
+
+echo "Test 8c (nexus-k6zxp): the placement label says what happened; GNU cp --reflink=auto may silently copy, so it is never reported as a clone"
+t8c="$WORKDIR/t8c"; mkdir -p "$t8c"; d8c="$t8c/nexus.jar"
+ln() { return 1; }
+cp() { if [[ "$1" == --reflink=auto ]]; then shift; command cp "$@"; else return 1; fi; }   # GNU-like: only --reflink=auto works
+gate_jar_cache_install k7 "$entry" "$d8c"
+unset -f cp
+[[ "$_GATE_JAR_PLACED" == clone-or-copy ]] && ok "a --reflink=auto placement is labelled clone-or-copy" || bad "label for --reflink=auto: $_GATE_JAR_PLACED"
+cmp -s "$d8c" "$entry/jar" && ok "and the bytes are right" || bad "bytes differ after the reflink=auto path"
+rm -f "$d8c" "$t8c/.gate-jar-key"
+cp() { if [[ "$1" == -* ]]; then return 1; else command cp "$@"; fi; }   # no flag works: a plain copy
+gate_jar_cache_install k7 "$entry" "$d8c"
+unset -f cp ln
+[[ "$_GATE_JAR_PLACED" == copy ]] && ok "a plain-copy placement is labelled copy" || bad "label for a plain copy: $_GATE_JAR_PLACED"
 
 echo "Test 9 (nexus-k6zxp): unshare breaks the link before an in-place rewrite, so the entry's bytes survive"
 rm -f "$dest" "$t8/.gate-jar-key"; gate_jar_cache_install k7 "$entry" "$dest"

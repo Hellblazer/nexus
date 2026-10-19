@@ -515,3 +515,101 @@ def test_the_freshness_dirs_sit_inside_the_gate_jar_cache_key_paths() -> None:
         assert "src/test" not in rel, f"{rel}: a test tree marks the jar stale"
         assert any(rel == k or rel.startswith(k + "/") for k in key_paths), (
             f"{rel} is watched for jar staleness but is not part of the gate-jar cache key {key_paths}")
+
+
+# ── nexus-k6zxp: a linked jar shares its mtime across worktrees ───────────────
+
+_GATE_JAR_LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "gate-jar-cache.sh"
+
+
+def _gate_jar_install(key: str, entry: Path, dest: Path) -> str:
+    """Run the REAL ``gate_jar_cache_install`` (what a build-gate-jar.sh hit calls)."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1" && gate_jar_cache_install "$2" "$3" "$4" && printf %s "$_GATE_JAR_PLACED"',
+         "_", str(_GATE_JAR_LIB), key, str(entry), str(dest)],
+        capture_output=True, text=True, check=True,
+    )
+    return proc.stdout
+
+
+class TestLinkedJarFreshnessIsPerWorktree:
+    """A gate-jar cache hit hard-links one cached jar into every worktree on a key,
+    so those worktrees share ONE inode and ONE mtime. Freshness must read the
+    worktree's own marker, or another worktree's hit makes an edited worktree's
+    stale jar look newer than its sources (a silent stale-jar false pass)."""
+
+    @staticmethod
+    def _worktree(tmp_path: Path, monkeypatch, name: str, src_mtime: float) -> tuple[Path, Path]:
+        repo = tmp_path / name
+        src = repo / "service" / "src" / "main" / "java"
+        _touch(src / "Main.java", src_mtime)
+        return repo, src
+
+    @staticmethod
+    def _watch(monkeypatch, repo: Path, src: Path) -> None:
+        monkeypatch.setattr("tests.db._service_fixture._REPO_ROOT", repo)
+        monkeypatch.setattr("tests.db._service_fixture._SERVICE_SRC_DIRS", (src,))
+
+    @posix_only("drives the bash gate-jar cache and hard links")
+    def test_another_worktrees_hit_cannot_freshen_an_edited_worktree(self, tmp_path: Path, monkeypatch) -> None:
+        import time
+
+        # The entry's jar was built at t=1000; both worktrees were checked out
+        # later (sources at t=1500), so a bare jar-mtime comparison calls a
+        # freshly linked jar STALE.
+        entry = tmp_path / "cache" / "k1"
+        _touch(entry / "built.jar", 1000.0)  # a real zip (the freshness gate opens it)
+        (entry / "built.jar").rename(entry / "jar")
+        os.chmod(entry / "jar", 0o444)
+        repo_a, src_a = self._worktree(tmp_path, monkeypatch, "A", 1500.0)
+        repo_c, src_c = self._worktree(tmp_path, monkeypatch, "C", 1500.0)
+        jar_a = repo_a / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        jar_c = repo_c / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        for jar in (jar_a, jar_c):
+            jar.parent.mkdir(parents=True)
+            assert _gate_jar_install("k1", entry, jar) == "link"
+        assert os.path.samefile(jar_a, jar_c), "test premise: the two worktrees share one inode"
+
+        # 1. C has just hit: its sources predate its install, so it is FRESH
+        #    although the shared jar's own mtime (1000) predates them.
+        self._watch(monkeypatch, repo_c, src_c)
+        assert jar_freshness_skip_reason(jar_c) is None
+
+        # 2. Time passes; C edits a source after its install.
+        marker_c = jar_c.parent / ".gate-jar-key"
+        long_ago = time.time() - 100
+        os.utime(marker_c, (long_ago, long_ago))
+        os.utime(src_c / "Main.java", (long_ago + 50, long_ago + 50))
+
+        # 3. A hits the same entry again now (a repeat build-gate-jar.sh run).
+        assert _gate_jar_install("k1", entry, jar_a) == "kept"
+
+        # C's jar is still the one built before its edit: STALE, whatever A did.
+        reason = jar_freshness_skip_reason(jar_c)
+        assert reason is not None and "STALE" in reason and "Main.java" in reason
+
+        # A, untouched since its own install, stays fresh.
+        self._watch(monkeypatch, repo_a, src_a)
+        assert jar_freshness_skip_reason(jar_a) is None
+
+    def test_a_jar_rewritten_after_the_marker_is_judged_by_its_own_mtime(self, tmp_path: Path, monkeypatch) -> None:
+        """A bare ``mvnw package`` after a hit leaves an old marker beside a NEW jar:
+        the jar's own mtime is the reference, so a build of the current sources is fresh."""
+        repo, src = self._worktree(tmp_path, monkeypatch, "R", 3000.0)
+        jar = repo / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        _touch(jar, 4000.0)
+        marker = jar.parent / ".gate-jar-key"
+        marker.write_text("oldkey\n")
+        os.utime(marker, (2000.0, 2000.0))
+        self._watch(monkeypatch, repo, src)
+        assert jar_freshness_skip_reason(jar) is None
+
+    def test_no_marker_means_the_jar_mtime_alone(self, tmp_path: Path, monkeypatch) -> None:
+        repo, src = self._worktree(tmp_path, monkeypatch, "P", 3000.0)
+        jar = repo / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        _touch(jar, 2000.0)
+        self._watch(monkeypatch, repo, src)
+        reason = jar_freshness_skip_reason(jar)
+        assert reason is not None and "STALE" in reason

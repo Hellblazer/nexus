@@ -156,7 +156,7 @@ if [[ -n "$cache_key" ]] && cached="$(gate_jar_cache_lookup "$repo_root" "$cache
     # linking fails (nexus-k6zxp).
     if hit_ref="$(cat "$cached/build_ref" 2>/dev/null)" && [[ -n "$hit_ref" ]] \
         && gate_jar_cache_install "$cache_key" "$cached" "$target_jar" \
-        && _gate_jar_cache_jar_ok "$target_jar"; then
+        && _gate_jar_cache_jar_ok "$target_jar" "$hit_ref"; then
         echo "stamped release_version=$ver"
         echo "stamped build_ref=$hit_ref"
         echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached; jar $_GATE_JAR_PLACED)"

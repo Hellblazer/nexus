@@ -60,6 +60,8 @@ lock_acquire "$LOCKDIR" || exit 1
 # a different, harness-wide concurrency guard; the two are complementary).
 # shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
 source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
+# shellcheck source=../../../scripts/lib/gate-jar-cache.sh disable=SC1091
+source "$SCRIPT_DIR/../../../scripts/lib/gate-jar-cache.sh"   # nexus-k6zxp: gate_jar_cache_unshare
 trap 'build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
@@ -79,6 +81,12 @@ build_variant() { # gc-name
   # single-writer resource the host-side lease guards — acquire it here on
   # the host, around the docker invocation, not inside the container.
   build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build "--gc=${gc}"
+  # nexus-k6zxp: a build-gate-jar.sh hit or store leaves the shaded jar
+  # hard-linked to the read-only gate-jar cache entry. The container runs as
+  # root, which ignores the read-only mode and would rewrite the jar IN PLACE
+  # through the link, corrupting the cache entry and every linked worktree.
+  # Unlink a shared or read-only jar here on the host, before docker run.
+  gate_jar_cache_unshare "$PWD/service/target/nexus-service-1.0-SNAPSHOT.jar"
   docker run --rm --entrypoint bash \
     -e NX_NO_TELEMETRY=1 \
     --add-host=host.docker.internal:host-gateway \

@@ -311,6 +311,8 @@ source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
 source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
 # shellcheck source=./scripts/lib/release-props-lease.sh disable=SC1091
 source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
+# shellcheck source=./scripts/lib/gate-jar-cache.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/gate-jar-cache.sh"   # nexus-k6zxp: gate_jar_cache_unshare before the bare package below
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME"
 export HOME="$GATE_HOME"
@@ -538,6 +540,12 @@ print(jar_freshness_skip_reason() or "")
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Bare mvnw, deliberately (see the lease comment above) — this process
   # already holds the lease scripts/mvnw-leased.sh would otherwise acquire.
+  # nexus-k6zxp: a build-gate-jar.sh hit or store leaves this jar hard-linked
+  # to the read-only gate-jar cache entry, and the jar plugin rewrites an
+  # existing jar in place -- unlink a shared or read-only jar first, or this
+  # rebuild fails ("jar is read-only") right after the release checklist's
+  # build-gate-jar.sh run. A private writable jar is left alone.
+  gate_jar_cache_unshare "$JAR"
   if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
     release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
     RELEASE_PROPS_SNAPSHOT=""

@@ -67,8 +67,8 @@ things to avoid carefully; they are impossible.
    buys "we gated what we shipped", which is the whole point of a battery.
 
    The engine build needs neither tree: the lease lives in the git common
-   dir and the jar cache is keyed on `service/` content, so any worktree
-   gets a copy.
+   dir and the jar cache is keyed on the engine's build inputs, so any
+   worktree links the cached jar (`scripts/build-gate-jar.sh`).
 
 5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Scoped runs
    are unaffected. This rule exists because worktrees DESTROY an accidental
