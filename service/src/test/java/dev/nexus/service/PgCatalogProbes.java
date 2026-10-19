@@ -369,6 +369,12 @@ public final class PgCatalogProbes {
             DSL.field(DSL.name("conname"), String.class).eq(conname));
     }
 
+    /** Number of {@code pg_constraint} rows named {@code conname} (schema-agnostic, as the raw probes were). */
+    public static int constraintCount(DSLContext ctx, String conname) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_constraint")),
+            DSL.field(DSL.name("conname"), String.class).eq(conname));
+    }
+
     /** {@code pg_constraint.convalidated} for the constraint named {@code conname}, or null. */
     public static Boolean constraintValidated(DSLContext ctx, String conname) {
         var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");

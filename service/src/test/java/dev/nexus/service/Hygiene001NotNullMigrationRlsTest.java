@@ -20,10 +20,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.nio.charset.StandardCharsets;
-import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -166,26 +166,26 @@ class Hygiene001NotNullMigrationRlsTest {
                 // Phase 4: assert per-tenant outcomes.
                 try (Connection su = pg.createConnection("")) {
                     for (String tenant : List.of(TENANT_1, TENANT_2)) {
-                        ResultSet orphan = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.document_aspects "
-                            + "WHERE tenant_id = '" + tenant + "' AND source_path = 'orphan.md'");
-                        assertThat(orphan.next())
+                        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                        assertThat(ctx.fetchExists(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant),
+                                DOCUMENT_ASPECTS.SOURCE_PATH.eq("orphan.md")))
                             .as("hygiene-001-1's DELETE WHERE doc_id IS NULL must have removed "
                                 + "the orphan row for tenant " + tenant + " -- a false result here "
                                 + "means the toggle-wrapped DELETE silently no-op'd under FORCE RLS "
                                 + "(the exact nexus-1wjmq production incident)")
                             .isFalse();
 
-                        ResultSet legit = su.createStatement().executeQuery(
-                            "SELECT doc_id, source_uri FROM nexus.document_aspects "
-                            + "WHERE tenant_id = '" + tenant + "' AND source_path = 'legit.md'");
-                        assertThat(legit.next())
+                        var legit = ctx.select(DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                            .from(DOCUMENT_ASPECTS)
+                            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant), DOCUMENT_ASPECTS.SOURCE_PATH.eq("legit.md"))
+                            .fetch();
+                        assertThat(legit)
                             .as("the legit row for tenant " + tenant + " must survive the DELETE")
-                            .isTrue();
-                        assertThat(legit.getString("doc_id"))
+                            .isNotEmpty();
+                        assertThat(legit.get(0).get(DOCUMENT_ASPECTS.DOC_ID))
                             .as("the legit row's pre-existing doc_id must be untouched")
                             .isEqualTo(tenant + "-doc-1");
-                        assertThat(legit.getString("source_uri"))
+                        assertThat(legit.get(0).get(DOCUMENT_ASPECTS.SOURCE_URI))
                             .as("hygiene-001-1's UPDATE must have backfilled the legit row's "
                                 + "NULL source_uri to '' for tenant " + tenant + " -- a null/absent "
                                 + "result here means that toggle-wrapped UPDATE also no-op'd")
@@ -197,18 +197,16 @@ class Hygiene001NotNullMigrationRlsTest {
                         // class (nexus-lgdel), never left behind and never
                         // aborting the walk.
                         String legacyChash = "legacywidthchsh" + (tenant.equals(TENANT_1) ? "1" : "2");
-                        ResultSet chunkGone = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.chunks WHERE tenant_id = '" + tenant
-                            + "' AND chash = '" + legacyChash + "'");
-                        assertThat(chunkGone.next())
+                        byte[] legacyChashBytes = legacyChash.getBytes(StandardCharsets.US_ASCII);
+                        assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant),
+                                CHUNKS.CHASH.eq(legacyChashBytes)))
                             .as("hygiene-001-5's DELETE WHERE octet_length(chash) <> 32 must have "
                                 + "removed the legacy-width chunks row for tenant " + tenant)
                             .isFalse();
 
-                        ResultSet manifestGone = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant
-                            + "' AND chash = '" + legacyChash + "'");
-                        assertThat(manifestGone.next())
+                        assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS,
+                                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant),
+                                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(legacyChashBytes)))
                             .as("the legacy-width chunk's catalog_document_chunks manifest row must "
                                 + "also be gone for tenant " + tenant + " -- either via hygiene-001-5's "
                                 + "own FK-safety pre-delete (ahead of the chunks DELETE) or "
@@ -221,14 +219,14 @@ class Hygiene001NotNullMigrationRlsTest {
                         // documents (2026-01-01, the earlier of the two seeded),
                         // never the later document's indexed_at and never now().
                         String collA = tenant + "__created-at-two-docs__v1";
-                        ResultSet collAIsMin = su.createStatement().executeQuery(
-                            "SELECT created_at = '2026-01-01T00:00:00+00:00'::timestamptz AS is_min "
-                            + "FROM nexus.catalog_collections "
-                            + "WHERE tenant_id = '" + tenant + "' AND name = '" + collA + "'");
-                        assertThat(collAIsMin.next())
+                        var collACreatedAt = ctx.select(CATALOG_COLLECTIONS.CREATED_AT).from(CATALOG_COLLECTIONS)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(collA))
+                            .fetch();
+                        assertThat(collACreatedAt)
                             .as("collection A must exist for tenant " + tenant)
-                            .isTrue();
-                        assertThat(collAIsMin.getBoolean("is_min"))
+                            .isNotEmpty();
+                        assertThat(collACreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT).toInstant()
+                                .equals(OffsetDateTime.parse("2026-01-01T00:00:00+00:00").toInstant()))
                             .as("collection A's created_at must equal the MIN indexed_at "
                                 + "(2026-01-01) of its two documents for tenant " + tenant
                                 + " -- not the later document's indexed_at (2026-06-01) and "
@@ -239,13 +237,13 @@ class Hygiene001NotNullMigrationRlsTest {
                         // returns no row, so COALESCE must fall back to now() --
                         // created_at must still end up NOT NULL, never left NULL.
                         String collB = tenant + "__created-at-no-docs__v1";
-                        ResultSet collBCreatedAt = su.createStatement().executeQuery(
-                            "SELECT created_at FROM nexus.catalog_collections "
-                            + "WHERE tenant_id = '" + tenant + "' AND name = '" + collB + "'");
-                        assertThat(collBCreatedAt.next())
+                        var collBCreatedAt = ctx.select(CATALOG_COLLECTIONS.CREATED_AT).from(CATALOG_COLLECTIONS)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(collB))
+                            .fetch();
+                        assertThat(collBCreatedAt)
                             .as("collection B must exist for tenant " + tenant)
-                            .isTrue();
-                        assertThat(collBCreatedAt.getTimestamp("created_at"))
+                            .isNotEmpty();
+                        assertThat(collBCreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT))
                             .as("collection B has no documents for tenant " + tenant
                                 + " -- created_at must fall back to now(), never left NULL")
                             .isNotNull();

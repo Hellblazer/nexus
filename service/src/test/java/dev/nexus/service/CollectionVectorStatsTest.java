@@ -7,13 +7,11 @@ import org.jooq.impl.DSL;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.nio.charset.StandardCharsets;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -87,13 +85,6 @@ class CollectionVectorStatsTest {
     // ── Svc role (NOSUPERUSER, NOBYPASSRLS — subject to FORCE RLS) ───────────
     private static final String SVC_ROLE = "svc_cvs_test";
     private static final String SVC_PASS = "svc_cvs_test_pass";
-
-    /**
-     * Per-collection vector statistics view.
-     * {@code nexus.collection_vector_stats(tenant_id, collection, dim, chunk_count, last_write)}.
-     * SECURITY INVOKER; tombstone-filtered via live_chunks semantics.
-     */
-    private static final String VIEW_STATS = "nexus.collection_vector_stats";
 
     // ── Test collections (registered in catalog_collections per fk-002) ──────
     // Conformant shape <type>__<owner>__<model>__<version>; model token routes dim.
@@ -190,46 +181,52 @@ class CollectionVectorStatsTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT dim, chunk_count, last_write FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_384 + "'");
-            assertThat(rs.next())
-                .as("stats row for COLL_A_384 must exist").isTrue();
-            assertThat(rs.getInt("dim"))
+            var stats = DSL.using(su, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.DIM, COLLECTION_VECTOR_STATS.CHUNK_COUNT,
+                        COLLECTION_VECTOR_STATS.LAST_WRITE)
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_384))
+                .fetch();
+            assertThat(stats).as("stats row for COLL_A_384 must exist").isNotEmpty();
+            var row = stats.get(0);
+            assertThat(row.get(COLLECTION_VECTOR_STATS.DIM))
                 .as("COLL_A_384 dim must be exactly 384").isEqualTo(384);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(row.get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_A_384 chunk_count must be exactly 3").isEqualTo(3L);
-            assertThat(rs.getObject("last_write", java.time.OffsetDateTime.class).toInstant())
+            assertThat(row.get(COLLECTION_VECTOR_STATS.LAST_WRITE).toInstant())
                 .as("COLL_A_384 last_write must be exactly max(created_at) = T3")
                 .isEqualTo(java.time.OffsetDateTime.parse("2026-01-01T00:00:03+00:00").toInstant());
-            assertThat(rs.next())
-                .as("exactly ONE stats row per (tenant, collection, dim)").isFalse();
+            assertThat(stats)
+                .as("exactly ONE stats row per (tenant, collection, dim)").hasSize(1);
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT dim, chunk_count, last_write FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_1024 + "'");
-            assertThat(rs.next())
-                .as("stats row for COLL_A_1024 must exist").isTrue();
-            assertThat(rs.getInt("dim"))
+            var stats = DSL.using(su, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.DIM, COLLECTION_VECTOR_STATS.CHUNK_COUNT,
+                        COLLECTION_VECTOR_STATS.LAST_WRITE)
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_1024))
+                .fetch();
+            assertThat(stats).as("stats row for COLL_A_1024 must exist").isNotEmpty();
+            var row = stats.get(0);
+            assertThat(row.get(COLLECTION_VECTOR_STATS.DIM))
                 .as("COLL_A_1024 dim must be exactly 1024").isEqualTo(1024);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(row.get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_A_1024 chunk_count must be exactly 2").isEqualTo(2L);
-            assertThat(rs.getObject("last_write", java.time.OffsetDateTime.class).toInstant())
+            assertThat(row.get(COLLECTION_VECTOR_STATS.LAST_WRITE).toInstant())
                 .as("COLL_A_1024 last_write must be exactly max(created_at) = T5")
                 .isEqualTo(java.time.OffsetDateTime.parse("2026-02-01T00:00:05+00:00").toInstant());
-            assertThat(rs.next())
-                .as("exactly ONE stats row per (tenant, collection, dim)").isFalse();
+            assertThat(stats)
+                .as("exactly ONE stats row per (tenant, collection, dim)").hasSize(1);
         }
 
         // Zero-chunk registered collection must be ABSENT
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_EMPTY + "'");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                    COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_EMPTY)))
                 .as("registered-but-empty collection must NOT appear in stats " +
                     "(chunk-driven view, matching DISTINCT-based listCollections)")
                 .isEqualTo(0L);
@@ -376,11 +373,11 @@ class CollectionVectorStatsTest {
 
         // CONTROL: superuser (bypasses RLS) sees both tenants underneath the view
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(DISTINCT tenant_id) FROM " + VIEW_STATS +
-                " WHERE tenant_id IN ('" + TENANT_A + "', '" + TENANT_B + "')");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.countDistinct(COLLECTION_VECTOR_STATS.TENANT_ID))
+                    .from(COLLECTION_VECTOR_STATS)
+                    .where(COLLECTION_VECTOR_STATS.TENANT_ID.in(TENANT_A, TENANT_B))
+                    .fetchSingle(0, Long.class))
                 .as("CONTROL: superuser must see BOTH tenants' stats rows " +
                     "(proves foreign rows exist; the RLS assertions below are non-vacuous)")
                 .isEqualTo(2L);
@@ -389,18 +386,14 @@ class CollectionVectorStatsTest {
         // svc + GUC=A: zero tenant-B rows, but tenant-A rows visible
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rsB = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_B + "'");
-            rsB.next();
-            assertThat(rsB.getLong(1))
+            DSLContext svcCtx = DSL.using(svc, SQLDialect.POSTGRES);
+            assertThat(svcCtx.fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_B)))
                 .as("GUC=A must see ZERO tenant-B stats rows (caller RLS via security_invoker)")
                 .isEqualTo(0L);
-            ResultSet rsA = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_384 + "'");
-            rsA.next();
-            assertThat(rsA.getLong(1))
+            assertThat(svcCtx.fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                    COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_384)))
                 .as("GUC=A must see its OWN tenant-A stats row for COLL_A_384")
                 .isEqualTo(1L);
         }
@@ -408,26 +401,25 @@ class CollectionVectorStatsTest {
         // svc + GUC=B: exactly the one tenant-B collection row, exact count
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT collection, chunk_count FROM " + VIEW_STATS);
-            assertThat(rs.next())
-                .as("GUC=B must see exactly one stats row").isTrue();
-            assertThat(rs.getString("collection"))
+            var stats = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.CHUNK_COUNT)
+                .from(COLLECTION_VECTOR_STATS)
+                .fetch();
+            assertThat(stats)
+                .as("GUC=B must see exactly one stats row").isNotEmpty();
+            assertThat(stats.get(0).get(COLLECTION_VECTOR_STATS.COLLECTION))
                 .as("GUC=B's single visible collection must be COLL_B_384")
                 .isEqualTo(COLL_B_384);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(stats.get(0).get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_B_384 chunk_count must be exactly 2").isEqualTo(2L);
-            assertThat(rs.next())
-                .as("GUC=B must see NO further rows").isFalse();
+            assertThat(stats)
+                .as("GUC=B must see NO further rows").hasSize(1);
         }
 
         // svc + no GUC: zero rows
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS);
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(svc, SQLDialect.POSTGRES).fetchCount(COLLECTION_VECTOR_STATS))
                 .as("svc with NO nexus.tenant GUC must see 0 stats rows " +
                     "(tenant_isolation matches nothing on NULL)")
                 .isEqualTo(0L);
@@ -532,11 +524,12 @@ class CollectionVectorStatsTest {
     /** chunk_count for (tenant, collection) via the stats view, superuser connection. */
     private long statsCount(String tenantId, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT coalesce(sum(chunk_count), 0) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.coalesce(DSL.sum(COLLECTION_VECTOR_STATS.CHUNK_COUNT), java.math.BigDecimal.ZERO))
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(tenantId),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(collection))
+                .fetchSingle(0, Long.class);
         }
     }
 
@@ -547,12 +540,9 @@ class CollectionVectorStatsTest {
      */
     private static long rawChunkCount(Connection conn, int dim, String tenantId,
                                       String collection) throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME +
-            " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
-            " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL");
-        rs.next();
-        return rs.getLong(1);
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(tenantId), CHUNKS.COLLECTION.eq(collection),
+            VectorSeeds.chunkEmbedding(dim).isNotNull());
     }
 
     /**

@@ -23,7 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.Comparator;
 import java.util.stream.Stream;
@@ -217,16 +216,14 @@ class Taxonomy014TenantFkRepointTest {
             // still be exactly where it was (fail-loud leaves quarantine + re-run as
             // the human-directed remedy, never a half-migrated schema).
             try (Connection su = pg.createConnection("")) {
-                assertThat(count(su,
-                    "SELECT count(*) FROM pg_constraint WHERE conname = 'fk_topics_parent_tenant'"))
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, "fk_topics_parent_tenant"))
                     .as("the failed changeset must leave no half-created composite FK behind")
                     .isEqualTo(0);
-                assertThat(count(su,
-                    "SELECT count(*) FROM pg_constraint WHERE conname = 'topics_parent_fk'"))
+                assertThat(PgCatalogProbes.constraintCount(ctx, "topics_parent_fk"))
                     .as("the OLD tenant-blind FK must survive the failed changeset unchanged")
                     .isEqualTo(1);
-                assertThat(count(su,
-                    "SELECT count(*) FROM nexus.topics WHERE tenant_id IN ('tenant-a', 'tenant-b')"))
+                assertThat(ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.in("tenant-a", "tenant-b")))
                     .as("fail-loud must not have deleted the offending rows either -- they stay "
                         + "in place for the human-directed quarantine, not silently reaped")
                     .isEqualTo(2);
@@ -288,13 +285,14 @@ class Taxonomy014TenantFkRepointTest {
             // reference doc_count at all, and pre-repoint there is no FK
             // blocking the cross-tenant reference in the first place.
             try (Connection su = pg.createConnection("")) {
-                assertThat(count(su, "SELECT doc_count FROM nexus.topics WHERE id = " + topicB))
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(ctx.select(TOPICS.DOC_COUNT).from(TOPICS).where(TOPICS.ID.eq(topicB))
+                        .fetchSingle(TOPICS.DOC_COUNT))
                     .as("nexus.topics_doc_count_recount_ins's own t.tenant_id = a.tenant_id "
                         + "predicate must keep a cross-tenant assignment from mutating the "
                         + "referenced topic's doc_count, independently of any FK")
                     .isEqualTo(7);
-                assertThat(count(su,
-                    "SELECT count(*) FROM nexus.topics WHERE tenant_id = 'tenant-a' AND id = " + topicB))
+                assertThat(ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq("tenant-a"), TOPICS.ID.eq(topicB)))
                     .as("tenant-a must not have gained a topic row under tenant-b's id either")
                     .isEqualTo(0);
             }
@@ -417,13 +415,6 @@ class Taxonomy014TenantFkRepointTest {
             .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
     }
 
     /** Genuine 64-lowercase-hex sha256 chash for the doc_count-trigger test's

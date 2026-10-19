@@ -253,14 +253,9 @@ class CatalogPurgeTrashTest {
      *  guard keeps this helper correct if that ever changes). */
     private long chunks384Count(String chashHex) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND chash = decode(?, 'hex') "
-                + "AND embedding_384 IS NOT NULL");
-            ps.setString(1, TENANT);
-            ps.setString(2, chashHex);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashHex)),
+                CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
@@ -286,34 +281,23 @@ class CatalogPurgeTrashTest {
      *  the mechanical before/after diff a preview count is checked against. */
     private long totalChunks384Rows() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND embedding_384 IS NOT NULL");
-            ps.setString(1, TENANT);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
     private long countManifestRows(String chashHex) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = ? AND chash = decode(?, 'hex')");
-            ps.setString(1, TENANT);
-            ps.setString(2, chashHex);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashHex)));
         }
     }
 
     private boolean documentExists(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, tumbler);
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(tumbler));
         }
     }
 
@@ -323,11 +307,8 @@ class CatalogPurgeTrashTest {
      *  fk_catalog_links_to_document, with no explicit Java or plpgsql step required. */
     private boolean linkToExists(String toTumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.catalog_links WHERE tenant_id = ? AND to_tumbler = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, toTumbler);
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_LINKS,
+                CATALOG_LINKS.TENANT_ID.eq(TENANT), CATALOG_LINKS.TO_TUMBLER.eq(toTumbler));
         }
     }
 
@@ -336,9 +317,8 @@ class CatalogPurgeTrashTest {
      *  backdates {@code deleted_at} relative to. */
     private java.time.OffsetDateTime capturedNow() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery("SELECT NOW()");
-            rs.next();
-            return rs.getObject(1, java.time.OffsetDateTime.class);
+            return DSL.using(su, SQLDialect.POSTGRES).select(DSL.currentOffsetDateTime())
+                .fetchOne(0, java.time.OffsetDateTime.class);
         }
     }
 

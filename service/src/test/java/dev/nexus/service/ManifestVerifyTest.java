@@ -15,12 +15,12 @@ import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.HexFormat;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -136,10 +136,8 @@ class ManifestVerifyTest {
     @Test
     void catalog020Changesets_recordedInDatabaseChangeLog() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM databasechangelog WHERE id LIKE 'catalog-020-%'");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("databasechangelog")),
+                    DSL.field(DSL.name("id"), String.class).like("catalog-020-%")))
                 .as("all 5 catalog-020 changesets (columns, index, manifest_verify, " +
                     "manifest_verify_all, grants) must be recorded as applied")
                 .isEqualTo(5L);
@@ -168,11 +166,12 @@ class ManifestVerifyTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertDoc(su, TENANT, docId);
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT index_state FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("index_state"))
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.INDEX_STATE).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .fetch();
+            assertThat(rows).isNotEmpty();
+            assertThat(rows.get(0).get(CATALOG_DOCUMENTS.INDEX_STATE))
                 .as("index_state must default to NULL (unknown) — no backfill asserts a fact " +
                     "nobody measured")
                 .isNull();
@@ -471,18 +470,19 @@ class ManifestVerifyTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT referenced, present, missing FROM nexus.manifest_verify('" + docId + "')");
-            assertThat(rs.next())
+            var mv = MANIFEST_VERIFY.call(docId);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(mv.REFERENCED, mv.PRESENT, mv.MISSING)
+                .from(mv).fetch();
+            assertThat(rows)
                 .as("manifest_verify always returns exactly one aggregate row, even with " +
                     "no tenant GUC set")
-                .isTrue();
-            assertThat(rs.getLong("referenced"))
+                .isNotEmpty();
+            assertThat(rows.get(0).get(mv.REFERENCED))
                 .as("no GUC = no tenant = no rows matched -> referenced = 0 " +
                     "(reader contract: never RAISE, unlike purge_trash)")
                 .isEqualTo(0L);
-            assertThat(rs.getLong("present")).isEqualTo(0L);
-            assertThat(rs.getLong("missing")).isEqualTo(0L);
+            assertThat(rows.get(0).get(mv.PRESENT)).isEqualTo(0L);
+            assertThat(rows.get(0).get(mv.MISSING)).isEqualTo(0L);
         }
     }
 
@@ -539,10 +539,8 @@ class ManifestVerifyTest {
         // RDR-191 Phase 6 (nexus-o8dil.33): narrowed from
         // nexusSvc_hasExecuteGrantOnBothFunctions — manifest_verify_all() is dropped.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT has_function_privilege('nexus_svc', 'nexus.manifest_verify(text)', 'EXECUTE')");
-            rs.next();
-            assertThat(rs.getBoolean(1))
+            assertThat(PgCatalogProbes.canExecuteFunction(DSL.using(su, SQLDialect.POSTGRES),
+                    "nexus_svc", "nexus.manifest_verify(text)"))
                 .as("nexus_svc must have EXECUTE on nexus.manifest_verify(text) (catalog-020-5 grants)")
                 .isTrue();
         }
@@ -555,13 +553,10 @@ class ManifestVerifyTest {
     /** Call manifest_verify(docId) under the TENANT GUC. Returns [referenced, present, missing]. */
     private long[] verify(String docId) {
         return tenantScope.withTenant(TENANT, ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT referenced, present, missing FROM nexus.manifest_verify(?)", docId);
+            var mv = MANIFEST_VERIFY.call(docId);
+            var row = ctx.select(mv.REFERENCED, mv.PRESENT, mv.MISSING).from(mv).fetchOne();
             assertThat(row).as("manifest_verify must return exactly one row").isNotNull();
-            return new long[]{
-                row.get("referenced", Long.class),
-                row.get("present", Long.class),
-                row.get("missing", Long.class)};
+            return new long[]{row.get(mv.REFERENCED), row.get(mv.PRESENT), row.get(mv.MISSING)};
         });
     }
 

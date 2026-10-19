@@ -5,7 +5,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -232,13 +234,9 @@ class CatalogManifestSweepRepositoryTest {
     private boolean chunk384Exists(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.chunks WHERE tenant_id = ? AND collection = ? AND chash = ? "
-                + "AND embedding_384 IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CHUNKS,
+                CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION.eq(collection),
+                CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)), CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
@@ -570,8 +568,8 @@ class CatalogManifestSweepRepositoryTest {
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThatThrownBy(() -> acquireGateExclusive(connA, TENANT_A, col1, 1000))
                 .as("A's exclusive acquire must be refused, not silently granted, while B holds SHARED")
-                .isInstanceOf(SQLException.class)
-                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("55P03"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(e -> assertThat(((DataAccessException) e).sqlState()).isEqualTo("55P03"));
             connA.rollback();
 
             // B now completes its manifest insert normally and commits.
@@ -662,10 +660,8 @@ class CatalogManifestSweepRepositoryTest {
     /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape on a raw
      *  connection, for tests that need manual transaction control around it. */
     private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock_shared(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     /** Hand-drives {@code acquireSweepGateExclusive}'s exact SQL shape
@@ -673,14 +669,11 @@ class CatalogManifestSweepRepositoryTest {
      *  raw connection. */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", String.class, DSL.inline("lock_timeout"),
+                DSL.val(String.valueOf(lockTimeoutMs)), DSL.inline(true))).fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     @Test @Order(17)

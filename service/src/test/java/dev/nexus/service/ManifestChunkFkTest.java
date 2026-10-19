@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
@@ -20,10 +21,10 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -246,11 +247,13 @@ class ManifestChunkFkTest {
                 .execute();
             assertThat(updated).as("the chunk row must exist to rename").isEqualTo(1);
 
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "' AND position = 0");
-            assertThat(rs.next()).as("manifest row must still exist after cascade").isTrue();
-            assertThat(rs.getString("collection"))
+            var manifest = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc),
+                       CATALOG_DOCUMENT_CHUNKS.POSITION.eq(0))
+                .fetch();
+            assertThat(manifest).as("manifest row must still exist after cascade").isNotEmpty();
+            assertThat(manifest.get(0).get(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
                 .as("ON UPDATE CASCADE must propagate the chunk's collection rename to the manifest row "
                     + "(F10a: chunks is the FK's parent)")
                 .isEqualTo(newCollection);
@@ -286,11 +289,8 @@ class ManifestChunkFkTest {
                     .as("the DELETE reaches a leaf, and PostgreSQL names the per-partition clone it fired; "
                         + "that clone is a child (conparentid) of " + FK_NAME)
                     .isEqualTo(FK_NAME));
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) AS n FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "'");
-            rs.next();
-            assertThat(rs.getInt("n"))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)))
                 .as("the manifest row must survive the rejected delete intact")
                 .isEqualTo(1);
         }
@@ -341,23 +341,20 @@ class ManifestChunkFkTest {
             su.setAutoCommit(true);
             assertThatCode(() -> {
                 PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
-                su.createStatement().execute("SELECT nexus.purge_trash(interval '30 days')");
+                dev.nexus.service.jooq.nexus.Routines.purgeTrash(DSL.using(su, SQLDialect.POSTGRES).configuration(),
+                    new org.jooq.types.YearToSecond(new org.jooq.types.YearToMonth(0, 0), new org.jooq.types.DayToSecond(30)));
             })
                 .as("purge_trash's chunk-before-manifest deletion must survive under the deferred FK "
                     + "(catalog-029-3's SET CONSTRAINTS fix) -- must NOT raise " + FK_NAME)
                 .doesNotThrowAnyException();
 
-            ResultSet chunkRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = '" + TENANT
-                + "' AND collection = '" + collection + "' AND chash = decode('" + chash + "', 'hex')");
-            chunkRs.next();
-            assertThat(chunkRs.getInt(1)).as("the aged tombstoned chunk must be swept").isEqualTo(0);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.COLLECTION.eq(collection),
+                    CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash))))
+                .as("the aged tombstoned chunk must be swept").isEqualTo(0);
 
-            ResultSet manifestRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "'");
-            manifestRs.next();
-            assertThat(manifestRs.getInt(1))
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)))
                 .as("the manifest row must be gone too (fk-001 CASCADE off the deleted document)")
                 .isEqualTo(0);
         }
@@ -393,17 +390,14 @@ class ManifestChunkFkTest {
             .doesNotThrowAnyException();
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet chunkRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = '" + TENANT
-                + "' AND collection = '" + collection + "' AND chash = decode('" + chash + "', 'hex')");
-            chunkRs.next();
-            assertThat(chunkRs.getInt(1)).as("the collection's chunk must be gone").isEqualTo(0);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.COLLECTION.eq(collection),
+                    CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash))))
+                .as("the collection's chunk must be gone").isEqualTo(0);
 
-            ResultSet manifestRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "'");
-            manifestRs.next();
-            assertThat(manifestRs.getInt(1)).as("the manifest row must be gone too").isEqualTo(0);
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)))
+                .as("the manifest row must be gone too").isEqualTo(0);
         }
     }
 }

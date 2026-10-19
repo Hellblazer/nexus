@@ -907,16 +907,14 @@ class CombinedQueryParityTest {
     @Test @Order(93)
     void chashColumn_isMatchedChunkChash() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT id, chash FROM nexus.search_metadata_scoped_1024(" +
-                queryVecLiteral(1024) + ", ARRAY['" + COLL_M + "']::text[], 'paper', " +
-                "NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
-                + "') ORDER BY distance");
+            var fn = SEARCH_METADATA_SCOPED_1024.call(queryVec(1024), new String[] {COLL_M},
+                "paper", null, null, null, null, null, 10, "voyage-context-3", TENANT_A);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(fn.ID, fn.CHASH).from(fn).orderBy(fn.DISTANCE).fetch();
             int seen = 0;
-            while (rs.next()) {
-                assertThat(rs.getString("chash"))
-                    .as("chash column must be the matched chunk's chash for doc " + rs.getString("id"))
-                    .isEqualTo(validChash(rs.getString("id")));
+            for (var rec : rows) {
+                assertThat(rec.get(fn.CHASH))
+                    .as("chash column must be the matched chunk's chash for doc " + rec.get(fn.ID))
+                    .isEqualTo(validChash(rec.get(fn.ID)));
                 seen++;
             }
             assertThat(seen).as("type=paper → m1,m2,m4,m5").isEqualTo(4);
@@ -1595,14 +1593,9 @@ class CombinedQueryParityTest {
 
     private static long rawChunkCount(Connection conn, int dim, String tenantId,
                                       String collection) throws Exception {
-        try (var st = conn.createStatement();
-             ResultSet rs = st.executeQuery(
-                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME +
-                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
-                " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            rs.next();
-            return rs.getLong(1);
-        }
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(tenantId), CHUNKS.COLLECTION.eq(collection),
+            VectorSeeds.chunkEmbedding(dim).isNotNull());
     }
 
     // ── value helpers ────────────────────────────────────────────────────────

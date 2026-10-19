@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
@@ -260,14 +261,10 @@ class GraphHopParityTest {
     @Test @Order(10)
     void signature_queryVectorFirst_chashInResult() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args, " +
-                "       pg_catalog.pg_get_function_result(p.oid)    AS result " +
-                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                " WHERE n.nspname = 'nexus' AND p.proname = 'search_graph_hop_1024'");
-            assertThat(rs.next())
-                .as("nexus.search_graph_hop_1024 must exist (catalog-007)").isTrue();
-            String args = rs.getString("args");
+            var sig = PgCatalogProbes.routineSignature(DSL.using(su, SQLDialect.POSTGRES), "nexus", "search_graph_hop_1024");
+            assertThat(sig)
+                .as("nexus.search_graph_hop_1024 must exist (catalog-007)").isNotNull();
+            String args = sig.arguments();
             assertThat(args)
                 .as("query vector must be the FIRST argument, typed `vector` (Finding 5a)")
                 .startsWith("p_query nexus.vector");
@@ -280,7 +277,7 @@ class GraphHopParityTest {
                 .contains("p_direction text")
                 .contains("p_where jsonb")
                 .contains("p_n integer");
-            assertThat(rs.getString("result"))
+            assertThat(sig.result())
                 .as("audit HIGH: result table MUST carry the matched chunk's chash so the "
                     + "query() repoint (rzqto) populates RDR-086 chunk_text_hash from the "
                     + "MATCHED chunk, not a per-doc manifest guess")
@@ -377,15 +374,13 @@ class GraphHopParityTest {
     @Test @Order(50)
     void chashColumn_matchesSeededChunkChash() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT id, chash FROM nexus.search_graph_hop_1024(" +
-                queryVecLiteral(1024) + ", ARRAY['g0']::text[], " +
-                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
-                + "') ORDER BY distance");
+            var fn = SEARCH_GRAPH_HOP_1024.call(VectorSeeds.vecXY(1024, 1f, 0f), new String[] {"g0"},
+                new String[] {COLL_G}, "cites", 1, "out", null, 10, "voyage-context-3", TENANT_A);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(fn.ID, fn.CHASH).from(fn).orderBy(fn.DISTANCE).fetch();
             int seen = 0;
-            while (rs.next()) {
-                String id = rs.getString("id");
-                String chash = rs.getString("chash");
+            for (var rec : rows) {
+                String id = rec.get(fn.ID);
+                String chash = rec.get(fn.CHASH);
                 assertThat(chash)
                     .as("the chash column must be the MATCHED chunk's chash for doc " + id)
                     .isEqualTo(validChash(id));

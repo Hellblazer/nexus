@@ -18,8 +18,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -346,9 +344,7 @@ class ChunksRlsBehavioralTest {
         // First borrow: stamp tenant-a via withTenant (SET LOCAL, commits, returns conn).
         leakScope.withTenant(TENANT_A, ctx -> {
             // Verify the GUC is active during this txn (sanity check).
-            var result = ctx.fetch("SELECT current_setting(?, true) AS guc",
-                                   TenantConstants.GUC_NAME);
-            assertThat(result.get(0).get("guc", String.class))
+            assertThat(gucOf(ctx))
                 .as("GUC must be set to tenant-a inside withTenant")
                 .isEqualTo(TENANT_A);
             return null;
@@ -358,31 +354,15 @@ class ChunksRlsBehavioralTest {
         // it is the same physical connection). No GUC stamping occurs in this block.
         try (Connection conn = leakDs.getConnection()) {
             // GUC must be NULL or empty (SET LOCAL was txn-local; commit cleared it).
-            String gucValue;
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT current_setting(?, true) AS guc")) {
-                ps.setString(1, TenantConstants.GUC_NAME);
-                try (ResultSet rs = ps.executeQuery()) {
-                    rs.next();
-                    gucValue = rs.getString("guc");
-                }
-            }
+            String gucValue = gucOf(DSL.using(conn, SQLDialect.POSTGRES));
             assertThat(gucValue == null || gucValue.isEmpty())
                 .as("GUC must be NULL or empty on re-borrowed connection (no SET LOCAL bleed): got '" + gucValue + "'")
                 .isTrue();
 
             // RLS must apply fail-closed on the unstamped connection. embedding_<dim>
             // IS NOT NULL scopes to this parameterized run's rows only (unified table).
-            long leakCount;
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND "
-                    + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-                ps.setString(1, col);
-                try (ResultSet rs = ps.executeQuery()) {
-                    rs.next();
-                    leakCount = rs.getLong(1);
-                }
-            }
+            long leakCount = DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(col), VectorSeeds.chunkEmbedding(dim).isNotNull());
             assertThat(leakCount)
                 .as("Unstamped re-borrowed connection must see 0 rows in nexus.chunks (dim=" + dim + ", fail-closed)")
                 .isEqualTo(0L);
@@ -483,10 +463,8 @@ class ChunksRlsBehavioralTest {
      */
     private long tenantCount(int dim, String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                    + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL",
-                collection)
-               .get(0, Long.class));
+            (long) ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull()));
     }
 
     /**
@@ -497,15 +475,9 @@ class ChunksRlsBehavioralTest {
      * for OTHER dims (same unified table post-RDR-191) cannot skew the count.
      */
     private long superuserCount(int dim, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull());
         }
     }
 
@@ -517,16 +489,17 @@ class ChunksRlsBehavioralTest {
      * symmetric with {@link #superuserCount}.
      */
     private long unstampedSvcCount(int dim, String collection) throws SQLException {
-        try (Connection conn = svcDs.getConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection conn = svcDs.getConnection()) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull());
         }
+    }
+
+    /** {@code current_setting(<tenant GUC>, true)}: null when the GUC was never set on the session. */
+    private static String gucOf(DSLContext ctx) {
+        return ctx.select(DSL.function("current_setting", String.class,
+                DSL.val(TenantConstants.GUC_NAME), DSL.inline(true)))
+            .fetchOne(0, String.class);
     }
 
     /**

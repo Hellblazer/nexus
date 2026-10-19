@@ -56,7 +56,7 @@ class PgSessionStatementTimeoutIntegrationTest {
             assertThat(currentSetting(ctx)).isEqualTo("200ms");
 
             long started = System.nanoTime();
-            assertThatThrownBy(() -> ctx.resultQuery("SELECT pg_sleep(30)").fetch())
+            assertThatThrownBy(() -> ctx.select(DSL.function("pg_sleep", Object.class, DSL.inline(30))).fetch())
                 .isInstanceOf(DataAccessException.class)
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo(QUERY_CANCELED));
             long elapsedMs = (System.nanoTime() - started) / 1_000_000;
@@ -92,7 +92,11 @@ class PgSessionStatementTimeoutIntegrationTest {
     }
 
     private static String currentSetting(DSLContext ctx) {
-        return ctx.resultQuery("SELECT current_setting('statement_timeout')")
+        return currentSetting(ctx, "statement_timeout");
+    }
+
+    private static String currentSetting(DSLContext ctx, String name) {
+        return ctx.select(DSL.function("current_setting", String.class, DSL.val(name)))
                   .fetchOne(0, String.class);
     }
 
@@ -111,15 +115,12 @@ class PgSessionStatementTimeoutIntegrationTest {
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(false);
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
-            String before = ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                               .fetchOne(0, String.class);
+            String before = currentSetting(ctx, "plan_cache_mode");
             assertThat(before).isEqualTo("auto");
             PgSession.setSearchPlanCacheMode(ctx);
-            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                          .fetchOne(0, String.class)).isEqualTo("force_custom_plan");
+            assertThat(currentSetting(ctx, "plan_cache_mode")).isEqualTo("force_custom_plan");
             c.rollback();
-            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                          .fetchOne(0, String.class)).isEqualTo(before);
+            assertThat(currentSetting(ctx, "plan_cache_mode")).isEqualTo(before);
         }
     }
 

@@ -15,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -244,14 +243,8 @@ class ChashRepositoryTest {
         // The manifest's denormalized collection re-homed too — renaming
         // chunks without it strands the combined-query join key on the old
         // name (nexus-x6kdz class; .3 critique S2).
-        assertThat(countRows(
-            "SELECT count(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + TENANT_A + "' AND collection = 'ren-dst'"))
-            .isEqualTo(1);
-        assertThat(countRows(
-            "SELECT count(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + TENANT_A + "' AND collection = 'ren-src'"))
-            .isZero();
+        assertThat(manifestRowsIn("ren-dst")).isEqualTo(1);
+        assertThat(manifestRowsIn("ren-src")).isZero();
     }
 
     @Test
@@ -375,13 +368,14 @@ class ChashRepositoryTest {
 
     /** Raw microsecond-precision created_at for one (chash, collection), superuser-side. */
     private String rawCreatedAt(Chash chash, String collection) {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT created_at::text FROM nexus.chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + collection + "' " +
-                "  AND chash = decode('" + chash.toHex() + "', 'hex')")) {
-            if (!rs.next()) throw new IllegalStateException("row not found");
-            return rs.getString(1);
+        try (Connection su = pg.createConnection("")) {
+            var createdAtText = CHUNKS.CREATED_AT.cast(org.jooq.impl.SQLDataType.CLOB);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(createdAtText).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A), CHUNKS.COLLECTION.eq(collection),
+                       CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash.toHex())))
+                .fetch(createdAtText);
+            if (rows.isEmpty()) throw new IllegalStateException("row not found");
+            return rows.get(0);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -413,14 +407,11 @@ class ChashRepositoryTest {
      *  SQL shape on a raw connection, for tests needing manual transaction control. */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", String.class, DSL.inline("lock_timeout"),
+                DSL.val(String.valueOf(lockTimeoutMs)), DSL.inline(true))).fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     private void assertRenameBlocksOnExternalExclusiveGate(String gatedCollection,
@@ -515,11 +506,11 @@ class ChashRepositoryTest {
             .execute();
     }
 
-    private int countRows(String sql) {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
+    /** catalog_document_chunks rows TENANT_A holds for {@code collection}, superuser-side. */
+    private int manifestRowsIn(String collection) {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A), CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

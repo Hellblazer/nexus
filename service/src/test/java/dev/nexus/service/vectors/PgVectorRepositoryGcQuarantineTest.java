@@ -291,40 +291,37 @@ class PgVectorRepositoryGcQuarantineTest {
     }
 
     private long chunkCount(String collection) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection + "' AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL");
-            rs.next();
-            return rs.getLong(1);
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(collection), CHUNKS.EMBEDDING_1024.isNotNull());
         }
     }
 
     private String chunkText(String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            var rows = DSL.using(conn, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CHUNK_TEXT);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     private String metadataField(String collection, String chash, String key) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            var field = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key);
+            var rows = DSL.using(conn, SQLDialect.POSTGRES).select(field).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(field);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     /** nexus-brxnp: this chash's {@code created_at}, normalized to UTC. */
     private OffsetDateTime createdAt(String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT created_at FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            rs.next();
-            return rs.getObject(1, OffsetDateTime.class).withOffsetSameInstant(ZoneOffset.UTC);
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).select(CHUNKS.CREATED_AT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CREATED_AT).get(0).withOffsetSameInstant(ZoneOffset.UTC);
         }
     }
 
@@ -356,11 +353,9 @@ class PgVectorRepositoryGcQuarantineTest {
      *  nexus-syfes regression target: a zero-orphan/zero-restore GC pass must NOT
      *  leave one of these behind for a collection sibling that was never written to. */
     private boolean collectionRegistered(String tenant, String name) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT 1 FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + name + "'");
-            return rs.next();
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchExists(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(name));
         }
     }
 
@@ -371,12 +366,17 @@ class PgVectorRepositoryGcQuarantineTest {
     private record CollectionRow(String contentType, String ownerId, String embeddingModel, String modelVersion) {}
 
     private CollectionRow collectionRow(String tenant, String name) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT content_type, owner_id, embedding_model, model_version FROM nexus.catalog_collections "
-                + "WHERE tenant_id = '" + tenant + "' AND name = '" + name + "'");
-            if (!rs.next()) return null;
-            return new CollectionRow(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4));
+        try (var conn = pg.createConnection("")) {
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(name))
+                .fetch();
+            if (rows.isEmpty()) return null;
+            var r = rows.get(0);
+            return new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
+                r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL), r.get(CATALOG_COLLECTIONS.MODEL_VERSION));
         }
     }
 

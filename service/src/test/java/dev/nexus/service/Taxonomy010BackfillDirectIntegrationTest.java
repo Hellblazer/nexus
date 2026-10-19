@@ -18,7 +18,6 @@ import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -87,6 +86,14 @@ class Taxonomy010BackfillDirectIntegrationTest {
     private static final String CHANGELOG_FILE = "db/changelog/taxonomy-010-source-collection-backfill.xml";
     private static final String CHANGESET_ID = "taxonomy-010-1";
     private static final String TENANT = "p3b-direct";
+
+    // Walk-point shape of nexus.topic_assignments: this test relaxes source_collection to nullable and
+    // doc_id to TEXT (the generated TOPIC_ASSIGNMENTS has bytea doc_id), so it reads the table by name.
+    private static final org.jooq.Table<?> TA = DSL.table(DSL.name("nexus", "topic_assignments"));
+    private static final org.jooq.Field<String> TA_TENANT = DSL.field(DSL.name("nexus", "topic_assignments", "tenant_id"), String.class);
+    private static final org.jooq.Field<String> TA_DOC_ID = DSL.field(DSL.name("nexus", "topic_assignments", "doc_id"), String.class);
+    private static final org.jooq.Field<String> TA_SOURCE_COLLECTION =
+        DSL.field(DSL.name("nexus", "topic_assignments", "source_collection"), String.class);
 
     PostgreSQLContainer<?> pg;
 
@@ -199,15 +206,13 @@ class Taxonomy010BackfillDirectIntegrationTest {
             String legacyNonNullChash = "d".repeat(32);
             seedTopicAssignment(su, TENANT, legacyNonNullChash, topicId, "code__x");
 
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND source_collection IS NULL"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_SOURCE_COLLECTION.isNull()))
                 .as("ground truth before re-running taxonomy-010-1's SQL: the three "
                     + "NULL-source_collection seeded rows (unique/ambiguous/unresolvable) "
                     + "— the fourth (legacyNonNullChash) is deliberately NOT NULL")
                 .isEqualTo(3);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = '" + TENANT + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT)))
                 .as("ground truth before re-running taxonomy-010-1's SQL: four rows total")
                 .isEqualTo(4);
 
@@ -240,43 +245,32 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
             // ── Row-state ground truth: exactly the unique-resolution row
             // survives, backfilled with its ONE real collection. ──
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT)))
                 .as("exactly one of the four seeded rows survives")
                 .isEqualTo(1);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + uniqueChash
-                + "' AND source_collection = 'code__x'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(uniqueChash),
+                    TA_SOURCE_COLLECTION.eq("code__x")))
                 .as("the surviving row must be the unique-resolution one, backfilled to its "
                     + "real collection -- not merely non-NULL")
                 .isEqualTo(1);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + ambiguousChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(ambiguousChash)))
                 .as("the ambiguous row must be gone")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + unresolvableChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(unresolvableChash)))
                 .as("the unresolvable row must be gone")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + legacyNonNullChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(legacyNonNullChash)))
                 .as("RDR-194 critical fix round (nexus-i3k3e): the shape-invalid row must be "
                     + "gone DESPITE its non-NULL source_collection -- direct proof the "
                     + "2026-08-17 fix's shape branch is unconditional on source_collection, "
                     + "not the pre-fix behavior that would have left this row behind")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM information_schema.columns "
-                + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
-                + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
+            var sourceCollection = PgCatalogProbes.columnInfo(ctx, "nexus", "topic_assignments", "source_collection");
+            assertThat(sourceCollection).as("source_collection column must exist").isNotNull();
+            assertThat(sourceCollection.nullable())
                 .as("SET NOT NULL must have re-applied cleanly -- only reachable if the DML "
                     + "ahead of it left no NULL row for this tenant behind")
-                .isEqualTo(1);
+                .isFalse();
             // ── The guard taxonomy-011-1 runs next in the real changelog walk
             // (this test replays taxonomy-010-1 alone, not the full walk) --
             // direct proof this tenant's surviving rows would now PASS that
@@ -284,9 +278,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // wedge: before the fix, this count would have been 1 (the
             // legacyNonNullChash row survives), which is exactly what would
             // have RAISE EXCEPTIONed taxonomy-011-1's guard on the cloud walk.
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id !~ '^[0-9a-f]{64}$'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.notLikeRegex("^[0-9a-f]{64}$")))
                 .as("taxonomy-011-1's own guard predicate must find zero non-canonical "
                     + "doc_id rows for this tenant after taxonomy-010-1's fixed DELETE -- "
                     + "the direct nexus-i3k3e wedge-closure proof")
@@ -408,12 +400,5 @@ class Taxonomy010BackfillDirectIntegrationTest {
             .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0f))
             .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
             .execute();
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
     }
 }

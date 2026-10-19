@@ -234,11 +234,9 @@ class VectorsUnifyChunksIntegrationTest {
         return b;
     }
 
-    private static long rowCount(Connection conn, String qualifiedTable) throws Exception {
-        try (var rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM " + qualifiedTable)) {
-            rs.next();
-            return rs.getLong(1);
-        }
+    /** Row count of {@code nexus.<table>}; the legacy per-dim tables are not generated, so it reads by name. */
+    private static long rowCount(Connection conn, String table) throws Exception {
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("nexus", table)));
     }
 
     private static boolean tableExists(Connection conn, String schema, String table) throws Exception {
@@ -264,14 +262,14 @@ class VectorsUnifyChunksIntegrationTest {
 
     private static String changesetExecType(Connection conn, String id, String author, String filename)
             throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT exectype FROM databasechangelog WHERE id = ? AND author = ? AND filename = ?")) {
-            ps.setString(1, id);
-            ps.setString(2, author);
-            ps.setString(3, filename);
-            var rs = ps.executeQuery();
-            return rs.next() ? rs.getString("exectype") : null;
-        }
+        var execType = DSL.field(DSL.name("exectype"), String.class);
+        var rows = DSL.using(conn, SQLDialect.POSTGRES).select(execType)
+            .from(DSL.table(DSL.name("databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq(id),
+                   DSL.field(DSL.name("author"), String.class).eq(author),
+                   DSL.field(DSL.name("filename"), String.class).eq(filename))
+            .fetch(execType);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     // ── Test 1: fresh install, full replay from genesis ─────────────────────
@@ -355,27 +353,24 @@ class VectorsUnifyChunksIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(4L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(4L);
 
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.chunks WHERE chash = ?")) {
-                    ps.setBytes(1, chash32(1));
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).as("chash32(1) came from chunks_384").isTrue();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).isFalse();
-                }
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.chunks WHERE chash = ?")) {
-                    ps.setBytes(1, chash32(3));
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).isFalse();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).as("chash32(3) came from chunks_1024").isTrue();
+                for (int fill : new int[] {1, 3}) {
+                    var flags = DSL.using(conn, SQLDialect.POSTGRES)
+                        .select(CHUNKS.EMBEDDING_384.isNotNull(), CHUNKS.EMBEDDING_768.isNotNull(),
+                                CHUNKS.EMBEDDING_1024.isNotNull())
+                        .from(CHUNKS).where(CHUNKS.CHASH.eq(chash32(fill))).fetch();
+                    assertThat(flags).isNotEmpty();
+                    var row = flags.get(0);
+                    if (fill == 1) {
+                        assertThat(row.get(0, Boolean.class)).as("chash32(1) came from chunks_384").isTrue();
+                        assertThat(row.get(1, Boolean.class)).isFalse();
+                        assertThat(row.get(2, Boolean.class)).isFalse();
+                    } else {
+                        assertThat(row.get(0, Boolean.class)).isFalse();
+                        assertThat(row.get(1, Boolean.class)).isFalse();
+                        assertThat(row.get(2, Boolean.class)).as("chash32(3) came from chunks_1024").isTrue();
+                    }
                 }
             }
         } finally {
@@ -401,7 +396,7 @@ class VectorsUnifyChunksIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(1L);
                 // The 768/1024 HNSW indexes must still be built UNCONDITIONALLY (C4)
                 // even though those shards contributed zero rows.
                 for (String idx : new String[] {
@@ -634,9 +629,9 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThat(tableExists(conn, "nexus", "chunks_384")).isTrue();
                 assertThat(tableExists(conn, "nexus", "chunks_768")).isTrue();
                 assertThat(tableExists(conn, "nexus", "chunks_1024")).isTrue();
-                assertThat(rowCount(conn, "nexus.chunks_384")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.chunks_768")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.chunks_1024")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_384")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_768")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_1024")).isEqualTo(1L);
 
                 // All three shards, not just 384/1024 (critic S4: the prior
                 // version of this test never seeded or asserted chunks_768 at
@@ -656,7 +651,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
                     .as("re-applying after rollback must succeed cleanly")
                     .doesNotThrowAnyException();
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(3L);
             }
         } finally {
             rig.close();
@@ -779,17 +774,12 @@ class VectorsUnifyChunksIntegrationTest {
                     assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
                 }
                 // Non-vacuity: the migration actually moved the seeded rows.
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
-                try (var ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_1024 IS NOT NULL "
-                            + "AND embedding_384 IS NULL AND embedding_768 IS NULL")) {
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1))
-                        .as("every row must land with ONLY the 1024-dim embedding populated -- "
-                            + "no NULL-everywhere rows")
-                        .isEqualTo(3L);
-                }
+                assertThat(rowCount(conn, "chunks")).isEqualTo(3L);
+                assertThat(DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                        CHUNKS.EMBEDDING_1024.isNotNull(), CHUNKS.EMBEDDING_384.isNull(), CHUNKS.EMBEDDING_768.isNull()))
+                    .as("every row must land with ONLY the 1024-dim embedding populated -- "
+                        + "no NULL-everywhere rows")
+                    .isEqualTo(3);
                 assertThat(constraintExists(conn, "chunks_chash_octet_check")).isTrue();
                 assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
                     .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
@@ -840,17 +830,12 @@ class VectorsUnifyChunksIntegrationTest {
                 for (String dim : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                     assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
                 }
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(2L);
-                try (var ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL "
-                            + "AND embedding_384 IS NULL AND embedding_1024 IS NULL")) {
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1))
-                        .as("every row must land with ONLY the 768-dim embedding populated -- "
-                            + "no NULL-everywhere rows")
-                        .isEqualTo(2L);
-                }
+                assertThat(rowCount(conn, "chunks")).isEqualTo(2L);
+                assertThat(DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                        CHUNKS.EMBEDDING_768.isNotNull(), CHUNKS.EMBEDDING_384.isNull(), CHUNKS.EMBEDDING_1024.isNull()))
+                    .as("every row must land with ONLY the 768-dim embedding populated -- "
+                        + "no NULL-everywhere rows")
+                    .isEqualTo(2);
                 assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
                     .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
                     .isFalse();

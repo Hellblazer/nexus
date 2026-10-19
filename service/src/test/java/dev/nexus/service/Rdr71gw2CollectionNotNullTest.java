@@ -25,7 +25,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.concurrent.ExecutorService;
@@ -328,34 +327,28 @@ class Rdr71gw2CollectionNotNullTest {
 
     private static String collectionOf(Connection su, String tenantId, String docId, int position)
             throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT collection FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId
-                 + "' AND position = " + position)) {
-            return rs.next() ? rs.getString(1) : null;
-        }
+        var rows = DSL.using(su, SQLDialect.POSTGRES)
+            .select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId),
+                   CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position))
+            .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private static boolean rowExists(Connection su, String tenantId, String docId, int position)
             throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT 1 FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId
-                 + "' AND position = " + position)) {
-            return rs.next();
-        }
+        return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId),
+            CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position));
     }
 
     private static int chunkCountOf(Connection su, String tenantId, String docId) throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT chunk_count FROM nexus.catalog_documents "
-                 + "WHERE tenant_id = '" + tenantId + "' AND tumbler = '" + docId + "'")) {
-            assertThat(rs.next()).isTrue();
-            return rs.getInt(1);
-        }
+        var rows = DSL.using(su, SQLDialect.POSTGRES)
+            .select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .fetch(CATALOG_DOCUMENTS.CHUNK_COUNT);
+        assertThat(rows).isNotEmpty();
+        return rows.get(0);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -532,12 +525,8 @@ class Rdr71gw2CollectionNotNullTest {
             assertThat(rowExists(su, tenant, "m.1", 0)).isFalse();
             assertThat(rowExists(su, tenant, "m.2", 0)).isFalse();
             assertThat(collectionOf(su, tenant, "m.3", 0)).isEqualTo(coll);
-            try (Statement st = su.createStatement();
-                 ResultSet rs = st.executeQuery(
-                     "SELECT count(*) FROM nexus.catalog_document_chunks WHERE collection IS NULL")) {
-                rs.next();
-                assertThat(rs.getLong(1)).isEqualTo(0L);
-            }
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull())).isEqualTo(0);
         }
     }
 

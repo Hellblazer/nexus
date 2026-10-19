@@ -116,8 +116,10 @@ class CatalogDocumentCascadeTest {
         assertThat(n).as("soft delete tombstoned one row").isEqualTo(1);
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT deleted_at IS NOT NULL FROM nexus.catalog_documents WHERE tenant_id='"
-                + TENANT + "' AND tumbler='soft-doc-1'")).as("row tombstoned, not removed").isEqualTo(1);
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq("soft-doc-1"),
+                    CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+                .as("row tombstoned, not removed").isEqualTo(1);
             // Children survive the tombstone (no cascade on UPDATE deleted_at).
             assertChildCounts(su, TENANT, "soft-doc-1", 1, 1, 1, 1);
             assertThat(countLinks(su, TENANT, "soft-doc-1"))
@@ -158,8 +160,9 @@ class CatalogDocumentCascadeTest {
             // The four fk-001 CASCADE children are gone.
             assertChildCounts(su, TENANT, "hard-doc-1", 0, 0, 0, 0);
             // topic_assignments has NO document-rooted FK (fk-001 changeset 1 = index only) — survives.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT
-                + "' AND doc_id=decode('" + hexChash("hard-doc-1") + "', 'hex')"))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
+                    TOPIC_ASSIGNMENTS.DOC_ID.eq(java.util.HexFormat.of().parseHex(hexChash("hard-doc-1")))))
                 .as("topic_assignments NOT cascaded by document delete (no doc-rooted FK)").isEqualTo(1);
             // nexus-tk070.p1 (RDR-194 § D2): fk_catalog_links_from_document/_to_document
             // now cascade BOTH links (either endpoint = hard-doc-1) off this same hard delete.
@@ -167,8 +170,9 @@ class CatalogDocumentCascadeTest {
                 .as("catalog_links cascaded on both sides by fk_catalog_links_from_document/_to_document")
                 .isEqualTo(0);
             // hard-doc-2 itself (the surviving OTHER endpoint) is untouched.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT
-                + "' AND tumbler='hard-doc-2'")).as("the other endpoint's document row survives").isEqualTo(1);
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq("hard-doc-2")))
+                .as("the other endpoint's document row survives").isEqualTo(1);
         }
     }
 
@@ -220,14 +224,15 @@ class CatalogDocumentCascadeTest {
     /** Assert the four fk-001 child tables hold the expected row counts for {@code tenant}/{@code tumbler}. */
     private void assertChildCounts(Connection su, String tenant, String tumbler,
                                    int aspects, int highlights, int queue, int manifest) throws Exception {
-        assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_aspects WHERE tenant_id='" + tenant
-            + "' AND doc_id='" + tumbler + "'")).as("document_aspects").isEqualTo(aspects);
-        assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_highlights WHERE tenant_id='" + tenant
-            + "' AND doc_id='" + tumbler + "'")).as("document_highlights").isEqualTo(highlights);
-        assertThat(rows(su, "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE tenant_id='" + tenant
-            + "' AND doc_id='" + tumbler + "'")).as("aspect_extraction_queue").isEqualTo(queue);
-        assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + tenant
-            + "' AND doc_id='" + tumbler + "'")).as("catalog_document_chunks manifest").isEqualTo(manifest);
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        assertThat(ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant),
+            DOCUMENT_ASPECTS.DOC_ID.eq(tumbler))).as("document_aspects").isEqualTo(aspects);
+        assertThat(ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant),
+            DOCUMENT_HIGHLIGHTS.DOC_ID.eq(tumbler))).as("document_highlights").isEqualTo(highlights);
+        assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant),
+            ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(tumbler))).as("aspect_extraction_queue").isEqualTo(queue);
+        assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant),
+            CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))).as("catalog_document_chunks manifest").isEqualTo(manifest);
     }
 
     /** Seed one document + its four fk-001 child rows (aspects/highlights/queue/manifest) for {@code tenant}. */
@@ -325,8 +330,9 @@ class CatalogDocumentCascadeTest {
 
     /** Count catalog_links rows naming {@code tumbler} on EITHER side for {@code tenant}. */
     private static int countLinks(Connection su, String tenant, String tumbler) throws Exception {
-        return rows(su, "SELECT COUNT(*) FROM nexus.catalog_links WHERE tenant_id='" + tenant
-            + "' AND (from_tumbler='" + tumbler + "' OR to_tumbler='" + tumbler + "')");
+        return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_LINKS,
+            CATALOG_LINKS.TENANT_ID.eq(tenant),
+            CATALOG_LINKS.FROM_TUMBLER.eq(tumbler).or(CATALOG_LINKS.TO_TUMBLER.eq(tumbler)));
     }
 
     /** 32-char hex-alphabet label, stored as its own ASCII bytes (no real hash semantics --
@@ -356,14 +362,5 @@ class CatalogDocumentCascadeTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private static int rows(Connection su, String sql) throws Exception {
-        var rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        // boolean expressions (deleted_at IS NOT NULL) come back as t/f; coerce to 1/0.
-        Object v = rs.getObject(1);
-        if (v instanceof Boolean b) return b ? 1 : 0;
-        return rs.getInt(1);
     }
 }

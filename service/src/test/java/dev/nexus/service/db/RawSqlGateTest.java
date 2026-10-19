@@ -911,9 +911,8 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 6 -> 4
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 15), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15
-        Map.entry("dev/nexus/service/CatalogDeleteCollectionCascadeTest.java", 14),
-        Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
+        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 10), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10
+        Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 2), // nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 2
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 4; vector seeds 4 -> 2
         Map.entry("dev/nexus/service/CatalogFtsFilenameSearchTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 3 -> 2
         // nexus-brxnp fix round: 8 -> 10 (+2, insertManifestRowBypassingFk's
@@ -922,18 +921,17 @@ class RawSqlGateTest {
         // PgVectorRepositoryGcQuarantineTest.java already carry entries for).
         Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 6; vector seeds 6 -> 3
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 4 -> 2
-        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 13), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 13
+        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 9), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 13; nexus-cbo4a 2026-10-19 SELECT probes: 13 -> 9
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 6 -> 3
-        Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 8), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 8
+        Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 1
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 5; vector seeds 5 -> 4
         Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 1), // nexus-cbo4a 2026-10-18 vector seeds: 2 -> 1
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
-        Map.entry("dev/nexus/service/ChashRepositoryTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 7 -> 5; vector seeds 5 -> 4
-        Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 8), // nexus-cbo4a 2026-10-18 vector seeds: 11 -> 8
-        Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 14), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 14
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 6), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6
+        Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 11 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
+        Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 4
+        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 2 raw-JDBC fixture sites,
         // the same idiom CombinedWriteRepositoryTest's own seedChunk384/
         // chunk384Exists use just below -- seedChunk's chunks INSERT (a
@@ -942,7 +940,6 @@ class RawSqlGateTest {
         // fk_catalog_chunks_chunk) and deleteChunk's chunks DELETE. nexus-cbo4a 2026-10-18:
         // seedChunk's INSERT moved onto the generated CHUNKS table; only the DELETE stays raw.
         Map.entry("dev/nexus/service/CombinedWriteRacedEmbedCounterTest.java", 1), // nexus-cbo4a 2026-10-18 vector seeds: 2 -> 1
-        Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 6 -> 5
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 3), // nexus-cbo4a 2026-10-18 vector seeds: 5 -> 3
         // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
         // (metadata->>key read, no jOOQ codegen shortcut used here) and
@@ -961,15 +958,15 @@ class RawSqlGateTest {
         // the GRANT pg_monitor ... WITH ADMIN OPTION the second test replays because that exact statement is
         // the test's subject, and the three pg_ls_waldir()/SET ROLE probes (table-valued function in FROM).
         Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 5),
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 6), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
-        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 13), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 22 -> 20, review fold-in 20 -> 14; vector seeds 14 -> 13
-        Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 9), // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 9
-        Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 5), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 7; vector seeds 7 -> 5
-        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 11), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 14 -> 12; vector seeds 12 -> 11
-        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 8), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 9; vector seeds 9 -> 8
+        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 22 -> 20, review fold-in 20 -> 14; vector seeds 14 -> 13; nexus-cbo4a 2026-10-19 SELECT probes: 13 -> 7
+        Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 9; nexus-cbo4a 2026-10-19 SELECT probes: 9 -> 2
+        Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 7; vector seeds 7 -> 5; nexus-cbo4a 2026-10-19 SELECT probes: 5 -> 2
+        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 14 -> 12; vector seeds 12 -> 11; nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 3
+        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 9; vector seeds 9 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 3
         Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 3),
         // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): a
         // REVOKE/GRANT pair (column-level, to isolate arm 1's full-row SELECT from
@@ -978,10 +975,9 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/NexusServiceTupleSweepIsolationTest.java", 3),
         Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 2
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 1
-        Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 9 -> 7
+        Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 9 -> 7; nexus-cbo4a 2026-10-19 SELECT probes: 7 -> 2
         Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 3), // nexus-cbo4a 2026-10-18: 13 -> 10, three GRANT EXECUTE sites onto grantExecuteOnFunction; nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 10 -> 6; vector seeds 6 -> 3
-        Map.entry("dev/nexus/service/PgVectorServingContractTest.java", 4),
-        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 14), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 20 -> 15; vector seeds 15 -> 14
+        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 10), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 20 -> 15; vector seeds 15 -> 14; nexus-cbo4a 2026-10-19 SELECT probes: 14 -> 10
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 3), // nexus-cbo4a 2026-10-18 vector seeds: 4 -> 3
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
         // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
@@ -1141,9 +1137,9 @@ class RawSqlGateTest {
         // nexus-cbo4a pre-walk bootstrap fold: 14 -> 9 (the 5-statement owner provisioning is
         // PgContainerHelper.bootstrapNonSuperuserOwner now; the 5 in the list above are gone).
         Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 9),
-        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 17), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17
+        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
-        Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 11 -> 8; vector seeds 8 -> 7
+        Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 11 -> 8; vector seeds 8 -> 7; nexus-cbo4a 2026-10-19 SELECT probes: 7 -> 1
         // nexus-f3yxx (as first written): seedFixtures' raw chunk/centroid INSERTs (2),
         // plan-shape's raw hnsw-off session-var SETs for the second role bootstrap (2),
         // the recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
@@ -1186,7 +1182,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 7 -> 4
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 3 -> 2
-        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 6), // nexus-cbo4a 2026-10-18 vector seeds: 13 -> 6
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
         // nexus-v4pj4 (round-2 review decision): 1 raw-JDBC site -- prosrc(...)'s
         // su.prepareStatement(...) fetching pg_proc.prosrc (no jOOQ codegen for
@@ -1198,7 +1193,7 @@ class RawSqlGateTest {
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
         // generated jOOQ DSL only. No entry: actual count is 0.
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
+        Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 2), // nexus-cbo4a 2026-10-19 SELECT probes: 7 -> 2
         // nexus-f3yxx rework round: topicsLockHeldByAnotherBackend's raw pg_locks
         // probe -- pg_locks.relation = 'X'::regclass and pg_backend_pid() are
         // assembled SQL expressions with no typed jOOQ DSL form, so this is plain
@@ -1252,8 +1247,6 @@ class RawSqlGateTest {
         // REINDEX (maintenance syntax with no jOOQ form).
         Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 2
-        Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
-        Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
         // nexus-brxnp: 11 -> 13 (+2, the new createdAt/backdateChunk helpers'
         // raw executeQuery/execute -- the live-origin-row-wins regression
@@ -1261,7 +1254,7 @@ class RawSqlGateTest {
         // same raw idiom this file's existing chunkText/metadataField
         // helpers already use). nexus-cbo4a 2026-10-18: backdateChunk's UPDATE and the
         // null-chash chunks INSERT moved onto the generated CHUNKS table.
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 8) // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 8
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 2) // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
     );
 
     /**
@@ -1690,7 +1683,16 @@ class RawSqlGateTest {
     // outright, 98 -> 86 files. Seeds that run before search-path-001 relocates the extension, or against the
     // per-dim chunks_<dim> / taxonomy_centroids_<dim> tables, bind the embedding as a real[] (VectorSeeds.
     // LEGACY_EMBEDDING). Nothing in the shape is kept raw outside the held file.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 427;
+    // nexus-cbo4a 2026-10-19 SELECT probes: 427 -> 278 (-149: row-count, existence and value-read SELECTs in 26
+    // files, plus the (Connection, String sql) wrappers they ran through, onto the generated tables, the generated
+    // table-valued functions (document_text, manifest_verify, search_metadata_scoped_1024, search_graph_hop_1024)
+    // and PgCatalogProbes; 7 entries reach 0 and are removed outright, 86 -> 79 files). Kept raw:
+    // PgSessionStatementTimeoutIntegrationTest.java's two planCounts sites (they pin pgjdbc's server-side
+    // prepared-statement promotion at the fifth execution of ONE PreparedStatement and read that statement's
+    // pg_prepared_statements row by its text, so the JDBC statement is the thing under test). Not converted in
+    // this pass: the runIds(Connection, String) oracle wrappers of CombinedQueryParityTest.java and
+    // GraphHopParityTest.java with the stitched-path oracle statements their callers assemble as strings.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 278;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

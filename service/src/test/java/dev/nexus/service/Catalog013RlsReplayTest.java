@@ -14,7 +14,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.regex.Matcher;
@@ -160,9 +159,9 @@ class Catalog013RlsReplayTest {
                 // 4. The RLS-blindness ground truth that motivated the
                 //    no-DML design: FORCE RLS + no tenant GUC hides every
                 //    row from the non-BYPASSRLS owner.
-                assertThat(count(su, "SELECT count(*) FROM nexus.catalog_document_chunks"))
+                assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS))
                     .as("superuser ground truth").isEqualTo(2);
-                assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_document_chunks"))
+                assertThat(DSL.using(admin, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS))
                     .as("FORCE RLS hides every row from the non-BYPASSRLS owner "
                         + "— any DML in a changeset would silently no-op here")
                     .isEqualTo(0);
@@ -177,15 +176,16 @@ class Catalog013RlsReplayTest {
 
             // 6. The legacy rows are byte-untouched (rekey belongs to
             //    /v1/remap/rekey under withTenant, never to Liquibase).
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE octet_length(chash) = 16"))
+            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(suCtx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    DSL.function("octet_length", Integer.class, CATALOG_DOCUMENT_CHUNKS.CHASH).eq(16)))
                 .as("mid-migration legacy rows survive the replay unmodified")
                 .isEqualTo(2);
             // The octet CHECK exists and remains NOT VALID (validated only
             // by the client rung's admin connection, post-rekey).
-            assertThat(count(su,
-                "SELECT count(*) FROM pg_constraint "
-                + "WHERE conname = 'catalog_document_chunks_chash_octet_check' AND NOT convalidated"))
+            assertThat(suCtx.fetchCount(DSL.table(DSL.name("pg_constraint")),
+                    DSL.field(DSL.name("conname"), String.class).eq("catalog_document_chunks_chash_octet_check"),
+                    DSL.field(DSL.name("convalidated"), Boolean.class).isFalse()))
                 .isEqualTo(1);
         }
     }
@@ -253,13 +253,6 @@ class Catalog013RlsReplayTest {
             + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
             + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
             + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
     }
 
     private static void exec(Connection c, String sql) throws Exception {

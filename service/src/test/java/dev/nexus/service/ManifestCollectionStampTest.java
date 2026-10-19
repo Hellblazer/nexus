@@ -13,13 +13,13 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -195,23 +195,25 @@ class ManifestCollectionStampTest {
     }
 
     private String collectionOf(String chash) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT collection FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + TENANT + "' AND chash = decode('" + chash + "', 'hex')")) {
-            return rs.next() ? rs.getString(1) : null;
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                       CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash)))
+                .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     private int combinedQueryHits() throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
-                 + "ARRAY['" + COLL + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
-            rs.next();
-            return rs.getInt(1);
+        return combinedQueryHits(COLL);
+    }
+
+    private int combinedQueryHits(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(SEARCH_METADATA_SCOPED_1024.call(
+                VectorSeeds.vec(1024, 0.1f), new String[] {collection},
+                null, null, null, null, null, null, 10, "voyage-context-3", TENANT));
         }
     }
 
@@ -585,16 +587,8 @@ class ManifestCollectionStampTest {
                 + "CASCADE now (F10a) -- the explicit per-table UPDATE that used to "
                 + "do this work finds nothing left to touch")
             .isEqualTo(0);
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
-                 + "ARRAY['" + renamed + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
-            rs.next();
-            assertThat(rs.getInt(1))
-                .as("combined query follows the rename end-to-end").isEqualTo(1);
-        }
+        assertThat(combinedQueryHits(renamed))
+            .as("combined query follows the rename end-to-end").isEqualTo(1);
         // restore for sibling tests (PER_CLASS lifecycle, shared fixture)
         repo.renameCollection(TENANT, renamed, COLL);
     }
