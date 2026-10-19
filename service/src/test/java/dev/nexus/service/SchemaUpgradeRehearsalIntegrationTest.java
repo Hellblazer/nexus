@@ -134,8 +134,12 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * Both RED paths were verified by temporarily neutering each toggle
  * (2026-07-10, nexus-u5dln): the 013-1b neuter reproduces the incident's
  * VALIDATE failure verbatim; the 014-0 neuter is the nastier shape — the
- * migration COMPLETES with the stamp silently un-applied (0 of 2 rows), and
- * only this leg's effect assertion catches it.
+ * migration COMPLETES with the stamp silently un-applied, and only this leg's
+ * effect assertion catches it. Later changesets (catalog-025-0's NULL-row
+ * delete, hygiene-001-5/-8's legacy-width delete) came to erase the 014-0
+ * evidence before HEAD, and the 014-0 neuter went GREEN (measured 2026-10-18,
+ * nexus-iu7hp); its assertion now runs at a partial-walk checkpoint just after
+ * catalog-014-0.
  *
  * <p><strong>Tag availability.</strong> {@code git archive} needs {@link
  * #OLD_TAG} present locally. The test attempts a shallow {@code git fetch
@@ -969,6 +973,27 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── catalog-014-0 checkpoint (nexus-iu7hp): the stamp can only be
+                // observed here, right after 014-0. Later in the hop catalog-025-0
+                // deletes any manifest row still collection NULL, and hygiene-001-5/-8
+                // delete every legacy-width (16-byte) row, which every row seeded at
+                // OLD_TAG is. So at HEAD a neutered 014-0 and a working one leave the
+                // same final state; here, a neutered one leaves all three rows NULL. ──
+                migrateUpTo(adminDs, "catalog-015-0");
+                try (Connection su = pg.createConnection("")) {
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq("code__x"))))
+                        .as("catalog-014-0 must stamp all three seeded manifest rows (1.1.100 x2, "
+                            + "1.1.101) with code__x under FORCE-RLS; fewer means its toggle-wrapped "
+                            + "manifest_backfill() no-oped for the NOBYPASSRLS owner")
+                        .isEqualTo(3);
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()))
+                        .as("no manifest row may remain un-stamped right after catalog-014-0")
+                        .isEqualTo(0);
+                }
+
                 // ── nexus-r7xao seed-coverage follow-up: tuples-003-2's target table
                 // (nexus.tuples) does not exist until PARTWAY through this SAME hop,
                 // unlike every table seeded above -- migrate up to just before
@@ -1264,7 +1289,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                     assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()))
-                        .as("no manifest row may remain un-stamped after catalog-014-0")
+                        .as("no manifest row may be un-stamped at HEAD (catalog-025-0 deletes NULL "
+                            + "rows, so this cannot tell a working catalog-014-0 from a neutered one; "
+                            + "the catalog-015-0 checkpoint above does)")
                         .isEqualTo(0);
 
                     // catalog-025-0 leg (nexus-j862l, seed-coverage lint follow-up): the
