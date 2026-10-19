@@ -728,6 +728,15 @@ if steps_supported is not True:
         f"(got {steps_supported!r}) — the .p1d per-step cost/quality "
         "telemetry capability probe is inert for every cloud client"
     )
+# nexus-0bl77 (rtg20 phase A): the test-only POST /v1/_test/tenant-reset route is registered only when
+# NX_TEST_TENANT_RESET_ROUTE=1, which must never be set on the cloud engine. /version reports it as an
+# always-present boolean on an engine that carries the route; an engine older than the route omits the key.
+# Absent and false both pass; only an explicit true fails.
+if body.get("test_tenant_reset_route") is True:
+    errs.append(
+        "test_tenant_reset_route is true: POST /v1/_test/tenant-reset is registered on this engine — "
+        "NX_TEST_TENANT_RESET_ROUTE must never be set on the cloud engine"
+    )
 if errs:
     print("  /version body:", json.dumps(body), file=sys.stderr)
     for e in errs:
