@@ -40,8 +40,13 @@ def installed_plugin(tmp_path_factory) -> Path:
     # --local turns that failure fatal. With TMPDIR on another volume than
     # the checkout (the shared /Volumes/SanHell TMPDIR on Sam's Mac) every
     # link is cross-device, so --local failed all 24 cases at setup.
+    # --shared (nexus-kyujr): inside a lab-run grant tmp_path_factory lives on
+    # tmpfs, where hard links to the source are impossible and a plain copy of the
+    # object store was 1.3 GB per xdist worker on the primary, charged to the
+    # grant's memory. The test reads only the working tree, so the copy borrows
+    # the objects through alternates instead.
     result = subprocess.run(
-        ["git", "clone", str(REPO_ROOT), str(clone_root)],
+        ["git", "clone", "--shared", str(REPO_ROOT), str(clone_root)],
         capture_output=True,
         text=True,
     )

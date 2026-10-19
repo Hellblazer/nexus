@@ -61,6 +61,45 @@ its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`. A test that
 drives the decision itself starts from a cleared `NX_TEST_PG_ROOT_SESSION`
 (`tests/test_engine_substrate_pg_root.py` has the fixture).
 
+**Where pytest's basetemp and `TMPDIR` live** (nexus-kyujr, `tests/_tmp_root.py`). One
+CI-shaped shard wrote 442 MiB to chas's NVMe and 227 MB of that was `tmp_path` data
+under `~/tmp/pytest-of-<user>`, which pytest keeps for the last three runs. Inside a
+lab-run grant (`LAB_CPUS` set; a CI job on the pool has it too) on Linux, with `/dev/shm`
+a writable tmpfs **not mounted `noexec`**, 3 GiB free and 3 GiB of cgroup headroom (the
+cluster root's floors), the controller creates
+`/dev/shm/nexus-tmp-<uid>/r<random>/{t,p,owner.json}` (0700, a sibling of
+`nexus-test-pg-<uid>`) before it spawns workers, runs one real script from it, and sets
+`TMPDIR=<run>/t` and `PYTEST_DEBUG_TEMPROOT=<run>/p`. `tempfile`, `tmp_path`, every child
+process, the fenced home and the cluster-log file follow; workers and nested pytest runs
+find `NX_TEST_TMP_SESSION` and decide nothing. The original tempdir stays in
+`NX_TEST_TMP_ORIG` and is what the boot-slot directory and the stray-cluster sweep's disk
+root use (`_engine_substrate._original_tempdir`): a per-run slot directory would split the
+cross-run boot cap. What does NOT follow: the engine JVM's `java.io.tmpdir` (the JDK ignores
+`TMPDIR` on Linux; `/tmp`, hsperfdata and a uid probe file) and the ONNX native cache
+(`NX_ORT_NATIVE_DIR`, pinned to the real home on purpose). The summary ends with one line,
+`nexus test tmp: basetemp and TMPDIR on tmpfs <run>, N MiB at the end of the run, removed at
+exit; nx-* reports are copied to <dir>`, or `... on disk <tempdir> because: <reason>`
+(not inside a grant, not Linux, noexec, low room, ...; a Linux grant that could not use
+tmpfs also warns). Settings: `NX_TEST_TMP_ROOT=default` keeps the old behaviour;
+`NX_TEST_TMP_ROOT=<dir>` uses `<dir>/{t,p}` and keeps it after the run (inspecting a
+failure); `NX_TEST_PG_ROOT=default` also keeps the tempdir; an explicit `--basetemp` wins for
+the basetemp. **The run dir is removed at the end of the run** (`pytest_unconfigure`, after
+the terminal summary), not retained: pytest's own keep-3 retention only ever sees the one
+numbered dir inside the private run dir, so it never keeps a previous run on tmpfs. The DDL
+counter and the storage-touch guard write their `nx-*` reports into the controller basetemp
+by default, after the session finishes, so just before the removal the basetemp's top-level
+`nx-*` files are copied to `<original tempdir>/nexus-test-reports-<uid>/<run>` (newest three
+kept); `NX_DDL_REPORT_DIR` / `NX_STORAGE_TOUCH_REPORT_DIR` still put them where you choose. A
+killed run leaves one `r*` dir, which the next grant run removes at its start: the owner record
+(pid plus `/proc` start time) says the controller is gone, or a record-less dir is older than
+10 minutes; the dir's `p` tree is first handed to the same scoped daemon reaper the
+start-of-run drain uses, and nothing outside the per-uid root or owned by another user is
+touched. A fixture must not assume hard links to the checkout (tmpfs cannot): the
+plugin-install fixture clones with `--shared` for this reason (a plain clone copied the 1.3 GB
+object store per worker). `tests/test_tmp_root.py` drives the decision with injected inputs and
+runs real nested pytests (serial, xdist, SIGKILL) against `NX_TEST_TMP_SHM_DIR`, a directory
+standing in for `/dev/shm` that is treated as exec-capable tmpfs on any platform.
+
 **If `SubstrateRootExhausted` trips** (nexus-vo9qn). It means this run chose tmpfs
 for its clusters and, after 45 s of re-reading, a start still saw under 512 MiB
 (the floor) of tmpfs space or cgroup memory headroom. It is a capacity statement,

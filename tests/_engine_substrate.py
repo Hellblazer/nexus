@@ -164,6 +164,19 @@ _SHM_DIR_SEAM_ENV = "NX_TEST_PG_SHM_DIR"
 _SHM_DIR = Path("/dev/shm")
 _TMPFS_DIR_PREFIX = "nexus-test-pg"
 
+#: The tempdir this run started with. ``tests/_tmp_root.py`` (nexus-kyujr) moves
+#: ``TMPDIR`` onto a private tmpfs directory inside a lab-run grant and records the
+#: original here. Two things must keep the ORIGINAL: the boot-slot directory (a
+#: per-run directory would split the cross-run concurrency cap) and the stray-cluster
+#: sweep's disk root (clusters stranded by an earlier run live there, not in the new
+#: run's private directory).
+_TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
+
+
+def _original_tempdir() -> Path:
+    """The process tempdir as it was before ``tests/_tmp_root.py`` moved it."""
+    return Path(os.environ.get(_TMP_ORIG_ENV) or tempfile.gettempdir())
+
 #: Headroom required before clusters are put on tmpfs: 2 GiB plus a 1 GiB margin,
 #: checked against the SMALLER of the tmpfs's free space and the process's cgroup
 #: memory headroom (tmpfs pages are charged to the cgroup, and on a 64 GB box
@@ -785,7 +798,7 @@ def substrate_pg_roots(
     sweep looks at, because a cluster stranded in tmpfs is RAM until reaped.
     """
     env = os.environ if env is None else env
-    base = Path(tempfile.gettempdir()) if tempdir is None else tempdir
+    base = _original_tempdir() if tempdir is None else tempdir
     if shm_dir is None:
         shm_dir = Path(env.get(_SHM_DIR_SEAM_ENV) or _SHM_DIR)
     override = (env.get(_PG_ROOT_ENV) or "").strip()
@@ -1515,7 +1528,7 @@ def _boot_semaphore_dir(root: Path, uid: int | str | None = None) -> Path:
     return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{uid}"
 
 
-_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))
+_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(_original_tempdir())
 
 #: Generous: a slow/loaded box waiting out a genuine queue of concurrent
 #: boots is expected, not a hang. Failing loud after this window (rather

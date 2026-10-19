@@ -108,6 +108,12 @@ def pytest_configure(config):
         uv run pytest                          # quiet (WARNING)
         uv run pytest --log-level=DEBUG        # full debug output
     """
+    # nexus-kyujr: basetemp and TMPDIR on tmpfs inside a lab-run grant, decided once
+    # by the controller BEFORE it spawns workers (they inherit the environment).
+    # First, so everything below (the cluster log, the fenced home) follows TMPDIR.
+    from tests._tmp_root import TmpRootPlugin  # noqa: PLC0415 — configure-time only
+
+    config.pluginmanager.register(TmpRootPlugin(drain=_drain_stale_tmp_run), "nexus-tmp-root")
     _clamp_xdist_workers(config)
     _begin_pg_root_session(config)
 
@@ -4453,6 +4459,14 @@ def _ps_all() -> list[tuple[int, str]]:
 
 # Back-compat alias: the reaper's own tests import this name.
 _ps_aspect_workers = _ps_all
+
+
+def _drain_stale_tmp_run(pytest_root: Path) -> None:
+    """The start-of-run drain for a crashed run's private pytest tree
+    (``tests/_tmp_root.py``, nexus-kyujr): its basetemp is no sibling of ours, so
+    :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``."""
+    snapshot = _ps_all()
+    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot)
 
 
 def _matches_class(cmd: str, label: str) -> bool:

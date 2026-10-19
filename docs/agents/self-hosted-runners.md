@@ -64,6 +64,20 @@ differ from a GitHub-hosted runner:
   writing to disk. `NX_XDIST_NO_CAP=1` and `NX_TEST_PG_ROOT=default` are the
   escapes; `default` puts the clusters back on the NVMe, which is the write this
   removes.
+  Pytest's basetemp and `TMPDIR` go on `/dev/shm` too (nexus-kyujr): a CI-shaped
+  shard wrote 442 MiB to the NVMe, 227 MB of it `tmp_path` data that pytest kept for
+  three runs. Inside a grant, with a writable exec-capable tmpfs and the same 3 GiB
+  floors, the controller makes `/dev/shm/nexus-tmp-<uid>/r<random>` once per run,
+  points `TMPDIR` and `PYTEST_DEBUG_TEMPROOT` at it, and deletes it when the run
+  ends; a killed run's dir is removed by the next one. The summary line `nexus test
+  tmp: basetemp and TMPDIR on tmpfs ...` (or `on disk ... because: <reason>`) says
+  where it went. The data is charged to the grant's memory (a shard measured about
+  230 MB; the 2.5 GiB per worker above covers it). `NX_TEST_TMP_ROOT=default` is the
+  escape; `NX_TEST_TMP_ROOT=<dir>` keeps the tree in `<dir>` for inspecting a failure.
+  The DDL and storage-touch `nx-*` reports are copied to
+  `<tempdir>/nexus-test-reports-<uid>/<run>` before the removal. The engine JVM's own
+  `java.io.tmpdir` stays on `/tmp` (the JDK ignores `TMPDIR`). `tests/AGENTS.md` has
+  the full paragraph.
   If `SubstrateRootExhausted` trips, the floor is 512 MiB of tmpfs space or cgroup
   headroom after a 45 s wait: read the cause in the exception, the summary line and
   the `cluster_root` events (`--log-level=INFO`), then run fewer workers (`-n` =
