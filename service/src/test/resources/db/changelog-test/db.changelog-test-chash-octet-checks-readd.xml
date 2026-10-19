@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: re-adds the chash octet-width CHECKs NOT VALID after a test dropped them to seed a legacy
+    16-byte chash, in Liquibase XML instead of Java SQL strings (Sam's rule, nexus-zrcj7: no SQL strings in
+    Java, tests included). Run through PgContainerHelper#readdChashOctetChecksNotValid.
+
+    Each constraint is re-added only when its table lacks it, so a caller that dropped one of the two (as
+    Catalog013RlsReplayTest does) and a caller that dropped both use the same call. NOT VALID leaves the
+    seeded legacy rows in place and checks every later write: the aged-fleet shape rdr180-001 documents.
+    The jOOQ constraint DSL has no NOT VALID, which is why this is not jOOQ.
+
+    Needs nothing but the two tables, so it runs on a partially migrated database too (Hygiene001's
+    mid-walk seed). runAlways: every call runs again; bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="chash-octet-checks-readd-chunks" author="nexus-cbo4a" runAlways="true">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">
+                SELECT count(*) FROM pg_constraint
+                 WHERE conrelid = 'nexus.chunks'::regclass AND conname = 'chunks_chash_octet_check'
+            </sqlCheck>
+        </preConditions>
+        <sql>ALTER TABLE nexus.chunks ADD CONSTRAINT chunks_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID</sql>
+    </changeSet>
+
+    <changeSet id="chash-octet-checks-readd-catalog-document-chunks" author="nexus-cbo4a" runAlways="true">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">
+                SELECT count(*) FROM pg_constraint
+                 WHERE conrelid = 'nexus.catalog_document_chunks'::regclass
+                   AND conname = 'catalog_document_chunks_chash_octet_check'
+            </sqlCheck>
+        </preConditions>
+        <sql>ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID</sql>
+    </changeSet>
+</databaseChangeLog>

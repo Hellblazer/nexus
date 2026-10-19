@@ -125,19 +125,13 @@ class ChashConformanceReportIntegrationTest {
     // not a per-dim constraint. Dropping it opens the poisoning window for
     // whichever dim column this test's insert populates.
     private void withChecksDropped(Connection su, Runnable seed) throws Exception {
-        su.createStatement().execute(
-            "ALTER TABLE nexus.chunks DROP CONSTRAINT chunks_chash_octet_check");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
+        DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
+        DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+            .dropConstraint("catalog_document_chunks_chash_octet_check").execute();
         try {
             seed.run();
         } finally {
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chunks ADD CONSTRAINT chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            PgContainerHelper.readdChashOctetChecksNotValid(su);
         }
     }
 

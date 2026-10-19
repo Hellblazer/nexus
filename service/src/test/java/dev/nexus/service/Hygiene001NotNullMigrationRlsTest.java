@@ -123,23 +123,14 @@ class Hygiene001NotNullMigrationRlsTest {
                 // Phase 3 runs hygiene-001-5/-8 against it.
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks DROP CONSTRAINT chunks_chash_octet_check");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks "
-                        + "DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
+                    DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
+                    DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+                        .dropConstraint("catalog_document_chunks_chash_octet_check").execute();
 
                     seedLegacyChunkAndManifest(su, TENANT_1, "legacywidthchsh1");
                     seedLegacyChunkAndManifest(su, TENANT_2, "legacywidthchsh2");
 
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks "
-                        + "ADD CONSTRAINT chunks_chash_octet_check "
-                        + "CHECK (octet_length(chash) = 32) NOT VALID");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks "
-                        + "ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                        + "CHECK (octet_length(chash) = 32) NOT VALID");
+                    PgContainerHelper.readdChashOctetChecksNotValid(su);
                 }
 
                 // Phase 2c (coordinator item E, review round): catalog_collections
@@ -302,9 +293,7 @@ class Hygiene001NotNullMigrationRlsTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             String collection = tenant + "__coll__voyage-context-3__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collection + "')");
+            insertBareCollection(su, tenant, collection);
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
                 .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-doc-1")
@@ -435,9 +424,7 @@ class Hygiene001NotNullMigrationRlsTest {
             su.setAutoCommit(true);
 
             String collA = tenant + "__created-at-two-docs__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collA + "')");
+            insertBareCollection(su, tenant, collA);
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
                 .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-created-at-doc-1")
@@ -454,10 +441,19 @@ class Hygiene001NotNullMigrationRlsTest {
                 .execute();
 
             String collB = tenant + "__created-at-no-docs__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collB + "')");
+            insertBareCollection(su, tenant, collB);
         }
+    }
+
+    /**
+     * A {@code catalog_collections} row with only tenant and name, the columns the mid-walk schema has at
+     * this point; PgContainerHelper.insertCollection sets columns later changesets add.
+     */
+    private static void insertBareCollection(Connection su, String tenant, String name) {
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant)
+            .set(CATALOG_COLLECTIONS.NAME, name)
+            .execute();
     }
 
     /** Minimal DBA-equivalent bootstrap: the migrating role, nexus_svc, the CREATE grants, the extensions

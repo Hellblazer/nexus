@@ -129,15 +129,13 @@ class Catalog013RlsReplayTest {
             // mid-migration state arises from the type conversion of rows
             // that predate rdr180; reconstruct it the same way the pre-flip
             // incident tests did — drop, seed, re-add NOT VALID.
-            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
-                + "DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+                .dropConstraint("catalog_document_chunks_chash_octet_check").execute();
             byte[] legacyA = HexFormat.of().parseHex("a".repeat(32));  // 16 bytes
             byte[] legacyC = HexFormat.of().parseHex("c".repeat(32));
             seedRow(su, "t1", legacyA, "code__x");
             seedRow(su, "t2", legacyC, "code__z");
-            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            PgContainerHelper.readdChashOctetChecksNotValid(su);
 
             // 3. Production-shaped ownership for the replay role.
             exec(su, "GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);

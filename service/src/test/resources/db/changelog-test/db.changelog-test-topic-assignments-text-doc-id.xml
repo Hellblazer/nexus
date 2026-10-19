@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: reverts nexus.topic_assignments.doc_id from bytea to TEXT (hex), in Liquibase XML instead
+    of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's
+    alterColumn(..).set(type) has no USING clause, and bytea to text needs one.
+
+    Taxonomy010BackfillDirectIntegrationTest replays taxonomy-010-1's own SQL, written for a TEXT doc_id,
+    on a fully migrated throwaway database; the caller first drops what depends on doc_id's type (the diag
+    view and topic_assignments_chunk_fk). Run through PgContainerHelper#revertTopicAssignmentsDocIdToText;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="topic-assignments-text-doc-id" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')</sql>
+    </changeSet>
+</databaseChangeLog>

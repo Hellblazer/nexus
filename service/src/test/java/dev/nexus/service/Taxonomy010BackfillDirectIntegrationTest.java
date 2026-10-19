@@ -23,6 +23,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -125,8 +126,8 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // full migration; SET NOT NULL is already in place. Relax it back
             // off so this test can seed NULL-source_collection input, exactly
             // the pre-remediation shape the real migration walk saw.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments ALTER COLUMN source_collection DROP NOT NULL");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).alterColumn(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).dropNotNull()
+                .execute();
             // RDR-194 P3c (nexus-tk070.p3c): startAll()'s full migration now
             // ALSO runs taxonomy-011-1, converting doc_id to bytea. This test
             // replays taxonomy-010-1's OWN <sql> text unmodified (extractChangesetSql,
@@ -147,8 +148,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // view first (same test-only-relaxation shape as the two
             // statements above; a real migration walk never does this,
             // taxonomy-011-8 recreates it going forward every boot).
-            su.createStatement().execute(
-                "DROP VIEW IF EXISTS nexus.diag_chash_conformance");
+            DSL.using(su, SQLDialect.POSTGRES).dropViewIfExists(DSL.name("nexus", "diag_chash_conformance")).execute();
             // RDR-194 P3d (nexus-tk070.p3d): startAll()'s full migration now ALSO
             // runs taxonomy-012, which ADDs topic_assignments_chunk_fk -- a
             // composite FK whose (source_collection, doc_id) leg targets
@@ -160,10 +160,8 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // re-adds the constraint, because this test replays taxonomy-010-1
             // alone (never touches taxonomy-011/012's own logic) and the whole
             // container is stopped in @AfterAll.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
+            PgContainerHelper.revertTopicAssignmentsDocIdToText(su);
 
             // RDR-225: a collection holds one embedding model, so one width. code__x holds the 384-wide chunks
             // below and code__y the 768-wide one; the ambiguous chash is one chunk in each of the two.
@@ -351,16 +349,21 @@ class Taxonomy010BackfillDirectIntegrationTest {
             .fetchOne(TOPICS.ID);
     }
 
+    /**
+     * {@code doc_id} as TEXT: the generated {@code TOPIC_ASSIGNMENTS.DOC_ID} is bytea, but this class reverts
+     * the column to TEXT before seeding (see the test body), so the seeds bind the hex string by name.
+     */
+    private static final org.jooq.Field<String> TEXT_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
+
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, embedding_model) "
-            + "VALUES (?, ?, ?, 'direct-test-seed', 'bge-base-en-v15-768')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.executeUpdate();
-        }
+        DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TEXT_DOC_ID, docId)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+            .execute();
     }
 
     /**
@@ -374,16 +377,14 @@ class Taxonomy010BackfillDirectIntegrationTest {
     private static void seedTopicAssignment(
             Connection c, String tenant, String docId, long topicId, String sourceCollection)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments "
-            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
-            + "VALUES (?, ?, ?, 'direct-test-seed', ?, 'bge-base-en-v15-768')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.setString(4, sourceCollection);
-            ps.executeUpdate();
-        }
+        DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TEXT_DOC_ID, docId)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+            .execute();
     }
 
     /** A fresh {@code nexus.chunks} row -- already bytea, no legacy-width CHECK. */

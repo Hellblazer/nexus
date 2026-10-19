@@ -1543,6 +1543,29 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Re-adds {@code chunks_chash_octet_check} and {@code catalog_document_chunks_chash_octet_check}
+     * NOT VALID, each only if its table lacks it (nexus-cbo4a), after a test dropped one or both with
+     * jOOQ's {@code dropConstraint} to seed a legacy 16-byte chash. Runs
+     * {@code db.changelog-test-chash-octet-checks-readd.xml}; see that file's header for why this is not
+     * jOOQ. Needs only the two tables, not the {@code nexus_test} objects. Leaves {@code su} autoCommit.
+     */
+    public static void readdChashOctetChecksNotValid(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-chash-octet-checks-readd.xml",
+            "databasechangelog_test_octet_checks", Map.of());
+    }
+
+    /**
+     * Reverts {@code nexus.topic_assignments.doc_id} to TEXT (hex) through
+     * {@code db.changelog-test-topic-assignments-text-doc-id.xml} (nexus-cbo4a), for a test that replays a
+     * changeset written for the TEXT-era column. The caller drops what depends on the column's type first.
+     * Leaves {@code su} autoCommit.
+     */
+    public static void revertTopicAssignmentsDocIdToText(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-topic-assignments-text-doc-id.xml",
+            "databasechangelog_test_text_doc_id", Map.of());
+    }
+
+    /**
      * Second half of the dangling-manifest-row idiom (nexus-cbo4a): re-adds {@code fk_catalog_chunks_chunk}
      * NOT VALID in catalog-029-0's shape through {@link #addFkNotValidComposite3}, so it is live (unvalidated)
      * again for every later statement. The function appends {@code embedding_model} to both column lists when

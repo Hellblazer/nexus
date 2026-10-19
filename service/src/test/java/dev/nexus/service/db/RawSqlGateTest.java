@@ -912,7 +912,7 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 6 -> 4
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 8), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10; FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 10 -> 8
+        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 6), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10; FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 10 -> 8; nexus-cbo4a 2026-10-19 octet-CHECK / topic_assignments DDL: 8 -> 6
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 2), // nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 2
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 4; vector seeds 4 -> 2
         // nexus-brxnp fix round: 8 -> 10 (+2, insertManifestRowBypassingFk's
@@ -928,7 +928,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 3 -> 1
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
-        Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 5; vector seeds 5 -> 4
         Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 1), // nexus-cbo4a 2026-10-18 vector seeds: 2 -> 1
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 11 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 2
@@ -964,7 +963,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
-        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 22 -> 20, review fold-in 20 -> 14; vector seeds 14 -> 13; nexus-cbo4a 2026-10-19 SELECT probes: 13 -> 7
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 9; nexus-cbo4a 2026-10-19 SELECT probes: 9 -> 2
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 7; vector seeds 7 -> 5; nexus-cbo4a 2026-10-19 SELECT probes: 5 -> 2
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 14 -> 12; vector seeds 12 -> 11; nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 3 -> 1
@@ -1139,7 +1137,7 @@ class RawSqlGateTest {
         // nexus-cbo4a pre-walk bootstrap fold: 14 -> 9 (the 5-statement owner provisioning is
         // PgContainerHelper.bootstrapNonSuperuserOwner now; the 5 in the list above are gone).
         Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 9),
-        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7
+        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7; nexus-cbo4a 2026-10-19 octet-CHECK / topic_assignments DDL: 7 -> 1 (the 1 left replays taxonomy-010-1's own changeset SQL, read from the product changelog)
         // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
         // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
         // changeset SQL, read from the product changelog and executed as the admin role: no string in Java, but
@@ -1720,7 +1718,14 @@ class RawSqlGateTest {
     // nexus-cbo4a 2026-10-19 Taxonomy011ForeignOwnedDiagViewTest fixture, 217 -> 209: see its entry.
     // Review fold-in, 209 -> 207: Catalog013RlsReplayTest installs the nexus_test objects after its superuser
     // walk and its FK-bypass pair moved onto the same two helpers.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 207;
+    // nexus-cbo4a 2026-10-19 octet CHECKs and topic_assignments DDL, 207 -> 188 (72 -> 70 files): the chash
+    // octet-width CHECK drops are jOOQ dropConstraint (strict, no IF EXISTS) and the NOT VALID re-adds go
+    // through PgContainerHelper.readdChashOctetChecksNotValid (db.changelog-test-chash-octet-checks-readd.xml,
+    // which needs no nexus_test objects, so Hygiene001's mid-walk seed can use it); Taxonomy010's relaxation is
+    // jOOQ (DROP NOT NULL, dropViewIfExists, dropConstraintIfExists) plus revertTopicAssignmentsDocIdToText for
+    // the USING cast jOOQ cannot express; its topic_assignments seeds and Hygiene001's bare catalog_collections
+    // seeds are jOOQ inserts.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 188;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
