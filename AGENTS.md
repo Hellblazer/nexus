@@ -93,6 +93,7 @@ Two of them hold always-on rules, repeated here because no file read triggers th
 
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
 - On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI. An engine build is the exception: `scripts/mvnw-leased.sh --lab-run <class> ...`, never wrapped in lab-run, so the build lease is taken before the grant.
+- **Never stop processes by pattern on a shared pool user** (chas/qwent `nxtest`): no `pkill -f`, `pkill -u`, `killall` or `kill $(pgrep ...)`; they kill other sessions' work. Stop your own lab-run, or kill one pid you checked with `ps`; report strays to the labrun session. Full text: [labrun README § Stopping work on a shared user](https://github.com/Hellblazer/labrun/blob/main/README.md#stopping-work-on-a-shared-user) (labrun RDR-001 F13).
 
 ## Worktrees: one session, one worktree (2026-09-19)
 
