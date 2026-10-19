@@ -118,6 +118,20 @@ git -C "$repo2" checkout -q -- service/src/main/A.java
 kr="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" == "$kr" ]] && ok "restoring the inputs restores the key" || bad "key did not return after restore"
 
+echo "Test 1c (nexus-fkhd3 review): a path with a space is part of the key"
+repo3="$WORKDIR/repo3"
+mkdir -p "$repo3/service/src/main/dir one" "$repo3/service/.mvn"
+git -C "$repo3" init -q
+git -C "$repo3" config user.email t@t; git -C "$repo3" config user.name t
+echo 'class A {}' > "$repo3/service/src/main/dir one/A.java"
+echo '<project/>' > "$repo3/service/pom.xml"
+echo '#!/bin/sh' > "$repo3/service/mvnw"
+git -C "$repo3" add service && git -C "$repo3" commit -qm base
+ks1="$(gate_jar_cache_key "$repo3" 0.1.0 "")"
+mv "$repo3/service/src/main/dir one" "$repo3/service/src/main/dir two"
+ks2="$(gate_jar_cache_key "$repo3" 0.1.0 "")"
+[[ -n "$ks1" && "$ks1" != "$ks2" ]] && ok "renaming a directory whose name has a space moves the key" || bad "space-path rename did not move the key ($ks1 vs $ks2)"
+
 echo "Test 2: store/lookup roundtrip, worktree shares the cache, corrupt entry is a miss"
 jar="$WORKDIR/built.jar"; _fake_jar "$jar"
 gate_jar_cache_store "$repo" "$k3" "$jar" "abc+1" && ok "store rc 0" || bad "store failed"
@@ -168,6 +182,49 @@ left="$(cd "$jroot" && ls -d main-* test-* | tr '\n' ' ')"
 [[ ! -d "$jroot/.staging.main.dead.wt.1" ]] && ok "a day-old staging leftover is removed" || bad "dead staging dir survived"
 NX_JOOQ_CACHE=off gate_jar_cache_prune_jooq "$repo" && ok "NX_JOOQ_CACHE=off prunes nothing and succeeds" || bad "off prune failed"
 NX_JOOQ_CACHE="$WORKDIR/does-not-exist" gate_jar_cache_prune_jooq "$repo" && ok "a missing cache dir is a no-op" || bad "missing dir failed"
+
+echo "Test 5 (nexus-fkhd3 review): a cache that cannot be written never fails the caller"
+afile="$WORKDIR/a-regular-file"; echo x > "$afile"
+NX_GATE_JAR_CACHE="$afile/cache" gate_jar_cache_store "$repo" "$k3" "$jar" "x" 2>"$WORKDIR/store.err" \
+    && ok "store under a path that cannot be created returns 0" || bad "unwritable store returned non-zero"
+grep -q "gate jar cache" "$WORKDIR/store.err" && ok "the failure is warned about, not silent" || bad "no warning on an unwritable store"
+NX_GATE_JAR_CACHE="$afile/cache" gate_jar_cache_lookup "$repo" "$k3" >/dev/null 2>&1 && bad "lookup hit in an unusable cache" || ok "lookup in an unusable cache is a miss"
+if [[ "$(id -u)" != 0 ]]; then
+    ro="$WORKDIR/ro-cache"; mkdir -p "$ro"; chmod 555 "$ro"
+    NX_GATE_JAR_CACHE="$ro" gate_jar_cache_store "$repo" "$k3" "$jar" "x" 2>/dev/null \
+        && ok "store into a read-only cache dir returns 0" || bad "read-only store returned non-zero"
+    chmod 755 "$ro"
+    [[ -z "$(ls -A "$ro")" ]] && ok "the read-only cache holds nothing" || bad "read-only cache was written"
+else
+    ok "(root: the read-only variant is covered by the regular-file variant above)"
+fi
+gate_jar_cache_store "$repo" "$k3" "$jar.missing" "x" 2>/dev/null && bad "store without a jar returned 0" || ok "store without a jar is still an error (a caller bug, not a cache fault)"
+
+echo "Test 6 (nexus-fkhd3 review): prune renames an entry aside before it deletes it"
+# A restore that is copying an entry while a prune runs must see the entry vanish by RENAME,
+# never a tree being emptied under it: record what every rm is asked to remove.
+rm_log="$WORKDIR/rm.log"; : > "$rm_log"
+rm() {
+    local a
+    for a in "$@"; do
+        [[ "$a" == -* ]] && continue
+        printf '%s\n' "$a" >> "$rm_log"
+    done
+    command rm "$@"
+}
+proot="$WORKDIR/prune-root"; mkdir -p "$proot"
+for i in 1 2 3 4; do mkdir -p "$proot/k$i"; echo x > "$proot/k$i/f"; touch -t "20260101010$i" "$proot/k$i"; done
+GATE_JAR_CACHE_KEEP=2 _gate_jar_cache_prune "$proot"
+[[ -d "$proot/k4" && -d "$proot/k3" && ! -e "$proot/k1" && ! -e "$proot/k2" ]] && ok "gate-jar prune kept the newest 2" || bad "gate-jar prune result: $(ls "$proot")"
+if grep -E "/k[0-9]+$" "$rm_log" >/dev/null; then bad "gate-jar prune deleted an entry in place: $(grep -E '/k[0-9]+$' "$rm_log" | head -2)"; else ok "gate-jar prune never rm'd an entry under its own name"; fi
+[[ -z "$(ls -A "$proot" | grep -E '\.old')" ]] && ok "no .old leftovers after the prune" || bad "leftovers: $(ls -A "$proot")"
+: > "$rm_log"
+jr2="$WORKDIR/jooq-prune"; mkdir -p "$jr2"
+for i in 1 2 3; do mkdir -p "$jr2/main-h$i/generated"; touch -t "20260101010$i" "$jr2/main-h$i"; done
+NX_JOOQ_CACHE="$jr2" JOOQ_CACHE_KEEP=1 gate_jar_cache_prune_jooq "$repo"
+[[ -d "$jr2/main-h3" && ! -e "$jr2/main-h1" && ! -e "$jr2/main-h2" ]] && ok "jooq prune kept the newest 1" || bad "jooq prune result: $(ls "$jr2")"
+if grep -E "/main-h[0-9]+$" "$rm_log" >/dev/null; then bad "jooq prune deleted an entry in place"; else ok "jooq prune never rm'd an entry under its own name"; fi
+unset -f rm
 
 echo
 echo "gate-jar-cache_test.sh: $PASS passed, $FAIL failed"

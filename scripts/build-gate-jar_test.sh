@@ -125,6 +125,19 @@ out5="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc5=$?
 out6="$(cd "$repo" && NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc6=$?
 [[ $rc6 -eq 0 && "$out6" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 5 ]] && ok "cache off: builds every time" || bad "cache off misbehaved: $out6"
 
+echo "Test 5b (nexus-fkhd3 review): a cache that cannot be written does not fail the build"
+echo 'class C {}' > "$repo/service/src/main/C.java"
+echo "not a directory" > "$WORKDIR/cache-is-a-file"
+before5b="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out5b="$(cd "$repo" && NX_GATE_JAR_CACHE="$WORKDIR/cache-is-a-file/cache" scripts/build-gate-jar.sh 2>&1)"; rc5b=$?
+[[ $rc5b -eq 0 ]] && ok "the build exits 0 although the cache cannot be created" || bad "unwritable cache failed the build (rc $rc5b): $out5b"
+[[ "$out5b" == *"MISS"* && "$out5b" == *"built "* ]] && ok "it still builds and prints the built line" || bad "output: $out5b"
+[[ "$out5b" == *"gate jar cache"*"not"* ]] && ok "and says the cache was not written" || bad "no warning about the cache: $out5b"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((before5b + 1))" ]] && ok "mvnw ran once" || bad "mvnw count after the unwritable-cache build: $(wc -l < "$MVNW_COUNT")"
+[[ -f "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" ]] && ok "the jar is in service/target" || bad "no jar after the unwritable-cache build"
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored" || bad "props dirty after the unwritable-cache build"
+rm -f "$repo/service/src/main/C.java"
+
 echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
 (cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &
 holder6=$!

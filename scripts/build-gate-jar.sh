@@ -137,19 +137,32 @@ build_ref="${sha}+${nonce}"
 # The key covers the build inputs; extra mvn args are part of it too, so a
 # `-Pfoo` build never serves a plain one.
 jar_name="nexus-service-1.0-SNAPSHOT.jar"
-cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"
-if cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
-    mkdir -p "$repo_root/service/target"
-    cp "$cached/jar" "$repo_root/service/target/$jar_name"
-    build_ref="$(cat "$cached/build_ref")"
-    echo "stamped release_version=$ver"
-    echo "stamped build_ref=$build_ref"
-    echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached)"
-    echo "built $repo_root/service/target/$jar_name"
-    build_lease_release service
-    exit 0
+# The cache is best-effort end to end: a key that cannot be computed, an entry
+# that cannot be read or copied whole, a root that cannot be written, all fall
+# through to a plain build (nexus-fkhd3 review).
+cache_key=""
+if ! cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"; then
+    echo "gate jar cache disabled for this run: the key could not be computed" >&2
+    cache_key=""
 fi
-echo "gate jar cache MISS key=$cache_key — building"
+if [[ -n "$cache_key" ]] && cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
+    mkdir -p "$repo_root/service/target"
+    # Copy, then re-verify the COPY: an entry pruned or damaged between the
+    # lookup's check and this read must become a rebuild, not a bad jar.
+    if cp "$cached/jar" "$repo_root/service/target/$jar_name" 2>/dev/null \
+        && hit_ref="$(cat "$cached/build_ref" 2>/dev/null)" && [[ -n "$hit_ref" ]] \
+        && _gate_jar_cache_jar_ok "$repo_root/service/target/$jar_name"; then
+        echo "stamped release_version=$ver"
+        echo "stamped build_ref=$hit_ref"
+        echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached)"
+        echo "built $repo_root/service/target/$jar_name"
+        build_lease_release service
+        exit 0
+    fi
+    rm -f "$repo_root/service/target/$jar_name"
+    echo "gate jar cache entry $cached could not be used whole; building" >&2
+fi
+echo "gate jar cache MISS key=${cache_key:-none} — building"
 
 backup="$(mktemp)"
 cp "$props" "$backup"
@@ -180,7 +193,11 @@ cd "$repo_root/service"
 
 built_jar="$repo_root/service/target/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }
-gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref"
+if [[ -n "$cache_key" ]]; then
+    # Best-effort: the store warns and returns 0 on a cache that cannot be written.
+    gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref" \
+        || echo "gate jar cache not written; continuing without it" >&2
+fi
 # The build just (re)published the jOOQ generated trees to the shared cache
 # (service/pom.xml, nexus-fkhd3); keep it bounded.
 gate_jar_cache_prune_jooq "$repo_root"

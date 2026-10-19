@@ -113,23 +113,29 @@ gate_jar_cache_key() {
         GIT_INDEX_FILE="$idx" git -C "$repo" update-index --cacheinfo "100644,$blob,$props" >/dev/null 2>&1 || {
             rm -f "$idx"; echo "gate_jar_cache_key: could not normalize $props in the throwaway index" >&2; return 1; }
     fi
-    # The staged listing of exactly the key paths: mode, blob hash, path. No
-    # tree object is written, so a key computation leaves only the blobs
-    # `add` hashed.
-    listing="$(GIT_INDEX_FILE="$idx" git -C "$repo" ls-files -s -- "${paths[@]}" 2>/dev/null | awk '{print $1, $2, $4}')"
+    # The staged listing of exactly the key paths: mode, blob hash, stage, path,
+    # hashed verbatim (a field split would cut a path at its first space and
+    # leave a rename inside a spaced directory invisible to the key). No tree
+    # object is written, so a key computation leaves only the blobs `add` hashed.
+    listing="$(GIT_INDEX_FILE="$idx" git -C "$repo" ls-files -s -- "${paths[@]}" 2>/dev/null)"
     rm -f "$idx"
     [[ -n "$listing" ]] || { echo "gate_jar_cache_key: nothing staged from ${paths[*]} in $repo" >&2; return 1; }
     printf 'inputs=%s\nrelease_version=%s\nargs=%s\n' "$(printf '%s\n' "$listing" | shasum -a 256 | cut -c1-64)" "$ver" "$args" | shasum -a 256 | cut -c1-40
 }
 
-_gate_jar_cache_entry_ok() {
-    local entry="$1"
-    [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
-    python3 - "$entry/jar" <<'PY' >/dev/null 2>&1
+# _gate_jar_cache_jar_ok <jar> -- the jar opens as a zip and carries a manifest.
+_gate_jar_cache_jar_ok() {
+    python3 - "$1" <<'PY' >/dev/null 2>&1
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as zf:
     zf.read("META-INF/MANIFEST.MF")
 PY
+}
+
+_gate_jar_cache_entry_ok() {
+    local entry="$1"
+    [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
+    _gate_jar_cache_jar_ok "$entry/jar"
 }
 
 # gate_jar_cache_lookup <repo> <key> — prints the entry dir on a hit (rc 0);
@@ -158,11 +164,15 @@ gate_jar_cache_store() {
     local root staging entry
     root="$(gate_jar_cache_root "$repo")" || return 0
     [[ -f "$jar" ]] || { echo "gate_jar_cache_store: no jar at $jar" >&2; return 1; }
-    mkdir -p "$root" || return 1
-    staging="$(mktemp -d "$root/.staging.XXXXXX")" || return 1
-    if ! cp "$jar" "$staging/jar" || ! printf '%s\n' "$build_ref" > "$staging/build_ref"; then
+    # The cache is an optimisation: a root that cannot be created or written
+    # (read-only, another owner, full disk) is warned about and skipped, never
+    # a build failure -- the jar is already built and in service/target.
+    mkdir -p "$root" 2>/dev/null || { _gate_jar_cache_unwritable "$root"; return 0; }
+    staging="$(mktemp -d "$root/.staging.XXXXXX" 2>/dev/null)" || { _gate_jar_cache_unwritable "$root"; return 0; }
+    if ! cp "$jar" "$staging/jar" 2>/dev/null || ! printf '%s\n' "$build_ref" > "$staging/build_ref" 2>/dev/null; then
         rm -rf "$staging"
-        return 1
+        _gate_jar_cache_unwritable "$root"
+        return 0
     fi
     entry="$root/$key"
     # Publish by rename: an existing entry is moved aside first (a reader
@@ -170,14 +180,31 @@ gate_jar_cache_store() {
     # a half-copied jar), then discarded.
     local aside="$entry.old.$$"
     [[ -d "$entry" ]] && mv "$entry" "$aside" 2>/dev/null
-    if ! mv "$staging" "$entry"; then
+    if ! mv "$staging" "$entry" 2>/dev/null; then
         rm -rf "$staging"
         [[ -d "$aside" ]] && mv "$aside" "$entry" 2>/dev/null
-        return 1
+        _gate_jar_cache_unwritable "$root"
+        return 0
     fi
     rm -rf "${aside:?}"
     _gate_jar_cache_prune "$root"
     return 0
+}
+
+_gate_jar_cache_unwritable() {
+    echo "gate jar cache not written (cannot write under $1); continuing without it" >&2
+}
+
+# _gate_jar_cache_discard <root> <name> -- take an entry out of service by
+# RENAMING it to a unique hidden *.old name, then delete that. A reader that is
+# copying the entry sees it vanish whole (its next open fails and it falls
+# through to a rebuild) instead of a tree being emptied file by file under it.
+_gate_jar_cache_discard() {
+    local root="$1" name="$2" aside
+    aside="$root/.discard.$name.$$.$RANDOM.old"
+    if mv "$root/$name" "$aside" 2>/dev/null; then
+        rm -rf "${aside:?}"
+    fi
 }
 
 _gate_jar_cache_prune() {
@@ -188,9 +215,11 @@ _gate_jar_cache_prune() {
         [[ "$d" == .staging.* || "$d" == *.old.* ]] && continue
         n=$((n + 1))
         if (( n > GATE_JAR_CACHE_KEEP )); then
-            rm -rf "${root:?}/${d:?}"
+            _gate_jar_cache_discard "$root" "$d"
         fi
     done < <(ls -t "$root" 2>/dev/null)
+    # Leftovers of a killed store or discard (hidden staging dirs, *.old asides).
+    find "$root" -maxdepth 1 \( -name '.staging.*' -o -name '*.old' -o -name '*.old.*' \) -mtime +1 -exec rm -rf {} + 2>/dev/null || true
 }
 
 # gate_jar_cache_prune_jooq <repo> -- trim the shared cache of jOOQ generated
@@ -219,7 +248,7 @@ gate_jar_cache_prune_jooq() {
             [[ "$d" == .* || "$d" == *.old ]] && continue
             n=$((n + 1))
             if (( n > JOOQ_CACHE_KEEP )); then
-                rm -rf "${root:?}/${d:?}"
+                _gate_jar_cache_discard "$root" "$d"
             fi
         done < <(cd "$root" && ls -t -d "$kind"-* 2>/dev/null)
     done
