@@ -104,15 +104,21 @@ class ServiceIntegrationTest {
     // ─── Test 2: auth 401 matrix ──────────────────────────────────────────────
 
     @Test
-    void version_reportsAppVersion_andExplicitSchemaError_withoutJournal() throws Exception {
-        // nexus-pebfx.4: this harness bootstraps schema manually (no Liquibase),
-        // so /version must report app_version AND an explicit schema_error —
-        // never silently omit the schema fields.
+    void version_reportsAppVersion_andExplicitSchemaError_withoutPublicJournal() throws Exception {
+        // nexus-pebfx.4: this harness never runs the product master changelog and keeps its
+        // own Liquibase journal in nexus_test, so there is no public.databasechangelog and
+        // /version must report app_version AND an explicit schema_error — never silently
+        // omit the schema fields.
         var resp = get("/version", null);
         org.assertj.core.api.Assertions.assertThat(resp.statusCode()).isEqualTo(200);
         org.assertj.core.api.Assertions.assertThat(resp.body())
             .contains("\"app_version\"")
-            .contains("\"schema_error\"");
+            .contains("\"schema_error\"")
+            // The journal-less premise itself: the error is the missing public.databasechangelog,
+            // not a permission error on a journal that exists (installRlsProbeHarness keeps its own
+            // Liquibase journal in nexus_test for exactly this).
+            .contains("databasechangelog")
+            .contains("does not exist");
     }
 
     @Test

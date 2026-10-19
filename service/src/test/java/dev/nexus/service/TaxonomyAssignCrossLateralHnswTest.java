@@ -71,8 +71,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       migration (permission denied to set parameter, found by the
  *       candidate-migration leg 2026-09-25). Both fail HERE.</li>
  *   <li>{@link #withoutTheSets_theSameLateralShapeMissesRowsOnTheDenseSource}:
- *       a NEGATIVE CONTROL — the identical LATERAL shape, run directly (not
- *       through the function) at {@code ef_search=40} with NO
+ *       a NEGATIVE CONTROL — the identical LATERAL shape, run outside
+ *       assign_from_chashes_1024 (through the test function
+ *       nexus_test.lateral_cross_rows_1024, which sets nothing of its own) at {@code ef_search=40} with NO
  *       {@code iterative_scan} (Postgres's own default), against the SAME
  *       &gt;=40-own-centroid source collection. Proves the fixture actually
  *       exercises the hazard the SET clauses exist to close: without them,
