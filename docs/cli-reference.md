@@ -3904,6 +3904,15 @@ engine's view has `expired`, and when its reads have failed since it started and
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
 
+**Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
+body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
+whether search is reranked; `reranker_available` is the engine's answer on whether the reranker's model files are present, read live
+from the files on every response. It reports files on disk, not that a rerank would succeed: files that are present but cannot be
+loaded, and the Voyage reranker, read true. The row warns when it is false, naming the reranker, and says to run
+`nx init --service`; the value is a bare boolean and carries no path. A value that is not a boolean warns. Not
+applicable (green) when the engine cannot be reached or an older engine does not report the key, which is "cannot tell", never "available".
+It works in local and managed mode alike, over HTTP only.
+
 **Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
 threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
 `NX_SEARCH_EXACT_MAX_ROWS` rows (default 20,000). At or below that count the router runs the collection exact; above it

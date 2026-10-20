@@ -6,15 +6,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import dev.nexus.service.vectors.AdmissionControlledReranker;
 import dev.nexus.service.vectors.BootPlan;
+import dev.nexus.service.vectors.CrossEncoderReranker;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingProfile;
 import dev.nexus.service.vectors.LocalModelProbe;
+import dev.nexus.service.vectors.LocalOnnxAdmission;
 import dev.nexus.service.vectors.Reranker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Proxy;
@@ -23,8 +27,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -83,8 +90,13 @@ class EmbedPostureHandlersTest {
     }
 
     private static Reranker reranker(String token) {
+        return reranker(token, new AtomicBoolean(true));
+    }
+
+    private static Reranker reranker(String token, AtomicBoolean available) {
         return new Reranker() {
             @Override public String modelToken() { return token; }
+            @Override public boolean available() { return available.get(); }
             @Override public List<Scored> rerank(String query, List<String> documents, Integer topK) { return List.of(); }
         };
     }
@@ -168,6 +180,78 @@ class EmbedPostureHandlersTest {
         assertThat(body.has("embedding_profile")).isFalse();
     }
 
+    @Test
+    void status_rerankerAvailable_isLive_namesTheRerankerEitherWay_andFlipsWithoutARestart() throws Exception {
+        var present = new AtomicBoolean(false);
+        var plan = BootPlan.decide(presence(true, true, false), EmbeddingProfile.BGE);
+        EmbedPosture posture = EmbedPosture.of(plan, reranker("ms-marco-minilm-l6-v2", present));
+        var handler = new StatusHandler(router(fakeBge(), "pa-key", EmbeddingProfile.BGE)).embedPosture(() -> posture);
+
+        JsonNode absent = get("/v1/status", handler);
+        assertThat(absent.get("reranker").asText()).as("the chosen reranker is still named")
+                .isEqualTo("ms-marco-minilm-l6-v2");
+        assertThat(absent.get("reranker_available").isBoolean()).isTrue();
+        assertThat(absent.get("reranker_available").asBoolean()).as("files absent").isFalse();
+        server.stop(0);
+
+        present.set(true);   // the same posture object, the same handler: no rebuild, no restart
+        JsonNode loaded = get("/v1/status", handler);
+        assertThat(loaded.get("reranker_available").asBoolean()).as("files appeared").isTrue();
+        assertThat(loaded.get("reranker").asText()).isEqualTo("ms-marco-minilm-l6-v2");
+    }
+
+    @Test
+    void reranker_available_isABareBoolean_andAddsNoPathOrProbeTextToTheWire() throws Exception {
+        var plan = BootPlan.decide(presence(true, true, false), EmbeddingProfile.BGE);
+        var handler = new StatusHandler(router(fakeBge(), "pa-key", EmbeddingProfile.BGE))
+                .embedPosture(() -> EmbedPosture.of(plan, reranker("ms-marco-minilm-l6-v2", new AtomicBoolean(false))));
+
+        String raw = get("/v1/status", handler).toString();
+
+        assertThat(raw).contains("\"reranker_available\":false");
+        assertThat(raw).doesNotContain("model.onnx").doesNotContain("tokenizer.json").doesNotContain("/models/");
+    }
+
+    @Test
+    void theReranker_asBootPlanBuildsIt_overMissingFiles_rendersRerankerAvailableFalse_andTrueOncePresent(
+            @TempDir Path dir) throws Exception {
+        // The production path: BootPlan.buildReranker wraps the cross-encoder in AdmissionControlledReranker,
+        // and EmbedPosture.of asks that wrapper. Nothing in this test stubs available().
+        var plan = BootPlan.decide(presence(true, true, false), EmbeddingProfile.BGE);
+        Path model = dir.resolve("onnx/model.onnx");
+        Path tokenizer = dir.resolve("onnx/tokenizer.json");
+        Reranker built = plan.buildReranker(
+                () -> { throw new AssertionError("the Voyage reranker must not be built"); },
+                () -> new CrossEncoderReranker(model.toString(), tokenizer.toString()),
+                new LocalOnnxAdmission(1, 1000));
+        assertThat(built).isInstanceOf(AdmissionControlledReranker.class);
+
+        EmbedPosture posture = EmbedPosture.of(plan, built);
+        var handler = new StatusHandler(router(fakeBge(), "pa-key", EmbeddingProfile.BGE)).embedPosture(() -> posture);
+
+        String raw = get("/v1/status", handler).toString();
+        assertThat(raw).contains("\"reranker\":\"ms-marco-minilm-l6-v2\"").contains("\"reranker_available\":false");
+        server.stop(0);
+
+        Files.createDirectories(model.getParent());
+        Files.writeString(model, "m");
+        Files.writeString(tokenizer, "t");
+        assertThat(get("/v1/status", handler).get("reranker_available").asBoolean())
+                .as("the same wrapped reranker, files now present").isTrue();
+    }
+
+    @Test
+    void aPostureWithNoReranker_reportsNullAndNotAvailable() throws Exception {
+        var plan = BootPlan.decide(presence(true, true, true), EmbeddingProfile.BGE);
+        var handler = new StatusHandler(router(fakeBge(), "pa-key", EmbeddingProfile.BGE))
+                .embedPosture(() -> EmbedPosture.of(plan, null));
+
+        JsonNode body = get("/v1/status", handler);
+
+        assertThat(body.get("reranker").isNull()).isTrue();
+        assertThat(body.get("reranker_available").asBoolean()).isFalse();
+    }
+
     // ── /version ───────────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -235,7 +319,7 @@ class EmbedPostureHandlersTest {
         server.stop(0);
         JsonNode version = get("/version", new VersionHandler(refusingPool(),
                 router(null, "pa-key", EmbeddingProfile.BGE)).embedPosture(() -> posture));
-        for (String key : List.of("embedding_profile", "reranker", "embedding_degraded")) {
+        for (String key : List.of("embedding_profile", "reranker", "reranker_available", "embedding_degraded")) {
             assertThat(version.get(key)).as(key).isEqualTo(status.get(key));
         }
     }

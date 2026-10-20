@@ -4705,6 +4705,61 @@ def _compact_span(seconds: float) -> str:
     return f"{seconds}s"
 
 
+_RERANKER_LABEL = "Reranker"
+
+
+def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-yuh4a (RDR-210 P3.1): are the engine's reranker model files present?
+
+    ``GET /v1/status`` names the CHOSEN reranker in ``reranker`` even when its model files are absent and every rerank
+    degrades, so the name does not say whether search is reranked. ``reranker_available`` is the engine's answer on
+    whether the reranker's model files are present, read live from the files on every response. It reports files on
+    disk, not that a rerank would succeed (present-but-unloadable files read true, and so does the Voyage reranker).
+    The value is a bare boolean; the engine puts no path in it.
+
+    * warn: ``reranker_available`` is false (searches are served without rerank, with a degraded-rerank field).
+    * warn: the key is present but not a boolean (never read as available).
+    * not applicable (ok): the engine cannot be reached, or an older engine does not report the key, which is
+      "cannot tell", not "available".
+    """
+    label = _RERANKER_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_reranker_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    if status is None:
+        return [HealthResult(label=label, ok=True, detail="not applicable: the engine's status endpoint could not be read")]
+    if "reranker_available" not in status:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: this engine's status does not report whether its reranker is available "
+            "(an older engine, or one that is still starting)"))]
+    available = status.get("reranker_available")
+    if not isinstance(available, bool):
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"the engine's reranker_available could not be read (not a boolean; got {repr(available)[:40]})",
+            fix_suggestions=["Check that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+    name = status.get("reranker")
+    name = name if isinstance(name, str) and name else None
+    if available:
+        return [HealthResult(label=label, ok=True, detail=f"{name or 'the reranker'}: model files are present")]
+    which = f"the reranker ({name}): model files are absent" if name else "no reranker is configured"
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=f"{which}, so searches are served without rerank",
+        fix_suggestions=["Run `nx init --service` to provision the cross-encoder model files; the engine reads this "
+                         "row's value from those files"],
+    )]
+
+
 def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
 
@@ -11256,6 +11311,7 @@ def run_health_checks(
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
     results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
+    results.extend(_check_reranker(engine_status))  # nexus-yuh4a
     results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())

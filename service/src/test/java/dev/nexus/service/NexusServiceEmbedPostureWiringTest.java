@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class NexusServiceEmbedPostureWiringTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String[] KEYS = {"embedding_profile", "reranker", "embedding_degraded"};
+    private static final String[] KEYS = {"embedding_profile", "reranker", "reranker_available", "embedding_degraded"};
 
     private PostgreSQLContainer<?> pg;
     private com.zaxxer.hikari.HikariDataSource ds;
@@ -90,6 +90,7 @@ class NexusServiceEmbedPostureWiringTest {
             JsonNode body = get(path);
             assertThat(body.get("embedding_profile").asText()).as(path).isEqualTo("voyage");
             assertThat(body.get("reranker").asText()).as(path).isEqualTo("rerank-2.5");
+            assertThat(body.get("reranker_available").asBoolean()).as("%s: a posture built without a probe", path).isTrue();
             assertThat(body.has("embedding_degraded")).as(path).isTrue();
             assertThat(body.get("embedding_degraded").isNull()).as(path).isTrue();
         }

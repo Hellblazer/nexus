@@ -100,6 +100,18 @@ public final class CrossEncoderReranker implements Reranker {
         return "ms-marco-minilm-l6-v2";
     }
 
+    /**
+     * File presence, read live (nexus-yuh4a): true once the session is loaded, else true only while
+     * BOTH the model and the tokenizer are regular files on disk now. Two stats, no ONNX runtime, so a
+     * status poll is cheap. It says the files are there, not that a rerank would succeed: files that are
+     * present but cannot be loaded still read true.
+     */
+    @Override
+    public boolean available() {
+        return initialized
+                || (Files.isRegularFile(Path.of(modelPath)) && Files.isRegularFile(Path.of(tokenizerPath)));
+    }
+
     @Override
     public List<Scored> rerank(String query, List<String> documents, Integer topK) {
         if (query == null || query.isBlank()) {

@@ -97,6 +97,27 @@ class AdmissionControlledRerankerTest {
         assertThat(gated.rerank("q", List.of("d1", "d2"), null)).hasSize(1);
     }
 
+    private static Reranker availability(boolean available) {
+        return new Reranker() {
+            @Override public String modelToken() { return "stub"; }
+            @Override public boolean available() { return available; }
+            @Override public List<Scored> rerank(String query, List<String> documents, Integer topK) {
+                return List.of();
+            }
+        };
+    }
+
+    @Test
+    void available_delegatesToTheWrappedReranker_bothWays_notTheInterfaceDefault() {
+        // BootPlan.buildReranker always wraps the cross-encoder in this class, so without the override the
+        // interface default (true) would win and /v1/status would claim a missing model is present.
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(1, 1000);
+        assertThat(new AdmissionControlledReranker(availability(false), admission, true).available())
+                .as("wrapped reranker reports false").isFalse();
+        assertThat(new AdmissionControlledReranker(availability(true), admission, true).available())
+                .as("wrapped reranker reports true").isTrue();
+    }
+
     @Test
     void interactiveRerank_failsLoudWithTypedRetryableSignal_whenAdmissionQueueFull() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
