@@ -488,6 +488,28 @@ class PgServerLogTest {
     @Test
     void a_killed_container_is_exited_137_to_a_fresh_inspect_and_the_failure_line_says_so() throws Exception {
         assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector");
+        // The killed container's log is gone, so stop()'s record() counts a log error: keep that and the container's
+        // registration out of this fork's real count file, which the DDL ratchet reads.
+        Path countDir = Files.createTempDirectory("nx-ccg9y-counts");
+        String previousDir = System.getProperty(DdlCounts.DIR_PROPERTY);
+        System.setProperty(DdlCounts.DIR_PROPERTY, countDir.toString());
+        try (AutoCloseable isolated = DdlCounts.isolateForTest()) {
+            killedContainerReadsExited137();
+        } finally {
+            if (previousDir == null) {
+                System.clearProperty(DdlCounts.DIR_PROPERTY);
+            } else {
+                System.setProperty(DdlCounts.DIR_PROPERTY, previousDir);
+            }
+            try (Stream<Path> walk = Files.walk(countDir)) {
+                for (Path p : walk.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                    Files.deleteIfExists(p);
+                }
+            }
+        }
+    }
+
+    private static void killedContainerReadsExited137() throws Exception {
         FailFastPostgreSQLContainer c = (FailFastPostgreSQLContainer) PgContainerHelper.newContainer();
         try {
             c.start();
