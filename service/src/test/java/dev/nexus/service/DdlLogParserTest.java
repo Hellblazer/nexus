@@ -194,6 +194,20 @@ class DdlLogParserTest {
         assertThat(out.at("/wal/unreleased_databases").asLong()).isZero();
     }
 
+    /** A database whose DROP failed leaks: it stays unreleased, and its class's later span is still credited. */
+    @Test
+    void a_leaked_database_does_not_freeze_its_class() throws IOException {
+        DdlCounts.Totals totals = new DdlCounts.Totals();
+        totals.noteDatabase("db_a", "LeakTest", false, 100L);
+        totals.noteLeak("db_a");
+        totals.noteLeak("db_a");  // once only
+        totals.noteDatabase("db_b", "LeakTest", false, 200L);
+        totals.noteRelease("db_b", 260L);
+        JsonNode out = asJson(totals.snapshot());
+        assertThat(out.at("/per_class/LeakTest/wal_bytes").asLong()).isEqualTo(60);
+        assertThat(out.at("/wal/unreleased_databases").asLong()).isEqualTo(1);
+    }
+
     @Test
     void folding_logs_sums_into_buckets_and_attributes_databases_to_classes() throws IOException {
         DdlCounts.Totals totals = new DdlCounts.Totals(); // not the fork's: the real file must stay real

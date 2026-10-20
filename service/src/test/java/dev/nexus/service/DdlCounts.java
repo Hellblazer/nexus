@@ -266,6 +266,16 @@ final class DdlCounts {
         GLOBAL.noteRelease(dbName, endLsn);
     }
 
+    /** The shared database {@code dbName} could not be dropped and leaks for the rest of the fork: it stays
+     *  counted as unreleased, and its class's open span closes uncredited so the class's later databases
+     *  are still credited (nexus-7he0t). */
+    static void noteLeak(String dbName) {
+        if (!enabled()) {
+            return;
+        }
+        GLOBAL.noteLeak(dbName);
+    }
+
     /** Wait briefly for the {@code end} mark to reach the container log (the log stream lags a moment). */
     private static String logsWithEndMark(FailFastPostgreSQLContainer c, boolean marked) {
         String log = PgContainerHelper.serverLog(c);
@@ -339,6 +349,7 @@ final class DdlCounts {
          *  cluster-wide, so a class holding two databases at once is credited one merged span, not
          *  one per database (nexus-7he0t). One SharedCluster per fork, so one LSN space. */
         private final Map<String, long[]> openSpan = new HashMap<>();
+        private final Set<String> leaked = new java.util.HashSet<>();
         private final Set<String> emptyDbs = new java.util.HashSet<>();
         // {databases, containers, ddl, wal_bytes}
         private final Map<String, long[]> perClass = new TreeMap<>();
@@ -378,6 +389,14 @@ final class DdlCounts {
             }
             if (--span[0] == 0 && endLsn >= span[1]) {
                 perClass.computeIfAbsent(owner, k -> new long[4])[3] += endLsn - span[1];
+            }
+        }
+
+        synchronized void noteLeak(String dbName) {
+            String owner = dbOwner.get(dbName);
+            long[] span = owner == null ? null : openSpan.get(owner);
+            if (dbStartLsn.containsKey(dbName) && leaked.add(dbName) && span != null && span[0] > 0) {
+                span[0]--;
             }
         }
 

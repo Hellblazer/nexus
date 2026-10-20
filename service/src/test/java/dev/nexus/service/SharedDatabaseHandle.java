@@ -137,6 +137,7 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
             // nexus-sz651: the cluster's WAL position after this class's last write, for its bytes.
             DdlCounts.noteRelease(dbName, DdlCounts.walBytes(admin));
         } catch (SQLException e) {
+            DdlCounts.noteLeak(dbName);
             LOG.warn("best-effort DROP DATABASE \"{}\" failed (nexus-yhmav shared-cluster handle) "
                 + "-- leaking a per-class database for the remainder of this fork's run; if this class declared "
                 + "exclusive roles the role cleanup below will fail too and say so", dbName, e);
