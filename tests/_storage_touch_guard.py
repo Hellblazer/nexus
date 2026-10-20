@@ -291,7 +291,12 @@ _TESTS_PREFIX = str(_HERE.parent) + os.sep
 
 @functools.lru_cache(maxsize=4096)
 def _real(filename: str) -> str:
-    return os.path.realpath(filename)
+    """``realpath`` of a relative name (``<string>``, which xdist's execnet frames carry)
+    calls ``getcwd()``, which raises once the cwd is deleted: keep the name as it is."""
+    try:
+        return os.path.realpath(filename)
+    except OSError:
+        return filename
 
 
 @functools.lru_cache(maxsize=1)
