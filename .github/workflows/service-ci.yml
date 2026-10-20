@@ -310,9 +310,11 @@ jobs:
             echo "::notice::jOOQ host cache unused: cannot create $dir"
             exit 0
           fi
-          # Earlier weeks go once idle a day (a job that straddles the week boundary keeps
-          # its directory; a failure never fails the job); this week keeps the newest
+          # Every job touches its week directory here (a hit touches only the entry inside it),
+          # so a directory untouched for a day has no job left on it (this job's timeout is 60
+          # min) and goes; a failure never fails the job. This week keeps the newest
           # JOOQ_CACHE_KEEP entries of each kind.
+          touch "$dir" || true
           find "$base" -mindepth 1 -maxdepth 1 -type d -name '*-W*' -mmin +1440 ! -name "$(basename "$dir")" -exec rm -rf {} + 2>/dev/null || true
           NX_JOOQ_CACHE="$dir" bash -c '. scripts/lib/gate-jar-cache.sh && gate_jar_cache_prune_jooq "$PWD"' || true
           find "$dir" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-before" || true
