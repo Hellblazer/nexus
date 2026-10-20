@@ -103,7 +103,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
                         + "(structurally impossible for the ALTER to survive a surviving "
                         + "dependent view, verified empirically this fix round against a real "
                         + "PostgreSQL 17 instance) and not a raw, unnamed PostgreSQL error")
-                    .isInstanceOf(Exception.class)
+                    .isInstanceOf(java.sql.SQLException.class)
                     .hasMessageContaining("nexus-7ec4i")
                     .hasMessageContaining("does not own it and cannot drop it")
                     .hasMessageContaining("DROP VIEW IF EXISTS nexus.diag_chash_conformance")

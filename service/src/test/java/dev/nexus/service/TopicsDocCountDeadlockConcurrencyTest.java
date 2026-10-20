@@ -596,6 +596,14 @@ class TopicsDocCountDeadlockConcurrencyTest {
             su.setAutoCommit(true);
             // The pre-fix bodies ARE the product's taxonomy-003-1/-2 text (byte-identical to the hand copies this
             // replaced, checked 2026-10-19 after stripping the XML indentation): replayed, not copied.
+            // The RED premise is the UNORDERED body: if the changeset ever gained ORDER BY / FOR UPDATE, this
+            // replay would stop reproducing the deadlock and the test would go quietly green.
+            for (String id : List.of("taxonomy-003-1", "taxonomy-003-2")) {
+                assertThat(PgContainerHelper.changesetForwardText(PRE_FIX_TRIGGER_CHANGELOG, id).toUpperCase())
+                    .as("%s must still be the unordered pre-fix body", id)
+                    .doesNotContain("ORDER BY")
+                    .doesNotContain("FOR UPDATE");
+            }
             PgContainerHelper.replayChangeset(su, PRE_FIX_TRIGGER_CHANGELOG, "taxonomy-003-1");
             PgContainerHelper.replayChangeset(su, PRE_FIX_TRIGGER_CHANGELOG, "taxonomy-003-2");
         }

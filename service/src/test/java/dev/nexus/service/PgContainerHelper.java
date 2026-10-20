@@ -1908,12 +1908,19 @@ public final class PgContainerHelper {
      * A changeset that is not found, or whose selected part is empty (an empty {@code <rollback/>}), throws
      * {@link IllegalStateException}: a replay of nothing would pass vacuously. XML entities are decoded, as
      * Liquibase decodes them.
+     *
+     * <p>The replay is NOT a Liquibase run: it does not honour {@code splitStatements}, {@code stripComments},
+     * {@code endDelimiter}, {@code preConditions}, {@code dbms} or {@code runAlways}. The text goes to the server
+     * as ONE simple-query string. A changeset that depends on any of those attributes is not replayable here.
+     * See {@link #changesetText} for what is refused (non-product changelogs, mixed or non-{@code <sql>}
+     * rollback content).
      */
     private static List<String> replayPart(Connection conn, String changelog, String changesetId,
             ChangesetPart part) throws Exception {
         String sql = changesetText(changelog, changesetId, part);
         List<String> notices = new ArrayList<>();
         try (java.sql.Statement st = conn.createStatement()) {
+            // SANCTIONED RAW (nexus-cbo4a): product changeset text, run verbatim for its NOTICE chain, role and isolation from siblings
             st.execute(sql);
             for (java.sql.SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) {
                 notices.add(w.getMessage());
@@ -1924,12 +1931,31 @@ public final class PgContainerHelper {
 
     private static final String LIQUIBASE_NS = "http://www.liquibase.org/xml/ns/dbchangelog";
 
+    private static final String PRODUCT_CHANGELOG_PREFIX = "db/changelog/";
+
+    /**
+     * The text {@link #replayPart} runs, with its refusals. {@code changelog} must start with
+     * {@code db/changelog/} (no {@code ..} segment) and its resolved resource must NOT come from the test classes
+     * output: a test resource cannot shadow a product file, and a test changelog (db/changelog-test) never runs
+     * through this helper. ROLLBACK throws {@link IllegalStateException} for a {@code <rollback>} that has element
+     * children other than {@code <sql>}, or has both {@code <sql>} children and non-blank loose text; several
+     * {@code <rollback>} elements are joined with a newline.
+     */
     private static String changesetText(String changelog, String changesetId, ChangesetPart part) throws Exception {
+        if (!changelog.startsWith(PRODUCT_CHANGELOG_PREFIX) || changelog.contains("..")) {
+            throw new IllegalStateException("changeset replay is for PRODUCT changelogs under "
+                + PRODUCT_CHANGELOG_PREFIX + ", got: " + changelog);
+        }
+        java.net.URL url = PgContainerHelper.class.getClassLoader().getResource(changelog);
+        if (url == null) {
+            throw new IllegalStateException("changelog not found on classpath: " + changelog);
+        }
+        if (url.toString().contains("/test-classes/")) {
+            throw new IllegalStateException("changelog " + changelog + " resolves into the test classes output ("
+                + url + "); a test resource must not shadow a product changelog");
+        }
         org.w3c.dom.Document doc;
-        try (var in = PgContainerHelper.class.getClassLoader().getResourceAsStream(changelog)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelog);
-            }
+        try (var in = url.openStream()) {
             var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
             factory.setNamespaceAware(true);
             factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -1947,8 +1973,10 @@ public final class PgContainerHelper {
                     StringBuilder sb = new StringBuilder();
                     for (var n = cs.getFirstChild(); n != null; n = n.getNextSibling()) {
                         if (n instanceof org.w3c.dom.Element el && "rollback".equals(el.getLocalName())) {
-                            String inner = directSql(el);
-                            sb.append(inner.isBlank() ? el.getTextContent() : inner);
+                            if (sb.length() > 0) {
+                                sb.append('\n');
+                            }
+                            sb.append(rollbackText(el, changesetId, changelog));
                         }
                     }
                     yield sb.toString();
@@ -1961,6 +1989,29 @@ public final class PgContainerHelper {
             return text;
         }
         throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelog);
+    }
+
+    /** One {@code <rollback>}: its direct {@code <sql>} children, or its own text; never a mix, never other tags. */
+    private static String rollbackText(org.w3c.dom.Element rollback, String changesetId, String changelog) {
+        boolean hasSql = false;
+        StringBuilder loose = new StringBuilder();
+        for (var n = rollback.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n instanceof org.w3c.dom.Element el) {
+                if (!"sql".equals(el.getLocalName())) {
+                    throw new IllegalStateException("changeset " + changesetId + " in " + changelog
+                        + ": <rollback> has a <" + el.getLocalName() + "> child; only <sql> children can be replayed");
+                }
+                hasSql = true;
+            } else if (n.getNodeType() == org.w3c.dom.Node.TEXT_NODE
+                    || n.getNodeType() == org.w3c.dom.Node.CDATA_SECTION_NODE) {
+                loose.append(n.getNodeValue());
+            }
+        }
+        if (hasSql && !loose.toString().isBlank()) {
+            throw new IllegalStateException("changeset " + changesetId + " in " + changelog
+                + ": <rollback> mixes <sql> children with loose text; the replay would pick one and drop the other");
+        }
+        return hasSql ? directSql(rollback) : loose.toString();
     }
 
     private static String directSql(org.w3c.dom.Element parent) {
