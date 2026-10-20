@@ -318,12 +318,31 @@ def test_the_cgroup_io_reader_sums_wbytes_over_devices(tmp_path: Path) -> None:
     )
     proc = tmp_path / "cgroup"
     proc.write_text("0::/job.slice\n")
-    got = ddl.cgroup_io_wbytes(proc, root)
-    assert got == {"cgroup": "job.slice", "wbytes": 5096, "per_device": {"259:0": 4096, "8:16": 1000}}
+    got = ddl.cgroup_io_wbytes(proc, root, tmp_path / "no-sysfs")
+    assert got == {
+        "cgroup": "job.slice", "wbytes": 5096, "per_device": {"259:0": 4096, "8:16": 1000}, "stacked": [],
+    }
     (root / "job.slice" / "io.stat").write_text("259:0 rbytes=10 wbytes=9096\n8:16 wbytes=1000\n")
-    after = ddl.cgroup_io_wbytes(proc, root)
+    after = ddl.cgroup_io_wbytes(proc, root, tmp_path / "no-sysfs")
     assert ddl.cgroup_io_delta(got, after) == {
         "cgroup": "job.slice", "wbytes_delta": 5000, "per_device_delta": {"259:0": 5000, "8:16": 0},
+    }
+
+
+def test_a_stacked_device_is_not_summed_on_top_of_the_disk_beneath_it(tmp_path: Path) -> None:
+    # chas: / is an LVM volume (252:0, dm) over nvme0n1p3, and the cgroup charges one write at
+    # both layers, so summing every io.stat row counted each byte twice (nexus-7xmnr).
+    root = tmp_path / "cg"
+    (root / "job.slice").mkdir(parents=True)
+    (root / "job.slice" / "io.stat").write_text("259:0 wbytes=94560256\n252:0 wbytes=94560256\n")
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/job.slice\n")
+    sys_block = tmp_path / "sys-dev-block"
+    (sys_block / "252:0" / "slaves" / "nvme0n1p3").mkdir(parents=True)
+    (sys_block / "259:0" / "slaves").mkdir(parents=True)
+    assert ddl.cgroup_io_wbytes(proc, root, sys_block) == {
+        "cgroup": "job.slice", "wbytes": 94560256,
+        "per_device": {"259:0": 94560256, "252:0": 94560256}, "stacked": ["252:0"],
     }
 
 

@@ -588,9 +588,14 @@ def summary_line(merged: dict[str, Any], *, uncounted: int | None = None, provis
 
 def cgroup_io_wbytes(
     proc_cgroup: Path = Path("/proc/self/cgroup"), cgroup_root: Path = Path("/sys/fs/cgroup"),
+    sys_dev_block: Path = Path("/sys/dev/block"),
 ) -> dict[str, Any] | None:
     """The calling process's cgroup (v2) ``io.stat``, ``wbytes`` summed over its block devices,
-    or None where it cannot be read (not Linux, cgroup v1, no ``io`` controller). Only a run that
+    or None where it cannot be read (not Linux, cgroup v1, no ``io`` controller). A stacked device
+    (device-mapper, LVM, md: one whose ``/sys/dev/block/<maj:min>/slaves`` is non-empty) is kept in
+    ``per_device`` and listed in ``stacked`` but left out of the sum, because the cgroup charges
+    one write at every layer it passes and chas's root volume is LVM over the NVMe, so summing
+    every row counted each byte twice (nexus-7xmnr). Only a run that
     owns its cgroup (a Nomad task, a container, a systemd scope) gets a figure that is the run's;
     on a shared cgroup the delta also counts every sibling's writes. A tmpfs write is not a
     block-device write, so a run entirely on tmpfs reads near zero here. This figure covers the
@@ -613,7 +618,20 @@ def cgroup_io_wbytes(
         fields = dict(p.split("=", 1) for p in rest.split() if "=" in p)
         if "wbytes" in fields:
             per_device[device] = int(fields["wbytes"])
-    return {"cgroup": path or "/", "wbytes": sum(per_device.values()), "per_device": per_device}
+    stacked = [d for d in per_device if _has_slaves(sys_dev_block / d)]
+    return {
+        "cgroup": path or "/",
+        "wbytes": sum(v for d, v in per_device.items() if d not in stacked),
+        "per_device": per_device,
+        "stacked": stacked,
+    }
+
+
+def _has_slaves(device: Path) -> bool:
+    try:
+        return any((device / "slaves").iterdir())
+    except OSError:
+        return False
 
 
 def cgroup_io_delta(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
