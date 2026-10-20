@@ -72,10 +72,12 @@ _SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
 
 
 def _refresh_spawning_test() -> None:
-    """A FORKED child has run no pytest of its own: the variable is still its spawner's, and
-    the value frozen at the parent's start (an xdist worker's is empty) would charge no test."""
+    """A child FORKED by the guard's own process (an xdist worker, whose start-time value is
+    empty) takes the test running now. Any other forker, a nested pytest among them, keeps
+    the value frozen at its start: its own variable names its nested tests."""
     global _SPAWNING_TEST
-    _SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
+    if os.environ.get(_OWNER_ENV) == str(os.getppid()):
+        _SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
 
 
 if hasattr(os, "register_at_fork"):

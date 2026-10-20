@@ -599,6 +599,17 @@ def test_a_forked_child_of_a_shim_loaded_process_is_charged_to_the_running_test(
     touches = [json.loads(line) for line in log.read_text().splitlines() if json.loads(line)["k"] == "touch"]
     assert touches and {t["current_test"] for t in touches} == {"t.py::test_x (call)"}, touches
 
+    # A fork from a process that is NOT the guard's (a nested pytest, started inside
+    # outer.py::test_spawner, now running its own test) stays charged to the spawner.
+    log.unlink()
+    env.update({"PYTEST_CURRENT_TEST": "outer.py::test_spawner (call)", "NX_STORAGE_TOUCH_GUARD_PID": "1"})
+    nested = code.replace(
+        "os.environ['NX_STORAGE_TOUCH_GUARD_PID'] = str(os.getpid())\n", ""
+    ).replace("t.py::test_x (call)", "inner.py::test_nested (call)")
+    subprocess.run([sys.executable, "-c", nested], env=env, check=True, timeout=120)
+    touches = [json.loads(line) for line in log.read_text().splitlines() if json.loads(line)["k"] == "touch"]
+    assert touches and {t["current_test"] for t in touches} == {"outer.py::test_spawner (call)"}, touches
+
 
 def test_the_child_shim_is_on_pythonpath_only_while_an_optin_session_runs(pytester, monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", "/outer/path")
