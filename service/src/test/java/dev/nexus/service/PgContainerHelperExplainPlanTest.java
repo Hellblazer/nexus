@@ -15,20 +15,26 @@ import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link PgContainerHelper#explainPlan} and {@link PgContainerHelper#explainPlanInlined} refuse a plan of more than
- * 50 rows (nexus-cbo4a batch 9): jOOQ's {@code Explain.plan()} sizes its table from the first 50 rows and abbreviates
- * the rest, so a {@code doesNotContain} over a longer plan would pass vacuously. No database: a jOOQ mock connection
- * answers the EXPLAIN with a canned plan of N rows, so the 50/51 boundary is exercised exactly.
+ * {@link PgContainerHelper#explainPlan} and {@link PgContainerHelper#explainPlanInlined} return every plan row
+ * (nexus-cbo4a), with binds bound or inlined respectively. A non-vacuity pin against a jOOQ upgrade: in 3.20
+ * {@code Explain.plan()} formats with no row cap (only {@code Result.toString()} stops at 50), so a
+ * {@code doesNotContain} over a long plan sees every node. No database: a jOOQ mock connection answers the EXPLAIN
+ * with a canned plan of N rows and records the statement it was sent.
  */
 class PgContainerHelperExplainPlanTest {
 
     private static final Field<String> QUERY_PLAN = DSL.field(DSL.name("QUERY PLAN"), SQLDataType.VARCHAR);
 
-    /** A context whose every statement answers with an {@code n}-row EXPLAIN result. */
-    private static DSLContext contextAnswering(int n) {
+    /** The SQL text and bind values of the last statement a {@link #contextAnswering} context received. */
+    private static final class Seen {
+        String sql;
+        Object[] binds;
+    }
+
+    /** A context whose every statement answers with an {@code n}-row EXPLAIN result, recording what it was sent. */
+    private static DSLContext contextAnswering(int n, Seen seen) {
         DSLContext fixture = DSL.using(SQLDialect.POSTGRES);
         Result<Record1<String>> plan = fixture.newResult(QUERY_PLAN);
         for (int i = 1; i <= n; i++) {
@@ -36,35 +42,41 @@ class PgContainerHelperExplainPlanTest {
             row.set(QUERY_PLAN, "Node " + i + " (cost=0.00..1.00 rows=1 width=4)");
             plan.add(row);
         }
-        return DSL.using(new MockConnection(ctx -> new MockResult[] {new MockResult(n, plan)}), SQLDialect.POSTGRES);
+        return DSL.using(new MockConnection(ctx -> {
+            seen.sql = ctx.sql();
+            seen.binds = ctx.bindings();
+            return new MockResult[] {new MockResult(n, plan)};
+        }), SQLDialect.POSTGRES);
     }
 
-    private static Query anyQuery(DSLContext ctx) {
-        return ctx.selectOne();
+    /** A query carrying one bind value, 4242, so bound versus inlined rendering is observable. */
+    private static Query boundQuery(DSLContext ctx) {
+        return ctx.selectOne().where(DSL.val(4242).eq(DSL.val(4242)));
     }
 
-    @Test
-    void aPlanOfExactlyFiftyRows_isReturnedWhole() {
-        DSLContext ctx = contextAnswering(50);
-        String plan = PgContainerHelper.explainPlan(ctx, anyQuery(ctx));
-        assertThat(plan).contains("Node 1 ").contains("Node 50 ");
-    }
-
-    @Test
-    void aPlanOfFiftyOneRows_isRefused() {
-        DSLContext ctx = contextAnswering(51);
-        assertThatThrownBy(() -> PgContainerHelper.explainPlan(ctx, anyQuery(ctx)))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("51 rows");
+    private static long planRows(String plan) {
+        return plan.lines().filter(l -> l.contains("Node ")).count();
     }
 
     @Test
-    void theInlinedVariant_holdsTheSameBoundary() {
-        DSLContext ok = contextAnswering(50);
-        assertThat(PgContainerHelper.explainPlanInlined(ok, anyQuery(ok))).contains("Node 50 ");
-        DSLContext over = contextAnswering(51);
-        assertThatThrownBy(() -> PgContainerHelper.explainPlanInlined(over, anyQuery(over)))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("51 rows");
+    void aPlanPastFiftyRows_isReturnedWhole_withBindsBound() {
+        Seen seen = new Seen();
+        DSLContext ctx = contextAnswering(120, seen);
+        String plan = PgContainerHelper.explainPlan(ctx, boundQuery(ctx));
+        assertThat(planRows(plan)).isEqualTo(120);
+        assertThat(plan).contains("Node 51 ").contains("Node 120 ");
+        assertThat(seen.sql).startsWithIgnoringCase("explain ").contains("?").doesNotContain("4242");
+        assertThat(seen.binds).contains(4242);
+    }
+
+    @Test
+    void theInlinedVariant_returnsTheWholePlan_withBindsInlined() {
+        Seen seen = new Seen();
+        DSLContext ctx = contextAnswering(120, seen);
+        String plan = PgContainerHelper.explainPlanInlined(ctx, boundQuery(ctx));
+        assertThat(planRows(plan)).isEqualTo(120);
+        assertThat(plan).contains("Node 120 ");
+        assertThat(seen.sql).startsWithIgnoringCase("explain ").contains("4242").doesNotContain("?");
+        assertThat(seen.binds).isEmpty();
     }
 }

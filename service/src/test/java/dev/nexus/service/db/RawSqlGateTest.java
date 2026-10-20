@@ -1590,8 +1590,9 @@ class RawSqlGateTest {
     // to the driver's SQLException, so every constraint name and SQLSTATE assertion is unchanged).
     // nexus-cbo4a 2026-10-19 batch 9, 58 -> 32 (20 -> 16 files; four entries removed, seven lowered): plan-shape, probe and
     // role shapes. ChashProbePlanShapeTest explains the product's own ChashRepository.PROBE_SQL through the new
-    // PgContainerHelper.explainPlan (ctx.explain over a jOOQ Query, which throws for a plan of more than 50 rows because
-    // jOOQ cuts the text past the 50th and a doesNotContain over it would pass vacuously), drops its indexes through
+    // PgContainerHelper.explainPlan (ctx.explain over a jOOQ Query; batch 9 also threw past 50 rows on the false
+    // premise that plan() truncates there, only Result.toString() does, and the guard was removed 2026-10-20 after
+    // it refused a legitimate 53-row plan in CI 39365428198), drops its indexes through
     // PgContainerHelper.dropIndex (schema-qualified; jOOQ's dropIndexIfExists renders the name unqualified on POSTGRES and
     // would skip them) after asserting each exists, and counts with fetchCount. Part of that file's drop is gate
     // visibility, not conversion: resultQuery(ChashRepository.PROBE_SQL, ..) explains the product's sanctioned constant,

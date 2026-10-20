@@ -2024,18 +2024,16 @@ public final class PgContainerHelper {
         return sb.toString();
     }
 
-    /** jOOQ formats an EXPLAIN into a table whose column width comes from the first 50 rows; longer plans are cut. */
-    private static final int EXPLAIN_WHOLE_PLAN_MAX_ROWS = 50;
-
     /**
-     * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run. Runs on
-     * {@code ctx}'s connection and transaction, so a tenant GUC or SET LOCAL pin applies. jOOQ's
-     * {@code Explain.plan()} abbreviates rows past the 50th to the width of the first 50, so a
-     * {@code doesNotContain} over a longer plan would pass vacuously: this throws for a plan of more than 50 rows
-     * rather than return text a negative assertion cannot trust.
+     * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run, every row.
+     * Runs on {@code ctx}'s connection and transaction, so a tenant GUC or SET LOCAL pin applies. jOOQ 3.20's
+     * {@code Explain.plan()} renders through {@code Result.format()}, which has no row cap (only
+     * {@code Result.toString()} stops at 50), so a {@code doesNotContain} over a long plan is not vacuous;
+     * PgContainerHelperExplainPlanTest pins that against a jOOQ upgrade. Batch 9 wrongly guarded a 50-row cap here
+     * and the guard refused a legitimate 53-row plan (CI run 39365428198).
      */
     public static String explainPlan(DSLContext ctx, Query query) {
-        return requireWholePlan(ctx.explain(query).plan());
+        return ctx.explain(query).plan();
     }
 
     /**
@@ -2048,17 +2046,7 @@ public final class PgContainerHelper {
     public static String explainPlanInlined(DSLContext ctx, Query query) {
         DSLContext inline = ctx.configuration()
             .deriveSettings(s -> s.withStatementType(StatementType.STATIC_STATEMENT)).dsl();
-        return requireWholePlan(inline.explain(query).plan());
-    }
-
-    private static String requireWholePlan(String plan) {
-        // Result.format() frames the rows with a top border, a header, a separator and a bottom border.
-        long rows = plan.lines().count() - 4;
-        if (rows > EXPLAIN_WHOLE_PLAN_MAX_ROWS) {
-            throw new IllegalStateException("EXPLAIN has " + rows + " rows; jOOQ cuts the text past "
-                + EXPLAIN_WHOLE_PLAN_MAX_ROWS + ", so a negative assertion over it would be vacuous");
-        }
-        return plan;
+        return inline.explain(query).plan();
     }
 
     /**
