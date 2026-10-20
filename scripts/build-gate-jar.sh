@@ -65,7 +65,8 @@
 # ~9 minutes here rebuilding a jar byte-identical to the primary's. The
 # stamped jar is now cached in the git common dir keyed on the EXACT
 # working-tree content of what the jar is built from -- service/pom.xml,
-# service/src/main/**, service/mvnw, service/.mvn/** (tracked, modified and
+# service/src/main/**, service/src/build/** (the jOOQ codegen runner and its
+# generator files), service/mvnw, service/.mvn/** (tracked, modified and
 # untracked non-ignored files, via a throwaway index; src/test, docs and
 # scripts under service/ are NOT part of it, nexus-fkhd3) -- plus the
 # stamped release_version; a hit

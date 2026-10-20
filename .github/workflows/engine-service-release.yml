@@ -77,8 +77,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Generate jOOQ sources ONCE on a Docker-capable runner (testcontainers codegen
-  # needs Docker), upload them. The per-platform native builds then consume the
+  # Generate jOOQ sources ONCE on a Docker-capable runner (the codegen runner,
+  # service/src/build/java/JooqCodegen.java, starts a Postgres container), upload them. The per-platform native builds then consume the
   # artifact with -Pprebuilt-jooq and need no Docker — which unblocks mac-arm64
   # (GH macOS runners have no Docker). nexus-f6j31.
   jooq-codegen:
@@ -97,10 +97,10 @@ jobs:
           java-version: '25.0.3'
           distribution: 'graalvm'
           cache: 'maven'
-      - name: Run testcontainers jOOQ codegen
+      - name: Run jOOQ codegen
         working-directory: service
-        # generate-sources triggers testcontainers-jooq-codegen (boots pgvector,
-        # applies the master changelog, generates into target/generated-sources/jooq).
+        # generate-sources triggers the generate-jooq-sources exec of service/src/build/java/JooqCodegen.java
+        # (boots pgvector on a tmpfs, applies the master changelog, generates into target/generated-sources/jooq).
         run: ./mvnw -q generate-sources
       - name: Upload generated jOOQ sources
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -387,7 +387,7 @@ jobs:
 
       - name: Build native image (-Pnative -Pprebuilt-jooq)
         working-directory: service
-        # -Pprebuilt-jooq unbinds the testcontainers codegen and compiles the
+        # -Pprebuilt-jooq unbinds the jOOQ codegen runner and compiles the
         # downloaded sources → no Docker needed (mac-arm64 builds here).
         # Do NOT `clean`: it would wipe the downloaded target/generated-sources/jooq.
         env:

@@ -5,7 +5,9 @@
 EXECUTES the three antrun steps (``jooq-inputs`` at initialize, ``jooq-stamp-main`` at
 process-sources, ``jooq-stamp-test`` at process-test-sources) under Apache Ant 1.10.12,
 the version maven-antrun-plugin 3.1.0 declares, with a scratch project standing in for
-``service/`` and a fake ``generate`` that writes a file recording which inputs it saw.
+``service/`` and a fake ``generate`` that writes a file recording which inputs it saw
+(the pom, the changelogs, and since nexus-aca0q.3 the codegen runner source and the two
+generator XML files).
 The Maven phases are replayed by hand, so a build can stop at any phase or die in the
 middle of a generation.
 
@@ -42,6 +44,10 @@ import pytest
 pytestmark = pytest.mark.lint
 
 _POM = Path(__file__).resolve().parents[1] / "service" / "pom.xml"
+
+#: nexus-aca0q.3: the generation inputs beside the changelogs (service/src/build/...), per kind.
+_RUNNER = "src/build/java/JooqCodegen.java"
+_GENERATOR = {"main": "src/build/jooq/jooq-main.xml", "test": "src/build/jooq/jooq-test.xml"}
 
 _ANT_VERSION = "1.10.12"  # what maven-antrun-plugin 3.1.0 declares
 _ANT_JARS = {
@@ -170,6 +176,7 @@ class Project:
             "jooq.version": "3.20.11",
             "postgresql.version": "42.7.4",
             "testcontainers.version": "1.21.4",
+            "liquibase.version": "4.29.0",
             "harness.out": str(self.root / "out"),
             **({} if self.cache is None else {"nexus.jooq.cache.dir": self.cache}),
             **(props or {}),
@@ -207,6 +214,7 @@ class Project:
         files = sorted((self.root / "src" / "main" / "resources" / "db").rglob("*.xml"))
         if kind == "test":
             files += sorted((self.root / "src" / "test" / "resources" / "db").rglob("*.xml"))
+        files += [self.root / _RUNNER, self.root / _GENERATOR[kind]]
         return hashlib.sha256(b"".join(f.read_bytes() for f in [self.root / "pom.xml", *files])).hexdigest()
 
     def generate(self, kind: str, d: Decision, *, killed: bool = False) -> None:
@@ -277,6 +285,9 @@ def _make_project(parent: Path, ant_cp: str, cache: str | None = "off") -> Proje
     p.put("src/main/resources/db/changelog/master.xml", "<main>A</main>")
     p.put("src/main/resources/db/changelog/other.xml", "<main-other>A</main-other>")
     p.put("src/test/resources/db/changelog-test/test-master.xml", "<test>A</test>")
+    p.put(_RUNNER, "class JooqCodegen {} // A")
+    p.put(_GENERATOR["main"], "<configuration>main A</configuration>")
+    p.put(_GENERATOR["test"], "<configuration>test A</configuration>")
     # an unrelated file under resources/ that the hash must NOT cover
     p.put("src/main/resources/META-INF/nexus/release.properties", "stamp=1")
     return p
@@ -336,6 +347,28 @@ def test_a_pom_edit_regenerates_both(proj: Project) -> None:
     assert proj.build().skip == {"main": False, "test": False}
 
 
+def test_a_runner_edit_regenerates_both(proj: Project) -> None:
+    """The runner decides how the tree is produced (the container, the changelog apply, the jOOQ call)."""
+    proj.build()
+    proj.generations.clear()
+    proj.put(_RUNNER, "class JooqCodegen {} // B")
+    assert proj.build().skip == {"main": False, "test": False}
+    assert proj.generations == ["main", "test"]
+
+
+def test_a_generator_file_edit_regenerates_only_its_own_tree(proj: Project) -> None:
+    """jooq-main.xml carries the includes, excludes, forced types and flags of the product tree, jooq-test.xml those of the test tree."""
+    proj.build()
+    proj.generations.clear()
+    proj.put(_GENERATOR["main"], "<configuration>main B</configuration>")
+    assert proj.build().skip == {"main": False, "test": True}
+    assert proj.generations == ["main"]
+    proj.generations.clear()
+    proj.put(_GENERATOR["test"], "<configuration>test B</configuration>")
+    assert proj.build().skip == {"main": True, "test": False}
+    assert proj.generations == ["test"]
+
+
 def test_files_outside_db_do_not_move_the_hash(proj: Project) -> None:
     proj.build()
     proj.put("src/main/resources/META-INF/nexus/release.properties", "stamp=2")
@@ -351,7 +384,7 @@ def test_regenerate_true_regenerates_even_when_current(proj: Project) -> None:
     assert proj.build().skip == {"main": True, "test": True}
 
 
-@pytest.mark.parametrize("prop", ["jooq.version", "postgresql.version", "testcontainers.version"])
+@pytest.mark.parametrize("prop", ["jooq.version", "postgresql.version", "liquibase.version", "testcontainers.version"])
 def test_a_dependency_version_override_regenerates_and_reverting_regenerates_again(proj: Project, prop: str) -> None:
     """A -D override changes the codegen classpath without changing a byte of the pom."""
     proj.build()
@@ -455,7 +488,7 @@ def _other_worktree(p: Project, name: str = "wt-b") -> Project:
 
 
 #: what the pom's jooq-inputs step names as the producer unless a -D says otherwise
-_PRODUCER = "testcontainers-fresh-replay"
+_PRODUCER = "tmpfs-codegen-runner"
 
 
 def _entry(p: Project, kind: str, digest: str, producer: str = _PRODUCER) -> Path:

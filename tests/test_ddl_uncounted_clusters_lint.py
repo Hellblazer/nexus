@@ -115,7 +115,7 @@ def test_the_scan_is_not_vacuous() -> None:
     found = sites.scan()
     assert sum(found.values()) >= 30, dict(found)
     assert any(k.startswith("tests/db/") for k in found)
-    assert sites.POM_SITE in found
+    assert sites.CODEGEN_SITE in found
 
 
 def test_the_report_figure_is_the_uncounted_sum() -> None:

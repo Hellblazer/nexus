@@ -37,25 +37,25 @@
             jOOQ generated sources (bead nexus-9qvam — supersedes the earlier
             committed-sources "Option 3" design):
 
-            Generated at build time into target/generated-sources/jooq by the
-            testcontainers-jooq-codegen-maven-plugin (generate-sources phase): boots a
-            pgvector/pgvector:pg17 container, applies the master Liquibase changelog
-            (sole schema authority; the role-001-nexus-svc bootstrap changeset makes it
-            self-contained), runs jOOQ codegen (PostgresDatabase, nexus + t1 schemata).
-            build-helper registers the directory as a compile source root; mvn clean
-            removes it. Same pattern as the conexus control-plane.
+            Generated at build time into target/generated-sources/jooq by
+            service/src/build/java/JooqCodegen.java (exec-maven-plugin, generate-sources
+            phase): boots a pgvector/pgvector:pg17 container on a tmpfs, applies the master
+            Liquibase changelog (sole schema authority; the role-001-nexus-svc bootstrap
+            changeset makes it self-contained), runs jOOQ codegen (PostgresDatabase, nexus
+            + t1 schemata). build-helper registers the directory as a compile source root;
+            mvn clean removes it. Same pattern as the conexus control-plane.
 
             History: committed sources + -Pcodegen + a CI drift guard were chosen when
             the viable build-time mechanisms were GMaven Plus (broken on Java 25) and
-            hand-rolled exec classpaths (brittle). The dedicated Testcontainers codegen
-            plugin removes both objections; Postgres-only DDL still rules out H2/
+            hand-rolled exec classpaths (brittle). testcontainers-jooq-codegen-maven-plugin
+            removed both objections until nexus-aca0q.3, when its untunable on-disk Postgres
+            made the runner above the better trade; Postgres-only DDL still rules out H2/
             LiquibaseDatabase codegen. Every build (and the IDE import) needs Docker,
             which the test suite already required.
         -->
         <jooq.generated.dir>${project.build.directory}/generated-sources/jooq</jooq.generated.dir>
         <jooq.generated.pkg>dev.nexus.service.jooq</jooq.generated.pkg>
         <jooq.generated.test.dir>${project.build.directory}/generated-test-sources/jooq</jooq.generated.test.dir>
-        <jooq.generated.test.pkg>dev.nexus.service.jooq.test</jooq.generated.test.pkg>
 
         <!-- Seam B — local ONNX embedding (S0.2 proven stack) -->
         <onnxruntime.version>1.20.0</onnxruntime.version>
@@ -241,6 +241,22 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Test scope: the jOOQ code generator (nexus-aca0q.3). Not compiled against: the exec-maven-plugin
+             executions that run service/src/build/java/JooqCodegen.java put the test classpath on the
+             runner's JVM. jooq-codegen pulls jooq-meta; both are named so the version is this pom's. -->
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq-codegen</artifactId>
+            <version>${jooq.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq-meta</artifactId>
+            <version>${jooq.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Test: SQLite FTS5 — the legacy FTS5 engine itself (unicode61 tokenizer), the
              text leg of the RDR-155 Phase 3 hybrid-parity comparand. The Python T2 path
              uses the same SQLite FTS5 C library; xerial bundles it. -->
@@ -256,7 +272,7 @@
     <build>
         <!-- nexus-8cz4z: the Java language server (Eclipse JDT.LS via m2e)
              imports this pom and, without this mapping, executes the jOOQ
-             codegen mojos at import time. Each needs a live PostgreSQL and
+             codegen exec at import time. Each needs a live PostgreSQL and
              fails, and the attempt leaves ecj-compiled classes and phantom
              diagnostics behind. m2e reads only this artifact; command-line
              Maven never resolves or runs it. -->
@@ -271,10 +287,10 @@
                             <pluginExecutions>
                                 <pluginExecution>
                                     <pluginExecutionFilter>
-                                        <groupId>org.testcontainers</groupId>
-                                        <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
-                                        <versionRange>[0.0.1,)</versionRange>
-                                        <goals><goal>generate</goal></goals>
+                                        <groupId>org.codehaus.mojo</groupId>
+                                        <artifactId>exec-maven-plugin</artifactId>
+                                        <versionRange>[1.0,)</versionRange>
+                                        <goals><goal>exec</goal></goals>
                                     </pluginExecutionFilter>
                                     <action><ignore /></action>
                                 </pluginExecution>
@@ -411,123 +427,54 @@
             </plugin>
 
             <!--
-                Testcontainers jOOQ codegen (generate-sources phase, bead nexus-9qvam).
-                Boots an ephemeral pgvector/pgvector:pg17 container (same image as the
-                test suite), applies the master Liquibase changelog, then runs jOOQ
-                codegen (PostgresDatabase) into target/generated-sources/jooq.
-                The plugin bundles an older jooq-codegen; override to ${jooq.version}
-                so codegen and runtime jOOQ stay aligned (conexus pattern).
+                jOOQ codegen (generate-sources and generate-test-sources phases, beads nexus-9qvam
+                and nexus-aca0q.3). Our own runner, service/src/build/java/JooqCodegen.java, run
+                as a Java source-file program by exec-maven-plugin: it boots an ephemeral
+                pgvector/pgvector:pg17 container configured like PgContainerHelper.newContainer()
+                (PGDATA on a capped tmpfs, fsync off, a memory limit), applies the master Liquibase
+                changelog (sole schema authority; the role-001-nexus-svc bootstrap changeset makes
+                it self-contained) and runs jOOQ's GenerationTool with the generator configuration
+                beside it (service/src/build/jooq/jooq-main.xml, jooq-test.xml) into
+                target/generated-sources/jooq and target/generated-test-sources/jooq.
 
-                Docker API pin: this plugin's container boot runs in the MAVEN JVM,
-                where docker-java's API-version negotiation fails against Docker
-                Desktop (Status 400 on /info). service/.mvn/jvm.config pins
-                -Dapi.version=1.47 for the Maven JVM (docker-java reads it as a
-                system property). Surefire-forked test JVMs negotiate on their own
-                and are unaffected. Same workaround as the conexus control-plane;
-                jvm.config cannot carry comments, so the rationale lives here.
+                It replaces testcontainers-jooq-codegen-maven-plugin 0.0.4 (the newest ever
+                published), whose Postgres kept PGDATA on the image's anonymous docker volume (about
+                52 MB written to the host disk per codegen cache miss; labrun 2026-10-20) and which
+                has no setting for tmpfs, memory or server flags.
+
+                The runner runs in a JVM of its own with the test-scope classpath (classpathScope
+                test: Testcontainers, the PostgreSQL driver, Liquibase and jooq-codegen at the
+                versions this pom pins, so codegen and runtime jOOQ stay aligned). That JVM
+                negotiates the Docker API version the way Surefire's forks do, so the Maven-JVM
+                workaround the plugin needed (-Dapi.version in service/.mvn/jvm.config) is gone.
+                The runner source is outside src/main and src/test, so neither compiles it.
+                Generation inputs: this pom, the runner source, the two generator files and the
+                changelog trees; the jooq-inputs antrun step below hashes them.
             -->
             <plugin>
-                <groupId>org.testcontainers</groupId>
-                <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
-                <version>0.0.4</version>
-                <dependencies>
-                    <dependency>
-                        <groupId>org.testcontainers</groupId>
-                        <artifactId>postgresql</artifactId>
-                        <version>${testcontainers.version}</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.postgresql</groupId>
-                        <artifactId>postgresql</artifactId>
-                        <version>${postgresql.version}</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.jooq</groupId>
-                        <artifactId>jooq-codegen</artifactId>
-                        <version>${jooq.version}</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.jooq</groupId>
-                        <artifactId>jooq-meta</artifactId>
-                        <version>${jooq.version}</version>
-                    </dependency>
-                </dependencies>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
                 <executions>
                     <execution>
                         <id>generate-jooq-sources</id>
                         <goals>
-                            <goal>generate</goal>
+                            <goal>exec</goal>
                         </goals>
                         <phase>generate-sources</phase>
                         <configuration>
                             <skip>${nexus.jooq.main.skip}</skip>
-                            <database>
-                                <type>POSTGRES</type>
-                                <containerImage>pgvector/pgvector:pg17</containerImage>
-                            </database>
-                            <liquibase>
-                                <changeLogDirectory>${project.basedir}/src/main/resources</changeLogDirectory>
-                                <changeLogPath>db/changelog/db.changelog-master.xml</changeLogPath>
-                            </liquibase>
-                            <!-- Mirrors the retired JooqCodegenBootstrap generator config
-                                 exactly: nexus + t1 schemata, pojos + fluent setters +
-                                 java.time types, no DAOs. -->
-                            <jooq>
-                                <generator>
-                                    <database>
-                                        <name>org.jooq.meta.postgres.PostgresDatabase</name>
-                                        <includes>.*</includes>
-                                        <!-- RDR-225 (nexus-3wh8d.8): chunks and taxonomy_centroids are LIST-partitioned
-                                             by embedding_model, then tenant_id, and the second level is DDL created at run
-                                             time (one leaf per tenant per model), so codegen must see only the PARENTS.
-                                             Excluded by name: the model partitions chunks_m<8 hex> and the tenant leaves
-                                             chunks_m<8 hex>_t_<16 hex> (the same two shapes under taxonomy_centroids), the
-                                             retired pre-walk tables kept for 14 days (chunks_retired_225,
-                                             taxonomy_centroids_retired_225), and the walk's staging names (chunks_new,
-                                             taxonomy_centroids_new, which the swap renames away). A pattern that missed
-                                             one would generate a Record class per leaf and move
-                                             JooqRecordReflectionFeatureTest's count with every tenant in the build's
-                                             database. -->
-                                        <excludes>databasechangelog|databasechangeloglock|(chunks|taxonomy_centroids)_m[0-9a-f]{8}(_t_[0-9a-f]{16})?|(chunks|taxonomy_centroids)_retired_225|(chunks|taxonomy_centroids)_new</excludes>
-                                        <schemata>
-                                            <schema>
-                                                <inputSchema>nexus</inputSchema>
-                                            </schema>
-                                            <schema>
-                                                <inputSchema>t1</inputSchema>
-                                            </schema>
-                                        </schemata>
-                                        <!-- nexus-xtmtf: pgvector columns generate as
-                                             TableField<R, Vector> via VectorBinding —
-                                             retires the ?::vector casts + vectorLiteral()
-                                             strings. (jOOQ's own FloatVector types are
-                                             commercial-edition-only; the OSS
-                                             jooq-postgres-extensions jar has no vector
-                                             support, hence the in-repo binding.) The
-                                             binding class is referenced by NAME in
-                                             generated code and compiles in the same
-                                             javac pass — no codegen-classpath dep. -->
-                                        <forcedTypes>
-                                            <forcedType>
-                                                <userType>dev.nexus.service.jooq.binding.Vector</userType>
-                                                <binding>dev.nexus.service.jooq.binding.VectorBinding</binding>
-                                                <includeTypes>vector</includeTypes>
-                                                <priority>-2147483648</priority>
-                                            </forcedType>
-                                        </forcedTypes>
-                                    </database>
-                                    <generate>
-                                        <pojos>true</pojos>
-                                        <daos>false</daos>
-                                        <fluentSetters>true</fluentSetters>
-                                        <javaTimeTypes>true</javaTimeTypes>
-                                    </generate>
-                                    <target>
-                                        <packageName>dev.nexus.service.jooq</packageName>
-                                        <directory>${jooq.generated.dir}</directory>
-                                    </target>
-                                </generator>
-                            </jooq>
+                            <executable>${java.home}/bin/java</executable>
+                            <classpathScope>test</classpathScope>
+                            <arguments>
+                                <argument>-classpath</argument>
+                                <classpath/>
+                                <argument>${project.basedir}/src/build/java/JooqCodegen.java</argument>
+                                <argument>${project.basedir}/src/build/jooq/jooq-main.xml</argument>
+                                <argument>${jooq.generated.dir}</argument>
+                                <argument>db/changelog/db.changelog-master.xml</argument>
+                                <argument>${project.basedir}/src/main/resources</argument>
+                            </arguments>
                         </configuration>
                     </execution>
                     <!-- nexus-cbo4a batch 5 (Sam's ruling 2026-09-05): test-only schema
@@ -539,41 +486,22 @@
                     <execution>
                         <id>generate-jooq-test-sources</id>
                         <goals>
-                            <goal>generate</goal>
+                            <goal>exec</goal>
                         </goals>
                         <phase>generate-test-sources</phase>
                         <configuration>
                             <skip>${nexus.jooq.test.skip}</skip>
-                            <database>
-                                <type>POSTGRES</type>
-                                <containerImage>pgvector/pgvector:pg17</containerImage>
-                            </database>
-                            <liquibase>
-                                <changeLogDirectory>${project.basedir}/src/main/resources,${project.basedir}/src/test/resources</changeLogDirectory>
-                                <changeLogPath>db/changelog-test/db.changelog-test-master.xml</changeLogPath>
-                            </liquibase>
-                            <jooq>
-                                <generator>
-                                    <database>
-                                        <name>org.jooq.meta.postgres.PostgresDatabase</name>
-                                        <includes>.*</includes>
-                                        <schemata>
-                                            <schema>
-                                                <inputSchema>nexus_test</inputSchema>
-                                            </schema>
-                                        </schemata>
-                                    </database>
-                                    <generate>
-                                        <pojos>false</pojos>
-                                        <daos>false</daos>
-                                        <javaTimeTypes>true</javaTimeTypes>
-                                    </generate>
-                                    <target>
-                                        <packageName>${jooq.generated.test.pkg}</packageName>
-                                        <directory>${jooq.generated.test.dir}</directory>
-                                    </target>
-                                </generator>
-                            </jooq>
+                            <executable>${java.home}/bin/java</executable>
+                            <classpathScope>test</classpathScope>
+                            <arguments>
+                                <argument>-classpath</argument>
+                                <classpath/>
+                                <argument>${project.basedir}/src/build/java/JooqCodegen.java</argument>
+                                <argument>${project.basedir}/src/build/jooq/jooq-test.xml</argument>
+                                <argument>${jooq.generated.test.dir}</argument>
+                                <argument>db/changelog-test/db.changelog-test-master.xml</argument>
+                                <argument>${project.basedir}/src/main/resources,${project.basedir}/src/test/resources</argument>
+                            </arguments>
                         </configuration>
                     </execution>
                 </executions>
@@ -582,7 +510,7 @@
             <!--
                 Register target/generated-sources/jooq as a compile source root so javac
                 (and IDE imports) see the generated classes. Cleaned by mvn clean;
-                regenerated by the codegen plugin above whenever its inputs changed (the
+                regenerated by the codegen executions above whenever its inputs changed (the
                 jooq-inputs antrun step below skips it when they did not, nexus-bnc56).
             -->
             <plugin>
@@ -691,24 +619,27 @@
                 <version>3.1.0</version>
                 <configuration>
                     <!-- nexus-bnc56: the jooq-inputs execution below sets nexus.jooq.*.skip
-                         for the codegen plugin; the properties must leave the Ant project. -->
+                         for the codegen executions; the properties must leave the Ant project. -->
                     <exportAntProperties>true</exportAntProperties>
                 </configuration>
                 <executions>
                     <!-- nexus-bnc56: do not boot the codegen container when the generated sources
-                         are current. testcontainers-jooq-codegen-maven-plugin 0.0.4 (the newest ever
-                         published) boots pgvector/pgvector:pg17 per execution and exposes no tmpfs,
-                         memory or command setting, so PGDATA sits on Docker's overlay (the host disk)
-                         with no memory cap, twice per Maven invocation, outside PgContainerHelper.
+                         are current. Each codegen execution boots a pgvector/pgvector:pg17 container
+                         (twice per Maven invocation), and a boot replays the whole changelog. Until
+                         nexus-aca0q.3 that was testcontainers-jooq-codegen-maven-plugin 0.0.4, which
+                         exposed no tmpfs, memory or command setting, so PGDATA sat on Docker's overlay
+                         (the host disk); the runner that replaced it (service/src/build/java/JooqCodegen.java)
+                         mirrors PgContainerHelper.newContainer(): PGDATA on a tmpfs, a memory limit.
 
-                         This step hashes what the generation reads (this pom, which holds the jOOQ
-                         config; the changelog tree each execution applies; the jOOQ, PostgreSQL and
-                         Testcontainers versions, which a -D can change without touching the pom) and
-                         compares it with the stamp the jooq-stamp-* steps write. A match with the
-                         generated .java files still on disk sets the plugin's skip.
+                         This step hashes what the generation reads (this pom, which holds the
+                         executions' arguments; the runner source and the generator XML each execution
+                         runs; the changelog tree each execution applies; the jOOQ, PostgreSQL,
+                         Liquibase and Testcontainers versions, which a -D can change without touching
+                         the pom) and compares it with the stamp the jooq-stamp-* steps write. A match
+                         with the generated .java files still on disk sets the execution's skip.
 
                          THE INVARIANT: a stamp exists only while the generated tree matches it.
-                         When this step decides to regenerate it DELETES that stamp, before the plugin
+                         When this step decides to regenerate it DELETES that stamp, before the generation
                          runs. The stamp is written only by the jooq-stamp-* steps, in phases after the
                          generation. A regeneration that never reaches its stamp phase (generate-sources
                          alone, Ctrl-C, a failed codegen, a -Dnexus.jooq.regenerate=true run killed
@@ -762,7 +693,8 @@
                          pre-fkhd3 behaviour. scripts/lib/gate-jar-cache.sh gate_jar_cache_prune_jooq trims it, and only
                          scripts/build-gate-jar.sh calls that. The producer (nexus.jooq.producer) is part of the key:
                          generating against the nexus-v0ts5 migrated template instead of a fresh replay never serves,
-                         or is served, the other's tree. -->
+                         or is served, the other's tree, and a tree made by the retired testcontainers codegen plugin
+                         (producer testcontainers-fresh-replay) is never served as one made by the runner. -->
                     <execution>
                         <id>jooq-inputs</id>
                         <phase>initialize</phase>
@@ -818,8 +750,9 @@
                                 <property name="nexus.jooq.cache.dir" value="off"/>
                                 <!-- What makes the generated trees. It is part of the entry key (see the SHARED CACHE
                                      note above): -Dnexus.jooq.producer=<name> for a generation by anything other than a
-                                     fresh Testcontainers replay, the nexus-v0ts5 migrated template for one. -->
-                                <property name="nexus.jooq.producer" value="testcontainers-fresh-replay"/>
+                                     fresh replay in the tmpfs codegen runner, the nexus-v0ts5 migrated template for one.
+                                     nexus-aca0q.3 renamed it from testcontainers-fresh-replay (the retired plugin). -->
+                                <property name="nexus.jooq.producer" value="tmpfs-codegen-runner"/>
                                 <condition property="nexus.jooq.cache.on" value="true" else="false">
                                     <not>
                                         <or>
@@ -834,6 +767,8 @@
                                 <fileset id="nexus.jooq.main.inputs" dir="${project.basedir}">
                                     <include name="pom.xml"/>
                                     <include name="src/main/resources/db/**"/>
+                                    <include name="src/build/java/JooqCodegen.java"/>
+                                    <include name="src/build/jooq/jooq-main.xml"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.main.names" pathsep="&#10;" dirsep="/">
                                     <sort>
@@ -843,7 +778,7 @@
                                     <map from="${project.basedir}/" to=""/>
                                 </pathconvert>
                                 <echo file="${nexus.jooq.stamp.dir}/main.names"
-                                      message="${nexus.jooq.main.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;testcontainers.version=${testcontainers.version}"/>
+                                      message="${nexus.jooq.main.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;liquibase.version=${liquibase.version}&#10;testcontainers.version=${testcontainers.version}"/>
                                 <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.hash"
                                           forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-sums">
                                     <union>
@@ -1029,6 +964,8 @@
                                     <include name="pom.xml"/>
                                     <include name="src/main/resources/db/**"/>
                                     <include name="src/test/resources/db/**"/>
+                                    <include name="src/build/java/JooqCodegen.java"/>
+                                    <include name="src/build/jooq/jooq-test.xml"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.test.names" pathsep="&#10;" dirsep="/">
                                     <sort>
@@ -1038,7 +975,7 @@
                                     <map from="${project.basedir}/" to=""/>
                                 </pathconvert>
                                 <echo file="${nexus.jooq.stamp.dir}/test.names"
-                                      message="${nexus.jooq.test.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;testcontainers.version=${testcontainers.version}"/>
+                                      message="${nexus.jooq.test.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;liquibase.version=${liquibase.version}&#10;testcontainers.version=${testcontainers.version}"/>
                                 <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.hash"
                                           forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-sums">
                                     <union>
@@ -1743,7 +1680,7 @@
         </profile>
 
         <!-- -Pprebuilt-jooq: compile PRE-GENERATED jOOQ sources instead of running
-             the Docker-dependent testcontainers codegen (nexus-f6j31). The
+             the Docker-dependent codegen runner (nexus-f6j31). The
              engine-service-release.yml `jooq-codegen` job runs codegen once on a
              Docker-capable linux runner and uploads ${jooq.generated.dir}; the
              per-platform native build jobs download it here and build with this
@@ -1764,8 +1701,8 @@
             <build>
                 <plugins>
                     <plugin>
-                        <groupId>org.testcontainers</groupId>
-                        <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
                         <executions>
                             <execution>
                                 <id>generate-jooq-sources</id>

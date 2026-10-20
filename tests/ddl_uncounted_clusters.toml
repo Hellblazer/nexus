@@ -9,7 +9,7 @@
 # direction.
 #
 # Scanned: tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb, docker_run of a postgres/pgvector image),
-# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the pom's code generator.
+# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the jOOQ code generator's runner.
 # NOT scanned, so this is not every start site: shell outside tests/e2e, among it files that do start clusters:
 #   - scripts/liquibase_bundle_smoke.sh (provisions a bundle cluster with pg_provision.provision())
 #   - service/native-smoke.sh (docker run of pgvector/pgvector:pg17)
@@ -24,7 +24,7 @@
 sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 
 [uncounted]
-"service/pom.xml::testcontainers-jooq-codegen-maven-plugin" = 1
+"service/src/build/java/JooqCodegen.java::PostgreSQLContainer" = 1
 "tests/_engine_substrate.py::throwaway_pg_cluster::pg_ctl_start" = 1
 "tests/benchmarks/test_retrieval_drift_gate.py::<module>::initdb" = 1
 "tests/benchmarks/test_retrieval_drift_gate.py::pg_instance::pg_ctl_start" = 1

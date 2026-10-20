@@ -1,22 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Pins the jOOQ codegen skip wiring in ``service/pom.xml`` (nexus-bnc56).
 
-The two ``testcontainers-jooq-codegen-maven-plugin`` executions each boot their own
-``pgvector/pgvector:pg17`` container, and release 0.0.4 (the newest ever published)
-gives the build no handle on it: ``DatabaseProps`` carries an image, a user, a password
-and a database name, so there is no tmpfs, no memory limit and no command. Measured on
-chas 2026-10-19 the container's PGDATA sat on Docker's overlay (the host NVMe) with no
-memory cap, twice per Maven invocation, outside ``PgContainerHelper`` and its gate.
+The two codegen executions each boot their own ``pgvector/pgvector:pg17`` container and
+replay the changelog into it. Until nexus-aca0q.3 that was
+``testcontainers-jooq-codegen-maven-plugin`` 0.0.4 (the newest ever published), which
+gave the build no handle on the container (an image, a user, a password and a database
+name: no tmpfs, no memory limit, no command), so PGDATA sat on Docker's overlay, the host
+NVMe, with no memory cap (measured on chas 2026-10-19; about 52 MB per cache miss, labrun
+2026-10-20). The executions are now ``exec-maven-plugin`` runs of our own runner,
+``service/src/build/java/JooqCodegen.java``, whose container mirrors ``PgContainerHelper``
+(PGDATA on a tmpfs, a memory limit, the same server flags).
 
-The lever that is in the build's hands is not to boot the container when the generated
-sources are already current. An ``initialize``-phase Ant step hashes the codegen inputs
-(``pom.xml`` plus every changelog directory the execution reads), compares the hash with
-the stamp written after the last successful generation, and sets the plugin's ``skip``.
-This file keeps that wiring from rotting:
+Not booting the container when the generated sources are already current stays the other
+lever. An ``initialize``-phase Ant step hashes the codegen inputs (``pom.xml``, the runner
+source, the execution's generator XML, plus every changelog directory the execution reads),
+compares the hash with the stamp written after the last successful generation, and sets the
+execution's ``skip``. This file keeps that wiring from rotting:
 
 * each execution's ``skip`` is bound to a property the hash step sets;
-* the hash covers every ``changeLogDirectory`` the execution reads, DERIVED from the
-  execution's own config, so a new changelog root cannot be added without being hashed
+* the hash covers every changelog root the execution is given as its last argument, the
+  runner source and the execution's own generator file, all DERIVED from the execution's
+  arguments, so a new changelog root or generator file cannot be added without being hashed
   (a stale hit would then ship out-of-date generated sources);
 * the stamp is written in a phase AFTER the generation it vouches for;
 * ``-Pprebuilt-jooq`` unbinds the stamp steps along with the codegen it replaces;
@@ -43,7 +47,8 @@ pytestmark = pytest.mark.lint
 _POM = Path(__file__).resolve().parents[1] / "service" / "pom.xml"
 _NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 
-CODEGEN = "testcontainers-jooq-codegen-maven-plugin"
+CODEGEN = "exec-maven-plugin"
+RETIRED_CODEGEN = "testcontainers-jooq-codegen-maven-plugin"
 ANTRUN = "maven-antrun-plugin"
 
 MAIN = "generate-jooq-sources"
@@ -122,24 +127,140 @@ def _codegen_config(root: ET.Element) -> dict[str, ET.Element]:
     return execs
 
 
+def _args(execution: ET.Element) -> list[str]:
+    """The runner's command line after ``-classpath %classpath``: runner source, generator XML, target dir,
+    master changelog, comma-separated changelog roots."""
+    # exec-maven-plugin expands an empty <classpath/> element in <arguments> to the classpath of classpathScope
+    # (the %classpath placeholder only works in commandlineArgs, where it is not expanded in <argument>).
+    args = [
+        "<classpath/>" if a.tag.endswith("}classpath") else a.text.strip()
+        for a in execution.find("m:configuration/m:arguments", _NS)
+    ]
+    assert args[:2] == ["-classpath", "<classpath/>"], f"the runner lost its test classpath: {args}"
+    assert len(args) == 7, f"expected the runner source, generator XML, target dir, master changelog and roots: {args}"
+    return args[2:]
+
+
+def _rel(arg: str) -> str:
+    assert arg.startswith("${project.basedir}/"), f"not under the project: {arg}"
+    return arg.removeprefix("${project.basedir}/")
+
+
 def _changelog_roots(execution: ET.Element) -> list[str]:
-    raw = execution.findtext("m:configuration/m:liquibase/m:changeLogDirectory", namespaces=_NS)
-    assert raw, "a codegen execution lost its changeLogDirectory"
-    roots = [r.strip().removeprefix("${project.basedir}/") for r in raw.split(",")]
-    assert all(r and "${" not in r for r in roots), f"unexpected changeLogDirectory shape: {raw}"
+    raw = _args(execution)[4]
+    roots = [_rel(r.strip()) for r in raw.split(",")]
+    assert all(r and "${" not in r for r in roots), f"unexpected changelog roots shape: {raw}"
     return roots
 
 
-def test_the_plugin_has_no_container_knob_so_the_skip_is_the_lever() -> None:
-    """The reason this wiring exists: no newer plugin and no tmpfs/memory setting.
+def _generator_file(execution: ET.Element) -> str:
+    return _rel(_args(execution)[1])
 
-    If a release ever adds one, this is the place to notice and prefer it.
-    """
+
+def _master_changelog(execution: ET.Element) -> str:
+    return _args(execution)[3]
+
+
+_SERVICE = _POM.parent
+_RUNNER = "src/build/java/JooqCodegen.java"
+_HELPER = _SERVICE / "src" / "test" / "java" / "dev" / "nexus" / "service" / "PgContainerHelper.java"
+
+
+def test_the_codegen_is_our_runner_not_the_retired_plugin() -> None:
+    """nexus-aca0q.3: the plugin had no container knob (PGDATA on the host disk); the runner has a tmpfs one."""
     root = _pom()
-    assert _plugin(root, CODEGEN).findtext("m:version", namespaces=_NS) == "0.0.4"
-    for execution in _codegen_config(root).values():
-        database = execution.find("m:configuration/m:database", _NS)
-        assert {c.tag.split("}")[1] for c in database} == {"type", "containerImage"}
+    assert f"<artifactId>{RETIRED_CODEGEN}</artifactId>" not in _POM.read_text(encoding="utf-8"), (
+        "the retired plugin is back in the pom (as a plugin, a profile unbinding or a lifecycle mapping)")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", _plugin(root, CODEGEN).findtext("m:version", namespaces=_NS) or ""), (
+        "pin exec-maven-plugin to an exact version")
+    for exec_id, execution in _codegen_config(root).items():
+        assert [g.text for g in execution.findall("m:goals/m:goal", _NS)] == ["exec"], exec_id
+        config = execution.find("m:configuration", _NS)
+        assert config.findtext("m:executable", namespaces=_NS) == "${java.home}/bin/java", (
+            f"{exec_id}: the runner must run on the JDK that runs Maven")
+        assert config.findtext("m:classpathScope", namespaces=_NS) == "test", (
+            f"{exec_id}: the runner needs Testcontainers, the driver, Liquibase and jOOQ codegen (test scope)")
+        args = _args(execution)
+        assert _rel(args[0]) == _RUNNER and (_SERVICE / _RUNNER).is_file()
+        assert (_SERVICE / _generator_file(execution)).is_file()
+    # the runner is not compiled into the product or the tests
+    assert not list((_SERVICE / "src" / "main").rglob("JooqCodegen*")) and not list((_SERVICE / "src" / "test").rglob("JooqCodegen*"))
+
+
+def test_the_codegen_classpath_has_the_generator_at_the_pinned_version() -> None:
+    deps = {
+        d.findtext("m:artifactId", namespaces=_NS): d
+        for d in _pom().findall("m:dependencies/m:dependency", _NS) if d.findtext("m:groupId", namespaces=_NS) == "org.jooq"
+    }
+    for artifact in ("jooq-codegen", "jooq-meta"):
+        assert artifact in deps, f"{artifact} is not a dependency: the runner's classpath (test scope) lacks it"
+        assert deps[artifact].findtext("m:version", namespaces=_NS) == "${jooq.version}"
+        assert deps[artifact].findtext("m:scope", namespaces=_NS) == "test", "the generator must not reach the product jar"
+
+
+def _java_constants(text: str) -> dict[str, str]:
+    consts = dict(re.findall(r'\bString (IMAGE|DATABASE|USERNAME|PASSWORD|PGDATA|TMPFS_SIZE) = "([^"]*)";', text))
+    memory = re.search(r"\blong MEMORY_LIMIT_BYTES = ([^;]+);", text)
+    assert memory and len(consts) == 6, f"constants not found: {consts}, {memory}"
+    return {**consts, "MEMORY_LIMIT_BYTES": memory.group(1).strip()}
+
+
+def _server_flags(block: str) -> set[str]:
+    return set(re.findall(r'"-c",\s*"([a-z_]+=[^"]+)"', block))
+
+
+def test_the_runner_container_mirrors_pg_container_helper() -> None:
+    """The runner cannot call PgContainerHelper (it runs before the test classes compile), so it copies the recipe;
+    this keeps the copy in step: same image, credentials, tmpfs PGDATA and cap, memory limit and server flags."""
+    runner = (_SERVICE / _RUNNER).read_text(encoding="utf-8")
+    helper = _HELPER.read_text(encoding="utf-8")
+    assert _java_constants(runner) == _java_constants(helper)
+    helper_block = helper[helper.index('List<String> command = new ArrayList<>(List.of("postgres",'):]
+    helper_block = helper_block[:helper_block.index("if (counted) {")]
+    runner_block = runner[runner.index('.withCommand("postgres",'):]
+    runner_block = runner_block[:runner_block.index(".withCreateContainerCmdModifier")]
+    flags = _server_flags(helper_block)
+    assert {"fsync=off", "max_wal_size=64MB"} <= flags, f"the helper's flag block moved: {flags}"
+    assert _server_flags(runner_block) == flags, "the runner's server flags differ from PgContainerHelper's"
+    # (the helper takes the size and the limit as parameters; the runner has them as the constants checked above)
+    for in_runner, in_helper in (
+        ('.withTmpFs(Map.of(PGDATA, "rw,size=" + TMPFS_SIZE))', '.withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))'),
+        (".withMemory(MEMORY_LIMIT_BYTES)", ".withMemory(memoryBytes)"),
+        (".withMemorySwap(MEMORY_LIMIT_BYTES)", ".withMemorySwap(memoryBytes)"),
+        ('.withUrlParam("sslmode", "disable")', '.withUrlParam("sslmode", "disable")'),
+        (".withStartupAttempts(3)", ".withStartupAttempts(3)"),
+    ):
+        assert in_runner in runner, f"{in_runner} is not in the runner"
+        assert in_helper in helper, f"{in_helper} is not in PgContainerHelper: the recipe moved, move the runner with it"
+
+
+_JOOQ_NS = {"j": "http://www.jooq.org/xsd/jooq-codegen-3.20.0.xsd"}
+_GENERATED_DIR = {MAIN: "${jooq.generated.dir}", TEST: "${jooq.generated.test.dir}"}
+_SCHEMATA = {MAIN: ["nexus", "t1"], TEST: ["nexus_test"]}
+
+
+@pytest.mark.parametrize("exec_id", [MAIN, TEST])
+def test_the_generator_file_holds_the_schemata_and_leaves_the_connection_and_directory_to_the_runner(exec_id: str) -> None:
+    execution = _codegen_config(_pom())[exec_id]
+    root = ET.parse(_SERVICE / _generator_file(execution)).getroot()
+    assert root.tag == "{" + _JOOQ_NS["j"] + "}configuration", "the jOOQ version in the namespace must match jooq.version's minor"
+    assert [e.text for e in root.findall("j:generator/j:database/j:schemata/j:schema/j:inputSchema", _JOOQ_NS)] == _SCHEMATA[exec_id]
+    assert root.find("j:generator/j:database/j:name", _JOOQ_NS).text == "org.jooq.meta.postgres.PostgresDatabase"
+    # the runner owns the connection (its own container) and the pom owns the directory
+    assert root.find("j:jdbc", _JOOQ_NS) is None, "a jdbc section would point codegen at a database the runner did not start"
+    assert root.find("j:generator/j:target/j:directory", _JOOQ_NS) is None, "the pom passes the target directory"
+    assert _args(execution)[2] == _GENERATED_DIR[exec_id]
+    assert root.findtext("j:generator/j:target/j:packageName", namespaces=_JOOQ_NS), "no target package"
+
+
+def test_the_product_generator_keeps_the_excludes_and_the_vector_binding() -> None:
+    """The two settings with a reason attached: the partition-leaf excludes (RDR-225) and the pgvector binding (nexus-xtmtf)."""
+    root = ET.parse(_SERVICE / "src/build/jooq/jooq-main.xml").getroot()
+    excludes = root.findtext("j:generator/j:database/j:excludes", namespaces=_JOOQ_NS)
+    assert excludes and "databasechangelog" in excludes and "_t_[0-9a-f]{16}" in excludes and "_retired_225" in excludes
+    [forced] = root.findall("j:generator/j:database/j:forcedTypes/j:forcedType", _JOOQ_NS)
+    assert forced.findtext("j:binding", namespaces=_JOOQ_NS) == "dev.nexus.service.jooq.binding.VectorBinding"
+    assert forced.findtext("j:includeTypes", namespaces=_JOOQ_NS) == "vector"
 
 
 @pytest.mark.parametrize("exec_id", [MAIN, TEST])
@@ -165,11 +286,17 @@ def test_the_hash_covers_every_changelog_root_the_execution_reads(exec_id: str) 
     includes = set(re.findall(r'<include name="([^"]+)"', fileset.group()))
     # The checksum must hash that fileset, not some other one.
     assert text.count(f'refid="nexus.jooq.{kind}.inputs"') >= 2, "hash and name list both read the fileset"
-    assert "pom.xml" in includes, "the jOOQ config lives in the pom: a pom change must regenerate"
-    for changelog_root in _changelog_roots(_codegen_config(root)[exec_id]):
+    assert "pom.xml" in includes, "the executions' arguments live in the pom: a pom change must regenerate"
+    execution = _codegen_config(root)[exec_id]
+    for changelog_root in _changelog_roots(execution):
         assert f"{changelog_root}/db/**" in includes, (
             f"{exec_id} reads {changelog_root} but the hash does not cover {changelog_root}/db/**; "
             "a changelog edit there would skip regeneration and ship stale generated sources")
+    # nexus-aca0q.3: the runner and the generator file are generation inputs too
+    assert _rel(_args(execution)[0]) in includes, f"{exec_id}: the runner source is not hashed"
+    assert _generator_file(execution) in includes, f"{exec_id}: its generator XML is not hashed"
+    other = _generator_file(_codegen_config(root)["generate-jooq-test-sources" if exec_id == MAIN else MAIN])
+    assert other not in includes, f"{exec_id}: the other tree's generator file would regenerate this one for nothing"
 
 
 @pytest.mark.parametrize("exec_id", [MAIN, TEST])
@@ -203,6 +330,18 @@ def test_prebuilt_profile_unbinds_the_antrun_steps_with_the_codegen_it_replaces(
     wired = set(_wired(root))
     assert len(wired) == 3, f"expected hash + two stamp executions, found {sorted(wired)}"
     assert wired <= unbound
+
+
+def test_prebuilt_profile_unbinds_both_codegen_executions() -> None:
+    """The release native legs (macOS and Windows runners) have no Docker: -Pprebuilt-jooq must leave neither
+    codegen execution bound, or the runner starts a container there (nexus-f6j31, nexus-cbo4a batch 5)."""
+    root = _pom()
+    profile = next(
+        p for p in root.findall("m:profiles/m:profile", _NS) if p.findtext("m:id", namespaces=_NS) == "prebuilt-jooq"
+    )
+    unbound = {eid for eid, e in _executions(_plugin(profile, CODEGEN)).items() if _phase(e) == "none"}
+    assert unbound == {MAIN, TEST}, f"-Pprebuilt-jooq leaves a codegen execution bound: {sorted(unbound)}"
+    assert profile.findtext("m:properties/m:maven.test.skip", namespaces=_NS) == "true"
 
 
 # --- the safety core: the pieces whose loss turns the skip into a stale-tree generator ----------
@@ -253,7 +392,7 @@ def test_the_hash_covers_the_names_file_which_carries_the_versions(kind: str) ->
     echo = re.search(rf'<echo file="{re.escape(names)}"\s+message="([^"]+)"', text)
     assert echo, f"{kind}: nothing writes the names file"
     for needed in ("${nexus.jooq.%s.names}" % kind, "${jooq.version}", "${postgresql.version}",
-                   "${testcontainers.version}"):
+                   "${liquibase.version}", "${testcontainers.version}"):
         assert needed in echo.group(1), f"{kind}: {needed} is not in the hashed names file"
 
 
@@ -444,8 +583,10 @@ def test_publishing_is_best_effort_and_stages_beside_the_entry_marker_last(kind:
 def test_the_producer_is_declared_once_and_is_part_of_every_entry_key() -> None:
     root = _pom()
     inputs = _live(_target_text(_hash_execution(root)))
-    assert re.search(r'<property name="nexus\.jooq\.producer" value="[\w.-]+"/>', inputs), (
-        "the jooq-inputs step must declare the producer (a -D overrides it)")
+    declared = re.search(r'<property name="nexus\.jooq\.producer" value="([\w.-]+)"/>', inputs)
+    assert declared, "the jooq-inputs step must declare the producer (a -D overrides it)"
+    # nexus-aca0q.3: a tree made by the retired testcontainers plugin must never be served as one made by the runner
+    assert declared.group(1) != "testcontainers-fresh-replay", "the retired plugin's producer name would serve its cached trees"
     for kind in KINDS:
         stamp = _live(_target_text(_stamp_execution(root, EXEC_OF[kind])))
         assert 'name="nexus.jooq.producer"' not in stamp, "the stamp steps take the producer the inputs step exported"
@@ -576,5 +717,7 @@ def test_the_reference_scan_rejects_a_reference_that_leaves_db(tmp_path: Path) -
 
 def test_the_codegen_master_changelogs_live_under_db() -> None:
     for execution in _codegen_config(_pom()).values():
-        path = execution.findtext("m:configuration/m:liquibase/m:changeLogPath", namespaces=_NS)
-        assert path and path.startswith("db/"), f"codegen master changelog {path!r} is outside the hashed db/ tree"
+        path = _master_changelog(execution)
+        assert path.startswith("db/"), f"codegen master changelog {path!r} is outside the hashed db/ tree"
+        assert any((_SERVICE / root / path).is_file() for root in _changelog_roots(execution)), (
+            f"codegen master changelog {path!r} is under none of the execution's roots")

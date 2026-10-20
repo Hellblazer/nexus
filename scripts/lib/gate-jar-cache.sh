@@ -12,7 +12,9 @@
 #
 # KEY. `gate_jar_cache_key <repo> <release_version> <mvn-args>` keys on what
 # the jar is BUILT FROM and nothing else (nexus-fkhd3): service/pom.xml,
-# service/src/main/**, service/mvnw and service/.mvn/** (GATE_JAR_KEY_PATHS).
+# service/src/main/**, service/src/build/** (the jOOQ codegen runner and its
+# generator files, nexus-aca0q.3: they decide the generated classes in the jar),
+# service/mvnw and service/.mvn/** (GATE_JAR_KEY_PATHS).
 # `-DskipTests` leaves tests out of the jar, so a src/test edit, a README, a
 # deploy script or a smoke probe cannot change a byte of it; keying on the
 # whole service/ subtree (the first version) missed on every test-only commit
@@ -112,7 +114,7 @@ JOOQ_CACHE_KEEP="${JOOQ_CACHE_KEEP:-6}"
 # What the stamped jar is a pure function of (see KEY above). Relative to the
 # repo root; a path absent from both the working tree and the index is skipped
 # so a fixture or a trimmed checkout without, say, service/.mvn still keys.
-GATE_JAR_KEY_PATHS=(service/pom.xml service/src/main service/mvnw service/.mvn)
+GATE_JAR_KEY_PATHS=(service/pom.xml service/src/main service/src/build service/mvnw service/.mvn)
 
 gate_jar_cache_root() {
     local repo="${1:?gate_jar_cache_root: usage: gate_jar_cache_root <repo>}"

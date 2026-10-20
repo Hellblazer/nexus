@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- jOOQ generator configuration of the product schema (service/pom.xml, execution
+     generate-jooq-sources; runner: ../java/JooqCodegen.java). The runner adds the jdbc
+     section (its own throwaway container) and the target directory (the pom's
+     ${jooq.generated.dir}); everything else is here. This file is a generation input:
+     the pom's jooq-inputs step hashes it. -->
+<configuration xmlns="http://www.jooq.org/xsd/jooq-codegen-3.20.0.xsd">
+    <!-- Mirrors the retired JooqCodegenBootstrap generator config exactly: nexus + t1
+         schemata, pojos + fluent setters + java.time types, no DAOs. -->
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <includes>.*</includes>
+            <!-- RDR-225 (nexus-3wh8d.8): chunks and taxonomy_centroids are LIST-partitioned
+                 by embedding_model, then tenant_id, and the second level is DDL created at run
+                 time (one leaf per tenant per model), so codegen must see only the PARENTS.
+                 Excluded by name: the model partitions chunks_m<8 hex> and the tenant leaves
+                 chunks_m<8 hex>_t_<16 hex> (the same two shapes under taxonomy_centroids), the
+                 retired pre-walk tables kept for 14 days (chunks_retired_225,
+                 taxonomy_centroids_retired_225), and the walk's staging names (chunks_new,
+                 taxonomy_centroids_new, which the swap renames away). A pattern that missed
+                 one would generate a Record class per leaf and move
+                 JooqRecordReflectionFeatureTest's count with every tenant in the build's
+                 database. -->
+            <excludes>databasechangelog|databasechangeloglock|(chunks|taxonomy_centroids)_m[0-9a-f]{8}(_t_[0-9a-f]{16})?|(chunks|taxonomy_centroids)_retired_225|(chunks|taxonomy_centroids)_new</excludes>
+            <schemata>
+                <schema>
+                    <inputSchema>nexus</inputSchema>
+                </schema>
+                <schema>
+                    <inputSchema>t1</inputSchema>
+                </schema>
+            </schemata>
+            <!-- nexus-xtmtf: pgvector columns generate as
+                 TableField<R, Vector> via VectorBinding —
+                 retires the ?::vector casts + vectorLiteral()
+                 strings. (jOOQ's own FloatVector types are
+                 commercial-edition-only; the OSS
+                 jooq-postgres-extensions jar has no vector
+                 support, hence the in-repo binding.) The
+                 binding class is referenced by NAME in
+                 generated code and compiles in the same
+                 javac pass — no codegen-classpath dep. -->
+            <forcedTypes>
+                <forcedType>
+                    <userType>dev.nexus.service.jooq.binding.Vector</userType>
+                    <binding>dev.nexus.service.jooq.binding.VectorBinding</binding>
+                    <includeTypes>vector</includeTypes>
+                    <priority>-2147483648</priority>
+                </forcedType>
+            </forcedTypes>
+        </database>
+        <generate>
+            <pojos>true</pojos>
+            <daos>false</daos>
+            <fluentSetters>true</fluentSetters>
+            <javaTimeTypes>true</javaTimeTypes>
+        </generate>
+        <target>
+            <packageName>dev.nexus.service.jooq</packageName>
+        </target>
+    </generator>
+</configuration>

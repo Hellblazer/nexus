@@ -285,7 +285,8 @@ jobs:
           persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       # nexus-km7ma (Sam 2026-10-20): on the pool, generated jOOQ trees persist in a host cache
-      # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the jOOQ/JDBC/Testcontainers versions
+      # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the codegen runner and generator files,
+      # the jOOQ/JDBC/Liquibase/Testcontainers versions
       # and the producer (service/pom.xml, jooq-inputs). A hit skips the codegen container and
       # its changelog replay for inputs a fresh replay already generated on this host. The suite
       # still replays the full changelog once per fork (PgContainerHelper.applyProductSchema), a
@@ -324,7 +325,7 @@ jobs:
           echo "jOOQ host cache: $dir, $(wc -l < "$RUNNER_TEMP/jooq-cache-before") entries"
 
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
-      # testcontainers-jooq-codegen-maven-plugin generates into
+      # service/src/build/java/JooqCodegen.java (run by exec-maven-plugin) generates into
       # target/generated-sources/jooq at the generate-sources phase from the
       # Liquibase changelog (sole schema authority), so generated sources are
       # never committed and drift is impossible by construction — a codegen

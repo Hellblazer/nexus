@@ -284,7 +284,7 @@ jobs:
           java-version: '25.0.3'
           distribution: 'graalvm'
           cache: 'maven'
-      - name: Run testcontainers jOOQ codegen
+      - name: Run jOOQ codegen
         working-directory: service
         run: ./mvnw -q generate-sources
       - name: Upload generated jOOQ sources

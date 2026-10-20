@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- jOOQ generator configuration of the test-only schema (service/pom.xml, execution
+     generate-jooq-test-sources; runner: ../java/JooqCodegen.java). nexus-cbo4a batch 5
+     (Sam's ruling 2026-09-05): test-only schema objects get their own codegen in the TEST
+     lifecycle, with the product master + test changelog applied and only the nexus_test
+     schema generated, into a test source root. The product schema and changelog stay free
+     of test tooling. The runner adds the jdbc section and the target directory (the pom's
+     ${jooq.generated.test.dir}). This file is a generation input: the pom's jooq-inputs
+     step hashes it. -->
+<configuration xmlns="http://www.jooq.org/xsd/jooq-codegen-3.20.0.xsd">
+    <generator>
+        <database>
+            <name>org.jooq.meta.postgres.PostgresDatabase</name>
+            <includes>.*</includes>
+            <schemata>
+                <schema>
+                    <inputSchema>nexus_test</inputSchema>
+                </schema>
+            </schemata>
+        </database>
+        <generate>
+            <pojos>false</pojos>
+            <daos>false</daos>
+            <javaTimeTypes>true</javaTimeTypes>
+        </generate>
+        <target>
+            <packageName>dev.nexus.service.jooq.test</packageName>
+        </target>
+    </generator>
+</configuration>

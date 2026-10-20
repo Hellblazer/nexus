@@ -13,8 +13,8 @@ description: >-
 
   jOOQ sources come from the jooq-codegen job's artifact (-Pprebuilt-jooq), as
   on the other three legs: codegen boots a pgvector container through
-  testcontainers, and a Windows runner has no Docker. The generated sources are
-  plain Java, identical on every OS, so one linux codegen run gives all four
+  testcontainers (service/src/build/java/JooqCodegen.java), and a Windows runner
+  has no Docker. The generated sources are plain Java, identical on every OS, so one linux codegen run gives all four
   legs the same schema identity.
 
   Runner prerequisites (on top of the PG bundle leg's): Visual Studio 2022 Build

@@ -415,7 +415,7 @@ jobs:
     #  - ubuntu-latest only. No premium runner: the artifact is
     #    platform-neutral bytecode.
     #
-    # A clean checkout runs the testcontainers jOOQ codegen (Docker) because
+    # A clean checkout runs the jOOQ codegen runner (Docker) because
     # the generated sources are NOT committed — which is exactly why the cache
     # is load-bearing rather than a nicety.
     name: service jar (pytest substrate)
@@ -2356,7 +2356,7 @@ jobs:
     # service. A jOOQ-apply, Liquibase, or GraalVM-reachability regression in
     # service/** can merge to develop unseen until a human cuts a release tag.
     # This is a PR trip-wire: on service/** changes, regenerate jOOQ sources
-    # (testcontainers codegen, Docker) and run the SAME native build the release
+    # (the codegen runner, Docker) and run the SAME native build the release
     # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
     #
     # REQUIRED CHECK since 2026-07-13 (nexus-a5rj8, decided by Hal): a RED
@@ -2417,7 +2417,7 @@ jobs:
           distribution: 'graalvm'
           cache: 'maven'
 
-      - name: Generate jOOQ sources (testcontainers codegen, Docker)
+      - name: Generate jOOQ sources (codegen runner, Docker)
         if: steps.changes.outputs.svc == 'true'
         working-directory: service
         run: ./mvnw -q generate-sources

@@ -95,6 +95,12 @@ echo '// main edit' >> "$repo2/service/src/main/A.java"
 km="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" != "$km" ]] && ok "a src/main edit moves the key" || bad "src/main edit did not move the key"
 git -C "$repo2" checkout -q -- service/src/main/A.java
+# nexus-aca0q.3: the codegen runner and its generator files decide the generated classes in the jar.
+mkdir -p "$repo2/service/src/build/jooq"
+echo '<configuration/>' > "$repo2/service/src/build/jooq/jooq-main.xml"
+kg="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
+[[ "$kb" != "$kg" ]] && ok "a new service/src/build file (the jOOQ codegen inputs) moves the key" || bad "src/build file did not move the key"
+rm -rf "$repo2/service/src/build"
 echo '<project>x</project>' > "$repo2/service/pom.xml"
 kp="$(gate_jar_cache_key "$repo2" 0.1.0 "")"
 [[ "$kb" != "$kp" ]] && ok "a pom.xml edit moves the key" || bad "pom edit did not move the key"

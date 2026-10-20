@@ -82,9 +82,11 @@ EXCEPTIONS = Path(__file__).resolve().parent / "pg_data_dir_exceptions.toml"
 #: Sites whose cluster ``tests/_ddl_counter.py`` reads (the engine substrate's ``_boot``).
 COUNTED: tuple[str, ...] = ("tests/_engine_substrate.py::_boot::pg_ctl_start",)
 
-#: The jOOQ code generator boots a Postgres container at build time (service/pom.xml); no counter reads it.
-POM_SITE = "service/pom.xml::testcontainers-jooq-codegen-maven-plugin"
-_POM_MARKER = "<artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>"
+#: The jOOQ code generator boots a Postgres container at build time (service/pom.xml runs this source file through
+#: exec-maven-plugin, nexus-aca0q.3); no counter reads it. Its data directory is a tmpfs, like PgContainerHelper's.
+CODEGEN_RUNNER = "service/src/build/java/JooqCodegen.java"
+CODEGEN_SITE = f"{CODEGEN_RUNNER}::PostgreSQLContainer"
+_CODEGEN_MARKER = "new PostgreSQLContainer<"
 
 _SCANNED = ("tests", "scripts")
 
@@ -140,7 +142,7 @@ def _site_kind(call: ast.Call) -> str | None:
 
 
 def scan(repo: Path = REPO) -> Counter[str]:
-    """Every start site under ``tests/`` and ``scripts/`` (plus the pom's code generator), with its count."""
+    """Every start site under ``tests/`` and ``scripts/`` (plus the jOOQ code generator's runner), with its count."""
     sites: Counter[str] = Counter()
     for top in _SCANNED:
         for path in sorted((repo / top).rglob("*.py")):
@@ -183,10 +185,10 @@ def scan(repo: Path = REPO) -> Counter[str]:
             rel = path.relative_to(repo).as_posix()
             for kind in sh_sites(text):
                 sites[f"{rel}::{kind}"] += 1
-    pom = repo / "service" / "pom.xml"
-    if pom.is_file():
-        if _POM_MARKER in pom.read_text(encoding="utf-8"):
-            sites[POM_SITE] = 1  # one cluster per build, however many declarations (profiles, lifecycle mapping)
+    runner = repo / CODEGEN_RUNNER
+    if runner.is_file():
+        if _CODEGEN_MARKER in runner.read_text(encoding="utf-8"):
+            sites[CODEGEN_SITE] = 1  # one cluster per execution; the pom's two executions run the same one site
     return sites
 
 
@@ -922,7 +924,7 @@ def render(sites: Counter[str]) -> str:
         "# direction.",
         "#",
         "# Scanned: tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb, docker_run of a postgres/pgvector image),",
-        "# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the pom's code generator.",
+        "# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the jOOQ code generator's runner.",
         "# NOT scanned, so this is not every start site: shell outside tests/e2e, among it files that do start clusters:",
         *[f"#   - {entry}" for entry in UNSCANNED_SHELL],
         "# also e2e clusters started by anything but a literal `nx init` (nx start, wrapper scripts), and a docker run",
