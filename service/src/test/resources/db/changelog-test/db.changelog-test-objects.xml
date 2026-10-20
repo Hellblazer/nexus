@@ -685,6 +685,9 @@ $$;
     </changeSet>
 
     <changeSet id="test-objects-cosine-order" author="nexus-cbo4a">
+        <preConditions onFail="CONTINUE" onFailMessage="nexus.vector does not exist yet; retried on the next update">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'nexus' AND t.typname = 'vector'</sqlCheck>
+        </preConditions>
         <comment>nexus_test.cosine_order(nexus.vector, nexus.vector): the pgvector cosine-distance operator
         (nexus.&lt;=&gt;) as a function, so a typed jOOQ ORDER BY can carry it (nexus-cbo4a batch D). jOOQ has no form
         for OPERATOR(nexus.&lt;=&gt;), and Routines.cosineDistance1 is pgvector's C function, which an HNSW index never
@@ -706,6 +709,9 @@ $$;
     </changeSet>
 
     <changeSet id="test-objects-cosine-order-blocked" author="nexus-cbo4a">
+        <preConditions onFail="CONTINUE" onFailMessage="nexus.vector does not exist yet; retried on the next update">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'nexus' AND t.typname = 'vector'</sqlCheck>
+        </preConditions>
         <comment>nexus_test.cosine_order_blocked(nexus.vector, nexus.vector): cosine_order's twin with one difference, a
         SET clause (pg_proc.proconfig is not null), which makes inline_function refuse it. It exists only as the
         detector's own control in NexusTestCosineOrderInliningTest: a plan that names this function, sorts and has no
