@@ -2604,13 +2604,27 @@ public final class PgContainerHelper {
     /**
      * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run, every row.
      * Runs on {@code ctx}'s connection and transaction, so a tenant GUC or SET LOCAL pin applies. jOOQ 3.20's
-     * {@code Explain.plan()} renders through {@code Result.format()}, which has no row cap (only
-     * {@code Result.toString()} stops at 50), so a {@code doesNotContain} over a long plan is not vacuous;
-     * PgContainerHelperExplainPlanTest pins that against a jOOQ upgrade. Batch 9 wrongly guarded a 50-row cap here
-     * and the guard refused a legitimate 53-row plan (CI run 39365428198).
+     * {@code Explain.plan()} renders through {@code Result.format()}: a table with '|' borders and no row cap (only
+     * {@code Result.toString()} stops at 50), but the column width is set by the first 50 rows and a later row wider
+     * than that is cut to it, ending in "..." (nexus-ou2za). A cut row could hide the very text a
+     * {@code doesNotContain} looks for, so this refuses a plan that has one; such a caller uses
+     * {@link #explainPlanWith}, which returns the server's own lines. Batch 9 wrongly refused every plan past 50
+     * rows here and broke a legitimate 53-row one (CI run 39365428198); this refuses only an actual cut.
      */
     public static String explainPlan(DSLContext ctx, Query query) {
-        return ctx.explain(query).plan();
+        return requireUncut(ctx.explain(query).plan());
+    }
+
+    /** A cell jOOQ's text format cut to an earlier column width ends in "..." right before the border. */
+    private static final java.util.regex.Pattern CUT_CELL = java.util.regex.Pattern.compile("(?m)\\.\\.\\.\\|$");
+
+    static String requireUncut(String formattedPlan) {
+        if (CUT_CELL.matcher(formattedPlan).find()) {
+            throw new IllegalStateException("EXPLAIN plan has a row jOOQ's text format cut to the width of its first"
+                + " 50 rows, so assertions over it could pass vacuously; use PgContainerHelper.explainPlanWith, which"
+                + " returns the server's own lines (nexus-ou2za)");
+        }
+        return formattedPlan;
     }
 
     /**
@@ -2623,7 +2637,7 @@ public final class PgContainerHelper {
     public static String explainPlanInlined(DSLContext ctx, Query query) {
         DSLContext inline = ctx.configuration()
             .deriveSettings(s -> s.withStatementType(StatementType.STATIC_STATEMENT)).dsl();
-        return inline.explain(query).plan();
+        return requireUncut(inline.explain(query).plan());
     }
 
     /**

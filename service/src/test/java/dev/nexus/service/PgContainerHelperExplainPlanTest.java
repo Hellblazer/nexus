@@ -15,6 +15,7 @@ import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link PgContainerHelper#explainPlan} and {@link PgContainerHelper#explainPlanInlined} return every plan row
@@ -115,5 +116,26 @@ class PgContainerHelperExplainPlanTest {
         assertThat(java.util.Arrays.copyOfRange(seen.binds, 1, 5)).containsExactly(false, true, true, false);
         PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), new PgContainerHelper.ExplainOptions(false, false, true, false));
         assertThat(java.util.Arrays.copyOfRange(seen.binds, 1, 5)).containsExactly(false, false, true, false);
+    }
+
+    @Test
+    void aPlanWhoseLateRowsAreWiderThanItsFirstFifty_isRefused_notReturnedCut() {
+        // jOOQ's text format sizes the column from the first 50 rows and cuts a wider later row to that width
+        Seen seen = new Seen();
+        DSLContext fixture = DSL.using(SQLDialect.POSTGRES);
+        Result<Record1<String>> plan = fixture.newResult(QUERY_PLAN);
+        for (int i = 1; i <= 60; i++) {
+            var row = fixture.newRecord(QUERY_PLAN);
+            row.set(QUERY_PLAN, i <= 50 ? "Node " + i : "Node " + i + " Filter: (a very long late condition " + "x".repeat(80) + ")");
+            plan.add(row);
+        }
+        DSLContext ctx = DSL.using(new MockConnection(c -> {
+            seen.sql = c.sql();
+            return new MockResult[] {new MockResult(60, plan)};
+        }), SQLDialect.POSTGRES);
+        assertThatThrownBy(() -> PgContainerHelper.explainPlan(ctx, boundQuery(ctx)))
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("explainPlanWith");
+        assertThatThrownBy(() -> PgContainerHelper.explainPlanInlined(ctx, boundQuery(ctx)))
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("explainPlanWith");
     }
 }
