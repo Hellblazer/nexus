@@ -472,7 +472,22 @@ file, `PgContainerHelper.SERVER_LOG_FILE` (`<PGDATA>/nx-log/postgresql.log`, on 
 tmpfs), and everything that reads the server log (`DdlCounts`, the `auto_explain` readers) calls
 `PgContainerHelper.serverLog(container)`, which `cat`s that file; `container.getLogs()` is Docker's log and
 holds only the postmaster's first lines. Because the collector also takes the "ready to accept connections"
-line off Docker's log, the container waits on a `pg_isready` TCP probe. `PgServerLogTest` pins all three.
+line off Docker's log, the container waits on a `pg_isready -h 127.0.0.1` TCP probe (60 s a start attempt).
+`PgServerLogTest` pins all three. A `docker exec` that never returns (seen once on colima, cause not
+established) is abandoned after 60 s and retried, 3 tries; each abandon is a WARN
+(`event=server_log_read_abandoned`) naming `owner` (the class that BOOTED the container; `unknown` for a
+handle) and `reader` (the test class on the calling thread; `unknown` for a read from the JVM-exit hook, whose thread has no test frame). That bounds the caller. What becomes of the stuck
+exec depends on where it hangs, and which one happened on colima is not established: if it is parked in
+docker-java's `awaitCompletion` waiting for its stream, `Future.cancel(true)` wakes it and its `finally`
+closes the stream; if the hang is inside the synchronous execCreate/inspect HTTP call, the reader thread stays
+blocked until the JVM exits. A start whose wait times out logs the last 50 lines of the log file at ERROR
+(Testcontainers' own dump is Docker's log and lacks them). That tail is readable only while the container is
+still up (a slow initdb, a hung probe): a postmaster that died takes PID 1, the tmpfs and the file with it, and
+the line then reads `(server log unreadable: ...)`. The JVM-exit hook reads the still-live containers under
+one 15 s budget, inside surefire's 30 s `forkedProcessExitTimeoutInSeconds` (not set in `service/pom.xml`) so
+the `log_errors` mark of an abandoned read is flushed before the fork is halted; a read slower than 15 s is
+cut and counted as a log error, so the ratchet refuses that run (conservative, by design). A test must not
+call `getLogs()` on a Postgres container; `PgContainerTmpfsGateTest` fails the build if one does.
 
 The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so how the work is split does
 not move them: bytes and DDL per test and the migration's bytes and DDL per booted worker (Python); the

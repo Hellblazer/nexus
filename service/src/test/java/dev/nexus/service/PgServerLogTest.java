@@ -96,8 +96,13 @@ class PgServerLogTest {
         assertThat(PgContainerHelper.SERVER_LOG_FILE).startsWith(PgContainerHelper.PGDATA + "/");
         PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
         try {
-            ExecResult mount = c.execInContainer("sh", "-c", "df -P " + PgContainerHelper.SERVER_LOG_FILE + " | tail -1");
-            assertThat(mount.getStdout()).as("the file's filesystem: %s", mount.getStdout()).containsAnyOf("tmpfs", PgContainerHelper.PGDATA);
+            // df -PT: Filesystem Type 1024-blocks Used Available Capacity Mounted-on. The image declares PGDATA a
+            // VOLUME, so SOME mount sits there either way; only the type tells tmpfs from a Docker volume on disk.
+            ExecResult mount = c.execInContainer("sh", "-c", "df -PT " + PgContainerHelper.SERVER_LOG_FILE + " | tail -1");
+            String[] cols = mount.getStdout().trim().split("\\s+");
+            assertThat(cols).as("df -PT: %s", mount.getStdout()).hasSize(7);
+            assertThat(cols[1]).as("the log file's filesystem type").isEqualTo("tmpfs");
+            assertThat(cols[6]).as("mounted at the data directory, not a tmpfs elsewhere").isEqualTo(PgContainerHelper.PGDATA);
             try (Connection conn = c.createConnection("")) {
                 DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
                 assertThat(show(ctx, "logging_collector")).isEqualTo("on");
@@ -167,17 +172,218 @@ class PgServerLogTest {
                 Thread.sleep(60_000); // the first exec never returns
             }
             return "log";
-        }, java.time.Duration.ofMillis(300), 3);
+        }, java.time.Duration.ofMillis(300), 3, "PgServerLogTest");
         assertThat(got).isEqualTo("log");
         assertThat(calls.get()).as("the stuck try was abandoned and one more ran").isEqualTo(2);
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> PgContainerHelper.retryingRead(() -> {
             Thread.sleep(60_000);
             return "never";
-        }, java.time.Duration.ofMillis(100), 2)).isInstanceOf(IllegalStateException.class).hasMessageContaining("timed out 2 times");
+        }, java.time.Duration.ofMillis(100), 2, "PgServerLogTest")).isInstanceOf(IllegalStateException.class).hasMessageContaining("timed out 2 times");
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> PgContainerHelper.retryingRead(() -> {
             throw new IllegalStateException("cat exited 1");
-        }, java.time.Duration.ofSeconds(5), 3)).isInstanceOf(IllegalStateException.class).hasMessage("cat exited 1");
+        }, java.time.Duration.ofSeconds(5), 3, "PgServerLogTest")).isInstanceOf(IllegalStateException.class).hasMessage("cat exited 1");
+    }
+
+    /** Capture what {@link PgContainerHelper}'s logger writes while {@code body} runs. */
+    private static List<ch.qos.logback.classic.spi.ILoggingEvent> logged(Runnable body) {
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(PgContainerHelper.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+            new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            body.run();
+        } finally {
+            logger.detachAppender(appender);
+        }
+        return List.copyOf(appender.list);
+    }
+
+    /**
+     * Every abandoned try leaves a WARN naming the class that booted the container (owner), the class that asked
+     * for the read (reader), the attempt and the time waited (nexus-t4y7b).
+     */
+    @Test
+    void an_abandoned_read_is_logged_at_warn_with_owner_attempt_and_elapsed() {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var events = logged(() -> PgContainerHelper.retryingRead(() -> {
+            if (calls.incrementAndGet() <= 2) {
+                Thread.sleep(60_000);
+            }
+            return "log";
+        }, java.time.Duration.ofMillis(200), 3, "SomeIntegrationTest"));
+        assertThat(events).as("one WARN per abandoned try").hasSize(2);
+        for (int i = 0; i < 2; i++) {
+            var e = events.get(i);
+            assertThat(e.getLevel()).isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(e.getFormattedMessage()).contains("server_log_read_abandoned", "owner=SomeIntegrationTest",
+                "reader=PgServerLogTest", "attempt=" + (i + 1), "of=3");
+            long elapsedMs = Long.parseLong(e.getFormattedMessage().replaceAll(".*elapsed_ms=(\\d+).*", "$1"));
+            assertThat(elapsedMs).as("waited about the timeout").isBetween(150L, 5_000L);
+        }
+        // A read that returns in time logs nothing.
+        assertThat(logged(() -> PgContainerHelper.retryingRead(() -> "ok", java.time.Duration.ofSeconds(5), 3, "x"))).isEmpty();
+    }
+
+    /**
+     * The wait is the TCP probe with -h 127.0.0.1: without it pg_isready asks the unix socket, which the image's
+     * init-time temp server also answers, so the container would count as ready before the real server is up.
+     * The strategy's command is a private field, read here by reflection.
+     */
+    @Test
+    void the_counter_on_wait_is_the_tcp_pg_isready_probe_with_a_60_second_attempt() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false keeps the library's default wait");
+        FailFastPostgreSQLContainer c = (FailFastPostgreSQLContainer) PgContainerHelper.newContainer();
+        var strategy = c.ddlWaitStrategy();
+        assertThat(strategy).isInstanceOf(org.testcontainers.containers.wait.strategy.ShellStrategy.class);
+        var command = org.testcontainers.containers.wait.strategy.ShellStrategy.class.getDeclaredField("command");
+        command.setAccessible(true);
+        var startupTimeout = org.testcontainers.containers.wait.strategy.AbstractWaitStrategy.class.getDeclaredField("startupTimeout");
+        startupTimeout.setAccessible(true);
+        assertThat((String) command.get(strategy)).isEqualTo(PgContainerHelper.READY_PROBE)
+            .contains("pg_isready -h 127.0.0.1 ", "-p 5432");
+        assertThat((java.time.Duration) startupTimeout.get(strategy)).isEqualTo(PgContainerHelper.STARTUP_TIMEOUT)
+            .isEqualTo(java.time.Duration.ofSeconds(60));
+    }
+
+    /** {@code ExecResult} is final with a package-private constructor; a stub has to build one reflectively. */
+    private static ExecResult execResult(int exit, String out, String err) {
+        try {
+            var ctor = ExecResult.class.getDeclaredConstructor(int.class, String.class, String.class);
+            ctor.setAccessible(true);
+            return ctor.newInstance(exit, out, err);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /** A counter-on container whose exec and Docker log are scripted (it never reaches Docker: nothing starts it). */
+    private static final class StubContainer extends FailFastPostgreSQLContainer {
+        interface Exec {
+            ExecResult run(String... command) throws Exception;
+        }
+
+        volatile Exec exec = command -> execResult(0, "", "");
+        volatile String dockerLog = "docker log";
+        final java.util.List<List<String>> execs = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        StubContainer() {
+            super(org.testcontainers.utility.DockerImageName.parse(PgContainerHelper.IMAGE));
+            ddlOwner("StubbedTest");
+        }
+
+        @Override
+        public ExecResult execInContainer(String... command) throws java.io.IOException, InterruptedException {
+            execs.add(List.of(command));
+            try {
+                return exec.run(command);
+            } catch (java.io.IOException | InterruptedException | RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        @Override
+        public String getLogs() {
+            return dockerLog;
+        }
+    }
+
+    /** What {@link PgContainerHelper#serverLog} does is pinned through the public method on a counter-on container stub. */
+    @Test
+    void serverLog_cats_the_file_and_retries_a_stuck_exec_three_times() {
+        StubContainer c = new StubContainer();
+        assertThat(c.ddlCounted()).isTrue();
+
+        // Path and shape: one `cat` of the log file, its stdout returned.
+        c.exec = command -> execResult(0, "the log", "");
+        assertThat(PgContainerHelper.serverLog(c)).isEqualTo("the log");
+        assertThat(c.execs).containsExactly(List.of("cat", PgContainerHelper.SERVER_LOG_FILE));
+
+        // The production numbers: 60 s a try, 3 tries.
+        assertThat(PgContainerHelper.SERVER_LOG_READ_TIMEOUT).isEqualTo(java.time.Duration.ofSeconds(60));
+        assertThat(PgContainerHelper.SERVER_LOG_READ_ATTEMPTS).isEqualTo(3);
+
+        // Wiring: with the per-try wait shortened for this thread, the PUBLIC method abandons a stuck exec and
+        // tries again, twice over, and gives up on the third.
+        PgContainerHelper.SERVER_LOG_READ_TIMEOUT_OVERRIDE.set(java.time.Duration.ofMillis(200));
+        try {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            c.exec = command -> {
+                if (calls.incrementAndGet() <= 2) {
+                    Thread.sleep(60_000);
+                }
+                return execResult(0, "after two stuck", "");
+            };
+            assertThat(PgContainerHelper.serverLog(c)).isEqualTo("after two stuck");
+            assertThat(calls.get()).as("two abandoned tries, the third read").isEqualTo(3);
+
+            var stuck = new java.util.concurrent.atomic.AtomicInteger();
+            c.exec = command -> {
+                stuck.incrementAndGet();
+                Thread.sleep(60_000);
+                return execResult(0, "never", "");
+            };
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> PgContainerHelper.serverLog(c))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("timed out 3 times");
+            assertThat(stuck.get()).isEqualTo(3);
+        } finally {
+            PgContainerHelper.SERVER_LOG_READ_TIMEOUT_OVERRIDE.remove();
+        }
+    }
+
+    @Test
+    void a_counter_off_container_reads_dockers_log_not_the_file() {
+        StubContainer off = new StubContainer();
+        off.ddlCounted(false);
+        assertThat(PgContainerHelper.serverLog(off)).isEqualTo("docker log");
+        assertThat(off.execs).as("no exec: there is no file").isEmpty();
+    }
+
+    /** Written only by the real server (the init-time temp server has listen_addresses empty). */
+    private static final String REAL_SERVER_LISTENING = "listening on IPv4 address \"0.0.0.0\"";
+
+    /**
+     * A start whose wait times out while the server is up prints the end of the log FILE, which Testcontainers'
+     * own failed-start dump (Docker's log) does not carry. The wait is the production probe, so the REAL
+     * server is up and listening, followed by a probe that can never pass: the failure comes only after the
+     * server is ready, however slow the host. The asserted line is one only the real server writes (the
+     * image's init-time temp server listens on the unix socket only).
+     */
+    @Test
+    void a_failed_start_wait_prints_the_tail_of_the_server_log_file() {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector");
+        FailFastPostgreSQLContainer c = (FailFastPostgreSQLContainer) PgContainerHelper.newContainer();
+        c.withStartupAttempts(1).waitingFor(new org.testcontainers.containers.wait.strategy.WaitAllStrategy(
+                org.testcontainers.containers.wait.strategy.WaitAllStrategy.Mode.WITH_INDIVIDUAL_TIMEOUTS_ONLY)
+            .withStrategy(org.testcontainers.containers.wait.strategy.Wait.forSuccessfulCommand(PgContainerHelper.READY_PROBE)
+                .withStartupTimeout(PgContainerHelper.STARTUP_TIMEOUT))
+            .withStrategy(org.testcontainers.containers.wait.strategy.Wait.forSuccessfulCommand("false")
+                .withStartupTimeout(java.time.Duration.ofSeconds(2))));
+        var events = new java.util.ArrayList<ch.qos.logback.classic.spi.ILoggingEvent>();
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(FailFastPostgreSQLContainer.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+            new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(c::start)
+                .isInstanceOf(org.testcontainers.containers.ContainerLaunchException.class);
+        } finally {
+            logger.detachAppender(appender);
+            events.addAll(appender.list);
+            c.stop();
+        }
+        assertThat(c.startFailureLogTail()).as("the file's tail, captured while the container was up")
+            .contains(REAL_SERVER_LISTENING);
+        assertThat(events).anySatisfy(e -> {
+            assertThat(e.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
+            assertThat(e.getFormattedMessage()).contains("start_wait_failed", REAL_SERVER_LISTENING);
+        });
     }
 }

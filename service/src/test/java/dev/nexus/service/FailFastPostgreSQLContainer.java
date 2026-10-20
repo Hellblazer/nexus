@@ -83,7 +83,7 @@ import java.util.concurrent.TimeUnit;
  * to confirm the retry shape (condition, sleep interval, final wrapped exception) has not
  * changed underneath this override.
  */
-final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQLContainer> {
+class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQLContainer> {
 
     /** SQLSTATE 28000 — invalid_authorization_specification (e.g. "role ... does not exist"). */
     static final String SQLSTATE_INVALID_AUTHORIZATION_SPECIFICATION = "28000";
@@ -135,6 +135,34 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
 
     String ddlOwner() {
         return ddlOwner;
+    }
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(FailFastPostgreSQLContainer.class);
+
+    private volatile String startFailureLogTail;
+
+    /** The server log's tail captured when the last start's wait failed, or null when none failed (a test reads it). */
+    String startFailureLogTail() {
+        return startFailureLogTail;
+    }
+
+    /**
+     * nexus-t4y7b: when the wait fails, print the end of the server log FILE. Testcontainers' failed-start
+     * dump is Docker's log, which with the counter on no longer carries the server's lines after the
+     * collector started. The library retries the start (and calls this again) up to the startup attempts.
+     */
+    @Override
+    protected void waitUntilContainerStarted() {
+        try {
+            super.waitUntilContainerStarted();
+        } catch (RuntimeException e) {
+            if (ddlCounted) {
+                String tail = PgContainerHelper.serverLogTail(this, PgContainerHelper.START_FAILURE_TAIL_LINES);
+                startFailureLogTail = tail;
+                LOG.error("event=start_wait_failed owner={} error={} server_log_tail=\n{}", ddlOwner, e.toString(), tail);
+            }
+            throw e;
+        }
     }
 
     @Override

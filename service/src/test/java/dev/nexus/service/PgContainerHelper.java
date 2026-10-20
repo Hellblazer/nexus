@@ -153,11 +153,13 @@ public final class PgContainerHelper {
      *       startup probe failing "setting up the SSL connection" for the
      *       whole 120s window against a restarting/half-up server under
      *       Docker pressure (pg JDBC defaults to sslmode=prefer; a local
-     *       throwaway container needs no TLS). The testcontainers default
-     *       wait strategy ALREADY waits for the ready line twice, so the
-     *       classic initdb-restart fix is a no-op here — the URL param is
-     *       the load-bearing change, propagating via getJdbcUrl() to every
-     *       pool and createConnection call.</li>
+     *       throwaway container needs no TLS). The wait already covers the
+     *       classic initdb-restart window, so that fix is a no-op here: with
+     *       the counter off the default wait reads the ready line twice, and
+     *       with it on the {@link #READY_PROBE} passes only for the real
+     *       server (nexus-sz651). The URL param is the load-bearing change,
+     *       propagating via getJdbcUrl() to every pool and createConnection
+     *       call.</li>
      *   <li>{@code withStartupAttempts(3)}: native belt — a genuinely
      *       failed startup recreates the whole container (fresh initdb)
      *       instead of flaking the class.</li>
@@ -252,8 +254,7 @@ public final class PgContainerHelper {
             // the real server, once init is done. (The default wait reads Docker's log for the ready line,
             // which the collector moved into the file.) Counter off: the default wait stays.
             container
-                .waitingFor(Wait.forSuccessfulCommand("pg_isready -h 127.0.0.1 -p 5432 -q")
-                    .withStartupTimeout(Duration.ofSeconds(120)))
+                .waitingFor(Wait.forSuccessfulCommand(READY_PROBE).withStartupTimeout(STARTUP_TIMEOUT))
                 .withCopyFileToContainer(
                     MountableFile.forClasspathResource("ddl/nx-ddl-probe.sql"),
                     "/docker-entrypoint-initdb.d/00-nx-ddl-probe.sql");
@@ -261,8 +262,30 @@ public final class PgContainerHelper {
         return container;
     }
 
+    /**
+     * The wait the counter-on container starts with (nexus-sz651). {@code -h 127.0.0.1} is load-bearing: without
+     * it {@code pg_isready} uses the unix socket and passes on the image's init-time temp server, before the
+     * real server is up. That temp server listens on the socket only, so TCP passes only for the real one.
+     */
+    static final String READY_PROBE = "pg_isready -h 127.0.0.1 -p 5432 -q";
+
+    /**
+     * One start attempt's wait. 60 s is the library's own value for {@code PostgreSQLContainer}'s ready-line
+     * wait, which this probe replaces; nexus-sz651 first wrote 120 s with no reason (nexus-t4y7b found none
+     * in history). With {@code withStartupAttempts(3)} a server that never comes up costs three of these.
+     */
+    static final Duration STARTUP_TIMEOUT = Duration.ofSeconds(60);
+
     /** Reads of the server log wait this long for one {@code docker exec} before abandoning it and trying again. */
     static final Duration SERVER_LOG_READ_TIMEOUT = Duration.ofSeconds(60);
+
+    /** How many tries {@link #serverLog} gives one read. */
+    static final int SERVER_LOG_READ_ATTEMPTS = 3;
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(PgContainerHelper.class);
+
+    /** Test seam, per thread so a parallel test is unaffected: a shorter per-try wait for {@link #serverLog}. */
+    static final ThreadLocal<Duration> SERVER_LOG_READ_TIMEOUT_OVERRIDE = new ThreadLocal<>();
 
     private static final java.util.concurrent.ExecutorService LOG_READERS = java.util.concurrent.Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "nx-server-log-read");
@@ -276,13 +299,22 @@ public final class PgContainerHelper {
      * postmaster's first lines then. Counter off (the container was built with it off, nexus-3cwsw): there
      * is no file and the log is Docker's, {@code getLogs()}. The file only grows, so a length taken from one read is a valid offset for the next.
      * Throws when the file cannot be read. One {@code docker exec} that never returns (seen once, in a
-     * 10-class run on colima: the exec's stream never closed) is abandoned after
-     * {@link #SERVER_LOG_READ_TIMEOUT} and the read is tried again, so a stuck exec cannot hang a suite.
+     * 10-class run on colima; the cause is not established) is abandoned after
+     * {@link #SERVER_LOG_READ_TIMEOUT} and the read is tried again, up to {@link #SERVER_LOG_READ_ATTEMPTS}
+     * tries. That bounds the CALLER. What happens to the stuck exec depends on where it hangs, and which
+     * one happened on colima is not established: if the exec is parked in docker-java's
+     * {@code awaitCompletion} waiting for its stream, {@code Future.cancel(true)} wakes it and its
+     * {@code finally} closes the stream; if the hang is inside the synchronous execCreate/inspect HTTP call,
+     * the reader thread stays blocked until the JVM exits. Every abandon is logged at WARN
+     * ({@link #retryingRead}) so the recurrence rate can be read off a run.
      */
     public static String serverLog(PostgreSQLContainer<?> c) {
         if (c instanceof FailFastPostgreSQLContainer f && !f.ddlCounted()) {
             return c.getLogs(); // counter off: no collector, the server log is Docker's log again
         }
+        Duration timeout = SERVER_LOG_READ_TIMEOUT_OVERRIDE.get() != null
+            ? SERVER_LOG_READ_TIMEOUT_OVERRIDE.get() : SERVER_LOG_READ_TIMEOUT;
+        String owner = c instanceof FailFastPostgreSQLContainer f ? f.ddlOwner() : "unknown";
         return retryingRead(() -> {
             org.testcontainers.containers.Container.ExecResult r = c.execInContainer("cat", SERVER_LOG_FILE);
             if (r.getExitCode() != 0) {
@@ -290,17 +322,55 @@ public final class PgContainerHelper {
                     + r.getExitCode() + ": " + r.getStderr());
             }
             return r.getStdout();
-        }, SERVER_LOG_READ_TIMEOUT, 3);
+        }, timeout, SERVER_LOG_READ_ATTEMPTS, owner);
     }
 
-    /** Run {@code read} on a daemon thread, giving each of {@code attempts} tries {@code timeout}. */
-    static String retryingRead(java.util.concurrent.Callable<String> read, Duration timeout, int attempts) {
+    /** Lines of the server log's end a failed start prints. */
+    static final int START_FAILURE_TAIL_LINES = 50;
+
+    /**
+     * The last {@code lines} lines of the server log file, for a start that failed its wait. Testcontainers'
+     * own dump of a failed start is Docker's log, which with the collector on holds only the postmaster's
+     * first lines; a FATAL or PANIC after the collector started is only in the file. Best effort, one try
+     * of 15 s: a container that already exited took its tmpfs, and the file, with it. Never throws.
+     */
+    static String serverLogTail(PostgreSQLContainer<?> c, int lines) {
+        String owner = c instanceof FailFastPostgreSQLContainer f ? f.ddlOwner() : "unknown";
+        try {
+            return retryingRead(() -> {
+                org.testcontainers.containers.Container.ExecResult r =
+                    c.execInContainer("tail", "-n", Integer.toString(lines), SERVER_LOG_FILE);
+                if (r.getExitCode() != 0) {
+                    throw new IllegalStateException("tail exited " + r.getExitCode() + ": " + r.getStderr());
+                }
+                return r.getStdout();
+            }, Duration.ofSeconds(15), 1, owner);
+        } catch (RuntimeException e) {
+            return "(server log unreadable: " + e + ")";
+        }
+    }
+
+    /**
+     * Run {@code read} on a daemon thread, giving each of {@code attempts} tries {@code timeout}. A try that
+     * times out is abandoned and logged at WARN with the attempt number and the time waited, and two classes:
+     * {@code owner}, the class that BOOTED the container ({@link FailFastPostgreSQLContainer#ddlOwner()},
+     * "unknown" for a handle), and {@code reader}, the first class outside the container plumbing on the
+     * calling thread's stack, i.e. the one that asked for this read. An abandoned try's thread is interrupted
+     * with {@code cancel(true)}: that wakes an exec parked in {@code awaitCompletion} (its {@code finally}
+     * closes the stream), but not one blocked in the synchronous create/inspect HTTP call, which stays
+     * blocked until the JVM exits. Which of the two a real hang is has not been established.
+     */
+    static String retryingRead(java.util.concurrent.Callable<String> read, Duration timeout, int attempts, String owner) {
         for (int attempt = 1; ; attempt++) {
+            long started = System.nanoTime();
             java.util.concurrent.Future<String> f = LOG_READERS.submit(read);
             try {
                 return f.get(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
             } catch (java.util.concurrent.TimeoutException e) {
                 f.cancel(true);
+                LOG.warn("event=server_log_read_abandoned owner={} reader={} attempt={} of={} elapsed_ms={} file={}",
+                    owner, callerClass(), attempt, attempts, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                    SERVER_LOG_FILE);
                 if (attempt >= attempts) {
                     throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE + " timed out "
                         + attempts + " times, " + timeout + " each", e);

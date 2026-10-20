@@ -39,9 +39,14 @@ class PgContainerTmpfsGateTest {
     /** The factory, the only file that may construct a container or name a Postgres image. */
     private static final Path FACTORY = PKG.resolve("PgContainerHelper.java");
 
-    /** The two subclasses; SharedDatabaseHandle never starts a container of its own. */
+    /**
+     * The subclasses that may exist. SharedDatabaseHandle never starts a container of its own; PgServerLogTest's
+     * StubContainer extends FailFastPostgreSQLContainer to script an exec and is never started (nexus-t4y7b).
+     * Any other file subclassing a container, FailFast included, is an offender.
+     */
     private static final List<Path> SUBCLASSES = List.of(
-        PKG.resolve("FailFastPostgreSQLContainer.java"), PKG.resolve("SharedDatabaseHandle.java"));
+        PKG.resolve("FailFastPostgreSQLContainer.java"), PKG.resolve("SharedDatabaseHandle.java"),
+        PKG.resolve("PgServerLogTest.java"));
 
     /** Ways to get a Postgres container without the factory. */
     private static final List<Pattern> BYPASSES = List.of(
@@ -52,8 +57,9 @@ class PgContainerTmpfsGateTest {
         Pattern.compile("\"(pgvector/pgvector[^\"]*|postgres:(?!//)[^\"]+)\""),
         Pattern.compile("jdbc:tc:"));
 
+    // \w* so a subclass of FailFastPostgreSQLContainer (the factory's own type) is caught as well.
     private static final Pattern SUBCLASSING = Pattern.compile(
-        "extends\\s+([\\w.]+\\.)?PostgreSQLContainer\\b");
+        "extends\\s+([\\w.]+\\.)?\\w*PostgreSQLContainer\\b");
 
     /**
      * String literals, line comments and block comments in one pass, so a {@code "/*"}
@@ -69,6 +75,55 @@ class PgContainerTmpfsGateTest {
         return COMMENTS.matcher(src).replaceAll(
             m -> m.group().startsWith("\"") || m.group().startsWith("'")
                 ? java.util.regex.Matcher.quoteReplacement(m.group()) : "");
+    }
+
+    /**
+     * Files that may call {@code .getLogs()}: the factory (the counter-off branch of {@code serverLog}, where
+     * Docker's log IS the server log) and the test that asserts Docker's log stays empty of statements.
+     */
+    private static final List<Path> GET_LOGS_ALLOWED = List.of(
+        FACTORY, PKG.resolve("PgServerLogTest.java"));
+
+    private static final Pattern GET_LOGS = Pattern.compile("\\.\\s*getLogs\\s*\\(");
+
+    /**
+     * nexus-t4y7b: with the DDL counter on, Docker's log of a test Postgres container holds only the
+     * postmaster's first lines (the server log is a file in the container), so a NEGATIVE assertion on
+     * {@code getLogs()} (no deadlock, no ERROR) passes vacuously and a positive one times out. Readers call
+     * {@link PgContainerHelper#serverLog}. Non-vacuity: both allowed files really contain a call, so a scan
+     * that read nothing, or a pattern that stopped matching, fails here and not silently.
+     */
+    @Test
+    void nothing_but_the_factory_and_its_pin_reads_a_containers_docker_log() throws IOException {
+        Path root = Path.of("src", "test", "java");
+        List<Path> files;
+        try (Stream<Path> s = Files.walk(root)) {
+            files = s.filter(p -> p.toString().endsWith(".java")).toList();
+        }
+        assertThat(files.size()).isGreaterThan(300);
+        for (Path allowed : GET_LOGS_ALLOWED) {
+            assertThat(files).as("the scan reaches %s", allowed).contains(allowed);
+            assertThat(GET_LOGS.matcher(stripComments(Files.readString(allowed))).find())
+                .as("%s calls getLogs(), so the pattern and the scan are alive", allowed).isTrue();
+        }
+        List<String> offenders = new ArrayList<>();
+        for (Path p : files) {
+            if (GET_LOGS_ALLOWED.contains(p) || p.getFileName().toString().equals("PgContainerTmpfsGateTest.java")) {
+                continue;
+            }
+            if (GET_LOGS.matcher(stripComments(Files.readString(p))).find()) {
+                offenders.add(p.toString());
+            }
+        }
+        assertThat(offenders)
+            .as("read a Postgres container's server log with PgContainerHelper.serverLog(container); "
+                + "getLogs() is Docker's log, empty of statements with the counter on (nexus-sz651, nexus-t4y7b)")
+            .isEmpty();
+        // The pattern sees the spellings it exists for and not prose.
+        for (String hit : List.of("c.getLogs()", "pg.getLogs ( )", "container\n    .getLogs()")) {
+            assertThat(GET_LOGS.matcher(hit).find()).as(hit).isTrue();
+        }
+        assertThat(GET_LOGS.matcher(stripComments("// pg.getLogs() in a comment\nvar x = serverLog(c);")).find()).isFalse();
     }
 
     @Test
@@ -123,6 +178,10 @@ class PgContainerTmpfsGateTest {
         }
         assertThat(SUBCLASSING.matcher("class X extends org.testcontainers.containers.PostgreSQLContainer<X> {").find())
             .isTrue();
+        assertThat(SUBCLASSING.matcher("private static final class S extends FailFastPostgreSQLContainer {").find())
+            .as("a subclass of the factory's own container type").isTrue();
+        assertThat(SUBCLASSING.matcher("class S extends dev.nexus.service.FailFastPostgreSQLContainer {").find())
+            .as("the same, qualified").isTrue();
         List<String> clean = List.of(
             "String url = \"jdbc:postgresql://localhost:5432/postgres\";",
             "String u = \"postgres://u@h/db\";",

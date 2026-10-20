@@ -44,6 +44,14 @@ EXEMPT = {
     "DdlLogParserTest.java": "parses string literals; starts no container",
 }
 
+# Single tests exempt from the check, as "<path under JAVA_TESTS>::<method>", each with its reason.
+EXEMPT_TESTS = {
+    "dev/nexus/service/PgServerLogTest.java::serverLog_cats_the_file_and_retries_a_stuck_exec_three_times": (
+        "a stub container that is counter-on by construction (ddlCounted defaults to true); starts no server, "
+        "so it runs the same with the switch off (nexus-t4y7b)"
+    ),
+}
+
 # The scan must have examined at least this many counter-dependent tests: a pass over an empty set is a failure.
 MIN_COUNTER_TESTS_SEEN = 5
 
@@ -72,14 +80,20 @@ def test_the_scan_flags_an_unguarded_test_and_passes_a_guarded_one() -> None:
 def test_every_counter_dependent_java_test_skips_when_the_counter_is_off() -> None:
     seen = 0
     unguarded: list[str] = []
+    exempt_seen: set[str] = set()
     for path in sorted(JAVA_TESTS.rglob("*Test.java")):
         if path.name in EXEMPT:
             continue
         for name, guarded in counter_dependent_segments(path.read_text()):
             seen += 1
-            if not guarded:
-                unguarded.append(f"{path.relative_to(JAVA_TESTS)}::{name}")
+            key = f"{path.relative_to(JAVA_TESTS).as_posix()}::{name}"
+            if key in EXEMPT_TESTS:
+                exempt_seen.add(key)
+            elif not guarded:
+                unguarded.append(key)
     assert seen >= MIN_COUNTER_TESTS_SEEN, f"the scan saw {seen} counter-dependent tests: it is looking at the wrong tree"
+    stale = sorted(set(EXEMPT_TESTS) - exempt_seen)
+    assert stale == [], f"EXEMPT_TESTS names tests the scan no longer flags; drop them: {stale}"
     assert unguarded == [], (
         "these Java tests assert on the DDL counter's surfaces but do not "
         f"{ASSUMPTION}, ...): they fail in a -Dnexus.ddl.count=false run: {unguarded}"

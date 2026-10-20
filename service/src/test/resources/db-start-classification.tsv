@@ -41,6 +41,7 @@ GrantsPgMonitorTest	startDedicated	CLUSTER_STATE	falsifies grants-004 without th
 ReadPathLeafPruningIntegrationTest	startDedicated	CLUSTER_STATE	reads the plans auto_explain writes to the container's server log, and sets auto_explain on a cluster-wide role
 Rdr192LiveCExplainEvidenceIntegrationTest	startDedicated	CLUSTER_STATE	reads auto_explain plans from the container's server log, which a shared cluster fills with every class's output
 PgServerLogTest	startDedicated	CLUSTER_STATE	tests the server-log reader against containers whose log it controls
+PgServerLogTest	newContainer	INFRA	builds the container recipe unstarted to pin its wait strategy, and starts one whose wait must fail to read the log tail it prints
 TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STATE	a latency measurement that creates and drops about 2,500 leaves; wants an idle server and a lock table of its own
 ChashProbePlanShapeTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
@@ -50,6 +51,7 @@ PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a differen
 DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)
 DdlCountSwitchTest	startDedicated	INFRA	tests the DDL counter's switch on a dedicated container (its server log goes to Docker when the counter is off)
 DdlCountSwitchTest	startEmptyDatabase	INFRA	tests the DDL counter's switch on an empty database (the probe is installed only when the counter is on)
+DdlExitBudgetTest	newContainer	INFRA	registers unstarted containers with the DDL counter to drive its JVM-exit budget; nothing is booted
 PristineCloneSkipTest	startEmptyDatabase	INFRA	tests applyProductSchema's pristine-clone skip; needs an empty database to prove the skip never applies to one
 PgContainerTmpfsGateTest	newContainer	INFRA	tests the container factory's own tmpfs and memory bounds
 FailFastPostgreSQLContainerTest	newContainer	INFRA	tests that the factory returns the fail-fast container

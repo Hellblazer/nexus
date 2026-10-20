@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,12 +26,13 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * Bytes written and DDL statements per test run for the engine suite (nexus-sz651): this fork's
  * containers' server logs, read from the file in each container ({@link PgContainerHelper#serverLog}),
- * never from Docker's log (its json-file store is on the host's disk, which the counter must not write to), counted and written to {@code target/ddl-counts/*.json} when a container
- * starts, when it stops and when the JVM exits. {@code scripts/ddl_ratchet.py} reads the files of
+ * never from Docker's log (its json-file store is on the host's disk, which the counter must not write to),
+ * counted and written to {@code target/ddl-counts/*.json} when a container starts, when it stops and when the JVM exits. {@code scripts/ddl_ratchet.py} reads the files of
  * ONE run of ONE suite.
  *
  * <p>The target is bytes written (disk thrashing); the DDL count is the diagnostic that explains
@@ -286,7 +288,7 @@ final class DdlCounts {
      * {@code log_errors}, so {@code stop()} can always go on to stop it.
      */
     static void record(FailFastPostgreSQLContainer c) {
-        if (!enabled() || !LIVE.remove(c)) {
+        if (!enabled() || !claimLive(c)) {
             return;
         }
         try {
@@ -296,6 +298,16 @@ final class DdlCounts {
             GLOBAL.logError();
         }
         flush();
+    }
+
+    /**
+     * Take {@code c} out of the live set; false when it was not there (already recorded). {@link #record} claims
+     * a container BEFORE it reads the log, so a read that never returns has already left the set: the exit hook
+     * counts it as a log error and only the containers it never reached stay unread. A test's recorder calls
+     * this to model that order.
+     */
+    static boolean claimLive(FailFastPostgreSQLContainer c) {
+        return LIVE.remove(c);
     }
 
     /**
@@ -501,7 +513,7 @@ final class DdlCounts {
     }
 
     /** Rewrite this fork's file; cheap, so it runs after every container start and stop. */
-    static void flush() {
+    static synchronized void flush() {
         if (!enabled()) {
             return;
         }
@@ -517,9 +529,45 @@ final class DdlCounts {
         }
     }
 
+    /**
+     * All the JVM-exit hook may spend reading the logs of containers still live; see {@link #onJvmExit(Duration, Consumer)}.
+     * Surefire 3.5.2 halts a fork {@code forkedProcessExitTimeoutInSeconds} (default 30, not set in
+     * service/pom.xml) after exit starts, and this hook runs inside that window. The budget therefore has to
+     * finish well inside 30 s, or the {@code log_errors} mark of an abandoned read is never flushed and the
+     * ratchet trusts numbers that miss a container. A read that is merely slow, 15 s or more, is cut the same
+     * way and counted as a log error, so the ratchet refuses that run: conservative, by design.
+     */
+    static final Duration EXIT_BUDGET = Duration.ofSeconds(15);
+
     private static void onJvmExit() {
-        for (FailFastPostgreSQLContainer c : new ArrayList<>(LIVE)) {
-            record(c);
+        onJvmExit(EXIT_BUDGET, DdlCounts::record);
+    }
+
+    /**
+     * Record every container still live, within ONE overall {@code budget}. Each record can take up to three
+     * 60 s tries when an exec wedges ({@link PgContainerHelper#serverLog}); done one after another on a fork
+     * with several live containers that outlasts any shutdown. The records run on a daemon thread and this
+     * waits for it only as long as the budget. On a timeout the containers it did not reach stay live (the
+     * count file reports them as unread) and the one it was inside is counted as a {@code log_errors}, so the
+     * ratchet refuses the run instead of trusting numbers that are missing a container.
+     */
+    static void onJvmExit(Duration budget, Consumer<FailFastPostgreSQLContainer> recorder) {
+        Thread worker = new Thread(() -> {
+            for (FailFastPostgreSQLContainer c : new ArrayList<>(LIVE)) {
+                recorder.accept(c);
+            }
+        }, "ddl-counts-exit-record");
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(budget.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (worker.isAlive()) {
+            GLOBAL.logError();
+            System.err.println("nexus-t4y7b: DDL counts: still reading container logs after " + budget
+                + "; " + LIVE.size() + " container(s) not read, one read abandoned");
         }
         flush();
     }
