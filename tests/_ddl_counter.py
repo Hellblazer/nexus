@@ -559,7 +559,7 @@ def fmt_bytes(n: int | None) -> str:
     return f"{n}B"  # pragma: no cover
 
 
-def summary_line(merged: dict[str, Any], *, uncounted: int | None = None) -> str:
+def summary_line(merged: dict[str, Any], *, uncounted: int | None = None, provisioning: int | None = None) -> str:
     b = merged["buckets"]
     migration = b.get("migration", empty_tally())["total"]
     tests = b.get("tests", empty_tally())["total"]
@@ -578,6 +578,8 @@ def summary_line(merged: dict[str, Any], *, uncounted: int | None = None) -> str
         line += f" io_wbytes={fmt_bytes(io['wbytes_delta'])}"
     if uncounted is not None:
         line += f" | {uncounted} uncounted cluster start sites (static tree census)"
+        if provisioning is not None:
+            line += f" + {provisioning} product-provisioning commands (sh_nx_init, counted apart)"
     return line
 
 
@@ -629,6 +631,15 @@ def cgroup_io_delta(before: dict[str, Any] | None, after: dict[str, Any] | None)
 # ── uncounted clusters ───────────────────────────────────────────────────────
 
 UNCOUNTED_FILE = Path(__file__).resolve().parent / "ddl_uncounted_clusters.toml"
+
+
+def provisioning_command_count(path: Path = UNCOUNTED_FILE) -> int | None:
+    """The sum of the ``[provisioning]`` table (``nx init`` commands in the e2e scripts: the product provisioning its
+    own cluster), kept apart from the start-site figure. None when the file cannot be read."""
+    try:
+        return sum(int(n) for n in tomllib.loads(path.read_text()).get("provisioning", {}).values())
+    except (OSError, ValueError):
+        return None
 
 
 def uncounted_cluster_count(path: Path = UNCOUNTED_FILE) -> int | None:
@@ -754,6 +765,7 @@ class _Recorder:
         merged["workers_lost"] = max(0, self.lost - len(recovered))
         merged["cgroup_io"] = cgroup_io_delta(self.cgroup_start, cgroup_io_wbytes())
         merged["uncounted_cluster_start_sites"] = uncounted_cluster_count()
+        merged["product_provisioning_commands"] = provisioning_command_count()
         # The report is written even when no worker booted a substrate: the substrate boots lazily, so a
         # shard of tests that never touch it is legitimate, and ``ddl_ratchet.py fan-in`` needs that
         # shard's test count and its (absent) clusters to add up the run.
@@ -770,7 +782,7 @@ class _Recorder:
                 terminalreporter.write_line(f"ddl: no substrate counted (report: {_summary_report_path(path)}){note}")
             return
         terminalreporter.write_line(
-            f"{summary_line(merged, uncounted=merged['uncounted_cluster_start_sites'])} "
+            f"{summary_line(merged, uncounted=merged['uncounted_cluster_start_sites'], provisioning=merged['product_provisioning_commands'])} "
             f"(report: {_summary_report_path(path)}){note}"
         )
 

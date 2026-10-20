@@ -286,6 +286,10 @@ def test_two_workers_merge_into_one_report() -> None:
         "ddl: migration=18 tests=34 per_test=0.76 wal: migration=2.0KB tests=8.8KB per_test=200B"
     )
     assert ddl.summary_line(merged, uncounted=3).endswith(" | 3 uncounted cluster start sites (static tree census)")
+    assert ddl.summary_line(merged, uncounted=3, provisioning=7).endswith(
+        " | 3 uncounted cluster start sites (static tree census)"
+        " + 7 product-provisioning commands (sh_nx_init, counted apart)"
+    )
 
 
 def test_one_worker_with_an_unmeasured_phase_voids_the_wal_total() -> None:
@@ -337,8 +341,10 @@ def test_the_cgroup_io_reader_says_none_where_it_cannot_read(tmp_path: Path) -> 
 
 def test_the_uncounted_cluster_count_is_the_allowlists_sum(tmp_path: Path) -> None:
     allow = tmp_path / "u.toml"
-    allow.write_text('[counted]\nsites = ["x::y"]\n[uncounted]\n"a::b" = 2\n"c::d" = 3\n')
-    assert ddl.uncounted_cluster_count(allow) == 5
+    allow.write_text('[counted]\nsites = ["x::y"]\n[uncounted]\n"a::b" = 2\n"c::d" = 3\n[provisioning]\n"e::sh_nx_init" = 4\n')
+    assert ddl.uncounted_cluster_count(allow) == 5  # the provisioning table is not folded in
+    assert ddl.provisioning_command_count(allow) == 4
+    assert ddl.provisioning_command_count(tmp_path / "missing.toml") is None
     assert ddl.uncounted_cluster_count(tmp_path / "missing.toml") is None
     assert isinstance(ddl.uncounted_cluster_count(), int)  # the committed file
 
@@ -403,7 +409,7 @@ def test_a_serial_run_prints_and_writes_the_counts(pytester, monkeypatch, tmp_pa
     result.stdout.fnmatch_lines([
         "ddl: migration=9 tests=17 per_test=2.12 wal: migration=1000B tests=4.4KB per_test=562B"
         # a cgroup (Linux, under lab-run) adds " io_wbytes=<n>" before the bar
-        "*| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
+        "*| * uncounted cluster start sites (static tree census) + * product-provisioning commands (sh_nx_init, counted apart) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert report["total"]["total"] == 26
@@ -413,6 +419,7 @@ def test_a_serial_run_prints_and_writes_the_counts(pytester, monkeypatch, tmp_pa
     assert report["wal"]["tests_bytes"] == 4500
     assert report["workers_ready_mark_seen"] == 1
     assert isinstance(report["uncounted_cluster_start_sites"], int)
+    assert isinstance(report["product_provisioning_commands"], int)
 
 
 def test_xdist_workers_merge_into_one_report(pytester, monkeypatch, tmp_path) -> None:
@@ -422,7 +429,7 @@ def test_xdist_workers_merge_into_one_report(pytester, monkeypatch, tmp_path) ->
     result.stdout.fnmatch_lines([
         "ddl: migration=18 tests=34 per_test=4.25 wal: migration=2.0KB tests=8.8KB per_test=1.1KB"
         # a cgroup (Linux, under lab-run) adds " io_wbytes=<n>" before the bar
-        "*| * uncounted cluster start sites (static tree census) (report: *nx-ddl-report.json)",
+        "*| * uncounted cluster start sites (static tree census) + * product-provisioning commands (sh_nx_init, counted apart) (report: *nx-ddl-report.json)",
     ])
     report = json.loads((tmp_path / "ddl-report" / ddl.REPORT_NAME).read_text())
     assert (report["workers"], report["workers_booted"], report["recovered_workers"]) == (2, 2, 0)

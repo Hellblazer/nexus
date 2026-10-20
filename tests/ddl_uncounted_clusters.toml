@@ -1,13 +1,22 @@
 # Postgres cluster start sites the DDL/bytes counter does not read (nexus-sz651, epic nexus-aca0q).
 #
-# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line
-# prints the sum of [uncounted] as `N uncounted cluster start sites (static tree census)`;
-# tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either
-# direction. The scan covers tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb and docker_run of a
-# postgres/pgvector image), tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the
-# pom's code generator. Not scanned: shell outside tests/e2e, e2e clusters started by anything but a literal
-# nx init (nx start, wrapper scripts), and a docker run whose argv or image is not a literal; so this is not every start
-# site (the full list is the module docstring's Scope). Regenerate with
+# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line prints the
+# sum of [uncounted] as `N uncounted cluster start sites (static tree census)`, then the sum of [provisioning]
+# as `+ M product-provisioning commands (sh_nx_init, counted apart)`: an `nx init` provisions the product's own
+# cluster, so it is never added into N. Both are call sites, not clusters: one Python cluster usually counts
+# twice (its <module>::initdb and its pg_instance::pg_ctl_start). Shell sites are keyed by file and kind, with the
+# per-file count. tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either
+# direction.
+#
+# Scanned: tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb, docker_run of a postgres/pgvector image),
+# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the pom's code generator.
+# NOT scanned, so this is not every start site: shell outside tests/e2e, among it files that do start clusters:
+#   - scripts/liquibase_bundle_smoke.sh (provisions a bundle cluster with pg_provision.provision())
+#   - service/native-smoke.sh (docker run of pgvector/pgvector:pg17)
+#   - tests/containers/fanout.sh (docker run of the pytest shard images, whose Python clusters are census sites once per run)
+#   - tests/cc-validation/* (docker run of an image whose Claude Code session starts the product service; no literal start)
+# also e2e clusters started by anything but a literal `nx init` (nx start, wrapper scripts), and a docker run
+# whose argv or image is not a literal. Regenerate with
 #   uv run python -m tests._ddl_cluster_sites --write
 # and review the diff: a new line is a start site whose cluster the counter cannot see.
 
@@ -72,13 +81,15 @@ sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 "tests/db/test_write_seam_gate_integration.py::pg_instance::docker_run" = 1
 "tests/db/test_xnz0o_commands_integration.py::<module>::initdb" = 1
 "tests/db/test_xnz0o_commands_integration.py::pg_instance::pg_ctl_start" = 1
-"tests/e2e/benchmark-corpus.sh::_cmd_run::sh_nx_init" = 1
-"tests/e2e/fresh-install-mvv.sh::<script>::sh_nx_init" = 1
-"tests/e2e/gc-ab/run-ab.sh::measure_variant::sh_docker_run" = 1
-"tests/e2e/hook-surface-shakeout/shakeout_in_container.sh::<script>::sh_nx_init" = 1
-"tests/e2e/local-service-gate.sh::<script>::sh_nx_init" = 1
-"tests/e2e/migration-rehearsal/rehearse_acquire.sh::<script>::sh_nx_init" = 1
-"tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh::<script>::sh_nx_init" = 2
+"tests/e2e/gc-ab/run-ab.sh::sh_docker_run" = 1
 "tests/test_init_pg_bundle_acquire.py::test_pinned_tag_downloads_extracts_selects::initdb" = 1
 "tests/test_pg_ctl_start.py::test_a_failed_start_raises_with_what_pg_ctl_said::pg_ctl_start" = 2
 "tests/test_pg_ctl_start.py::test_pg_ctl_start_returns_while_the_postmaster_still_holds_its_handles::pg_ctl_start" = 1
+
+[provisioning]
+"tests/e2e/benchmark-corpus.sh::sh_nx_init" = 1
+"tests/e2e/fresh-install-mvv.sh::sh_nx_init" = 1
+"tests/e2e/hook-surface-shakeout/shakeout_in_container.sh::sh_nx_init" = 1
+"tests/e2e/local-service-gate.sh::sh_nx_init" = 1
+"tests/e2e/migration-rehearsal/rehearse_acquire.sh::sh_nx_init" = 1
+"tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh::sh_nx_init" = 2

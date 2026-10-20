@@ -46,6 +46,7 @@ def _py_report(tmp_path: Path, *, name="nx-ddl-report.json", migration_ddl=2000,
             "workers_complete": booted if wal_complete else 0,
         },
         "uncounted_cluster_start_sites": 59,
+        "product_provisioning_commands": 7,
     }))
     return path
 
@@ -185,6 +186,7 @@ def test_a_run_at_every_ceiling_passes(tmp_path) -> None:
     code, message = ratchet.check("python_unit", _py_report(tmp_path), _py_ceilings(tmp_path))
     assert code == ratchet.EXIT_OK, message
     assert "uncounted_cluster_start_sites=59 (static tree census)" in message
+    assert "product_provisioning_commands=7 (sh_nx_init, counted apart)" in message
 
 
 def test_bytes_pass_inside_the_tolerance_band_and_fail_outside_it(tmp_path) -> None:

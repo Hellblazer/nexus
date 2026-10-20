@@ -7,31 +7,37 @@ fixtures of the integration modules, the product's own provisioning under test) 
 it, and a number that silently omits some of the work reads as a smaller number. This module finds
 those clusters in the source so the omission is a visible, committed figure, not an absence.
 
-A "start site" is, keyed by file, outermost enclosing function (``<module>`` at module level; ``<script>`` for shell
-code outside a function) and kind:
+A "start site" is a place in the source that starts a cluster. A Python site is keyed by file, outermost enclosing
+function (``<module>`` at module level) and kind; a shell site is keyed by file and kind only ("a start exists in this
+file", so renaming a function or reflowing the script changes no key), with the per-file count kept:
 
 * ``pg_ctl_start`` / ``initdb``: a call to ``pg_ctl_start`` (the one helper every test cluster start goes through) or to
   ``exe_name("initdb")`` (a test that bootstraps a data directory itself), in ``tests/**/*.py`` and ``scripts/**/*.py``;
 * ``docker_run`` (nexus-d84zv): a literal argv list in those files that holds ``"docker", "run"`` next to a string
   naming a postgres or pgvector image (also behind a wrapper such as ``["lab-run", "--", "docker", "run", ...]``);
-* ``sh_pg_ctl_start`` / ``sh_initdb`` / ``sh_docker_run`` / ``sh_nx_init`` (nexus-d84zv): a command in
-  ``tests/e2e/**/*.sh`` (comments skipped, backslash continuations joined) that runs ``pg_ctl ... start``, runs ``initdb``
-  (command position, so ``command -v initdb`` and ``[ -x .../initdb ]`` are not sites), runs ``docker run`` with a
-  postgres / pgvector image token (``postgres:17``, ``pgvector/pgvector:pg17``), or runs ``nx init`` (command position,
-  also ``_nx init`` and ``uv run nx init``), which provisions the product's own cluster.
+* ``sh_pg_ctl_start`` / ``sh_initdb`` / ``sh_docker_run`` (nexus-d84zv): a command in ``tests/e2e/**/*.sh`` (comments
+  skipped, backslash continuations joined) that runs ``pg_ctl ... start``, runs ``initdb`` (command position, so
+  ``command -v initdb`` and ``[ -x .../initdb ]`` are not sites) or runs ``docker run`` with a postgres / pgvector
+  image token (``postgres:17``, ``pgvector/pgvector:pg17``);
+* ``sh_nx_init`` (nexus-d84zv): a command-position ``nx init`` (also ``_nx init``, ``uv run nx init``) in the same
+  scripts. It is PRODUCT PROVISIONING, not a cluster a test started, so it is a separate figure (``PROVISIONING_KIND``,
+  the ``[provisioning]`` table): never added into the start-site number.
 
-``COUNTED`` are the
-sites whose cluster the counter reads; every other site is in the ``[uncounted]`` table of
-``tests/ddl_uncounted_clusters.toml`` with how many times it occurs. A new site that is in neither
-fails ``tests/test_ddl_uncounted_clusters_lint.py``: it must be counted or listed on purpose.
+``COUNTED`` are the sites whose cluster the counter reads; every other start site is in the ``[uncounted]`` table of
+``tests/ddl_uncounted_clusters.toml`` with how many times it occurs, and the ``sh_nx_init`` commands are in
+``[provisioning]``. A new site that is in no table fails ``tests/test_ddl_uncounted_clusters_lint.py``: it must be
+counted or listed on purpose.
 
-The figure is a STATIC CENSUS OF CALL SITES, labelled "uncounted cluster start sites" wherever it
-prints: not a count of clusters that ran (it is the same on every run, whichever tests ran), not
-weighted by size, and not complete: see "Scope" for what it does not read.
+The figure is a STATIC CENSUS OF CALL SITES, labelled "uncounted cluster start sites" wherever it prints, followed by
+"+ N product-provisioning commands (sh_nx_init, counted apart)". It is not a count of clusters that ran (it is the same
+on every run, whichever tests ran), not weighted by size, and not complete: see "Scope". It counts call sites, so ONE
+Python cluster usually counts TWICE: the module-level ``initdb`` lookup (``<module>::initdb``) and the fixture's
+``pg_instance::pg_ctl_start`` are two sites of one cluster. Read it as a size for the omission, never as a number of
+clusters.
 
 Scope, stated so the figure is not trusted past it: the Python test tree and ``scripts/`` (``.py``) and ``tests/e2e``
-(``.sh``) are scanned. Not scanned: shell outside ``tests/e2e`` (``scripts/*.sh``, ``tests/cc-validation``,
-``tests/containers``); a cluster an e2e script starts through anything but a literal ``nx init`` (``nx start``,
+(``.sh``) are scanned. Not scanned: shell outside ``tests/e2e``, among it files KNOWN to start clusters
+(:data:`UNSCANNED_SHELL`); a cluster an e2e script starts through anything but a literal ``nx init`` (``nx start``,
 ``nx upgrade``, a wrapper script, an image that itself runs ``nx init``); a ``docker run`` whose argv is not a literal
 list or whose image is a variable; product code under ``src/`` (it provisions Postgres for real use, and tests that
 run it are listed through their own ``initdb`` lookups). The Java suite is gated by
@@ -84,6 +90,19 @@ _SCANNED = ("tests", "scripts")
 
 #: Shell scripts the census reads (nexus-d84zv): the e2e gates and their helpers.
 _SH_SCANNED = ("tests/e2e",)
+
+#: The kind that is product provisioning (``nx init``), listed in its own table and printed as its own figure.
+PROVISIONING_KIND = "sh_nx_init"
+
+#: Shell files that start a cluster and sit OUTSIDE the scan (each checked by grep when this list was written; a file
+#: that only mentions or probes the binaries, such as ``scripts/build_pg_bundle.sh`` (``--version``) and
+#: ``scripts/sweep-test-substrates.sh`` (kills clusters), is not here). Named so the omission is a list, not a shrug.
+UNSCANNED_SHELL: tuple[str, ...] = (
+    "scripts/liquibase_bundle_smoke.sh (provisions a bundle cluster with pg_provision.provision())",
+    "service/native-smoke.sh (docker run of pgvector/pgvector:pg17)",
+    "tests/containers/fanout.sh (docker run of the pytest shard images, whose Python clusters are census sites once per run)",
+    "tests/cc-validation/* (docker run of an image whose Claude Code session starts the product service; no literal start)",
+)
 
 #: The kinds that name a Python ``initdb`` / ``pg_ctl_start`` data-dir use; the provenance half traces these and
 #: nothing else (a docker-run site has its tmpfs rule, a shell site has no Python data dir).
@@ -162,8 +181,8 @@ def scan(repo: Path = REPO) -> Counter[str]:
             except (UnicodeDecodeError, OSError):
                 continue
             rel = path.relative_to(repo).as_posix()
-            for func, kind in sh_sites(text):
-                sites[f"{rel}::{func}::{kind}"] += 1
+            for kind in sh_sites(text):
+                sites[f"{rel}::{kind}"] += 1
     pom = repo / "service" / "pom.xml"
     if pom.is_file():
         if _POM_MARKER in pom.read_text(encoding="utf-8"):
@@ -173,8 +192,6 @@ def scan(repo: Path = REPO) -> Counter[str]:
 
 # ── Shell sites (nexus-d84zv) ─────────────────────────────────────────────────
 
-#: ``name() {`` / ``function name {`` at the start of a logical line: the shell function the code below belongs to.
-_SH_FUNC = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][\w:.-]*)\s*\(\)\s*\{?|^\s*function\s+([A-Za-z_][\w:.-]*)\s*\{?")
 #: ``pg_ctl`` as a command (bare or a quoted path to it) with a ``start`` argument: not ``pg_ctl.out``, not ``stop``.
 _SH_PG_CTL_START = re.compile(r"""(?:^|[\s"'/=(;&|`])pg_ctl["']?\s(?:[^;&|#]*\s)?start(?:["']|\s|;|&|\||$)""")
 #: ``initdb`` in command position: line start, after ``; & | (``, ``then``/``do``/``else``/``exec``/``sudo``; a probe such
@@ -208,36 +225,22 @@ def _logical_lines(text: str) -> list[str]:
     return out
 
 
-def sh_sites(text: str) -> list[tuple[str, str]]:
-    """``(outermost enclosing function or "<script>", kind)`` for each cluster start in the shell *text*: one entry
-    per kind per logical command line. Whole-line comments and trailing ``# ...`` comments are skipped. A function is
-    entered at ``name() {`` and left at a ``}`` line indented no deeper than its definition (or at once, for a
-    one-line ``name() { ...; }``); functions nested in functions keep the outermost name, as the Python scan does."""
-    found: list[tuple[str, str]] = []
-    stack: list[tuple[str, int]] = []  # (name, indent of its definition line)
+def sh_sites(text: str) -> list[str]:
+    """The kind of each cluster start in the shell *text*: one entry per kind per logical command line. Whole-line
+    and trailing ``# ...`` comments are skipped. The enclosing function is deliberately not part of the answer."""
+    found: list[str] = []
     for line in _logical_lines(text):
-        stripped = line.strip()
-        if stripped.startswith("#"):
+        if line.strip().startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip())
-        m = _SH_FUNC.match(line)
-        if m:
-            stack.append((m.group(1) or m.group(2), indent))
-        func = stack[0][0] if stack else "<script>"
         code = re.sub(r"\s#\s.*$", "", line)
         if _SH_PG_CTL_START.search(code):
-            found.append((func, "sh_pg_ctl_start"))
+            found.append("sh_pg_ctl_start")
         if _SH_INITDB.search(code):
-            found.append((func, "sh_initdb"))
+            found.append("sh_initdb")
         if _SH_NX_INIT.search(code):
-            found.append((func, "sh_nx_init"))
+            found.append(PROVISIONING_KIND)
         if _SH_DOCKER_RUN.search(code) and any(_SH_PG_IMAGE.match(tok.strip("\"'")) for tok in code.split()):
-            found.append((func, "sh_docker_run"))
-        if stack:
-            if m and stripped.endswith("}"):
-                stack.pop()  # a one-line `name() { ...; }`
-            elif not m and stripped.startswith("}") and indent <= stack[-1][1]:
-                stack.pop()
+            found.append("sh_docker_run")
     return found
 
 
@@ -903,19 +906,27 @@ def docker_pg_problems(repo: Path = REPO) -> list[str]:
 
 
 def render(sites: Counter[str]) -> str:
-    """The allowlist file's text for *sites*."""
-    uncounted = {k: n for k, n in sorted(sites.items()) if k not in COUNTED}
+    """The allowlist file's text for *sites*: start sites in ``[uncounted]``, ``nx init`` commands in ``[provisioning]``."""
+    listed = {k: n for k, n in sorted(sites.items()) if k not in COUNTED}
+    starts = {k: n for k, n in listed.items() if not k.endswith("::" + PROVISIONING_KIND)}
+    provisioning = {k: n for k, n in listed.items() if k.endswith("::" + PROVISIONING_KIND)}
     out = [
         "# Postgres cluster start sites the DDL/bytes counter does not read (nexus-sz651, epic nexus-aca0q).",
         "#",
-        "# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line",
-        "# prints the sum of [uncounted] as `N uncounted cluster start sites (static tree census)`;",
-        "# tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either",
-        "# direction. The scan covers tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb and docker_run of a",
-        "# postgres/pgvector image), tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the",
-        "# pom's code generator. Not scanned: shell outside tests/e2e, e2e clusters started by anything but a literal",
-        "# nx init (nx start, wrapper scripts), and a docker run whose argv or image is not a literal; so this is not every start",
-        "# site (the full list is the module docstring's Scope). Regenerate with",
+        "# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line prints the",
+        "# sum of [uncounted] as `N uncounted cluster start sites (static tree census)`, then the sum of [provisioning]",
+        "# as `+ M product-provisioning commands (sh_nx_init, counted apart)`: an `nx init` provisions the product's own",
+        "# cluster, so it is never added into N. Both are call sites, not clusters: one Python cluster usually counts",
+        "# twice (its <module>::initdb and its pg_instance::pg_ctl_start). Shell sites are keyed by file and kind, with the",
+        "# per-file count. tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either",
+        "# direction.",
+        "#",
+        "# Scanned: tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb, docker_run of a postgres/pgvector image),",
+        "# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the pom's code generator.",
+        "# NOT scanned, so this is not every start site: shell outside tests/e2e, among it files that do start clusters:",
+        *[f"#   - {entry}" for entry in UNSCANNED_SHELL],
+        "# also e2e clusters started by anything but a literal `nx init` (nx start, wrapper scripts), and a docker run",
+        "# whose argv or image is not a literal. Regenerate with",
         "#   uv run python -m tests._ddl_cluster_sites --write",
         "# and review the diff: a new line is a start site whose cluster the counter cannot see.",
         "",
@@ -924,7 +935,9 @@ def render(sites: Counter[str]) -> str:
         "",
         "[uncounted]",
     ]
-    out += [f'"{k}" = {n}' for k, n in uncounted.items()]
+    out += [f'"{k}" = {n}' for k, n in starts.items()]
+    out += ["", "[provisioning]"]
+    out += [f'"{k}" = {n}' for k, n in provisioning.items()]
     return "\n".join(out) + "\n"
 
 
@@ -932,7 +945,9 @@ def main(argv: list[str]) -> int:
     sites = scan()
     if "--write" in argv:
         ALLOWLIST.write_text(render(sites), encoding="utf-8")
-        print(f"wrote {ALLOWLIST} ({sum(n for k, n in sites.items() if k not in COUNTED)} uncounted sites)")
+        listed = {k: n for k, n in sites.items() if k not in COUNTED}
+        prov = sum(n for k, n in listed.items() if k.endswith("::" + PROVISIONING_KIND))
+        print(f"wrote {ALLOWLIST} ({sum(listed.values()) - prov} uncounted start sites + {prov} {PROVISIONING_KIND} commands)")
         return 0
     print(render(sites), end="")
     return 0

@@ -14,10 +14,14 @@ WHAT THIS LINT DOES NOT SCAN, so a green run is not read as "every cluster the s
 
 * ``scripts/**`` (the Windows smoke tools are standalone programs run on a Windows host, and cannot import the
   helper), for the data-dir half; the census half does scan ``scripts/*.py``;
-* shell scripts outside ``tests/e2e/`` (``scripts/*.sh``, ``tests/cc-validation``, ``tests/containers``), and a
-  cluster an e2e script starts through anything but a literal ``nx init`` (``nx start``, ``nx upgrade``, a wrapper
-  script, ``pg_provision``): the census reads ``pg_ctl ... start``, a command-position ``initdb``, ``docker run`` of a
-  postgres / pgvector image and a command-position ``nx init``;
+* shell scripts outside ``tests/e2e/``, among them files that DO start clusters: ``scripts/liquibase_bundle_smoke.sh``,
+  ``service/native-smoke.sh``, ``tests/containers/fanout.sh``, ``tests/cc-validation/*`` (see
+  ``_ddl_cluster_sites.UNSCANNED_SHELL``); and a cluster an e2e script starts through anything but a literal
+  ``nx init`` (``nx start``, ``nx upgrade``, a wrapper script): the census reads ``pg_ctl ... start``, a
+  command-position ``initdb``, ``docker run`` of a postgres / pgvector image and, as a SEPARATE figure (product
+  provisioning, not a cluster a test started), a command-position ``nx init``;
+* what the figure counts: call sites, so one Python cluster usually counts twice (its ``<module>::initdb`` and its
+  ``pg_instance::pg_ctl_start``);
 * a ``docker run`` whose argv is not a literal list in a ``.py`` file (a shell string, a variable argv) and an e2e
   ``docker run`` whose image is a variable (``$PG_IMAGE``); the tmpfs half covers literal lists under ``tests/`` only;
 * a cluster started by product code under ``src/`` that a test merely drives (the five ``provision()`` files
@@ -52,9 +56,39 @@ pytestmark = pytest.mark.lint
 PROVISION_DRIVEN = sites.PROVISION_DRIVEN  # one definition, shared with tests/test_integration_pg_cluster.py
 
 
-def _allowlist() -> tuple[list[str], dict[str, int]]:
+def _tables() -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """``(counted, [uncounted] start sites, [provisioning] commands)`` from the committed file."""
     data = tomllib.loads(sites.ALLOWLIST.read_text())
-    return list(data["counted"]["sites"]), {k: int(v) for k, v in data["uncounted"].items()}
+    return (
+        list(data["counted"]["sites"]),
+        {k: int(v) for k, v in data["uncounted"].items()},
+        {k: int(v) for k, v in data["provisioning"].items()},
+    )
+
+
+def _allowlist() -> tuple[list[str], dict[str, int]]:
+    """``(counted, every listed site)``: the two tables together, which is what the scan is compared with."""
+    counted, uncounted, provisioning = _tables()
+    return counted, {**uncounted, **provisioning}
+
+
+def test_the_product_provisioning_commands_are_a_separate_figure() -> None:
+    """``nx init`` provisions the PRODUCT's cluster; it is not a cluster a test started. It is listed in its own table
+    so the start-site figure never absorbs it, and the figure the report prints is the [uncounted] sum alone."""
+    _, uncounted, provisioning = _tables()
+    assert provisioning and all(k.endswith("::" + sites.PROVISIONING_KIND) for k in provisioning)
+    assert not any(k.endswith("::" + sites.PROVISIONING_KIND) for k in uncounted)
+    assert ddl.uncounted_cluster_count() == sum(uncounted.values())
+    assert ddl.provisioning_command_count() == sum(provisioning.values())
+
+
+def test_the_rendered_file_puts_each_kind_in_its_own_table() -> None:
+    text = sites.render(Counter({
+        "tests/a.py::f::initdb": 2, "tests/e2e/x.sh::sh_nx_init": 3, "tests/e2e/x.sh::sh_docker_run": 1,
+    }))
+    data = tomllib.loads(text)
+    assert data["uncounted"] == {"tests/a.py::f::initdb": 2, "tests/e2e/x.sh::sh_docker_run": 1}
+    assert data["provisioning"] == {"tests/e2e/x.sh::sh_nx_init": 3}
 
 
 def test_the_allowlist_equals_the_tree() -> None:
@@ -85,7 +119,7 @@ def test_the_scan_is_not_vacuous() -> None:
 
 
 def test_the_report_figure_is_the_uncounted_sum() -> None:
-    _, uncounted = _allowlist()
+    _, uncounted, _ = _tables()
     assert ddl.uncounted_cluster_count() == sum(uncounted.values()) > 0
 
 
@@ -619,39 +653,23 @@ def test_the_scan_finds_the_e2e_shell_sites(tmp_path: Path) -> None:
         "tests/e2e/lib/h.sh": "start() {\n  pg_ctl -D d -w start\n}\n",
         "tests/other/y.sh": "pg_ctl -D d start\n",
     })
+    # Keyed by file and kind only: a shell site is "a start exists in this file", so moving it between functions,
+    # renaming a function or reflowing the script changes no key. The count per file is kept.
     assert sites.scan(repo) == Counter({
-        "tests/e2e/x.sh::helper::sh_pg_ctl_start": 1,
-        "tests/e2e/x.sh::helper::sh_initdb": 1,
-        "tests/e2e/x.sh::helper::sh_docker_run": 1,
-        "tests/e2e/x.sh::other::sh_pg_ctl_start": 1,
-        "tests/e2e/x.sh::<script>::sh_pg_ctl_start": 1,
-        "tests/e2e/x.sh::<script>::sh_nx_init": 2,
-        "tests/e2e/lib/h.sh::start::sh_pg_ctl_start": 1,
+        "tests/e2e/x.sh::sh_pg_ctl_start": 3,
+        "tests/e2e/x.sh::sh_initdb": 1,
+        "tests/e2e/x.sh::sh_docker_run": 1,
+        "tests/e2e/x.sh::sh_nx_init": 2,
+        "tests/e2e/lib/h.sh::sh_pg_ctl_start": 1,
     })
 
 
-def test_shell_functions_nest_and_close_by_indentation(tmp_path: Path) -> None:
-    body = (
-        "if [ -n \"$X\" ]; then\n"
-        "    inner() {\n"
-        "        pg_ctl -D d start\n"
-        "    }\n"
-        "fi\n"
-        "outer() {\n"
-        "    nested() {\n"
-        "        docker run postgres:17\n"
-        "    }\n"
-        "    initdb -D d\n"
-        "}\n"
-        "pg_ctl -D d start\n"
-    )
-    repo = _fixture_repo(tmp_path, {"tests/e2e/x.sh": body})
-    assert sites.scan(repo) == Counter({
-        "tests/e2e/x.sh::inner::sh_pg_ctl_start": 1,
-        "tests/e2e/x.sh::outer::sh_docker_run": 1,
-        "tests/e2e/x.sh::outer::sh_initdb": 1,
-        "tests/e2e/x.sh::<script>::sh_pg_ctl_start": 1,
-    })
+def test_a_shell_site_is_keyed_by_file_whatever_function_holds_it(tmp_path: Path) -> None:
+    flat = "pg_ctl -D d start\ndocker run postgres:17\n"
+    wrapped = "outer() {\n    nested() {\n        pg_ctl -D d start\n    }\n    docker run postgres:17\n}\n"
+    a = sites.scan(_fixture_repo(tmp_path / "a", {"tests/e2e/x.sh": flat}))
+    b = sites.scan(_fixture_repo(tmp_path / "b", {"tests/e2e/x.sh": wrapped}))
+    assert a == b == Counter({"tests/e2e/x.sh::sh_pg_ctl_start": 1, "tests/e2e/x.sh::sh_docker_run": 1})
 
 
 @pytest.mark.parametrize(
@@ -694,11 +712,11 @@ def test_the_new_scans_are_not_vacuous() -> None:
     for module in ("test_http_combined_query_integration", "test_write_seam_gate_integration"):
         assert found[f"tests/db/{module}.py::pg_instance::docker_run"] == 1, module
     shell = {k for k in found if "::sh_" in k}
-    assert "tests/e2e/gc-ab/run-ab.sh::measure_variant::sh_docker_run" in shell, shell
+    assert "tests/e2e/gc-ab/run-ab.sh::sh_docker_run" in shell, shell
     assert all(k.startswith("tests/e2e/") for k in shell)
     # The gates that start their cluster by running the product (`nx init`) are sites too.
     for gate in ("local-service-gate", "fresh-install-mvv"):
-        assert any(k.startswith(f"tests/e2e/{gate}.sh::") and k.endswith("::sh_nx_init") for k in shell), gate
+        assert f"tests/e2e/{gate}.sh::sh_nx_init" in shell, gate
     # Every e2e script is read, not a subset: the same walk the scan uses.
     assert len(list((sites.REPO / "tests" / "e2e").rglob("*.sh"))) >= 20
 

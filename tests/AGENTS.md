@@ -445,7 +445,7 @@ client singleton and lease cache) are cleared on every lease.
 The primary gated signal is the **DDL count per test** (exact, the same on every host, and the lever that
 explains the writes); the WAL bytes are a churn proxy for disk thrashing, not a disk meter. Every run with the engine substrate prints
 `ddl: migration=<n> tests=<n> per_test=<x> wal: migration=<size> tests=<size> per_test=<size>
-[io_wbytes=<size>] | <n> uncounted cluster start sites (static tree census)` in the terminal summary and writes `nx-ddl-report.json`
+[io_wbytes=<size>] | <n> uncounted cluster start sites (static tree census) + <m> product-provisioning commands (sh_nx_init, counted apart)` in the terminal summary and writes `nx-ddl-report.json`
 (under `NX_DDL_REPORT_DIR`, else the controller's basetemp; a worker's own file is under
 `<basetemp>/popen-gwN`). WAL bytes are `pg_current_wal_insert_lsn()` differences between the probe's
 `start`, `ready` and `end` marks (insert, not the write pointer `pg_current_wal_lsn()`, which lags
@@ -584,12 +584,17 @@ were cut off.
 
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
 `pg_ctl_start` / `initdb` / `docker_run` (postgres image) sites a static scan of the Python in `tests/`
-and `scripts/` finds, the `pg_ctl start` / `initdb` / `docker run` / `nx init` commands in `tests/e2e/**/*.sh`
-(`sh_*` kinds), and the jOOQ code generator. Not scanned: shell outside `tests/e2e`, e2e clusters started by
-anything but a literal `nx init`, and a `docker run` whose argv or image is not a literal; so the list is not
-every start site (`tests/_ddl_cluster_sites.py` lists the limits).
+and `scripts/` finds, the `pg_ctl start` / `initdb` / `docker run` commands in `tests/e2e/**/*.sh` (`sh_*` kinds,
+keyed by file and kind with a per-file count), and the jOOQ code generator. The `nx init` commands in those scripts
+are product provisioning, not a cluster a test started: they sit in their own `[provisioning]` table and print as a
+separate `+ <m> product-provisioning commands` figure, never folded into the start-site number. Not scanned, so the
+list is not every start site: shell outside `tests/e2e`, among it files that do start clusters
+(`scripts/liquibase_bundle_smoke.sh`, `service/native-smoke.sh`, `tests/containers/fanout.sh`, `tests/cc-validation/*`),
+e2e clusters started by anything but a literal `nx init`, and a `docker run` whose argv or image is not a literal
+(`tests/_ddl_cluster_sites.py` lists the limits).
 The terminal line prints the total as `<n> uncounted cluster start sites (static tree census)`: a
-census of call sites, the same on every run whichever tests ran, unweighted by size.
+census of call sites, not clusters (one Python cluster usually counts twice: its `<module>::initdb` and its
+`pg_instance::pg_ctl_start`), the same on every run whichever tests ran, unweighted by size.
 `tests/test_ddl_uncounted_clusters_lint.py` keeps the list equal to the scan, so a new start site
 must be read through the counter or listed on purpose.
 

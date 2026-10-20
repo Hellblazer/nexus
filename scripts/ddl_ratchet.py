@@ -161,6 +161,8 @@ def _python_extra(data: dict) -> str:
         extra += f" recovered_workers={data['recovered_workers']}"
     if data.get("uncounted_cluster_start_sites") is not None:
         extra += f" uncounted_cluster_start_sites={data['uncounted_cluster_start_sites']} (static tree census)"
+    if data.get("product_provisioning_commands") is not None:
+        extra += f" product_provisioning_commands={data['product_provisioning_commands']} (sh_nx_init, counted apart)"
     io = data.get("cgroup_io")
     if io is not None:
         if io.get("wbytes_delta") is None:
