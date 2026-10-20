@@ -204,6 +204,7 @@ jobs:
       # pins this step. A missing or ambiguous value fails the step, and
       # assert_rehearsal_ran.py below still fails the job if the rehearsal skipped.
       - name: Fetch the one old engine tag the upgrade rehearsal reads
+        shell: bash
         run: |
           tag=$(sed -n 's/.*String OLD_TAG = "\(engine-service-v[0-9.]*\)";.*/\1/p' service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java)
           if [ -z "$tag" ] || [ "$(printf '%s\n' "$tag" | wc -l)" -ne 1 ]; then
@@ -298,6 +299,7 @@ jobs:
       - name: Point the jOOQ cache at the pool host cache
         id: jooqcache
         if: runner.environment == 'self-hosted'
+        shell: bash
         run: |
           root="${NX_LAB_CACHE_ROOT:-}"
           if [ -z "$root" ] || [ ! -d "$root" ] || [ ! -w "$root" ]; then
@@ -431,9 +433,10 @@ jobs:
       # both restored (or the publish was refused, which the pom warns about in the log).
       - name: jOOQ host cache hit or miss (diagnostic, never fails)
         if: always() && steps.jooqcache.outputs.dir != ''
+        shell: bash
         run: |
           find "${{ steps.jooqcache.outputs.dir }}" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-after" || true
-          new=$(comm -13 "$RUNNER_TEMP/jooq-cache-before" "$RUNNER_TEMP/jooq-cache-after" | sed -E 's/-.*//' | sort -u | tr '\n' ' ')
+          new=$(comm -13 "$RUNNER_TEMP/jooq-cache-before" "$RUNNER_TEMP/jooq-cache-after" | sed -E 's/-.*//' | sort -u | tr '\n' ' ') || new="(unreadable)"
           echo "jOOQ host cache: missed and published: ${new:-none}"
 
       # nexus-rjk2a: per-class timing, so the next duration question has data.
