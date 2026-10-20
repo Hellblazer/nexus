@@ -434,7 +434,8 @@ chunk rows and leave `last_written_at` alone (metadata updates, chash
 re-homing, quarantine retags and one catalog path; `nexus_rdr/230-research-17`),
 and on production non-HOT updates outnumber deletes 4.5 to 1 on the busiest
 leaf and 25 to 1 on the next (A4). How many of those are maintenance rather
-than client re-writes is not measured (Open Question 5).
+than client re-writes is not measured; Sam kept the rule as drafted for Phase
+1 and revisits it with the canary's first readings (Open Question 5).
 
 *The bulk-delete rule is detected, not signalled.* The delete sources (the
 reaper's quarantine move and expiry, `drop-orphan-collections`, purge-trash, a
@@ -914,7 +915,8 @@ outside a REINDEX's write amplification.
 
 ## Open Questions for Sam
 
-All four answered by Sam on 2026-10-20 ("go with your recommendations").
+Questions 1 to 4 answered by Sam on 2026-10-20 ("go with your
+recommendations"); question 5 answered the same day.
 
 1. **Thresholds.** The draft carries your provisional values (1.4, 25%, 10%,
    leaf 1.5, mean recall 0.99, any top-1 miss) and adds four limits of its own:
@@ -946,7 +948,8 @@ All four answered by Sam on 2026-10-20 ("go with your recommendations").
    leaf's non-HOT update count since the build to the anchor and the rule,
    attributed to the collection by its share of the leaf's rows; it fires
    sooner and may over-fire on a leaf with several collections. Recommendation:
-   (a) for Phase 1, and revisit with the canary's first readings. *Open.*
+   (a) for Phase 1, and revisit with the canary's first readings. *Decided
+   (Sam, 2026-10-20):* (a).
 
 ## Finalization Gate
 
@@ -1043,3 +1046,5 @@ bulk delete, both on an existing session under an existing lock.
   read-only production query and log read (`nexus_rdr/230-research-15`, `-16`);
   maintenance non-HOT updates recorded as a miss of the deletes rule that may
   be most of the churn, Open Question 5 added (`nexus_rdr/230-research-17`).
+- 2026-10-20: Open Question 5 answered: the deletes rule stays as drafted for
+  Phase 1.
