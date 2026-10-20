@@ -70,6 +70,7 @@ JOINT_DIR = RDR_DIR / "joint"
 #: tokens in docs/ did not resolve). Add a row only with a reason a reader
 #: can check; fix the citation instead when it was meant to be a commit.
 SHA_ALLOWLIST: dict[str, str] = {
+    "54b9a319f": "wire-contract-pending.md RDR-222 Phase 1 client-half entry: a worktree commit not yet published (nexus-yye8l.12); the push re-points the entry at the published sha and deletes this row, since test_sha_allowlist_carries_no_dead_rows fails on a row that resolves",
     "71437ca05": "rdr-225: gate round 1 commit before the 2026-10-06 rebase onto develop; the gate critique in T2 is keyed to it, so the citation keeps the gated sha",
     "7fafc96c2": "rdr-225: gate round 2 commit before the 2026-10-06 rebase onto develop; the gate critique and fix check in T2 are keyed to it, so the citation keeps the gated sha",
     "a1b2c3d4e5f6": "docs/catalog.md: chash placeholder in a usage example",
