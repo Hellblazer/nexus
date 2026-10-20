@@ -940,6 +940,9 @@ jobs:
           # compare it (advisory) and hand it to the fan-in in pytest-gate.
           export NX_DDL_REPORT_DIR="$RUNNER_TEMP/ddl-report"
           rm -rf "$NX_DDL_REPORT_DIR"
+          # nexus-abcqb: the storage-touch guard writes this shard's nx-storage-touch-report.json
+          # beside it, so the one per-shard artifact carries both reports to pytest-gate.
+          export NX_STORAGE_TOUCH_REPORT_DIR="$NX_DDL_REPORT_DIR"
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
             mkdir -p "$TMPDIR"
@@ -997,7 +1000,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ddl-report-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/ddl-report/nx-ddl-report.json
+          path: |
+            ${{ runner.temp }}/ddl-report/nx-ddl-report.json
+            ${{ runner.temp }}/ddl-report/nx-storage-touch-report.json
           retention-days: 7
           if-no-files-found: error
           # A re-run of all jobs keeps the first attempt's artifacts under the same names.
@@ -1791,6 +1796,9 @@ jobs:
           sparse-checkout: |
             scripts/ddl_ratchet.py
             tests/ddl_ceiling.toml
+            tests/__init__.py
+            tests/_storage_touch_fan_in.py
+            tests/storage_touch_ceiling.toml
           sparse-checkout-cone-mode: false
 
       - name: Fetch every shard's DDL report
@@ -1803,6 +1811,17 @@ jobs:
       - name: DDL/bytes ratchet over the whole run (fan-in)
         if: needs.changes.outputs.code == 'true'
         run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
+
+      # nexus-abcqb: the tenant-saving ratchet. Sums `provisioned` over every shard's
+      # nx-storage-touch-report.json (uploaded with the DDL report) and checks the run's total against
+      # tests/storage_touch_ceiling.toml. Stdlib only, from the repo root (python3 >= 3.11 for tomllib).
+      # ADVISORY until `[python_unit] measured_on` is set in that file: the ceiling was measured on chas,
+      # not on CI, so the step reports and cannot fail pytest-gate (continue-on-error), the DDL fan-in's
+      # own path to arming. tests/scripts/test_storage_touch_fan_in_wiring.py keeps the two consistent.
+      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)
+        if: needs.changes.outputs.code == 'true'
+        continue-on-error: true
+        run: python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

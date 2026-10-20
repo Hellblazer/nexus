@@ -18,24 +18,30 @@
 # another host. Ceilings are reduce-only: the fan-in prints when one can be lowered, lower it in
 # the commit that lowers the count; raising one needs a reviewed reason in that commit's message.
 #
-# "measure" means no full-run measurement exists yet. The fan-in then fails and prints the number
-# to commit (a ceiling nobody set must not pass a run). The follow-up commit after the next full
-# chas run (every report from ONE run, NX_STORAGE_TOUCH_SWEEP=1 with NX_STORAGE_TOUCH_GUARD_MODE=report:
-# a fail-mode full run exits non-zero on the known late child touches) replaces each "measure" with that
-# total. No CI leg runs the fan-in yet. A run that pytest-split is splitting (a CI shard, whatever
-# its size) or that collects at least SWEEP_AUTO_FLOOR tests (tests/_storage_touch_guard.py) turns the
-# whole-run checks on by itself, as advice only, and its report says sweep=true, so the fan-in
-# accepts it as a whole-run one; the docs-readers leg (1561) is neither split nor above the floor and still needs
-# the sweep switch exported on that leg (a CI change, left to nexus-0ite2's follow-up).
-# Earlier per-shard measurements, chas lab-m, 55c082c63, for orientation only (2 of 6 shards):
-#   shard1 409 of 5692, shard4 868 of 5615, docs-readers 581 of 1561.
+# "measure" means no full-run measurement exists: the fan-in then fails and prints the number to
+# commit (a ceiling nobody set must not pass a run).
+#
+# Measured 2026-10-20 on chas (nexus-abcqb), each from ONE run with NX_STORAGE_TOUCH_SWEEP=1 and
+# NX_STORAGE_TOUCH_GUARD_MODE=report:
+#   python_unit  4916 of 30679, `uv run pytest -n 8` at 9383142eb (lab-l); the fail-mode full run at
+#                c3ed01320 counted the same 4916 of 30718;
+#   docs_readers 581 of 1561, the docs-readers leg's own selection, serial, at d9d1a2891 (lab-m),
+#                the same 581 as the 55c082c63 measurement.
+#
+# pytest-gate runs the python_unit fan-in over the six shards' reports (they ride the DDL report
+# artifact). It is ADVISORY until `measured_on` is set under [python_unit]: these numbers are chas
+# numbers, so CI fan-ins must confirm them first, as the DDL ratchet's were
+# (tests/scripts/test_storage_touch_fan_in_wiring.py holds the step's continue-on-error to that key).
+# A CI shard turns the whole-run checks on by itself (pytest-split is splitting it), so its report says
+# sweep=true and the fan-in accepts it. The docs-readers leg is neither split nor above SWEEP_AUTO_FLOOR,
+# so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = "measure"
+provisioned_tests = 4916
 tolerance_tests = 0
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
 # substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
 [docs_readers]
-provisioned_tests = "measure"
+provisioned_tests = 581
 tolerance_tests = 0
