@@ -583,8 +583,11 @@ switch stays so that any later change to the counter can be A/B'd at the same sh
 were cut off.
 
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
-`pg_ctl_start` / `initdb` sites a static scan of `tests/` and `scripts/` finds (plus the jOOQ code
-generator); docker-run and e2e shell clusters are not scanned, so the list is not every start site.
+`pg_ctl_start` / `initdb` / `docker_run` (postgres image) sites a static scan of the Python in `tests/`
+and `scripts/` finds, the `pg_ctl start` / `initdb` / `docker run` / `nx init` commands in `tests/e2e/**/*.sh`
+(`sh_*` kinds), and the jOOQ code generator. Not scanned: shell outside `tests/e2e`, e2e clusters started by
+anything but a literal `nx init`, and a `docker run` whose argv or image is not a literal; so the list is not
+every start site (`tests/_ddl_cluster_sites.py` lists the limits).
 The terminal line prints the total as `<n> uncounted cluster start sites (static tree census)`: a
 census of call sites, the same on every run whichever tests ran, unweighted by size.
 `tests/test_ddl_uncounted_clusters_lint.py` keeps the list equal to the scan, so a new start site

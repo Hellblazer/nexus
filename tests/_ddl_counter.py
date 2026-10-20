@@ -21,7 +21,8 @@ into the migration the substrate boots with and what the tests themselves cause:
   only means something when the run owns its cgroup.
 
   NOT MEASURED here: the job workspace and checkout, ``target/``, ``.venv``, jar builds,
-  journald, anything before pytest starts, and the docker-run and e2e shell clusters. The labrun
+  journald, anything before pytest starts, and the docker-run and e2e shell clusters (those are only listed in
+  the static census, never measured). The labrun
   NVMe sampler is the source of truth for bytes written to disk.
 * DDL statements, the secondary diagnostic that explains where the bytes come from, split by
   kind.
@@ -66,8 +67,9 @@ basetemp). A worker the OS killed before its ``sessionfinish`` leaves no file an
 the controller sees it only as an xdist node going down without a report, counts it as
 ``workers_lost`` and ``ddl_ratchet.py`` refuses the report. Clusters other than the substrate's (``throwaway_pg_cluster``, a
 test's own engine) are not counted; ``tests/ddl_uncounted_clusters.toml`` lists the start sites a
-static scan of ``tests/`` and ``scripts/`` finds (docker-run and e2e shell clusters are not scanned),
-and the terminal line prints how many there are. That figure is a census of call sites, printed on
+static scan finds (``pg_ctl_start``, ``initdb`` and ``docker run`` of a postgres image in ``tests/`` and ``scripts/``
+Python; ``pg_ctl start``, ``initdb``, ``docker run`` of a postgres image and ``nx init`` in ``tests/e2e`` shell; the
+module docstring of ``tests/_ddl_cluster_sites.py`` lists what is not scanned), and the terminal line prints how many there are. That figure is a census of call sites, printed on
 every run whether or not the tests that reach them ran, and unweighted by size.
 """
 from __future__ import annotations

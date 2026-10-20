@@ -14,8 +14,12 @@ WHAT THIS LINT DOES NOT SCAN, so a green run is not read as "every cluster the s
 
 * ``scripts/**`` (the Windows smoke tools are standalone programs run on a Windows host, and cannot import the
   helper), for the data-dir half; the census half does scan ``scripts/*.py``;
-* ``tests/e2e/*.sh`` and every other shell script that starts a cluster (their data lives under ``$SCRATCH``);
-* a ``docker run`` whose argv is not a literal list in a ``.py`` file under ``tests/``;
+* shell scripts outside ``tests/e2e/`` (``scripts/*.sh``, ``tests/cc-validation``, ``tests/containers``), and a
+  cluster an e2e script starts through anything but a literal ``nx init`` (``nx start``, ``nx upgrade``, a wrapper
+  script, ``pg_provision``): the census reads ``pg_ctl ... start``, a command-position ``initdb``, ``docker run`` of a
+  postgres / pgvector image and a command-position ``nx init``;
+* a ``docker run`` whose argv is not a literal list in a ``.py`` file (a shell string, a variable argv) and an e2e
+  ``docker run`` whose image is a variable (``$PG_IMAGE``); the tmpfs half covers literal lists under ``tests/`` only;
 * a cluster started by product code under ``src/`` that a test merely drives (the five ``provision()`` files
   are listed, but a new caller reached through a helper in another module is only seen if that helper's own
   file has a ``provision``, ``_init_cluster``, ``pg_ctl_start`` or initdb argv call);
@@ -57,9 +61,7 @@ def test_the_allowlist_equals_the_tree() -> None:
     found = sites.scan()
     counted, uncounted = _allowlist()
     assert counted == list(sites.COUNTED)
-    expected = {k: n for k, n in found.items() if k not in sites.COUNTED}
-    new = {k: n for k, n in expected.items() if uncounted.get(k) != n}
-    gone = {k: n for k, n in uncounted.items() if k not in expected}
+    new, gone = sites.allowlist_drift(found, uncounted)
     assert not new and not gone, (
         "cluster start sites changed. A NEW site is a cluster the counter cannot see: read it through "
         "tests/_ddl_counter.py or list it on purpose (uv run python -m tests._ddl_cluster_sites --write, "
@@ -564,6 +566,141 @@ def test_a_docker_run_postgres_without_tmpfs_is_flagged(tmp_path: Path) -> None:
     assert sites.docker_pg_problems(good) == []
     other = _fixture_repo(tmp_path / "other", {"tests/test_d.py": "subprocess.run(['docker', 'run', 'alpine'])\n"})
     assert sites.docker_pg_runs(other) == []
+
+
+# ── Docker-run and e2e shell sites (nexus-d84zv) ──────────────────────────────
+
+_DOCKER_PY = (
+    "def fx():\n"
+    "    subprocess.run(['docker', 'run', '-d', '--name', 'n', 'pgvector/pgvector:pg17'])\n"
+    "def wrapped():\n"
+    "    subprocess.run(['lab-run', '--', 'docker', 'run', 'postgres:17'])\n"
+    "def unrelated():\n"
+    "    subprocess.run(['docker', 'run', 'alpine'])\n"
+    "    subprocess.run(['docker', 'exec', 'n', 'pg_isready'])\n"
+)
+
+_E2E_SH = """#!/bin/bash
+# pg_ctl -D x start      <- a comment is no site
+helper() {
+  "$bin/pg_ctl" -D "$d" -l log start
+  pg_ctl -D "$d" stop -m fast
+  echo "see $cfg/postgres/pg_ctl.out"
+  "$bin/initdb" -D "$d"
+  command -v initdb >/dev/null
+  [ -x "$bin/initdb" ] && echo have
+  docker run -d --name n \\
+    -e POSTGRES_DB=n \\
+    pgvector/pgvector:pg17 >/dev/null
+  docker run --rm alpine
+  docker run --rm -v "$cfg/postgres:/x" -e NX_DB_URL=jdbc:postgresql://h/n nexus-image
+}
+other() { pg_ctl -D d start; }
+pg_ctl -D "$top" start
+NEXUS_CONFIG_DIR="$S" uv run nx init --service --no-autostart </dev/null
+if _nx init -y; then echo ok; fi
+echo "run nx init first"
+die "Provision with 'nx init --service' or set X"
+"""
+
+
+def test_the_scan_finds_docker_run_postgres_sites_in_python(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {"tests/test_d.py": _DOCKER_PY, "scripts/s.py": "def go():\n    run(['docker','run','postgres'])\n"})
+    assert sites.scan(repo) == Counter({
+        "tests/test_d.py::fx::docker_run": 1,
+        "tests/test_d.py::wrapped::docker_run": 1,
+        "scripts/s.py::go::docker_run": 1,
+    })
+
+
+def test_the_scan_finds_the_e2e_shell_sites(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {
+        "tests/e2e/x.sh": _E2E_SH,
+        "tests/e2e/lib/h.sh": "start() {\n  pg_ctl -D d -w start\n}\n",
+        "tests/other/y.sh": "pg_ctl -D d start\n",
+    })
+    assert sites.scan(repo) == Counter({
+        "tests/e2e/x.sh::helper::sh_pg_ctl_start": 1,
+        "tests/e2e/x.sh::helper::sh_initdb": 1,
+        "tests/e2e/x.sh::helper::sh_docker_run": 1,
+        "tests/e2e/x.sh::other::sh_pg_ctl_start": 1,
+        "tests/e2e/x.sh::<script>::sh_pg_ctl_start": 1,
+        "tests/e2e/x.sh::<script>::sh_nx_init": 2,
+        "tests/e2e/lib/h.sh::start::sh_pg_ctl_start": 1,
+    })
+
+
+def test_shell_functions_nest_and_close_by_indentation(tmp_path: Path) -> None:
+    body = (
+        "if [ -n \"$X\" ]; then\n"
+        "    inner() {\n"
+        "        pg_ctl -D d start\n"
+        "    }\n"
+        "fi\n"
+        "outer() {\n"
+        "    nested() {\n"
+        "        docker run postgres:17\n"
+        "    }\n"
+        "    initdb -D d\n"
+        "}\n"
+        "pg_ctl -D d start\n"
+    )
+    repo = _fixture_repo(tmp_path, {"tests/e2e/x.sh": body})
+    assert sites.scan(repo) == Counter({
+        "tests/e2e/x.sh::inner::sh_pg_ctl_start": 1,
+        "tests/e2e/x.sh::outer::sh_docker_run": 1,
+        "tests/e2e/x.sh::outer::sh_initdb": 1,
+        "tests/e2e/x.sh::<script>::sh_pg_ctl_start": 1,
+    })
+
+
+@pytest.mark.parametrize(
+    ("files", "kind"),
+    [
+        ({"tests/test_d.py": _DOCKER_PY}, "docker_run"),
+        ({"tests/e2e/x.sh": "pg_ctl -D d start\n"}, "sh_pg_ctl_start"),
+        ({"tests/e2e/x.sh": "\"$b/initdb\" -D d\n"}, "sh_initdb"),
+        ({"tests/e2e/x.sh": "docker run -d pgvector/pgvector:pg17\n"}, "sh_docker_run"),
+        ({"tests/e2e/x.sh": "nx init --service --yes\n"}, "sh_nx_init"),
+    ],
+)
+def test_a_new_site_of_each_new_kind_fails_the_allowlist_until_it_is_listed(
+    tmp_path: Path, files: dict[str, str], kind: str,
+) -> None:
+    repo = _fixture_repo(tmp_path, files)
+    found = sites.scan(repo)
+    assert found and all(k.endswith("::" + kind) for k in found), dict(found)
+    new, gone = sites.allowlist_drift(found, {})
+    assert new == dict(found) and not gone
+    listed = dict(found)
+    assert sites.allowlist_drift(found, listed) == ({}, {})
+    new, gone = sites.allowlist_drift(Counter(), listed)  # the site went away, the entry did not
+    assert not new and gone == listed
+
+
+def test_a_docker_or_shell_site_is_not_a_data_dir_use_to_trace(tmp_path: Path) -> None:
+    """The provenance half follows Python initdb / pg_ctl_start data dirs; a docker-run site has its own tmpfs
+    rule (docker_pg_problems) and a shell site has no Python data dir, so neither may demand a traced use."""
+    repo = _fixture_repo(tmp_path, {
+        "tests/test_d.py": _DOCKER_PY.replace("'pgvector/pgvector:pg17'", "'--tmpfs', '/var/lib/postgresql/data', 'pgvector/pgvector:pg17'"),
+        "tests/e2e/x.sh": "pg_ctl -D d start\n",
+    })
+    assert sites.provenance_problems(repo) == []
+
+
+def test_the_new_scans_are_not_vacuous() -> None:
+    """The committed tree: both docker-run modules, and the e2e shell cluster starts the literal spellings reach."""
+    found = sites.scan()
+    for module in ("test_http_combined_query_integration", "test_write_seam_gate_integration"):
+        assert found[f"tests/db/{module}.py::pg_instance::docker_run"] == 1, module
+    shell = {k for k in found if "::sh_" in k}
+    assert "tests/e2e/gc-ab/run-ab.sh::measure_variant::sh_docker_run" in shell, shell
+    assert all(k.startswith("tests/e2e/") for k in shell)
+    # The gates that start their cluster by running the product (`nx init`) are sites too.
+    for gate in ("local-service-gate", "fresh-install-mvv"):
+        assert any(k.startswith(f"tests/e2e/{gate}.sh::") and k.endswith("::sh_nx_init") for k in shell), gate
+    # Every e2e script is read, not a subset: the same walk the scan uses.
+    assert len(list((sites.REPO / "tests" / "e2e").rglob("*.sh"))) >= 20
 
 
 # ── The converted fixtures' teardown ──────────────────────────────────────────
