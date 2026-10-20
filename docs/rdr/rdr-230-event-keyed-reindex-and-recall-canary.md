@@ -317,10 +317,14 @@ measurement.
   after RDR-225, and leaf `REINDEX` time. **Status**: Verified in part by a
   read-only conexus query on 2026-10-20 (`nexus_rdr/230-research-15`): dead
   fractions 0 to 10.4%, every index valid, bytes per row 0.95 to 1.12 of the
-  8 KB page, no leaf reloptions yet (production runs 0.1.160; nexus-s9wav ships
-  in 0.1.161). `VACUUM` duration is not measurable from conexus tooling (the
-  server log is not reachable) and leaf `REINDEX` time stays with the PITR fork
-  in Phase 2 (Minimum Viable Validation). The measurement also showed that
+  8 KB page, no leaf reloptions at the time (production then ran 0.1.160;
+  0.1.161, which sets them through nexus-s9wav, went live at 19:46Z the same
+  day). The server log is not reachable from conexus tooling, so `VACUUM`
+  duration was measured on a PITR fork of production instead, with
+  autovacuum's throttle (`nexus_rdr/230-research-19`): 145.0 s for the
+  busiest leaf (228,457 rows, five HNSW indexes totalling 3,140 MB) and 61.4 s
+  for the next (101,262 rows, one 791 MB index). Leaf `REINDEX` time stays
+  with the PITR fork in Phase 2 (Minimum Viable Validation). The measurement also showed that
   non-HOT updates, not deletes, are most of the churn (Technical Design 3).
 - [x] **A5.** `REINDEX INDEX CONCURRENTLY` on a leaf's HNSW index keeps it
   attached to the partitioned parent index, and a comment on an index survives
@@ -509,7 +513,8 @@ instead of removing it (measured, `nexus_rdr/230-research-13`)
 condition). A `VACUUM` of a leaf holds `ShareUpdateExclusiveLock`
 for its run, which makes autovacuum skip that leaf meanwhile; it scans every
 index on the leaf, including the leaf graph, which is the slow part (conexus-h2ol:
-367.6 s on the HNSW indexes of the pre-RDR-225 table).
+367.6 s on the HNSW indexes of the pre-RDR-225 table; 145.0 s for the busiest
+leaf after RDR-225, `nexus_rdr/230-research-19`).
 
 **5. The recall canary (Phase 1).** For one `pci_` index, a run is the RDR-227
 Gap 1 method on up to ten recent query vectors from the ring (item 6):
@@ -978,8 +983,8 @@ not conflict: A3 measured pure ingest at 1.000 of the build.
 
 A3 and A5 are verified by a local spike (2026-10-20); P1.5 and the tests in
 P1.1 and P2.3 pin them in the engine. A4 is verified in part by a read-only
-production query (2026-10-20); its `VACUUM` duration and leaf `REINDEX` time
-remain for the Phase 2 fork. A1, A2 and A6 are unverified and are verified by
+production query and a fork measurement of `VACUUM` duration (2026-10-20); leaf
+`REINDEX` time remains for the Phase 2 fork. A1, A2 and A6 are unverified and are verified by
 Phase 1's cloud run. A1 is answered in part by a recall run on a production
 fork (k 10, all `pci_` indexes 1.0000; one read as aged).
 
@@ -1065,3 +1070,6 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-10-20: A1 answered in part by conexus's recall run on a production
   fork (`nexus_rdr/230-research-18`); it stays unverified at the k 40 to 120
   bar until Phase 1's canary.
+- 2026-10-20: A4's `VACUUM` duration measured on a production fork
+  (`nexus_rdr/230-research-19`); its note on leaf reloptions brought up to date
+  for 0.1.161 going live.
