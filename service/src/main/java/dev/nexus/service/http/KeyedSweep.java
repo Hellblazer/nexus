@@ -32,8 +32,15 @@ import java.util.regex.Pattern;
  * {@code idempotency_key_malformed} and {@code idempotency_key_unsupported} (nothing ran, no ledger row);
  * 422 {@code idempotency_key_reused}; 409 {@code request_in_flight} with {@code Retry-After}; a replay is the
  * stored status and body with {@code Idempotency-Replayed: true}; 503 {@code sweep_gate_busy} with
- * {@code Retry-After} on the quarantine forms. Every response for a request the ledger recorded echoes
- * {@code Idempotency-Key}; the echo is telemetry, the client never gates on it.
+ * {@code Retry-After} on the quarantine forms; 503 {@code request_claim_contended} with {@code Retry-After} when the
+ * ledger's bounded claim rounds could not settle the key (nothing was written, resend with the same key). Every
+ * response for a request the ledger recorded echoes {@code Idempotency-Key}; the echo is telemetry, the client
+ * never gates on it.
+ *
+ * <p>The failure marker is best effort and never holds up the error response: skipped when the failure is pool
+ * exhaustion, otherwise waited for at most {@link #FAIL_MARKER_WAIT_MS}. A row it did not mark reads
+ * {@code in_flight} until its lease lapses, then {@code rolled_back}, and {@code rolled_back} is final (see
+ * {@link RequestLedger}).
  */
 final class KeyedSweep {
 
@@ -47,6 +54,19 @@ final class KeyedSweep {
 
     /** {@code Retry-After} on {@code sweep_gate_busy}: the gate wait is 2 s and a manifest writer holds it. */
     static final int SWEEP_GATE_BUSY_RETRY_AFTER_SECONDS = 5;
+
+    /**
+     * The longest the failure marker may hold up the error response (nexus-yye8l.18). The marker is an
+     * optimisation, not a correctness step: the RDR's backstop for a missed marker is the lease expiry, so the
+     * row simply reads {@code in_flight} until the lease lapses and then {@code rolled_back}. A healthy marker
+     * takes milliseconds; one that has to wait for an admission permit or a connection (up to two pool waits,
+     * ~60 s, behind an exhausted pool) is abandoned after this, and the error response goes out without it.
+     */
+    static final long FAIL_MARKER_WAIT_MS = 2_000L;
+
+    /** Wire code and {@code Retry-After} of the 503 for a claim that could not settle (nexus-yye8l.20). */
+    static final String CLAIM_CONTENDED_ERROR = "request_claim_contended";
+    static final int CLAIM_CONTENDED_RETRY_AFTER_SECONDS = 1;
 
     /** Canonical 8-4-4-4-12 hex only; {@link UUID#fromString} alone accepts short forms like 1-1-1-1-1. */
     private static final Pattern CANONICAL_UUID = Pattern.compile(
@@ -88,7 +108,7 @@ final class KeyedSweep {
             case RequestLedger.KeyReused ignored -> sendKeyReused(ex);
             case RequestLedger.Replay replay -> sendReplay(ex, replay);
             case RequestLedger.InFlight inFlight -> {
-                ex.getResponseHeaders().set("Retry-After", Long.toString(retryAfterSeconds(inFlight.leaseUntil())));
+                ex.getResponseHeaders().set("Retry-After", Long.toString(retryAfterSeconds(inFlight.observedAt(), inFlight.leaseUntil())));
                 var body = new LinkedHashMap<String, Object>();
                 body.put("error", "request_in_flight");
                 body.put("request_id", inFlight.requestId().toString());
@@ -157,10 +177,21 @@ final class KeyedSweep {
             // The status the marker records is the one the handler's exception ladder sends, read at the
             // moment HttpUtil.send puts it on the wire (HttpUtil.armBeforeSend, per exchange), so there is no second
             // hand-kept copy of the ladder to drift from it. The marker still runs before the response is
-            // written, so a client that retries at once finds the row failed, not in flight.
+            // written (within the budget below), so a client that retries at once finds the row failed, not in
+            // flight.
+            //
+            // nexus-yye8l.18: the marker is skipped when the failure IS pool exhaustion or an admission
+            // timeout. It would queue on the same exhausted pool, behind the connection waits that just failed,
+            // to record what the lease expiry records anyway, and the 503 is what the client is waiting for. Any
+            // other failure arms it, but the response waits at most FAIL_MARKER_WAIT_MS for it.
             boolean busy = gateBusy && isSweepGateBusy(e);
-            HttpUtil.armBeforeSend(ex,
-                status -> ledger.failMarker(tenant, requestId, claimed.nonce(), status));
+            if (HttpUtil.isPoolExhausted(e)) {
+                log.warn("event=request_ledger_fail_marker_skipped tenant={} request_id={} reason=pool_exhausted",
+                    tenant, requestId);
+            } else {
+                HttpUtil.armBeforeSend(ex,
+                    status -> failMarkerWithinBudget(tenant, requestId, claimed.nonce(), status));
+            }
             if (!busy) {
                 throw e;
             }
@@ -170,6 +201,31 @@ final class KeyedSweep {
             return;
         }
         HttpUtil.send(ex, 200, live[0]);
+    }
+
+    /**
+     * Run {@link RequestLedger#failMarker} on a thread of its own and wait at most {@link #FAIL_MARKER_WAIT_MS}
+     * for it. After the budget the response goes out and the marker keeps trying in the background: if it
+     * lands later it only moves a row this attempt still holds from {@code in_flight} to {@code failed}, which
+     * its own SQL guard allows at any time; if it never does, the lease expiry covers the row.
+     */
+    private void failMarkerWithinBudget(String tenant, UUID requestId, UUID nonce, int status) {
+        var done = new java.util.concurrent.CountDownLatch(1);
+        Thread.ofVirtual().name("ledger-fail-marker").start(() -> {
+            try {
+                ledger.failMarker(tenant, requestId, nonce, status);
+            } finally {
+                done.countDown();
+            }
+        });
+        try {
+            if (!done.await(FAIL_MARKER_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                log.warn("event=request_ledger_fail_marker_deferred tenant={} request_id={} waited_ms={}",
+                    tenant, requestId, FAIL_MARKER_WAIT_MS);
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
@@ -271,9 +327,12 @@ final class KeyedSweep {
         return false;
     }
 
-    /** Whole seconds until the lease ends, never below 1. */
-    private static long retryAfterSeconds(OffsetDateTime leaseUntil) {
-        long millis = Duration.between(OffsetDateTime.now(), leaseUntil).toMillis();
+    /**
+     * Whole seconds until the lease ends, never below 1. Both instants are the database's: {@code observedAt} is
+     * its clock at the read, so a skewed JVM clock cannot stretch or cut the wait (nexus-yye8l.20).
+     */
+    private static long retryAfterSeconds(OffsetDateTime observedAt, OffsetDateTime leaseUntil) {
+        long millis = Duration.between(observedAt, leaseUntil).toMillis();
         return Math.max(1L, (millis + 999L) / 1000L);
     }
 

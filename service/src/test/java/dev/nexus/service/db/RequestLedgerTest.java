@@ -552,4 +552,246 @@ class RequestLedgerTest {
         assertThat(peekLeavingTableUnchanged("some-other-tenant", key, ROUTE, sha(36))).isNull();
         assertThat(RequestLedgerActivity.snapshot().replays()).isZero();
     }
+
+    // ── nexus-yye8l.19: rolled_back is stable in the marker-to-COMMIT window ──
+
+    private void shortenLease(UUID key, long millisFromNow) {
+        scope.withTenant(TENANT, ctx -> ctx.update(REQUEST_LEDGER)
+            .set(REQUEST_LEDGER.LEASE_UNTIL, OffsetDateTime.now().plus(Duration.ofMillis(millisFromNow)))
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+            .execute());
+    }
+
+    private static void sleepPast(OffsetDateTime instant) throws InterruptedException {
+        while (OffsetDateTime.now().isBefore(instant.plus(Duration.ofMillis(300)))) {
+            Thread.sleep(50);
+        }
+    }
+
+    private OffsetDateTime leaseOf(UUID key) {
+        return scope.withTenant(TENANT, ctx -> ctx.select(REQUEST_LEDGER.LEASE_UNTIL).from(REQUEST_LEDGER)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+            .fetchOne(REQUEST_LEDGER.LEASE_UNTIL));
+    }
+
+    @Test
+    void statusDuringAMarkerTransactionHeldPastTheLease_saysInFlight_thenCommitted() throws Exception {
+        UUID key = UUID.randomUUID();
+        RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(40), BOUND_MS);
+        shortenLease(key, 1_500);
+        OffsetDateTime lease = leaseOf(key);
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            // The marker UPDATE runs while the lease is live and its row lock stays held, uncommitted.
+            ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200,
+                "{\"moved\": 1}");
+            sleepPast(lease);
+
+            assertThat(ledger.status(TENANT, key).kind())
+                .as("the marker is about to commit: an expired lease must not read rolled_back")
+                .isEqualTo(RequestLedger.StatusKind.IN_FLIGHT);
+
+            tx.commit();
+        }
+        assertThat(ledger.status(TENANT, key).kind()).isEqualTo(RequestLedger.StatusKind.COMMITTED);
+    }
+
+    @Test
+    void statusAfterAMarkerTransactionHeldPastTheLeaseRollsBack_readsRolledBack() throws Exception {
+        UUID key = UUID.randomUUID();
+        RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(41), BOUND_MS);
+        shortenLease(key, 1_500);
+        OffsetDateTime lease = leaseOf(key);
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200, "{}");
+            sleepPast(lease);
+            assertThat(ledger.status(TENANT, key).kind()).isEqualTo(RequestLedger.StatusKind.IN_FLIGHT);
+
+            tx.rollback();
+        }
+        assertThat(ledger.status(TENANT, key).kind())
+            .as("the marker never committed and its lease is gone: now rolled_back is final")
+            .isEqualTo(RequestLedger.StatusKind.ROLLED_BACK);
+    }
+
+    @Test
+    void claimDuringAMarkerTransactionHeldPastTheLease_waitsForTheCommit_thenReplays_neverTakesOver()
+            throws Exception {
+        UUID key = UUID.randomUUID();
+        RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(42), BOUND_MS);
+        shortenLease(key, 1_500);
+        OffsetDateTime lease = leaseOf(key);
+        var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200, "{}");
+            sleepPast(lease);
+
+            // The claim's INSERT ... ON CONFLICT waits on the marker transaction's uncommitted update of the
+            // row, so a resend cannot take the row over underneath a marker that is about to commit.
+            var resend = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(42), BOUND_MS));
+            Thread.sleep(700);
+            assertThat(resend.isDone()).as("the resend waits for the marker transaction").isFalse();
+
+            tx.commit();
+            assertThat(resend.get(10, java.util.concurrent.TimeUnit.SECONDS))
+                .as("after the commit the key replays; a takeover would run the sweep twice")
+                .isInstanceOf(RequestLedger.Replay.class);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void aRowLockedAfterTheInsertConflictAndBeforeTheRead_isInFlight_notTakenOver() throws Exception {
+        // The race the probe in read() closes for claim(): the INSERT's conflict saw no lock, then a marker
+        // transaction (which matched while the lease was live) takes the row before the claim's read.
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(48), BOUND_MS);
+        forceLeaseExpired(key);
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.setClaimPhaseHookForTests((phase, round) -> {
+                if (phase == RequestLedger.ClaimPhase.AFTER_INSERT_CONFLICT && round == 0) {
+                    DSL.using(tx, org.jooq.SQLDialect.POSTGRES).select(REQUEST_LEDGER.REQUEST_ID)
+                        .from(REQUEST_LEDGER)
+                        .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+                        .forUpdate().fetch();
+                }
+            });
+            try {
+                RequestLedger.Claim claim = ledger.claim(TENANT, key, ROUTE, sha(48), BOUND_MS);
+
+                assertThat(claim).isInstanceOf(RequestLedger.InFlight.class);
+                assertThat(((RequestLedger.InFlight) claim).leaseUntil())
+                    .as("the lease is behind the reading: held, not live")
+                    .isBefore(((RequestLedger.InFlight) claim).observedAt());
+            } finally {
+                ledger.setClaimPhaseHookForTests(null);
+                tx.rollback();
+            }
+        }
+    }
+
+    // ── nexus-yye8l.20: claim() branches that need an interleaving ───────────
+
+    private void setHolder(UUID key, UUID holder) {
+        scope.withTenant(TENANT, ctx -> ctx.update(REQUEST_LEDGER).set(REQUEST_LEDGER.HOLDER, holder)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key))).execute());
+    }
+
+    private UUID holderOf(UUID key) {
+        return scope.withTenant(TENANT, ctx -> ctx.select(REQUEST_LEDGER.HOLDER).from(REQUEST_LEDGER)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+            .fetchOne(REQUEST_LEDGER.HOLDER));
+    }
+
+    @Test
+    void aTakeoverLostToAnotherAttemptBetweenTheReadAndTheUpdate_isReclassifiedAsInFlight() {
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(43), BOUND_MS);
+        forceLeaseExpired(key);
+        UUID rival = UUID.randomUUID();
+        ledger.setClaimPhaseHookForTests((phase, round) -> {
+            if (phase == RequestLedger.ClaimPhase.BEFORE_TAKEOVER && round == 0) {
+                // The rival takes the row between this attempt's read and its takeover UPDATE.
+                setHolder(key, rival);
+                shortenLease(key, 60_000);
+            }
+        });
+        try {
+            RequestLedger.Claim claim = ledger.claim(TENANT, key, ROUTE, sha(43), BOUND_MS);
+
+            assertThat(claim).as("taken == 0 re-runs the round, which now sees the rival's live lease")
+                .isInstanceOf(RequestLedger.InFlight.class);
+            assertThat(holderOf(key)).as("the loser did not overwrite the rival").isEqualTo(rival);
+        } finally {
+            ledger.setClaimPhaseHookForTests(null);
+        }
+    }
+
+    @Test
+    void aRowDeletedBetweenTheInsertConflictAndTheRead_isClaimedOnTheNextRound() {
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(44), BOUND_MS);
+        ledger.setClaimPhaseHookForTests((phase, round) -> {
+            if (phase == RequestLedger.ClaimPhase.AFTER_INSERT_CONFLICT && round == 0) {
+                // The retention arm purges the row between the conflict and the read.
+                scope.withTenant(TENANT, ctx -> ctx.deleteFrom(REQUEST_LEDGER)
+                    .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key))).execute());
+            }
+        });
+        try {
+            RequestLedger.Claim claim = ledger.claim(TENANT, key, ROUTE, sha(44), BOUND_MS);
+
+            assertThat(claim).isInstanceOf(RequestLedger.Claimed.class);
+            assertThat(((RequestLedger.Claimed) claim).takeover()).as("a fresh insert, not a takeover").isFalse();
+            assertThat(holderOf(key)).isEqualTo(((RequestLedger.Claimed) claim).nonce());
+        } finally {
+            ledger.setClaimPhaseHookForTests(null);
+        }
+    }
+
+    @Test
+    void aClaimThatNeverSettles_throwsClaimContended_notAnIllegalState() {
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(45), BOUND_MS);
+        forceLeaseExpired(key);
+        ledger.setClaimPhaseHookForTests((phase, round) -> {
+            if (phase == RequestLedger.ClaimPhase.BEFORE_TAKEOVER) {
+                setHolder(key, UUID.randomUUID()); // the lease stays expired, so every round tries and loses
+            }
+        });
+        try {
+            assertThatThrownBy(() -> ledger.claim(TENANT, key, ROUTE, sha(45), BOUND_MS))
+                .isInstanceOf(RequestLedger.ClaimContendedException.class)
+                .isNotInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(key.toString());
+        } finally {
+            ledger.setClaimPhaseHookForTests(null);
+        }
+    }
+
+    @Test
+    void aTakeover_refreshesStartedAtAlongsideTheFreshLease() {
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(46), BOUND_MS);
+        forceLeaseExpired(key);
+        OffsetDateTime longAgo = OffsetDateTime.now().minusHours(1);
+        scope.withTenant(TENANT, ctx -> ctx.update(REQUEST_LEDGER).set(REQUEST_LEDGER.STARTED_AT, longAgo)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key))).execute());
+
+        RequestLedger.Claim takeover = ledger.claim(TENANT, key, ROUTE, sha(46), BOUND_MS);
+
+        assertThat(takeover).isInstanceOf(RequestLedger.Claimed.class);
+        RequestLedger.Status status = ledger.status(TENANT, key);
+        assertThat(status.startedAt()).as("started_at belongs to the attempt that holds the lease")
+            .isAfter(OffsetDateTime.now().minusMinutes(1));
+        assertThat(status.leaseUntil()).isAfter(status.startedAt());
+    }
+
+    @Test
+    void theLeaseMarginReadsTheSameDefaultTimeoutAsTheAdmissionWait() {
+        // A DataSource that is not a Hikari pool: both the admission wait and the lease margin fall back to
+        // the one default TenantScope owns, so the margin cannot drift from the wait it covers.
+        javax.sql.DataSource plain = new org.postgresql.ds.PGSimpleDataSource();
+        RequestLedger l = new RequestLedger(new TenantScope(plain), plain);
+
+        assertThat(TenantScope.connectionTimeoutMs(plain)).isEqualTo(TenantScope.DEFAULT_TIMEOUT_MS);
+        assertThat(l.leaseMs(0)).isEqualTo(2 * TenantScope.DEFAULT_TIMEOUT_MS + RequestLedger.LEASE_SLACK_MS);
+        assertThat(TenantScope.connectionTimeoutMs(ds)).isEqualTo(ds.getConnectionTimeout());
+    }
+
+    @Test
+    void anInFlightAnswerCarriesTheDatabaseClockReading_soRetryAfterNeedsNoJvmClock() {
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(47), BOUND_MS);
+
+        RequestLedger.InFlight inFlight = (RequestLedger.InFlight) ledger.claim(TENANT, key, ROUTE, sha(47), BOUND_MS);
+
+        long remainingMs = Duration.between(inFlight.observedAt(), inFlight.leaseUntil()).toMillis();
+        assertThat(remainingMs).as("lease left at the database's own reading")
+            .isBetween(ledger.leaseMs(BOUND_MS) - 5_000, ledger.leaseMs(BOUND_MS));
+    }
 }

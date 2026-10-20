@@ -385,6 +385,16 @@ public final class VectorHandler implements HttpHandler {
                 "nothing_moved", !e.somethingMoved(),
                 "audit_ids", e.auditIds(),
                 "moved_chashes", e.movedChashes())));
+        } catch (dev.nexus.service.db.RequestLedger.ClaimContendedException e) {
+            // nexus-yye8l.20: the request ledger could not settle the key in its bounded claim rounds, because
+            // other attempts kept taking or purging the row between this one's read and write. Nothing was
+            // written for this attempt, so a resend with the same key is safe: 503, inside the client's gateway
+            // retry codes, not the 422 ("do not resend") the IllegalStateException arm gave it before.
+            log.warn("event=request_ledger_claim_contended op={} error={}", op, e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Integer.toString(KeyedSweep.CLAIM_CONTENDED_RETRY_AFTER_SECONDS));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                "error", KeyedSweep.CLAIM_CONTENDED_ERROR,
+                "retry_after_seconds", KeyedSweep.CLAIM_CONTENDED_RETRY_AFTER_SECONDS)));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.

@@ -948,10 +948,93 @@ class KeyedSweepRouteTest {
 
         assertThat(r.statusCode()).as("%s: %s", failure, r.body()).isEqualTo(failure.status);
         assertThat(header(r, "Idempotency-Key")).as("the echo on a failure after the claim").isEqualTo(key);
-        assertThat(ledgerStatus(key)).as("%s: the failed row records the status the client was sent", failure)
-            .isEqualTo(failure.status);
-        assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        if (failure == Failure.POOL_EXHAUSTED) {
+            // nexus-yye8l.18: a failure that IS pool exhaustion skips the marker (it would queue on the same
+            // exhausted pool); the row stays in_flight until the lease lapses, which covers it.
+            assertThat(ledgerStatus(key)).as("no failure marker on pool exhaustion").isNull();
+            assertThat(status(key).get("state").asText()).isEqualTo("in_flight");
+        } else {
+            assertThat(ledgerStatus(key)).as("%s: the failed row records the status the client was sent", failure)
+                .isEqualTo(failure.status);
+            assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        }
         assertThat(count(f.source())).as("the sweep rolled back").isEqualTo(3);
+    }
+
+    // ── a response that cannot be written after the commit never un-commits it ──
+
+    @ParameterizedTest
+    @EnumSource(Form.class)
+    void aResponseWriteFailureAfterTheCommit_leavesTheRequestCommitted_andAResendReplaysIt(Form form) throws Exception {
+        // RDR-222 minimum viable validation: "a committed request is followed by an exception". The edge has cut
+        // the connection, so writing the 200 fails after the sweep committed; the handler's ladder then answers
+        // 500 on the (dead) exchange. None of that may touch the row.
+        Fx f = fixture(form, 3);
+        String key = newKey();
+        var armed = new AtomicBoolean(true);
+        dev.nexus.service.http.HttpUtil.setSendObserverForTests(ex -> {
+            if (ex.getRequestURI().getPath().equals(form.path) && armed.compareAndSet(true, false)) {
+                throw new java.io.UncheckedIOException(new java.io.IOException("Broken pipe"));
+            }
+        });
+
+        HttpResponse<String> first = sweep(f, 2, key);
+
+        assertThat(armed).as("the write failure was injected on the success send").isFalse();
+        assertThat(first.statusCode()).as("the client saw a failure: %s", first.body()).isEqualTo(500);
+        assertThat(movedRows(f)).as("the sweep committed before the write failed").isEqualTo(2);
+        JsonNode st = status(key);
+        assertThat(st.get("state").asText()).as("a committed request never reads rolled_back").isEqualTo("committed");
+        assertThat(st.get("response_status").asInt()).isEqualTo(200);
+        assertThat(ledgerStatus(key)).isEqualTo(200);
+
+        dev.nexus.service.http.HttpUtil.setSendObserverForTests(null);
+        HttpResponse<String> resend = sweep(f, 2, key);
+        assertThat(resend.statusCode()).as(resend.body()).isEqualTo(200);
+        assertThat(header(resend, "Idempotency-Replayed")).isEqualTo("true");
+        assertThat(MAPPER.readTree(resend.body())).isEqualTo(st.get("response"));
+        assertThat(movedRows(f)).as("the replay moved nothing more").isEqualTo(2);
+    }
+
+    // ── a claim that cannot settle answers 503, not 422 ───────────────────────
+
+    @ParameterizedTest
+    @EnumSource(Form.class)
+    void aClaimThatNeverSettles_answers503ClaimContendedWithRetryAfter_notThe422DoNotResend(Form form)
+            throws Exception {
+        Fx f = fixture(form, 2);
+        String key = newKey();
+        // A failed row for the key (the first attempt's opaque failure), so the resend reaches the takeover.
+        repo.setAfterSweepSqlHookForTests(() -> { throw new RuntimeException("injected opaque failure"); });
+        assertThat(sweep(f, 2, key).statusCode()).isEqualTo(500);
+        repo.setAfterSweepSqlHookForTests(null);
+        assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        // Another attempt wins the row between this claim's read and its takeover UPDATE, every round: the seam
+        // changes the holder (the lease stays expired) just before the takeover, so each round ends with taken == 0.
+        var ledger = service.requestLedgerForTests();
+        ledger.setClaimPhaseHookForTests((phase, round) -> {
+            if (phase == dev.nexus.service.db.RequestLedger.ClaimPhase.BEFORE_TAKEOVER) {
+                try {
+                    su(ctx -> ctx.update(REQUEST_LEDGER).set(REQUEST_LEDGER.HOLDER, UUID.randomUUID())
+                        .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT)
+                            .and(REQUEST_LEDGER.REQUEST_ID.eq(UUID.fromString(key)))).execute());
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+        try {
+            HttpResponse<String> r = sweep(f, 2, key);
+
+            assertThat(r.statusCode()).as("the claim could not settle; resending is safe: %s", r.body()).isEqualTo(503);
+            assertThat(MAPPER.readTree(r.body()).get("error").asText()).isEqualTo("request_claim_contended");
+            assertThat(header(r, "Retry-After")).isEqualTo("1");
+            assertThat(count(f.source())).as("nothing ran").isEqualTo(2);
+        } finally {
+            ledger.setClaimPhaseHookForTests(null);
+        }
+        HttpResponse<String> resend = sweep(f, 2, key);
+        assertThat(resend.statusCode()).as("with the contention gone the same key runs: %s", resend.body()).isEqualTo(200);
     }
 
     // ── a collection the sweep cannot resolve fails before the claim ─────────

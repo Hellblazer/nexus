@@ -985,6 +985,11 @@ public final class NexusService {
         return requestLedger.retainAll(reaperTenants(), now.minusDays(requestLedgerRetentionDays));
     }
 
+    /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */
+    dev.nexus.service.db.RequestLedger requestLedgerForTests() {
+        return requestLedger;
+    }
+
     /** The Runnable the scheduler runs for ledger retention. Package-private for the wiring test. */
     Runnable requestLedgerRetentionTask() {
         return requestLedgerRetentionTask;
