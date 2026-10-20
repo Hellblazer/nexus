@@ -375,10 +375,14 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
                 + " function call. Plan was:%n%s", plan)
             .contains("catalog_document_chunks");
         assertThat(plan)
-            .as("the base table scan must be the HNSW index, not an unqualified sequential scan of nexus.chunks"
-                + " or another index; this also proves nexus_test.cosine_order inlined, which the recall tests"
-                + " here rely on. Plan was:%n%s", plan)
-            .containsPattern("Index Scan using \"?\\S*embedding_384");
+            .as("the base table scan must be an index scan, not an unqualified sequential scan of nexus.chunks."
+                + " At this fixture's 510 rows the planner rightly takes the primary key and a top-N sort, not HNSW;"
+                + " Msz9iScale pins the HNSW path at scale. Plan was:%n%s", plan)
+            .contains("Index Scan");
+        assertThat(plan)
+            .as("nexus_test.cosine_order must be inlined: the plan orders by the operator and never names the"
+                + " function. Plan was:%n%s", plan)
+            .contains("<=>").doesNotContain("cosine_order");
     }
 
     // ── recall@10: plain_search_384 now carries live(c) (RDR-192 Step 5, nexus-wbfpw.10) ──
