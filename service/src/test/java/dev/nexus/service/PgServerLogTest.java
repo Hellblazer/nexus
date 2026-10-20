@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import dev.nexus.service.FailFastPostgreSQLContainer.ContainerExit;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -268,6 +270,9 @@ class PgServerLogTest {
 
         volatile Exec exec = command -> execResult(0, "", "");
         volatile String dockerLog = "docker log";
+        /** Scripted answer to the daemon's inspect (nexus-ccg9y); a throwing one models a daemon that cannot be asked. */
+        volatile java.util.concurrent.Callable<ContainerExit> inspect =
+            () -> new ContainerExit("running", 0L, false);
         final java.util.List<List<String>> execs = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         StubContainer() {
@@ -281,6 +286,17 @@ class PgServerLogTest {
             try {
                 return exec.run(command);
             } catch (java.io.IOException | InterruptedException | RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        @Override
+        ContainerExit inspectExit() {
+            try {
+                return inspect.call();
+            } catch (RuntimeException e) {
                 throw e;
             } catch (Exception e) {
                 throw new IllegalStateException(e);
@@ -336,6 +352,170 @@ class PgServerLogTest {
         }
     }
 
+    /**
+     * nexus-ccg9y (2): with no per-thread override, the PUBLIC read path hands its reader the 60 s per-try wait and the
+     * 3 tries. The reader is injected so nothing waits 60 s; the same call with the override set shows the capture
+     * does see the other path, so a reader that recorded a constant would not pass both.
+     */
+    @Test
+    void serverLog_with_no_override_hands_the_reader_the_production_timeout_and_attempts() {
+        StubContainer c = new StubContainer();
+        c.exec = command -> execResult(0, "the log", "");
+        var seen = new java.util.ArrayList<Object[]>();
+        PgContainerHelper.LogReader recording = (read, timeout, attempts, owner) -> {
+            seen.add(new Object[] {timeout, attempts, owner});
+            try {
+                return read.call();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        assertThat(PgContainerHelper.SERVER_LOG_READ_TIMEOUT_OVERRIDE.get()).as("no override on this thread").isNull();
+
+        assertThat(PgContainerHelper.serverLog(c, recording)).isEqualTo("the log");
+
+        assertThat(seen).hasSize(1);
+        assertThat(seen.get(0)[0]).as("the per-try wait").isEqualTo(java.time.Duration.ofSeconds(60));
+        assertThat(seen.get(0)[1]).as("the tries").isEqualTo(3);
+        assertThat(seen.get(0)[2]).as("the container's owner").isEqualTo("StubbedTest");
+        assertThat(c.execs).hasSize(1);
+        assertThat(c.execs.get(0)).startsWith("cat");
+
+        PgContainerHelper.SERVER_LOG_READ_TIMEOUT_OVERRIDE.set(java.time.Duration.ofMillis(200));
+        try {
+            PgContainerHelper.serverLog(c, recording);
+        } finally {
+            PgContainerHelper.SERVER_LOG_READ_TIMEOUT_OVERRIDE.remove();
+        }
+        assertThat(seen).hasSize(2);
+        assertThat(seen.get(1)[0]).as("control: the override is what the reader sees when it is set")
+            .isEqualTo(java.time.Duration.ofMillis(200));
+    }
+
+    private static <C extends FailFastPostgreSQLContainer> List<ch.qos.logback.classic.spi.ILoggingEvent> failureEvents(
+            java.util.function.Consumer<C> body, C c) {
+        ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(FailFastPostgreSQLContainer.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+            new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            body.accept(c);
+            return List.copyOf(appender.list);
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    /**
+     * nexus-ccg9y (1): when the postmaster dies the container exits and its tmpfs log goes with it. The failure line then
+     * carries the container's state and exit code, which is the only diagnosis left, and the unreadable-log branch
+     * prints its own marker.
+     */
+    @Test
+    void a_start_wait_failure_with_an_unreadable_log_still_names_the_container_state_and_exit_code() {
+        StubContainer c = new StubContainer();
+        c.exec = command -> {
+            throw new IllegalStateException("container is not running");
+        };
+        c.inspect = () -> new ContainerExit("exited", 137L, true);
+
+        var events = failureEvents(x -> x.reportStartWaitFailure(new IllegalStateException("wait timed out")), c);
+
+        assertThat(c.startFailureLogTail()).startsWith("(server log unreadable:").contains("container is not running");
+        assertThat(events).singleElement().satisfies(e -> {
+            assertThat(e.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
+            assertThat(e.getFormattedMessage())
+                .contains("event=start_wait_failed", "owner=StubbedTest", "wait timed out",
+                    "container_state=exited exit_code=137 oom_killed=true", "(server log unreadable:");
+        });
+    }
+
+    @Test
+    void a_daemon_that_cannot_be_inspected_never_masks_the_original_wait_failure() {
+        StubContainer c = new StubContainer();
+        c.exec = command -> execResult(0, "tail of the log", "");
+        c.inspect = () -> {
+            throw new IllegalStateException("docker is gone");
+        };
+
+        var events = failureEvents(x -> x.reportStartWaitFailure(new IllegalStateException("wait timed out")), c);
+
+        assertThat(events).singleElement().satisfies(e -> assertThat(e.getFormattedMessage())
+            .contains("wait timed out", "container_state=unreadable", "docker is gone", "tail of the log"));
+        c.inspect = () -> null;
+        assertThat(c.containerStateForLog()).isEqualTo("container_state=unknown (inspect returned no state)");
+    }
+
+    /**
+     * nexus-ccg9y (F1): the inspect is one unbounded docker-java call on the failure path. A daemon that never answers
+     * costs the report the inspect's timeout, not the whole run: the line still goes out, says the state timed out, and
+     * carries the log tail and the original wait failure.
+     */
+    @Test
+    void an_inspect_that_never_returns_is_abandoned_and_the_failure_line_still_goes_out() throws Exception {
+        StubContainer c = new StubContainer();
+        c.exec = command -> execResult(0, "tail of the log", "");
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        c.inspect = () -> {
+            release.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            return new ContainerExit("running", 0L, false);
+        };
+        FailFastPostgreSQLContainer.INSPECT_TIMEOUT_OVERRIDE.set(java.time.Duration.ofMillis(300));
+        try {
+            long t0 = System.nanoTime();
+            var events = failureEvents(x -> x.reportStartWaitFailure(new IllegalStateException("wait timed out")), c);
+            long millis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+
+            assertThat(millis).as("the report waited for the inspect's timeout and no longer").isBetween(250L, 10_000L);
+            assertThat(events).singleElement().satisfies(e -> assertThat(e.getFormattedMessage())
+                .contains("wait timed out", "container_state=unreadable", "timed out after", "tail of the log"));
+        } finally {
+            FailFastPostgreSQLContainer.INSPECT_TIMEOUT_OVERRIDE.remove();
+            release.countDown();
+        }
+        assertThat(FailFastPostgreSQLContainer.INSPECT_TIMEOUT).as("the production wait is bounded too")
+            .isEqualTo(java.time.Duration.ofSeconds(15));
+    }
+
+    /**
+     * nexus-ccg9y (B2), against a real daemon: a container whose process was killed is {@code exited} with code 137 to
+     * a FRESH inspect, while the response cached when the container was created (what {@code getContainerInfo()}
+     * returns) still says it is running, which is why {@code inspectExit} asks the daemon again. The failure line then
+     * carries the real state although the log file went with the container's tmpfs.
+     */
+    @Test
+    void a_killed_container_is_exited_137_to_a_fresh_inspect_and_the_failure_line_says_so() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false has no collector");
+        FailFastPostgreSQLContainer c = (FailFastPostgreSQLContainer) PgContainerHelper.newContainer();
+        try {
+            c.start();
+            String id = c.getContainerId();
+            assertThat(c.inspectExit().status()).as("before the kill").isEqualTo("running");
+
+            c.getDockerClient().killContainerCmd(id).exec();
+            long end = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+            while (c.getDockerClient().inspectContainerCmd(id).exec().getState().getRunning() == Boolean.TRUE
+                && System.nanoTime() < end) {
+                Thread.sleep(100);
+            }
+
+            ContainerExit exit = c.inspectExit();
+            assertThat(exit.status()).isEqualTo("exited");
+            assertThat(exit.exitCode()).as("SIGKILL").isEqualTo(137L);
+            assertThat(c.getContainerInfo().getState().getStatus())
+                .as("control: the cached info is the creation-time response, so reading it would miss the exit")
+                .isNotEqualTo("exited");
+
+            var events = failureEvents(x -> x.reportStartWaitFailure(new IllegalStateException("wait timed out")), c);
+            assertThat(events).singleElement().satisfies(e -> assertThat(e.getFormattedMessage())
+                .contains("event=start_wait_failed", "container_state=exited exit_code=137"));
+        } finally {
+            c.stop();
+        }
+    }
+
     @Test
     void a_counter_off_container_reads_dockers_log_not_the_file() {
         StubContainer off = new StubContainer();
@@ -383,7 +563,9 @@ class PgServerLogTest {
             .contains(REAL_SERVER_LISTENING);
         assertThat(events).anySatisfy(e -> {
             assertThat(e.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
-            assertThat(e.getFormattedMessage()).contains("start_wait_failed", REAL_SERVER_LISTENING);
+            assertThat(e.getFormattedMessage()).contains("start_wait_failed", REAL_SERVER_LISTENING)
+                .as("the failed wait names the container's state (nexus-ccg9y); here the server is up")
+                .contains("container_state=running exit_code=0");
         });
     }
 }

@@ -84,7 +84,8 @@ class PgContainerTmpfsGateTest {
     private static final List<Path> GET_LOGS_ALLOWED = List.of(
         FACTORY, PKG.resolve("PgServerLogTest.java"));
 
-    private static final Pattern GET_LOGS = Pattern.compile("\\.\\s*getLogs\\s*\\(");
+    // A call, or a method reference (`c::getLogs`, `PostgreSQLContainer::getLogs`) that a stream or a retry hands on (nexus-ccg9y).
+    private static final Pattern GET_LOGS = Pattern.compile("\\.\\s*getLogs\\s*\\(|::\\s*getLogs\\b");
 
     /**
      * nexus-t4y7b: with the DDL counter on, Docker's log of a test Postgres container holds only the
@@ -120,10 +121,17 @@ class PgContainerTmpfsGateTest {
                 + "getLogs() is Docker's log, empty of statements with the counter on (nexus-sz651, nexus-t4y7b)")
             .isEmpty();
         // The pattern sees the spellings it exists for and not prose.
-        for (String hit : List.of("c.getLogs()", "pg.getLogs ( )", "container\n    .getLogs()")) {
-            assertThat(GET_LOGS.matcher(hit).find()).as(hit).isTrue();
+        for (String hit : List.of("c.getLogs()", "pg.getLogs ( )", "container\n    .getLogs()",
+                "containers.stream().map(PostgreSQLContainer::getLogs)", "retry(c::getLogs)", "Supplier<String> s = c :: getLogs;",
+                "map(FailFastPostgreSQLContainer::getLogs)")) {
+            assertThat(GET_LOGS.matcher(stripComments(hit)).find()).as(hit).isTrue();
         }
         assertThat(GET_LOGS.matcher(stripComments("// pg.getLogs() in a comment\nvar x = serverLog(c);")).find()).isFalse();
+        assertThat(GET_LOGS.matcher(stripComments("// map(Container::getLogs) in a comment\nvar x = serverLog(c);")).find()).isFalse();
+        // Near misses are not reads of the Docker log.
+        for (String miss : List.of("c.getLogsDir()", "x::getLogsDir", "serverLog(c)", "String getLogs = \"a\";")) {
+            assertThat(GET_LOGS.matcher(stripComments(miss)).find()).as(miss).isFalse();
+        }
     }
 
     @Test

@@ -575,8 +575,18 @@ final class DdlCounts {
      */
     static final Duration EXIT_BUDGET = Duration.ofSeconds(15);
 
-    private static void onJvmExit() {
-        onJvmExit(EXIT_BUDGET, DdlCounts::record);
+    /** What the exit hook runs its budget and recorder through; a test swaps in one that records them (nexus-ccg9y). */
+    @FunctionalInterface
+    interface ExitRunner {
+        void run(Duration budget, Consumer<FailFastPostgreSQLContainer> recorder);
+    }
+
+    /** The runner {@link #onJvmExit()} uses: production runs the budgeted record; only a test replaces it. */
+    static volatile ExitRunner exitRunner = DdlCounts::onJvmExit;
+
+    /** The shutdown hook's body: {@link #EXIT_BUDGET} and {@link #record}, handed to {@link #exitRunner}. */
+    static void onJvmExit() {
+        exitRunner.run(EXIT_BUDGET, DdlCounts::record);
     }
 
     /**

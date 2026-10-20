@@ -134,4 +134,42 @@ class DdlExitBudgetTest {
             return null;
         });
     }
+
+    /**
+     * nexus-ccg9y (4): the no-arg hook the JVM runs at exit hands {@link DdlCounts#EXIT_BUDGET} and
+     * {@link DdlCounts#record} to {@link DdlCounts#exitRunner}. The real no-arg hook is called with a runner that
+     * checks the budget it is given and then runs the production one; the recorder is identified by what it does to a
+     * registered container (claims it, folds its log read and flushes: an unstarted container's read fails, which
+     * {@code record} counts as one log error), which a recorder that only claimed it, or did nothing, would not do.
+     * A hook body that bypassed the runner, or gave it another budget or recorder, fails here.
+     */
+    @Test
+    void the_no_arg_exit_hook_runs_the_production_budget_and_the_real_recorder() throws Exception {
+        assumeTrue(DdlCounts.enabled(), "needs the DDL counter: -Dnexus.ddl.count=false registers nothing");
+        withCountDir(() -> {
+            FailFastPostgreSQLContainer c = (FailFastPostgreSQLContainer) PgContainerHelper.newContainer();
+            DdlCounts.register(c);
+            long errorsBefore = flushedFile().at("/log_errors").asLong();
+            assertThat(flushedFile().at("/containers_unread").asLong()).isEqualTo(1L);
+            AtomicInteger runs = new AtomicInteger();
+            DdlCounts.ExitRunner production = DdlCounts.exitRunner;
+            DdlCounts.exitRunner = (budget, recorder) -> {
+                runs.incrementAndGet();
+                assertThat(budget).as("the production budget").isSameAs(DdlCounts.EXIT_BUDGET);
+                production.run(budget, recorder);
+            };
+            try {
+                DdlCounts.onJvmExit();                       // the real no-arg hook, through the seam it calls
+            } finally {
+                DdlCounts.exitRunner = production;
+            }
+            assertThat(runs.get()).as("the no-arg hook went through the runner").isEqualTo(1);
+            JsonNode after = flushedFile();
+            assertThat(after.at("/containers_unread").asLong()).as("the recorder took the container").isEqualTo(0L);
+            assertThat(after.at("/log_errors").asLong() - errorsBefore)
+                .as("and it is record(): the unstarted container's log read failed and was counted").isEqualTo(1L);
+
+            return null;
+        });
+    }
 }

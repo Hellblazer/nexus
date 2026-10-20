@@ -8,6 +8,7 @@ import org.testcontainers.utility.DockerImageName;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
@@ -146,6 +147,43 @@ class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQL
         return startFailureLogTail;
     }
 
+    /** One try, as long as the server log tail's read: a wedged daemon must not hang the failure report (nexus-ccg9y). */
+    static final Duration INSPECT_TIMEOUT = Duration.ofSeconds(15);
+
+    /** Test seam, per thread: a shorter wait for {@link #containerStateForLog}'s inspect. */
+    static final ThreadLocal<Duration> INSPECT_TIMEOUT_OVERRIDE = new ThreadLocal<>();
+
+    /** What the daemon says about a container that failed its wait (nexus-ccg9y). */
+    record ContainerExit(String status, Long exitCode, Boolean oomKilled) { }
+
+    /**
+     * A FRESH inspect, not {@code getContainerInfo()}: that is the response cached when the container was created,
+     * so it still says "running" after the postmaster died and the container exited. A seam for the stub test.
+     */
+    ContainerExit inspectExit() {
+        var state = getDockerClient().inspectContainerCmd(getContainerId()).exec().getState();
+        return state == null ? null : new ContainerExit(state.getStatus(), state.getExitCodeLong(), state.getOOMKilled());
+    }
+
+    /**
+     * The container's state and exit code for the failure line, or why they could not be read. When the postmaster
+     * dies the container exits and the tmpfs server log goes with it, so this is then the only diagnosis the line
+     * carries (nexus-ccg9y). Never throws and waits at most {@link #INSPECT_TIMEOUT}: a daemon that cannot be asked, or
+     * answers too slowly, must not mask or delay the original wait failure.
+     */
+    String containerStateForLog() {
+        try {
+            Duration timeout = INSPECT_TIMEOUT_OVERRIDE.get() != null ? INSPECT_TIMEOUT_OVERRIDE.get() : INSPECT_TIMEOUT;
+            ContainerExit exit = PgContainerHelper.boundedOnce(this::inspectExit, timeout, "docker inspect");
+            if (exit == null) {
+                return "container_state=unknown (inspect returned no state)";
+            }
+            return "container_state=" + exit.status() + " exit_code=" + exit.exitCode() + " oom_killed=" + exit.oomKilled();
+        } catch (RuntimeException e) {
+            return "container_state=unreadable (" + e + ")";
+        }
+    }
+
     /**
      * nexus-t4y7b: when the wait fails, print the end of the server log FILE. Testcontainers' failed-start
      * dump is Docker's log, which with the counter on no longer carries the server's lines after the
@@ -156,13 +194,20 @@ class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQL
         try {
             super.waitUntilContainerStarted();
         } catch (RuntimeException e) {
-            if (ddlCounted) {
-                String tail = PgContainerHelper.serverLogTail(this, PgContainerHelper.START_FAILURE_TAIL_LINES);
-                startFailureLogTail = tail;
-                LOG.error("event=start_wait_failed owner={} error={} server_log_tail=\n{}", ddlOwner, e.toString(), tail);
-            }
+            reportStartWaitFailure(e);
             throw e;
         }
+    }
+
+    /** Logs {@code event=start_wait_failed} with the container state and the server log tail; never throws. */
+    void reportStartWaitFailure(RuntimeException e) {
+        if (!ddlCounted) {
+            return;
+        }
+        String state = containerStateForLog();
+        String tail = PgContainerHelper.serverLogTail(this, PgContainerHelper.START_FAILURE_TAIL_LINES);
+        startFailureLogTail = tail;
+        LOG.error("event=start_wait_failed owner={} error={} {} server_log_tail=\n{}", ddlOwner, e.toString(), state, tail);
     }
 
     @Override

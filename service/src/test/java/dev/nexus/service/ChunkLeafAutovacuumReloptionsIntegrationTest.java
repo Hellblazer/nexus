@@ -415,6 +415,21 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             .fetch(r -> r.value1() + "/" + r.value2() + "/pid" + r.value3() + "/rel" + r.value4());
     }
 
+    /**
+     * {@code pg_stat_database.deadlocks} for the current database (nexus-yskw3 b). Liquibase drops warnings and the
+     * heal's deadlock is caught inside the migration, so this counter is the only direct witness that PostgreSQL
+     * really detected one. The count reaches the shared statistics when the detecting backend next goes idle, at
+     * most once a second, so a reader polls ({@link #awaitTrue}) and reads in autocommit, where each read takes a
+     * fresh snapshot.
+     */
+    private static long deadlocks(DSLContext ctx) {
+        Long n = ctx.select(DSL.field(DSL.name("deadlocks"), Long.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_database")))
+            .where(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class)))
+            .fetchOne(0, Long.class);
+        return n == null ? 0 : n;
+    }
+
     private static int backendPid(Connection c) throws Exception {
         return c.unwrap(org.postgresql.PGConnection.class).getBackendPID();
     }
@@ -536,39 +551,124 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             assertThat(leaves).contains(first);
 
             // Phase 2: hold every leaf but `first`; the heal alters `first`, then waits on the next; ask for `first`.
-            stripLeaves(leaves);
-            clearAlterLog();
-            try (Connection holder = deadlockHolder(); Connection su = pg.createConnection("")) {
-                for (String l : leaves) if (!l.equals(first)) holdLeaf(holder, l);
-                int holderPid = backendPid(holder);
-                Future<?> migrate = pool.submit(() -> SchemaMigrator.migrate(adminDs));
-                awaitTrue("the heal to hold " + first + " and wait for another leaf", () -> {
-                    boolean holds = sueLocks(dsl(su), true).stream().anyMatch(r -> r.pid() != holderPid && r.rel().equals(first));
-                    boolean waits = sueLocks(dsl(su), false).stream().anyMatch(r -> r.pid() != holderPid && leaves.contains(r.rel()));
-                    return holds && waits;
-                }, 90_000);
-                Future<?> holderAsks = pool.submit(() -> holdLeaf(holder, first));
-                migrate.get(120, TimeUnit.SECONDS);       // fatal 40P01 here if deadlock_detected is not caught
-                holderAsks.get(30, TimeUnit.SECONDS);     // the holder was granted `first`, not made the victim
-                holder.rollback();
-                try (Connection check = pg.createConnection("")) {
-                    DSLContext ctx = dsl(check);
-                    assertThat(reloptions(ctx, first)).as("the leaf the migration held is healed").isEqualTo(FOUR);
-                    for (String l : leaves) {
-                        if (!l.equals(first)) assertThat(reloptions(ctx, l)).as("leaf %s was held by the other session", l).isEmpty();
-                    }
-                    assertThat(loggedAlters(ctx)).as("only the first leaf was altered").containsExactly("nexus." + first);
-                }
+            // PostgreSQL decides which busy outcome the heal gets: normally the holder's ask closes the cycle inside the
+            // heal's 1 s deadlock_timeout (40P01), but a stall of this thread past that second leaves no cycle to find
+            // and the heal ends at its 5 s lock_timeout (55P03) instead, with every other assertion below unchanged
+            // (the sibling test documents the same window). So the deadlock witness is "PostgreSQL counted one" in at
+            // least one of three attempts: a stall is not repeated three times, while a holder that never asks
+            // (the mutation check) never produces one.
+            int attempts = 0;
+            boolean deadlockCounted = false;
+            while (!deadlockCounted && attempts < 3) {
+                attempts++;
+                deadlockCounted = deadlockShapedAttempt(pool, leaves, first);
             }
+            assertThat(deadlockCounted).as("pg_stat_database.deadlocks rose in one of %d attempts (40P01 path, not only 55P03)", attempts)
+                .isTrue();
             clearAlterLog();
             SchemaMigrator.migrate(adminDs);
             try (Connection su = pg.createConnection("")) {
                 for (String l : leaves) assertThat(reloptions(dsl(su), l)).as("next boot heals %s", l).isEqualTo(FOUR);
             }
-            System.out.println("S9WAV evidence: deadlock-shaped migrate completed; first leaf " + first + " healed, "
-                + (leaves.size() - 1) + " held leaves skipped, all " + leaves.size() + " healed by the next boot");
+            System.out.println("S9WAV evidence: deadlock-shaped migrate completed (deadlock counted on attempt " + attempts
+                + "); first leaf " + first + " healed, " + (leaves.size() - 1) + " held leaves skipped, all " + leaves.size()
+                + " healed by the next boot");
         } finally {
             pool.shutdownNow();
+        }
+    }
+
+    /**
+     * One run of phase 2 of the deadlock-shaped test: strip every leaf, hold all but {@code first}, let the heal alter
+     * {@code first} and wait, and ask for {@code first} from the holder. Asserts what holds on either busy outcome (the
+     * heal finished, the holder was granted {@code first}, only {@code first} was healed) and returns whether
+     * {@code pg_stat_database.deadlocks} rose, the direct witness that PostgreSQL detected a deadlock (nexus-yskw3 b).
+     * Liquibase drops warnings, so the counter is the only one; it reaches the shared statistics when the detecting
+     * backend next goes idle, at most once a second, hence the poll.
+     */
+    private boolean deadlockShapedAttempt(ExecutorService pool, List<String> leaves, String first) throws Exception {
+        stripLeaves(leaves);
+        clearAlterLog();
+        try (Connection holder = deadlockHolder(); Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            long deadlocksBefore = deadlocks(dsl(su));
+            for (String l : leaves) if (!l.equals(first)) holdLeaf(holder, l);
+            int holderPid = backendPid(holder);
+            Future<?> migrate = pool.submit(() -> SchemaMigrator.migrate(adminDs));
+            awaitTrue("the heal to hold " + first + " and wait for another leaf", () -> {
+                boolean holds = sueLocks(dsl(su), true).stream().anyMatch(r -> r.pid() != holderPid && r.rel().equals(first));
+                boolean waits = sueLocks(dsl(su), false).stream().anyMatch(r -> r.pid() != holderPid && leaves.contains(r.rel()));
+                return holds && waits;
+            }, 90_000);
+            Future<?> holderAsks = pool.submit(() -> holdLeaf(holder, first));
+            migrate.get(120, TimeUnit.SECONDS);       // fatal 40P01 here if deadlock_detected is not caught
+            holderAsks.get(30, TimeUnit.SECONDS);     // the holder was granted `first`, not made the victim
+            boolean counted = false;
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!counted && System.nanoTime() < end) {
+                counted = deadlocks(dsl(su)) - deadlocksBefore >= 1;
+                if (!counted) Thread.sleep(50);
+            }
+            holder.rollback();
+            try (Connection check = pg.createConnection("")) {
+                DSLContext ctx = dsl(check);
+                assertThat(reloptions(ctx, first)).as("the leaf the migration held is healed").isEqualTo(FOUR);
+                for (String l : leaves) {
+                    if (!l.equals(first)) assertThat(reloptions(ctx, l)).as("leaf %s was held by the other session", l).isEmpty();
+                }
+                assertThat(loggedAlters(ctx)).as("only the first leaf was altered").containsExactly("nexus." + first);
+            }
+            return counted;
+        }
+    }
+
+    /**
+     * nexus-yskw3 (d): the catch-and-rollback path of {@code checkAndLog}, which runs on the migration's own
+     * connection (autocommit off) right after Liquibase, and whose later reads (the walk's changeset count) must still
+     * work. A failed catalog read is made real: a statement in the open transaction fails (division by zero), which
+     * puts the transaction in the aborted state, so the check's own read fails with 25P02, as a read that failed on its
+     * own would leave it. The check must not throw, must say so at WARN, must roll the aborted transaction back so the
+     * connection is usable, and must leave what the connection had already committed.
+     */
+    @Test
+    void aFailedCatalogRead_isLoggedNotThrown_rollsBackTheAbortedTransaction_andKeepsTheCommittedWork() throws Throwable {
+        Table<?> committed = DSL.table(DSL.name("public", "yskw3_committed"));
+        Table<?> uncommitted = DSL.table(DSL.name("public", "yskw3_uncommitted"));
+        try (Connection migration = admin(); Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try {
+                migration.setAutoCommit(false);
+                DSLContext mctx = dsl(migration);
+                mctx.createTable(committed.getQualifiedName()).column("x", SQLDataType.INTEGER).execute();
+                migration.commit();                                  // the migration's work, committed before the check
+                mctx.createTable(uncommitted.getQualifiedName()).column("x", SQLDataType.INTEGER).execute();
+                assertThatThrownBy(() -> mctx.select(DSL.val(1).div(DSL.val(0))).fetch())
+                    .as("the statement that aborts the open transaction").hasMessageContaining("division by zero");
+                assertThatThrownBy(() -> ChunksLeafAutovacuumCheck.inspect(mctx))
+                    .as("the premise: the check's own read fails on the aborted transaction")
+                    .hasMessageContaining("current transaction is aborted");
+
+                List<String> logs = captureLogs(() -> ChunksLeafAutovacuumCheck.checkAndLog(migration));
+
+                assertThat(logs).as("one WARN naming the failure, and no health line")
+                    .anyMatch(m -> m.startsWith("WARN ") && m.contains("event=chunks_leaf_autovacuum_check_failed"))
+                    .noneMatch(m -> m.contains("event=chunks_leaf_autovacuum_checked"));
+                // Boot proceeds: the same connection answers the next statement (the walk's changeset count is one).
+                assertThat(mctx.select(DSL.val(1)).fetchOne(0, Integer.class)).as("the connection is usable again").isEqualTo(1);
+                // And what it had committed is still there, while the aborted transaction's own work is not.
+                assertThat(dsl(su).select(DSL.function("to_regclass", String.class, DSL.val("public.yskw3_committed")))
+                    .fetchOne(0, String.class)).as("the migration's committed work is kept").isEqualTo("yskw3_committed");
+                assertThat(dsl(su).select(DSL.function("to_regclass", String.class, DSL.val("public.yskw3_uncommitted")))
+                    .fetchOne(0, String.class)).as("the aborted transaction was rolled back").isNull();
+                // Control: on a healthy connection the same call reads the tree and logs the checked line, so the WARN
+                // above came from the failure and the helper is not simply silent.
+                migration.rollback();
+                List<String> healthy = captureLogs(() -> ChunksLeafAutovacuumCheck.checkAndLog(migration));
+                assertThat(healthy).anyMatch(m -> m.contains("event=chunks_leaf_autovacuum_checked"))
+                    .noneMatch(m -> m.contains("check_failed"));
+            } finally {
+                dsl(su).dropTableIfExists(committed).execute();
+            }
         }
     }
 

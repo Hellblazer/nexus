@@ -311,13 +311,24 @@ public final class PgContainerHelper {
      * ({@link #retryingRead}) so the recurrence rate can be read off a run.
      */
     public static String serverLog(PostgreSQLContainer<?> c) {
+        return serverLog(c, PgContainerHelper::retryingRead);
+    }
+
+    /** The retrying reader {@link #serverLog} hands its read to; a test passes one that records the arguments. */
+    @FunctionalInterface
+    interface LogReader {
+        String read(java.util.concurrent.Callable<String> read, Duration timeout, int attempts, String owner);
+    }
+
+    /** {@link #serverLog} with its reader injected, so a test can see the timeout and attempts it is given (nexus-ccg9y). */
+    static String serverLog(PostgreSQLContainer<?> c, LogReader reader) {
         if (c instanceof FailFastPostgreSQLContainer f && !f.ddlCounted()) {
             return c.getLogs(); // counter off: no collector, the server log is Docker's log again
         }
         Duration timeout = SERVER_LOG_READ_TIMEOUT_OVERRIDE.get() != null
             ? SERVER_LOG_READ_TIMEOUT_OVERRIDE.get() : SERVER_LOG_READ_TIMEOUT;
         String owner = c instanceof FailFastPostgreSQLContainer f ? f.ddlOwner() : "unknown";
-        return retryingRead(() -> {
+        return reader.read(() -> {
             org.testcontainers.containers.Container.ExecResult r = c.execInContainer("cat", SERVER_LOG_FILE);
             if (r.getExitCode() != 0) {
                 throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE + " exited "
@@ -388,6 +399,31 @@ public final class PgContainerHelper {
                 }
                 throw new IllegalStateException("nexus-sz651: reading " + SERVER_LOG_FILE, cause);
             }
+        }
+    }
+
+    /**
+     * One try of {@code call} on the same daemon-thread pool as {@link #retryingRead}, abandoned after {@code timeout}:
+     * for a docker-java call on a failure path, where a wedged daemon must not hang the report. A timeout throws
+     * {@code IllegalStateException("timed out after ...")} and interrupts the try, which wakes a stream wait but not a
+     * call blocked in the synchronous HTTP exchange; that thread stays blocked until the JVM exits (nexus-ccg9y).
+     */
+    static <T> T boundedOnce(java.util.concurrent.Callable<T> call, Duration timeout, String what) {
+        java.util.concurrent.Future<T> f = LOG_READERS.submit(call);
+        try {
+            return f.get(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            f.cancel(true);
+            throw new IllegalStateException("timed out after " + timeout + ": " + what, e);
+        } catch (InterruptedException e) {
+            f.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted: " + what, e);
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException(what, e.getCause());
         }
     }
 
@@ -1343,12 +1379,21 @@ public final class PgContainerHelper {
      * and name; an UPDATE that touches no row throws, so it cannot pass vacuously. Superuser only.
      */
     public static void markIndexInvalid(Connection su, String schema, String index) {
+        setIndexValid(su, schema, index, false);
+    }
+
+    /** The inverse of {@link #markIndexInvalid}: an index that became valid after a snapshot judged it a leftover. */
+    public static void markIndexValid(Connection su, String schema, String index) {
+        setIndexValid(su, schema, index, true);
+    }
+
+    private static void setIndexValid(Connection su, String schema, String index, boolean valid) {
         Table<?> pgClass = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
         Table<?> pgNamespace = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
         Field<Object> classOid = DSL.field(DSL.name("c", "oid"));
         int updated = DSL.using(su, SQLDialect.POSTGRES)
             .update(DSL.table(DSL.name("pg_catalog", "pg_index")))
-            .set(DSL.field(DSL.name("indisvalid"), Boolean.class), false)
+            .set(DSL.field(DSL.name("indisvalid"), Boolean.class), valid)
             .where(DSL.field(DSL.name("indexrelid")).eq(
                 DSL.select(classOid).from(pgClass).join(pgNamespace)
                     .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
@@ -1356,8 +1401,8 @@ public final class PgContainerHelper {
                     .and(DSL.field(DSL.name("c", "relname"), String.class).eq(index))))
             .execute();
         if (updated != 1) {
-            throw new IllegalStateException("expected to mark exactly one index invalid, found " + updated + ": "
-                + schema + "." + index);
+            throw new IllegalStateException("expected to mark exactly one index " + (valid ? "valid" : "invalid")
+                + ", found " + updated + ": " + schema + "." + index);
         }
     }
 

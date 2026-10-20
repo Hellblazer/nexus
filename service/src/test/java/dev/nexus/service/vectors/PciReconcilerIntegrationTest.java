@@ -1014,6 +1014,110 @@ class PciReconcilerIntegrationTest {
         assertThat(statusJson(r, sweep).get("per_collection_indexes").get("reindex_leftover").asInt()).isZero();
     }
 
+    /**
+     * A leftover the planner sees as invalid, changed in PG between the snapshot and the DROP (nexus-jyva9): the
+     * reconciler's catalog read hands back the real snapshot and then, still inside the pass, {@code change} turns the
+     * leftover valid or removes it. The session's re-read before the DROP then answers STALE.
+     *
+     * @return the pass report; the sweep's reader calls are counted in {@code sweepReads}
+     */
+    private PassReport staleLeftoverPass(String tenant, String leftover, AtomicInteger sweepReads,
+                                         ThrowingConsumer<Connection> change) throws Exception {
+        PciSettings s = settings(16);
+        PciIndexSweep countingSweep = new PciIndexSweep(() -> {
+            sweepReads.incrementAndGet();
+            return catalog.read();
+        }, s);
+        AtomicInteger snapshotsSeenInvalid = new AtomicInteger();
+        PciReconciler r = new PciReconciler(() -> {
+            PciCatalog.Snapshot snapshot = catalog.read();
+            if (leaf(snapshot, tenant).indexes().stream()
+                    .anyMatch(i -> i.name().equals(leftover) && !i.valid() && i.leftover())) {
+                snapshotsSeenInvalid.incrementAndGet();
+            }
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                change.accept(su);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return snapshot;
+        }, builderSession(s), countingSweep, s, Clock.systemUTC(), PciReconciler.SET_LOCAL_TENANT,
+            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), new Random(1));
+
+        PassReport report = r.reconcileOnce();
+
+        assertThat(snapshotsSeenInvalid.get()).as("the planner's snapshot did carry the invalid leftover").isEqualTo(1);
+        assertThat(report.ranToEnd()).isTrue();
+        return report;
+    }
+
+    private static PciCatalog.Leaf leaf(PciCatalog.Snapshot snapshot, String tenant) {
+        return snapshot.leaves().stream().filter(l -> M384.equals(l.model()) && tenant.equals(l.tenant()))
+            .findFirst().orElseThrow();
+    }
+
+    @FunctionalInterface
+    private interface ThrowingConsumer<T> {
+        void accept(T t) throws Exception;
+    }
+
+    /** A leftover on a leaf whose only collection is under the build threshold: the pass has nothing else to do. */
+    private String invalidGhostLeftover(String tenant) throws Exception {
+        collection(tenant, name("small"), B / 4);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String ghostIndex = PciCatalog.indexName(M384, tenant, name("ghost")) + "_ccnew";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), ghostIndex, "embedding_384",
+                name("ghost"));
+            PgContainerHelper.markIndexInvalid(su, leaf.schema(), ghostIndex);
+        }
+        return ghostIndex;
+    }
+
+    @Test
+    void aLeftoverThatBecameValidBetweenSnapshotAndDrop_isStale_notCountedAsADrop_andTheSweepIsNotRefreshed()
+            throws Exception {
+        String tenant = newTenant("stalevalid");
+        String ghostIndex = invalidGhostLeftover(tenant);
+        String schema = leaf(tenant).schema();
+        AtomicInteger sweepReads = new AtomicInteger();
+
+        PassReport report = staleLeftoverPass(tenant, ghostIndex, sweepReads,
+            su -> PgContainerHelper.markIndexValid(su, schema, ghostIndex));
+
+        assertThat(report.drops()).as("nothing was dropped").isZero();
+        assertThat(report.builds()).isZero();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_drop_skipped_stale reason=valid_now")
+            && l.contains("index=" + ghostIndex));
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_drop_stale") && l.contains("index=" + ghostIndex));
+        assertThat(logged("event=pci_index_dropped")).isZero();
+        assertThat(logged("event=pci_reconcile_pass ")).isEqualTo(1);
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reconcile_pass ") && l.contains("drops=0"));
+        assertThat(sweepReads.get()).as("a stale drop refreshes nothing").isZero();
+        assertThat(leaf(tenant).indexes()).as("the now-valid index is still there")
+            .anyMatch(i -> i.name().equals(ghostIndex) && i.valid());
+    }
+
+    @Test
+    void aLeftoverThatWentAwayBetweenSnapshotAndDrop_isStale_notCountedAsADrop_andTheSweepIsNotRefreshed()
+            throws Exception {
+        String tenant = newTenant("stalegone");
+        String ghostIndex = invalidGhostLeftover(tenant);
+        String schema = leaf(tenant).schema();
+        AtomicInteger sweepReads = new AtomicInteger();
+
+        PassReport report = staleLeftoverPass(tenant, ghostIndex, sweepReads,
+            su -> PgContainerHelper.dropIndex(su, DSL.name(schema, ghostIndex)));
+
+        assertThat(report.drops()).as("nothing of ours was dropped").isZero();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_drop_skipped_stale reason=gone")
+            && l.contains("index=" + ghostIndex));
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_drop_stale") && l.contains("index=" + ghostIndex));
+        assertThat(logged("event=pci_index_dropped")).isZero();
+        assertThat(sweepReads.get()).as("a stale drop refreshes nothing").isZero();
+    }
+
     @Test
     void aLeftoverFreesNoCapSlot_soTheLargestCandidateStillWinsTheOneSlot() throws Exception {
         String tenant = newTenant("rislot");
