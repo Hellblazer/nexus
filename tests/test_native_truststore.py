@@ -6,8 +6,10 @@ to, so the engine trusts whatever the build JDK trusted: v0.1.161 embedded AAA C
 Services (which cross-signed the eMudhra issuing CAs revoked for compromise on 2026-10-18) and the
 three emSign roots. ``service/src/build/java/NativeTrustStore.java`` prunes a copy before the image
 is built and checks the built executable afterwards; ``service/pom.xml``'s ``native`` profile runs
-both. These tests run the real program on the real JDK cacerts against stand-in executables, and
-pin the pom wiring. A machine with no JVM FAILS this file instead of skipping it.
+both. These tests run the real program against stand-in executables and a generated source store
+named like a JDK cacerts (the build reads GraalVM's, whose aliases are "<name> [jdk]"; a Debian
+OpenJDK's cacerts is the system bundle under other aliases, so the tests cannot read the runner's
+own), and pin the pom wiring. A machine with no JVM FAILS this file instead of skipping it.
 """
 
 from __future__ import annotations
@@ -43,42 +45,92 @@ def _keytool(*args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run([str(keytool), *args], capture_output=True, check=False, timeout=60)
 
 
-def _der(alias: str) -> bytes:
-    out = _keytool("-exportcert", "-cacerts", "-storepass", "changeit", "-alias", alias)
+#: The generated source store: each JDK alias the program names, with the subject of the real root,
+#: plus two unrelated roots so "everything but DROP is kept" has something to keep.
+_ROOTS = {
+    "comodoaaaca [jdk]": "CN=AAA Certificate Services, O=Comodo CA Limited, C=GB",
+    "emsignrootcag1 [jdk]": "CN=emSign Root CA - G1, O=eMudhra Technologies Limited, C=IN",
+    "emsignrootcag2 [jdk]": "CN=emSign Root CA - G2, O=eMudhra Technologies Limited, C=IN",
+    "emsigneccrootcag3 [jdk]": "CN=emSign ECC Root CA - G3, O=eMudhra Technologies Limited, C=IN",
+    "globalsignca [jdk]": "CN=GlobalSign Root CA, OU=Root CA, O=GlobalSign nv-sa, C=BE",
+    "gtsrootcar1 [jdk]": "CN=GTS Root R1, O=Google Trust Services LLC, C=US",
+    "controlroota [jdk]": "CN=Control Root A, O=Test, C=US",
+    "controlrootb [jdk]": "CN=Control Root B, O=Test, C=US",
+}
+
+
+def _store(directory: Path, roots: dict[str, str]) -> Path:
+    """A PKCS12 of self-signed trusted-certificate entries, one per alias, as cacerts holds them."""
+    directory.mkdir(parents=True, exist_ok=True)
+    store = directory / "cacerts"
+    for i, (alias, subject) in enumerate(roots.items()):
+        keys = directory / f"k{i}.p12"
+        der = directory / f"c{i}.der"
+        for args in (
+            ("-genkeypair", "-keystore", str(keys), "-storetype", "PKCS12", "-storepass", "changeit",
+             "-alias", "k", "-keyalg", "EC", "-groupname", "secp256r1", "-dname", subject, "-validity", "3650"),
+            ("-exportcert", "-keystore", str(keys), "-storepass", "changeit", "-alias", "k", "-file", str(der)),
+            ("-importcert", "-noprompt", "-keystore", str(store), "-storetype", "PKCS12", "-storepass", "changeit",
+             "-alias", alias, "-file", str(der)),
+        ):
+            run = _keytool(*args)
+            assert run.returncode == 0, run.stderr.decode()
+    return store
+
+
+@pytest.fixture(scope="module")
+def source(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _store(tmp_path_factory.mktemp("source"), _ROOTS)
+
+
+def _der(store: Path, alias: str) -> bytes:
+    out = _keytool("-exportcert", "-keystore", str(store), "-storepass", "changeit", "-alias", alias)
     assert out.returncode == 0, out.stderr.decode()
     return out.stdout
 
 
-def _run(mode: str, path: Path) -> subprocess.CompletedProcess[str]:
+def _aliases(store: Path) -> set[str]:
+    listed = _keytool("-list", "-keystore", str(store), "-storepass", "changeit").stdout.decode()
+    return {line.split(",")[0] for line in listed.splitlines() if ", trustedCertEntry" in line}
+
+
+def _run(mode: str, path: Path, source: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(_java()), str(_PROGRAM), mode, str(path)], capture_output=True, text=True, check=False, timeout=180,
+        [str(_java()), f"-Dnexus.truststore.source={source}", str(_PROGRAM), mode, str(path)],
+        capture_output=True, text=True, check=False, timeout=180,
     )
 
 
-def _executable(tmp_path: Path, *aliases: str) -> Path:
+def _executable(tmp_path: Path, source: Path, *aliases: str) -> Path:
     # Image-heap stand-in: the captured KeyStore's aliases between runs of filler, plus the DER of
     # EVERY root, as a real image carries them whatever its trust store (so a DER search would
     # fail every build; verify must key on the aliases).
     filler = bytes(range(256)) * 64
     body = filler + b"".join(a.encode("ascii") + b"\0\0" + filler for a in aliases)
-    body += b"".join(_der(a) + filler for a in DROP + KEEP)
+    body += b"".join(_der(source, a) + filler for a in DROP + KEEP)
     exe = tmp_path / "nexus-service"
     exe.write_bytes(body)
     return exe
 
 
-def test_prune_drops_the_named_roots_and_keeps_voyages_anchors(tmp_path: Path) -> None:
+def test_prune_drops_the_named_roots_and_keeps_everything_else(tmp_path: Path, source: Path) -> None:
     out = tmp_path / "native-truststore" / "cacerts"
-    run = _run("prune", out)
+    run = _run("prune", out, source)
     assert run.returncode == 0, run.stderr
-    listed = _keytool("-list", "-keystore", str(out), "-storepass", "changeit").stdout.decode()
-    aliases = {line.split(",")[0] for line in listed.splitlines() if ", trustedCertEntry" in line}
-    assert not aliases & set(DROP), aliases & set(DROP)
-    assert set(KEEP) <= aliases
-    jdk = _keytool("-list", "-cacerts", "-storepass", "changeit").stdout.decode()
-    jdk_aliases = {line.split(",")[0] for line in jdk.splitlines() if ", trustedCertEntry" in line}
-    assert aliases == jdk_aliases - set(DROP)
-    assert len(aliases) > 50, f"a pruned store of {len(aliases)} roots is not the JDK's cacerts"
+    assert _aliases(out) == set(_ROOTS) - set(DROP)
+    assert "4 of 4 named roots dropped" in run.stdout
+
+
+def test_prune_refuses_a_jdk_without_voyages_anchors(tmp_path: Path) -> None:
+    roots = {a: s for a, s in _ROOTS.items() if a != "globalsignca [jdk]"}
+    run = _run("prune", tmp_path / "out", _store(tmp_path / "src", roots))
+    assert run.returncode == 1 and "has no globalsignca [jdk]" in run.stderr
+
+
+def test_prune_refuses_a_jdk_that_names_none_of_the_dropped_roots(tmp_path: Path) -> None:
+    roots = {a: s for a, s in _ROOTS.items() if a in KEEP or a.startswith("control")}
+    run = _run("prune", tmp_path / "out", _store(tmp_path / "src", roots))
+    assert run.returncode == 1 and "check the aliases against this JDK" in run.stderr
 
 
 _TRUSTED = """
@@ -89,9 +141,11 @@ public class Trusted {
     public static void main(String[] args) throws Exception {
         TrustManagerFactory f = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         f.init((KeyStore) null);
-        for (var m : f.getTrustManagers()) {
-            if (m instanceof X509TrustManager x) {
-                for (var c : x.getAcceptedIssuers()) System.out.println(c.getSubjectX500Principal().getName());
+        for (javax.net.ssl.TrustManager m : f.getTrustManagers()) {
+            if (m instanceof X509TrustManager) {
+                for (java.security.cert.X509Certificate c : ((X509TrustManager) m).getAcceptedIssuers()) {
+                    System.out.println(c.getSubjectX500Principal().getName());
+                }
             }
         }
     }
@@ -99,12 +153,12 @@ public class Trusted {
 """
 
 
-def test_the_pruned_store_loads_with_only_the_property_the_build_passes(tmp_path: Path) -> None:
+def test_the_pruned_store_loads_with_only_the_property_the_build_passes(tmp_path: Path, source: Path) -> None:
     # The builder captures the default trust store from javax.net.ssl.trustStore alone. A PKCS12
     # written with its defaults (protected bags) loads with ZERO roots that way, which would embed
     # an empty store; this reads it exactly as the build does, with no password.
     out = tmp_path / "cacerts"
-    assert _run("prune", out).returncode == 0
+    assert _run("prune", out, source).returncode == 0
     program = tmp_path / "Trusted.java"
     program.write_text(_TRUSTED)
     run = subprocess.run(
@@ -113,8 +167,7 @@ def test_the_pruned_store_loads_with_only_the_property_the_build_passes(tmp_path
     )
     assert run.returncode == 0, run.stderr
     subjects = run.stdout.splitlines()
-    jdk = _keytool("-list", "-cacerts", "-storepass", "changeit").stdout.decode()
-    assert len(subjects) == sum(", trustedCertEntry" in line for line in jdk.splitlines()) - len(DROP)
+    assert len(subjects) == len(_ROOTS) - len(DROP), subjects
     assert any("CN=GlobalSign Root CA" in s for s in subjects)
     assert any("CN=GTS Root R1" in s for s in subjects)
     assert not any("AAA Certificate Services" in s or "emSign" in s for s in subjects)
@@ -122,48 +175,39 @@ def test_the_pruned_store_loads_with_only_the_property_the_build_passes(tmp_path
 
 def test_prune_refuses_a_root_of_the_distrusted_hierarchy_that_drop_does_not_name(tmp_path: Path) -> None:
     # A JDK whose cacerts names an emSign or AAA root differently would otherwise keep it silently.
-    store = tmp_path / "cacerts"
-    for alias in [*KEEP, "comodoaaaca [jdk]"]:
-        der = tmp_path / "x.der"
-        der.write_bytes(_der(alias))
-        name = "renamed-aaa" if alias == "comodoaaaca [jdk]" else alias
-        imp = _keytool("-importcert", "-noprompt", "-keystore", str(store), "-storetype", "PKCS12",
-                       "-storepass", "changeit", "-alias", name, "-file", str(der))
-        assert imp.returncode == 0, imp.stderr.decode()
-    run = subprocess.run(
-        [str(_java()), f"-Dnexus.truststore.source={store}", str(_PROGRAM), "prune", str(tmp_path / "out")],
-        capture_output=True, text=True, check=False, timeout=120,
-    )
+    roots = {a: s for a, s in _ROOTS.items() if a != "comodoaaaca [jdk]"}
+    roots["renamed-aaa"] = _ROOTS["comodoaaaca [jdk]"]
+    run = _run("prune", tmp_path / "out", _store(tmp_path / "src", roots))
     assert run.returncode == 1
     assert "kept root renamed-aaa" in run.stderr and "AAA Certificate Services" in run.stderr
 
 
-def test_verify_passes_an_executable_that_embeds_only_kept_roots(tmp_path: Path) -> None:
-    _executable(tmp_path, *KEEP, "digicertglobalrootg2 [jdk]")
-    run = _run("verify", tmp_path)
+def test_verify_passes_an_executable_that_embeds_only_kept_roots(tmp_path: Path, source: Path) -> None:
+    _executable(tmp_path, source, *KEEP, "controlroota [jdk]")
+    run = _run("verify", tmp_path, source)
     assert run.returncode == 0, run.stderr
     assert "4 dropped roots absent, 2 required roots present" in run.stdout
 
 
-def test_verify_fails_an_executable_that_embeds_a_dropped_root(tmp_path: Path) -> None:
+def test_verify_fails_an_executable_that_embeds_a_dropped_root(tmp_path: Path, source: Path) -> None:
     # The released v0.1.161 binary fails exactly this way (all four embedded).
-    _executable(tmp_path, *KEEP, "comodoaaaca [jdk]")
-    run = _run("verify", tmp_path)
+    _executable(tmp_path, source, *KEEP, "comodoaaaca [jdk]")
+    run = _run("verify", tmp_path, source)
     assert run.returncode == 1
     assert "embeds dropped root comodoaaaca [jdk]" in run.stderr
     assert "emsign" not in run.stderr
 
 
-def test_verify_fails_when_a_required_root_is_not_embedded(tmp_path: Path) -> None:
-    # Non-vacuity: a search that cannot see embedded certificates would pass every dropped root.
-    _executable(tmp_path, "gtsrootcar1 [jdk]")
-    run = _run("verify", tmp_path)
+def test_verify_fails_when_a_required_root_is_not_embedded(tmp_path: Path, source: Path) -> None:
+    # Non-vacuity: a search that cannot see the captured store would pass every dropped root.
+    _executable(tmp_path, source, "gtsrootcar1 [jdk]")
+    run = _run("verify", tmp_path, source)
     assert run.returncode == 1
     assert "does not embed required root globalsignca [jdk]" in run.stderr
 
 
-def test_verify_fails_where_there_is_no_executable(tmp_path: Path) -> None:
-    run = _run("verify", tmp_path)
+def test_verify_fails_where_there_is_no_executable(tmp_path: Path, source: Path) -> None:
+    run = _run("verify", tmp_path, source)
     assert run.returncode == 1 and "no nexus-service executable" in run.stderr
 
 
