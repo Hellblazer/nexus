@@ -30,7 +30,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.stream.Collectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
@@ -82,19 +81,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       REWORKED again for nexus-swam7 (taxonomy-020) — EXPLAINs the EXACT
  *       cross-branch statement text ({@code assign_from_chashes_1024} is
  *       LANGUAGE plpgsql and opaque to a direct EXPLAIN of a call to it, so
- *       this runs the same SQL text verbatim, not a proxy function anymore —
+ *       this runs the deployed SQL text, not a proxy function anymore —
  *       see this method's own javadoc for why the prior proxy-function
  *       version could pass regardless of whether the fix under test existed)
  *       against the CLASS's shared, now production-shaped fixture (43
  *       collections, largest 67, ~1,000-2,000 centroids/dim — see
  *       {@link #FILLER_COLLECTION_COUNT}'s javadoc), asserting the HNSW index
  *       binds, no Seq Scan appears, and no plain (non-incremental) Sort node
- *       is used either. Also asserts — review round, code-review-expert's
- *       finding that nothing tied the hand-copied statement text to the real
- *       function body — that this statement text is a normalized-whitespace
- *       SUBSTRING of {@code assign_from_chashes_1024}'s real {@code prosrc}
- *       (parameter names restored in place of this fixture's literals),
- *       so the two cannot silently drift apart. IMPORTANT: this test proves
+ *       is used either. The statement is not a copy: since nexus-cbo4a
+ *       batch C it is cut from {@code assign_from_chashes_1024}'s deployed
+ *       {@code prosrc} ({@link #deployedCrossBranchStatement()}), with this
+ *       fixture's values substituted for the function's parameters, so it
+ *       cannot drift from the function (the review round's finding that
+ *       nothing tied a hand copy to the real body, closed by construction).
+ *       IMPORTANT: this test proves
  *       the four settings' EFFECT on the plan at this fixture's scale — it
  *       does NOT prove the real function actually sets them; that is
  *       {@link #assignFromChashesFunctions_carryTheLoadBearingHnswSettings}'s
@@ -620,101 +620,69 @@ class TaxonomyAssignCrossLateralHnswTest {
     // enable_seqscan/enable_sort pin.
     // ════════════════════════════════════════════════════════════════════════
 
-    /**
-     * The EXACT cross-branch statement text embedded in
-     * {@code assign_from_chashes_1024}'s cross branch (taxonomy-020-3),
-     * parameters substituted for this fixture's literals -- built ONCE so
-     * the plan-shape test, its prosrc drift check, and the negative control
-     * below all run against the IDENTICAL text; they can only ever diverge
-     * from the real function body (which the drift check catches), never
-     * from each other.
-     */
-    private String crossBranchStatementText() {
-        String chashArrayLiteral = chunkChashes.stream()
-            .map(h -> "'" + h + "'")
-            .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
-        // Verbatim (parameters substituted as literals) copy of the `batch`/
-        // `nearest` CTEs inside assign_from_chashes_1024's cross branch
-        // (taxonomy-020-3). The `persisted` INSERT CTE is included too, so
-        // this is the FULL statement, not a read-only excerpt of it -- a bare
-        // EXPLAIN (no ANALYZE) never executes the query, so the INSERT never
-        // runs and the fixture is never mutated.
-        return
-            "WITH batch AS ("
-            + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model"
-            + "      FROM nexus.chunks c"
-            + "     WHERE c.embedding_model = '" + MODEL + "'"
-            + "       AND c.tenant_id = '" + TENANT + "' /*p_tenant*/"
-            + "       AND c.collection = '" + COL_DENSE + "'"
-            + "       AND c.embedding_1024 IS NOT NULL"
-            + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(" + chashArrayLiteral + ") x))"
-            + " ), nearest AS ("
-            + "    SELECT encode(b.b_chash, 'hex') AS m_chash, b.b_chash AS m_chash_bytes,"
-            + "           b.b_model AS m_model,"
-            + "           n.n_topic_id AS m_topic_id, (1 - n.n_dist)::double precision AS m_sim"
-            + "      FROM batch b"
-            + "      CROSS JOIN LATERAL ("
-            + "          SELECT ct.topic_id AS n_topic_id,"
-            + "                 (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist"
-            + "            FROM nexus.taxonomy_centroids ct"
-            + "           WHERE ct.embedding_model = '" + MODEL + "'"
-            + "             AND ct.tenant_id = '" + TENANT + "' /*p_tenant*/"
-            + "             AND ct.collection <> '" + COL_DENSE + "'"
-            + "             AND ct.embedding_1024 IS NOT NULL"
-            + "           ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
-            + "           LIMIT 1"
-            + "      ) n"
-            + " ), persisted AS ("
-            // RDR-225: the function's own SQL comments are part of its prosrc, so they are copied here too
-            // (each ends in a newline, or it would comment out the rest of this one-line statement).
-            + "    -- RDR-225: embedding_model is the chunk's own (it is part of the four-column chunk foreign key).\n"
-            + "    INSERT INTO nexus.topic_assignments AS ta"
-            + "        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
-            + "         embedding_model)"
-            + "    SELECT '" + TENANT + "', n.m_chash_bytes, n.m_topic_id,"
-            + "           'projection', n.m_sim, now(), '" + COL_DENSE + "', n.m_model"
-            + "      FROM nearest n"
-            + "    ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET"
-            + "        similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),"
-            + "        assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
-            + "                            THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,"
-            + "        source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
-            + "                            THEN EXCLUDED.source_collection ELSE ta.source_collection END,"
-            + "        -- the model moves with the source collection: the pair is one chunk reference.\n"
-            + "        embedding_model = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
-            + "                            THEN EXCLUDED.embedding_model ELSE ta.embedding_model END,"
-            + "        assigned_by = 'projection'"
-            + "    RETURNING 1"
-            + " ) SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n";
-    }
+    /** The first {@code RETURN QUERY} statement of the function body: the cross-collection branch, which comes first. */
+    private static final java.util.regex.Pattern FIRST_RETURN_QUERY =
+        java.util.regex.Pattern.compile("(?s)RETURN QUERY\\s+(.*?);");
+    /** Any plpgsql parameter name left in the statement after the fixture's values replaced the known ones. */
+    private static final java.util.regex.Pattern LEFTOVER_PARAMETER =
+        java.util.regex.Pattern.compile("\\bp_[a-z_]+\\b");
+    private static final java.util.regex.Pattern TENANT_GUC_READ =
+        java.util.regex.Pattern.compile("current_setting\\('nexus\\.tenant', true\\)");
 
     /**
-     * {@link #crossBranchStatementText()} with {@code p_collection}/
-     * {@code p_chashes}/the tenant GUC read MECHANICALLY restored in place of
-     * this fixture's literals -- the form comparable, after whitespace
-     * normalization, against {@code assign_from_chashes_1024}'s real
-     * {@code prosrc} (review round, code-review-expert's finding: nothing
-     * previously tied the hand-copied statement to the real function body,
-     * so a future edit to one could silently stop matching the other while
-     * this test kept passing against its own stale copy).
+     * The cross-branch statement of {@code assign_from_chashes_1024} exactly as DEPLOYED (nexus-cbo4a batch C): cut from
+     * the function's own {@code pg_proc.prosrc}, with this fixture's tenant, model, collection and chash array rendered
+     * as literals in place of the function's parameters (and the tenant GUC read), so the planner sees the constants a
+     * plpgsql EXECUTE with literal values gives it. Nothing here is a hand copy of the statement, so it cannot drift
+     * from the function, which is what the previous version's substring check against the same {@code prosrc} existed
+     * to catch. Built from the body in one place, so the plan-shape test and the negative control run against the
+     * IDENTICAL text.
+     *
+     * <p>Every step fails loud: the first {@code RETURN QUERY} must exist and be the lateral cross branch, each
+     * parameter the substitution handles must occur in it, and no other {@code p_*} name may remain. A body that grows a
+     * parameter, reorders its branches or stops containing a name the fixture substitutes fails here instead of
+     * planning a statement that no longer says what production runs. Values are rendered by jOOQ
+     * ({@code renderInlined}), so quoting is the library's, and the replacement is at word boundaries, never a bare
+     * substring replace. A bare EXPLAIN (no ANALYZE) never executes the statement, so its {@code persisted} INSERT CTE
+     * never runs and the fixture is not mutated.
      */
-    private String crossBranchStatementTextParametrized() {
-        String chashArrayLiteral = chunkChashes.stream()
-            .map(h -> "'" + h + "'")
-            .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
-        return crossBranchStatementText()
-            .replace("'" + TENANT + "' /*p_tenant*/", "p_tenant")
-            .replace("'" + MODEL + "'", "p_embedding_model")
-            .replace("'" + COL_DENSE + "'", "p_collection")
-            .replace(chashArrayLiteral, "p_chashes")
-            .replace("'" + TENANT + "'", "current_setting('nexus.tenant', true)");
+    private String deployedCrossBranchStatement() throws Exception {
+        String prosrc;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_1024");
+            assertThat(fn).as("assign_from_chashes_1024 must exist").isNotNull();
+            prosrc = fn.prosrc();
+        }
+        java.util.regex.Matcher branch = FIRST_RETURN_QUERY.matcher(prosrc);
+        assertThat(branch.find()).as("the deployed body has a RETURN QUERY statement:%n%s", prosrc).isTrue();
+        String statement = branch.group(1).strip();
+        assertThat(statement)
+            .as("the first RETURN QUERY of the deployed body is the cross-collection lateral branch")
+            .contains("CROSS JOIN LATERAL").contains("OPERATOR(nexus.<=>)").endsWith("nearest n");
+
+        DSLContext render = DSL.using(SQLDialect.POSTGRES);
+        statement = substituteParameter(statement, "p_chashes", render.renderInlined(
+            DSL.val(chunkChashes.toArray(String[]::new), org.jooq.impl.SQLDataType.CLOB.array())));
+        statement = substituteParameter(statement, "p_collection", render.renderInlined(DSL.val(COL_DENSE)));
+        statement = substituteParameter(statement, "p_embedding_model", render.renderInlined(DSL.val(MODEL)));
+        String tenant = render.renderInlined(DSL.val(TENANT));
+        statement = substituteParameter(statement, "p_tenant", tenant);
+        assertThat(TENANT_GUC_READ.matcher(statement).find())
+            .as("the deployed statement reads the tenant GUC for its INSERT:%n%s", statement).isTrue();
+        statement = TENANT_GUC_READ.matcher(statement).replaceAll(java.util.regex.Matcher.quoteReplacement(tenant));
+        assertThat(LEFTOVER_PARAMETER.matcher(statement).find())
+            .as("every function parameter in the statement was substituted:%n%s", statement).isFalse();
+        return statement;
     }
 
-    /** Collapse all whitespace runs to a single space and trim, so two SQL
-     *  texts formatted differently (line breaks, indentation) compare equal
-     *  on their TOKEN sequence alone. */
-    private static String normalizeWhitespace(String s) {
-        return s.replaceAll("\\s+", " ").trim();
+    /** {@code statement} with {@code literal} in place of every whole-word {@code parameter}; fails when it occurs nowhere. */
+    private static String substituteParameter(String statement, String parameter, String literal) {
+        java.util.regex.Pattern word = java.util.regex.Pattern.compile("\\b" + parameter + "\\b");
+        assertThat(word.matcher(statement).find())
+            .as("the deployed cross-branch statement uses %s:%n%s", parameter, statement).isTrue();
+        return word.matcher(statement).replaceAll(java.util.regex.Matcher.quoteReplacement(literal));
     }
 
     /** Matches a plain (non-incremental) EXPLAIN "Sort" node -- ANCHORED so it
@@ -740,7 +708,7 @@ class TaxonomyAssignCrossLateralHnswTest {
      * bd comment, conexus-b3, 2026-09-25), nowhere near either fixture's
      * scale.
      *
-     * <p>This version instead EXPLAINs {@link #crossBranchStatementText()},
+     * <p>This version instead EXPLAINs {@link #deployedCrossBranchStatement()},
      * NOT a proxy function -- {@code assign_from_chashes_1024} is
      * {@code LANGUAGE plpgsql} and opaque to a direct {@code EXPLAIN} of a
      * call to it, and the only faithful way to see the REAL statement's plan
@@ -761,12 +729,11 @@ class TaxonomyAssignCrossLateralHnswTest {
      * live, the plan at THIS fixture's scale uses the HNSW index. The
      * DEPLOYED-body claim is {@link
      * #assignFromChashesFunctions_carryTheLoadBearingHnswSettings}'s job
-     * alone (its {@code prosrc} mutation guard), and this test additionally
-     * asserts its own hand-copied statement text is a normalized-whitespace
-     * substring of that SAME {@code prosrc} (see {@link
-     * #crossBranchStatementTextParametrized()}), closing the remaining gap:
-     * that the text this test EXPLAINs is the text the function actually
-     * runs. Together -- never either alone -- these two tests are what back
+     * alone (its {@code prosrc} mutation guard), and the text this test
+     * EXPLAINs is cut from that SAME {@code prosrc} (see {@link
+     * #deployedCrossBranchStatement()}), closing the remaining gap: that the
+     * text this test EXPLAINs is the text the function actually runs.
+     * Together -- never either alone -- these two tests are what back
      * this bead's claim that production's cross-collection assignment now
      * takes the reviewed HNSW path instead of the exact fallback it took
      * before taxonomy-020 (see the class javadoc's "Stated plainly" section
@@ -774,7 +741,7 @@ class TaxonomyAssignCrossLateralHnswTest {
      */
     @Test
     void crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale() throws Exception {
-        String sql = crossBranchStatementText();
+        String deployedStatement = deployedCrossBranchStatement();
 
         String plan = tenantScope.withTenant(TENANT, ctx -> {
             // Mirrors EXACTLY the FOUR transaction-local set_config calls
@@ -785,11 +752,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             PgSession.setLocal(ctx, "hnsw.ef_search", "400");
             PgSession.setLocal(ctx, "enable_seqscan", "off");
             PgSession.setLocal(ctx, "enable_sort", "off");
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
+            return PgContainerHelper.explainPlan(ctx, ctx.resultQuery(deployedStatement));
         });
 
         assertThat(plan)
@@ -819,28 +782,6 @@ class TaxonomyAssignCrossLateralHnswTest {
                 + " would need a full Sort to satisfy the ORDER BY, silently reopening"
                 + " a slower plan than measured. Plan was:%n%s", plan)
             .isFalse();
-
-        // Review round, code-review-expert's finding: nothing above ties `sql`
-        // to the REAL function body -- assert it explicitly. Fetch
-        // assign_from_chashes_1024's prosrc and check that this test's
-        // statement text (parameters restored) is a normalized-whitespace
-        // substring of it.
-        String prosrc;
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
-                DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_1024");
-            assertThat(fn).as("assign_from_chashes_1024 must exist").isNotNull();
-            prosrc = fn.prosrc();
-        }
-        assertThat(normalizeWhitespace(prosrc))
-            .as("this test's hand-copied cross-branch statement text (parameters"
-                + " restored) must be a substring of the REAL assign_from_chashes_1024"
-                + " prosrc -- if this ever fails, the two have drifted apart and the"
-                + " plan-shape assertions above no longer say anything about what"
-                + " production actually runs. Parametrized test text was:%n%s",
-                normalizeWhitespace(crossBranchStatementTextParametrized()))
-            .contains(normalizeWhitespace(crossBranchStatementTextParametrized()));
     }
 
     /**
@@ -859,17 +800,13 @@ class TaxonomyAssignCrossLateralHnswTest {
      * in isolation.
      */
     @Test
-    void crossLateral_planShape_withoutTheAccessPathPins_choosesSeqScan() {
-        String sql = crossBranchStatementText();
+    void crossLateral_planShape_withoutTheAccessPathPins_choosesSeqScan() throws Exception {
+        String deployedStatement = deployedCrossBranchStatement();
 
         String plan = tenantScope.withTenant(TENANT, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "strict_order");
             PgSession.setLocal(ctx, "hnsw.ef_search", "400");
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
+            return PgContainerHelper.explainPlan(ctx, ctx.resultQuery(deployedStatement));
         });
 
         assertThat(plan)

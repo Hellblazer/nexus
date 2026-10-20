@@ -921,8 +921,7 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; review fold-in: 4 -> 3 (twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS); nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 3 -> 2; batch 9: 2 -> 1 (setDeleted onto a typed update; the 1 left is runIds with its oracle SQL strings)
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3; batch 9: 3 -> 2 (setDeleted onto a typed update; the 2 left are the reached-set EXPLAIN and the stitchedGraphOracle runIds)
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3; batch 9: 3 -> 2 (setDeleted onto a typed update); batch C: 2 -> 1 (stitchedGraphOracle is DSL.withRecursive with an exact cosineDistance1 order; the 1 left is the reached-set EXPLAIN, which needs the HNSW operator form: batch D)
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
@@ -988,19 +987,9 @@ class RawSqlGateTest {
         // the recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
         // and role-bootstrap statements (5). The chunk INSERT and vectorLiteral are gone
         // since the 2026-10-18 vector-seed batch; the count below is current.
-        // nexus-swam7: +1 (10) -- the realistic-scale plan-shape rework's
-        // EXPLAIN-the-exact-statement-text raw ctx.resultQuery(...).fetch()
-        // call, replacing the prior proxy-function ctx.explain(...) call
-        // (which was typed jOOQ, not raw SQL, and so carried no entry here).
-        // nexus-swam7 review round: +2 (12) -- the negative-control test's own
-        // ctx.resultQuery(...).fetch() (EXPLAIN without the access-path pins)
-        // and the prosrc drift check's raw su.prepareStatement(...) fetching
-        // pg_proc.prosrc (no jOOQ codegen for pg_catalog reads, same idiom
-        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL bootstrap uses).
-        // nexus-cbo4a 2026-10-19: the session SETs, both oracles and both pg_proc reads are
-        // converted (see the note above TEST_TREE_RAW_SQL_TOTAL_CEILING); the 2 left are
-        // the two EXPLAIN-the-exact-statement-text resultQuery calls.
-        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 12 -> 11; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc and typed oracles: 11 -> 2
+        // TaxonomyAssignCrossLateralHnswTest.java: RETIRED at zero in nexus-cbo4a batch C. Its two EXPLAINs run the
+        // statement cut from assign_from_chashes_1024's deployed prosrc (parameters substituted by jOOQ-rendered
+        // literals) through PgContainerHelper.explainPlan; no SQL text is a Java literal. No entry: actual count is 0.
         // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
         // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
@@ -1039,16 +1028,12 @@ class RawSqlGateTest {
         // the inline current_setting('hnsw.max_scan_tuples') read in the new recall
         // test (production code never sets this GUC, so its value is read directly to
         // report it, per the coordinator's explicit request).
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 4), // nexus-cbo4a batch 9: 5 -> 4 (the current_setting read is a select-list DSL.function; the 4 left are runHnsw, runExact, countMatching and explainProd)
-        // RDR-192 live(c) recall, extended (beads nexus-wbfpw.44/.45/.46): 2 raw-JDBC sites.
-        // rawRows(String, Object...) is the one raw read -- the exact oracle
-        // (ORDER BY (distance) + 0, so HNSW cannot serve it), its EXPLAIN and the live-count
-        // pin; the same OPERATOR(nexus.<=>)/set-returning-function-in-EXISTS reason as the
-        // sibling entries above. The production statement itself goes through the generated
-        // plain_search_<dim> function table, not raw SQL. The second site is the opt-in
-        // REINDEX (maintenance syntax with no jOOQ form).
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 1), // nexus-cbo4a batch 9: 2 -> 1 (the opt-in REINDEX is ctx.set plus PgContainerHelper.reindexIndex; rawRows is the one left)
-        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 1) // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 2; batch 9: 2 -> 1 (the leakproof probe is PgCatalogProbes.operatorFunctionLeakproof; the EXPLAIN (ANALYZE, VERBOSE) of the product statement is the 1 left)
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 4) // nexus-cbo4a batch 9: 5 -> 4 (the current_setting read is a select-list DSL.function; the 4 left are runHnsw, runExact, countMatching and explainProd)
+        // ChunkLiveOwnersRecallExtendedIntegrationTest.java and ManifestLessCensusNotesGuardIndexPlanShapeTest.java: RETIRED
+        // at zero in nexus-cbo4a batch C. The recall test's exact oracle, its EXPLAIN and its live count are typed jOOQ
+        // (EXISTS over the generated chunk_live_owners table function, ORDER BY Routines.cosineDistance1(..) + 0, which no
+        // HNSW index serves); the census plan test explains the product's MANIFEST_LESS_CENSUS_SQL as a jOOQ ResultQuery
+        // through PgContainerHelper.explainPlanWith (nexus_test.explain_plan). No entries: actual count is 0.
     );
 
     /**
@@ -1635,7 +1620,17 @@ class RawSqlGateTest {
     // <sql> body; everyParameterisedTestChangelog_isValidatedOrExempt derives completeness from the resources (every ${-bearing changelog is
     // on VALIDATED_PARAMETER_CHANGELOGS or in EXEMPT_PARAMETERISED_CHANGELOGS with a reason); the named-only-by-PgContainerHelper pin matches
     // the runSuperuserTestChangelog(<conn>, "db/changelog-test/<stem>.xml" call shape in comment-stripped code.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 23;
+    // nexus-cbo4a 2026-10-20 batch C, 23 -> 17 (10 -> 6 files; four entries removed outright, GraphHopParityTest 2 -> 1): new test function
+    // nexus_test.explain_plan(text, boolean x4) RETURNS SETOF text (db.changelog-test-objects.xml, test-objects-explain-plan) behind
+    // PgContainerHelper.explainPlanWith(ctx, Query, ExplainOptions): EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS) assembled server side from
+    // the four booleans, the statement taking a jOOQ Query only, rendered with every bind inlined, run in the caller's transaction and role.
+    // ManifestLessCensusNotesGuardIndexPlanShapeTest (the product MANIFEST_LESS_CENSUS_SQL as a ResultQuery) goes to zero on it.
+    // ChunkLiveOwnersRecallExtendedIntegrationTest's exact oracle, its EXPLAIN and its live count are typed (EXISTS over the generated
+    // chunk_live_owners table function; ORDER BY Routines.cosineDistance1(..) + 0, never the operator form, so no HNSW index serves it).
+    // CombinedQueryParityTest's three stitched oracles and GraphHopParityTest's recursive one are typed joins and DSL.withRecursive ordered
+    // by Routines.cosineDistance1, and their runIds helpers are deleted. TaxonomyAssignCrossLateralHnswTest runs the statement cut from
+    // assign_from_chashes_1024's deployed prosrc with the fixture's values substituted as jOOQ-rendered literals (a Java literal holds no SQL).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 17;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

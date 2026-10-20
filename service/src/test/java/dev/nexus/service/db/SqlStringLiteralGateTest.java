@@ -97,18 +97,14 @@ class SqlStringLiteralGateTest {
     private static final Map<String, Integer> EXECUTED = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 2),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 8),
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 3),
         Map.entry("dev/nexus/service/DdlCounts.java", 1),
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 6),
+        // the reached-set EXPLAIN (batch D: needs the HNSW operator form) and its createStatement helper
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 2),
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
-        // a verbatim copy of assign_from_chashes_1024's cross branch, run under a bare EXPLAIN
-        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 8),
         Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 7),
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 3),
-        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 1));
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 7));
 
-    private static final int EXECUTED_TOTAL = 44;
+    private static final int EXECUTED_TOTAL = 25;
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(
@@ -151,9 +147,8 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         // the statements counted in EXECUTED; held by another session
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 4),
-        // oracle and EXPLAIN statements counted in EXECUTED
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 1),
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 2),
+        // the EXPLAIN statement counted in EXECUTED
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 1),
         // replayChangeset: product changeset text run verbatim for its NOTICE chain (SANCTIONED RAW)
         Map.entry("dev/nexus/service/PgContainerHelper.java", 1),
         // plpgsql_check's own report query, read from its resource
@@ -163,7 +158,7 @@ class SqlStringLiteralGateTest {
         // a typed jOOQ insert rendered by ctx.render and bound by hand, for its lock order
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 1));
 
-    private static final int JDBC_ENTRY_TOTAL = 14;
+    private static final int JDBC_ENTRY_TOTAL = 12;
 
     /** References to a product {@code *_SQL} constant, per file, exact. */
     private static final Map<String, Integer> PRODUCT_SQL = Map.ofEntries(
@@ -171,7 +166,7 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 1),
         // MANIFEST_LESS_CENSUS_SQL run in its literal-value form (static statement, values inlined by jOOQ)
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusIntegrationTest.java", 1),
-        // MANIFEST_LESS_CENSUS_SQL under the EXPLAIN counted in EXECUTED
+        // MANIFEST_LESS_CENSUS_SQL explained through PgContainerHelper.explainPlanWith (a jOOQ ResultQuery, binds inlined)
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 1),
         // MANIFEST_LESS_CENSUS_SQL compared byte for byte with its changelog, never executed
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusSqlIdentityTest.java", 1));

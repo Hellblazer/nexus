@@ -79,4 +79,27 @@ class PgContainerHelperExplainPlanTest {
         assertThat(seen.sql).startsWithIgnoringCase("explain ").contains("4242").doesNotContain("?");
         assertThat(seen.binds).isEmpty();
     }
+
+    @Test
+    void explainPlanWith_sendsTheInlinedQueryAndFourBooleans_andReturnsEveryRow() {
+        Seen seen = new Seen();
+        DSLContext ctx = contextAnswering(120, seen);
+        String plan = PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx),
+            PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF);
+        assertThat(planRows(plan)).as("every row, no cap").isEqualTo(120);
+        assertThat(seen.sql).contains("nexus_test").contains("explain_plan");
+        // statement text first, with its bind inlined (a bind marker inside it would fail in EXECUTE), then the
+        // four option booleans in the order analyze, verbose, buffers, costs
+        assertThat(seen.binds).hasSize(5);
+        assertThat((String) seen.binds[0]).startsWithIgnoringCase("select").contains("4242").doesNotContain("?");
+        assertThat(seen.binds).containsSubsequence(true, true, false, false);
+    }
+
+    @Test
+    void explainPlanWith_buffersOptionsAreTheOtherPreset() {
+        Seen seen = new Seen();
+        DSLContext ctx = contextAnswering(3, seen);
+        PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS);
+        assertThat(seen.binds).containsSubsequence(true, false, true, true);
+    }
 }

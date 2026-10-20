@@ -7,7 +7,11 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -18,7 +22,6 @@ import org.jooq.impl.DSL;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -664,14 +667,6 @@ class GraphHopParityTest {
         }
     }
 
-    private static List<String> runIds(Connection conn, String sql) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) out.add(rs.getString(1));
-        }
-        return out;
-    }
-
     // ══════════════════════════════════════════════════════════════════════════
     // STITCHED-PATH ORACLE (the app-side follow_links dance the function retires)
     // ══════════════════════════════════════════════════════════════════════════
@@ -690,35 +685,51 @@ class GraphHopParityTest {
      */
     private List<String> stitchedGraphOracle(Connection conn, int dim, String collection,
                                              String seed, String linkType, int depth,
-                                             String direction) throws Exception {
-        String dirPred =
-            "out".equals(direction)  ? "l.from_tumbler = r.tumbler"
-          : "in".equals(direction)   ? "l.to_tumbler = r.tumbler"
-          : "(l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)";
-        String sql =
-            "WITH RECURSIVE reach(tumbler, d) AS (" +
-            "    SELECT '" + seed + "', 0 " +
-            "  UNION " +
-            "    SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END, r.d + 1 " +
-            "    FROM reach r JOIN nexus.catalog_links l ON " + dirPred + " " +
-            // nexus-t7m8e: both traversed endpoints must be LIVE — an algorithmic
-            // alias of the function body's own fix, so this oracle stays in
-            // lockstep with search_graph_hop_<dim> rather than silently diverging.
-            "    JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL " +
-            "    JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL " +
-            "    WHERE r.d < " + depth +
-            "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
-            "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
-            "SELECT d.tumbler AS id " +
-            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
-            "  JOIN nexus.catalog_documents d " +
-            "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
-            "  JOIN reached rd ON rd.tumbler = d.tumbler " +
-            " WHERE c.collection = '" + collection + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
-        return runIds(conn, sql);
+                                             String direction) {
+        Field<String> reachTumbler = DSL.field(DSL.name("reach", "tumbler"), CATALOG_LINKS.FROM_TUMBLER.getDataType());
+        Field<Integer> reachDepth = DSL.field(DSL.name("reach", "d"), SQLDataType.INTEGER);
+        Condition dirPred = switch (direction) {
+            case "out" -> CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler);
+            case "in" -> CATALOG_LINKS.TO_TUMBLER.eq(reachTumbler);
+            default -> CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler).or(CATALOG_LINKS.TO_TUMBLER.eq(reachTumbler));
+        };
+        Condition linkTypePred = linkType == null ? DSL.noCondition() : CATALOG_LINKS.LINK_TYPE.eq(linkType);
+        CatalogDocuments fromDoc = CATALOG_DOCUMENTS.as("fd");
+        CatalogDocuments toDoc = CATALOG_DOCUMENTS.as("td");
+        // nexus-t7m8e: both traversed endpoints must be LIVE -- an algorithmic alias of the function body's own
+        // fix, so this oracle stays in lockstep with search_graph_hop_<dim> rather than silently diverging.
+        var reach = DSL.name("reach").fields("tumbler", "d").as(
+            // the cast keeps the seed column text: a bound String travels as varchar, and a recursive CTE refuses a
+            // column whose non-recursive term is varchar and whose recursive term is text
+            DSL.select(DSL.cast(DSL.val(seed), CATALOG_LINKS.FROM_TUMBLER.getDataType()), DSL.inline(0))
+                .union(DSL.select(
+                        DSL.when(CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler), CATALOG_LINKS.TO_TUMBLER)
+                            .otherwise(CATALOG_LINKS.FROM_TUMBLER),
+                        reachDepth.plus(1))
+                    .from(DSL.table(DSL.name("reach")))
+                    .join(CATALOG_LINKS).on(dirPred)
+                    .join(fromDoc).on(fromDoc.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER).and(fromDoc.DELETED_AT.isNull()))
+                    .join(toDoc).on(toDoc.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER).and(toDoc.DELETED_AT.isNull()))
+                    .where(reachDepth.lt(depth).and(linkTypePred))));
+        var reached = DSL.name("reached").fields("tumbler").as(
+            DSL.selectDistinct(reachTumbler).from(DSL.table(DSL.name("reach"))));
+        Field<String> reachedTumbler = DSL.field(DSL.name("reached", "tumbler"), CATALOG_LINKS.FROM_TUMBLER.getDataType());
+        Field<Vector> embedding = VectorSeeds.chunkEmbedding(dim);
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .withRecursive(reach, reached)
+            .select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CHUNKS)
+            .join(CATALOG_DOCUMENT_CHUNKS)
+                .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(CHUNKS.COLLECTION))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH)))
+            .join(CATALOG_DOCUMENTS)
+                .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+            .join(reached).on(reachedTumbler.eq(CATALOG_DOCUMENTS.TUMBLER))
+            .where(CHUNKS.COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .orderBy(Routines.cosineDistance1(embedding, DSL.val(VectorSeeds.vecXY(dim, 1f, 0f), embedding)).asc())
+            .fetch(CATALOG_DOCUMENTS.TUMBLER);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -817,10 +828,6 @@ class GraphHopParityTest {
     private static String fmt(double v) {
         if (v == Math.rint(v)) return Integer.toString((int) v);
         return Double.toString(v);
-    }
-
-    private static String sqlText(String v) {
-        return v == null ? "NULL" : "'" + v.replace("'", "''") + "'";
     }
 
     /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the

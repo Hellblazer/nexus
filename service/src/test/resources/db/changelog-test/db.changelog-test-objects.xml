@@ -645,4 +645,43 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.catalog_snapshot()</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-explain-plan" author="nexus-cbo4a">
+        <comment>nexus_test.explain_plan(text, boolean, boolean, boolean, boolean): one text row per line of
+        EXPLAIN (ANALYZE a, VERBOSE v, BUFFERS b, COSTS c) p_stmt (nexus-cbo4a batch C), for
+        PgContainerHelper#explainPlanWith. jOOQ's DSLContext#explain runs a plain EXPLAIN only: no ANALYZE (so no
+        actual loops= counts), no VERBOSE, no BUFFERS and no COSTS OFF, which several plan-shape tests read. The option
+        list is built here from the four booleans, so no caller supplies option text; the statement text is the only
+        string, and the Java wrapper accepts a jOOQ Query only, rendered with every bind inlined (EXPLAIN takes no bind
+        parameters through EXECUTE). A plpgsql FOR .. IN EXECUTE returns every plan row, with no row cap. SECURITY
+        INVOKER and no SET clause: it runs inside the caller's transaction, as the caller's role, so the caller's SET
+        LOCAL planner pins and tenant GUC apply to the plan, and ANALYZE executes the statement under the caller's own
+        row-level security.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.explain_plan(
+    p_stmt    text,
+    p_analyze boolean,
+    p_verbose boolean,
+    p_buffers boolean,
+    p_costs   boolean) RETURNS SETOF text
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_line text;
+BEGIN
+    IF p_stmt IS NULL OR p_analyze IS NULL OR p_verbose IS NULL OR p_buffers IS NULL OR p_costs IS NULL THEN
+        RAISE EXCEPTION 'nexus_test.explain_plan: no argument may be NULL';
+    END IF;
+    FOR v_line IN EXECUTE format('EXPLAIN (ANALYZE %s, VERBOSE %s, BUFFERS %s, COSTS %s) %s',
+                                 p_analyze, p_verbose, p_buffers, p_costs, p_stmt)
+    LOOP
+        RETURN NEXT v_line;
+    END LOOP;
+    RETURN;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.explain_plan(text, boolean, boolean, boolean, boolean)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

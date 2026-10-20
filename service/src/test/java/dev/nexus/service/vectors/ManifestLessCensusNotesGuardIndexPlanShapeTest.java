@@ -10,8 +10,6 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.Field;
-import org.jooq.Record;
-import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -22,7 +20,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -224,17 +221,17 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
     private static final Pattern REV_CANDIDATES_MATERIALIZATION_LOOPS =
         Pattern.compile("CTE rev_candidates\\s*\\n\\s*->.*?loops=(\\d+)", Pattern.DOTALL);
 
+    /**
+     * {@code EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)} of the product statement, run as the RLS-subject role under the
+     * tenant GUC. ANALYZE for the {@code loops=} counts and VERBOSE for the {@code Output:} lines the assertions read,
+     * which {@code ctx.explain} (a plain EXPLAIN) cannot give. The query is the product's own constant with the same
+     * six binds the route passes; the explain function renders them inline, so this is the custom plan for these
+     * literals, the plan the first execution of the route's statement gets.
+     */
     private String explainFullStatement() {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            Result<Record> rows = ctx.fetch(
-                "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) " + PgVectorRepository.MANIFEST_LESS_CENSUS_SQL,
-                TENANT, COLLECTION, TENANT, COLLECTION, 300, 0);
-            List<String> lines = new ArrayList<>();
-            for (var rec : rows) {
-                lines.add(rec.get(0, String.class));
-            }
-            return String.join("\n", lines);
-        });
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
+            ctx.resultQuery(PgVectorRepository.MANIFEST_LESS_CENSUS_SQL, TENANT, COLLECTION, TENANT, COLLECTION, 300, 0),
+            PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
     }
 
     /**

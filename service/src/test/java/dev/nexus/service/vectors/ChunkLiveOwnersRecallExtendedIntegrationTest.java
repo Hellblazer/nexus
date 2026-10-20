@@ -5,15 +5,21 @@ package dev.nexus.service.vectors;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
 
 import org.jooq.Record;
+import org.jooq.Record1;
+import org.jooq.ResultQuery;
 import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
@@ -46,6 +52,7 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
@@ -595,15 +602,6 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         return out;
     }
 
-    private static String vectorLiteral(float[] v) {
-        StringBuilder sb = new StringBuilder(v.length * 8 + 2).append('[');
-        for (int i = 0; i < v.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(v[i]);
-        }
-        return sb.append(']').toString();
-    }
-
     // ── production statement, and the exact oracle ──────────────────────────
 
     private Table<?> plainSearch(float[] q, String collection) {
@@ -675,31 +673,38 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         }
     }
 
-    private static String exactSql() {
-        return "SELECT encode(c.chash, 'hex') AS id FROM nexus.chunks c"
-            + " WHERE c.collection = ? AND c.embedding_" + DIM + " IS NOT NULL"
-            + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
-            + " ORDER BY (c.embedding_" + DIM + " OPERATOR(nexus.<=>) ?::nexus.vector) + 0"
-            + " LIMIT ?";
+    /**
+     * The exact oracle: the live, embedded chunks of one collection ranked by {@code cosine_distance(..) + 0}
+     * ({@code Routines.cosineDistance1}, pgvector's own function, the value the {@code <=>} operator computes). The
+     * {@code + 0} and the function form are what keep an HNSW index from ever serving it, so the ranking is exact:
+     * the operator itself would be index-served and approximate. Liveness is the product predicate, the
+     * set-returning {@code chunk_live_owners} function inside {@code EXISTS}, by name rather than by a copy of its
+     * text, so the oracle grades the statement against the same predicate it runs.
+     */
+    private ResultQuery<Record1<byte[]>> exactQuery(DSLContext ctx, Probe q) {
+        Field<Vector> embedding = VectorSeeds.chunkEmbedding(DIM);
+        return ctx.select(CHUNKS.CHASH).from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(collections.get(q.collection())))
+            .and(embedding.isNotNull())
+            .and(liveOwned())
+            .orderBy(Routines.cosineDistance1(embedding, DSL.val(Vector.of(q.vector()), embedding)).plus(DSL.inline(0)))
+            .limit(K);
     }
 
-    /** The one raw-SQL read in this class: the exact oracle, its EXPLAIN and the live-count pin
-     *  all go through it. SANCTIONED RAW (nexus-wbfpw.44): {@code ORDER BY (distance) + 0} and a
-     *  set-returning function inside {@code EXISTS} have no typed jOOQ form, and the oracle must
-     *  be the same predicate text as the statement it grades. */
-    private Result<Record> rawRows(String sql, Object... binds) {
-        return tenantScope.withTenant(TENANT, ctx -> ctx.fetch(sql, binds));
+    /** {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))}. */
+    private static Condition liveOwned() {
+        return DSL.exists(DSL.selectOne().from(CHUNK_LIVE_OWNERS.call(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)));
     }
 
     private List<String> runExact(Probe q) {
-        return ids(rawRows(exactSql(), collections.get(q.collection()), vectorLiteral(q.vector()), K));
+        return tenantScope.withTenant(TENANT, ctx -> exactQuery(ctx, q)
+            .fetch(r -> HexFormat.of().formatHex(r.value1())));
     }
 
     /** Full-population live count for one collection, for the fixture pin. */
     private long liveCount(int c) {
-        return rawRows("SELECT count(*) FROM nexus.chunks c WHERE c.collection = ?"
-            + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))",
-            collections.get(c)).get(0).get(0, Long.class);
+        return tenantScope.withTenant(TENANT, ctx ->
+            ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collections.get(c)).and(liveOwned())));
     }
 
     private long expectedLive(int c) {
@@ -718,12 +723,9 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         });
     }
 
+    /** Plain EXPLAIN of {@link #exactQuery}, every row, binds bound as the oracle runs. */
     private String explainExact(Probe q) {
-        StringBuilder sb = new StringBuilder();
-        for (Record r : rawRows("EXPLAIN " + exactSql(), collections.get(q.collection()), vectorLiteral(q.vector()), K)) {
-            sb.append(r.get(0, String.class)).append('\n');
-        }
-        return sb.toString();
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlan(ctx, exactQuery(ctx, q)));
     }
 
     private String pgvectorVersion() {
@@ -889,8 +891,11 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         setDeadFraction(0);
         Probe probe = uniformQueries(20260930300L).get(0);
         String exactPlan = explainExact(probe);
+        // Name-free: chunk HNSW indexes are per-collection PCI indexes now (PciCatalog.indexName), so a pin on the
+        // retired idx_chunks_embedding_<dim> name could no longer fail. An index-served KNN prints "Order By:" on
+        // its scan; the exact oracle sorts.
         assertThat(exactPlan).as("the exact oracle must not use HNSW. Plan:%n%s", exactPlan)
-            .doesNotContain("idx_chunks_embedding_" + DIM);
+            .contains("Sort Key:").doesNotContain("Order By:");
 
         // Baseline (0% dead, live(c) only removes the manifest-less quarter): the fixture
         // must let production settings reach 0.9 on every collection, or a low number later

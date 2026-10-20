@@ -4,7 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
-import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.jooq.nexus.Routines;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.Field;
@@ -16,7 +17,6 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -1214,7 +1214,7 @@ class CombinedQueryParityTest {
     }
 
     /** A length-{@code dim} typed pgvector value with the SAME first-two-components
-     *  (x=1.0, y=0.0, rest zero) shape as {@link #queryVecLiteral} -- for EXPLAIN
+     *  (x=1.0, y=0.0, rest zero) shape as {@link #probeDistance} -- for EXPLAIN
      *  call sites converted onto typed jOOQ {@code Table<?>.call(...)} (nexus-cbo4a
      *  batch 3), which need an actual {@link Vector}, not a literal-text pgvector
      *  cast. */
@@ -1257,12 +1257,15 @@ class CombinedQueryParityTest {
             .select(fn.field("id", String.class)).from(fn).fetch(r -> r.get(0, String.class));
     }
 
-    private static List<String> runIds(Connection conn, String sql) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) out.add(rs.getString(1));
-        }
-        return out;
+    /**
+     * The probe-direction distance every oracle ranks by: {@code Routines.cosineDistance1} (pgvector's C
+     * function, the value the {@code <=>} operator computes) between the chunk's {@code dim}-wide embedding and the
+     * 2-D unit direction (1,0) padded to {@code dim}. Exact, never served by an HNSW index, which is what an oracle
+     * wants. The probe vector binds through the generated field's own vector binding.
+     */
+    private static Field<Double> probeDistance(int dim) {
+        Field<Vector> embedding = VectorSeeds.chunkEmbedding(dim);
+        return Routines.cosineDistance1(embedding, DSL.val(queryVec(dim), embedding));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1271,52 +1274,59 @@ class CombinedQueryParityTest {
 
     /**
      * Stitched metadata path: catalog filter → candidate chashes → vector rank.
-     * One SQL statement, but structured as the explicit join the Python query tool
+     * One statement, but structured as the explicit join the Python query tool
      * performs across stores today. Tombstone-filtered (deleted_at IS NULL).
      */
     private List<String> stitchedMetaOracle(Connection conn, int dim, String collection,
-                                            String contentType, String author)
-            throws Exception {
-        String sql =
-            "SELECT d.tumbler AS id " +
-            "  FROM nexus.catalog_documents d " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
-            "  JOIN " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
-            "   AND c.chash = m.chash " +
-            " WHERE m.collection = '" + collection + "' " +
-            "   AND d.deleted_at IS NULL " +
-            (contentType == null ? "" : "   AND d.content_type = " + sqlText(contentType) + " ") +
-            (author == null ? "" : "   AND d.author ILIKE '%' || " + sqlText(author) + " || '%' ") +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
-        return runIds(conn, sql);
+                                            String contentType, String author) {
+        Condition where = CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection)
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
+        if (contentType != null) where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
+        if (author != null) where = where.and(CATALOG_DOCUMENTS.AUTHOR.likeIgnoreCase("%" + author + "%"));
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CATALOG_DOCUMENTS)
+            .join(CATALOG_DOCUMENT_CHUNKS)
+                .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
+                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
+            .join(CHUNKS)
+                .on(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                    .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))
+            .where(where)
+            .orderBy(probeDistance(dim).asc())
+            .fetch(CATALOG_DOCUMENTS.TUMBLER);
     }
 
     /** Stitched topic path: topics ⋈ topic_assignments ⋈ manifest ⋈ chunks, vector rank. */
     private List<String> stitchedTopicOracle(Connection conn, int dim, String collection,
-                                             String topicLabel) throws Exception {
-        String sql =
-            "SELECT encode(c.chash, 'hex') AS id " +
-            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "  JOIN nexus.topic_assignments ta " +
-            // RDR-194 P3c: doc_id is bytea now -- direct equality, no encode(),
-            // matching search_topic_scoped_<dim>'s own post-P3c join predicate.
-            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash " +
-            "  JOIN nexus.topics t " +
-            "    ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id " +
-            " WHERE c.collection = '" + collection + "' " +
-            "   AND t.collection = '" + collection + "' " +
-            "   AND t.label = " + sqlText(topicLabel) + " " +
-            "   AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m " +
-            "                     WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash) " +
-            "        OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m " +
-            "                     JOIN nexus.catalog_documents d " +
-            "                       ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
-            "                    WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash " +
-            "                      AND d.deleted_at IS NULL)) " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
-        return runIds(conn, sql);
+                                             String topicLabel) {
+        // RDR-194 P3c: doc_id is bytea now -- direct equality, no encode(),
+        // matching search_topic_scoped_<dim>'s own post-P3c join predicate.
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(CHUNKS.CHASH)
+            .from(CHUNKS)
+            .join(TOPIC_ASSIGNMENTS)
+                .on(TOPIC_ASSIGNMENTS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(CHUNKS.CHASH)))
+            .join(TOPICS)
+                .on(TOPICS.TENANT_ID.eq(TOPIC_ASSIGNMENTS.TENANT_ID)
+                    .and(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID)))
+            .where(CHUNKS.COLLECTION.eq(collection)
+                .and(TOPICS.COLLECTION.eq(collection))
+                .and(TOPICS.LABEL.eq(topicLabel))
+                .and(DSL.notExists(DSL.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                        .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))))
+                    .or(DSL.exists(DSL.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                        .join(CATALOG_DOCUMENTS)
+                            .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                        .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))
+                            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))))))
+            .orderBy(probeDistance(dim).asc())
+            .fetch(r -> HexFormat.of().formatHex(r.get(CHUNKS.CHASH)));
     }
 
     /**
@@ -1329,22 +1339,24 @@ class CombinedQueryParityTest {
      * a vector window that already truncated it away.
      */
     private List<String> twoStepAspectOracle(Connection conn, int dim, String collection,
-                                             String pattern, int topK) throws Exception {
-        String topKSql =
-            "SELECT d.tumbler AS id " +
-            "  FROM nexus.catalog_documents d " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
-            "  JOIN " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
-            "   AND c.chash = m.chash " +
-            " WHERE m.collection = '" + collection + "' " +
-            "   AND d.deleted_at IS NULL " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC " +
-            " LIMIT " + topK;
-        List<String> topKIds = runIds(conn, topKSql);
-        List<String> matched = new ArrayList<>();
+                                             String pattern, int topK) {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        List<String> topKIds = ctx
+            .select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CATALOG_DOCUMENTS)
+            .join(CATALOG_DOCUMENT_CHUNKS)
+                .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
+                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
+            .join(CHUNKS)
+                .on(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                    .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))
+            .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection)
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .orderBy(probeDistance(dim).asc())
+            .limit(topK)
+            .fetch(CATALOG_DOCUMENTS.TUMBLER);
+        List<String> matched = new ArrayList<>();
         for (String id : topKIds) {
             if (ctx.fetchExists(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A),
@@ -1598,29 +1610,6 @@ class CombinedQueryParityTest {
     }
 
     // ── value helpers ────────────────────────────────────────────────────────
-
-    /** The probe query vector literal: 2-D direction (1,0) padded to dim, ::nexus.vector. */
-    private static String queryVecLiteral(int dim) {
-        return vec2(dim, 1.0, 0.0) + "::nexus.vector";
-    }
-
-    /** A length-{@code dim} pgvector literal with first two components (x,y), rest 0. */
-    private static String vec2(int dim, double x, double y) {
-        StringBuilder sb = new StringBuilder("'[");
-        sb.append(fmt(x)).append(',').append(fmt(y));
-        for (int i = 2; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
-    }
-
-    private static String fmt(double v) {
-        if (v == Math.rint(v)) return Integer.toString((int) v);
-        return Double.toString(v);
-    }
-
-    /** SQL string literal or NULL token for a nullable text value. */
-    private static String sqlText(String v) {
-        return v == null ? "NULL" : "'" + v.replace("'", "''") + "'";
-    }
 
     /**
      * Full 64-lowercase-hex chash deterministically derived from seed (RDR-180:

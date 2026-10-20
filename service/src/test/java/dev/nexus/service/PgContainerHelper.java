@@ -2613,6 +2613,43 @@ public final class PgContainerHelper {
     }
 
     /**
+     * The four {@code EXPLAIN} options {@code nexus_test.explain_plan} takes (nexus-cbo4a batch C). jOOQ's
+     * {@code ctx.explain} runs a plain {@code EXPLAIN}; a test that reads {@code loops=} counts, {@code Output:} lines or
+     * buffer counts needs ANALYZE, VERBOSE or BUFFERS, and one that must not see cost numbers needs COSTS OFF. The
+     * options are booleans, never text: the function assembles the option list server side.
+     */
+    public record ExplainOptions(boolean analyze, boolean verbose, boolean buffers, boolean costs) {
+        /** {@code EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)}. */
+        public static final ExplainOptions ANALYZE_VERBOSE_COSTS_OFF = new ExplainOptions(true, true, false, false);
+        /** {@code EXPLAIN (ANALYZE, BUFFERS)}. */
+        public static final ExplainOptions ANALYZE_BUFFERS = new ExplainOptions(true, false, true, true);
+    }
+
+    /**
+     * The plan text of {@code EXPLAIN (options) query}, every row, through {@code nexus_test.explain_plan}
+     * (db.changelog-test-objects.xml, nexus-cbo4a batch C). It takes a jOOQ {@link Query} and nothing else, rendered
+     * with every bind value inlined ({@code ctx.renderInlined}): EXPLAIN cannot take bind parameters through the
+     * function's EXECUTE, so this is the CUSTOM plan for those literal values, the plan the planner makes for the
+     * first execution of a prepared statement whose parameters are known. A caller needing the GENERIC plan
+     * (plan_cache_mode) proves it separately. No string parameter exists, so text cannot be laundered through it.
+     *
+     * <p>The function runs on {@code ctx}'s connection and in its open transaction, as its role, so a tenant GUC and any
+     * SET LOCAL planner pin apply to the plan and ANALYZE executes the query under the caller's row-level security.
+     * The role needs USAGE on schema nexus_test, which {@link #bootstrapServiceRole} grants.
+     *
+     * @param ctx     the context to run on; bind it to the connection or transaction the query is meant to run in
+     * @param query   the statement to explain (a select, or an insert, update or delete)
+     * @param options the EXPLAIN options
+     */
+    public static String explainPlanWith(DSLContext ctx, Query query, ExplainOptions options) {
+        return String.join("\n", ctx
+            .select(DSL.function(DSL.name("nexus_test", "explain_plan"), SQLDataType.CLOB,
+                DSL.val(ctx.renderInlined(query)), DSL.val(options.analyze()), DSL.val(options.verbose()),
+                DSL.val(options.buffers()), DSL.val(options.costs())))
+            .fetch(0, String.class));
+    }
+
+    /**
      * {@code ANALYZE table} on an existing, test-owned {@link Connection} (nexus-cbo4a
      * batch 3/4) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
      *
