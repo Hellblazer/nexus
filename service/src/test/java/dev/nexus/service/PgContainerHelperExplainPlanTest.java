@@ -105,7 +105,8 @@ class PgContainerHelperExplainPlanTest {
 
     @Test
     void explainPlanWith_sendsEachBooleanInItsOwnSlot() {
-        // distinct values in every slot, so a swap of any two (buffers and costs included) fails here
+        // buffers and costs differ in the third case, so their swap fails here; the analyze/costs swap fails in
+        // explainPlanWith_sendsTheInlinedQueryAndFourBooleans_andReturnsEveryRow
         Seen seen = new Seen();
         DSLContext ctx = contextAnswering(1, seen);
         PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), new PgContainerHelper.ExplainOptions(true, false, false, true));
