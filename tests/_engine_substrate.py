@@ -610,11 +610,15 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
 _TMPFS_FLOOR_WAIT_S = 45.0
 _TMPFS_FLOOR_POLL_S = 3.0
 
-#: Set when the floor tripped in this process: the next start looks once instead of
+#: When the floor last tripped in this process (the injected clock's reading), or
+#: None. A start within :data:`_TMPFS_FLOOR_LATCH_S` of a trip looks once instead of
 #: polling again, since module- and function-scoped fixtures would otherwise each
-#: re-wait the full bound for the same verdict (nexus-gsjzh). Cleared by a start
-#: that finds room.
-_FLOOR_TRIPPED = False
+#: re-wait the full bound for the same verdict (nexus-gsjzh). After the window a
+#: start polls the full bound again, so a squeeze that outlasts one poll but passes
+#: (the neighbour-JVM spike the poll exists for) is still absorbed. Cleared by a
+#: start that finds room.
+_FLOOR_TRIPPED_AT: float | None = None
+_TMPFS_FLOOR_LATCH_S = 120.0
 
 
 def _tmpfs_floor_cause(
@@ -655,23 +659,27 @@ def _check_tmpfs_has_room(
     """Fail loud when a run that chose tmpfs cannot fit one more cluster, after
     polling for up to *wait_s* (default :data:`_TMPFS_FLOOR_WAIT_S`) for the
     headroom to recover. Once that has failed in this process, later calls look
-    once and do not wait (:data:`_FLOOR_TRIPPED`). Clock and sleep are injectable."""
-    global _FLOOR_TRIPPED
-    latched = _FLOOR_TRIPPED
+    once and do not wait for :data:`_TMPFS_FLOOR_LATCH_S` after it
+    (:data:`_FLOOR_TRIPPED_AT`). Clock and sleep are injectable."""
+    global _FLOOR_TRIPPED_AT
+    latched = _FLOOR_TRIPPED_AT is not None and clock() - _FLOOR_TRIPPED_AT < _TMPFS_FLOOR_LATCH_S
     wait = 0.0 if latched else (_TMPFS_FLOOR_WAIT_S if wait_s is None else wait_s)
     poll = _TMPFS_FLOOR_POLL_S if poll_s is None else poll_s
     start = clock()
     while True:
         cause = _tmpfs_floor_cause(root, free_bytes, cgroup_headroom)
         if cause is None:
-            _FLOOR_TRIPPED = False
+            _FLOOR_TRIPPED_AT = None
             return
         if clock() - start >= wait:
             break
         sleep(poll)
-    _FLOOR_TRIPPED = True
+    if not latched:
+        # only a full poll stamps the window, so repeated fast raises cannot slide it
+        _FLOOR_TRIPPED_AT = clock()
     waited = (
-        "the floor already tripped in this process, so this start did not wait again"
+        f"the floor already tripped in this process within the last {_TMPFS_FLOOR_LATCH_S:g} s, "
+        f"so this start did not wait again"
         if latched else f"it did not recover in {wait:g} s"
     )
     raise SubstrateRootExhausted(

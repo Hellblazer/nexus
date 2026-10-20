@@ -47,7 +47,8 @@ therefore never drifts to ext4 as the grant's memory fills (tmpfs pages are char
 to it; that drift wrote 3.9 GB to the NVMe in 4 minutes on lab-l). A cluster start
 that finds under 512 MiB of tmpfs space or cgroup headroom (droppable page cache
 counted as room) waits up to 45 s for it to recover, then raises
-`SubstrateRootExhausted` (see "If `SubstrateRootExhausted` trips" below). The start
+`SubstrateRootExhausted`; a start within 120 s of such a raise in the same process
+looks once and raises at once instead of waiting again (nexus-gsjzh) (see "If `SubstrateRootExhausted` trips" below). The start
 decision uses the same page-cache-credited headroom, so a grant warmed by a build or
 `uv sync` still picks tmpfs; `nexus_t2_substrate.root_decision_headroom` logs the raw
 and the credited figure. Every cluster start
@@ -122,7 +123,8 @@ runs real nested pytests (serial, xdist, SIGKILL) against `NX_TEST_TMP_SHM_DIR`,
 standing in for `/dev/shm` that is treated as exec-capable tmpfs on any platform.
 
 **If `SubstrateRootExhausted` trips** (nexus-vo9qn). It means this run chose tmpfs
-for its clusters and, after 45 s of re-reading, a start still saw under 512 MiB
+for its clusters and, after 45 s of re-reading (or at once, within 120 s of an
+earlier trip in that process), a start still saw under 512 MiB
 (the floor) of tmpfs space or cgroup memory headroom. It is a capacity statement,
 not a code failure: do not rerun hoping it passes.
 - Read the cause: the exception names it (`... MiB free` or `the cgroup has N MiB
