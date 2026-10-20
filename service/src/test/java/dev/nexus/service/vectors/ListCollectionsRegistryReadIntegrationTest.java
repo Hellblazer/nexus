@@ -89,6 +89,13 @@ class ListCollectionsRegistryReadIntegrationTest {
         };
         repo = new PgVectorRepository(tenantScope, none, none);
         seed();
+        // The plan-shape test reads the planner's choice, which follows the statistics: without an explicit ANALYZE
+        // it depended on how far autoanalyze had got on a loaded runner (CI 304bd4611 planned a HashAggregate
+        // and Merge Join over the chunk leaves). Both tables are under the sample size, so ANALYZE reads every row.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.analyzeTable(su, CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_COLLECTIONS);
+        }
     }
 
     @AfterAll
