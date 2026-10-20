@@ -14,8 +14,9 @@ import org.jooq.tools.jdbc.MockConnection;
 import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link PgContainerHelper#explainPlan} and {@link PgContainerHelper#explainPlanInlined} return every plan row
@@ -120,7 +121,7 @@ class PgContainerHelperExplainPlanTest {
     }
 
     @Test
-    void aPlanWhoseLateRowsAreWiderThanItsFirstFifty_isRefused_notReturnedCut() {
+    void aPlanWhoseLateRowsAreWiderThanItsFirstFifty_comesBackWhole() {
         // jOOQ's text format sizes the column from the first 50 rows and cuts a wider later row to that width
         Seen seen = new Seen();
         DSLContext fixture = DSL.using(SQLDialect.POSTGRES);
@@ -135,9 +136,13 @@ class PgContainerHelperExplainPlanTest {
             seen.sql = c.sql();
             return new MockResult[] {new MockResult(60, plan)};
         }), SQLDialect.POSTGRES);
-        assertThatThrownBy(() -> PgContainerHelper.explainPlan(ctx, boundQuery(ctx)))
-            .isInstanceOf(IllegalStateException.class).hasMessageContaining("explainPlanWith");
-        assertThatThrownBy(() -> PgContainerHelper.explainPlanInlined(ctx, boundQuery(ctx)))
-            .isInstanceOf(IllegalStateException.class).hasMessageContaining("explainPlanWith");
+        String wideTail = "x".repeat(80) + ")";
+        for (String text : List.of(PgContainerHelper.explainPlan(ctx, boundQuery(ctx)),
+                PgContainerHelper.explainPlanInlined(ctx, boundQuery(ctx)))) {
+            assertThat(planRows(text)).isEqualTo(60);
+            assertThat(text.lines().filter(l -> l.endsWith(wideTail)).count())
+                .as("every late row comes back whole, not cut to the first rows' width").isEqualTo(10);
+            assertThat(text).doesNotContain("...");
+        }
     }
 }

@@ -14,10 +14,14 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.test.Routines;
+import org.jooq.Configuration;
 import org.jooq.DSLContext;
+import org.jooq.ExecuteContext;
+import org.jooq.ExecuteListener;
 import org.jooq.Field;
 import org.jooq.Name;
 import org.jooq.Query;
+import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.conf.StatementType;
@@ -38,6 +42,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -2602,29 +2607,31 @@ public final class PgContainerHelper {
     }
 
     /**
-     * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run, every row.
-     * Runs on {@code ctx}'s connection and transaction, so a tenant GUC or SET LOCAL pin applies. jOOQ 3.20's
-     * {@code Explain.plan()} renders through {@code Result.format()}: a table with '|' borders and no row cap (only
-     * {@code Result.toString()} stops at 50), but the column width is set by the first 50 rows and a later row wider
-     * than that is cut to it, ending in "..." (nexus-ou2za). A cut row could hide the very text a
-     * {@code doesNotContain} looks for, so this refuses a plan that has one; such a caller uses
-     * {@link #explainPlanWith}, which returns the server's own lines. Batch 9 wrongly refused every plan past 50
-     * rows here and broke a legitimate 53-row one (CI run 39365428198); this refuses only an actual cut.
+     * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run: the server's own
+     * lines, every row, joined with newlines. Runs on {@code ctx}'s connection and transaction, so a tenant GUC or SET
+     * LOCAL pin applies. It does not return jOOQ's {@code Explain.plan()}, a {@code Result.format()} table that sizes
+     * its column from the first 50 rows and cuts a wider later row with "..." (nexus-ou2za: a cut row could hide the
+     * text a {@code doesNotContain} looks for); an execute listener keeps the rows {@code ctx.explain} fetched.
      */
     public static String explainPlan(DSLContext ctx, Query query) {
-        return requireUncut(ctx.explain(query).plan());
+        return rawExplain(ctx.configuration(), query);
     }
 
-    /** A cell jOOQ's text format cut to an earlier column width ends in "..." right before the border. */
-    private static final java.util.regex.Pattern CUT_CELL = java.util.regex.Pattern.compile("(?m)\\.\\.\\.\\|$");
-
-    static String requireUncut(String formattedPlan) {
-        if (CUT_CELL.matcher(formattedPlan).find()) {
-            throw new IllegalStateException("EXPLAIN plan has a row jOOQ's text format cut to the width of its first"
-                + " 50 rows, so assertions over it could pass vacuously; use PgContainerHelper.explainPlanWith, which"
-                + " returns the server's own lines (nexus-ou2za)");
+    /** Runs jOOQ's EXPLAIN of {@code query} on {@code configuration} and returns the fetched plan rows, uncut. */
+    private static String rawExplain(Configuration configuration, Query query) {
+        List<Result<?>> fetched = new ArrayList<>();
+        configuration.deriveAppending(new ExecuteListener() {
+            @Override
+            public void fetchEnd(ExecuteContext e) {
+                if (e.result() != null) {
+                    fetched.add(e.result());
+                }
+            }
+        }).dsl().explain(query);
+        if (fetched.size() != 1) {
+            throw new IllegalStateException("EXPLAIN fetched " + fetched.size() + " results, expected one (nexus-ou2za)");
         }
-        return formattedPlan;
+        return fetched.get(0).stream().map(r -> String.valueOf(r.get(0))).collect(Collectors.joining("\n"));
     }
 
     /**
@@ -2635,9 +2642,8 @@ public final class PgContainerHelper {
      * plan; a generic-plan test is a separate proof.
      */
     public static String explainPlanInlined(DSLContext ctx, Query query) {
-        DSLContext inline = ctx.configuration()
-            .deriveSettings(s -> s.withStatementType(StatementType.STATIC_STATEMENT)).dsl();
-        return requireUncut(inline.explain(query).plan());
+        return rawExplain(ctx.configuration().deriveSettings(s -> s.withStatementType(StatementType.STATIC_STATEMENT)),
+            query);
     }
 
     /**
