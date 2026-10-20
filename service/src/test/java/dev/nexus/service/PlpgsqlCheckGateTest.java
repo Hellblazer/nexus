@@ -97,33 +97,74 @@ class PlpgsqlCheckGateTest {
         "apt-get update && apt-get install -y --no-install-recommends postgresql-17-plpgsql-check"
             + " && rm -rf /var/lib/apt/lists/*";
 
+    static final String PLPGSQL_CHECK_REPO = "nexus-test/pg17-plpgsql-check";
+
+    /** The ISO week the image is built for (UTC), e.g. {@code 2026-W43}. */
+    static String isoWeek(java.time.LocalDate day) {
+        return String.format("%d-W%02d", day.get(java.time.temporal.IsoFields.WEEK_BASED_YEAR),
+            day.get(java.time.temporal.IsoFields.WEEK_OF_WEEK_BASED_YEAR));
+    }
+
     /**
-     * The image's name: its recipe's hash, so a changed base or install line is a new image. It is kept
-     * after the run (Testcontainers deletes a built image at exit by default), so the daemon's build cache
-     * answers the next run instead of repeating the apt download and the layer write on every Service CI
-     * job (nexus-aca0q.2: about 40 MB of container writes per job on chas). The tag is a label only: the
-     * daemon's build cache keys on the local base image's ID plus the RUN line, so a re-pulled base rebuilds
-     * under the same tag, and the plpgsql_check package stays whatever apt served while that base is local.
+     * The image's tag: the week plus its recipe's hash. The image is kept after the run (Testcontainers
+     * deletes a built image at exit by default), so the daemon's build cache answers the rest of the week's
+     * Service CI jobs instead of repeating the apt download and the layer write on each (nexus-aca0q.2: about
+     * 40 MB of container writes per job on chas). The cache keys on the base image's ID and the instructions,
+     * not the tag, so the week also goes INTO the recipe (a LABEL before the RUN): a new week misses the cache
+     * and apt serves a current plpgsql_check. The pool's weekly prune never removes a tagged image, so the
+     * build removes this repo's older tags itself ({@link #removeOlderTags}).
      */
-    static String plpgsqlCheckImageName() {
+    static String plpgsqlCheckImageName(String week) {
         try {
             byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest((PgContainerHelper.IMAGE + "\n" + PLPGSQL_CHECK_INSTALL).getBytes(StandardCharsets.UTF_8));
-            return "nexus-test/pg17-plpgsql-check:" + java.util.HexFormat.of().formatHex(digest).substring(0, 16);
+                .digest((PgContainerHelper.IMAGE + "\n" + week + "\n" + PLPGSQL_CHECK_INSTALL).getBytes(StandardCharsets.UTF_8));
+            return PLPGSQL_CHECK_REPO + ":" + week + "-" + java.util.HexFormat.of().formatHex(digest).substring(0, 12);
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
     }
 
+    /** Remove this repo's tags other than {@code keep}. Best effort: a tag in use by a running job's container
+     *  is refused by the daemon and stays; nothing here can fail the gate. */
+    static void removeOlderTags(String keep) {
+        try {
+            var docker = org.testcontainers.DockerClientFactory.instance().client();
+            for (var img : docker.listImagesCmd().withReferenceFilter(PLPGSQL_CHECK_REPO).exec()) {
+                for (String tag : img.getRepoTags() == null ? new String[0] : img.getRepoTags()) {
+                    if (tag.startsWith(PLPGSQL_CHECK_REPO + ":") && !tag.equals(keep)) {
+                        try {
+                            docker.removeImageCmd(tag).exec();
+                        } catch (RuntimeException e) {
+                            System.out.println("PLPGSQL_CHECK kept older image " + tag + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            System.out.println("PLPGSQL_CHECK could not list older images: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void the_image_tag_carries_the_iso_week_and_changes_with_it() {
+        assertThat(isoWeek(java.time.LocalDate.of(2026, 10, 20))).isEqualTo("2026-W43");
+        assertThat(isoWeek(java.time.LocalDate.of(2027, 1, 1))).isEqualTo("2026-W53");
+        assertThat(plpgsqlCheckImageName("2026-W43")).startsWith(PLPGSQL_CHECK_REPO + ":2026-W43-")
+            .isNotEqualTo(plpgsqlCheckImageName("2026-W44"));
+    }
+
     @BeforeAll
     static void walkAndCheck() throws Exception {
         long t0 = System.nanoTime();
-        var image = new ImageFromDockerfile(plpgsqlCheckImageName(), false)
+        String week = isoWeek(java.time.LocalDate.now(java.time.ZoneOffset.UTC));
+        var image = new ImageFromDockerfile(plpgsqlCheckImageName(week), false)
             .withDockerfileFromBuilder(b -> b
                 .from(PgContainerHelper.IMAGE)
+                .label("nexus.plpgsql-check.week", week)
                 .run(PLPGSQL_CHECK_INSTALL)
                 .build());
         String imageName = image.get();
+        removeOlderTags(imageName);
         buildMillis = (System.nanoTime() - t0) / 1_000_000;
         pg = PgContainerHelper.newContainer(DockerImageName.parse(imageName));
         pg.start();
