@@ -3242,6 +3242,12 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     import nexus.mcp_infra as mcp_infra
 
     before = mcp_infra._t3_instance
+    # The T1 twin (nexus-kt6kj): ``get_t1()`` memoises an HttpScratchStore bound to the
+    # endpoint and session the first caller saw, so one test's store served a later
+    # test's scratch put after that endpoint was gone ("connect failed on /v1/t1/put":
+    # tests/db/test_t1_cli_dedicated_session.py then tests/test_tier_writes.py, one
+    # process). Restored unconditionally; every inject_t1 site is function-scoped.
+    t1_before = (mcp_infra._t1_instance, mcp_infra._t1_isolated)
     # Bind the REAL invalidator now: a test may monkeypatch the module
     # attribute (some assert it is never called on a cache hit), and this
     # fixture's teardown can run before monkeypatch's undo.
@@ -3256,6 +3262,9 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     # -n 8, green alone). Drop it after every test, unconditionally: the
     # next reader refetches, exactly as a fresh process would.
     invalidate_rows()
+    if mcp_infra._t1_instance is not t1_before[0] or mcp_infra._t1_isolated is not t1_before[1]:
+        with mcp_infra._t1_lock:
+            mcp_infra._t1_instance, mcp_infra._t1_isolated = t1_before
     after = mcp_infra._t3_instance
     if after is before:
         return
