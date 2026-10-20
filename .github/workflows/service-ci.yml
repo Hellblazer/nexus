@@ -344,16 +344,6 @@ jobs:
           NX_JOOQ_CACHE: ${{ steps.jooqcache.outputs.dir || 'off' }}
         run: ./mvnw -q test -Dnexus.ddl.suite=main "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-main" -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
-      # nexus-km7ma: the evidence line for the host cache. A main/test entry that appeared
-      # during the suite means that kind missed and was generated and published; none means
-      # both restored (or the publish was refused, which the pom warns about in the log).
-      - name: jOOQ host cache hit or miss (diagnostic, never fails)
-        if: always() && steps.jooqcache.outputs.dir != ''
-        run: |
-          find "${{ steps.jooqcache.outputs.dir }}" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-after" || true
-          new=$(comm -13 "$RUNNER_TEMP/jooq-cache-before" "$RUNNER_TEMP/jooq-cache-after" | sed -E 's/-.*//' | sort -u | tr '\n' ' ')
-          echo "jOOQ host cache: missed and published: ${new:-none}"
-
       # nexus-ekp7w: the bytes-written and DDL ratchet for this suite. ADVISORY until the Java
       # ceilings in tests/ddl_ceiling.toml are numbers: they are still "measure", pending the
       # Java DDL cut (nexus-0ty8z), because a ceiling set before it would be set at the number
@@ -435,6 +425,16 @@ jobs:
           python3 scripts/assert_bge_gates_ran.py \
             service/target/surefire-reports/TEST-dev.nexus.service.Bge768ParityTest.xml \
             service/target/surefire-reports/TEST-dev.nexus.service.vectors.Bge768BatchCompositionTest.xml
+
+      # nexus-km7ma: the evidence line for the host cache. A main/test entry that appeared
+      # during the two suites means that kind missed and was generated and published; none means
+      # both restored (or the publish was refused, which the pom warns about in the log).
+      - name: jOOQ host cache hit or miss (diagnostic, never fails)
+        if: always() && steps.jooqcache.outputs.dir != ''
+        run: |
+          find "${{ steps.jooqcache.outputs.dir }}" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-after" || true
+          new=$(comm -13 "$RUNNER_TEMP/jooq-cache-before" "$RUNNER_TEMP/jooq-cache-after" | sed -E 's/-.*//' | sort -u | tr '\n' ' ')
+          echo "jOOQ host cache: missed and published: ${new:-none}"
 
       # nexus-rjk2a: per-class timing, so the next duration question has data.
       # `-q` only quiets maven's console; surefire still writes TEST-*.xml (the
