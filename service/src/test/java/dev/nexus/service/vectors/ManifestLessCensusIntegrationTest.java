@@ -9,6 +9,8 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
+import org.jooq.conf.Settings;
+import org.jooq.conf.StatementType;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -431,19 +433,17 @@ class ManifestLessCensusIntegrationTest {
             .containsEntry("owner_tumbler", D_TIE_ZERO)
             .containsEntry("owner_path", "reverse");
 
-        String literalSql = PgVectorRepository.MANIFEST_LESS_CENSUS_SQL
-            .replaceFirst("\\?", "'" + TENANT + "'")
-            .replaceFirst("\\?", "'" + COLLECTION_A + "'")
-            .replaceFirst("\\?", "'" + TENANT + "'")
-            .replaceFirst("\\?", "'" + COLLECTION_A + "'")
-            .replaceFirst("\\?", "300")
-            .replaceFirst("\\?", "0");
-        assertThat(literalSql).doesNotContain("?");
-
+        // The literal-value form: jOOQ's static-statement mode inlines the six values into the product statement's
+        // text and sends it with no bind parameters (nexus-cbo4a: no SQL text is spliced in Java).
         Set<String> literalLegacyUnmanifested = new HashSet<>();
         Map<String, String> literalTieOwner = new HashMap<>();
         tenantScope.withTenant(TENANT, ctx -> {
-            ctx.fetch(literalSql).forEach(r -> {
+            var literalForm = DSL.using(ctx.configuration().derive(
+                    new Settings().withStatementType(StatementType.STATIC_STATEMENT)))
+                .resultQuery(PgVectorRepository.MANIFEST_LESS_CENSUS_SQL,
+                    TENANT, COLLECTION_A, TENANT, COLLECTION_A, 300, 0);
+            assertThat(literalForm.getSQL()).doesNotContain("?");
+            literalForm.fetch().forEach(r -> {
                 if ("item".equals(r.get("row_kind", String.class))
                         && "legacy-unmanifested".equals(r.get("bucket", String.class))) {
                     literalLegacyUnmanifested.add(r.get("chash", String.class));
