@@ -1945,8 +1945,16 @@ def _tag_of(version: tuple[int, int, int]) -> str:
     return "engine-service-v" + ".".join(str(p) for p in version)
 
 
-def _write_engine_receipt(config_dir: Path, tag: str | None, *, raw: str | None = None) -> None:
-    """Write the provenance sidecar ``install_binary`` writes beside the well-known binary."""
+def _write_engine_receipt(
+    config_dir: Path, tag: str | None, *, raw: str | None = None, binary: str = "genuine",
+) -> None:
+    """Write the provenance sidecar ``install_binary`` writes beside the well-known binary.
+
+    The binary at the well-known path is real bytes whose sha256 the sidecar records, so
+    ``verify_installed_binary`` (nexus-8eaeg) passes. ``binary`` selects the other states:
+    ``"tampered"`` (the sidecar records the digest of other bytes), ``"missing"`` (no file).
+    """
+    import hashlib
     import json
 
     from nexus.daemon.binary_install import binary_sidecar_path
@@ -1956,8 +1964,15 @@ def _write_engine_receipt(config_dir: Path, tag: str | None, *, raw: str | None 
     if raw is not None:
         path.write_text(raw, encoding="utf-8")
         return
+    exe = well_known_binary_path(config_dir)
+    payload = b"engine-bytes"
+    if binary != "missing":
+        exe.write_bytes(b"other-bytes" if binary == "tampered" else payload)
     version = tag[len("engine-service-v"):] if tag else ""
-    path.write_text(json.dumps({"version": version, "tag": tag}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"version": version, "tag": tag, "sha256": hashlib.sha256(payload).hexdigest()}),
+        encoding="utf-8",
+    )
 
 
 #: The five choice/key cases of RDR-210 Phase 3 Step 1, as
@@ -1991,6 +2006,8 @@ class TestSpawnServiceDualKeyAndProfile:
         key_value: str = "the-key",
         explicit_profile: str | None = None,
         explicit_key: str | None = None,
+        binary: str = "genuine",
+        config_raw: str | None = None,
     ) -> dict[str, str]:
         """A real config.yml and a real sidecar in *config_dir*; Popen mocked. Returns the spawn env."""
         import yaml
@@ -2010,9 +2027,11 @@ class TestSpawnServiceDualKeyAndProfile:
             cfg["local"] = {"embed_model": choice}
         if persisted_key:
             cfg["credentials"] = {"voyage_api_key": key_value}
-        (config_dir / "config.yml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        (config_dir / "config.yml").write_text(
+            yaml.safe_dump(cfg) if config_raw is None else config_raw, encoding="utf-8"
+        )
         if tag is not None or receipt_raw is not None:
-            _write_engine_receipt(config_dir, tag, raw=receipt_raw)
+            _write_engine_receipt(config_dir, tag, raw=receipt_raw, binary=binary)
         sup = _make_supervisor(
             config_dir, clock,
             binary_path=binary_path or well_known_binary_path(config_dir),
@@ -2120,13 +2139,59 @@ class TestSpawnServiceDualKeyAndProfile:
         sup._launch_kind = "jar"
         assert sup._spawned_engine_version() is None
 
-    def test_an_explicit_nx_embed_profile_wins(self, config_dir, clock, monkeypatch) -> None:
-        env = self._spawn(config_dir, clock, monkeypatch, explicit_profile="voyage")
-        assert env["NX_EMBED_PROFILE"] == "voyage"  # local_embed_profile() would say bge
+    @pytest.mark.parametrize("ambient", ["voyage", "bge", "bogus"])
+    def test_an_ambient_nx_embed_profile_is_ignored(self, config_dir, clock, monkeypatch, ambient) -> None:
+        """RDR-210: the supervisor ALWAYS sets the profile from ``local_embed_profile()``, so the names
+        the client mints and the profile the engine seeds cannot disagree through a stray caller env."""
+        env = self._spawn(config_dir, clock, monkeypatch, explicit_profile=ambient)
+        assert env["NX_EMBED_PROFILE"] == "bge"  # local_embed_profile() on this config
 
-    def test_a_blank_nx_embed_profile_is_unset_not_a_choice(self, config_dir, clock, monkeypatch) -> None:
-        env = self._spawn(config_dir, clock, monkeypatch, explicit_profile="   ")
+    def test_an_ambient_profile_does_not_override_a_voyage_choice(self, config_dir, clock, monkeypatch) -> None:
+        env = self._spawn(
+            config_dir, clock, monkeypatch, choice="voyage-context-3", explicit_profile="bge",
+        )
+        assert env["NX_EMBED_PROFILE"] == "voyage"
+
+    def test_a_blank_nx_embed_profile_is_replaced_by_the_computed_one(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        env = self._spawn(
+            config_dir, clock, monkeypatch, persisted_key=True, explicit_profile="   ",
+        )
+        assert env["NX_EMBED_PROFILE"] == "voyage"  # computed from the persisted key, not the blank
+
+    @pytest.mark.parametrize("binary", ["tampered", "missing"])
+    def test_a_receipt_over_bytes_that_fail_verification_is_not_trusted(
+        self, config_dir, clock, monkeypatch, binary
+    ) -> None:
+        """nexus-8eaeg: the sidecar describes bytes; a binary that does not match it (swapped, corrupt,
+        gone) says nothing about the engine that would spawn, so the r5f3c rule stands."""
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice="BAAI/bge-base-en-v1.5", persisted_key=True, env_key=True,
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION), binary=binary,
+        )
+        assert "NX_VOYAGE_API_KEY" not in env
         assert env["NX_EMBED_PROFILE"] == "bge"
+
+    def test_a_malformed_config_does_not_fail_the_spawn_when_an_explicit_key_is_set(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        """The explicit-key path reads no config; the profile read must not make a malformed
+        config.yml fatal where it was not before. Falls back to bge and warns."""
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            env = self._spawn(
+                config_dir, clock, monkeypatch,
+                explicit_key="explicit-key", config_raw="local: [unclosed\n  - : :\n",
+            )
+        assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
+        assert env["NX_EMBED_PROFILE"] == "bge"
+        warned = [e for e in logs if e.get("event") == "storage_service_embed_profile_unreadable"]
+        assert warned and warned[0]["log_level"] == "warning"
 
     def test_an_explicit_nx_voyage_api_key_still_wins_at_the_first_dual_tag(
         self, config_dir, clock, monkeypatch

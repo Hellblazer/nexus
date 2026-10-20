@@ -1452,10 +1452,17 @@ class StorageServiceSupervisor:
         override, a ``NEXUS_SERVICE_JAR`` launch, no sidecar, a corrupt one, or a tag that is not
         ``engine-service-v<X.Y.Z>`` all read ``None`` ("unknown"), which callers treat as an
         engine that may predate the dual router.
+
+        The receipt is trusted only while the bytes it describes are still the bytes on disk
+        (``verify_installed_binary``, nexus-8eaeg): a sidecar over a swapped, corrupt or missing
+        binary names an engine that will not be the one that starts, so it reads ``None`` too.
         """
         if self._launch_kind != "native":
             return None
-        from nexus.daemon.binary_install import TAG_NAMESPACE_PREFIX  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            TAG_NAMESPACE_PREFIX,
+            verify_installed_binary,
+        )
         from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             read_installed_provenance,
             well_known_binary_path,
@@ -1468,6 +1475,8 @@ class StorageServiceSupervisor:
         except OSError:
             return None
         provenance = read_installed_provenance(self._config_dir)
+        if not verify_installed_binary(self._config_dir, provenance=provenance).ok:
+            return None
         tag = provenance.get("tag") if provenance else None
         if not isinstance(tag, str) or not tag.startswith(TAG_NAMESPACE_PREFIX):
             return None
@@ -1627,6 +1636,7 @@ class StorageServiceSupervisor:
             )
 
             embed_choice = local_embed_model_choice() or ""
+            bge_choice = bool(embed_choice) and not local_embed_model_is_voyage()
             spawned_version = self._spawned_engine_version()
             dual_engine = (
                 spawned_version is not None
@@ -1636,12 +1646,17 @@ class StorageServiceSupervisor:
             # local-mode branch both dispatch off local_embed_model_is_voyage() — the
             # single shared predicate — so "plumb the key into the engine" and "mint
             # voyage-* collection names" can never disagree again.
-            if embed_choice and not local_embed_model_is_voyage() and not dual_engine:
+            if bge_choice and not dual_engine:
                 _log.info(
                     "storage_service_voyage_key_not_plumbed",
                     configured_embed_model=embed_choice,
-                    reason="local.embed_model configures a non-voyage embedder; "
-                    "set NX_VOYAGE_API_KEY explicitly to override",
+                    engine_tag=(
+                        "unknown (no verified install receipt for the spawned binary)"
+                        if spawned_version is None
+                        else ".".join(str(p) for p in spawned_version) + " (below the first dual tag)"
+                    ),
+                    reason="local.embed_model configures a non-voyage embedder and the engine may "
+                    "predate the dual router; set NX_VOYAGE_API_KEY explicitly to override",
                 )
             else:
                 voyage_key = get_credential("voyage_api_key")
@@ -1650,7 +1665,7 @@ class StorageServiceSupervisor:
                     _log.info(
                         "storage_service_voyage_key_resolved", source="credential_chain"
                     )
-                elif not (embed_choice and not local_embed_model_is_voyage()):
+                elif not bge_choice:
                     # A bge-choice install with no key never asked for Voyage: no warning (it
                     # only reaches here at a dual tag, where the key is optional for it).
                     _log.warning(
@@ -1664,12 +1679,21 @@ class StorageServiceSupervisor:
         # profile, from the one function the client's write model reads, so the names the client
         # mints and the profile the engine seeds agree. The engine reads NX_EMBED_PROFILE
         # (EmbeddingProfile.ENV, Main.java) and an engine that predates it ignores the variable.
-        # An explicit value in the caller's env is the operator's choice and wins; a blank one is
-        # "unset", as the engine reads it.
-        if not env.get("NX_EMBED_PROFILE", "").strip():
-            from nexus.config import local_embed_profile  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        # The caller's environment does not override it: a stray NX_EMBED_PROFILE would let the
+        # engine seed a profile the client does not mint for. A config the client cannot read must not
+        # fail the spawn (an explicit NX_VOYAGE_API_KEY never touched config.yml before this block):
+        # fall back to bge, the profile of an install with no recorded Voyage intent, and say so.
+        from nexus.config import local_embed_profile  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+        try:
             env["NX_EMBED_PROFILE"] = local_embed_profile()
+        except Exception as exc:  # noqa: BLE001 — a malformed config.yml must not make the supervisor spawn fail
+            _log.warning(
+                "storage_service_embed_profile_unreadable",
+                error=type(exc).__name__,
+                fallback="bge",
+            )
+            env["NX_EMBED_PROFILE"] = "bge"
 
         # Launch artifact: native binary (argv[0] = binary) or, when explicitly
         # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The

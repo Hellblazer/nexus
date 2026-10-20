@@ -105,6 +105,63 @@ def test_an_engine_that_does_not_report_a_profile_is_read_against_the_clients_in
     assert r.ok is False and r.warn is True
 
 
+def test_a_voyage_only_engine_that_reports_no_profile_is_not_read_against_the_clients_bge() -> None:
+    """A pre-profile engine in voyage mode serves Voyage whatever this client intends: the client's
+    profile is no evidence about what that engine was told, so the row cannot tell (never warn)."""
+    body = {"embedding_mode": "voyage", "embedding_models": ["voyage-code-3", "voyage-context-3"]}
+    r = _row(body, client_profile="bge")
+    assert r.ok is True and not r.warn and "not applicable" in r.detail
+
+
+def test_the_clients_profile_still_reads_an_engine_in_another_mode_that_reports_no_profile() -> None:
+    body = {"embedding_mode": "onnx-local", "embedding_models": ["voyage-code-3", "voyage-context-3"]}
+    r = _row(body, client_profile="bge")
+    assert r.ok is False and r.warn is True
+
+
+def test_the_probe_uses_a_short_timeout() -> None:
+    """`_get` defaults to 30 s; `nx doctor` must not hang that long on one row."""
+    seen: dict = {}
+
+    def _fake_get(path, **kwargs):
+        seen.update(kwargs)
+        return {"embedding_profile": "bge", "embedding_models": [_BGE]}
+
+    with patch(_GET, _fake_get):
+        (r,) = _check_embedding_family()
+    assert r.ok is True
+    assert 0 < seen["timeout"] <= 5, seen
+
+
+def test_a_hung_endpoint_reads_not_applicable_quickly(monkeypatch) -> None:
+    """A real socket that accepts and never answers: the row gives up inside the probe budget."""
+    import socket
+    import threading
+    import time
+
+    import nexus.health as health
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    held: list = []
+    threading.Thread(target=lambda: held.append(srv.accept()), daemon=True).start()
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", str(port))
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
+    monkeypatch.setattr(health, "_EMBEDDING_FAMILY_PROBE_TIMEOUT_S", 0.5)
+    start = time.monotonic()
+    try:
+        (r,) = _check_embedding_family()
+    finally:
+        srv.close()
+        for conn, _ in held:
+            conn.close()
+    assert time.monotonic() - start < 5
+    assert r.ok is True and not r.warn and "not applicable" in r.detail
+
+
 def test_a_managed_engine_that_reports_no_profile_is_not_applicable() -> None:
     """The client's local profile says nothing about a managed engine, which has no bge files by design."""
     r = _row({"embedding_models": ["voyage-code-3", "voyage-context-3"]}, local=False, client_profile="bge")

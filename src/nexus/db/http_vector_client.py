@@ -1989,12 +1989,15 @@ def _unregistered_collection_message(code: int, err: Any) -> str | None:
     )
 
 
-def _get(path: str, *, tenant: str = "default") -> Any:
-    """GET from the service endpoint, return parsed response body."""
+def _get(path: str, *, tenant: str = "default", timeout: float = 30) -> Any:
+    """GET from the service endpoint, return parsed response body.
+
+    ``timeout`` is the per-attempt socket budget in seconds; a diagnostic probe passes a short one.
+    """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
-        return _request("GET", path, tenant=tenant, timeout=30, body=None)
+        return _request("GET", path, tenant=tenant, timeout=timeout, body=None)
     except urllib.error.HTTPError as e:
         body_bytes = _response_body(e)
         try:

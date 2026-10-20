@@ -4780,6 +4780,11 @@ _EMBEDDING_FAMILY_LABEL = "Embedding family"
 _PROFILE_FAMILY_PREFIX = {"voyage": "voyage", "bge": "bge"}
 
 
+#: Per-attempt socket budget for the Embedding family row's ``GET /version`` (``_get`` defaults to 30 s,
+#: which would stall ``nx doctor`` on a hung engine; same order as config.py's ``_LADDER_PROBE_TIMEOUT_S``).
+_EMBEDDING_FAMILY_PROBE_TIMEOUT_S = 3.0
+
+
 def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """nexus-wypwq (RDR-210 Phase 3 Step 1, Technical Design 2): does the engine serve the family of its profile?
 
@@ -4790,7 +4795,9 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
 
     The profile is the engine's own ``embedding_profile`` from the same ``/version`` body (what it seeded); an engine
     that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because a
-    managed engine has no bge files by design and the client's local intent says nothing about it.
+    managed engine has no bge files by design and the client's local intent says nothing about it. An engine that
+    reports ``embedding_mode`` ``voyage`` and no profile is voyage-only whatever the client intends, so it reads as
+    cannot tell. The fetch uses a short timeout (``_EMBEDDING_FAMILY_PROBE_TIMEOUT_S``).
 
     * warn: ``embedding_models`` lacks the profile's family (the remedy names the key or the bge files, then a restart).
     * warn: ``embedding_models`` is present but not a list of strings (never read as served).
@@ -4802,7 +4809,9 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
     if version_body is _ENGINE_STATUS_UNSET:
         try:
             from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to keep CLI startup fast
-            fetched = _get("/version", tenant=_process_default_tenant())
+            fetched = _get(
+                "/version", tenant=_process_default_tenant(), timeout=_EMBEDDING_FAMILY_PROBE_TIMEOUT_S,
+            )
             body = fetched if isinstance(fetched, dict) else None
         except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
             _log.debug("doctor_embedding_family_probe_failed", error=str(exc))
@@ -4825,7 +4834,9 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         )]
 
     profile = body.get("embedding_profile")
-    if profile is None:
+    if profile is None and body.get("embedding_mode") != "voyage":
+        # An engine in voyage mode serves Voyage whatever this client intends, so the client's profile is
+        # no evidence about what that engine was told: only the other modes are read against it.
         from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — deferred to avoid circular import
         profile = local_embed_profile() if is_local_mode() else None
     prefix = _PROFILE_FAMILY_PREFIX.get(profile) if isinstance(profile, str) else None
