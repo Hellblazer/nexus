@@ -161,12 +161,13 @@ class TestWiring:
         db_path = self._setup(tmp_path, monkeypatch)
         from nexus.mcp.core import memory_put
 
-        memory_put(
+        result = memory_put(
             content="hello", project="nexus", title="t1", tags="x", ttl=30,
         )
 
         rows = self._tier_writes(db_path)
-        assert ("memory_put", "T2", "nexus", "t1") in rows
+        # The tool returns its error as text and records nothing, so name it on a miss.
+        assert ("memory_put", "T2", "nexus", "t1") in rows, result
 
     def test_scratch_put_records_T1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -176,11 +177,11 @@ class TestWiring:
         db_path = self._setup(tmp_path, monkeypatch)
         from nexus.mcp.core import scratch
 
-        scratch(action="put", content="ephemeral hypothesis", tags="probe")
+        result = scratch(action="put", content="ephemeral hypothesis", tags="probe")
 
         rows = self._tier_writes(db_path)
         tools = [r[0] for r in rows]
-        assert "scratch_put" in tools
+        assert "scratch_put" in tools, result
         assert all(r[1] == "T1" for r in rows if r[0] == "scratch_put")
 
     def test_plan_save_records_plan_tier(
@@ -191,7 +192,7 @@ class TestWiring:
         db_path = self._setup(tmp_path, monkeypatch)
         from nexus.mcp.core import plan_save
 
-        plan_save(
+        result = plan_save(
             query="how does X relate to Y in the catalog",
             plan_json='{"steps":[{"tool":"search","args":{"query":"$intent"}}]}',
             verb="query",
@@ -201,6 +202,6 @@ class TestWiring:
 
         rows = self._tier_writes(db_path)
         plan_rows = [r for r in rows if r[0] == "plan_save"]
-        assert len(plan_rows) == 1
+        assert len(plan_rows) == 1, result
         assert plan_rows[0][1] == "plan"
         assert plan_rows[0][2] == "nexus"  # project
