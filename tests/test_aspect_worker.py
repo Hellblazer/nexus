@@ -136,7 +136,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -201,7 +201,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -262,7 +262,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -338,7 +338,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -387,7 +387,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _row_status(_isolate_t2, "/p1.pdf") == "failed",
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -976,7 +976,13 @@ class TestEnqueueFailureTripwire:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _wait_until(predicate, timeout: float = 5.0, poll: float = 0.05) -> None:
+#: How long a worker-loop assertion waits. It returns as soon as the predicate holds, so this bounds only a
+#: genuine failure; 5 s was too tight for a worker making T2 HTTP round trips on a loaded 4-worker CI shard
+#: (test_worker_uncaught_exception_marks_failed timed out on develop 5d6eb342d, shard 3).
+_WAIT_S: float = 30.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_S, poll: float = 0.05) -> None:
     """Poll ``predicate`` until True or raise."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1076,7 +1082,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1152,7 +1158,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1232,7 +1238,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
