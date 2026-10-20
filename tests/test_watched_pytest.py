@@ -75,11 +75,16 @@ def test_a_failing_run_keeps_pytests_exit_code(tmp_path: Path) -> None:
 def test_a_hang_is_killed_with_its_tree_and_the_test_is_named(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     t0 = time.monotonic()
-    code, status, out = _watch(tmp_path, _HANG, "--stall", "3", "--faulthandler-timeout", "1",
+    # The stall clock starts with the watcher, so the nested interpreter's silent start
+    # (imports, plugins, collection) counts against it. 3 s was too tight on a loaded shard:
+    # the kill landed before pytest printed anything, so no test was named (nexus-npbum,
+    # CI 39341824865 shard 6). 10 s covers that start and still fires long before the
+    # test's own 120 s sleep.
+    code, status, out = _watch(tmp_path, _HANG, "--stall", "10", "--faulthandler-timeout", "1",
                                env={"GRANDCHILD_PID_FILE": str(pid_file)})
-    assert time.monotonic() - t0 < 30, "the watchdog must fire in seconds, not wait for the test"
+    assert time.monotonic() - t0 < 60, "the watchdog must fire in seconds, not wait for the test"
     assert (code, status["state"]) == (wp.EXIT_STALLED, "stalled"), out
-    assert status["current_test"] == "test_case.py::test_hangs"
+    assert status["current_test"] == "test_case.py::test_hangs", out
     assert "test_case.py::test_hangs" in out
     log = (tmp_path / "run.log").read_text()
     assert "Timeout (0:00:01)!" in log, "faulthandler must dump the stacks before the kill"
