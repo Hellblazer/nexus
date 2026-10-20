@@ -60,15 +60,17 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 #
 # THIS GATE RUNS THE LOCAL SERVICE KEYLESS, BGE-768 ONLY (nexus-w6h2m,
 # 2026-07-28). `nx init --service` stamps bge-768 and no Voyage key reaches
-# the service, so it embeds with bge-768 and nothing else — that is a
-# deliberate posture for THIS gate, not the engine's ceiling: a keyed local
-# service embeds with Voyage instead (nexus-umm29 carve-out). Either way the
-# service serves ONE embedding mode at a time (RDR-210 tracks the dual-mode
-# engine that would end that). So tests that need the SERVICE to embed
-# voyage-* collections are cloud-mode tests and are marked `cloud_mode` and
-# deselected here; the gate no longer needs a Voyage key for its own corpus.
-# COVERAGE GAP: no gate in this repo boots the local service keyed — a keyed
-# local engine is untested end-to-end.
+# the service, so it embeds with bge-768 and nothing else. That is the
+# deliberate posture of THIS gate and it stays (RDR-210 Phase 3 Step 2). The
+# engine itself, from the tag that carries RDR-210 P2.7, can serve bge-768
+# and Voyage side by side when a key reaches it; the supervisor passes the
+# key to a local engine only under the nexus-r5f3c rule until the Phase 3
+# client release (nexus-wypwq), so an installed local service is still one
+# posture today. Tests that need the SERVICE to embed voyage-* collections
+# are cloud-mode tests, marked `cloud_mode` and deselected here; the gate
+# needs no Voyage key for its own corpus.
+# COVERAGE GAP: no gate in this repo boots the local service keyed, dual
+# or not, so a keyed local engine is untested end-to-end.
 #
 # It used to carry those tests and pass, because it was never actually running
 # local: the CHROMA_* secrets made is_local_mode() answer False, `nx init
@@ -352,9 +354,10 @@ echo "[gate] fenced: HOME is an empty scratch dir at $HOME (toolchain caches onl
 
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
 # BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->
-# NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py),
-# so the key must be exported by then or the service falls back to ONNX-only
-# and 422s every voyage-* collection. pytest inherits the same exports.
+# NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py)
+# under its current rule, so the key must be exported by then or the service
+# has no Voyage embedder and 422s every voyage-* collection. pytest inherits
+# the same exports. (This gate runs keyless by design; see the header.)
 if [ -f "$REPO_ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -962,12 +965,13 @@ fi
 # discipline as lived_in above, and for the same reason.
 #
 # WHY IT EXISTS: this gate's corpus spanned TWO embedding modes while the
-# service serves exactly one. Three tests require the SERVICE to embed
+# service this gate boots serves one (it runs keyless). Three tests require the SERVICE to embed
 # voyage-* collections; everything else here is a bge-768 local install,
 # which is what RDR-160 says a local service IS. Whichever way the Voyage key
-# was routed, one half 422'd:
+# was routed to the single-posture engine of that day, one half 422'd:
 #     key withheld -> embedding mode onnx-local -> the voyage tests 422
 #     key plumbed  -> embedding mode voyage     -> the bge tests 422
+# (A dual engine, RDR-210, would serve both; no gate boots one yet.)
 # There was no value of that knob that made the gate green, which is why the
 # first attempt at this (6b04cd1b, reverted in 699369b0) traded one 422
 # cluster for its mirror image and reintroduced the exact failure nexus-r5f3c
