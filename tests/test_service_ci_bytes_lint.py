@@ -94,7 +94,6 @@ def test_the_non_vacuity_assert_on_the_rehearsal_is_still_wired() -> None:
     assert "assert_rehearsal_ran.py" in runs, "the rehearsal's skip guard must stay in the Java job"
 
 
-@pytest.mark.skipif(shutil.which("git") is None or shutil.which("bash") is None, reason="needs git and bash")
 def test_the_fetch_step_really_fetches_only_the_old_tag(tmp_path: Path) -> None:
     """Runs the step's own script against a throwaway origin holding two tags: only OLD_TAG may arrive."""
     steps = _steps()
