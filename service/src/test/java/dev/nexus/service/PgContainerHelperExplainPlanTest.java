@@ -40,7 +40,8 @@ class PgContainerHelperExplainPlanTest {
         Result<Record1<String>> plan = fixture.newResult(QUERY_PLAN);
         for (int i = 1; i <= n; i++) {
             var row = fixture.newRecord(QUERY_PLAN);
-            row.set(QUERY_PLAN, "Node " + i + " (cost=0.00..1.00 rows=1 width=4)");
+            // three-digit numbers keep every row one width, so jOOQ's text format cuts none of them (nexus-ou2za)
+            row.set(QUERY_PLAN, String.format("Node %03d (cost=0.00..1.00 rows=1 width=4)", i));
             plan.add(row);
         }
         return DSL.using(new MockConnection(ctx -> {
@@ -65,7 +66,7 @@ class PgContainerHelperExplainPlanTest {
         DSLContext ctx = contextAnswering(120, seen);
         String plan = PgContainerHelper.explainPlan(ctx, boundQuery(ctx));
         assertThat(planRows(plan)).isEqualTo(120);
-        assertThat(plan).contains("Node 51 ").contains("Node 120 ");
+        assertThat(plan).contains("Node 051 ").contains("Node 120 (cost=0.00..1.00 rows=1 width=4)");
         assertThat(seen.sql).startsWithIgnoringCase("explain ").contains("?").doesNotContain("4242");
         assertThat(seen.binds).contains(4242);
     }
@@ -76,7 +77,7 @@ class PgContainerHelperExplainPlanTest {
         DSLContext ctx = contextAnswering(120, seen);
         String plan = PgContainerHelper.explainPlanInlined(ctx, boundQuery(ctx));
         assertThat(planRows(plan)).isEqualTo(120);
-        assertThat(plan).contains("Node 120 ");
+        assertThat(plan).contains("Node 120 (cost=0.00..1.00 rows=1 width=4)");
         assertThat(seen.sql).startsWithIgnoringCase("explain ").contains("4242").doesNotContain("?");
         assertThat(seen.binds).isEmpty();
     }
@@ -126,7 +127,8 @@ class PgContainerHelperExplainPlanTest {
         Result<Record1<String>> plan = fixture.newResult(QUERY_PLAN);
         for (int i = 1; i <= 60; i++) {
             var row = fixture.newRecord(QUERY_PLAN);
-            row.set(QUERY_PLAN, i <= 50 ? "Node " + i : "Node " + i + " Filter: (a very long late condition " + "x".repeat(80) + ")");
+            String node = String.format("Node %03d (cost=0.00..1.00 rows=1 width=4)", i);
+            row.set(QUERY_PLAN, i <= 50 ? node : node + " Filter: (a very long late condition " + "x".repeat(80) + ")");
             plan.add(row);
         }
         DSLContext ctx = DSL.using(new MockConnection(c -> {
