@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * "DO NOTHING", "ALTER TABLE on chunks leaves") does not. Every literal piece that opens a statement counts, so the
  * maps are literal counts and a statement assembled from several such pieces counts once per piece.
  *
- * <p>Three exact per-file literal maps. {@link #EXECUTED} is SQL the tests send to a database; it drains to zero.
+ * <p>Three exact per-file literal maps. {@link #EXECUTED} is SQL the tests send to a database; it has drained to zero.
  * {@link #EXEMPT} is executed SQL with no typed, changelog or function form, each entry with its reason (the six
  * exemptions of the drain's design record, T2 nexus/cbo4a-remaining-58-classification). {@link #TEXT} is SQL the
  * tests never send: input to a parser or scanner under test, an expected substring of a function body, changeset
@@ -95,12 +95,14 @@ class SqlStringLiteralGateTest {
 
     static final Pattern STATEMENT = Pattern.compile("(?:" + String.join("|", STATEMENT_GRAMMAR) + ")");
 
-    /** SQL the tests execute, per file. Reduce-only and exact: lower an entry in the same edit that converts a site. */
-    private static final Map<String, Integer> EXECUTED = Map.ofEntries(
-        // held by another session
-        Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 8));
+    /**
+     * SQL the tests execute, per file. Reduce-only and exact, and DRAINED: it is empty (nexus-cbo4a batch E converted
+     * the last file, CatalogRepositoryTest). The map and its total stay so that the tree test still checks the
+     * exactness of what it replaced: a file that gains an executed statement is then in no literal map, and is reported.
+     */
+    private static final Map<String, Integer> EXECUTED = Map.ofEntries();
 
-    private static final int EXECUTED_TOTAL = 8;
+    private static final int EXECUTED_TOTAL = 0;
 
     /** Executed SQL kept as a Java string, per file, frozen. Each entry says why no typed form exists. */
     private static final Map<String, Integer> EXEMPT = Map.ofEntries(
@@ -156,8 +158,6 @@ class SqlStringLiteralGateTest {
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
         // the invalid INSERT counted in EXEMPT
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
-        // the statements counted in EXECUTED; held by another session
-        Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 4),
         // replayChangeset: product changeset text run verbatim for its NOTICE chain (SANCTIONED RAW)
         Map.entry("dev/nexus/service/PgContainerHelper.java", 1),
         // plpgsql_check's own report query, read from its resource
@@ -167,7 +167,7 @@ class SqlStringLiteralGateTest {
         // a typed jOOQ insert rendered by ctx.render and bound by hand, for its lock order
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 1));
 
-    private static final int JDBC_ENTRY_TOTAL = 11;
+    private static final int JDBC_ENTRY_TOTAL = 7;
 
     /** References to a product {@code *_SQL} constant, per file, exact. */
     private static final Map<String, Integer> PRODUCT_SQL = Map.ofEntries(

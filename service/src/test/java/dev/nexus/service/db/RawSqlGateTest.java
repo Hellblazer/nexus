@@ -920,7 +920,6 @@ class RawSqlGateTest {
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
-        Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
         // GraphHopParityTest.java: RETIRED at zero in nexus-cbo4a batch D (history: 2026-10-18 seed INSERTs 16 -> 9, vector seeds
         // 9 -> 6, 2026-10-19 SELECT probes 6 -> 4, setPlannerGuc 4 -> 3, batch 9 setDeleted 3 -> 2, batch C stitchedGraphOracle 2 -> 1;
         // batch D: the reached-set EXPLAIN is a typed select ordered by nexus_test.cosine_order, explained through
@@ -1621,7 +1620,13 @@ class RawSqlGateTest {
     // is the HNSW operator as an inlinable function, so a typed ORDER BY reaches the index (NexusTestCosineOrderInliningTest). The three files'
     // KNN statements, their EXPLAINs and the Msz9i full-population counts are typed Selects over it, run as a bootstrapServiceRole role
     // (nexus_svc holds no USAGE on nexus_test); the EXPLAINs go through PgContainerHelper.explainPlanWith.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 10;
+    // nexus-cbo4a batch E, 10 -> 5 (3 -> 2 files; CatalogRepositoryTest removed outright, 5 sites): its chunk stub (stubChunk, one embedding
+    // column picked by the collection model's dimension), the span-test chunk seed with jsonb metadata, the RLS WITH CHECK cross-tenant
+    // catalog_documents insert, the fail-closed no-GUC count and the next_seq read are typed jOOQ over the generated CHUNKS,
+    // CATALOG_DOCUMENTS and CATALOG_OWNERS tables, on the same connections, roles and tenant GUC state as before. The WITH CHECK test now
+    // sees a DataAccessException and asserts the wrapped PSQLException's message. Left, outside this batch: ArbiterCompletenessTest 1 (the deliberately
+    // invalid two-ON-CONFLICT INSERT) and SharedCluster 4 (per-fork cluster control); SqlStringLiteralGateTest's EXEMPT map gives the reasons.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 5;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
