@@ -67,7 +67,6 @@ from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
 from tests._child_process import integration_pg_conf, java_available, java_executable, pg_data_tempdir, popen_in_group, stop_group
-from tests._engine_substrate import record_integration_child
 from tests.db._service_fixture import SERVICE_ROLES_SQL, jar_argv, pg_bin_dir
 from tests._pg_ctl import pg_ctl_start
 
@@ -323,7 +322,6 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
-    record_integration_child(proc)  # nexus-942h9: the sweep kills it with its cluster
     # Every exit from the port wait that does not hand proc to the caller stops its
     # group: a timeout, a KeyboardInterrupt, anything. Without this a failed boot
     # leaked the JVM (nexus-f9bgu residuals; pinned by

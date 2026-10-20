@@ -975,19 +975,33 @@ def register_owned_cluster(root: Path, pgdata: str) -> None:
 
 
 def record_integration_child(proc: subprocess.Popen) -> None:
-    """Record an engine child (spawned by the integration fixture) so the sweep can
-    kill it with its cluster. A no-op unless this process recorded a cluster."""
+    """Record an engine child so a later sweep can kill it if this process dies. Every engine-JVM spawn
+    reaches it through ``tests._child_process.popen_in_group``; recording the same pid again is a no-op.
+
+    In a process that recorded integration clusters the child joins their records. In any other (the
+    substrate's own, and fixtures that boot against it) a children-only record is kept under the process's
+    original tempdir, a root every sweep reads, so the JVM is never left to nobody (nexus-qsqc6). A child with
+    no readable command line is not recorded: the sweep identifies a child by it."""
+    global _owner_exit_registered
     from nexus.daemon.service_registry import pid_alive, process_command
 
-    if not _owner_records:
-        return
+    if not isinstance(getattr(proc, "pid", None), int):
+        return  # a test double standing in for Popen
     cmdline = process_command(proc.pid)
     if not cmdline:
         return
     with _owner_lock:
+        if not _owner_records:
+            root = _original_tempdir()
+            _owner_records[root] = _load_owner_record(root)
+            if not _owner_exit_registered:
+                _owner_exit_registered = True
+                atexit.register(_drop_finished_owner_records)
         for root, info in _owner_records.items():
+            if any(c.get("pid") == proc.pid and c.get("cmdline") == cmdline for c in info["children"]):
+                continue
             info["children"] = [
-                c for c in info["children"] if pid_alive(c.get("pid", 0))
+                c for c in info["children"] if pid_alive(c.get("pid", 0)) and c.get("pid") != proc.pid
             ] + [{"pid": proc.pid, "cmdline": cmdline}]
             try:
                 _flush_owner_record(root, info)

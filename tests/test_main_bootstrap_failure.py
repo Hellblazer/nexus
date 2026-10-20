@@ -48,7 +48,8 @@ from typing import NamedTuple
 
 import pytest
 
-from tests._engine_substrate import engine_argv, ensure_engine, record_integration_child
+from tests._child_process import popen_in_group
+from tests._engine_substrate import engine_argv, ensure_engine
 from tests.db._service_fixture import jvm_error_file_arg
 from tests._module_seam import module_time, setattr_in
 
@@ -127,9 +128,9 @@ def _spawn_engine(state: dict, dbname: str, token: str, log_path: Path):
     fh = open(log_path, "wb")  # noqa: SIM115 — closed by the caller after reaping
     # ErrorFile: a crash writes hs_err into the run's temp dir, never the repo cwd.
     argv = [java, jvm_error_file_arg(), "-jar", str(_JAR)]
-    proc = subprocess.Popen(argv, env=env, stdout=fh, stderr=fh)
-    record_integration_child(proc)  # nexus-qsqc6: a killed run's sweep stops it with any recorded cluster
-    return proc, fh
+    # popen_in_group records the JVM for the crash sweep (nexus-qsqc6) and makes it a group leader, which the
+    # sweep's group kill needs.
+    return popen_in_group(argv, popen=subprocess.Popen, env=env, stdout=fh, stderr=fh), fh
 
 
 def _wait_ready(proc: subprocess.Popen, log_path: Path) -> bool:

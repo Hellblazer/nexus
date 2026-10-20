@@ -27,6 +27,7 @@ from nexus.daemon.service_registry import pid_alive, process_command
 from tests import _child_process as cp
 from tests import _ddl_cluster_sites as csites
 from tests import _engine_substrate as sub
+from tests.db._service_fixture import jar_argv
 from tests._module_seam import setattr_in
 
 _TMPFS_MOUNTS = (
@@ -273,11 +274,13 @@ class TestOwnerRecord:
         rec = self._record(root)
         assert rec["children"] == [{"pid": child.pid, "cmdline": process_command(child.pid)}]
 
-    def test_recording_a_child_is_a_no_op_when_no_cluster_is_recorded(self, owned_children) -> None:
+    def test_a_child_that_has_already_exited_is_not_recorded(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_original_tempdir", lambda: tmp_path)
         child = subprocess.Popen([sys.executable, "-c", "pass"])
-        owned_children.append(child)
-        sub.record_integration_child(child)  # must not raise or create anything
+        child.wait(timeout=5)
+        sub.record_integration_child(child)  # no command line to identify it by: nothing to record
         assert sub._owner_records == {}
+        assert not list(tmp_path.glob(sub._OWNER_RECORD_GLOB))
 
     def test_a_removed_pgdata_is_pruned_on_the_next_update(self, tmp_path, monkeypatch) -> None:
         root = tmp_path / "nexus-test-pg-1000"
@@ -1162,3 +1165,151 @@ class TestSweepRemovesAStaleOwnerRecordTmp:
         result = sub.sweep_stale_substrate_clusters(tmp_root=root)
         assert not old.exists() and new.exists()
         assert result.stale_tmp_removed == [str(old)]
+
+
+_FAKE_JAR = "nexus-service-1.0-SNAPSHOT.jar"
+_JAR_FLAG = "-" + "jar"  # not a literal, so the jar-launch lints do not read the predicate cases as launches
+
+
+@pytest.fixture
+def fake_java(tmp_path) -> str:
+    """A ``java`` that ignores its arguments and sleeps: an engine JVM stand-in. It is an interpreter script
+    that never execs, so its command line is the same from spawn to exit (a shell script that execs ``sleep``
+    changes it under a recorder)."""
+    java = tmp_path / "fake-java"
+    java.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    java.chmod(0o755)
+    return str(java)
+
+
+class TestEngineSpawnsAreRecordedWithoutACluster:
+    """A JVM spawned through ``popen_in_group`` is recorded for the sweep whether or not this process made an
+    integration cluster. Most engine-JVM processes made none (the substrate's own, and the fixtures that boot
+    against it), so a record kept only for cluster owners left their JVMs to nobody (nexus-qsqc6)."""
+
+    @pytest.fixture(autouse=True)
+    def _root(self, tmp_path, monkeypatch):
+        self.root = tmp_path / "tmproot"
+        self.root.mkdir()
+        monkeypatch.setattr(sub, "_original_tempdir", lambda: self.root)
+
+    def _record_file(self) -> Path:
+        return self.root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json"
+
+    def _spawn(self, fake_java, owned_children) -> subprocess.Popen:
+        proc = cp.popen_in_group(jar_argv(fake_java, f"/x/{_FAKE_JAR}"))
+        owned_children.append(proc)
+        time.sleep(0.1)
+        return proc
+
+    def test_an_engine_spawn_with_no_cluster_writes_a_children_only_record(self, fake_java, owned_children) -> None:
+        proc = self._spawn(fake_java, owned_children)
+        rec = json.loads(self._record_file().read_text())
+        assert rec["owner_pytest_pid"] == os.getpid()
+        assert rec["pgdatas"] == []
+        assert rec["children"] == [{"pid": proc.pid, "cmdline": process_command(proc.pid)}]
+
+    def test_a_spawn_that_is_not_the_engine_jar_is_not_recorded(self, owned_children) -> None:
+        owned_children.append(cp.popen_in_group([sys.executable, "-c", "import time; time.sleep(5)"]))
+        assert sub._owner_records == {}
+        assert not self._record_file().exists()
+
+    @pytest.mark.parametrize(("argv", "expected"), [
+        (["java", _JAR_FLAG, f"/x/{_FAKE_JAR}"], True),
+        (["java", "-Xmx1g", _JAR_FLAG, "svc/target/nexus-service-1.2.jar", "--x"], True),
+        (["java", _JAR_FLAG, "/x/some-other-tool.jar"], False),
+        (["java", "-cp", f"/x/{_FAKE_JAR}", "Main"], False),
+        (["java", _JAR_FLAG], False),
+        (["python", "-c", "pass"], False),
+        ("java -jar nexus-service.jar", False),
+    ])
+    def test_the_engine_argv_predicate(self, argv, expected) -> None:
+        assert cp.is_engine_jvm_argv(argv) is expected
+
+    def test_recording_the_same_child_twice_keeps_one_entry(self, fake_java, owned_children) -> None:
+        proc = self._spawn(fake_java, owned_children)
+        sub.record_integration_child(proc)
+        sub.record_integration_child(proc)
+        assert [c["pid"] for c in json.loads(self._record_file().read_text())["children"]] == [proc.pid]
+
+    def test_a_dead_owners_engine_is_killed_by_the_sweep_and_the_record_removed(
+        self, fake_java, owned_children,
+    ) -> None:
+        proc = self._spawn(fake_java, owned_children)
+        rec = self._record_file()
+        info = json.loads(rec.read_text())
+        info["owner_pytest_pid"] = _dead_pid()
+        info["owner_cmdline"] = ""
+        rec.write_text(json.dumps(info))
+        sub._owner_records.clear()  # this process no longer holds it: the sweep alone decides
+        result = sub.SweepResult()
+        sub._sweep_owner_records(self.root, result)
+        proc.wait(timeout=10)
+        assert not pid_alive(proc.pid)
+        assert not rec.exists()
+        assert result.errors == [] and result.mismatch_refused == []
+
+    def test_a_live_owners_engine_is_left_alone(self, fake_java, owned_children) -> None:
+        proc = self._spawn(fake_java, owned_children)
+        result = sub.SweepResult()
+        sub._sweep_owner_records(self.root, result)
+        assert proc.poll() is None
+        assert self._record_file().exists()
+        assert result.live_untouched == [str(self._record_file())]
+
+    def test_a_reused_child_pid_is_not_killed(self, fake_java, owned_children) -> None:
+        """The record names a pid with a command line; a different process there now is not the engine."""
+        proc = self._spawn(fake_java, owned_children)
+        rec = self._record_file()
+        info = json.loads(rec.read_text())
+        info["owner_pytest_pid"] = _dead_pid()
+        info["owner_cmdline"] = ""
+        info["children"][0]["cmdline"] = "/usr/bin/java -jar something-else.jar"
+        rec.write_text(json.dumps(info))
+        sub._owner_records.clear()
+        result = sub.SweepResult()
+        with pytest.warns(UserWarning, match="PID-reuse"):
+            sub._sweep_owner_records(self.root, result)
+        assert proc.poll() is None and result.mismatch_refused == [str(rec)]
+
+    def test_the_record_is_dropped_at_exit_once_its_child_is_gone(self, fake_java, owned_children) -> None:
+        proc = self._spawn(fake_java, owned_children)
+        sub._drop_finished_owner_records()
+        assert self._record_file().exists(), "a live child keeps its record"
+        proc.kill()
+        proc.wait(timeout=5)
+        sub._drop_finished_owner_records()
+        assert not self._record_file().exists()
+
+    @pytest.mark.parametrize(("module", "spawn", "args"), [
+        ("tests.test_main_bootstrap_failure", "_spawn_engine", ("db", "tok")),
+        ("tests.test_main_sigterm_during_model_init", "_spawn", ("db",)),
+    ])
+    def test_the_two_main_fixtures_record_their_jvm_in_a_process_with_no_cluster(
+        self, module, spawn, args, fake_java, owned_children, tmp_path, monkeypatch,
+    ) -> None:
+        import importlib
+
+        mod = importlib.import_module(module)
+        setattr_in(monkeypatch, module, "shutil.which", lambda name: fake_java)
+        state = {"pg_port": 1, "pg_user": "u"}
+        log = tmp_path / "engine.log"
+        if spawn == "_spawn":
+            proc, fh = mod._spawn(state, args[0], log, {})
+        else:
+            proc, fh = mod._spawn_engine(state, args[0], args[1], log)
+        owned_children.append(proc)
+        fh.close()
+        time.sleep(0.1)
+        assert sub._owner_records != {}, "the fixture's JVM was not recorded anywhere"
+        rec = json.loads(self._record_file().read_text())
+        assert [c["pid"] for c in rec["children"]] == [proc.pid]
+        # and a later sweep of a dead owner reaps it
+        rec_path = self._record_file()
+        rec["owner_pytest_pid"] = _dead_pid()
+        rec["owner_cmdline"] = ""
+        rec_path.write_text(json.dumps(rec))
+        sub._owner_records.clear()
+        sub._sweep_owner_records(self.root, sub.SweepResult())
+        proc.wait(timeout=10)
+        assert not rec_path.exists()

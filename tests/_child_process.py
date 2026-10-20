@@ -30,6 +30,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,38 @@ def popen_in_group(
     job = process_group.contain(proc)
     if job is not None:
         _JOBS[proc.pid] = job
+    if is_engine_jvm_argv(argv):
+        _record_engine_child(proc)
     return proc
+
+
+#: The engine jar's file-name prefix (``nexus-service-1.0-SNAPSHOT.jar`` in a build, a versioned name elsewhere).
+_ENGINE_JAR_PREFIX = "nexus-service"
+
+
+def is_engine_jvm_argv(argv: Any) -> bool:
+    """Is *argv* a JVM launch of the engine jar: a list holding ``-jar`` followed by a path whose file name
+    starts with :data:`_ENGINE_JAR_PREFIX`? Shaped like :func:`tests.db._service_fixture.jar_argv` and
+    :func:`tests._engine_substrate.engine_argv`."""
+    if not isinstance(argv, (list, tuple)):
+        return False
+    toks = [str(a) for a in argv]
+    try:
+        jar = toks[toks.index("-jar") + 1]
+    except (ValueError, IndexError):
+        return False
+    return Path(jar.replace("\\", "/")).name.startswith(_ENGINE_JAR_PREFIX)
+
+
+def _record_engine_child(proc: subprocess.Popen) -> None:
+    """Record an engine JVM for the crash sweep, whatever fixture started it (nexus-qsqc6). Best effort: a
+    record that cannot be written warns and never fails the spawn."""
+    from tests._engine_substrate import record_integration_child  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    try:
+        record_integration_child(proc)
+    except Exception as exc:  # noqa: BLE001 - the spawn already happened; losing the record must not lose the proc
+        warnings.warn(f"nexus tests: could not record engine pid {proc.pid} for the crash sweep ({exc})", stacklevel=3)
 
 
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
