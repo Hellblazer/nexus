@@ -286,11 +286,15 @@ jobs:
       # nexus-km7ma (Sam 2026-10-20): on the pool, generated jOOQ trees persist in a host cache
       # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the jOOQ/JDBC/Testcontainers versions
       # and the producer (service/pom.xml, jooq-inputs). A hit skips the codegen container and
-      # its changelog replay for inputs a fresh replay already generated; the suite still replays
-      # the changelog in every class (PgContainerHelper.applyProductSchema), and a db/ or pom
-      # change is a new key, so a new changelog always gets a fresh codegen replay here once.
-      # Step-scoped: the two Maven suite steps read this step's output; nothing is written to
-      # GITHUB_ENV, and hosted runners and every other step keep NX_JOOQ_CACHE=off.
+      # its changelog replay for inputs a fresh replay already generated on this host. The suite
+      # still replays the full changelog once per fork (PgContainerHelper.applyProductSchema), a
+      # db/ or pom change is a new key, and codegen itself is still checked fresh on every
+      # service/** change by ci.yml's hosted engine-service-build job and by the release job
+      # (both NX_JOOQ_CACHE=off, pinned by tests/test_service_jooq_codegen_skip_lint.py).
+      # The key cannot see the floating pg17 image, so entries live in a per-ISO-week
+      # directory and earlier weeks are deleted: an image change reaches codegen here within
+      # a week. Step-scoped: the two Maven suite steps read this step's output; nothing is
+      # written to GITHUB_ENV, and hosted runners and every other step keep NX_JOOQ_CACHE=off.
       - name: Point the jOOQ cache at the pool host cache
         id: jooqcache
         if: runner.environment == 'self-hosted'
@@ -300,15 +304,20 @@ jobs:
             echo "::notice::jOOQ host cache unused: NX_LAB_CACHE_ROOT is unset, missing or unwritable"
             exit 0
           fi
-          dir="$root/nexus/jooq"
+          base="$root/nexus/jooq"
+          dir="$base/$(date -u +%G-W%V)"
           if ! mkdir -p "$dir"; then
             echo "::notice::jOOQ host cache unused: cannot create $dir"
             exit 0
           fi
-          # Keep the newest JOOQ_CACHE_KEEP entries of each kind; a prune failure never fails the job.
+          # Earlier weeks go once idle a day (a job that straddles the week boundary keeps
+          # its directory; a failure never fails the job); this week keeps the newest
+          # JOOQ_CACHE_KEEP entries of each kind.
+          find "$base" -mindepth 1 -maxdepth 1 -type d -name '*-W*' -mmin +1440 ! -name "$(basename "$dir")" -exec rm -rf {} + 2>/dev/null || true
           NX_JOOQ_CACHE="$dir" bash -c '. scripts/lib/gate-jar-cache.sh && gate_jar_cache_prune_jooq "$PWD"' || true
+          find "$dir" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-before" || true
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          echo "jOOQ host cache: $dir, $(find "$dir" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) | wc -l) entries"
+          echo "jOOQ host cache: $dir, $(wc -l < "$RUNNER_TEMP/jooq-cache-before") entries"
 
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
       # testcontainers-jooq-codegen-maven-plugin generates into
@@ -332,6 +341,16 @@ jobs:
         env:
           NX_JOOQ_CACHE: ${{ steps.jooqcache.outputs.dir || 'off' }}
         run: ./mvnw -q test -Dnexus.ddl.suite=main "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-main" -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
+
+      # nexus-km7ma: the evidence line for the host cache. A main/test entry that appeared
+      # during the suite means that kind missed and was generated and published; none means
+      # both restored (or the publish was refused, which the pom warns about in the log).
+      - name: jOOQ host cache hit or miss (diagnostic, never fails)
+        if: always() && steps.jooqcache.outputs.dir != ''
+        run: |
+          find "${{ steps.jooqcache.outputs.dir }}" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) -printf '%f\n' | sort > "$RUNNER_TEMP/jooq-cache-after" || true
+          new=$(comm -13 "$RUNNER_TEMP/jooq-cache-before" "$RUNNER_TEMP/jooq-cache-after" | sed -E 's/-.*//' | sort -u | tr '\n' ' ')
+          echo "jOOQ host cache: missed and published: ${new:-none}"
 
       # nexus-ekp7w: the bytes-written and DDL ratchet for this suite. ADVISORY until the Java
       # ceilings in tests/ddl_ceiling.toml are numbers: they are still "measure", pending the
