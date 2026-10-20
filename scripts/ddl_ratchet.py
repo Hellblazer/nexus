@@ -5,7 +5,7 @@
     ddl_ratchet.py check  --suite python_unit      --report <dir>/nx-ddl-report.json --advisory
     ddl_ratchet.py check  --suite java_main        --report service/target/ddl-counts [--run <id>] [--advisory]
     ddl_ratchet.py check  --suite java_integration --report service/target/ddl-counts [--run <id>] [--advisory]
-    ddl_ratchet.py fan-in --suite python_unit      --report shard1.json shard2.json ... --shards N [--advisory]
+    ddl_ratchet.py fan-in --suite python_unit      --report shard1.json shard2.json ... --shards N [--advisory] [--bytes-advisory]
                                                    (the Python gate; enforced only once ``measured_on`` is set)
 
 THE PRIMARY GATED SIGNAL IS DDL PER TEST: an exact count (31881 DDL statements on macOS and on Linux
@@ -332,7 +332,8 @@ def _fmt(value: float) -> str:
 
 
 def compare(label: str, measured: Measurement, entry: dict, metric_names: tuple[str, ...], ceilings_name: str,
-            section: str) -> tuple[int, str]:
+            section: str, ungated: frozenset[str] = frozenset(), ungated_why: str = "") -> tuple[int, str]:
+    """``ungated`` metrics are compared and printed but never fail the run (``ungated_why`` says why)."""
     shown = " ".join(f"{k}={_fmt(v)}" for k, v in measured.metrics.items())
     head = f"ddl ratchet {label}: {shown} [{measured.extra}]"
     if measured.problems:
@@ -361,7 +362,10 @@ def compare(label: str, measured: Measurement, entry: dict, metric_names: tuple[
         tol = entry.get(f"{name}_tolerance", bytes_tol if _is_bytes(name) else ddl_tol)
         limit = entry[name] * (1 + tol)
         value = measured.metrics[name]
-        if value > limit:
+        if value > limit and name in ungated:
+            notes.append(f"{name} {_fmt(value)} is above the ceiling {_fmt(entry[name])}"
+                         + (f" (+{tol:.0%} band = {_fmt(limit)})" if tol else "") + f"; NOT GATED: {ungated_why}")
+        elif value > limit:
             over.append(f"{name} {_fmt(value)} is above the ceiling {_fmt(entry[name])}"
                         + (f" (+{tol:.0%} band = {_fmt(limit)})" if tol else ""))
         elif value < entry[name] * (1 - tol):
@@ -398,7 +402,14 @@ def check(suite: str, report: Path, ceilings_path: Path = DEFAULT_CEILINGS, run:
     return compare(suite, measured, entry, names, ceilings_path.name, suite)
 
 
-def check_fan_in(suite: str, reports: list[Path], shards: int, ceilings_path: Path = DEFAULT_CEILINGS) -> tuple[int, str]:
+#: Why a hosted fan-in does not gate the WAL metrics (nexus-ekp7w review): WAL per test is host-dependent and
+#: the python ceilings were measured on the pool; the DDL metrics are exact counts and gate everywhere.
+BYTES_ADVISORY_WHY = ("the shards ran on a hosted runner, and WAL bytes are host-dependent while the ceilings were "
+                      "measured on the pool; the DDL metrics are still gated")
+
+
+def check_fan_in(suite: str, reports: list[Path], shards: int, ceilings_path: Path = DEFAULT_CEILINGS,
+                 bytes_advisory: bool = False) -> tuple[int, str]:
     if suite != "python_unit":
         return EXIT_NOT_COMPARABLE, f"fan-in sums python shard reports; {suite!r} has none"
     try:
@@ -406,7 +417,9 @@ def check_fan_in(suite: str, reports: list[Path], shards: int, ceilings_path: Pa
         entry = load_ceilings(ceilings_path)[suite]
     except (OSError, ValueError, KeyError) as exc:
         return EXIT_NOT_COMPARABLE, f"ddl ratchet {suite} fan-in: cannot read the measurement or ceiling ({exc!r})"
-    return compare(f"{suite} fan-in", measured, entry, PYTHON_METRICS, ceilings_path.name, suite)
+    ungated = frozenset(n for n in PYTHON_METRICS if _is_bytes(n)) if bytes_advisory else frozenset()
+    return compare(f"{suite} fan-in", measured, entry, PYTHON_METRICS, ceilings_path.name, suite,
+                   ungated, BYTES_ADVISORY_WHY)
 
 
 def measured_on(suite: str, path: Path = DEFAULT_CEILINGS) -> str | None:
@@ -448,6 +461,9 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--advisory", action="store_true",
                    help="print the whole comparison and exit 0 whatever it is: the python ceilings are not yet "
                         "measured on the platform that enforces them (no [python_unit] measured_on)")
+    f.add_argument("--bytes-advisory", action="store_true",
+                   help="the shards ran on a hosted runner: report a WAL metric above its ceiling without failing "
+                        "(WAL is host-dependent; the ceilings were measured on the pool); the DDL metrics still gate")
     args = parser.parse_args(argv)
     if args.advisory:
         # Advisory means exit 0 whatever happens, a malformed report included: a report of the
@@ -468,7 +484,7 @@ def _run(args: argparse.Namespace) -> int:
             message += f"\n  ADVISORY: this would exit {code}; not enforced here."
             code = EXIT_OK
     else:
-        code, message = check_fan_in(args.suite, args.report, args.shards, args.ceilings)
+        code, message = check_fan_in(args.suite, args.report, args.shards, args.ceilings, args.bytes_advisory)
         if args.advisory:
             message += _fan_in_advisory_note(code, args.suite, args.ceilings)
             code = EXIT_OK

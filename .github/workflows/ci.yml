@@ -1758,6 +1758,9 @@ jobs:
       # failure message names the metric, and a new Liquibase changeset bumps migration_ddl_per_worker in
       # the same commit (tests/AGENTS.md). tests/scripts/test_ddl_ratchet_wiring.py keeps the flag and the
       # continue-on-error lines consistent with the marker.
+      # When the shards ran hosted (the test job's runs-on condition, repeated in the run line and kept equal
+      # by that test), --bytes-advisory reports a WAL breach without failing: WAL per test is host-dependent
+      # and the ceilings were measured on the pool. The DDL metrics are exact and gate on every runner.
       # Fan-in sums every shard's report and judges the whole run against tests/ddl_ceiling.toml:
       # bytes and DDL per test over all tests, and the migration's per booted worker, which do not
       # move with the shard split, with -n (the pool runs 4 workers a shard, a hosted runner one)
@@ -1784,7 +1787,7 @@ jobs:
 
       - name: DDL/bytes ratchet over the whole run (fan-in)
         if: needs.changes.outputs.code == 'true'
-        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json
+        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

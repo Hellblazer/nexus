@@ -505,17 +505,15 @@ its verdict step. The Java steps of
 persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
 exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and
 `tests/scripts/test_ddl_ratchet_wiring.py` fails the commit that sets them and leaves the flag on.
-**The Python fan-in is `--advisory` too until it is armed**: the python ceilings
-were estimated or measured off CI (`wal_bytes_per_test` is a cross-OS estimate; the same tests wrote 1.8x
-more WAL on chas than on the laptop), so an enforced fan-in could turn develop red on a number nobody
-measured there, after the whole shard matrix, with no way to re-run it green. `[python_unit] measured_on`
-in `tests/ddl_ceiling.toml` is the marker; the wiring lint keeps `--advisory` (and `continue-on-error` on
-the fan-in's checkout, download and run, and on each shard's advisory check and report upload) exactly
-while it is absent. **To arm it, in one commit:** paste the
-first Linux fan-in line (the `pytest-gate` log of a develop run) into nexus-ekp7w, set the four ceilings from
-it, add `measured_on = "<ci run url or sha>"`, and drop `--advisory` and the three `continue-on-error`
-lines from the fan-in steps in `ci.yml`, plus the `continue-on-error` line on the two per-shard steps in
-the `test` job. The fan-in prints the whole comparison either way.
+**The Python fan-in is armed** (2026-10-20, nexus-ekp7w): its ceilings come from three Linux CI fan-ins on
+the pool with the tenant pool on (the run ids are in `tests/ddl_ceiling.toml`), `[python_unit] measured_on`
+is the marker, and the wiring lint requires the fan-in to enforce and none of its steps (nor each shard's
+advisory check and report upload) to be `continue-on-error` while the marker is set. One exception by
+runner: when the shards ran hosted (a fork PR, or `NX_CI_POOL=off`) the fan-in passes `--bytes-advisory`,
+which prints a WAL breach without failing, because WAL per test is host-dependent and the ceilings were
+measured on the pool; the DDL metrics are exact counts and gate everywhere. The flag's condition is the
+`test` job's `runs-on` condition, and the lint keeps them equal. Disarming (dropping the marker) needs the
+advisory wiring back in the same commit.
 **Once armed, a commit that adds a Liquibase changeset bumps `migration_ddl_per_worker` in the same commit**
 (its tolerance is 0, because the migration's DDL count is the changelog's own; the failure message says
 the same). Raising any ceiling needs the reason in that commit's message.

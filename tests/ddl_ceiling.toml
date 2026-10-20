@@ -14,7 +14,7 @@
 # statement counts that explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are
 # reduce-only: lower one in the commit that lowers the number, raising one needs a reviewed reason in that
 # commit's message. A ceiling is only as good as its measurement: see "HOW THE PYTHON NUMBERS WERE
-# MEASURED" below for which of them are measurements and which are estimates.
+# OBTAINED" below for which of them are measurements and which are estimates.
 #
 # Every metric is INTENSIVE, so it does not move with how the work is split across shards or forks:
 #   python_unit    the gate (once armed, see below) is `ddl_ratchet.py fan-in`, which sums every shard's report and judges the whole
@@ -29,30 +29,26 @@
 # Tolerance bands: a bytes metric passes up to ceiling * (1 + bytes_tolerance), a DDL metric up to
 # ceiling * (1 + ddl_tolerance), and `<metric>_tolerance` overrides either for one metric.
 #
-# THE PYTHON GATE IS ADVISORY UNTIL IT IS ARMED. `[python_unit] measured_on` is the marker: while it is
-# absent, the CI fan-in runs `--advisory` (prints the whole comparison, exits 0), because the ceilings below
-# were not measured on the platform that enforces them. A false red there lands after the whole shard
-# matrix, on develop and on the release PR, and cannot be re-run green. tests/scripts/test_ddl_ratchet_wiring.py
-# keeps the flag on exactly while the marker is absent. To ARM it, in ONE commit:
-#   1. paste the first Linux fan-in line (CI run on develop, pytest-gate log) into nexus-ekp7w;
-#   2. set the four python ceilings from that line (DDL and migration are exact; WAL gets its band);
-#   3. add `measured_on = "<ci run url or sha>"` under [python_unit];
-#   4. drop `--advisory` and the three `continue-on-error` lines from the fan-in steps in
-#      .github/workflows/ci.yml, and the `continue-on-error` line on each of the two per-shard steps in
-#      the `test` job (the advisory check and the report upload).
+# THE PYTHON GATE IS ARMED (2026-10-20): `[python_unit] measured_on` names the CI runs the ceilings came from,
+# and tests/scripts/test_ddl_ratchet_wiring.py requires the CI fan-in to enforce while it is set. A fan-in
+# whose shards ran hosted (fork PR, NX_CI_POOL=off) passes --bytes-advisory: it prints a WAL breach without
+# failing (WAL is host-dependent, these were measured on the pool) and still gates the DDL metrics.
+# Re-measuring: take the fan-in lines from develop's pytest-gate logs and set every python ceiling from them in one
+# commit, naming the runs in measured_on and below.
 # Once armed, a commit that adds a Liquibase changeset bumps migration_ddl_per_worker (tolerance 0) in the
 # same commit (tests/AGENTS.md says how; the failure message repeats it).
 #
-# HOW THE PYTHON NUMBERS WERE OBTAINED (armed 2026-10-20, nexus-ekp7w): three Linux CI fan-ins on develop
-# (pool lab-6c18g, 6 shards x 4 workers, pytest-gate log), runs 39344928950 (e615ca68e), 39350826510
-# (51e9a4ae3) and 39361935431 (07ca0baf1):
-#   wal_bytes_per_test               232037 / 231805 / 232330   ceiling 232400 (max, rounded up; band 0.10)
-#   ddl_per_test                     18.7539 / 18.7533 / 18.7416 ceiling 18.76  (band 0.05: the test set moves)
-#   migration_wal_bytes_per_worker   11037918 / 11037914 / 11037916 ceiling 11038000. RAISED from 11010048:
+# HOW THE PYTHON NUMBERS WERE OBTAINED (armed 2026-10-20, nexus-ekp7w): three Linux CI fan-ins on develop with
+# the tenant pool on (its default since b5077eb4f), pool lab-6c18g, 6 shards x 4 workers, runs 39402256114
+# (7e245451d), 39403221114 (15f3dbd3b) and 39405019761 (0e3d81da9; its gate was red on an unrelated doc
+# citation after six green shards, so its six shard reports were fanned in by hand):
+#   wal_bytes_per_test               18438 / 18446 / 18426        ceiling 18450 (max, rounded up; band 0.10)
+#   ddl_per_test                     1.01278 / 1.01278 / 1.01252  ceiling 1.013 (band 0.05: the test set moves)
+#   migration_wal_bytes_per_worker   11037903 / 11037883 / 11037899 ceiling 11038000. RAISED from 11010048:
 #                                    that was a chas hand run, not CI; the enforcing platform measures 0.25% more.
 #   migration_ddl_per_worker         2101 on all three, tolerance 0 (the changelog's own count)
-# tests 30635-30655, workers_booted 24, total_ddl 624949 on all three. The pre-arming estimates (240000 and
-# 19.02 from macOS and chas) are superseded.
+# tests 30663-30671, workers_booted 24, total_ddl 81479 on all three. Pool-off runs (e615ca68e, 51e9a4ae3,
+# 07ca0baf1) measured 232k WAL and 18.75 DDL per test: a pool that stopped leasing fails this gate.
 #
 # "measure" means no measurement exists yet. The check then prints the numbers it just measured and exits
 # 11 (not 0), and a ceiling nobody set must not pass a run. The Java sections are still "measure": their
@@ -61,11 +57,11 @@
 # and drop --advisory from its step in service-ci.yml in the same commit (a lint checks they agree).
 
 [python_unit]
-measured_on = "CI 39344928950 (e615ca68e), 39350826510 (51e9a4ae3), 39361935431 (07ca0baf1)"
+measured_on = "CI 39402256114 (7e245451d), 39403221114 (15f3dbd3b), 39405019761 (0e3d81da9)"
 bytes_tolerance = 0.10
 ddl_tolerance = 0.05
-wal_bytes_per_test = 232400
-ddl_per_test = 18.76
+wal_bytes_per_test = 18450
+ddl_per_test = 1.013
 migration_wal_bytes_per_worker = 11038000
 migration_ddl_per_worker = 2101
 migration_ddl_per_worker_tolerance = 0.0

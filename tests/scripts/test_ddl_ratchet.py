@@ -291,6 +291,23 @@ def test_fan_in_over_a_ceiling_fails(tmp_path) -> None:
     assert "ddl_per_test" in message
 
 
+def test_bytes_advisory_reports_a_wal_breach_without_failing_and_still_gates_ddl(tmp_path) -> None:
+    """nexus-ekp7w: a hosted fan-in (--bytes-advisory) cannot be failed by WAL measured on another host, but the
+    exact DDL counts still gate it, and without the flag the same WAL breach fails."""
+    shards = _shards(tmp_path)
+    wal_over = _py_ceilings(tmp_path, wal_bytes_per_test=9000)
+    assert ratchet.check_fan_in("python_unit", shards, 3, wal_over)[0] == ratchet.EXIT_OVER
+    code, message = ratchet.check_fan_in("python_unit", shards, 3, wal_over, bytes_advisory=True)
+    assert code == ratchet.EXIT_OK, message
+    assert "wal_bytes_per_test 10000 is above the ceiling 9000" in message and "NOT GATED" in message
+    ddl_over = _py_ceilings(tmp_path, ddl_per_test=74)
+    code, message = ratchet.check_fan_in("python_unit", shards, 3, ddl_over, bytes_advisory=True)
+    assert code == ratchet.EXIT_OVER and "ddl_per_test" in message, message
+    wal_over = _py_ceilings(tmp_path, wal_bytes_per_test=9000)  # the same file: rewrite it after ddl_over
+    assert ratchet.main(["fan-in", "--suite", "python_unit", "--shards", "3", "--ceilings", str(wal_over),
+                         "--report", *map(str, shards), "--bytes-advisory"]) == ratchet.EXIT_OK
+
+
 def test_the_gate_is_the_whole_run_so_a_shard_that_looks_heavy_alone_does_not_flap_it(tmp_path) -> None:
     """nexus-2rhif: a shard's intensive numbers move with its mix. Shard A is the heavy mix (150 DDL a test),
     shard B the light one (30): alone, A is over the ceiling; together they are 50 a test, under it."""

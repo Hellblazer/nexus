@@ -110,6 +110,14 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
         m = re.search(r"--shards\s+(\d+)", run)
         if not m or int(m.group(1)) != n:
             problems.append(f"pytest-gate: fan-in --shards is {m.group(1) if m else 'missing'} but the matrix has {n} shards")
+        runs_on = str(doc["jobs"]["test"].get("runs-on", ""))
+        m_on = re.fullmatch(r"\$\{\{\s*(.+?)\s*&&\s*'ubuntu-latest'\s*\|\|\s*'lab-[\w-]+'\s*\}\}", runs_on)
+        m_ba = re.search(r"\$\{\{\s*(.+?)\s*&&\s*'--bytes-advisory'\s*\|\|\s*''\s*\}\}", run)
+        if not m_on:
+            problems.append(f"test: runs-on is not the '<hosted> && ubuntu-latest || lab-*' shape the fan-in mirrors: {runs_on!r}")
+        elif not m_ba or m_ba.group(1) != m_on.group(1):
+            problems.append("pytest-gate: the fan-in's --bytes-advisory condition is not the test job's hosted-runner condition, "
+                            "so a hosted run could be gated on WAL measured on the pool (nexus-ekp7w)")
         if "--suite python_unit" not in run or "ddl-reports/*/nx-ddl-report.json" not in run:
             problems.append("pytest-gate: the fan-in does not read every downloaded shard report")
         verdict = [i for i, s in enumerate(_steps(doc, "pytest-gate")) if 'echo "pytest-gate: PASS"' in str(s.get("run", ""))]
@@ -229,12 +237,16 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
         (_CHECK_HEAD, _CHECK_HEAD + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         (_UPLOAD_IF, _UPLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         ("--suite python_unit --shards 6 --report", "--suite python_unit --shards 6 --advisory --report", "the gate is switched off"),
+        ("&& '--bytes-advisory' || ''", "&& '' || ''", "--bytes-advisory condition is not the test job's"),
+        ("vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory'",
+         "vars.NX_CI_POOL == 'off') && '--bytes-advisory'", "--bytes-advisory condition is not the test job's"),
     ],
     ids=["fan-in gone", "shards drift", "shard check enforced", "no report dir", "artifact not a shard report",
          "missing report passes", "download pattern", "shard check on the 3.13 leg", "upload on the 3.13 leg",
          "fan-in runs on a skipped matrix", "download runs on a skipped matrix", "fan-in runs after a red verdict",
          "armed fan-in swallows a red", "armed download swallows a red",
-         "armed shard check swallows a red", "armed report upload swallows a red", "armed fan-in back to advisory"],
+         "armed shard check swallows a red", "armed report upload swallows a red", "armed fan-in back to advisory",
+         "hosted run gated on WAL", "bytes-advisory condition drifts from runs-on"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
     problems = python_wiring_problems(_mutate(CI_YML.read_text(), old, new), CEILINGS.read_text())
