@@ -240,6 +240,28 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   (`embedQuery`), so a ring of real query vectors costs no embedding call.
 - **❓ Assumed.** Every item under Critical Assumptions.
 
+- **✅ Verified** (spike, 2026-10-20). At 1024 dimensions an HNSW index is one
+  8 KB page per element plus a metapage (20000 rows: 163,848,192 bytes = 20001 x
+  8192), so bytes per row is slots over rows. Pure ingest 20k to 40k: 1.000.
+  Delete 25%: 1.333; 50%: 2.000. Plain `VACUUM` does not shrink the file;
+  reinsert after it refills every freed slot (back to 1.000). Delete and
+  reinsert with no `VACUUM` between grows the file (1.25, then 1.75), and it
+  stays there after `VACUUM` with no dead tuples. Plain `VACUUM` of a 40k-row
+  table with one HNSW index took 163.5 s after 10k deletes and 268.1 s after 20k
+  on a laptop. Not measured: recall at any step, other dimensions, autovacuum.
+  *Source: local spike, PG 17.11 and pgvector 0.8.7 (`pgvector/pgvector:pg17`),
+  m 16, `ef_construction` 64, seed 42; `nexus_rdr/230-research-11`.*
+- **✅ Verified** (spike, 2026-10-20). `REINDEX INDEX CONCURRENTLY` keeps a
+  leaf's child index attached to the parent index and keeps any index's
+  comment. A REINDEX cancelled while loading tuples leaves `<index>_ccnew`
+  (invalid, not ready, not attached, no predicate, no comment); the next
+  REINDEX names its copy `_ccnew1`. While a REINDEX runs, `DROP INDEX
+  CONCURRENTLY` under a 5 s lock timeout fails at 5.00 s on the leftover and on
+  the running REINDEX's own in-flight copy alike. The in-flight copy is also
+  invalid, so the `indisvalid` re-read cannot tell it from a dead leftover; the
+  lock timeout is what protects it. `_ccold` was not produced. *Source: local
+  spike as above; `nexus_rdr/230-research-13`.*
+
 ### Critical Assumptions
 
 These are the proposal's Unknowns that this design depends on. Each says how it
@@ -257,24 +279,28 @@ measurement.
   Unverified. **Method**: the canary runs after each vacuum of a leaf that had
   deletes or non-HOT updates to reap, so Phase 1 yields before-and-after pairs on
   the cloud.
-- [ ] **A3.** Index bytes per row is a usable bloat signal: pure ingest keeps it
+- [x] **A3.** Index bytes per row is a usable bloat signal: pure ingest keeps it
   under 1.4 times the fresh-build figure, and deletes push it up. **Status**:
-  Unverified and, per the proposal, uncalibrated: pgvector reuses deleted slots
-  on insert, so under steady churn the ratio under-reads. **Method**: a
-  substrate test in Phase 1 (grow a collection to twice its built size by
-  insert; then delete and reinsert 25% and 50%; record bytes per row after each
-  step and after `VACUUM`), and the first readings of the five cloud indexes.
-  That is also why the deletes rule (Technical Design 3) does not rely on size.
+  Verified by a local spike on 2026-10-20 (`nexus_rdr/230-research-11`), with a
+  calibration. At 1024 dimensions each graph element takes one 8 KB page, so
+  bytes per row is element slots divided by rows. Pure ingest to twice the built
+  size reads exactly 1.000; deletes raise it to 1/(1 - fraction deleted); plain
+  `VACUUM` leaves the size alone; reinsert after `VACUUM` reuses every freed slot
+  and brings it back to 1.000. The size rule therefore sees space (an unrefilled
+  shrink, or churn that outran `VACUUM`), never vacuumed churn, which is why the
+  deletes rule (Technical Design 3) does not rely on size.
 - [ ] **A4.** The managed instance's per-leaf state is in the range this design
   assumes: dead fractions, `last_autovacuum`, HNSW `VACUUM` duration per leaf
   after RDR-225, and leaf `REINDEX` time. **Status**: Unknown (not queried, per
   the proposal's brief). **Method**: a read-only query by conexus in Phase 1;
   leaf `REINDEX` time on a PITR fork in Phase 2 (Minimum Viable Validation).
-- [ ] **A5.** `REINDEX INDEX CONCURRENTLY` on a leaf's HNSW index keeps it
+- [x] **A5.** `REINDEX INDEX CONCURRENTLY` on a leaf's HNSW index keeps it
   attached to the partitioned parent index, and a comment on an index survives
-  `REINDEX INDEX CONCURRENTLY` (the swap moves the comment to the new copy).
-  **Status**: Documented in PostgreSQL behaviour as read, not tested here.
-  **Method**: substrate tests in Phase 1 (comment) and Phase 2 (attachment).
+  `REINDEX INDEX CONCURRENTLY`. **Status**: Verified by a local spike on
+  2026-10-20 (`nexus_rdr/230-research-13`) on both an attached leaf index and a
+  `pci_` partial index; the name, the predicate and the parent's validity are
+  unchanged. The substrate tests in Phase 1 (comment) and Phase 2 (attachment)
+  still pin it in the engine's own roles and schemas.
 - [ ] **A6.** Enough own-topic queries reach the lock holder for each indexed
   collection to give a verdict at least daily. **Status**: Unverified; with
   several engines behind a load balancer the holder sees about 1/N of the
@@ -373,7 +399,8 @@ for its dimension, with the leaf's rows read from `n_live_tup` (an estimate is
 enough for a ratio). The *install reference* for a dimension is the median
 bytes per row over this install's anchors with `"origin":"built"` at that
 dimension; with none, 8.2 KB per row for 1024 dimensions (RDR-227 A3, measured
-on fresh builds) and no reference for any other dimension, in which case the
+on fresh builds; it is the 8 KB page each element takes at that dimension, A3
+here) and no reference for any other dimension, in which case the
 leaf rule is inactive and the status says `unanchored`. After a leaf REINDEX the
 builder anchors the leaf index the same way.
 
@@ -402,8 +429,8 @@ follows under the new name). Their dead tuples are left to autovacuum, which
 nexus-s9wav sets to act at 5% per leaf.
 
 *Never on ingest or a migration walk.* No rule keys on inserts (they are
-recall-neutral as measured), and the size rule's 1.4 is above what pure ingest
-is assumed to reach (A3). The builder never runs during a migration (RDR-227),
+recall-neutral as measured), and pure ingest holds bytes per row at 1.000 of
+the build (A3, measured). The builder never runs during a migration (RDR-227),
 and a walk that rewrites leaves rebuilds every index fresh, with a fresh anchor.
 
 *Limits on how often.* REINDEXes run after the pass's drops and builds, one at
@@ -437,8 +464,10 @@ For a leaf's own HNSW index that rule does not apply yet, because its name is
 not a `pci_` name: this RDR extends the leftover carve-out to an invalid `hnsw`
 index named `<the leaf's HNSW index>_cc(new|old)[0-9]*` with no predicate on a
 leaf the builder resolved, through the same drop path as the `pci_` leftovers:
-the re-read of `indisvalid` before the drop and its 5 s lock timeout, so a build
-still running holds the heap lock and the drop times out instead of removing it
+the re-read of `indisvalid` before the drop and its 5 s lock timeout. The re-read
+does not protect a running build, whose copy is also invalid; the lock timeout
+does, because a running REINDEX holds the leaf's lock and the drop times out
+instead of removing it (measured, `nexus_rdr/230-research-13`)
 (`PciBuilderSession.drop`; Open Question 3, approved by Sam on 2026-10-20 on that
 condition). A `VACUUM` of a leaf holds `ShareUpdateExclusiveLock`
 for its run, which makes autovacuum skip that leaf meanwhile; it scans every
@@ -710,9 +739,10 @@ near-tie noise.
 
 ### Risks and Mitigations
 
-- **Risk**: the size trigger fires on ingest (A3 wrong). **Mitigation**: the
-  Phase 1 substrate test and the cloud's first readings come before Phase 2
-  enables REINDEX; the threshold is a constant in one class.
+- **Risk**: the size trigger fires on ingest. **Mitigation**: measured not to
+  (A3: 1.000 under pure ingest to twice the built size); the cloud's first
+  readings come before Phase 2 enables REINDEX; the threshold is a constant in
+  one class.
 - **Risk**: the canary goes red because of ordinary approximation on far
   queries, and REINDEX loops. **Mitigation**: own-topic admission, the
   once-per-24-hours limit and the `red_after_reindex` state, which ends the
@@ -878,8 +908,8 @@ All four answered by Sam on 2026-10-20 ("go with your recommendations").
    not cover it. The draft extends the carve-out to that one name pattern on
    leaves the builder resolved. *Decided:* approved, on the condition that the
    leaf leftover goes through the same drop path as the `pci_` leftovers (the
-   `indisvalid` re-read and the 5 s lock timeout), so an index whose build is
-   still running is never dropped.
+   `indisvalid` re-read and the 5 s lock timeout); the lock timeout is what keeps
+   an index whose build is still running from being dropped (A5).
 4. **Settings.** The draft adds one switch, `NX_SEARCH_PCI_REINDEX`, and keeps
    thresholds as constants changed by an engine cut. Settings per threshold are
    the alternative. *Decided:* one switch, thresholds as constants.
@@ -890,13 +920,14 @@ All four answered by Sam on 2026-10-20 ("go with your recommendations").
 
 RDR-217's premise that a bulk-built index retrieves better contradicts the
 measurements this design rests on; it is recorded under Relationship to Prior
-RDRs and not edited. Within this RDR, "never on ingest" and the size rule could
-conflict if A3 is wrong; Phase 1 measures A3 before Phase 2 enables the rule.
+RDRs and not edited. Within this RDR, "never on ingest" and the size rule do
+not conflict: A3 measured pure ingest at 1.000 of the build.
 
 ### Assumption Verification
 
-All six Critical Assumptions are unverified. A1, A2, A4 and A6 are verified by
-Phase 1's cloud run, A3 by P1.5, and A5 by tests in P1.1 and P2.3.
+A3 and A5 are verified by a local spike (2026-10-20); P1.5 and the tests in
+P1.1 and P2.3 pin them in the engine. A1, A2, A4 and A6 are unverified and are
+verified by Phase 1's cloud run.
 
 #### API Verification
 
@@ -967,3 +998,7 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-10-20: Sam's answers to Open Questions 1 to 4 recorded (thresholds
   confirmed as provisional, comment anchor, leaf leftover carve-out through the
   shared drop path, one switch).
+- 2026-10-20: A3 and A5 verified by a local spike (`nexus_rdr/230-research-11`,
+  `-13`); the size rule recorded as a space signal, and the lock timeout, not
+  the `indisvalid` re-read, as what protects a running build from the leftover
+  drop.
