@@ -2,8 +2,9 @@
 """Per-worker data-reset tenant pool for the engine substrate (nexus-fpwj1, rtg20 phase B).
 
 ``_engine_tenant_env`` mints a tenant for every test that touches storage and drops its partition leaves afterwards:
-about 50 relations created and dropped per test. With ``NX_TEST_TENANT_POOL=1`` a worker mints ONE tenant, lazily, on
-its first lease, and every later lease re-uses it after its data is reset. The pool is OFF by default.
+about 50 relations created and dropped per test. The pool is ON by default (nexus-7zloy): a worker mints ONE tenant,
+lazily, on its first lease, and every later lease re-uses it after its data is reset. ``NX_TEST_TENANT_POOL=0`` turns it
+off; any other value, including unset and ``1``, leaves it on.
 
 Teardown of a lease, in this order (design: T2 ``nexus/design-nexus-rtg20-data-reset-pool-2026-10-18``; route:
 nexus-0bl77):
@@ -82,9 +83,9 @@ _STASH = pytest.StashKey[Any]()
 
 
 def enabled(environ: Mapping[str, str] | None = None) -> bool:
-    """True only for exactly ``NX_TEST_TENANT_POOL=1``; unset (the default) and ``0`` mean off."""
+    """True unless ``NX_TEST_TENANT_POOL`` is exactly ``0``; unset (the default) and ``1`` mean on."""
     env = os.environ if environ is None else environ
-    return env.get(ENV_FLAG, "") == "1"
+    return env.get(ENV_FLAG, "") != "0"
 
 
 class TenantLeakError(AssertionError):

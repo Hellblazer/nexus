@@ -6,10 +6,11 @@ skipped (``TenantPool(evict=False)``) must show the stale state the eviction exi
 control does not differ proves nothing about the pool.
 
 The tests build their own :class:`TenantPool` over ``ensure_engine()``. The engine only registers the reset route, and
-only runs with per-collection index builds off, when ``NX_TEST_TENANT_POOL=1`` (``tests/_engine_substrate.py``), so every
-test that needs the engine skips unless the flag is on, and ``tests/test_tenant_pool_end_to_end.py`` runs this file in a
-child pytest with the flag on and fails unless the child ran and passed every test (non-vacuity). The default-off wiring
-through the real conftest is the same file.
+only runs with per-collection index builds and the reaper off, while the pool is on (the default; off only with
+``NX_TEST_TENANT_POOL=0``; ``tests/_engine_substrate.py``), so every test that needs the engine skips under ``=0``, and
+``tests/test_tenant_pool_end_to_end.py`` then runs this file in a child pytest with the pool on and fails unless the
+child ran and passed every test (non-vacuity). The default-on and ``=0`` wiring through the real conftest is the same
+file.
 """
 from __future__ import annotations
 
@@ -42,8 +43,8 @@ UNREGISTERED = "unregistered_collection"
 @pytest.fixture(scope="module")
 def state() -> dict[str, Any]:
     if not _tenant_pool.enabled():
-        pytest.skip(f"needs the engine the pool boots ({_tenant_pool.ENV_FLAG}=1); "
-                    "test_tenant_pool_end_to_end.py runs this file in a child with the flag on")
+        pytest.skip(f"needs the engine the pool boots (the pool is on unless {_tenant_pool.ENV_FLAG}=0); "
+                    "test_tenant_pool_end_to_end.py runs this file in a child with the pool on")
     return ensure_engine()
 
 
@@ -415,20 +416,20 @@ class _Req:
         return object() if name in self._marks else None
 
 
-def test_the_flag_is_exactly_one_and_the_marker_opts_a_test_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    for value, want in (("1", True), ("0", False), ("", False), ("true", False), ("2", False)):
+def test_the_pool_is_on_unless_the_flag_is_exactly_zero_and_the_marker_opts_a_test_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    for value, want in (("1", True), ("0", False), ("", True), ("true", True), ("2", True), ("00", True), (" 0", True)):
         assert _tenant_pool.enabled({_tenant_pool.ENV_FLAG: value}) is want, value
-    assert _tenant_pool.enabled({}) is False, "the pool is off by default"
+    assert _tenant_pool.enabled({}) is True, "the pool is on by default (nexus-7zloy)"
 
     monkeypatch.setattr(_tenant_pool, "get_pool", lambda s: type("P", (), {"lease": staticmethod(lambda owner="": "POOL")})())
     monkeypatch.setattr(_engine_substrate, "minted_test_tenant", lambda s: "MINT")
     monkeypatch.setitem(_tenant_pool._entries, "pooled", 0)
     monkeypatch.setitem(_tenant_pool._entries, "fresh", 0)
     state: dict[str, Any] = {}
-    monkeypatch.delenv(_tenant_pool.ENV_FLAG, raising=False)
+    monkeypatch.setenv(_tenant_pool.ENV_FLAG, "0")
     assert _tenant_pool.tenant_lease(state, _Req(set())) == "MINT"
     assert _tenant_pool._entries == {"pooled": 0, "fresh": 0}, "off: nothing is counted"
-    monkeypatch.setenv(_tenant_pool.ENV_FLAG, "1")
+    monkeypatch.delenv(_tenant_pool.ENV_FLAG, raising=False)
     assert _tenant_pool.tenant_lease(state, _Req(set())) == "POOL"
     assert _tenant_pool.tenant_lease(state, _Req({"fresh_tenant"})) == "MINT"
     assert _tenant_pool.tenant_lease(state, None) == "POOL"
@@ -687,15 +688,18 @@ def test_the_census_names_a_pci_index_on_a_tenant_leaf(state: dict[str, Any]) ->
         drop_test_tenant(state, tenant)
 
 
-def test_the_substrate_engine_runs_with_pci_off_and_the_reset_route_on_when_the_pool_is_on(state: dict[str, Any]) -> None:
-    """With ``NX_TEST_TENANT_POOL=1`` ``tests/_engine_substrate.py`` sets ``NX_SEARCH_PCI=0`` and
-    ``NX_TEST_TENANT_RESET_ROUTE=1``; the pool depends on both (the route answers 503 while PCI is on). Read them
-    off the engine. The off posture (neither flag) is ``test_tenant_pool_end_to_end.py``."""
+def test_the_substrate_engine_runs_with_pci_off_the_reset_route_on_and_the_reaper_off_when_the_pool_is_on(state: dict[str, Any]) -> None:
+    """While the pool is on (the default) ``tests/_engine_substrate.py`` sets ``NX_SEARCH_PCI=0``,
+    ``NX_TEST_TENANT_RESET_ROUTE=1`` and ``NX_REAPER_ENABLED=false``; the pool depends on all three (the route answers
+    503 while PCI is on; a reaper pass writes ``gc_audit`` rows for a tenant between its wipe and its census, which
+    failed the census in the nexus-7zloy A/B). Read them off the engine. The ``NX_TEST_TENANT_POOL=0`` posture
+    (none of them) is ``test_tenant_pool_end_to_end.py``."""
     resp = httpx.get(f"{state['base_url']}/v1/status", headers=_hdr(state["bearer"]), timeout=30.0)
     assert resp.status_code == 200, resp.text
     status = resp.json()
     assert status["test_tenant_reset_route"] is True
     assert status["per_collection_indexes"]["this_engine"]["builder_state"] == "off"
+    assert status["reaper"]["enabled"] is False
 
 
 def test_the_end_of_session_line_reports_the_pool_tenants_leaf_bloat(

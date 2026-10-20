@@ -395,18 +395,23 @@ deselects them, so no census has said which of them touch storage.
   and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
   environment fails with a `KeyError` the guard cannot see).
 
-## The per-worker tenant pool (nexus-fpwj1, `NX_TEST_TENANT_POOL`, default OFF)
+## The per-worker tenant pool (nexus-fpwj1, `NX_TEST_TENANT_POOL`, default ON since nexus-7zloy)
 
-`NX_TEST_TENANT_POOL=1` makes `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdist worker
-(`tests/_tenant_pool.py`) instead of minting and dropping one per test. With the flag on, the substrate engine boots with
-`NX_TEST_TENANT_RESET_ROUTE=1` and `NX_SEARCH_PCI=0`; with it off, the engine is exactly the one develop boots. Measured on 13 storage-touching files at `-n 4`
-(767 tests): DDL 41,968 -> 576, WAL 268 MB -> 15 MB, 373 leases on 4 mints, 0 retired. The flag is exactly `1`; unset
-and `0` are off, and with it off nothing about the tenant fixtures changes.
+By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdist worker (`tests/_tenant_pool.py`)
+instead of minting and dropping one per test. While the pool is on, the substrate engine boots with
+`NX_TEST_TENANT_RESET_ROUTE=1`, `NX_SEARCH_PCI=0` and `NX_REAPER_ENABLED=false`; the reaper's first pass (60 s after
+boot) writes `nexus.gc_audit` rows per tenant, and one landing between a lease's wipe and its census failed the census.
+`NX_TEST_TENANT_POOL=0` turns the pool off, and the engine is then exactly the one develop boots; unset and `1` are on,
+and any other value is on too. Measured on 13 storage-touching files at `-n 4` (767 tests): DDL 41,968 -> 576, WAL
+268 MB -> 15 MB, 373 leases on 4 mints, 0 retired. The default-flip A/B on chas (3+3 interleaved full runs, 16
+workers): wall off 1125/1097/1091 s vs on 1109/1084/1095 s, suite `io_wbytes` 817 MB -> 9.4 MB, DDL 574,525 ->
+30,287, test WAL 6.6 GB -> 0.5 GB. A test that needs per-collection index builds or the engine reaper to run belongs
+under `@pytest.mark.fresh_tenant` plus its own engine, or under `NX_TEST_TENANT_POOL=0`; none does today.
 
 A lease ends with four steps, in this order: (1) one psql transaction deletes the tenant's rows from every tenant-keyed
 relation (derived from the catalog at call time; token rows included; DML only, no DDL, no `TRUNCATE`); (2) `POST
 /v1/_test/tenant-reset` evicts every JVM cache keyed by the tenant (nexus-0bl77; the route answers 503 while per-collection index builds, which
-are DDL, are on, and the engine's default for an unset `NX_SEARCH_PCI` is on, hence the pool-only flags above); (3) a
+are DDL, are on, and the engine's default for an unset `NX_SEARCH_PCI` is on, hence the pool-on flags above); (3) a
 census proves zero rows in at least 40 relations including a required set, and zero `pci_` indexes. It runs AFTER the
 wipe in the same teardown, so it proves the wipe completed and the tenant was quiet through the teardown window; it
 cannot see rows a test left before the wipe, because the wipe deletes them; (4) `POST /v1/tenants/create` for the same name
@@ -423,18 +428,17 @@ client singleton and lease cache) are cleared on every lease.
   token, or needs a tenant whose partition leaves have never held data. The tenant it gets is the old per-test mint.
 - A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A
   writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so
-  it shows up, if at all, only as an unexplained failure in that test (a stray row the test never reads changes nothing visible). That residual belongs to the A/B failure-set diff
-  (nexus-7zloy); fix the writer, never the census.
+  it shows up, if at all, only as an unexplained failure in that test (a stray row the test never reads changes nothing visible). The A/B found one such writer, the engine reaper (now off in the pool's engine, above);
+  fix the writer, never the census.
 - The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W leaf_dead_tup=D
   leaf_live_tup=L leaf_bytes=B`; the last three are `pg_stat` dead/live tuples and bytes over the pool tenants' chunk
   leaves at the end of the session (the stat counters lag, so dead is a floor): what thousands of delete-only resets
   leave behind. A pool tenant that is not empty at the end, or tenant tests that took no lease, fail the run.
   `tests/test_tenant_pool.py` drives each behaviour against the real engine, each with a control that skips the
   eviction (or the lease-start census) and must show the stale state. It needs the pool's engine, so its engine-backed
-  tests skip unless the flag is on; `tests/test_tenant_pool_end_to_end.py` runs the file in a child with the flag on
-  (must run at least one test, pass all, skip none), runs the real conftest on and off, and asserts the off engine has
-  neither flag.
-- Flipping the default is nexus-7zloy (the A/B full run on chas), not part of the pool.
+  tests skip under `NX_TEST_TENANT_POOL=0`; there `tests/test_tenant_pool_end_to_end.py` runs the file in a child with
+  the pool on (must run at least one test, pass all, skip none). That file also runs the real conftest with the flag unset and with
+  `0`, and asserts the engine posture of each (pool on: reset route on, PCI builder off, reaper off; `0`: none of those).
 
 ## Bytes written and DDL per run (nexus-sz651)
 

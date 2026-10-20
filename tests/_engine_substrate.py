@@ -2129,14 +2129,20 @@ def _boot() -> dict:
     env.pop("NX_STORAGE_BACKEND", None)
     # nexus-fpwj1: the per-worker tenant pool (tests/_tenant_pool.py) needs POST /v1/_test/tenant-reset, which is
     # loopback-only and root-token-only, and which answers 503 while per-collection index builds (NX_SEARCH_PCI,
-    # default ON when unset; DDL a data reset cannot undo) are on. Both are set ONLY when the pool is on: an engine
-    # without the pool is exactly the engine develop boots (an ambient non-loopback NX_SERVICE_BIND would also refuse
-    # to boot with the route registered). The pool's own engine-backed tests run in a child pytest with the pool on.
+    # default ON when unset; DDL a data reset cannot undo) are on. These are set ONLY while the pool is on (it is on
+    # unless NX_TEST_TENANT_POOL=0, nexus-7zloy): an engine without the pool is exactly the engine develop boots (an
+    # ambient non-loopback NX_SERVICE_BIND would also refuse to boot with the route registered). Under =0 the pool's
+    # own engine-backed tests run in a child pytest with the pool on.
     from tests import _tenant_pool  # noqa: PLC0415
 
     if _tenant_pool.enabled():
         env["NX_TEST_TENANT_RESET_ROUTE"] = "1"
         env["NX_SEARCH_PCI"] = "0"
+        # The engine's ChunkReaper makes a pass ChunkReaper.INITIAL_DELAY (60 s) after boot and writes nexus.gc_audit
+        # rows per tenant; one landing between a lease's wipe and its census fails the census (nexus-7zloy A/B,
+        # on-2: tenant still has rows: nexus.gc_audit=1). A pooled tenant is wiped constantly, so an async writer
+        # is a race; without the pool a stray row sits in a tenant nobody reuses.
+        env["NX_REAPER_ENABLED"] = "false"
     _pin_ownerless_write_mode(env)
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)

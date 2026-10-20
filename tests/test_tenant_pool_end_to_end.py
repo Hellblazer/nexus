@@ -2,12 +2,14 @@
 """nexus-fpwj1: this repo's real ``tests/conftest.py`` wires the tenant pool behind ``NX_TEST_TENANT_POOL``.
 
 ``tests/test_tenant_pool.py`` drives the pool object; it cannot show that ``t2_service_env`` takes the pool, that
-``@pytest.mark.fresh_tenant`` opts out, or that with the flag unset nothing changes. So this runs a child pytest, real
-conftest included, over ``tests/_tenant_pool_probe.py`` twice (flag on, flag off) and reads what each case saw. The
-child boots its own engine, so the case needs the service jar and says so when it cannot run rather than passing empty.
+``@pytest.mark.fresh_tenant`` opts out, or that ``NX_TEST_TENANT_POOL=0`` changes nothing. So this runs a child pytest,
+real conftest included, over ``tests/_tenant_pool_probe.py`` twice (flag unset, which is ON since nexus-7zloy, and
+flag ``0``, which is off) and reads what each case saw. The child boots its own engine, so the case needs the service
+jar and says so when it cannot run rather than passing empty.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -22,11 +24,15 @@ from tests.db._service_fixture import jar_freshness_skip_reason
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROBE = "tests/_tenant_pool_probe.py"
 
+#: Engine flags the pool-on substrate sets itself; an ambient value would make the off arm's posture the operator's.
+_ENGINE_POSTURE_ENV = (_tenant_pool.ROUTE_ENV, "NX_SEARCH_PCI", "NX_REAPER_ENABLED")
+
 
 def _child_env(tmp_path: Path, label: str, flag: str | None) -> dict[str, str]:
     env = {
         k: v for k, v in os.environ.items()
-        if not k.startswith(("NX_SERVICE_", "NX_T1_", "NX_STORAGE_BACKEND", "NX_TEST_TENANT_POOL")) and k != "NX_LOCAL"
+        if not k.startswith(("NX_SERVICE_", "NX_T1_", "NX_STORAGE_BACKEND", "NX_TEST_TENANT_POOL"))
+        and k != "NX_LOCAL" and k not in _ENGINE_POSTURE_ENV
     }
     env["NX_TEST_T2_SUBSTRATE"] = "optin"
     env["NX_STORAGE_TOUCH_GUARD_MODE"] = "report"
@@ -47,7 +53,7 @@ def _engine_gate() -> None:
         pytest.skip(f"the child boots an engine: {reason}")
 
 
-def _run_child(tmp_path: Path, label: str, flag: str | None) -> tuple[str, dict[str, str]]:
+def _run_child(tmp_path: Path, label: str, flag: str | None) -> tuple[str, dict[str, str], dict[str, object]]:
     out = tmp_path / f"{label}.tenants"
     env = _child_env(tmp_path, label, flag)
     env["NX_POOL_PROBE_OUT"] = str(out)
@@ -58,46 +64,73 @@ def _run_child(tmp_path: Path, label: str, flag: str | None) -> tuple[str, dict[
     )
     text = proc.stdout + proc.stderr
     assert proc.returncode == 0, text[-4000:]
-    assert re.search(r"\b4 passed\b", text), text[-4000:]
+    assert re.search(r"\b5 passed\b", text), text[-4000:]
     seen = dict(line.split(" ", 1) for line in out.read_text().splitlines())
     assert sorted(seen) == ["test_a_writes_a_note", "test_b_sees_no_note_from_the_test_before",
                             "test_c_opts_out_and_gets_its_own_tenant"], seen
-    return text, seen
+    posture = json.loads(Path(str(out) + ".posture").read_text())
+    return text, seen, posture
 
 
-def test_the_real_conftest_pools_by_flag_and_changes_nothing_without_it(tmp_path: Path) -> None:
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
-        pytest.skip("outer run provisions no engine (NX_TEST_T2_SUBSTRATE=none); the child needs one")
-    reason = jar_freshness_skip_reason()
-    if reason is not None:
-        if os.environ.get("NX_T2_SUBSTRATE_EXPECTED"):
-            pytest.fail(f"NX_T2_SUBSTRATE_EXPECTED is set but the child cannot boot an engine: {reason}")
-        pytest.skip(f"the child boots an engine: {reason}")
+@pytest.fixture(scope="module")
+def default_child(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, dict[str, str], dict[str, object]]:
+    """The probe under the real conftest with ``NX_TEST_TENANT_POOL`` unset: the default, which is the pool on."""
+    _engine_gate()
+    return _run_child(tmp_path_factory.mktemp("pool-default"), "default", None)
 
-    text, seen = _run_child(tmp_path, "on", "1")
+
+@pytest.fixture(scope="module")
+def zero_child(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, dict[str, str], dict[str, object]]:
+    """The probe with ``NX_TEST_TENANT_POOL=0``: the pool off, the engine exactly the one develop boots."""
+    _engine_gate()
+    return _run_child(tmp_path_factory.mktemp("pool-zero"), "zero", "0")
+
+
+def test_the_real_conftest_pools_by_default(default_child: tuple[str, dict[str, str], dict[str, object]]) -> None:
+    text, seen, _posture = default_child
     a, b, c = (seen[k] for k in sorted(seen))
-    assert a == b, f"flag on: the two ordinary tests share the worker's one pool tenant ({seen})"
-    assert c != a, f"flag on: the fresh_tenant test gets its own ({seen})"
+    assert a == b, f"flag unset: the two ordinary tests share the worker's one pool tenant ({seen})"
+    assert c != a, f"flag unset: the fresh_tenant test gets its own ({seen})"
     # the second test found no note the first wrote (asserted inside the probe, so a pass IS the proof), and:
     line = re.search(r"^tenant pool: (.*)$", text, re.MULTILINE)
     assert line, text[-3000:]
     assert re.search(r"leases=2 mints=1 retired=0 fresh_tenant=1 workers=1 leaf_dead_tup=\d+ leaf_live_tup=\d+ leaf_bytes=\d+\b", line.group(1)), line.group(1)
     assert "VIOLATION" not in text
 
-    text, seen = _run_child(tmp_path, "off", None)
-    a, b, c = (seen[k] for k in sorted(seen))
-    assert len({a, b, c}) == 3, f"flag unset: every storage-touching test mints its own tenant ({seen})"
-    assert "tenant pool:" not in text, "flag unset: the plugin is not even registered"
 
-    text, seen = _run_child(tmp_path, "zero", "0")
-    assert len(set(seen.values())) == 3 and "tenant pool:" not in text, "NX_TEST_TENANT_POOL=0 is off"
+def test_the_real_conftest_changes_nothing_with_the_pool_off(zero_child: tuple[str, dict[str, str], dict[str, object]]) -> None:
+    text, seen, _posture = zero_child
+    assert len(set(seen.values())) == 3, f"NX_TEST_TENANT_POOL=0: every storage-touching test mints its own tenant ({seen})"
+    assert "tenant pool:" not in text, "NX_TEST_TENANT_POOL=0: the plugin is not even registered"
+
+
+def test_the_pool_on_substrate_engine_has_the_reset_route_pci_off_and_the_reaper_off(
+    default_child: tuple[str, dict[str, str], dict[str, object]],
+) -> None:
+    """The pool wipes and then censuses a tenant the engine must not write to in between. The reset route and PCI off
+    are what the pool needs; the reaper off (``NX_REAPER_ENABLED=false``) is what keeps its first pass, 60 s after
+    boot, from writing a ``gc_audit`` row for a pooled tenant between a wipe and its census (nexus-7zloy A/B)."""
+    _text, _seen, posture = default_child
+    assert posture == {"route": True, "pci_builder": "off", "reaper_enabled": False}, posture
+
+
+def test_without_the_pool_the_substrate_engine_has_none_of_the_pool_flags(
+    zero_child: tuple[str, dict[str, str], dict[str, object]],
+) -> None:
+    """The ``NX_TEST_TENANT_POOL=0`` arm is exactly the engine develop boots: no reset route, per-collection index
+    builds not forced off, the reaper running."""
+    _text, _seen, posture = zero_child
+    assert posture["route"] is False, posture
+    assert posture["pci_builder"] != "off", posture
+    assert posture["reaper_enabled"] is True, posture
 
 
 def test_the_pools_own_engine_tests_run_in_a_child_with_the_pool_on_and_all_pass(tmp_path: Path) -> None:
     """``tests/test_tenant_pool.py`` needs an engine with the reset route on and PCI off, which the substrate boots
-    only when ``NX_TEST_TENANT_POOL=1``; in a default run its engine-backed tests skip. This is the default CI's
-    coverage of them: a child with the flag on, which must run at least one test and pass every one, with nothing
-    skipped (a child whose tests all skipped proves nothing)."""
+    only while the pool is on; with ``NX_TEST_TENANT_POOL=0`` its engine-backed tests skip. This is that lane's
+    coverage of them: a child with the pool on, which must run at least one test and pass every one, with nothing
+    skipped (a child whose tests all skipped proves nothing). In a default run the pool is on and the file runs
+    directly, so this skips."""
     if _tenant_pool.enabled():
         pytest.skip("this run has the pool on: tests/test_tenant_pool.py runs here directly")
     _engine_gate()
@@ -114,22 +147,3 @@ def test_the_pools_own_engine_tests_run_in_a_child_with_the_pool_on_and_all_pass
     assert summary, text[-3000:]
     assert int(summary.group(1)) > 0, summary.group(0)
     assert not re.search(r"\b(skipped|failed|error|errors|deselected)\b", summary.group(0)), summary.group(0)
-
-
-def test_without_the_pool_the_substrate_engine_has_neither_flag() -> None:
-    """The off arm is exactly the engine develop boots: no reset route, per-collection index builds not forced off."""
-    if _tenant_pool.enabled():
-        pytest.skip("this run has the pool on; the on posture is asserted in tests/test_tenant_pool.py")
-    if os.environ.get(_tenant_pool.ROUTE_ENV) or os.environ.get("NX_SEARCH_PCI"):
-        pytest.skip("an ambient engine flag is set, so the posture is the operator's")
-    _engine_gate()
-    import httpx  # noqa: PLC0415
-
-    from tests._engine_substrate import ensure_engine  # noqa: PLC0415
-
-    state = ensure_engine()
-    resp = httpx.get(f"{state['base_url']}/v1/status", headers={"Authorization": f"Bearer {state['bearer']}"}, timeout=30.0)
-    assert resp.status_code == 200, resp.text
-    status = resp.json()
-    assert status["test_tenant_reset_route"] is False
-    assert status["per_collection_indexes"]["this_engine"]["builder_state"] != "off"
