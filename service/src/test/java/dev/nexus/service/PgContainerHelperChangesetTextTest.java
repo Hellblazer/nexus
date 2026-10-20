@@ -2,6 +2,8 @@ package dev.nexus.service;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -85,5 +87,35 @@ class PgContainerHelperChangesetTextTest {
                 "db/changelog/../changelog-test/db.changelog-test-reindex-index.xml", "anything"))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("PRODUCT changelogs");
+    }
+
+    @Test
+    void substitutingReplay_whoseTextIsAbsent_throwsBeforeAnythingIsSent() {
+        // The edit runs before a statement is created, so no connection is needed to see the refusal.
+        assertThatThrownBy(() -> PgContainerHelper.replayChangesetSubstituting(
+                null, TRIGGER_CHANGELOG, "taxonomy-003-1", "no such text in the changeset", "x"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no longer contains the substituted text");
+    }
+
+    @Test
+    void aChangesetCarryingDbmsOrEndDelimiter_isRefused() throws Exception {
+        String ns = "http://www.liquibase.org/xml/ns/dbchangelog";
+        for (String changeSet : List.of(
+                "<changeSet xmlns='" + ns + "' id='a' dbms='postgresql'><sql>x</sql></changeSet>",
+                "<changeSet xmlns='" + ns + "' id='b'><sql dbms='h2'>x</sql></changeSet>",
+                "<changeSet xmlns='" + ns + "' id='c'><sql endDelimiter='/'>x</sql></changeSet>")) {
+            var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            var cs = factory.newDocumentBuilder()
+                .parse(new org.xml.sax.InputSource(new java.io.StringReader(changeSet))).getDocumentElement();
+            assertThatThrownBy(() -> PgContainerHelper.refuseUnreplayable(cs, "db/changelog/x.xml"))
+                .as(changeSet).isInstanceOf(IllegalStateException.class).hasMessageContaining("dbms or endDelimiter");
+        }
+        var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        var plain = factory.newDocumentBuilder().parse(new org.xml.sax.InputSource(new java.io.StringReader(
+            "<changeSet xmlns='" + ns + "' id='d'><sql splitStatements='false'>x</sql></changeSet>"))).getDocumentElement();
+        PgContainerHelper.refuseUnreplayable(plain, "db/changelog/x.xml");
     }
 }

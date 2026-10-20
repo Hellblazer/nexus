@@ -2356,7 +2356,24 @@ public final class PgContainerHelper {
      */
     public static List<String> replayChangeset(Connection conn, String changelog, String changesetId)
             throws Exception {
-        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD);
+        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD, java.util.function.UnaryOperator.identity());
+    }
+
+    /**
+     * {@link #replayChangeset} with every occurrence of {@code from} in the forward text replaced by {@code to}
+     * first, for a test that replays an already-shipped changeset against a later schema (a column whose type has
+     * changed since it ran). {@code from} must occur in the text or this throws {@link IllegalStateException}, so
+     * an edit of the shipped text fails the test instead of replaying it unsubstituted.
+     */
+    public static List<String> replayChangesetSubstituting(Connection conn, String changelog, String changesetId,
+            String from, String to) throws Exception {
+        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD, text -> {
+            if (from.isEmpty() || !text.contains(from)) {
+                throw new IllegalStateException("changeset " + changesetId + " in " + changelog
+                    + " no longer contains the substituted text: " + from);
+            }
+            return text.replace(from, to);
+        });
     }
 
     /** The forward text {@link #replayChangeset} would run, for a test that pins which statement it replays. */
@@ -2372,7 +2389,7 @@ public final class PgContainerHelper {
     /** {@link #replayChangeset} for the changeset's {@code <rollback>} text instead of its forward SQL. */
     public static List<String> replayChangesetRollback(Connection conn, String changelog, String changesetId)
             throws Exception {
-        return replayPart(conn, changelog, changesetId, ChangesetPart.ROLLBACK);
+        return replayPart(conn, changelog, changesetId, ChangesetPart.ROLLBACK, java.util.function.UnaryOperator.identity());
     }
 
     /**
@@ -2390,14 +2407,16 @@ public final class PgContainerHelper {
      * Liquibase decodes them.
      *
      * <p>The replay is NOT a Liquibase run: it does not honour {@code splitStatements}, {@code stripComments},
-     * {@code endDelimiter}, {@code preConditions}, {@code dbms} or {@code runAlways}. The text goes to the server
-     * as ONE simple-query string. A changeset that depends on any of those attributes is not replayable here.
-     * See {@link #changesetText} for what is refused (non-product changelogs, mixed or non-{@code <sql>}
-     * rollback content).
+     * {@code preConditions} or {@code runAlways}. The text goes to the server as ONE simple-query string, and a
+     * test that replays a changeset with preconditions stages the state they check itself. A changeset or
+     * {@code <sql>} carrying {@code dbms} or {@code endDelimiter} is refused, since either changes what Liquibase
+     * would send. See {@link #changesetText} for the other refusals (non-product changelogs, mixed or
+     * non-{@code <sql>} rollback content). {@code edit} rewrites the text before it is sent (identity except for
+     * {@link #replayChangesetSubstituting}).
      */
     private static List<String> replayPart(Connection conn, String changelog, String changesetId,
-            ChangesetPart part) throws Exception {
-        String sql = changesetText(changelog, changesetId, part);
+            ChangesetPart part, java.util.function.UnaryOperator<String> edit) throws Exception {
+        String sql = edit.apply(changesetText(changelog, changesetId, part));
         List<String> notices = new ArrayList<>();
         try (java.sql.Statement st = conn.createStatement()) {
             // SANCTIONED RAW (nexus-cbo4a): product changeset text, run verbatim for its NOTICE chain, role and isolation from siblings
@@ -2447,6 +2466,7 @@ public final class PgContainerHelper {
             if (!changesetId.equals(cs.getAttribute("id"))) {
                 continue;
             }
+            refuseUnreplayable(cs, changelog);
             String text = switch (part) {
                 case FORWARD -> directSql(cs);
                 case ROLLBACK -> {
@@ -2492,6 +2512,24 @@ public final class PgContainerHelper {
                 + ": <rollback> mixes <sql> children with loose text; the replay would pick one and drop the other");
         }
         return hasSql ? directSql(rollback) : loose.toString();
+    }
+
+    /**
+     * Throws {@link IllegalStateException} when changeset {@code cs}, or any {@code <sql>} in it, carries
+     * {@code dbms} or {@code endDelimiter}: either changes what Liquibase would send, and a one-string replay
+     * honours neither. No product changeset carries them today; PgContainerHelperChangesetTextTest pins the check.
+     */
+    static void refuseUnreplayable(org.w3c.dom.Element cs, String changelog) {
+        boolean scoped = !cs.getAttribute("dbms").isEmpty();
+        org.w3c.dom.NodeList sqls = cs.getElementsByTagNameNS(LIQUIBASE_NS, "sql");
+        for (int j = 0; j < sqls.getLength(); j++) {
+            var el = (org.w3c.dom.Element) sqls.item(j);
+            scoped |= !el.getAttribute("dbms").isEmpty() || !el.getAttribute("endDelimiter").isEmpty();
+        }
+        if (scoped) {
+            throw new IllegalStateException("changeset " + cs.getAttribute("id") + " in " + changelog
+                + " carries dbms or endDelimiter, which a one-string replay cannot honour");
+        }
     }
 
     private static String directSql(org.w3c.dom.Element parent) {

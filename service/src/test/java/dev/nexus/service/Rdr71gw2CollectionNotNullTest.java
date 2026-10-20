@@ -61,9 +61,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * (read from the changelog at test time by {@link PgContainerHelper#replayChangeset},
  * never a hand-copied duplicate — the two can never drift apart) — proving
  * the ACTUAL production SQL converges on the fixture, not a stand-in for it.
- * The PostgreSQL JDBC simple-query protocol executes a semicolon-separated
- * multi-statement string as one implicit transaction when none is already
- * open, matching Liquibase's own per-changeset transaction shape.
+ * {@code runChangeset} wraps the replay in one explicit transaction, matching
+ * Liquibase's own per-changeset transaction ({@code LOCK TABLE} needs one).
  *
  * <p>Every scenario is seeded with a DISTINCT tenant so the changeset's
  * fleet-wide (no GUC) scan cannot cross-contaminate between tests even

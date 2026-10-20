@@ -149,9 +149,6 @@ class SqlStringLiteralGateTest {
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
         // the seed INSERT counted in EXECUTED
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
-        // catalog-016-0's shipped dedup text with NULLIF(indexed_at, '') rewritten for the column's later timestamptz
-        // type, so it cannot go through replayChangeset verbatim
-        Map.entry("dev/nexus/service/Catalog016SourceUriUniqueTest.java", 1),
         // the statements counted in EXECUTED; held by another session
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 4),
         // oracle and EXPLAIN statements counted in EXECUTED
@@ -166,7 +163,7 @@ class SqlStringLiteralGateTest {
         // a typed jOOQ insert rendered by ctx.render and bound by hand, for its lock order
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 1));
 
-    private static final int JDBC_ENTRY_TOTAL = 15;
+    private static final int JDBC_ENTRY_TOTAL = 14;
 
     /** References to a product {@code *_SQL} constant, per file, exact. */
     private static final Map<String, Integer> PRODUCT_SQL = Map.ofEntries(

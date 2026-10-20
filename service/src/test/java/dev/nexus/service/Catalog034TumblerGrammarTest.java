@@ -36,10 +36,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * tombstone it. Per Amendment 2's own accepted fallback, this test instead
  * (a) inserts a violating 2-segment LIVE document directly (this now
  * SUCCEEDS — no schema CHECK exists to block it) and (b) replays the
- * changeset's own {@code <sql>} text verbatim (extracted from the XML, the
- * same technique {@code Catalog016SourceUriUniqueTest} uses for its own
- * already-migrated container) to prove the tombstone LOGIC itself, rather
- * than re-triggering Liquibase.
+ * changeset's own {@code <sql>} text verbatim through
+ * {@link PgContainerHelper#replayChangeset} (as {@code Catalog016SourceUriUniqueTest}
+ * does for its own already-migrated container) to prove the tombstone LOGIC
+ * itself, rather than re-triggering Liquibase.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Catalog034TumblerGrammarTest {

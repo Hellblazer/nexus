@@ -449,7 +449,6 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         }
     }
 
-
     /** Runs the self-heal DO block alone on {@code c} and returns every NOTICE/WARNING it raised. */
     private static List<String> runSelfHeal(Connection c) throws Exception {
         c.setAutoCommit(true);

@@ -426,7 +426,7 @@ class Catalog016SourceUriUniqueTest {
         // INDEX / replay runs — NULLIF(timestamptz, unknown) fails to bind
         // the '' literal at all ("invalid input syntax for type timestamp
         // with time zone: \"\""). Apply the type-adjusted equivalent ONLY to
-        // this test's in-memory copy of the SQL text: bare `indexed_at`
+        // this test's replay of the SQL text: bare `indexed_at`
         // (NULL still sorts last under "ASC NULLS LAST", identical ordering
         // outcome to NULLIF('','')=NULL on the pre-migration TEXT column).
         // Asserted below so a future rewrite of 016-0's shipped text fails
@@ -437,13 +437,12 @@ class Catalog016SourceUriUniqueTest {
             "016-0's shipped <sql> no longer contains " + legacyNullSentinelExpr
             + " verbatim — the type-adjusted replay substitution below is stale; "
             + "re-derive it against the current changeset text before trusting this test");
-        dedupSql = dedupSql.replace(legacyNullSentinelExpr, "indexed_at");
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.dropIndex(su, DSL.name("nexus", "ux_catalog_documents_live_source_uri"));
             try {
-                runDedupAndAssert(su, dedupSql);
+                runDedupAndAssert(su, legacyNullSentinelExpr);
             } catch (Exception primary) {
                 // Review (78n33): the index is SHARED suite state — an
                 // assertion failure above must not leave it dropped for
@@ -467,7 +466,7 @@ class Catalog016SourceUriUniqueTest {
         }
     }
 
-    private void runDedupAndAssert(Connection su, String dedupSql) throws Exception {
+    private void runDedupAndAssert(Connection su, String legacyNullSentinelExpr) throws Exception {
         {
             String uri = "file:///legacy/dup.md";
             // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
@@ -484,9 +483,8 @@ class Catalog016SourceUriUniqueTest {
                     OffsetDateTime.parse("2026-01-02T00:00:00Z"))
                 .values(TENANT, "16.3", "loser-no-chunks", uri, 0, (OffsetDateTime) null)
                 .execute();
-            for (String stmt : dedupSql.split(";")) {
-                if (!stmt.isBlank()) su.createStatement().execute(stmt);
-            }
+            PgContainerHelper.replayChangesetSubstituting(su, CHANGELOG, "catalog-016-0",
+                legacyNullSentinelExpr, "indexed_at");
             var winners = DSL.using(su, SQLDialect.POSTGRES)
                 .select(CATALOG_DOCUMENTS.TUMBLER)
                 .from(CATALOG_DOCUMENTS)
