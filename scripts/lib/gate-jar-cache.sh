@@ -305,7 +305,7 @@ gate_jar_cache_lookup() {
         return 0
     fi
     echo "gate_jar_cache_lookup: discarding unusable cache entry $entry (not a complete jar, or its embedded build_ref differs from the entry's)" >&2
-    rm -rf "$entry"
+    _gate_jar_cache_discard_incomplete "$root" "$key"   # never a complete entry a store put there meanwhile
     return 1
 }
 
@@ -341,12 +341,13 @@ gate_jar_cache_store() {
     # (nexus-bjavr): `mv` onto an existing directory moves staging INSIDE it,
     # and moving an entry aside first can take out the one a concurrent store
     # of the same key has just published. A complete entry is never moved; an
-    # incomplete one is re-checked, discarded, and the rename tried once more.
+    # incomplete one is moved aside, checked again there (a concurrent store
+    # may have replaced it in between), and the rename tried once more.
     # A reader sees the complete entry or no entry, never a half-copied jar.
     if ! _gate_jar_cache_rename "$staging" "$entry"; then
         if ! _gate_jar_cache_entry_complete "$entry"; then
-            [[ -e "$entry" ]] && _gate_jar_cache_discard "$root" "$key"
-            _gate_jar_cache_rename "$staging" "$entry"
+            [[ -e "$entry" ]] && _gate_jar_cache_discard_incomplete "$root" "$key"
+            _gate_jar_cache_rename "$staging" "$entry" || :
         fi
         if [[ -d "$staging" ]]; then
             rm -rf "$staging"
@@ -368,6 +369,21 @@ gate_jar_cache_store() {
 # inside it (BSD mv has no -T).
 _gate_jar_cache_rename() {
     python3 -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2" 2>/dev/null
+}
+
+# _gate_jar_cache_discard_incomplete <root> <key> -- discard an entry judged
+# incomplete, without taking out a complete one a concurrent store put in its
+# place after that judgement: the entry is renamed aside FIRST and judged again
+# there. A complete one goes back (or, if a newer entry already took the name,
+# is dropped in its favour); an incomplete one is deleted.
+_gate_jar_cache_discard_incomplete() {
+    local root="$1" key="$2" aside
+    aside="$root/.discard.$key.$$.$RANDOM.old"
+    _gate_jar_cache_rename "$root/$key" "$aside" || return 0
+    if _gate_jar_cache_entry_complete "$aside" && _gate_jar_cache_rename "$aside" "$root/$key"; then
+        return 0
+    fi
+    rm -rf "${aside:?}"
 }
 
 _gate_jar_cache_unwritable() {

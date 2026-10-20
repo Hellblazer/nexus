@@ -391,16 +391,38 @@ _publish_other() {  # <entry> <jar-content>: what a concurrent store of the same
 }
 # The other store publishes after this one's first completeness check and before its rename:
 # chmod a-w on the staged jar runs in exactly that window.
-chmod() { [[ "$1" == a-w && "$2" == *"/.staging."*"/jar" && ! -e "$r10/k10" ]] && _publish_other "$r10/k10" "${_OTHER:-zip}"; command chmod "$@"; }
+_INJECTED="$WORKDIR/injected10"
+chmod() { [[ "$1" == a-w && "$2" == *"/.staging."*"/jar" && ! -e "$r10/k10" ]] && _publish_other "$r10/k10" "${_OTHER:-zip}" && : > "$_INJECTED"; command chmod "$@"; }
 gate_jar_cache_store "$repo" k10 "$j10" "ref-10" && ok "store rc 0 when a concurrent store wins the key" || bad "store failed"
 [[ -f "$r10/k10/sentinel" ]] && ok "the concurrent store's complete entry stays in place" || bad "the complete entry was moved aside: $(ls -A "$r10/k10" 2>&1)"
 [[ -z "$(ls -A "$r10/k10" | grep -E '^\.staging')" ]] && ok "no staging dir nested inside the entry" || bad "nested: $(ls -A "$r10/k10")"
 [[ -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] && ok "no staging or aside left in the root" || bad "leftovers: $(ls -A "$r10")"
 gate_jar_cache_lookup "$repo" k10 >/dev/null && ok "the kept entry hits" || bad "the kept entry misses"
-rm -rf "$r10/k10"; _OTHER=corrupt
+rm -rf "$r10/k10" "$_INJECTED"; _OTHER=corrupt
 gate_jar_cache_store "$repo" k10 "$j10" "ref-10" 2>/dev/null && ok "store rc 0 over an incomplete entry that appeared mid-store" || bad "store failed"
 unset -f chmod; unset _OTHER
+[[ -e "$_INJECTED" ]] && ok "(the incomplete entry was injected before the rename)" || bad "the injection never ran: the leg below proves nothing"
 [[ ! -e "$r10/k10/sentinel" && "$j10" -ef "$r10/k10/jar" ]] && ok "the incomplete entry is replaced by this store's" || bad "entry after store: $(ls -A "$r10/k10" 2>&1)"
+[[ -z "$(ls -A "$r10/k10" | grep -E '^\.staging')" && -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] \
+    && ok "and nothing nested or left over" || bad "leftovers: $(ls -A "$r10") / $(ls -A "$r10/k10")"
+# A pre-existing incomplete entry, replaced by a concurrent store's complete one after this
+# store judged it incomplete and before it discards it: the complete one must survive.
+rm -rf "$r10/k10"; mkdir -p "$r10/k10"; echo 'not a zip' > "$r10/k10/jar"; echo ref-10 > "$r10/k10/build_ref"
+eval "_real_complete() $(declare -f _gate_jar_cache_entry_complete | tail -n +2)"
+_n10=0
+_gate_jar_cache_entry_complete() {
+    local rc=0; _real_complete "$@" || rc=$?
+    _n10=$((_n10 + 1))
+    if [[ $_n10 -eq 2 && "$1" == "$r10/k10" ]]; then   # the post-rename judgement; the first is the store's opening check
+        command rm -rf "$r10/k10"; _publish_other "$r10/k10" zip; : > "$_INJECTED"
+    fi
+    return $rc
+}
+rm -f "$_INJECTED"
+gate_jar_cache_store "$repo" k10 "$j10" "ref-10" 2>/dev/null && ok "store rc 0 when the incomplete entry is replaced before the discard" || bad "store failed"
+eval "_gate_jar_cache_entry_complete() $(declare -f _real_complete | tail -n +2)"; unset -f _real_complete
+[[ -e "$_INJECTED" ]] && ok "(the complete entry was published between the judgement and the discard)" || bad "the injection never ran"
+[[ -f "$r10/k10/sentinel" ]] && ok "the discard keeps the complete entry a concurrent store published" || bad "the discard removed the concurrent store's complete entry"
 [[ -z "$(ls -A "$r10/k10" | grep -E '^\.staging')" && -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] \
     && ok "and nothing nested or left over" || bad "leftovers: $(ls -A "$r10") / $(ls -A "$r10/k10")"
 # The primitive: rename(2) refuses a non-empty target; mv (the control) nests into it.
@@ -418,7 +440,7 @@ for i in $(seq 1 12); do
     [[ -n "$(ls -A "$r10/c$i" 2>/dev/null | grep -E '^\.staging')" ]] && nested=$((nested + 1))
     _gate_jar_cache_entry_complete "$r10/c$i" || incomplete=$((incomplete + 1))
 done
-[[ $nested -eq 0 && $incomplete -eq 0 ]] && ok "12 concurrent store pairs: every entry complete, none nested" || bad "concurrent pairs: nested=$nested incomplete=$incomplete"
+[[ $nested -eq 0 && $incomplete -eq 0 ]] && ok "smoke, 12 unsynchronised concurrent store pairs: every entry complete, none nested" || bad "concurrent pairs: nested=$nested incomplete=$incomplete"
 [[ -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] && ok "and no staging or aside left in the root" || bad "leftovers: $(ls -A "$r10")"
 unset NX_GATE_JAR_CACHE
 
