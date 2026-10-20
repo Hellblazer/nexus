@@ -5,8 +5,8 @@ nexus-c3rer (critique of nexus-4m6i0.6): ``SchemaUpgradeRehearsalIntegrationTest
 skips loudly via JUnit ``Assumptions.abort`` when the old engine tag is
 unavailable — correct behavior locally, but a JUnit skip does not fail the
 Maven build, and Surefire's skip count is invisible behind a green Actions
-checkmark. If ``fetch-tags: true`` ever regressed in ``service-ci.yml`` (a
-workflow edit, checkout-action semantics change, tag deletion), the rehearsal
+checkmark. If the tag fetch ever regressed in ``service-ci.yml`` (the "Fetch the
+one old engine tag" step: a workflow edit, action semantics change, tag deletion), the rehearsal
 would silently and permanently stop running while CI stayed green — the exact
 gates-scripted-not-ambient failure mode (CLAUDE.md: "a gate that skip-passes
 when its dependency is absent must carry a max-skip / non-vacuity assert").
@@ -17,7 +17,7 @@ Usage: ``python scripts/assert_rehearsal_ran.py <surefire TEST-*.xml>``
 Exits non-zero when the report is missing (the test class never executed at
 all — e.g. renamed, or excluded by a pattern change), records zero testcases,
 or records any skip. Unlike CA-3 there are no legitimate platform-conditional
-skips here: in CI the tag is guaranteed by fetch-tags, so ANY skip is vacuous.
+skips here: in CI the tag is guaranteed by the explicit tag fetch, so ANY skip is vacuous.
 """
 from __future__ import annotations
 

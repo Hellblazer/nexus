@@ -146,8 +146,9 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * --depth 1 origin tag} fallback before giving up; if the tag is still
  * unavailable (e.g. a checkout that skipped tag-fetching entirely) the test
  * SKIPS with a loud reason via {@link Assumptions#abort} rather than silently
- * passing. {@code service-ci.yml}'s checkout step sets {@code fetch-tags: true}
- * specifically so this skip path is never exercised in CI.
+ * passing. {@code service-ci.yml} sets {@code fetch-tags: false} and fetches exactly this
+ * tag in its own step (read from {@link #OLD_TAG} below), so this skip path is never
+ * exercised in CI.
  */
 class SchemaUpgradeRehearsalIntegrationTest {
 
@@ -2340,12 +2341,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
         }
         if (!tagExists(repoRoot, OLD_TAG)) {
             log.error("event=schema_upgrade_rehearsal_tag_unavailable tag={} — SKIPPING (loud, non-silent). "
-                + "service-ci.yml's checkout step sets fetch-tags:true precisely so this never fires in CI; "
-                + "a persistent local skip means that checkout convention regressed.", OLD_TAG);
+                + "service-ci.yml fetches this tag in its own step precisely so this never fires in CI; "
+                + "a persistent local skip means that step regressed.", OLD_TAG);
             Assumptions.abort(
                 "Old tag " + OLD_TAG + " unavailable locally and shallow fetch fallback failed; "
                 + "skipping schema-upgrade rehearsal. This must NOT happen in CI — verify "
-                + "service-ci.yml's checkout step still sets fetch-tags: true.");
+                + "service-ci.yml still fetches the OLD_TAG tag.");
         }
 
         Path oldChangelogRoot = materializeOldChangelogTree(repoRoot, OLD_TAG);

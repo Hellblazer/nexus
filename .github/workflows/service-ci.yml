@@ -171,7 +171,12 @@ jobs:
     timeout-minutes: 60
     env:
       # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
-      # (service/pom.xml, jooq-inputs): the pool runner keeps its checkout, and so the cache.
+      # (service/pom.xml, jooq-inputs). On the lab pool this changes nothing today: the
+      # lab-runner deletes the job's $work directory after every job, so the cache in .git
+      # starts empty each time and codegen always runs. The setting guards a runner that
+      # does keep its tree. A cache that SURVIVES jobs would have to live outside $work (a
+      # host directory under NX_LAB_CACHE_ROOT); that is a separate decision (nexus-km7ma),
+      # not made here.
       NX_JOOQ_CACHE: "off"
       # The pool job is confined to 16 of the host's 64 CPUs, and ONNX Runtime
       # sizes its thread pool from the HOST's cores unless told otherwise.
@@ -186,17 +191,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
-          # The job token must not sit in a persistent workspace's .git/config
-          # after the job. No later step pushes;
+          # The job token must not sit in the workspace's .git/config after the job
+          # (the pool deletes the workspace; a runner that kept it would keep the token).
+          # No later step pushes;
           # the prime-* actions pass github.token through their own env, and the
-          # rehearsal's fallback `git fetch origin tag` reads a public repo.
+          # tag fetch below reads a public repo.
           persist-credentials: false
-          # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs an old
-          # engine-service tag's changelog tree via `git archive <tag>`. Default
-          # checkout (fetch-depth 1) fetches no tags at all; fetch-tags fetches
-          # every tag's commit+tree cheaply (no full history), so the rehearsal
-          # never falls back to its loud-skip path in CI.
-          fetch-tags: true
+          # nexus-km7ma: NO tags here. fetch-tags: true pulled all 575 engine-service
+          # tags (about 121 MB of trees written to the runner's disk) for the one tag
+          # this job reads. The next step fetches that tag alone.
+          fetch-tags: false
+
+      # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs one old engine-service
+      # tag's changelog tree via `git archive <tag>`. The tag is read from the test's own
+      # OLD_TAG constant, so the pin has one home; tests/test_service_ci_bytes_lint.py
+      # pins this step. A missing or ambiguous value fails the step, and
+      # assert_rehearsal_ran.py below still fails the job if the rehearsal skipped.
+      - name: Fetch the one old engine tag the upgrade rehearsal reads
+        run: |
+          tag=$(sed -n 's/.*String OLD_TAG = "\(engine-service-v[0-9.]*\)";.*/\1/p' service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java)
+          if [ -z "$tag" ] || [ "$(printf '%s\n' "$tag" | wc -l)" -ne 1 ]; then
+            echo "could not derive exactly one OLD_TAG from SchemaUpgradeRehearsalIntegrationTest.java: '$tag'" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+          git rev-parse -q --verify "refs/tags/${tag}^{commit}"
 
       - name: Set up GraalVM JDK 25
         uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
@@ -284,8 +303,9 @@ jobs:
       # that cut removes. Without --advisory this step exits 11 on "measure" and 10 above a
       # ceiling. The day the ceilings are set, delete the flag in this step and the next in
       # the same commit (tests/scripts/test_ddl_ratchet_wiring.py names that day's check).
-      # --run is the id mvn was given above, so the persistent pool workspace's older
-      # service/target/ddl-counts files are never read.
+      # --run is the id mvn was given above, so older service/target/ddl-counts files are
+      # never read. The lab pool deletes the workspace after every job, so there are none
+      # there; the id keeps that true on a runner that keeps its tree.
       - name: DDL/bytes ratchet, Java main suite (advisory until its ceilings are set)
         run: python3 scripts/ddl_ratchet.py check --suite java_main --report service/target/ddl-counts --run "${NX_TEST_RUN_ID}-main" --advisory
 
@@ -330,7 +350,7 @@ jobs:
       # Assumptions.abort) when the old engine tag is unavailable — a skip
       # that Maven treats as success and the Actions UI shows green. This
       # step fails the job if the rehearsal was skipped or never executed,
-      # so a fetch-tags regression can't silently retire the gate
+      # so a regression of the tag fetch can't silently retire the gate
       # (gates-scripted-not-ambient; mirrors ci.yml's assert_ca3_ran.py).
       - name: Assert upgrade rehearsal actually ran (not skipped)
         run: |

@@ -98,7 +98,7 @@
         <nexus.ddl.suite>main</nexus.ddl.suite>
         <!-- nexus-ekp7w: the run id the same way. The default is the build timestamp, which differs between
              invocations; CI gives mvn its own id for the run and the same id to the run option of
-             scripts/ddl_ratchet.py, so a persistent workspace's older runs cannot be mixed in. -->
+             scripts/ddl_ratchet.py, so the older runs of a workspace that survives between jobs cannot be mixed in. -->
         <nexus.ddl.run>${maven.build.timestamp}</nexus.ddl.run>
 
         <!-- nexus-3cwsw: -Dnexus.ddl.count=false turns the counter fully off (no log_statement, probe, event
@@ -337,7 +337,12 @@
                     <!-- nexus-rph82: every fork starts in UTC, so the migrator's
                          pin (SchemaMigrator.pinJvmTimeZoneToUtc) is a no-op in the
                          test JVM rather than an order-dependent side effect. -->
-                    <argLine>-Duser.timezone=UTC</argLine>
+                    <!-- nexus-km7ma: -Djava.util.logging.config.file quiets Liquibase's JUL INFO
+                         stream in the test forks only (see the properties file). It is argLine,
+                         not systemPropertyVariables, because JUL reads the property when the
+                         LogManager initialises, which can be before surefire's property
+                         injection runs in the fork. -->
+                    <argLine>-Duser.timezone=UTC -Djava.util.logging.config.file=${project.basedir}/src/test/resources/logging-quiet-liquibase.properties</argLine>
                     <excludedGroups>${test.excluded.groups}</excludedGroups>
                     <!-- nexus-9meyc: the BACKSTOP for a wedged fork, and the only
                          layer needing no cooperation from test code. Three runs hung
@@ -397,6 +402,10 @@
                         <nexus.ddl.suite>${nexus.ddl.suite}</nexus.ddl.suite>
                         <nexus.ddl.run>${nexus.ddl.run}</nexus.ddl.run>
                         <nexus.ddl.count>${nexus.ddl.count}</nexus.ddl.count>
+                        <!-- nexus-km7ma: Liquibase's end-of-walk UPDATE SUMMARY table goes to
+                             stdout through its UI service; every test class that migrates
+                             prints one. Test forks only: the engine's console keeps it. -->
+                        <liquibase.command.showSummary>OFF</liquibase.command.showSummary>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
@@ -709,9 +718,13 @@
                          `mvn compile` does not cost the following `mvn test` a regeneration.
 
                          `mvn clean`, any changelog or pom edit, or -Dnexus.jooq.regenerate=true
-                         regenerates. A CI runner that keeps its checkout between runs (the lab pool does)
-                         keeps target/ and the shared cache too, so the CI jobs set NX_JOOQ_CACHE=off and
-                         start every build from the replay they exist to check. The hash
+                         regenerates. A CI runner that keeps its tree between runs would keep target/
+                         and the shared cache too, so the CI jobs set NX_JOOQ_CACHE=off and start every
+                         build from the replay they exist to check. The lab pool is not such a runner:
+                         its lab-runner deletes the job's $work directory after every job, so there the
+                         setting changes nothing today and codegen runs every job. A cache that outlives
+                         jobs has to live outside $work (under NX_LAB_CACHE_ROOT); that is a separate
+                         decision (nexus-km7ma), not made here. The hash
                          cannot see the floating pg17 image tag; -Dnexus.jooq.regenerate=true is the
                          answer to that. nexus.jooq.main.skip and nexus.jooq.test.skip are this step's
                          OUTPUT: setting one by hand would beat the decision (Ant properties are

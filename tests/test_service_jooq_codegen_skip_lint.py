@@ -474,9 +474,11 @@ def _mvn_codegen_steps() -> list[tuple[str, str, str, dict[str, str]]]:
 
 
 def test_no_ci_job_restores_a_cached_tree_over_the_codegen_it_exists_to_check() -> None:
-    """A runner that keeps its checkout (the lab pool) keeps the shared cache in .git too, so a CI Maven run that
-    can restore from it would no longer replay the changelog it is gating. Every CI mvnw step that reaches
-    jooq-inputs turns the cache off (NX_JOOQ_CACHE=off, or -Dnexus.jooq.cache.dir=off / -Dnexus.jooq.regenerate=true)."""
+    """A runner that keeps its tree between jobs keeps the shared cache in .git too, so a CI Maven run that
+    can restore from it would no longer replay the changelog it is gating. (The lab pool is not such a runner:
+    lab-runner deletes $work after every job, so there the setting is inert today; it guards the runners that
+    do keep a tree.) Every CI mvnw step that reaches jooq-inputs turns the cache off (NX_JOOQ_CACHE=off, or
+    -Dnexus.jooq.cache.dir=off / -Dnexus.jooq.regenerate=true)."""
     steps = _mvn_codegen_steps()
     assert len(steps) >= 6, f"the sweep examined only {len(steps)} Maven steps: the workflows moved, fix this census"
     offenders = [f"{wf}:{job}:{name}" for wf, job, name, env in steps if env.get("NX_JOOQ_CACHE") != "off"]
