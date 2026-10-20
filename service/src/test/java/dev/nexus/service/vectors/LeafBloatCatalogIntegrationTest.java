@@ -37,6 +37,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
@@ -133,18 +134,27 @@ class LeafBloatCatalogIntegrationTest {
         }
     }
 
-    void suDdl(String ddl) throws Exception {
+    /** {@code ALTER TABLE nexus.leaf SET (options)} as the superuser. */
+    void setStorage(String leaf, Map<String, String> options) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdl(su, ddl);
+            PgContainerHelper.setTableStorageParams(su, DSL.table(DSL.name("nexus", leaf)), options);
         }
     }
 
-    /** VACUUM cannot run in a transaction block, so not through {@link #suDdl}; the no-transaction changelog runs it. */
+    /** {@code ALTER TABLE nexus.leaf RESET (names)} as the superuser. */
+    void resetStorage(String leaf, String... names) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.resetTableStorageParams(su, DSL.table(DSL.name("nexus", leaf)), names);
+        }
+    }
+
+    /** VACUUM cannot run in a transaction block, so a changelog changeset with runInTransaction="false" runs it. */
     void vacuum(String leaf) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "VACUUM nexus." + leaf);
+            PgContainerHelper.vacuumTable(su, "nexus", leaf);
         }
     }
 
@@ -275,7 +285,7 @@ class LeafBloatCatalogIntegrationTest {
         List<String> hex = rows(tenant, collection, 1300);
         String leaf = leafName(tenant);
         // Autovacuum off so the counts stay exactly what the deletes made them (nothing races the read).
-        suDdl("ALTER TABLE nexus." + leaf + " SET (autovacuum_enabled = false)");
+        setStorage(leaf, Map.of("autovacuum_enabled", "false"));
         awaitStats(leaf, 1300, 0);
         assertThat(leaf(leaf).overdue()).isFalse();
 
@@ -310,12 +320,12 @@ class LeafBloatCatalogIntegrationTest {
         assertThat(fresh.policySet()).as("a new leaf carries the four (partition_ensure_leaf)").isTrue();
         assertThat(fresh.autovacuumEnabled()).isTrue();
 
-        suDdl("ALTER TABLE nexus." + leaf + " RESET (autovacuum_vacuum_scale_factor)");
+        resetStorage(leaf, "autovacuum_vacuum_scale_factor");
         LeafBloatCatalog.Leaf missingOne = leaf(leaf);
         assertThat(missingOne.policySet()).as("one of the four missing").isFalse();
         assertThat(missingOne.autovacuumEnabled()).isTrue();
 
-        suDdl("ALTER TABLE nexus." + leaf + " SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_enabled = false)");
+        setStorage(leaf, Map.of("autovacuum_vacuum_scale_factor", "0.05", "autovacuum_enabled", "false"));
         LeafBloatCatalog.Leaf disabled = leaf(leaf);
         assertThat(disabled.policySet()).as("all four back, autovacuum off").isTrue();
         assertThat(disabled.autovacuumEnabled()).isFalse();
@@ -340,7 +350,7 @@ class LeafBloatCatalogIntegrationTest {
         List<String> hex = rows(tenant, collection, 5000);
         String leaf = leafName(tenant);
         // Autovacuum off so nothing races the numbers; the trigger it would use is checked arithmetically below.
-        suDdl("ALTER TABLE nexus." + leaf + " SET (autovacuum_enabled = false)");
+        setStorage(leaf, Map.of("autovacuum_enabled", "false"));
         vacuum(leaf);
         awaitStats(leaf, 5000, 0);
         assertThat(leaf(leaf).plannerRows()).as("a vacuum set reltuples").isEqualTo(5000);

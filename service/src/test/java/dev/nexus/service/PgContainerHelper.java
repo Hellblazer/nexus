@@ -1063,48 +1063,497 @@ public final class PgContainerHelper {
      * {@code SharedDatabaseHandle}'s teardown of an exclusive role; {@code admin} is the control connection, and the
      * role's database must already be gone. Leaves {@code admin} autoCommit.
      */
-    static void dropRoleRevokingGrants(Connection admin, String role) throws Exception {
+    public static void dropRoleRevokingGrants(Connection admin, String role) throws Exception {
         requireTestIdentifier(role);
         runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-drop-exclusive-role.xml",
             "databasechangelog_test_drop_role", Map.of("role", role));
     }
 
+    // ── nexus-cbo4a batch 11: the typed replacements for the old runSuperuserDdl helper ──────────
+    //
+    // That helper took a DDL string from the caller and ran it through a changelog parameter, which is exactly
+    // a SQL string in Java that RawSqlGateTest could not see. It is deleted. What replaced each of its 64 callers is
+    // one of: typed jOOQ (createTable/dropTable/truncate/grant/revoke/dropSchema), an existing helper, or one of the
+    // methods below. Every method below fixes the statement's SHAPE in a test changelog and lets the caller choose
+    // only validated names or closed-list values; none takes SQL text.
+
+    /** Plain lowercase identifier or {@code PUBLIC}, for a policy's TO clause. */
+    private static void requireRoleOrPublic(String role) {
+        if (!"PUBLIC".equals(role)) {
+            requireTestIdentifier(role);
+        }
+    }
+
+    /** The embedding columns of nexus.chunks, the only columns an index fixture may name. */
+    private static final Set<String> EMBEDDING_COLUMNS = Set.of("embedding_384", "embedding_768", "embedding_1024");
+
     /**
-     * Run one DDL statement on a superuser connection through a test changelog (nexus-wbfpw.48), for the
-     * statements jOOQ has no typed form for (RLS policies, ALTER TABLE ... ROW LEVEL SECURITY, CREATE ROLE
-     * with attributes). Same mechanism as {@link #grantRoleMembership}: its own bookkeeping table, runAlways.
+     * A value that goes inside a single-quoted literal of a test changelog: letters, digits, underscore, dot, hyphen
+     * and apostrophe only (no dollar, brace, backslash or whitespace, so nothing reaches the changelog's property
+     * syntax), with each apostrophe doubled. The apostrophe is admitted because PciCatalogIntegrationTest round-trips
+     * a collection name that has one.
      */
-    public static void runSuperuserDdl(Connection su, String ddl) throws Exception {
-        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-ddl.xml",
-            "databasechangelog_test_superuser_ddl", Map.of("ddl", ddl));
+    private static String requireTestLiteral(String value) {
+        if (value == null || !value.matches("[A-Za-z0-9_.'-]+")) {
+            throw new IllegalArgumentException("not a safe test literal: " + value);
+        }
+        return value.replace("'", "''");
     }
 
     /**
-     * {@link #runSuperuserDdl} for a statement PostgreSQL refuses inside a transaction block
-     * ({@code CREATE INDEX CONCURRENTLY}, {@code DROP INDEX CONCURRENTLY}; nexus-43ulx.11). The
-     * statement blocks until it ends, so a caller that wants to observe it mid-flight runs this on a
-     * thread of its own with its own connection.
+     * {@code ALTER ROLE role SET application_name TO 'empty_db_poison'} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-role-application-name-poison.xml}: jOOQ has no ALTER ROLE. The value is fixed in the
+     * changelog; a cluster-wide setting on {@code role} that SharedCluster's reset-at-acquire must clear.
+     */
+    public static void setRoleApplicationNamePoison(Connection su, String role) throws Exception {
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-application-name-poison.xml",
+            "databasechangelog_test_role_app_name_poison", Map.of("role", role));
+    }
+
+    /**
+     * {@code GRANT grantedRole TO memberRole GRANTED BY grantor} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-role-granted-by.xml}: a role-membership grant with a named grantor has no jOOQ form.
+     */
+    public static void grantRoleGrantedBy(Connection su, String grantedRole, String memberRole, String grantor)
+            throws Exception {
+        requireTestIdentifier(grantedRole);
+        requireTestIdentifier(memberRole);
+        requireTestIdentifier(grantor);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-granted-by.xml",
+            "databasechangelog_test_role_granted_by",
+            Map.of("grantedRole", grantedRole, "memberRole", memberRole, "grantor", grantor));
+    }
+
+    /**
+     * {@code CREATE SCHEMA schema AUTHORIZATION owner} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-schema-authorization.xml}: jOOQ's createSchema has no AUTHORIZATION clause.
+     */
+    public static void createSchemaAuthorization(Connection su, String schema, String owner) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(owner);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-authorization.xml",
+            "databasechangelog_test_schema_authorization", Map.of("schema", schema, "owner", owner));
+    }
+
+    /**
+     * The table {@code nx_sz651_nested_probe}, created by a {@code CREATE TABLE} issued through {@code EXECUTE}
+     * inside a {@code DO} block (nexus-cbo4a batch 11), through {@code db.changelog-test-nested-ddl-probe.xml}:
+     * SharedClusterEmptyDatabaseTest needs DDL the server sees only as a NESTED command.
+     */
+    public static void createProbeTableThroughDoBlock(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nested-ddl-probe.xml",
+            "databasechangelog_test_nested_ddl_probe", Map.of());
+    }
+
+    /**
+     * {@code nexus.collection_vector_stats_v019}, the vectors-019-5 view definition under a probe name, readable
+     * by PUBLIC (nexus-cbo4a batch 11). The view is {@code db.changelog-test-collection-vector-stats-v019.xml}
+     * (jOOQ's createView has no {@code WITH (security_invoker = true)}); the GRANT is typed jOOQ.
+     */
+    public static void createCollectionVectorStatsV019View(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-collection-vector-stats-v019.xml",
+            "databasechangelog_test_cvs_v019", Map.of());
+        DSL.using(su, SQLDialect.POSTGRES)
+            .grant(DSL.privilege("SELECT"))
+            .on(DSL.table(DSL.name("nexus", "collection_vector_stats_v019")))
+            .toPublic()
+            .execute();
+    }
+
+    /**
+     * {@code GRANT MAINTAIN ON nexus.chunks TO role}, typed jOOQ (nexus-cbo4a batch 11): the grant production's
+     * nexus_svc has (grants-005-chunks-unify-maintain), given to a test's own service role.
+     */
+    public static void grantMaintainOnChunks(Connection su, String role) {
+        DSL.using(su, SQLDialect.POSTGRES)
+            .grant(DSL.privilege("MAINTAIN"))
+            .on(CHUNKS)
+            .to(DSL.role(role))
+            .execute();
+    }
+
+    /**
+     * The undo of {@link #enableAutoExplainForService}'s module load (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-auto-explain-reset.xml}: {@code ALTER ROLE nexus_svc RESET session_preload_libraries}.
+     * Sessions opened afterwards run without auto_explain.
+     */
+    public static void disableAutoExplainForService(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-auto-explain-reset.xml",
+            "databasechangelog_test_auto_explain_reset", Map.of("svcRole", SVC_USERNAME));
+    }
+
+    /** The storage parameters {@link #setTableStorageParams} and {@link #resetTableStorageParams} accept. */
+    private static final Set<String> STORAGE_PARAM_ALLOWLIST = Set.of(
+        "autovacuum_enabled", "autovacuum_vacuum_scale_factor", "autovacuum_vacuum_threshold",
+        "autovacuum_vacuum_insert_scale_factor", "autovacuum_analyze_scale_factor", "fillfactor");
+
+    private static void requireStorageParamName(String name) {
+        if (!STORAGE_PARAM_ALLOWLIST.contains(name)) {
+            throw new IllegalArgumentException(
+                "storage parameter not permitted: " + name + " (allowed: " + STORAGE_PARAM_ALLOWLIST + ")");
+        }
+    }
+
+    /**
+     * {@code ALTER TABLE table SET (name = value, ...)} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-table-storage-set.xml}: jOOQ has no storage parameters. The names come from
+     * {@link #STORAGE_PARAM_ALLOWLIST}; a value is a plain number or {@code true}/{@code false}. The options keep the
+     * map's iteration order, so pass a {@link java.util.LinkedHashMap} where the order matters.
+     */
+    public static void setTableStorageParams(Connection conn, Table<?> table, Map<String, String> options)
+            throws Exception {
+        if (options.isEmpty()) {
+            throw new IllegalArgumentException("no storage parameters to set");
+        }
+        List<String> parts = new ArrayList<>();
+        for (var option : options.entrySet()) {
+            requireStorageParamName(option.getKey());
+            if (option.getValue() == null || !option.getValue().matches("[0-9]+(\\.[0-9]+)?|true|false")) {
+                throw new IllegalArgumentException("not a plain storage parameter value: " + option.getValue());
+            }
+            parts.add(option.getKey() + " = " + option.getValue());
+        }
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-storage-set.xml",
+            "databasechangelog_test_table_storage_set", Map.of(
+                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "options", String.join(", ", parts)));
+    }
+
+    /**
+     * {@code ALTER TABLE table RESET (name, ...)} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-table-storage-reset.xml}; the names come from {@link #STORAGE_PARAM_ALLOWLIST}.
+     */
+    public static void resetTableStorageParams(Connection conn, Table<?> table, String... names) throws Exception {
+        if (names.length == 0) {
+            throw new IllegalArgumentException("no storage parameters to reset");
+        }
+        for (String name : names) {
+            requireStorageParamName(name);
+        }
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-storage-reset.xml",
+            "databasechangelog_test_table_storage_reset", Map.of(
+                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "options", String.join(", ", names)));
+    }
+
+    /**
+     * The per-collection partial HNSW index the PCI builder writes, as a fixture (nexus-cbo4a batch 11):
+     * {@code CREATE INDEX index ON schema.table USING hnsw (column nexus.vector_cosine_ops) WHERE collection =
+     * 'collection'}, through {@code db.changelog-test-hnsw-index-collection.xml}. Not CONCURRENTLY; a build that must
+     * be observed mid-flight is {@link #createLeafHnswIndexConcurrently}'s.
+     */
+    public static void createLeafHnswIndex(Connection su, String schema, String table, String index, String column,
+                                           String collection) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection.xml",
+            "databasechangelog_test_hnsw_index_collection", Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collection", requireTestLiteral(collection)));
+    }
+
+    /**
+     * An HNSW index whose predicate is the compound {@code collection = 'c' AND tenant_id = 't'} (nexus-cbo4a batch
+     * 11), through {@code db.changelog-test-hnsw-index-collection-tenant.xml}: a shape the PCI catalog reader must
+     * count as unparsed.
+     */
+    public static void createLeafHnswIndexCollectionAndTenant(Connection su, String schema, String table, String index,
+                                                              String column, String collection, String tenant)
+            throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection-tenant.xml",
+            "databasechangelog_test_hnsw_index_coll_tenant", Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collection", requireTestLiteral(collection), "tenant", requireTestLiteral(tenant)));
+    }
+
+    /**
+     * An HNSW index with no predicate (nexus-cbo4a batch 11), through the existing
+     * {@code db.changelog-test-hnsw-index.xml}: {@code CREATE INDEX index ON schema.table USING hnsw (column
+     * nexus.vector_cosine_ops)}.
+     */
+    public static void createHnswIndex(Connection su, String schema, String table, String index, String column)
+            throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index.xml",
+            "databasechangelog_test_hnsw_index", Map.of(
+                "indexName", index, "tableName", schema + "." + table, "column", column));
+    }
+
+    /**
+     * {@code CREATE INDEX index ON schema.table (column) WHERE column = 'value'} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-btree-index-where-eq.xml}: an index the PCI catalog reader must not report.
+     */
+    public static void createBtreeIndexWhereEquals(Connection su, String schema, String table, String index,
+                                                   String column, String value) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireTestIdentifier(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-btree-index-where-eq.xml",
+            "databasechangelog_test_btree_index_where_eq", Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "value", requireTestLiteral(value)));
+    }
+
+    private static void requireEmbeddingColumn(String column) {
+        if (!EMBEDDING_COLUMNS.contains(column)) {
+            throw new IllegalArgumentException("not an embedding column: " + column + " (allowed: " + EMBEDDING_COLUMNS + ")");
+        }
+    }
+
+    /**
+     * {@code UPDATE pg_catalog.pg_index SET indisvalid = false} for one index (nexus-cbo4a batch 11), typed jOOQ over
+     * the catalog: what an interrupted {@code REINDEX INDEX CONCURRENTLY} leaves behind. The index is found by schema
+     * and name; an UPDATE that touches no row throws, so it cannot pass vacuously. Superuser only.
+     */
+    public static void markIndexInvalid(Connection su, String schema, String index) {
+        Table<?> pgClass = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        Table<?> pgNamespace = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        Field<Object> classOid = DSL.field(DSL.name("c", "oid"));
+        int updated = DSL.using(su, SQLDialect.POSTGRES)
+            .update(DSL.table(DSL.name("pg_catalog", "pg_index")))
+            .set(DSL.field(DSL.name("indisvalid"), Boolean.class), false)
+            .where(DSL.field(DSL.name("indexrelid")).eq(
+                DSL.select(classOid).from(pgClass).join(pgNamespace)
+                    .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                    .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+                    .and(DSL.field(DSL.name("c", "relname"), String.class).eq(index))))
+            .execute();
+        if (updated != 1) {
+            throw new IllegalStateException("expected to mark exactly one index invalid, found " + updated + ": "
+                + schema + "." + index);
+        }
+    }
+
+    /**
+     * {@code DROP INDEX IF EXISTS <qualified>} (nexus-cbo4a batch 11): jOOQ's {@code dropIndexIfExists} renders the
+     * name unqualified on POSTGRES and would silently find nothing, so the existence check is
+     * {@code to_regclass} over the rendered qualified name and the drop is {@link #dropIndex}.
+     */
+    public static void dropIndexIfExists(Connection conn, Name qualifiedIndex) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        String found = ctx.select(DSL.function("to_regclass", String.class, DSL.val(ctx.render(qualifiedIndex))))
+            .fetchOne(0, String.class);
+        if (found != null) {
+            dropIndex(conn, qualifiedIndex);
+        }
+    }
+
+    /**
+     * {@code ALTER ROLE role CONNECTION LIMIT limit} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-role-connection-limit.xml}: jOOQ has no ALTER ROLE. {@code 0} refuses every new
+     * connection, {@code -1} lifts the limit.
+     */
+    public static void setRoleConnectionLimit(Connection su, String role, int limit) throws Exception {
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-connection-limit.xml",
+            "databasechangelog_test_role_conn_limit", Map.of("role", role, "limit", Integer.toString(limit)));
+    }
+
+    /** {@code GRANT CREATE ON SCHEMA schema TO role} (nexus-cbo4a batch 11), through {@code db.changelog-test-schema-create-grant.xml}. */
+    public static void grantSchemaCreate(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-create-grant.xml",
+            "databasechangelog_test_schema_create_grant", Map.of("schema", schema, "role", role));
+    }
+
+    /** {@code REVOKE CREATE ON SCHEMA schema FROM role} (nexus-cbo4a batch 11), through {@code db.changelog-test-schema-create-revoke.xml}. */
+    public static void revokeSchemaCreate(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-create-revoke.xml",
+            "databasechangelog_test_schema_create_revoke", Map.of("schema", schema, "role", role));
+    }
+
+    /**
+     * {@code CREATE ROLE role PASSWORD 'password' NOLOGIN} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-nologin-role-password.xml}. The password goes through {@link #requireTestPasswordLiteral}.
+     */
+    public static void createNologinRoleWithPassword(Connection su, String role, String password) throws Exception {
+        requireTestIdentifier(role);
+        requireTestPasswordLiteral(password);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nologin-role-password.xml",
+            "databasechangelog_test_nologin_role_password", Map.of("role", role, "pass", password));
+    }
+
+    /**
+     * {@code CREATE ROLE role LOGIN PASSWORD 'password' SUPERUSER NOBYPASSRLS} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-superuser-login-role.xml}. The password goes through {@link #requireTestPasswordLiteral}.
+     */
+    public static void createSuperuserLoginRole(Connection su, String role, String password) throws Exception {
+        requireTestIdentifier(role);
+        requireTestPasswordLiteral(password);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-login-role.xml",
+            "databasechangelog_test_superuser_login_role", Map.of("role", role, "pass", password));
+    }
+
+    /** PERMISSIVE or RESTRICTIVE, for {@link #createPolicyUsingTrue}. */
+    public enum PolicyKind { PERMISSIVE, RESTRICTIVE }
+
+    /**
+     * {@code CREATE POLICY policy ON table AS kind FOR command TO role USING (true)} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-create-policy.xml}: jOOQ has no CREATE POLICY. {@code command} is one of ALL, SELECT,
+     * INSERT, UPDATE, DELETE; {@code role} a plain identifier or {@code PUBLIC}.
+     */
+    public static void createPolicyUsingTrue(Connection su, Table<?> table, String policy, PolicyKind kind,
+                                             String command, String role) throws Exception {
+        requireTestIdentifier(policy);
+        requireRoleOrPublic(role);
+        if (!Set.of("ALL", "SELECT", "INSERT", "UPDATE", "DELETE").contains(command)) {
+            throw new IllegalArgumentException("not a policy command: " + command);
+        }
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-create-policy.xml",
+            "databasechangelog_test_create_policy", Map.of(
+                "table", DSL.using(su, SQLDialect.POSTGRES).render(table), "policy", policy,
+                "kind", kind.name(), "command", command, "role", role));
+    }
+
+    /**
+     * {@code DROP POLICY policy ON table} (nexus-cbo4a batch 11), through {@code db.changelog-test-drop-policy.xml}.
+     * Not {@code nexus_test.drop_policy}: it also runs in a database the product changelog alone walked.
+     */
+    public static void dropPolicy(Connection conn, Table<?> table, String policy) throws Exception {
+        requireTestIdentifier(policy);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy.xml",
+            "databasechangelog_test_drop_policy",
+            Map.of("table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "policy", policy));
+    }
+
+    /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
+    public enum RowSecurityMode {
+        ENABLE("ENABLE"), DISABLE("DISABLE"), FORCE("FORCE"), NO_FORCE("NO FORCE");
+
+        private final String keyword;
+
+        RowSecurityMode(String keyword) {
+            this.keyword = keyword;
+        }
+    }
+
+    /**
+     * {@code ALTER TABLE table [ENABLE|DISABLE|FORCE|NO FORCE] ROW LEVEL SECURITY} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-table-row-security.xml}. Not {@code nexus_test.set_row_security}/{@link #setForceRls}:
+     * it also runs in a database the product changelog alone walked, which has no nexus_test schema.
+     */
+    public static void setRowSecurity(Connection conn, Table<?> table, RowSecurityMode mode) throws Exception {
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-row-security.xml",
+            "databasechangelog_test_table_row_security", Map.of(
+                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "mode", mode.keyword));
+    }
+
+    /** {@code CREATE EXTENSION plpgsql_check} (nexus-cbo4a batch 11), through {@code db.changelog-test-extension-plpgsql-check.xml}. */
+    public static void createPlpgsqlCheckExtension(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-extension-plpgsql-check.xml",
+            "databasechangelog_test_ext_plpgsql_check", Map.of());
+    }
+
+    /** The bookkeeping table the concurrent-index helpers share, so one lock clear covers them all. */
+    private static final String CONCURRENT_INDEX_BOOKKEEPING = "databasechangelog_test_concurrent_index";
+
+    /**
+     * {@code CREATE INDEX CONCURRENTLY index ON schema.table USING hnsw (column nexus.vector_cosine_ops) WHERE
+     * collection = 'collection'} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-hnsw-index-collection-concurrently.xml}, a changeset with runInTransaction="false"
+     * (PostgreSQL refuses CONCURRENTLY inside a transaction block). The statement blocks until it ends, so a
+     * caller that wants to observe it mid-flight runs this on a thread of its own with its own connection.
      *
      * <p><b>A run whose backend is terminated leaves the Liquibase lock held.</b> Liquibase cannot release its
      * lock row over the dead connection, so the next call blocks on it (for minutes) instead of running. A test
-     * that terminates the backend of a statement started here must call
-     * {@link #clearSuperuserDdlOutsideTransactionLock} before it calls this method again.
+     * that terminates the backend of a build started here must call {@link #clearConcurrentIndexBuildLock}
+     * before it calls this method or {@link #createBuilderHnswIndexConcurrently} again.
      */
-    public static void runSuperuserDdlOutsideTransaction(Connection su, String ddl) throws Exception {
-        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-ddl-no-tx.xml",
-            "databasechangelog_test_superuser_ddl_no_tx", Map.of("ddl", ddl));
+    public static void createLeafHnswIndexConcurrently(Connection su, String schema, String table, String index,
+                                                       String column, String collection) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection-concurrently.xml",
+            CONCURRENT_INDEX_BOOKKEEPING, Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collection", requireTestLiteral(collection)));
     }
 
     /**
-     * Release the Liquibase lock {@link #runSuperuserDdlOutsideTransaction} may have left held when its backend was
-     * terminated mid-statement: {@code locked = false} on its lock row, as the superuser that owns the table.
+     * The statement {@code PciBuilderSession} sends, as a fixture (nexus-cbo4a batch 11): {@link
+     * #createLeafHnswIndexConcurrently} plus {@code WITH (m = m, ef_construction = efConstruction)}, through
+     * {@code db.changelog-test-hnsw-index-builder-concurrently.xml}. Both numbers must be positive. The lock caveat
+     * of {@link #createLeafHnswIndexConcurrently} applies.
      */
-    public static void clearSuperuserDdlOutsideTransactionLock(Connection su) {
-        Table<?> lock = DSL.table(DSL.name("databasechangelog_test_superuser_ddl_no_tx_lock"));
+    public static void createBuilderHnswIndexConcurrently(Connection su, String schema, String table, String index,
+                                                          String column, String collection, int m, int efConstruction)
+            throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        if (m <= 0 || efConstruction <= 0) {
+            throw new IllegalArgumentException("m and ef_construction must be positive: " + m + ", " + efConstruction);
+        }
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-builder-concurrently.xml",
+            CONCURRENT_INDEX_BOOKKEEPING, Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collection", requireTestLiteral(collection),
+                "m", Integer.toString(m), "ef_construction", Integer.toString(efConstruction)));
+    }
+
+    /**
+     * Release the Liquibase lock {@link #createLeafHnswIndexConcurrently} or {@link #createBuilderHnswIndexConcurrently}
+     * may have left held when its backend was terminated mid-statement: {@code locked = false} on its lock row, as the
+     * superuser that owns the table.
+     */
+    public static void clearConcurrentIndexBuildLock(Connection su) {
+        Table<?> lock = DSL.table(DSL.name(CONCURRENT_INDEX_BOOKKEEPING + "_lock"));
         DSL.using(su, SQLDialect.POSTGRES)
             .update(lock)
             .set(DSL.field(DSL.name("locked"), Boolean.class), false)
             .execute();
+    }
+
+    /**
+     * {@code REINDEX INDEX CONCURRENTLY schema.index} (nexus-cbo4a batch 11), through
+     * {@code db.changelog-test-reindex-index-concurrently.xml}: jOOQ has no REINDEX. Like {@link #reindexIndex} it
+     * runs on {@code su} itself with no enclosing transaction, so session settings made on {@code su} first
+     * ({@code statement_timeout}, {@code application_name}) apply to it. It blocks until it ends or is cancelled.
+     */
+    public static void reindexIndexConcurrently(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-reindex-index-concurrently.xml",
+            "databasechangelog_test_reindex_concurrently", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code VACUUM schema.table} (nexus-cbo4a batch 11), through {@code db.changelog-test-vacuum-table.xml}: jOOQ
+     * has no VACUUM, and PostgreSQL refuses it inside a transaction block. Both names go through
+     * {@link #requireTestIdentifier}.
+     */
+    public static void vacuumTable(Connection su, String schema, String table) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-vacuum-table.xml",
+            "databasechangelog_test_vacuum_table", Map.of("schema", schema, "table", table));
+    }
+
+    /**
+     * {@code CREATE DATABASE name} on a throwaway database (nexus-cbo4a batch 11), jOOQ {@code createDatabase}.
+     * Autocommit is switched on first: PostgreSQL refuses the statement inside a transaction block.
+     */
+    public static void createDatabase(Connection su, String name) throws SQLException {
+        requireTestIdentifier(name);
+        su.setAutoCommit(true);
+        DSL.using(su, SQLDialect.POSTGRES).createDatabase(DSL.name(name)).execute();
+    }
+
+    /** {@code DROP DATABASE IF EXISTS name} (nexus-cbo4a batch 11), jOOQ {@code dropDatabaseIfExists}; autocommit as in {@link #createDatabase}. */
+    public static void dropDatabaseIfExists(Connection su, String name) throws SQLException {
+        requireTestIdentifier(name);
+        su.setAutoCommit(true);
+        DSL.using(su, SQLDialect.POSTGRES).dropDatabaseIfExists(DSL.name(name)).execute();
     }
 
     /**

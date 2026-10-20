@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE EXTENSION plpgsql_check.
+    jOOQ has no CREATE EXTENSION. PlpgsqlCheckGateTest installs the extension after the walk, in a container
+    built from an image that ships it. The name is fixed. Run through PgContainerHelper#createPlpgsqlCheckExtension;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="extension-plpgsql-check" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE EXTENSION plpgsql_check</sql>
+    </changeSet>
+</databaseChangeLog>

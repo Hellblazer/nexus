@@ -743,8 +743,7 @@ class ReadPathLeafPruningIntegrationTest {
         // back (twice per call), so every leaf-pruning test that ran after TS2 paid for the bloat (20 minutes for
         // the class, against under 10 seconds for the same tests run before TS2).
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "ALTER ROLE " + PgContainerHelper.SVC_USERNAME
-                + " RESET session_preload_libraries");
+            PgContainerHelper.disableAutoExplainForService(su);
         }
         try (HikariDataSource ts2Ds = svcPool("rp-ts2")) {
             ts2Scope = new TenantScope(ts2Ds);

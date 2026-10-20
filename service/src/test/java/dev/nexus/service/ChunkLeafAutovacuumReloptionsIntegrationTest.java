@@ -11,6 +11,7 @@ import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,9 @@ import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
@@ -86,19 +89,12 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         adminDs = new HikariDataSource(cfg);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // SECURITY DEFINER: the migrating role may not insert into this table of the superuser's.
-            PgContainerHelper.runSuperuserDdl(su, """
-                CREATE TABLE public.s9wav_alters (tag text, obj text);
-                CREATE FUNCTION public.s9wav_log_alter() RETURNS event_trigger
-                    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f$
-                BEGIN
-                    INSERT INTO public.s9wav_alters
-                    SELECT d.command_tag, d.object_identity FROM pg_event_trigger_ddl_commands() d
-                     WHERE d.command_tag = 'ALTER TABLE' AND d.object_identity LIKE 'nexus.chunks\\_m%';
-                END
-                $f$;
-                CREATE EVENT TRIGGER s9wav_log_alter ON ddl_command_end EXECUTE FUNCTION public.s9wav_log_alter();
-                """);
+            // The table is typed jOOQ; the SECURITY DEFINER logging function (the migrating role may not insert into this
+            // table of the superuser's) and the event trigger are db.changelog-test-s9wav-alter-log.xml.
+            dsl(su).createTable(ALTER_LOG.getQualifiedName())
+                .column("tag", SQLDataType.CLOB).column("obj", SQLDataType.CLOB).execute();
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-s9wav-alter-log.xml",
+                "databasechangelog_test_s9wav_alter_log", Map.of());
         }
     }
 
@@ -147,14 +143,35 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
     private void clearAlterLog() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdl(su, "TRUNCATE public.s9wav_alters");
+            dsl(su).truncate(ALTER_LOG).execute();
         }
     }
 
-    private void suDdl(String ddl) throws Exception {
+    private static Table<?> relation(String rel) {
+        return DSL.table(DSL.name("nexus", rel));
+    }
+
+    /** {@code ALTER TABLE nexus.rel SET (options)} as the superuser. */
+    private void setStorage(String rel, Map<String, String> options) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdl(su, ddl);
+            PgContainerHelper.setTableStorageParams(su, relation(rel), options);
+        }
+    }
+
+    /** {@code ALTER TABLE nexus.rel RESET (names)} as the superuser. */
+    private void resetStorage(String rel, String... names) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.resetTableStorageParams(su, relation(rel), names);
+        }
+    }
+
+    /** {@code ALTER TABLE nexus.rel OWNER TO owner} as the superuser. */
+    private void ownerTo(String rel, String owner) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.alterTableOwner(su, relation(rel), owner);
         }
     }
 
@@ -194,7 +211,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
 
     @Test
     void theParentRefusesStorageParametersItself() throws Exception {
-        assertThatThrownBy(() -> suDdl("ALTER TABLE nexus.chunks SET (autovacuum_vacuum_scale_factor = 0.05)"))
+        assertThatThrownBy(() -> setStorage("chunks", Map.of("autovacuum_vacuum_scale_factor", "0.05")))
             .hasStackTraceContaining("partitioned table");
         try (Connection su = pg.createConnection("")) {
             assertThat(reloptions(dsl(su), "chunks")).isEmpty();
@@ -276,9 +293,8 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             assertThat(wrong).as("two different leaves").isNotEqualTo(stripped);
             for (String[] l : leaves) before.add(l[1] + " " + reloptions(ctx, l[1]));
         }
-        suDdl("ALTER TABLE nexus." + stripped + " RESET (autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, "
-            + "autovacuum_vacuum_insert_scale_factor, autovacuum_analyze_scale_factor);"
-            + "ALTER TABLE nexus." + wrong + " SET (autovacuum_vacuum_scale_factor = 0.2)");
+        resetStorage(stripped, STRIP);
+        setStorage(wrong, Map.of("autovacuum_vacuum_scale_factor", "0.2"));
         try (Connection su = pg.createConnection("")) {
             assertThat(reloptions(dsl(su), stripped)).as("stripped, as set up").isEmpty();
             assertThat(reloptions(dsl(su), wrong)).as("wrong, as set up").contains("autovacuum_vacuum_scale_factor=0.2");
@@ -329,7 +345,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             leaf = leavesOf(dsl(su), "chunks").get(0)[1];
         }
-        suDdl("ALTER TABLE nexus." + leaf + " RESET (autovacuum_vacuum_threshold)");
+        resetStorage(leaf, "autovacuum_vacuum_threshold");
         try (Connection svc = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD)) {
             svc.setAutoCommit(true);
             assertThatThrownBy(() -> setLeaf(dsl(svc), leaf)).hasStackTraceContaining("must be owner");
@@ -346,8 +362,8 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
     private record LockRow(String rel, int pid) {}
 
     private static final String SUE = "ShareUpdateExclusiveLock";
-    private static final String STRIP = "RESET (autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, "
-        + "autovacuum_vacuum_insert_scale_factor, autovacuum_analyze_scale_factor)";
+    private static final String[] STRIP = {"autovacuum_vacuum_scale_factor", "autovacuum_vacuum_threshold",
+        "autovacuum_vacuum_insert_scale_factor", "autovacuum_analyze_scale_factor"};
 
     /** Every {@code nexus.chunks} leaf name, sorted. */
     private List<String> allLeafNames() throws Exception {
@@ -357,9 +373,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
     }
 
     private void stripLeaves(List<String> leaves) throws Exception {
-        StringBuilder ddl = new StringBuilder();
-        for (String l : leaves) ddl.append("ALTER TABLE nexus.").append(l).append(' ').append(STRIP).append(';');
-        suDdl(ddl.toString());
+        for (String l : leaves) resetStorage(l, STRIP);
     }
 
     /** ShareUpdateExclusiveLock rows on relations, granted or waiting, from pg_locks. */
@@ -585,8 +599,12 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
     // ── ownership ────────────────────────────────────────────────────────────
 
     private void makeRole(String role) throws Exception {
-        suDdl("DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + role + "') THEN CREATE ROLE "
-            + role + " NOLOGIN; END IF; END $r$");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            if (PgCatalogProbes.roleFlags(dsl(su), role) == null) {
+                PgContainerHelper.createNologinRole(su, role);
+            }
+        }
     }
 
     @Test
@@ -594,7 +612,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         List<String> leaves = allLeafNames();
         String leaf = leaves.get(0);
         makeRole("s9wav_other");
-        suDdl("ALTER TABLE nexus." + leaf + " OWNER TO s9wav_other");
+        ownerTo(leaf, "s9wav_other");
         try {
             clearAlterLog();
             List<String> messages;
@@ -612,7 +630,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             System.out.println("S9WAV evidence: foreign-owned correct leaf: examined " + leaves.size() + ", already correct "
                 + leaves.size() + ", foreign 0, warnings about ownership 0");
         } finally {
-            suDdl("ALTER TABLE nexus." + leaf + " OWNER TO " + ADMIN);
+            ownerTo(leaf, ADMIN);
         }
     }
 
@@ -622,7 +640,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         String leaf = leaves.get(0);
         makeRole("s9wav_other");
         stripLeaves(List.of(leaf));
-        suDdl("ALTER TABLE nexus." + leaf + " OWNER TO s9wav_other");
+        ownerTo(leaf, "s9wav_other");
         try {
             List<String> messages;
             try (Connection a = admin()) {
@@ -640,7 +658,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
                 assertThat(report.autovacuumDisabled()).isEmpty();
             }
         } finally {
-            suDdl("ALTER TABLE nexus." + leaf + " OWNER TO " + ADMIN);
+            ownerTo(leaf, ADMIN);
             try (Connection a = admin()) {
                 a.setAutoCommit(true);
                 setLeaf(dsl(a), leaf);
@@ -714,7 +732,10 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         String stripped = leaves.get(0);
         String disabled = leaves.get(leaves.size() - 1);
         stripLeaves(List.of(stripped));
-        suDdl("ALTER TABLE nexus." + disabled + " SET (autovacuum_enabled = false, fillfactor = 90)");
+        Map<String, String> disabledOptions = new LinkedHashMap<>();
+        disabledOptions.put("autovacuum_enabled", "false");
+        disabledOptions.put("fillfactor", "90");
+        setStorage(disabled, disabledOptions);
         try {
             try (Connection su = pg.createConnection("")) {
                 var before = ChunksLeafAutovacuumCheck.inspect(dsl(su));
@@ -737,7 +758,7 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
                 .anyMatch(m -> m.startsWith("WARN ") && m.contains("event=chunks_leaf_autovacuum_checked")
                     && m.contains("policy_unset=0 autovacuum_disabled=1") && m.contains(disabled));
         } finally {
-            suDdl("ALTER TABLE nexus." + disabled + " RESET (autovacuum_enabled, fillfactor)");
+            resetStorage(disabled, "autovacuum_enabled", "fillfactor");
         }
         try (Connection su = pg.createConnection("")) {
             var healthy = ChunksLeafAutovacuumCheck.inspect(dsl(su));

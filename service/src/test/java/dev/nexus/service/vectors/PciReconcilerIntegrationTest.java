@@ -23,6 +23,7 @@ import dev.nexus.service.vectors.PciReconciler.PassReport;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
@@ -794,8 +795,7 @@ class PciReconcilerIntegrationTest {
             setSession(su, "statement_timeout", "2s");
             Throwable failure = null;
             try {
-                PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
-                    "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + baseIndex);
+                PgContainerHelper.reindexIndexConcurrently(su, leaf.schema(), baseIndex);
             } catch (Exception e) {
                 failure = e;
             }
@@ -945,8 +945,7 @@ class PciReconcilerIntegrationTest {
             setSession(su, "statement_timeout", "60s");
             CompletableFuture<Void> reindex = CompletableFuture.runAsync(() -> {
                 try {
-                    PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
-                        "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + base);
+                    PgContainerHelper.reindexIndexConcurrently(su, leaf.schema(), base);
                 } catch (Exception e) {
                     reindexFailure.set(e);
                 }
@@ -1025,11 +1024,9 @@ class PciReconcilerIntegrationTest {
         String ghost = name("ghost");
         PciCatalog.Leaf leaf = leaf(tenant);
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + PciCatalog.indexName(M384, tenant, ghost)
-                + "_ccnew ON " + leaf.schema() + "." + leaf.name() + " USING hnsw (embedding_384 "
-                + "nexus.vector_cosine_ops) WHERE collection = '" + ghost + "'");
-            PgContainerHelper.runSuperuserDdl(su, "UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '"
-                + leaf.schema() + "." + PciCatalog.indexName(M384, tenant, ghost) + "_ccnew'::regclass");
+            String ghostIndex = PciCatalog.indexName(M384, tenant, ghost) + "_ccnew";
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), ghostIndex, "embedding_384", ghost);
+            PgContainerHelper.markIndexInvalid(su, leaf.schema(), ghostIndex);
         }
         PciSettings s = settings(1);
 
@@ -1062,8 +1059,7 @@ class PciReconcilerIntegrationTest {
             setSession(su, "statement_timeout", "60s");
             CompletableFuture<Void> reindex = CompletableFuture.runAsync(() -> {
                 try {
-                    PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
-                        "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + base);
+                    PgContainerHelper.reindexIndexConcurrently(su, leaf.schema(), base);
                 } catch (Exception e) {
                     // The test ends it by cancelling below.
                 }
@@ -1142,9 +1138,15 @@ class PciReconcilerIntegrationTest {
 
     // -- status truthfulness (nexus-43ulx.23 fix round) -----------------------------------------------------------
 
-    void superuserDdl(String ddl) throws Exception {
+    /** One fixture step as the superuser. */
+    @FunctionalInterface
+    interface SuStep {
+        void run(Connection su) throws Exception;
+    }
+
+    void superuserStep(SuStep step) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, ddl);
+            step.run(su);
         }
     }
 
@@ -1258,7 +1260,7 @@ class PciReconcilerIntegrationTest {
         Instant completed = r.status().lastDdlPassAt();
         assertThat(completed).isNotNull();
 
-        superuserDdl("ALTER ROLE " + ADMIN_ROLE + " CONNECTION LIMIT 0");
+        superuserStep(su -> PgContainerHelper.setRoleConnectionLimit(su, ADMIN_ROLE, 0));
         try {
             PassReport report = r.reconcileOnce();
 
@@ -1270,7 +1272,7 @@ class PciReconcilerIntegrationTest {
                 .anyMatch(l -> l.contains("event=pci_reconcile_pass_failed reason=builder_open")
                     && l.contains("too many connections"));
         } finally {
-            superuserDdl("ALTER ROLE " + ADMIN_ROLE + " CONNECTION LIMIT -1");
+            superuserStep(su -> PgContainerHelper.setRoleConnectionLimit(su, ADMIN_ROLE, -1));
         }
     }
 
@@ -1745,16 +1747,21 @@ class PciReconcilerIntegrationTest {
         assertThat(validIndexed(tenant)).isEmpty();
 
         PciCatalog.Leaf leaf = leaf(tenant);
-        superuserDdl("ALTER TABLE " + leaf.schema() + "." + leaf.name() + " OWNER TO " + PgContainerHelper.SVC_USERNAME);
-        superuserDdl("GRANT CREATE ON SCHEMA " + leaf.schema() + " TO " + PgContainerHelper.SVC_USERNAME);
+        Table<?> leafTable = DSL.table(DSL.name(leaf.schema(), leaf.name()));
+        superuserStep(su -> {
+            PgContainerHelper.alterTableOwner(su, leafTable, PgContainerHelper.SVC_USERNAME);
+            PgContainerHelper.grantSchemaCreate(su, leaf.schema(), PgContainerHelper.SVC_USERNAME);
+        });
         try {
             PassReport second = r.reconcileOnce();
             assertThat(second.builds()).as("the next pass tries again and builds").isEqualTo(1);
             assertThat(r.status().builderState()).as("a success clears no_privilege").isEqualTo(BuilderState.OK);
             assertThat(validIndexed(tenant)).containsExactly(name("wanted"));
         } finally {
-            superuserDdl("REVOKE CREATE ON SCHEMA " + leaf.schema() + " FROM " + PgContainerHelper.SVC_USERNAME);
-            superuserDdl("ALTER TABLE " + leaf.schema() + "." + leaf.name() + " OWNER TO " + ADMIN_ROLE);
+            superuserStep(su -> {
+                PgContainerHelper.revokeSchemaCreate(su, leaf.schema(), PgContainerHelper.SVC_USERNAME);
+                PgContainerHelper.alterTableOwner(su, leafTable, ADMIN_ROLE);
+            });
         }
     }
 

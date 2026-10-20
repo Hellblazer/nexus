@@ -324,11 +324,9 @@ class PciBuilderSessionIntegrationTest {
         String validCcnew = base + "_ccnew7";
         try (Connection su = pg.createConnection("")) {
             for (String n : new String[] {ccnew, validCcnew}) {
-                PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + n + " ON " + leaf.schema() + "." + leaf.name()
-                    + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = '" + collection + "'");
+                PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), n, "embedding_1024", collection);
             }
-            PgContainerHelper.runSuperuserDdl(su, "UPDATE pg_catalog.pg_index SET indisvalid = false "
-                + "WHERE indexrelid = '" + leaf.schema() + "." + ccnew + "'::regclass");
+            PgContainerHelper.markIndexInvalid(su, leaf.schema(), ccnew);
         }
         PciCatalog.Index leftover = indexOn(M1024, T1, ccnew).orElseThrow();
         PciCatalog.Index valid = indexOn(M1024, T1, validCcnew).orElseThrow();
@@ -360,8 +358,7 @@ class PciBuilderSessionIntegrationTest {
         // the snapshot and the drop leaves; the drop is handed the STALE snapshot, which said invalid.
         String name = base + "_ccnew3";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + name + " ON " + leaf.schema() + "." + leaf.name()
-                + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = '" + collection + "'");
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), name, "embedding_1024", collection);
         }
         PciCatalog.Index staleSnapshot = new PciCatalog.Index(name, false, null, collection);
         assertThat(indexOn(M1024, T1, name)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
@@ -593,7 +590,7 @@ class PciBuilderSessionIntegrationTest {
     void aMigrationLockHeldInAnotherDatabase_isNotAHolderHere_butIsInItsOwn() throws Exception {
         String other = "pcibld_otherdb";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "CREATE DATABASE " + other);
+            PgContainerHelper.createDatabase(su, other);
         }
         try {
             String url = pg.getJdbcUrl().replace("/" + pg.getDatabaseName(), "/" + other);
@@ -619,7 +616,7 @@ class PciBuilderSessionIntegrationTest {
             }
         } finally {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "DROP DATABASE IF EXISTS " + other);
+                PgContainerHelper.dropDatabaseIfExists(su, other);
             }
         }
     }
@@ -659,9 +656,10 @@ class PciBuilderSessionIntegrationTest {
     @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aRoleThatMayNotLogIn_givesAuthFailed_withSqlState28000() throws Exception {
         String role = "pcibld_nologin";
-        String password = "nologin-" + UUID.randomUUID();
+        // Letters, digits and underscore only: the helper refuses anything else in a password literal.
+        String password = "nologin_" + UUID.randomUUID().toString().replace('-', '_');
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " PASSWORD '" + password + "' NOLOGIN");
+            PgContainerHelper.createNologinRoleWithPassword(su, role, password);
         }
         try {
             PciBuilderSession session = new PciBuilderSession(pg.getJdbcUrl(), role, password, NONCE, ON);
@@ -676,7 +674,7 @@ class PciBuilderSessionIntegrationTest {
             assertThat(logs).noneMatch(l -> l.contains(password));
         } finally {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + role);
+                PgContainerHelper.dropRoleRevokingGrants(su, role);
             }
         }
     }
@@ -744,9 +742,7 @@ class PciBuilderSessionIntegrationTest {
         // An operator-made pci_ index: parsed()==false, a non-builder name.
         String operatorMade = "pci_foo";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su,
-                "CREATE INDEX " + operatorMade + " ON " + leaf.schema() + "." + leaf.name()
-                    + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = 'x'");
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), operatorMade, "embedding_1024", "x");
         }
         PciCatalog.Index unparsed = leaf(M1024, T1).indexes().stream()
             .filter(i -> operatorMade.equals(i.name())).findFirst().orElseThrow();

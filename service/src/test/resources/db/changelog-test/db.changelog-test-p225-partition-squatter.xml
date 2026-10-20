@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE TABLE nexus.${leaf} PARTITION OF nexus.${parent} FOR VALUES IN ('squatter').
+    jOOQ's createTable has no PARTITION OF. A relation that already holds the name a tenant's leaf would get,
+    bound to a different tenant, so create_tenant_partitions must refuse the collision (TenantPartitionFunctions
+    IntegrationTest). Run on the schema owner's connection through PartitionScratch#createSquatterLeaf, which
+    validates ${leaf} and ${parent} as plain identifiers; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p225-partition-squatter" author="nexus-3wh8d.7" runAlways="true">
+        <sql>CREATE TABLE nexus.${leaf} PARTITION OF nexus.${parent} FOR VALUES IN ('squatter')</sql>
+    </changeSet>
+</databaseChangeLog>

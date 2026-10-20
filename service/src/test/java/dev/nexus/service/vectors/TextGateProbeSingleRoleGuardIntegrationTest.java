@@ -496,10 +496,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         try (Connection su = c.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(definerProbes(ctx)).as("non-vacuity: a normal walk leaves 3 definer probes").hasSize(3);
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE guard_other_owner NOLOGIN");
-            PgContainerHelper.runSuperuserDdl(su, "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks");
-            PgContainerHelper.runSuperuserDdl(su,
-                "CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks FOR SELECT TO guard_other_owner USING (true)");
+            PgContainerHelper.createNologinRole(su, "guard_other_owner");
+            PgContainerHelper.dropPolicy(su, CHUNKS, "chunks_gate_probe_owner_read");
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "chunks_gate_probe_owner_read",
+                PgContainerHelper.PolicyKind.PERMISSIVE, "SELECT", "guard_other_owner");
             assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunks").stream()
                     .map(PgCatalogProbes.PolicyRoles::toString).toList())
                 .as("non-vacuity: the owner policy no longer names the migrating role")
@@ -656,10 +656,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     // fail, and the status field's structural half.
     // ---------------------------------------------------------------------------------------------------
 
-    private static void exec(Connection su, String ddl) throws Exception {
-        PgContainerHelper.runSuperuserDdl(su, ddl);
-    }
-
     /**
      * I1: a role RLS does not bind is never a violation, even though pg_has_role answers true for a superuser
      * for every role and the owner policy exists. Three shapes: a SUPERUSER without the BYPASSRLS attribute
@@ -674,8 +670,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         try {
             try (Connection su = c.createConnection("")) {
                 assertThat(execTypes(su)).as("the owner policy exists in this container").containsExactly("EXECUTED");
-                exec(su, "CREATE ROLE " + superLogin + " LOGIN PASSWORD '" + PgContainerHelper.MEMBER_PASSWORD
-                    + "' SUPERUSER NOBYPASSRLS");
+                PgContainerHelper.createSuperuserLoginRole(su, superLogin, PgContainerHelper.MEMBER_PASSWORD);
                 PgContainerHelper.grantRoleMembership(su, ADMIN, bypassLogin, true, true);
                 PgContainerHelper.grantRoleMembership(su, ADMIN, EXTRA, true, false);
                 var ctx = DSL.using(su, SQLDialect.POSTGRES);
@@ -710,12 +705,14 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-public", 1)) {
                 assertThat(ChunksIsolationCheck.violations(svc)).as("clean two-role posture").isEmpty();
                 try (Connection su = c.createConnection("")) {
-                    exec(su, "CREATE POLICY only_narrows ON nexus.chunks AS RESTRICTIVE FOR ALL TO PUBLIC USING (true)");
+                    PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "only_narrows",
+                        PgContainerHelper.PolicyKind.RESTRICTIVE, "ALL", "PUBLIC");
                 }
                 assertThat(ChunksIsolationCheck.violations(svc)).as("RESTRICTIVE policies only narrow").isEmpty();
                 ChunksIsolationCheck.verifyAtStartup(svc);
                 try (Connection su = c.createConnection("")) {
-                    exec(su, "CREATE POLICY opens_to_all ON nexus.chunks AS PERMISSIVE FOR ALL TO PUBLIC USING (true)");
+                    PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "opens_to_all",
+                        PgContainerHelper.PolicyKind.PERMISSIVE, "ALL", "PUBLIC");
                 }
                 assertThat(ChunksIsolationCheck.violations(svc).stream().map(Object::toString).toList())
                     .as("a PERMISSIVE policy for PUBLIC reaches every role")
@@ -744,25 +741,25 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
              Connection su = c.createConnection("")) {
             assertThat(awaitAnswer(svc)).as("baseline: intact").isTrue();
 
-            exec(su, "ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.NO_FORCE);
             assertThat(awaitAnswer(svc)).as("row security not forced").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
                 .hasMessageContaining("nexus.chunks").hasMessageContaining("FORCE");
-            exec(su, "ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.FORCE);
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
             ChunksIsolationCheck.verifyAtStartup(svc);
 
-            exec(su, "ALTER TABLE nexus.chunks DISABLE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.DISABLE);
             assertThat(awaitAnswer(svc)).as("row security disabled").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
                 .hasMessageContaining("nexus.chunks").hasMessageContaining("not enabled");
-            exec(su, "ALTER TABLE nexus.chunks ENABLE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.ENABLE);
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
             ChunksIsolationCheck.verifyAtStartup(svc);
 
-            exec(su, "DROP POLICY tenant_isolation ON nexus.chunks");
+            PgContainerHelper.dropPolicy(su, CHUNKS, "tenant_isolation");
             assertThat(awaitAnswer(svc)).as("tenant policy missing").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)

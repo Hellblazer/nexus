@@ -41,13 +41,10 @@ class HttpUtilPartitionErrorsPgTest {
     void start() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE SCHEMA p225_part_errs");
-            PgContainerHelper.runSuperuserDdl(su, "CREATE TABLE p225_part_errs.t (embedding_model text NOT NULL,"
-                + " tenant_id text NOT NULL, v int) PARTITION BY LIST (embedding_model)");
-            PgContainerHelper.runSuperuserDdl(su, "CREATE TABLE p225_part_errs.t_m1 PARTITION OF p225_part_errs.t"
-                + " FOR VALUES IN ('m1') PARTITION BY LIST (tenant_id)");
-            PgContainerHelper.runSuperuserDdl(su, "CREATE TABLE p225_part_errs.t_m1_a PARTITION OF p225_part_errs.t_m1"
-                + " FOR VALUES IN ('acme')");
+            // The schema and the two-level partition tree: db.changelog-test-http-util-partition-tree.xml (jOOQ's
+            // createTable has neither PARTITION BY nor PARTITION OF).
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-http-util-partition-tree.xml",
+                "databasechangelog_test_http_util_partition_tree", java.util.Map.of());
         }
     }
 
@@ -55,7 +52,7 @@ class HttpUtilPartitionErrorsPgTest {
     void stop() throws Exception {
         if (pg != null) {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "DROP SCHEMA p225_part_errs CASCADE");
+                DSL.using(su, SQLDialect.POSTGRES).dropSchema(DSL.name("p225_part_errs")).cascade().execute();
             }
             pg.stop();
         }

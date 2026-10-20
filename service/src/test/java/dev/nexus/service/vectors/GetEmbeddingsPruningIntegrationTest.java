@@ -103,7 +103,7 @@ class GetEmbeddingsPruningIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             // As in production: the service role has MAINTAIN, every leaf carries the parent's privileges, and
             // a leaf is vacuumed (a loaded, unvacuumed leaf has no visibility map and plans differently).
-            PgContainerHelper.runSuperuserDdl(su, "GRANT MAINTAIN ON nexus.chunks TO " + SVC_ROLE);
+            PgContainerHelper.grantMaintainOnChunks(su, SVC_ROLE);
             @SuppressWarnings("deprecation")
             int synced = Routines.partitionSyncAccess(DSL.using(su, SQLDialect.POSTGRES).configuration(),
                 "nexus.chunks", true);

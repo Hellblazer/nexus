@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE SCHEMA ${schema} AUTHORIZATION ${owner}.
+    jOOQ's createSchema has no AUTHORIZATION clause. A schema owned by another role, so that role owns an object
+    in a database other than its own (a cross-database ownership dependency that makes DROP ROLE fail). Run
+    through PgContainerHelper#createSchemaAuthorization, which validates both names; runAlways, bookkeeping in
+    its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="schema-authorization" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE SCHEMA ${schema} AUTHORIZATION ${owner}</sql>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): the event trigger that logs every ALTER TABLE on a nexus.chunks leaf into public.s9wav_alters.
+    ChunkLeafAutovacuumReloptionsIntegrationTest counts which leaves the self-heal altered. The table is typed
+    jOOQ createTable in the test; the function is SECURITY DEFINER because the migrating role may not insert into a
+    table of the superuser's. jOOQ has neither CREATE FUNCTION nor CREATE EVENT TRIGGER. Run by the test through
+    PgContainerHelper#runSuperuserTestChangelog, once, after the table exists.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="s9wav-alter-log" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">CREATE FUNCTION public.s9wav_log_alter() RETURNS event_trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f$
+BEGIN
+    INSERT INTO public.s9wav_alters
+    SELECT d.command_tag, d.object_identity FROM pg_event_trigger_ddl_commands() d
+     WHERE d.command_tag = 'ALTER TABLE' AND d.object_identity LIKE 'nexus.chunks\_m%';
+END
+$f$;
+CREATE EVENT TRIGGER s9wav_log_alter ON ddl_command_end EXECUTE FUNCTION public.s9wav_log_alter();</sql>
+    </changeSet>
+</databaseChangeLog>

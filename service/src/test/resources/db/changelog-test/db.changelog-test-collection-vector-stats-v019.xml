@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): nexus.collection_vector_stats_v019, the vectors-019-5 view definition under a probe name.
+    The text of vectors-032-1's rollback with the view renamed, kept as a test fixture so the set-based
+    replacement can be compared with the definition it replaced. jOOQ's createView has no WITH
+    (security_invoker = true), which is what makes the view obey row-level security as the caller. The GRANT is
+    typed jOOQ in PgContainerHelper#createCollectionVectorStatsV019View. Shared by CollectionVectorStatsSetBasedTest
+    and CollectionRoutingListingIntegrationTest; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="collection-vector-stats-v019" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE VIEW nexus.collection_vector_stats_v019
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)))          AS chunk_count,
+       max(c.created_at) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))) AS last_write,
+       count(*)                                                AS stored_count
+  FROM nexus.chunks c
+ GROUP BY c.tenant_id, c.collection, 3
+</sql>
+    </changeSet>
+</databaseChangeLog>

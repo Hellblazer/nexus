@@ -53,24 +53,6 @@ class CollectionVectorStatsSetBasedTest {
     static final String C_ELSEWHERE = "knowledge__cvs-sb-elsewhere__minilm-l6-v2-384__v1";
     static final String C_B = "knowledge__cvs-sb-b__minilm-l6-v2-384__v1";
 
-    /** The vectors-019-5 definition, under a probe name (the rollback text of vectors-032-1, renamed). */
-    static final String OLD_VIEW_DDL = """
-        CREATE VIEW nexus.collection_vector_stats_v019
-            WITH (security_invoker = true)
-        AS
-        SELECT c.tenant_id,
-               c.collection,
-               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                    WHEN c.embedding_768  IS NOT NULL THEN 768
-                    WHEN c.embedding_1024 IS NOT NULL THEN 1024
-               END AS dim,
-               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)))          AS chunk_count,
-               max(c.created_at) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))) AS last_write,
-               count(*)                                                AS stored_count
-          FROM nexus.chunks c
-         GROUP BY c.tenant_id, c.collection, 3
-        """;
-
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     TenantScope tenantScope;
@@ -85,10 +67,9 @@ class CollectionVectorStatsSetBasedTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
         try (Connection su = pg.createConnection("")) {
-            // The statements jOOQ has no typed form for go through the test changelog (RawSqlGateTest keeps
-            // raw SQL out of new test files).
-            PgContainerHelper.runSuperuserDdl(su, OLD_VIEW_DDL);
-            PgContainerHelper.runSuperuserDdl(su, "GRANT SELECT ON nexus.collection_vector_stats_v019 TO PUBLIC");
+            // The vectors-019-5 definition under a probe name: db.changelog-test-collection-vector-stats-v019.xml,
+            // the text of vectors-032-1's rollback with the view renamed (jOOQ's createView has no security_invoker).
+            PgContainerHelper.createCollectionVectorStatsV019View(su);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

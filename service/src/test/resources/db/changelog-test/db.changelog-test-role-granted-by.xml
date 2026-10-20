@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): GRANT ${grantedRole} TO ${memberRole} GRANTED BY ${grantor}.
+    jOOQ's GRANT is an object-privilege grant with no role-membership form. A membership whose grantor is a role
+    other than the superuser, which PostgreSQL 16+ refuses to drop while it is the grantor
+    (SharedClusterEmptyDatabaseTest). Run through PgContainerHelper#grantRoleGrantedBy, which validates all three
+    names; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-granted-by" author="nexus-cbo4a" runAlways="true">
+        <sql>GRANT ${grantedRole} TO ${memberRole} GRANTED BY ${grantor}</sql>
+    </changeSet>
+</databaseChangeLog>

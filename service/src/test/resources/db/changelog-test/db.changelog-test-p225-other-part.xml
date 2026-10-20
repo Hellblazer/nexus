@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): nexus.t225_other_part, a partitioned table with the right shape and the wrong name.
+    jOOQ's createTable has no PARTITION BY. The partition-function parent check must refuse anything but the four
+    served parents (TenantPartitionFunctionsIntegrationTest). db.changelog-test-p225-scratch.xml drops it on every
+    reset. Run on the schema owner's connection through PartitionScratch#createOtherPartitionedTable; runAlways,
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p225-other-part" author="nexus-3wh8d.7" runAlways="true">
+        <sql>CREATE TABLE nexus.t225_other_part (tenant_id text, embedding_model text) PARTITION BY LIST (embedding_model)</sql>
+    </changeSet>
+</databaseChangeLog>

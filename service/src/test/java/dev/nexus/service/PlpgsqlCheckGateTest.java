@@ -116,7 +116,7 @@ class PlpgsqlCheckGateTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdl(su, "CREATE EXTENSION plpgsql_check");
+            PgContainerHelper.createPlpgsqlCheckExtension(su);
             findings = PlpgsqlCheck.findFindings(su, List.of("nexus"));
         }
     }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): ALTER ROLE ${svcRole} RESET session_preload_libraries.
+    The undo of db.changelog-test-auto-explain.xml for the one setting that loads the module, so sessions opened
+    afterwards run without auto_explain (ReadPathLeafPruningIntegrationTest's timing test). jOOQ has no ALTER
+    ROLE. Run through PgContainerHelper#disableAutoExplainForService; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="auto-explain-reset" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER ROLE ${svcRole} RESET session_preload_libraries</sql>
+    </changeSet>
+</databaseChangeLog>

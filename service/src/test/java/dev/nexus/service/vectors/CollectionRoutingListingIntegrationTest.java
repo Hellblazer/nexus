@@ -70,24 +70,6 @@ class CollectionRoutingListingIntegrationTest {
     static final String EMPTY = "knowledge__clr-empty__minilm-l6-v2-384__v1";
     static final String OTHER_TENANT_ONLY = "knowledge__clr-t2only__minilm-l6-v2-384__v1";
 
-    /** The vectors-019-5 definition (the rollback text of vectors-032-1), under a probe name. */
-    static final String OLD_VIEW_DDL = """
-        CREATE VIEW nexus.collection_vector_stats_v019
-            WITH (security_invoker = true)
-        AS
-        SELECT c.tenant_id,
-               c.collection,
-               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                    WHEN c.embedding_768  IS NOT NULL THEN 768
-                    WHEN c.embedding_1024 IS NOT NULL THEN 1024
-               END AS dim,
-               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)))          AS chunk_count,
-               max(c.created_at) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))) AS last_write,
-               count(*)                                                AS stored_count
-          FROM nexus.chunks c
-         GROUP BY c.tenant_id, c.collection, 3
-        """;
-
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     TenantScope tenantScope;
@@ -126,8 +108,7 @@ class CollectionRoutingListingIntegrationTest {
         seed();
         try (Connection su = pg.createConnection("")) {
             // The vectors-019-5 view under another name, for the latency comparison below.
-            PgContainerHelper.runSuperuserDdl(su, OLD_VIEW_DDL);
-            PgContainerHelper.runSuperuserDdl(su, "GRANT SELECT ON nexus.collection_vector_stats_v019 TO PUBLIC");
+            PgContainerHelper.createCollectionVectorStatsV019View(su);
         }
         service = new NexusService(0, TOKEN, svcDs, null, repo);
         service.start();
@@ -207,7 +188,7 @@ class CollectionRoutingListingIntegrationTest {
                 }
             }
             // As in production: the service role has MAINTAIN and every leaf carries the parent's privileges.
-            PgContainerHelper.runSuperuserDdl(su, "GRANT MAINTAIN ON nexus.chunks TO " + SVC_ROLE);
+            PgContainerHelper.grantMaintainOnChunks(su, SVC_ROLE);
             @SuppressWarnings("deprecation")
             int synced = dev.nexus.service.jooq.nexus.Routines.partitionSyncAccess(dsl.configuration(),
                 "nexus.chunks", true);

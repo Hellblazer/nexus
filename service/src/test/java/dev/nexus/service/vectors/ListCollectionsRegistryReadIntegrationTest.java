@@ -171,7 +171,7 @@ class ListCollectionsRegistryReadIntegrationTest {
                 }
             }
             // As in production: the service role has MAINTAIN and every leaf carries the parent's privileges.
-            PgContainerHelper.runSuperuserDdl(su, "GRANT MAINTAIN ON nexus.chunks TO " + SVC_ROLE);
+            PgContainerHelper.grantMaintainOnChunks(su, SVC_ROLE);
             @SuppressWarnings("deprecation")
             int synced = dev.nexus.service.jooq.nexus.Routines.partitionSyncAccess(dsl.configuration(),
                 "nexus.chunks", true);

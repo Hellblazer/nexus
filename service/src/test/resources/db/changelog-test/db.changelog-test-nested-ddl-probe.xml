@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): a CREATE TABLE issued through EXECUTE inside a DO block.
+    SharedClusterEmptyDatabaseTest pins that DDL a function runs through EXECUTE is counted as a NESTED command
+    by the DDL probe's event trigger, so the statement has to be one the server only sees inside a block. The
+    table name is fixed; jOOQ has no DO block. Run through PgContainerHelper#createProbeTableThroughDoBlock;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="nested-ddl-probe" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">DO $$ BEGIN EXECUTE 'CREATE TABLE nx_sz651_nested_probe (i int)'; END $$</sql>
+    </changeSet>
+</databaseChangeLog>

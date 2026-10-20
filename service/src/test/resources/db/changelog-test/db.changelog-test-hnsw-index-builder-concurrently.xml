@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE INDEX CONCURRENTLY
+    ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WITH (m = ${m}, ef_construction =
+    ${ef_construction}) WHERE collection = '${collection}'. The statement PciBuilderSession sends, byte for byte in
+    what it sets, so a recall test measures the index the builder produces. Run through
+    PgContainerHelper#createBuilderHnswIndexConcurrently, which validates the identifiers, the embedding column, the
+    two positive integers and escapes ${collection} as a literal. runInTransaction="false": PostgreSQL refuses
+    CREATE INDEX CONCURRENTLY inside a transaction block. runAlways; bookkeeping in the table shared by the
+    concurrent-index helpers.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index-builder-concurrently" author="nexus-cbo4a" runAlways="true" runInTransaction="false">
+        <sql>CREATE INDEX CONCURRENTLY ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WITH (m = ${m}, ef_construction = ${ef_construction}) WHERE collection = '${collection}'</sql>
+    </changeSet>
+</databaseChangeLog>

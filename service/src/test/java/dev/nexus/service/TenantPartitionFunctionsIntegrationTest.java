@@ -6,8 +6,10 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -420,8 +422,7 @@ class TenantPartitionFunctionsIntegrationTest {
         try (Connection a = admin()) {
             // Deterministic collision: a relation already holds the name the victim's leaf would get, bound to
             // a different tenant.
-            PgContainerHelper.runSuperuserDdl(a, "CREATE TABLE nexus." + victimLeaf
-                + " PARTITION OF nexus." + mp + " FOR VALUES IN ('squatter')");
+            PartitionScratch.createSquatterLeaf(a, victimLeaf, mp);
         }
         try (Connection c = svc(); Connection a = admin()) {
             var ctx = dsl(c);
@@ -484,15 +485,15 @@ class TenantPartitionFunctionsIntegrationTest {
     void parentCheck_refusesAnythingButTheFourServedParents() throws Exception {
         try (Connection a = admin()) {
             var ctx = dsl(a);
-            PgContainerHelper.runSuperuserDdl(a,
-                "CREATE TABLE nexus.t225_other_part (tenant_id text, embedding_model text) PARTITION BY LIST (embedding_model)");
+            PartitionScratch.createOtherPartitionedTable(a);
             // Right shape, wrong name.
             assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "t225_other_part", "x", true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("22023"));
             // Right name, not partitioned: a plain table squatting on a served name. (Since vectors-030 walked them
             // the live chunks and taxonomy_centroids are partitioned and served, so the scratch names carry this.)
-            PgContainerHelper.runSuperuserDdl(a, "DROP TABLE nexus.chunks_new CASCADE");
-            PgContainerHelper.runSuperuserDdl(a, "CREATE TABLE nexus.chunks_new (tenant_id text, embedding_model text)");
+            ctx.dropTable(DSL.name("nexus", CHUNKS_NEW)).cascade().execute();
+            ctx.createTable(DSL.name("nexus", CHUNKS_NEW)).column("tenant_id", SQLDataType.CLOB)
+                .column("embedding_model", SQLDataType.CLOB).execute();
             assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "chunks_new", "x", true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("42809"));
             assertThatThrownBy(() -> PartitionScratch.createModelPartition(ctx, "chunks_new", CODE_3, true))
@@ -515,10 +516,10 @@ class TenantPartitionFunctionsIntegrationTest {
             var ctx = dsl(a);
             // A parent policy the production tables do not have: restrictive, per-command, role-scoped; and grants
             // beyond nexus_svc's, one of them with GRANT OPTION.
-            PgContainerHelper.runSuperuserDdl(a,
-                "CREATE POLICY t225_extra ON nexus.chunks_new AS RESTRICTIVE FOR SELECT TO nexus_svc USING (collection <> '')");
-            PgContainerHelper.runSuperuserDdl(a, "GRANT SELECT ON nexus.chunks_new TO PUBLIC");
-            PgContainerHelper.runSuperuserDdl(a, "GRANT UPDATE ON nexus.chunks_new TO pg_monitor WITH GRANT OPTION");
+            Table<?> chunksNew = DSL.table(DSL.name("nexus", CHUNKS_NEW));
+            PartitionScratch.addExtraParentPolicy(a);
+            ctx.grant(DSL.privilege("SELECT")).on(chunksNew).toPublic().execute();
+            ctx.grant(DSL.privilege("UPDATE")).on(chunksNew).to(DSL.role("pg_monitor")).withGrantOption().execute();
             PartitionScratch.createModelPartition(ctx, CHUNKS_NEW, CODE_3, true);
             PartitionScratch.createTenantPartitions(ctx, CHUNKS_NEW, "mirror", true);
             String mp = expectedName(CHUNKS_NEW, CODE_3, null);
@@ -539,9 +540,9 @@ class TenantPartitionFunctionsIntegrationTest {
                 .anyMatch(e -> e.startsWith("pg_monitor=w*/"));                                      // UPDATE, grant option
 
             // The parent loses the extras; sync removes them from the children too.
-            PgContainerHelper.runSuperuserDdl(a, "DROP POLICY t225_extra ON nexus.chunks_new");
-            PgContainerHelper.runSuperuserDdl(a, "REVOKE SELECT ON nexus.chunks_new FROM PUBLIC");
-            PgContainerHelper.runSuperuserDdl(a, "REVOKE UPDATE ON nexus.chunks_new FROM pg_monitor");
+            PgContainerHelper.dropPolicy(a, chunksNew, "t225_extra");
+            ctx.revoke(DSL.privilege("SELECT")).on(chunksNew).fromPublic().execute();
+            ctx.revoke(DSL.privilege("UPDATE")).on(chunksNew).from(DSL.role("pg_monitor")).execute();
             assertThat(PartitionScratch.syncAccess(ctx, CHUNKS_NEW, true)).isEqualTo(3);   // the model partition and its two leaves, mirror and default
             for (String child : List.of(mp, leaf)) {
                 assertThat(PartitionScratch.policies(ctx, child)).as(child).isEqualTo(PartitionScratch.policies(ctx, CHUNKS_NEW));
@@ -567,9 +568,7 @@ class TenantPartitionFunctionsIntegrationTest {
         twoModelsOnBothParents();
         try (Connection a = admin()) {
             // Attach it to the scratch stand-in for service_tokens, naming the scratch parents.
-            PgContainerHelper.runSuperuserDdl(a,
-                "CREATE TRIGGER t225_tokens_tenant AFTER INSERT ON nexus.t225_tokens FOR EACH ROW "
-                    + "EXECUTE FUNCTION nexus.service_tokens_create_tenant_partitions('nexus.chunks_new', 'nexus.taxonomy_centroids_new')");
+            PartitionScratch.attachTokenTrigger(a);
         }
         try (Connection c = svc(); Connection a = admin()) {
             var ctx = dsl(c);
@@ -911,9 +910,7 @@ class TenantPartitionFunctionsIntegrationTest {
     @Test
     void aStatementTimeoutSetInsideAFunction_doesNotShortenTheRunningStatement() throws Exception {
         try (Connection a = admin()) {
-            PgContainerHelper.runSuperuserDdl(a,
-                "CREATE FUNCTION nexus.t225_sleepy() RETURNS integer LANGUAGE plpgsql SET statement_timeout = '300ms' "
-                    + "AS $fn$ BEGIN PERFORM pg_catalog.pg_sleep(1.2); RETURN 1; END $fn$");
+            PartitionScratch.createSleepyFunction(a);
             var ctx = dsl(a);
             long t0 = System.nanoTime();
             String outcome;

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE INDEX CONCURRENTLY
+    ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection = '${collection}'.
+    The per-collection partial HNSW index as the PCI builder writes it, built without blocking writers. Run through
+    PgContainerHelper#createLeafHnswIndexConcurrently, which validates ${index}, ${schema}, ${table} (plain
+    identifiers), ${column} (an embedding column) and escapes ${collection} as a literal. runInTransaction="false":
+    PostgreSQL refuses CREATE INDEX CONCURRENTLY inside a transaction block. The statement blocks until it ends, so a
+    test that watches it mid-flight runs the helper on a thread of its own. runAlways; bookkeeping in the table shared
+    by the concurrent-index helpers (a terminated backend leaves its lock row held:
+    PgContainerHelper#clearConcurrentIndexBuildLock).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index-collection-concurrently" author="nexus-cbo4a" runAlways="true" runInTransaction="false">
+        <sql>CREATE INDEX CONCURRENTLY ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection = '${collection}'</sql>
+    </changeSet>
+</databaseChangeLog>

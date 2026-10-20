@@ -1625,6 +1625,12 @@ class RawSqlGateTest {
     // rendered with bind markers and prepared before the barrier, bound by hand, executed after it (gate-invisible: the text
     // comes from ctx.render, not a literal). StagingSchemaDropLiquibaseTest's regex extractors and st.execute(body)/(rollback)
     // (gate-invisible by variable name) are folded onto the same pair; the file carried no ceiling entry.
+    // nexus-cbo4a 2026-10-20 batch 11, 23 -> 23 (gate-invisible work): PgContainerHelper.runSuperuserDdl (a Connection and a DDL String) and its
+    // changelog are DELETED. Its 64 callers (and the private wrappers that fed it: suDdl/ddl/exec/superuserDdl in six tests) were SQL
+    // strings in Java that no pattern above could see. They are now typed jOOQ (createTable, dropTable, dropSchema, truncate, grant,
+    // revoke, createSchema), existing helpers (createNologinRole, grantRoleWithAdminOption, alterTableOwner, dropRoleRevokingGrants,
+    // lockTable) or the batch 11 PgContainerHelper methods over test changelogs that fix the statement and take only validated names
+    // (see validatedParameterChangelogs_areNamedOnlyByPgContainerHelper) or per-fixture changelogs with no parameter.
     private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 23;
 
     /**
@@ -3037,6 +3043,84 @@ class RawSqlGateTest {
         assertThat(scanned).as("test sources scanned").isGreaterThan(100);
         assertThat(namers).as("the only test source that may name the role-GUC changelog")
             .containsExactly("PgContainerHelper.java");
+    }
+
+    /**
+     * The validated-parameter changelogs (nexus-cbo4a batch 11): each takes names or values the changelog substitutes
+     * into its statement, so each has one caller, a {@code PgContainerHelper} method that validates them first. A
+     * second test naming one would run it with arguments nobody validated. Only {@code PgContainerHelper.java} may
+     * name them; the needles are assembled so this file does not name them either. Non-vacuity: every one is named
+     * there, so a renamed changelog fails here instead of dropping out of the scan.
+     */
+    @Test
+    void validatedParameterChangelogs_areNamedOnlyByPgContainerHelper() throws IOException {
+        String prefix = "db.changelog-test-";
+        List<String> needles = new ArrayList<>();
+        for (String stem : List.of("role-application-name-poison", "role-granted-by", "schema-authorization",
+                "table-storage-" + "set", "table-storage-" + "reset", "hnsw-index-" + "collection",
+                "hnsw-index-collection-" + "tenant", "btree-index-where-" + "eq", "role-connection-" + "limit",
+                "schema-create-" + "grant", "schema-create-" + "revoke", "nologin-role-" + "password",
+                "superuser-login-" + "role", "create-" + "policy", "drop-" + "policy", "table-row-" + "security",
+                "hnsw-index-collection-" + "concurrently", "hnsw-index-builder-" + "concurrently",
+                "reindex-index-" + "concurrently", "vacuum-" + "table")) {
+            needles.add(prefix + stem + ".xml");
+        }
+        List<String> namers = new ArrayList<>();
+        boolean helperNamesAll = false;
+        int scanned = 0;
+        try (Stream<Path> files = Files.walk(Path.of("src", "test", "java"))) {
+            for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
+                scanned++;
+                String text = Files.readString(p);
+                String name = p.getFileName().toString();
+                if (name.equals("PgContainerHelper.java")) {
+                    helperNamesAll = needles.stream().allMatch(text::contains);
+                    continue;
+                }
+                for (String needle : needles) {
+                    if (text.contains(needle)) {
+                        namers.add(name + " names " + needle);
+                    }
+                }
+            }
+        }
+        assertThat(scanned).as("test sources scanned").isGreaterThan(100);
+        assertThat(helperNamesAll).as("PgContainerHelper.java names every validated-parameter changelog").isTrue();
+        assertThat(namers).as("a test naming a validated-parameter changelog directly").isEmpty();
+    }
+
+    /**
+     * {@code PgContainerHelper.runSuperuserDdl} and its no-transaction-block sibling (nexus-cbo4a batch 11; each one
+     * Connection and one String parameter) took a DDL STRING from the caller and ran it through a changelog parameter,
+     * which {@link #RAW_EXECUTE} could not see (its text arrived as an argument of a call that is neither execute- nor
+     * fetch-shaped). The first had 64 callers, the second 10 (CREATE INDEX CONCURRENTLY, VACUUM, REINDEX CONCURRENTLY,
+     * CREATE/DROP DATABASE). Both are deleted along with their changelogs and the lock-clearing helper that served the
+     * second; this pins that none comes back. The statements PostgreSQL refuses inside a transaction block are now
+     * fixed-shape changesets with runInTransaction="false", reached only through validated-parameter helpers. The
+     * needles are assembled so this file does not contain them.
+     */
+    @Test
+    void runSuperuserDdl_theStringLaunderingHelpers_stayDeleted() throws IOException {
+        String bare = "runSuperuser" + "Ddl(";
+        String outside = "SuperuserDdl" + "OutsideTransaction";
+        List<String> hits = new ArrayList<>();
+        int scanned = 0;
+        try (Stream<Path> files = Files.walk(Path.of("src", "test", "java"))) {
+            for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
+                scanned++;
+                String text = Files.readString(p);
+                if (text.contains(bare) || text.contains(outside)) {
+                    hits.add(p.getFileName().toString());
+                }
+            }
+        }
+        assertThat(scanned).as("test sources scanned").isGreaterThan(100);
+        assertThat(hits).as("a call or declaration of a deleted string-DDL helper").isEmpty();
+        Path dir = Path.of("src", "test", "resources", "db", "changelog-test");
+        assertThat(dir.resolve("db.changelog-test-superuser-" + "ddl.xml")).as("its changelog stays deleted")
+            .doesNotExist();
+        assertThat(dir.resolve("db.changelog-test-superuser-" + "ddl-no-tx.xml"))
+            .as("the no-transaction sibling's changelog stays deleted").doesNotExist();
     }
 
     /**

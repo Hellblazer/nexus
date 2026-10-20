@@ -97,7 +97,7 @@ class SharedClusterEmptyDatabaseTest {
     void clusterWideRoleSettingsAreResetOnTheEmptyPathToo() throws Exception {
         PostgreSQLContainer<?> poisoner = PgContainerHelper.start();
         try (Connection su = poisoner.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "ALTER ROLE nexus_svc SET application_name TO 'empty_db_poison'");
+            PgContainerHelper.setRoleApplicationNamePoison(su, "nexus_svc");
             assertThat(roleSettingsHolding(su, "empty_db_poison"))
                 .as("non-vacuity: the poison landed as a cluster-wide setting").isEqualTo(1);
         } finally {
@@ -119,7 +119,7 @@ class SharedClusterEmptyDatabaseTest {
             PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(EXCLUSIVE_ROLE);
             try (Connection su = pg.createConnection("")) {
                 // The bare statement a fixed-name-role class issues; it would collide on round 2 if stop() kept the role.
-                PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + EXCLUSIVE_ROLE + " NOLOGIN");
+                PgContainerHelper.createNologinRole(su, EXCLUSIVE_ROLE);
                 assertThat(roleNames(DSL.using(su, SQLDialect.POSTGRES))).contains(EXCLUSIVE_ROLE);
             } finally {
                 pg.stop();
@@ -141,9 +141,9 @@ class SharedClusterEmptyDatabaseTest {
         String grantor = EXCLUSIVE_ROLE + "_grantor";
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(grantor);
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + grantor + " NOLOGIN");
-            PgContainerHelper.runSuperuserDdl(su, "GRANT pg_monitor TO " + grantor + " WITH ADMIN OPTION");
-            PgContainerHelper.runSuperuserDdl(su, "GRANT pg_monitor TO nexus_svc GRANTED BY " + grantor);
+            PgContainerHelper.createNologinRole(su, grantor);
+            PgContainerHelper.grantRoleWithAdminOption(su, "pg_monitor", grantor);
+            PgContainerHelper.grantRoleGrantedBy(su, "pg_monitor", "nexus_svc", grantor);
             assertThat(PgCatalogProbes.hasRole(DSL.using(su, SQLDialect.POSTGRES), "nexus_svc", "pg_monitor"))
                 .as("non-vacuity: the membership exists").isTrue();
         } finally {
@@ -163,7 +163,7 @@ class SharedClusterEmptyDatabaseTest {
         // The holder that "leaks": it creates the role and never declares it exclusive, so stop() leaves it.
         PostgreSQLContainer<?> holder = PgContainerHelper.startEmptyDatabase();
         try (Connection su = holder.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + leaked + " NOLOGIN");
+            PgContainerHelper.createNologinRole(su, leaked);
         } finally {
             holder.stop();
         }
@@ -172,7 +172,7 @@ class SharedClusterEmptyDatabaseTest {
             assertThatThrownBy(() -> PgContainerHelper.startEmptyDatabase(leaked)).hasMessageContaining(leaked);
         } finally {
             try (Connection su = cleaner.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + leaked);
+                PgContainerHelper.dropRoleRevokingGrants(su, leaked);
             }
             cleaner.stop();
         }
@@ -191,10 +191,10 @@ class SharedClusterEmptyDatabaseTest {
         PostgreSQLContainer<?> anchor = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = holder.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + stuck + " NOLOGIN");
+                PgContainerHelper.createNologinRole(su, stuck);
             }
             try (Connection su = anchor.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "CREATE SCHEMA stuck_schema AUTHORIZATION " + stuck);
+                PgContainerHelper.createSchemaAuthorization(su, "stuck_schema", stuck);
             }
             assertThatThrownBy(holder::stop)
                 .as("the holder's own teardown goes red, not a later class's acquire")
@@ -208,8 +208,8 @@ class SharedClusterEmptyDatabaseTest {
             holder.stop(); // a second stop is a no-op: it neither rethrows nor retries
         } finally {
             try (Connection su = anchor.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "DROP SCHEMA IF EXISTS stuck_schema");
-                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + stuck);
+                DSL.using(su, SQLDialect.POSTGRES).dropSchemaIfExists(DSL.name("stuck_schema")).execute();
+                PgContainerHelper.dropRoleRevokingGrants(su, stuck);
             }
             anchor.stop();
         }
@@ -221,13 +221,13 @@ class SharedClusterEmptyDatabaseTest {
         String role = EXCLUSIVE_ROLE + "_twice";
         PostgreSQLContainer<?> first = PgContainerHelper.startEmptyDatabase(role);
         try (Connection su = first.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " NOLOGIN");
+            PgContainerHelper.createNologinRole(su, role);
         }
         first.stop();
         PostgreSQLContainer<?> second = PgContainerHelper.startEmptyDatabase(role);
         try {
             try (Connection su = second.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " NOLOGIN");
+                PgContainerHelper.createNologinRole(su, role);
             }
             first.stop();
             try (Connection admin = SharedCluster.controlConnection(clusterOf())) {
@@ -285,8 +285,7 @@ class SharedClusterEmptyDatabaseTest {
             assertThat(ddlEntriesOf(name, false)).as("installing the probe is neither a logged statement nor an event")
                 .isEmpty();
 
-            PgContainerHelper.runSuperuserDdl(su,
-                "DO $$ BEGIN EXECUTE 'CREATE TABLE nx_sz651_nested_probe (i int)'; END $$");
+            PgContainerHelper.createProbeTableThroughDoBlock(su);
             assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_tables")),
                 DSL.field(DSL.name("tablename"), String.class).eq("nx_sz651_nested_probe")))
                 .as("non-vacuity: the nested DDL ran").isEqualTo(1);

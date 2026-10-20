@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): the tenant-creation trigger function attached to the scratch stand-in for service_tokens.
+    The walk attaches nexus.service_tokens_create_tenant_partitions() to the live service_tokens; this test
+    attaches it to nexus.t225_tokens, naming the scratch parents (TenantPartitionFunctionsIntegrationTest). jOOQ
+    has no CREATE TRIGGER. Run on the schema owner's connection through PartitionScratch#attachTokenTrigger;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p225-token-trigger" author="nexus-3wh8d.7" runAlways="true">
+        <sql>CREATE TRIGGER t225_tokens_tenant AFTER INSERT ON nexus.t225_tokens FOR EACH ROW EXECUTE FUNCTION nexus.service_tokens_create_tenant_partitions('nexus.chunks_new', 'nexus.taxonomy_centroids_new')</sql>
+    </changeSet>
+</databaseChangeLog>

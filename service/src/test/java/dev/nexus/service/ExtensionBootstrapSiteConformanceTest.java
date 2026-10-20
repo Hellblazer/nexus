@@ -99,8 +99,15 @@ class ExtensionBootstrapSiteConformanceTest {
      * for a dedicated container and so must install {@code vector}/{@code pg_trgm} as the superuser first.
      * It is run only through {@code PgContainerHelper#bootstrapNonSuperuserOwner}, by every fresh-walk
      * fixture that used to spell the same statements out by hand.
+     *
+     * <p><b>db.changelog-test-extension-plpgsql-check.xml</b> (nexus-cbo4a batch 11): {@code CREATE EXTENSION
+     * plpgsql_check} for {@code PlpgsqlCheckGateTest}, run on its superuser connection through {@code
+     * PgContainerHelper#createPlpgsqlCheckExtension} after the walk, in a container built from an image that
+     * ships the extension. A third-party analysis extension, not vector or pg_trgm, so no relocation applies.
+     * It used to be a Java string passed to the deleted string-DDL helper.
      */
-    private static final Set<String> SANCTIONED_TEST_CHANGELOGS = Set.of("db.changelog-test-nonsuper-owner.xml");
+    private static final Set<String> SANCTIONED_TEST_CHANGELOGS =
+        Set.of("db.changelog-test-nonsuper-owner.xml", "db.changelog-test-extension-plpgsql-check.xml");
 
     /**
      * (filename) Java test fixtures sanctioned to carry a literal {@code

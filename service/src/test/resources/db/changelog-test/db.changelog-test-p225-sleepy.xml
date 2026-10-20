@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): nexus.t225_sleepy(), a function with its own SET statement_timeout that sleeps longer than it.
+    Pins that a function-level statement_timeout does not re-arm the statement already running
+    (TenantPartitionFunctionsIntegrationTest). jOOQ has no CREATE FUNCTION. db.changelog-test-p225-scratch.xml
+    drops it on every reset. Run on the schema owner's connection through PartitionScratch#createSleepyFunction;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p225-sleepy" author="nexus-3wh8d.7" runAlways="true">
+        <sql splitStatements="false" stripComments="false">CREATE FUNCTION nexus.t225_sleepy() RETURNS integer LANGUAGE plpgsql SET statement_timeout = '300ms'
+AS $fn$ BEGIN PERFORM pg_catalog.pg_sleep(1.2); RETURN 1; END $fn$</sql>
+    </changeSet>
+</databaseChangeLog>

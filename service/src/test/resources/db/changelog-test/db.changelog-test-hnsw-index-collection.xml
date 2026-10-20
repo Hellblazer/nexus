@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE INDEX ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection = '${collection}'.
+    The per-collection partial HNSW index the PCI builder writes, built by hand as a fixture (jOOQ's createIndex
+    has neither an access method nor an operator class). Run through PgContainerHelper#createLeafHnswIndex, which
+    validates ${index}, ${schema}, ${table} (plain identifiers), ${column} (an embedding column) and escapes
+    ${collection} as a literal; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index-collection" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE INDEX ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection = '${collection}'</sql>
+    </changeSet>
+</databaseChangeLog>

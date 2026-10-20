@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): p225_part_errs.t, a two-level partition tree shaped like nexus.chunks (LIST by model, each model LIST by tenant).
+    HttpUtilPartitionErrorsPgTest makes PostgreSQL refuse a row at each level and reads the real message. jOOQ's
+    createTable has neither PARTITION BY nor PARTITION OF. The schema is dropped with jOOQ dropSchema ... cascade.
+    Run through PgContainerHelper#runSuperuserTestChangelog by the test; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="http-util-partition-tree" author="nexus-3wh8d.10" runAlways="true">
+        <sql splitStatements="false" stripComments="false">CREATE SCHEMA p225_part_errs;
+CREATE TABLE p225_part_errs.t (embedding_model text NOT NULL, tenant_id text NOT NULL, v int) PARTITION BY LIST (embedding_model);
+CREATE TABLE p225_part_errs.t_m1 PARTITION OF p225_part_errs.t FOR VALUES IN ('m1') PARTITION BY LIST (tenant_id);
+CREATE TABLE p225_part_errs.t_m1_a PARTITION OF p225_part_errs.t_m1 FOR VALUES IN ('acme');</sql>
+    </changeSet>
+</databaseChangeLog>

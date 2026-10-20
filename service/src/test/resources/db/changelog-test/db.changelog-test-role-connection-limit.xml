@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): ALTER ROLE ${role} CONNECTION LIMIT ${limit}.
+    jOOQ has no ALTER ROLE. PciReconcilerIntegrationTest closes the admin role's door (0) and reopens it (-1).
+    Run through PgContainerHelper#setRoleConnectionLimit, which validates ${role} and takes ${limit} as an int;
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-connection-limit" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER ROLE ${role} CONNECTION LIMIT ${limit}</sql>
+    </changeSet>
+</databaseChangeLog>

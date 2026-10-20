@@ -647,8 +647,9 @@ class P225MigrationWalkIntegrationTest {
                     su.setAutoCommit(true);
                     seedStore(DSL.using(su, SQLDialect.POSTGRES));
                     // A superuser-owned diag_chash_conformance, as pg_provision creates it: taxonomy-011-8 cannot
-                    // replace it (it degrades to a skip), but the schema owner can still drop it.
-                    PgContainerHelper.runSuperuserDdl(su, "ALTER VIEW nexus.diag_chash_conformance OWNER TO postgres");
+                    // replace it (it degrades to a skip), but the schema owner can still drop it. (OWNER TO is the one
+                    // ALTER TABLE form PostgreSQL accepts on a view, so the owner helper serves.)
+                    PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("nexus", "diag_chash_conformance")), "postgres");
                 }
                 applyRemaining(ds);
                 try (Connection su = c2.createConnection("")) {
