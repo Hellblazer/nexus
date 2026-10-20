@@ -20,8 +20,8 @@ def _no_live_build_lease(tmp_path, monkeypatch):
     """Isolate every test here from the BOX's build lease (nexus-pv93h).
 
     ``jar_freshness_skip_reason`` consults the lease before it looks at the
-    jar, and the lease is shared by every worktree of the repo, so while any
-    Maven run held it these tests reported "BUILD IS IN PROGRESS" instead of
+    jar, and the lease is shared by every worktree of the repo, so while a
+    Maven run held it (before nexus-qt6q7, one in any worktree) these tests reported "BUILD IS IN PROGRESS" instead of
     the jar states they exist to pin. Tests that want a lease pass an
     explicit root.
     """
@@ -383,6 +383,44 @@ class TestLeaseScopedToThisCheckout:
         here = tmp_path / "this-worktree"
         here.mkdir()
         assert build_in_progress_reason(self._lease(tmp_path, None), repo_root=here) is not None
+
+    def test_a_builder_path_that_cannot_be_read_here_still_refuses(self, tmp_path):
+        """Unsure is not foreign: a path this box cannot stat (another mount
+        namespace, an MSYS spelling, a symlink loop) may be this checkout."""
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")
+        for builder in (str(tmp_path / "gone"), str(tmp_path / "loop")):
+            lease = tmp_path / ("lease-" + builder.rsplit("/", 1)[1])
+            lease.mkdir()
+            root = self._lease(lease, builder)
+            assert build_in_progress_reason(root, repo_root=here) is not None, builder
+
+    def test_a_live_holder_mid_populate_still_refuses(self, tmp_path):
+        """The window between the pid claim and the descriptive files: a live
+        pid alone, or with an empty worktree file, is still a build."""
+        import os
+
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        d = tmp_path / "root" / "service"
+        d.mkdir(parents=True)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        assert build_in_progress_reason(tmp_path / "root", repo_root=here) is not None
+        (d / "worktree").write_text("")
+        assert build_in_progress_reason(tmp_path / "root", repo_root=here) is not None
+
+    def test_the_session_gate_waits_for_nothing_behind_another_worktrees_build(
+        self, tmp_path, monkeypatch,
+    ):
+        """The callers (conftest's session gate, the boot check) go through
+        wait_for_build_lease with the DEFAULT checkout, not an explicit one."""
+        from tests.db._service_fixture import wait_for_build_lease
+
+        other = tmp_path / "other-worktree"
+        other.mkdir()
+        monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(self._lease(tmp_path, str(other))))
+        assert wait_for_build_lease(0, announce=lambda _m: None) is None
 
 
 @posix_only("the build lease names the ./mvnw build's POSIX process group (pgid; os.getpgid/os.killpg)")

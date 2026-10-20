@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS. The build lease (scripts/lib/build-lease.sh) already makes
 the box single-writer for Maven, and ``tests/conftest.py`` already REFUSES a
-run while a build holds it. But the suite only ever READ that lease; it took
+run while a build in its own checkout holds it (nexus-qt6q7). But the suite only ever READ that lease; it took
 none of its own. So a build blocked a suite and a suite blocked nothing --
 two full runs on one box saw each other not at all, which is the shape that
 exhausts ``kern.sysv.shmmni`` and reports thousands of setup errors that read

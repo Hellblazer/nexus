@@ -249,6 +249,8 @@ else
 fi
 kill -9 "$holder6" 2>/dev/null
 wait "$holder6" 2>/dev/null
+bash -c "source '$WORKDIR/repo6-wt/scripts/lib/build-lease.sh'; build_lease_acquire fromwt >/dev/null 2>&1 || exit 9; cat '$root6/fromwt/worktree'; build_lease_release fromwt" > "$WORKDIR/wt6.out" 2>&1
+if [[ "$(cat "$WORKDIR/wt6.out")" == "$(cd "$WORKDIR/repo6-wt" && pwd -P)" ]]; then ok "a lease taken from the worktree names the worktree, not the primary (nexus-qt6q7)"; else bad "worktree-taken lease names: $(cat "$WORKDIR/wt6.out")"; fi
 outo="$(bash -c "export NX_BUILD_LEASE_ROOT='$WORKDIR/override'; source '$repo6/scripts/lib/build-lease.sh'; _build_lease_root")"
 if [[ "$outo" == "$WORKDIR/override" ]]; then ok "NX_BUILD_LEASE_ROOT overrides the resolution"; else bad "override ignored: $outo"; fi
 

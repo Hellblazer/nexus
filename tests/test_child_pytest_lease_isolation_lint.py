@@ -3,8 +3,8 @@
 
 A child pytest is a full session: its ``pytest_sessionstart`` runs
 ``_gate_on_build_lease``, which reads the build lease every worktree on the
-machine shares. Unless the child is told otherwise, a Maven run anywhere on the
-box makes it exit 75 before it does what the parent test is checking, and the
+machine shares. Unless the child is told otherwise, a Maven run in this checkout
+(anywhere on the box, under a lease that names no checkout) makes it exit 75 before it does what the parent test is checking, and the
 parent reports a failure that has nothing to do with the code under test. That
 is how ``test_sqlite_substrate_is_rejected_not_silently_upgraded`` went red in a
 full run beside a worktree agent's engine suite, and two sibling spawners had

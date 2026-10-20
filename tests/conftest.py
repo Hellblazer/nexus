@@ -415,10 +415,12 @@ def _gate_on_build_lease() -> None:
     """Refuse the whole session ONCE while a service build holds the lease,
     or wait for it when asked (nexus-pv93h).
 
-    The lease is shared by every worktree of this repo (nexus-g6xpa), so
-    while ANY Maven run on the box holds it, ``_boot()`` refuses per test:
-    a full run beside a scoped engine run reported 1216 setup errors
-    (2026-09-07), all one fact. Deciding at session start, on the xdist
+    The lease is shared by every worktree of this repo (nexus-g6xpa), but
+    only a build in THIS checkout counts: the lease names the checkout that
+    took it, and a build elsewhere never rewrites this jar (nexus-qt6q7;
+    ``build_in_progress_reason``). While one holds it, ``_boot()`` refuses
+    per test: a full run beside a scoped engine run reported 1216 setup
+    errors (2026-09-07), all one fact. Deciding at session start, on the xdist
     controller (workers spawn after this returns), turns that into one
     line and exit 75 — or, with ``NX_BUILD_LEASE_WAIT=<seconds>``, into a
     wait that starts the suite when the holder is gone. ``_boot()``'s own

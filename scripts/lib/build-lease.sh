@@ -281,7 +281,7 @@ _build_lease_group_alive() {
 # EVERYWHERE below).
 _build_lease_populate() {
     local dir="$1" holder_label="$2" command_line="$3"
-    (cd "$(_build_lease_repo_root)" && pwd -P) > "$dir/worktree" 2>/dev/null || true
+    (CDPATH='' cd "$(_build_lease_repo_root)" && pwd -P) > "$dir/worktree" 2>/dev/null || true
     _build_lease_ts > "$dir/ts"
     printf '%s\n' "$holder_label" > "$dir/label"
     printf '%s\n' "$command_line" > "$dir/command"

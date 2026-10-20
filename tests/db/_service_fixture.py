@@ -513,11 +513,14 @@ def build_in_progress_reason(
         elif not _pid_alive(pid):
             return None  # holder is gone; the lease lib will reclaim it
         builder = (lease / "worktree").read_text().strip() if (lease / "worktree").exists() else ""
-        if builder and Path(builder).resolve() != (repo_root or _REPO_ROOT).resolve():
+        if builder and _is_another_checkout(builder, repo_root or _REPO_ROOT):
             return None  # another worktree's build: it never rewrites this jar
-        holder = (lease / "label").read_text().strip() or "unknown"
-        command = (lease / "command").read_text().strip() or "unknown command"
-        since = (lease / "ts").read_text().strip() or "unknown time"
+        # The holder is live: a missing descriptive file is the populate
+        # window (scripts/lib/build-lease.sh writes worktree, ts, label,
+        # command after the pid), not a reason to proceed (nexus-qt6q7).
+        holder = _lease_field(lease / "label", "unknown")
+        command = _lease_field(lease / "command", "unknown command")
+        since = _lease_field(lease / "ts", "unknown time")
     except (OSError, ValueError):
         return None
     return (
@@ -526,6 +529,29 @@ def build_in_progress_reason(
         "rewritten, so launching the engine now would read a partial or "
         "half-replaced artifact. Wait for that build to finish and rerun."
     )
+
+
+def _lease_field(path: Path, default: str) -> str:
+    try:
+        return path.read_text().strip() or default
+    except OSError:
+        return default
+
+
+def _is_another_checkout(builder: str, here: Path) -> bool:
+    """True only when *builder* is provably a different directory from *here*.
+
+    Identity by inode (``os.path.samefile``), not by spelling: a bind mount, an
+    alias or an MSYS ``/c/...`` path names the same checkout under another
+    string, and treating that as foreign would ignore this checkout's own build
+    (the 2026-09-02 rewritten-jar case). A builder path that cannot be read
+    from here (absent, unmountable, a symlink loop) is not proof of anything,
+    so it counts as this checkout and the reader refuses.
+    """
+    try:
+        return not os.path.samefile(builder, here)
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 #: Seconds between lease polls while waiting (matches build_lease_acquire_wait).
