@@ -130,8 +130,12 @@ class TestT1HandoffMarkerWriter:
                         sibling_pids=(5001, 5002)):
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        # The stale-host note also calls find_mcp_sibling_pids when the REAL
+        # process table holds a stale nx-mcp host (another session's, on a
+        # shared box), which failed the no-marker tests on chas (nexus-ys8a4).
         with (
             patch("nexus.session.write_claude_session_id"),
+            patch("nexus.upgrade_finish.detect_stale_processes", return_value=_FakeSkewReport(stale=[])),
             patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
             patch("nexus.session.find_mcp_sibling_pids", return_value=list(sibling_pids)) as mock_siblings,
         ):
