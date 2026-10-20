@@ -318,32 +318,73 @@ def test_the_cgroup_io_reader_sums_wbytes_over_devices(tmp_path: Path) -> None:
     )
     proc = tmp_path / "cgroup"
     proc.write_text("0::/job.slice\n")
+    # No sysfs (a container without /sys/dev/block): nothing is left out, and stacked says unknown.
     got = ddl.cgroup_io_wbytes(proc, root, tmp_path / "no-sysfs")
     assert got == {
-        "cgroup": "job.slice", "wbytes": 5096, "per_device": {"259:0": 4096, "8:16": 1000}, "stacked": [],
+        "cgroup": "job.slice", "wbytes": 5096, "per_device": {"259:0": 4096, "8:16": 1000}, "stacked": None,
     }
     (root / "job.slice" / "io.stat").write_text("259:0 rbytes=10 wbytes=9096\n8:16 wbytes=1000\n")
     after = ddl.cgroup_io_wbytes(proc, root, tmp_path / "no-sysfs")
     assert ddl.cgroup_io_delta(got, after) == {
         "cgroup": "job.slice", "wbytes_delta": 5000, "per_device_delta": {"259:0": 5000, "8:16": 0},
+        "stacked": None,
     }
+
+
+def _sysfs(tmp_path: Path) -> Path:
+    """A /sys/dev/block shaped like chas's: nvme0n1 (259:0) with partition nvme0n1p3 (259:3) under
+    LVM dm-0 (252:0), plus a second disk nvme1n1 (259:1) and an md RAID1 (9:0) over both disks."""
+    devices = tmp_path / "devices"
+    for disk, devno in (("nvme0n1", "259:0"), ("nvme1n1", "259:1")):
+        (devices / disk).mkdir(parents=True)
+        (devices / disk / "dev").write_text(devno + "\n")
+    part = devices / "nvme0n1" / "nvme0n1p3"
+    part.mkdir()
+    (part / "dev").write_text("259:3\n")
+    (part / "partition").write_text("3\n")
+    sys_block = tmp_path / "sys-dev-block"
+    for devno, slaves in (
+        ("259:0", {}), ("259:1", {}),
+        ("252:0", {"nvme0n1p3": part}),
+        ("9:0", {"nvme0n1": devices / "nvme0n1", "nvme1n1": devices / "nvme1n1"}),
+    ):
+        (sys_block / devno / "slaves").mkdir(parents=True)
+        for name, target in slaves.items():
+            (sys_block / devno / "slaves" / name).symlink_to(target)
+    return sys_block
+
+
+def _io_stat(tmp_path: Path, rows: str) -> tuple[Path, Path]:
+    root = tmp_path / "cg"
+    (root / "job.slice").mkdir(parents=True)
+    (root / "job.slice" / "io.stat").write_text(rows)
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/job.slice\n")
+    return proc, root
 
 
 def test_a_stacked_device_is_not_summed_on_top_of_the_disk_beneath_it(tmp_path: Path) -> None:
-    # chas: / is an LVM volume (252:0, dm) over nvme0n1p3, and the cgroup charges one write at
-    # both layers, so summing every io.stat row counted each byte twice (nexus-7xmnr).
-    root = tmp_path / "cg"
-    (root / "job.slice").mkdir(parents=True)
-    (root / "job.slice" / "io.stat").write_text("259:0 wbytes=94560256\n252:0 wbytes=94560256\n")
-    proc = tmp_path / "cgroup"
-    proc.write_text("0::/job.slice\n")
-    sys_block = tmp_path / "sys-dev-block"
-    (sys_block / "252:0" / "slaves" / "nvme0n1p3").mkdir(parents=True)
-    (sys_block / "259:0" / "slaves").mkdir(parents=True)
-    assert ddl.cgroup_io_wbytes(proc, root, sys_block) == {
+    # chas: / is an LVM volume (252:0) over nvme0n1p3, and the cgroup charges a write at both
+    # layers, so summing every io.stat row counted each byte twice (nexus-7xmnr). The slave is a
+    # partition; io.stat lists its whole disk, 259:0.
+    proc, root = _io_stat(tmp_path, "259:0 wbytes=94560256\n252:0 wbytes=94560256\n")
+    assert ddl.cgroup_io_wbytes(proc, root, _sysfs(tmp_path)) == {
         "cgroup": "job.slice", "wbytes": 94560256,
         "per_device": {"259:0": 94560256, "252:0": 94560256}, "stacked": ["252:0"],
     }
+
+
+def test_a_stacked_device_whose_disk_is_not_charged_here_stays_in_the_sum(tmp_path: Path) -> None:
+    # Request-based dm (multipath) does not charge the disks below; dropping the only row read 0.
+    proc, root = _io_stat(tmp_path, "252:0 wbytes=4096\n")
+    got = ddl.cgroup_io_wbytes(proc, root, _sysfs(tmp_path))
+    assert (got["wbytes"], got["stacked"]) == (4096, [])
+
+
+def test_md_raid1_sums_both_mirrors_which_is_what_the_disks_wear(tmp_path: Path) -> None:
+    proc, root = _io_stat(tmp_path, "9:0 wbytes=100\n259:0 wbytes=100\n259:1 wbytes=100\n")
+    got = ddl.cgroup_io_wbytes(proc, root, _sysfs(tmp_path))
+    assert (got["wbytes"], got["stacked"]) == (200, ["9:0"])
 
 
 def test_the_cgroup_io_reader_says_none_where_it_cannot_read(tmp_path: Path) -> None:

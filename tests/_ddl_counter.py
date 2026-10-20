@@ -590,12 +590,15 @@ def cgroup_io_wbytes(
     proc_cgroup: Path = Path("/proc/self/cgroup"), cgroup_root: Path = Path("/sys/fs/cgroup"),
     sys_dev_block: Path = Path("/sys/dev/block"),
 ) -> dict[str, Any] | None:
-    """The calling process's cgroup (v2) ``io.stat``, ``wbytes`` summed over its block devices,
-    or None where it cannot be read (not Linux, cgroup v1, no ``io`` controller). A stacked device
-    (device-mapper, LVM, md: one whose ``/sys/dev/block/<maj:min>/slaves`` is non-empty) is kept in
-    ``per_device`` and listed in ``stacked`` but left out of the sum, because the cgroup charges
-    one write at every layer it passes and chas's root volume is LVM over the NVMe, so summing
-    every row counted each byte twice (nexus-7xmnr). Only a run that
+    """The calling process's cgroup (v2) ``io.stat``, ``wbytes`` summed over the devices nothing
+    else in it sits on, or None where it cannot be read (not Linux, cgroup v1, no ``io``
+    controller). A bio-based stacked device (LVM, dm-crypt, md) is charged once for itself and
+    again on each disk below it, and chas's root volume is LVM over the NVMe, so summing every row
+    counted each byte twice (nexus-7xmnr). A device is left out of the sum, kept in
+    ``per_device`` and listed in ``stacked``, only when one of its ``/sys/dev/block/<maj:min>/slaves``
+    resolves (a partition to its whole disk, as io.stat lists disks) to another row of the same
+    io.stat; a stacked device whose disks are not charged here stays in the sum. With sysfs
+    unreadable nothing is left out (the old double count) and ``stacked`` is None. Only a run that
     owns its cgroup (a Nomad task, a container, a systemd scope) gets a figure that is the run's;
     on a shared cgroup the delta also counts every sibling's writes. A tmpfs write is not a
     block-device write, so a run entirely on tmpfs reads near zero here. This figure covers the
@@ -618,20 +621,34 @@ def cgroup_io_wbytes(
         fields = dict(p.split("=", 1) for p in rest.split() if "=" in p)
         if "wbytes" in fields:
             per_device[device] = int(fields["wbytes"])
-    stacked = [d for d in per_device if _has_slaves(sys_dev_block / d)]
+    stacked: list[str] | None = None
+    if sys_dev_block.is_dir():
+        stacked = [d for d in per_device if _charged_disks_below(sys_dev_block / d) & (per_device.keys() - {d})]
     return {
         "cgroup": path or "/",
-        "wbytes": sum(v for d, v in per_device.items() if d not in stacked),
+        "wbytes": sum(v for d, v in per_device.items() if d not in (stacked or ())),
         "per_device": per_device,
         "stacked": stacked,
     }
 
 
-def _has_slaves(device: Path) -> bool:
+def _charged_disks_below(device: Path) -> set[str]:
+    """The ``maj:min`` of each whole disk ``device`` sits on, from its ``slaves`` entries; a slave
+    that is a partition (it has a ``partition`` file) answers for the disk that holds it."""
+    found: set[str] = set()
     try:
-        return any((device / "slaves").iterdir())
+        slaves = list((device / "slaves").iterdir())
     except OSError:
-        return False
+        return found
+    for slave in slaves:
+        try:
+            node = slave.resolve()
+            if (node / "partition").exists():
+                node = node.parent
+            found.add((node / "dev").read_text().strip())
+        except OSError:
+            continue
+    return found
 
 
 def cgroup_io_delta(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -643,6 +660,7 @@ def cgroup_io_delta(before: dict[str, Any] | None, after: dict[str, Any] | None)
         "per_device_delta": {
             d: v - before["per_device"].get(d, 0) for d, v in after["per_device"].items()
         },
+        "stacked": after.get("stacked"),
     }
 
 
