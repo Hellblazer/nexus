@@ -1015,11 +1015,18 @@ class TestKeptReportPath:
 # --- end to end: a real nested pytest --------------------------------------------
 
 _SANDBOX_CONFTEST = '''\
-from tests._tmp_root import TmpRootPlugin
+import functools, os
+
+from tests._tmp_root import TmpRootPlugin, decide_tmp_root
 
 
 def pytest_configure(config):
-    config.pluginmanager.register(TmpRootPlugin(), "nexus-tmp-root")
+    # PROBE_HEADROOM_MIB pins the cgroup-headroom input of the decision; unset, the
+    # nested run reads the real cgroup (the parent grant's memory state).
+    pin = os.environ.get("PROBE_HEADROOM_MIB")
+    decide = decide_tmp_root if pin is None else functools.partial(
+        decide_tmp_root, cgroup_headroom=lambda: int(pin) * 1024**2)
+    config.pluginmanager.register(TmpRootPlugin(decide=decide), "nexus-tmp-root")
 '''
 
 _SANDBOX_TEST = '''\
@@ -1109,7 +1116,13 @@ def _probes(tmp_path) -> list[dict]:
 def _grant_env(tmp_path) -> dict[str, str]:
     shm = tmp_path / "shm"
     shm.mkdir(exist_ok=True)
-    return {"LAB_CPUS": "4", "NX_TEST_TMP_SHM_DIR": str(shm)}
+    """A grant whose tmpfs decision is PINNED to tmpfs: the fake shm dir plus a headroom
+    far above the floor. The nested run must not inherit the parent grant's memory state
+    (nexus-npbum: a busy lab-l parent read 1.2-1.8 GB headroom and decided disk)."""
+    return {"LAB_CPUS": "4", "NX_TEST_TMP_SHM_DIR": str(shm), "PROBE_HEADROOM_MIB": str(_PINNED_HEADROOM_MIB)}
+
+
+_PINNED_HEADROOM_MIB = 64 * 1024
 
 
 class TestEndToEnd:
@@ -1150,6 +1163,31 @@ class TestEndToEnd:
             assert p["tmp_path"].startswith(str(run / "p") + os.sep)
         assert not run.exists()
         assert proj.is_dir()
+
+    def test_low_headroom_pinned_decides_disk_and_says_why(self, tmp_path) -> None:
+        r = _run_pytest(tmp_path, "-q", "test_probe.py", **{**_grant_env(tmp_path), "PROBE_HEADROOM_MIB": "1500"})
+        assert r.returncode == 0, r.stdout + r.stderr
+        (probe,) = _probes(tmp_path)
+        assert probe["session"].startswith("disk=the cgroup memory headroom is 1500 MiB, below the 3072 MiB floor")
+        assert probe["tmpdir_env"] == str(tmp_path / "orig-tmp")
+        assert not (tmp_path / "shm").exists() or list((tmp_path / "shm").iterdir()) == []
+
+    def test_the_real_headroom_decision_is_self_consistent(self, tmp_path) -> None:
+        """The one nested run that reads the real cgroup: its outcome depends on the host's
+        memory state, so it asserts that what was reported matches what was done."""
+        env = _grant_env(tmp_path)
+        del env["PROBE_HEADROOM_MIB"]
+        r = _run_pytest(tmp_path, "-q", "test_probe.py", **env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        (probe,) = _probes(tmp_path)
+        session = probe["session"]
+        if session.startswith("tmpfs="):
+            run = Path(session.split("=", 1)[1])
+            assert run.parent == tmp_path / "shm" / _ROOT and probe["tmpdir_env"] == str(run / "t")
+        else:
+            assert session.startswith("disk=the cgroup memory headroom is "), session
+            assert "below the 3072 MiB floor" in session
+            assert probe["tmpdir_env"] == str(tmp_path / "orig-tmp")
 
     def test_outside_a_grant_the_run_is_unchanged(self, tmp_path) -> None:
         r = _run_pytest(tmp_path, "-q", "test_probe.py", NX_TEST_TMP_SHM_DIR=str(tmp_path / "shm"))
