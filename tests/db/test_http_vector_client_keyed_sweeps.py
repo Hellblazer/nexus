@@ -20,6 +20,7 @@ Rules pinned here (nexus-zxgld, nexus-yye8l.12):
 """
 from __future__ import annotations
 
+import http.client
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -103,6 +104,15 @@ def srv(monkeypatch):
 @pytest.fixture
 def client() -> hv.HttpVectorClient:
     return hv.HttpVectorClient(tenant="default")
+
+
+def _assert_unresolved_note(exc: BaseException, why: str) -> None:
+    """The error says the sweep may have committed, names the key, and says where to look."""
+    notes = "\n".join(getattr(exc, "__notes__", []))
+    assert "outcome unknown" in notes and why in notes, notes
+    assert "the sweep may have committed" in notes
+    match = [w for w in notes.split() if w.count("-") == 4 and len(w) >= 36]
+    assert match and f"GET /v1/requests/{match[0].rstrip(':,')}" in notes, notes
 
 
 def _posts(srv, path):
@@ -198,8 +208,9 @@ def test_an_in_flight_status_is_polled_a_grace_past_its_lease_then_the_same_key_
     srv.script(f"POST {path}", sv.err(504, "gw"), sv.ok(_STORED))
     srv.script(f"GET {_STATUS}", in_flight)  # in_flight forever: the holder is gone
     assert call(client) == _STORED
-    # t=0 before the lease, t=5 one second past it (inside the grace), t=10 past lease + grace: resend.
-    assert clock.sleeps == [5.0, 5.0]
+    # t=0 before the lease, t=5 one second past it (inside the grace), t=10 past lease + grace: one
+    # more interval, then the resend (so a 409 loop is not four quick round trips).
+    assert clock.sleeps == [5.0, 5.0, 5.0]
     assert len(_polls(srv)) == 3
     first, second = _posts(srv, path)
     assert first["headers"][_KEY] == second["headers"][_KEY] and first["body"] == second["body"]
@@ -247,6 +258,7 @@ def test_a_404_from_the_status_route_surfaces_the_original_gateway_error(srv, cl
         call(client)
     assert exc.value.code == 504
     assert len(_posts(srv, path)) == 1 and len(_polls(srv)) == 1
+    _assert_unresolved_note(exc.value, "this engine keeps no request ledger")
 
 
 def test_polls_that_fail_three_times_surface_the_original_error(srv, client, clock):
@@ -258,6 +270,7 @@ def test_polls_that_fail_three_times_surface_the_original_error(srv, client, clo
     assert exc.value.code == 504
     assert len(_polls(srv)) == 3 and len(_posts(srv, path)) == 1
     assert clock.sleeps == [5.0, 5.0]
+    _assert_unresolved_note(exc.value, "the status polls kept failing")
 
 
 # ── sweep_gate_busy and the edge 503 ─────────────────────────────────────────
@@ -390,6 +403,46 @@ def test_resends_stop_at_three_and_the_last_outcome_surfaces(srv, client, clock)
     assert len(posts) == 4, "the first attempt plus three resends"
     assert {p["headers"][_KEY] for p in posts} == {posts[0]["headers"][_KEY]}
     assert len({p["body"] for p in posts}) == 1
+    assert len(_polls(srv)) == 4, "every ambiguous POST is polled, the last one too"
+    _assert_unresolved_note(exc.value, "the resend cap of 3 was reached")
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_the_fourth_post_timing_out_is_polled_and_a_committed_ledger_returns_the_stored_body(
+    srv, client, clock, monkeypatch, form,
+):
+    """The ll31n shape at the cap: three resends were spent, the 4th POST times out, and the sweep
+    committed. The failure must not surface; the ledger is asked."""
+    path, call, _ = _FORMS[form]
+    monkeypatch.setattr(hv, "_SWEEP_POST_TIMEOUT_S", 0.3)
+    srv.script(f"POST {path}", sv.err(504, "gw"), sv.err(504, "gw"), sv.err(504, "gw"), "hang")
+    srv.script(f"GET {_STATUS}", _status("unknown"), _status("unknown"), _status("unknown"), _committed(form))
+    assert call(client) == _stored(form)
+    posts = _posts(srv, path)
+    assert len(posts) == 4 and len(_polls(srv)) == 4
+    assert {p["headers"][_KEY] for p in posts} == {posts[0]["headers"][_KEY]}
+
+
+def test_a_rolled_back_status_at_the_cap_surfaces_with_a_note_and_no_fifth_post(srv, client, clock):
+    path, call, _ = _FORMS["quarantine"]
+    srv.script(f"POST {path}", sv.err(409, "request_in_flight"))
+    srv.script(f"GET {_STATUS}", _status("rolled_back"))
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code == 409
+    assert len(_posts(srv, path)) == 4 and len(_polls(srv)) == 4
+    _assert_unresolved_note(exc.value, "ledger last read rolled_back")
+
+
+def test_a_409_loop_over_a_stale_in_flight_key_sleeps_an_interval_before_each_resend(srv, client, clock):
+    path, call, _ = _FORMS["quarantine"]
+    stale = (clock.now - timedelta(seconds=100)).isoformat()
+    srv.script(f"POST {path}", sv.err(409, "request_in_flight"))
+    srv.script(f"GET {_STATUS}", _status("in_flight", started_at=stale, lease_until=stale))
+    with pytest.raises(hv.VectorServiceError):
+        call(client)
+    assert len(_posts(srv, path)) == 4
+    assert clock.sleeps == [5.0, 5.0, 5.0], "one interval before each resend, none after the last"
 
 
 def test_a_gate_busy_that_never_clears_stops_at_the_cap_too(srv, client, clock):
@@ -399,6 +452,7 @@ def test_a_gate_busy_that_never_clears_stops_at_the_cap_too(srv, client, clock):
         call(client)
     assert exc.value.code == 503 and exc.value.engine_body == {"error": "sweep_gate_busy"}
     assert len(_posts(srv, path)) == 4
+    assert _polls(srv) == [], "nothing ran: no poll, at the cap either"
 
 
 # ── keys: one per call, the thread-local, a replay ───────────────────────────
@@ -466,6 +520,147 @@ def test_an_engine_without_a_ledger_fails_a_gateway_timeout_exactly_as_before(sr
     assert clock.sleeps == []
 
 
+# ── unresolved outcomes, transport classification, old engines ───────────────
+
+
+def test_a_poll_budget_that_runs_out_surfaces_the_original_error_with_a_note(srv, client, clock):
+    path, call, _ = _FORMS["quarantine"]
+    lease = (clock.now + timedelta(hours=1)).isoformat()
+    srv.script(f"POST {path}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", _status("in_flight", started_at=clock.now.isoformat(), lease_until=lease))
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code == 504 and len(_posts(srv, path)) == 1
+    assert sum(clock.sleeps) > hv._STATUS_POLL_BUDGET_S
+    _assert_unresolved_note(exc.value, "the status poll budget ran out")
+
+
+def test_a_status_state_the_client_does_not_know_surfaces_the_original_error_with_a_note(srv, client, clock):
+    path, call, _ = _FORMS["quarantine"]
+    srv.script(f"POST {path}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", _status("exploded"))
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code == 504
+    _assert_unresolved_note(exc.value, "a state this client does not know")
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_committed_without_a_stored_body_reports_committed_with_unknown_counts(srv, client, clock, form):
+    path, call, _ = _FORMS[form]
+    srv.script(f"POST {path}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", _status("committed", response_status=200, response=None))
+    result = call(client)
+    assert isinstance(result, hv.CommittedWithUnknownCounts)
+    assert dict(result) == {"committed_unknown_counts": True}
+    assert len(_posts(srv, path)) == 1, "committed: never resent"
+
+
+@pytest.mark.parametrize("entry", ["drop", "garbage"])
+def test_a_reset_or_a_malformed_response_is_ambiguous_and_polled(srv, client, clock, entry):
+    """A connection closed with no answer (a reset/abort family) and a response that is not HTTP
+    (http.client.BadStatusLine) may follow a sweep that ran: ask the ledger."""
+    path, call, _ = _FORMS["quarantine"]
+    srv.script(f"POST {path}", entry)
+    srv.script(f"GET {_STATUS}", _committed("quarantine"))
+    assert call(client) == _STORED
+    assert len(_posts(srv, path)) == 1 and len(_polls(srv)) == 1
+
+
+def test_a_bad_status_line_is_the_http_client_family_the_catch_must_cover(srv):
+    srv.script(f"POST {_QUARANTINE}", "garbage")
+    with pytest.raises(http.client.HTTPException):
+        hv._post(_QUARANTINE, {"collection": "c"}, tenant="default")
+
+
+def _refuse_status_polls(monkeypatch) -> None:
+    def refuse(path, *, tenant="default"):
+        raise AssertionError(f"a request that provably never ran must not be polled: {path}")
+
+    monkeypatch.setattr(hv, "_get", refuse)
+
+
+@pytest.fixture
+def closed_port(monkeypatch):
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "tok"))
+    monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+    return port
+
+
+def test_a_refused_connection_proves_nothing_ran_and_raises_at_once_without_a_poll(
+    closed_port, client, clock, monkeypatch,
+):
+    _refuse_status_polls(monkeypatch)
+    path, call, _ = _FORMS["quarantine"]
+    with pytest.raises(OSError):
+        call(client)
+    assert clock.sleeps == []
+
+
+def test_a_managed_endpoints_timeout_reframed_without_a_code_is_polled(srv, client, clock, monkeypatch):
+    path, call, _ = _FORMS["quarantine"]
+    monkeypatch.setattr(hv, "_managed_remedy", lambda: "check NX_SERVICE_URL")
+    monkeypatch.setattr(hv, "_SWEEP_POST_TIMEOUT_S", 0.3)
+    srv.script(f"POST {path}", "hang")
+    srv.script(f"GET {_STATUS}", _committed("quarantine"))
+    assert call(client) == _STORED
+    assert len(_polls(srv)) == 1
+
+
+def test_a_managed_endpoints_refused_connection_is_unwrapped_and_raised_at_once(
+    closed_port, client, clock, monkeypatch,
+):
+    """code=None VectorServiceError from a managed endpoint: its __cause__ is the refused connection."""
+    _refuse_status_polls(monkeypatch)
+    monkeypatch.setattr(hv, "_managed_remedy", lambda: "check NX_SERVICE_URL")
+    path, call, _ = _FORMS["quarantine"]
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code is None and isinstance(exc.value.__cause__, OSError)
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_an_old_engine_with_a_socket_timeout_raises_the_timeout_after_one_post_and_one_404_poll(
+    srv, client, clock, monkeypatch, form,
+):
+    """No ledger (status route 404): the call raises what it raised before (the raw timeout), the only
+    additions being one status GET and a note."""
+    path, call, _ = _FORMS[form]
+    monkeypatch.setattr(hv, "_SWEEP_POST_TIMEOUT_S", 0.3)
+    srv.script(f"POST {path}", "hang")
+    with pytest.raises(TimeoutError) as exc:
+        call(client)
+    assert [r["method"] for r in srv.requests] == ["POST", "GET"]
+    assert json.loads(srv.requests[0]["body"]) == _PRE_CHANGE_BODIES[form]
+    _assert_unresolved_note(exc.value, "this engine keeps no request ledger")
+
+
+def test_an_old_engine_503_with_a_long_retry_after_sleeps_at_most_five_seconds_before_the_404_poll(
+    srv, client, clock,
+):
+    path, call, _ = _FORMS["quarantine"]
+    srv.script(f"POST {path}", sv.err(503, "overloaded", **{"Retry-After": "45"}))
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code == 503
+    assert clock.sleeps == [5.0], "Retry-After 45 is capped before a poll that an old engine answers 404"
+    assert [r["method"] for r in srv.requests] == ["POST", "GET"]
+
+
+def test_restore_never_waits_out_a_sweep_gate_busy_it_cannot_receive(srv, client, clock):
+    """Restore takes no sweep gate. Were an engine to send that body there, it is an ordinary 503: polled."""
+    path, call, _ = _FORMS["restore"]
+    srv.script(f"POST {path}", sv.err(503, "sweep_gate_busy", **{"Retry-After": "3"}))
+    srv.script(f"GET {_STATUS}", _committed("restore"))
+    assert call(client) == _RESTORE_STORED
+    assert len(_polls(srv)) == 1 and len(_posts(srv, path)) == 1
+
+
 # ── chunk_quarantine's loops ─────────────────────────────────────────────────
 
 
@@ -487,6 +682,29 @@ def test_each_batch_of_the_quarantine_drain_carries_its_own_key_and_a_truncated_
     assert len(sample) == 6
     k1, k2 = (p["headers"][_KEY] for p in _posts(srv, _QUARANTINE))
     assert k1 != k2
+
+
+def test_a_batch_committed_with_unknown_counts_ends_the_quarantine_drain_and_a_strict_drain_raises(
+    srv, client, clock,
+):
+    srv.script(f"POST {_QUARANTINE}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", _status("committed", response_status=200, response=None))
+    moved, _sample = cq.quarantine_orphans_bounded_serverside(
+        client, "col", "col__q", _QUARANTINED_AT, sample_limit=20, row_limit=100,
+    )
+    assert moved == 0 and len(_posts(srv, _QUARANTINE)) == 1, "stops, never loops on a guessed remaining"
+    with pytest.raises(cq.BoundedDrainIncomplete) as exc:
+        cq.quarantine_orphans_bounded_serverside(
+            client, "col", "col__q", _QUARANTINED_AT, sample_limit=20, row_limit=100, strict=True,
+        )
+    assert exc.value.reason == "batch committed, counts unknown"
+
+
+def test_a_batch_committed_with_unknown_counts_ends_the_restore_drain(srv, client, clock):
+    srv.script(f"POST {_RESTORE}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", _status("committed", response_status=200, response=None))
+    assert cq.restore_rereferenced_bounded_serverside(client, "col__q", "col", row_limit=100) == 0
+    assert len(_posts(srv, _RESTORE)) == 1
 
 
 def test_each_batch_of_the_restore_drain_carries_its_own_key(srv, client, clock):

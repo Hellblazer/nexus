@@ -410,6 +410,15 @@ def restore_rereferenced_bounded_serverside(
     remaining = None
     for _ in range(max_iterations):
         result = fn(quarantine_name, origin_name, row_limit)
+        if result.get("committed_unknown_counts"):
+            # RDR-222: the batch committed (the ledger says so) but its response was lost and its
+            # stored body is unavailable, so its count is unknown: stop and say so, never loop on
+            # a guessed ``remaining``.
+            _log.warning(
+                "gc_restore_batch_committed_counts_unknown",
+                quarantine_collection=quarantine_name, collection=origin_name, restored_before=total,
+            )
+            return total
         total += int(result.get("restored", 0))
         remaining = result.get("remaining")
         if remaining is None:
@@ -511,6 +520,17 @@ def quarantine_orphans_bounded_serverside(
                 raise BoundedDrainIncomplete("batch failed", total_moved, None, batches) from exc
             raise
         batches += 1
+        if result.get("committed_unknown_counts"):
+            # RDR-222: the batch committed (the ledger says so) but its response was lost and its
+            # stored body is unavailable, so its count and ``remaining`` are unknown. A strict drain
+            # cannot claim it finished; the other stops and reports what it counted.
+            _log.warning(
+                "gc_quarantine_batch_committed_counts_unknown",
+                collection=collection_name, quarantine_collection=quarantine_name, moved_before=total_moved,
+            )
+            if strict:
+                raise BoundedDrainIncomplete("batch committed, counts unknown", total_moved, None, batches)
+            return total_moved, sample
         if floor_bearing:
             _read_floor(result, floor, total_moved)
         batch_moved = int(result.get("moved", 0))

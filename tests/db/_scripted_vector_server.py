@@ -6,8 +6,9 @@ Each request is matched to a route key (``"POST /v1/vectors/gc/quarantine-orphan
 script, one entry per request, the last entry repeating. Every request is recorded with its
 headers and raw body, so a test can assert what went over the wire, not what a mock was called with.
 
-A script entry is a :class:`Reply` or the string ``"hang"`` (read the request, then say nothing
-until the client gives up, so the client's read times out). A route with no script answers 404
+A script entry is a :class:`Reply` or a string: ``"hang"`` (read the request, then say nothing until
+the client gives up, so the client's read times out), ``"drop"`` (read it, then close the connection
+with no response) or ``"garbage"`` (answer with bytes that are not an HTTP status line). A route with no script answers 404
 (the shape of an engine that has no such route).
 """
 from __future__ import annotations
@@ -81,6 +82,13 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
             entry = self.server.next_entry(self.command, self.path)  # type: ignore[attr-defined]
             if entry == "hang":
                 self.server._release.wait(timeout=30)  # type: ignore[attr-defined]
+                self.close_connection = True
+                return
+            if entry == "drop":
+                self.close_connection = True
+                return
+            if entry == "garbage":
+                self.wfile.write(b"NOT-HTTP nonsense\r\n\r\n")
                 self.close_connection = True
                 return
             reply = entry if isinstance(entry, Reply) else Reply(404, {"error": "no such route"})

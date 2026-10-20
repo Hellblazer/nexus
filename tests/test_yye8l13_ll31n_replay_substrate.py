@@ -173,8 +173,10 @@ def test_a_restore_sweep_held_past_the_clients_timeout_reports_committed_after_o
     texts = [f"yye8l13 restore chunk {i}: quarantined, then named again." for i in range(SEEDED)]
     hashes = write_chunks(coll, texts)
     age_chunks_past_grace(coll)
-    # The setup sweep (not under test, not held): the chunks leave the origin for the quarantine.
-    setup = client.gc_quarantine_orphans_bounded(coll, quarantine, _QUARANTINED_AT, 20, 100)
+    # The setup sweep (not under test, not held) runs on a separate client, so the client under test
+    # makes its first keyed call in the held restore: the chunks leave the origin for the quarantine.
+    setup_client = hvc.HttpVectorClient(tenant=client._tenant)
+    setup = setup_client.gc_quarantine_orphans_bounded(coll, quarantine, _QUARANTINED_AT, 20, 100)
     assert setup["moved"] == SEEDED
     # The same text arrives again and a document names it: the quarantined copies are re-referenced.
     assert write_chunks(coll, texts) == hashes

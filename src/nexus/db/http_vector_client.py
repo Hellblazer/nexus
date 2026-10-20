@@ -669,9 +669,10 @@ def _stash_response_headers(headers: object) -> None:
 
 def _pop_idempotency_response_headers() -> dict[str, str]:
     """The request-identity headers (``Idempotency-Key``, ``Idempotency-Replayed``,
-    ``Retry-After``) of this thread's MOST RECENT response that carried any, then clear -- a pop,
-    like :func:`_pop_response_headers`. A keyed method pops once before an attempt (to clear a
-    stale capture: a socket timeout leaves no response to overwrite it) and reads after."""
+    ``Retry-After``) of this thread's MOST RECENT response, then clear -- a pop, like
+    :func:`_pop_response_headers`. Every response replaces the capture, so a response carrying none
+    leaves it empty; a request that got no response (a socket timeout) leaves the previous one in
+    place, which is why a keyed method pops once before each attempt to clear it, then reads after."""
     value = getattr(_response_header_capture, "idempotency", None) or {}
     _response_header_capture.idempotency = {}
     return dict(value)
@@ -707,7 +708,7 @@ def _response_body(resp: Any) -> bytes:
 
 
 def _request_once(
-    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+    method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
     """One HTTP round-trip against the currently-resolved endpoint.
 
@@ -1461,7 +1462,7 @@ def _wait_for_lease_republication() -> None:
 
 
 def _request(
-    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+    method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
     """Round-trip with ONE re-resolve retry on the auto-restart signatures.
 
@@ -1839,7 +1840,7 @@ def _request_deadline_ms_for(path: str) -> int | None:
     return None
 
 
-def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
+def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
     ``timeout`` defaults to 120s for read/search/delete paths. The upsert-chunks
@@ -2041,13 +2042,23 @@ _STATUS_POLL_BUDGET_S = 180.0
 #: Wait before resending after a 503 ``sweep_gate_busy`` that carried no ``Retry-After``.
 _SWEEP_GATE_BUSY_DEFAULT_WAIT_S = 5.0
 
-#: 503 errors that mean the request did not run and the same key may be resent after ``Retry-After``:
-#: the sweep gate was busy (the two quarantine forms), or the ledger's claim loop was contended
-#: (``request_claim_contended``, ``Retry-After: 1``). Mapped to the wait used when the header is absent.
+#: 503 errors that mean the request did not run and the same key may be resent after ``Retry-After``,
+#: mapped to the wait used when the header is absent: the ledger's claim loop was contended
+#: (``request_claim_contended``, ``Retry-After: 1``), on any keyed form; and, on the two quarantine
+#: forms only (restore takes no sweep gate), the sweep gate was busy (``sweep_gate_busy``).
+_CLAIM_CONTENDED_DEFAULT_WAIT_S = 1.0
 _NOT_RUN_503_DEFAULT_WAIT_S: dict[str, float] = {
-    "sweep_gate_busy": _SWEEP_GATE_BUSY_DEFAULT_WAIT_S,
-    "request_claim_contended": 1.0,
+    "request_claim_contended": _CLAIM_CONTENDED_DEFAULT_WAIT_S,
 }
+_GATE_BUSY_503_DEFAULT_WAIT_S: dict[str, float] = {
+    **_NOT_RUN_503_DEFAULT_WAIT_S,
+    "sweep_gate_busy": _SWEEP_GATE_BUSY_DEFAULT_WAIT_S,
+}
+
+#: Longest a 503's ``Retry-After`` is slept before the first status poll. The poll answers the 503
+#: either way (a request that never reached the engine reads ``unknown``), and an engine without a
+#: ledger answers it 404 and surfaces the 503, so a long ``Retry-After`` must not delay that.
+_RETRY_AFTER_BEFORE_POLL_MAX_S = 5.0
 
 #: How long past ``lease_until`` an ``in_flight`` status keeps being polled before the key is resent.
 #: While a marker transaction holds an expired row the status route can answer ``in_flight`` with a
@@ -2060,7 +2071,7 @@ _RETRY_AFTER_MAX_S = 60.0
 #: Socket read timeout of a keyed sweep POST. The engine bounds a bounded sweep at 25 s plus its
 #: gate wait; the edge cuts a request at about 30 s. A timeout is not an error here, it is the
 #: ambiguity the status poll resolves.
-_SWEEP_POST_TIMEOUT_S: float = 120
+_SWEEP_POST_TIMEOUT_S: float = 120.0
 
 #: (status, ``error`` field) pairs that mean the key itself is wrong: raised, never resent.
 _KEY_REFUSALS: frozenset[tuple[int, str]] = frozenset({
@@ -2099,17 +2110,26 @@ def _parse_lease(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, dict | None]:
+class CommittedWithUnknownCounts(dict):
+    """The result of a keyed sweep the ledger reports ``committed`` but whose stored response it cannot
+    give (the row carries no body). The sweep ran exactly once; its counts are unknown, so the dict
+    holds only ``{"committed_unknown_counts": True}`` and no ``moved``, ``restored`` or ``remaining``."""
+
+
+def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, Any]:
     """Ask ``GET /v1/requests/<key>`` what became of a keyed request, until it can be answered.
 
-    Returns ``("committed", stored_response)``, ``("resend", None)`` (``rolled_back``, ``unknown``,
-    or an ``in_flight`` whose lease has passed: a resend under the SAME key is safe in every state),
-    or ``("surface", None)`` (the engine has no ledger, 404; or the polls kept failing; or the budget
-    ran out): the caller raises the original error.
+    Returns ``("committed", stored_response)``; ``("committed_unknown", None)`` (committed, no body);
+    ``("resend", reason)`` (``rolled_back``, ``unknown``, or ``in_flight`` a full grace past its lease,
+    reason ``"in_flight"``: a resend under the SAME key is safe in every state); or
+    ``("surface", reason)`` with reason ``no_ledger`` (404, the engine has no ledger), ``poll_failed``
+    (the polls kept failing), ``budget`` (the poll budget ran out) or ``unknown_state``. The caller
+    raises the original error for ``surface``.
 
     ``in_flight`` is polled every :data:`_STATUS_POLL_INTERVAL_S` until the poll body's
-    ``lease_until`` has passed, then once more. The first poll is immediate.
+    ``lease_until`` plus :data:`_STATUS_POLL_LEASE_GRACE_S` has passed. The first poll is immediate.
     """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     started = _now()
@@ -2122,10 +2142,10 @@ def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, dict | 
         except VectorServiceError as exc:
             if exc.code == 404:
                 _log.info("keyed_sweep_status_route_absent", path=path, request_id=key)
-                return "surface", None
+                return "surface", "no_ledger"
             failures += 1
             _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
-        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException) as exc:
             failures += 1
             _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
         else:
@@ -2137,55 +2157,70 @@ def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, dict | 
                 if isinstance(response, dict):
                     return "committed", response
                 _log.warning("keyed_sweep_committed_without_response", path=path, request_id=key)
-                return "surface", None
+                return "committed_unknown", None
             if state in ("rolled_back", "unknown"):
-                return "resend", None
+                return "resend", state
             if state == "in_flight":
                 lease = _parse_lease(body.get("lease_until"))
                 if lease is not None and _now() > lease + timedelta(seconds=_STATUS_POLL_LEASE_GRACE_S):
                     # Still in flight a full grace past its lease: the holder is gone. A same-key resend
                     # takes the key over or is told it is in flight, and either is safe.
-                    return "resend", None
+                    return "resend", "in_flight"
             else:
                 _log.warning("keyed_sweep_unknown_status_state", path=path, request_id=key, state=state)
-                return "surface", None
+                return "surface", "unknown_state"
         if failures >= _STATUS_POLL_MAX_FAILURES:
-            return "surface", None
+            return "surface", "poll_failed"
         if (_now() - started).total_seconds() > _STATUS_POLL_BUDGET_S:
             _log.warning("keyed_sweep_status_poll_budget_spent", path=path, request_id=key, polls=polls)
-            return "surface", None
+            return "surface", "budget"
         time.sleep(_STATUS_POLL_INTERVAL_S)
 
 
-def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
+def _note_unresolved(exc: BaseException, key: str, why: str) -> None:
+    """Say on *exc* (PEP 678) that the keyed request's outcome is not known, and how to find out."""
+    exc.add_note(
+        f"request {key}: outcome unknown ({why}): the sweep may have committed; "
+        f"check GET /v1/requests/{key} before retrying"
+    )
+
+
+def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) -> Any:
     """POST *body* to a bounded sweep route under one fresh request key, and resolve an ambiguous
     outcome through the ledger (RDR-222 Phase 1).
 
     One call is one logical request: the key is minted here, once, and *body* is frozen (the engine
     keys the request on the SHA-256 of the raw body, so a resend must be byte-identical; the same dict
     serialises to the same bytes). The key is set around each POST attempt only
-    (:func:`_request_key`), so the status polls between attempts carry none.
+    (:func:`_request_key`), so the status polls between attempts carry none. *gate_busy* is true for
+    the two quarantine forms, the only ones that can meet the sweep gate.
 
     * A 2xx is the result (a replay included).
     * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
       ``idempotency_key_unsupported`` raises :class:`IdempotencyKeyRefusedError`, never resent.
-    * A 503 ``sweep_gate_busy`` (the quarantine forms) or ``request_claim_contended``: nothing ran.
+    * A 503 ``sweep_gate_busy`` (*gate_busy* forms) or ``request_claim_contended``: nothing ran.
       Waits ``Retry-After`` (5 s and 1 s when absent) and resends under the same key.
-    * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``: the
-      managed edge answers its own 503 for a request that never reached the engine), a socket timeout
-      or a connection failure that does not prove the engine never ran the request, is ambiguous:
-      :func:`_poll_request_status` answers it. Never a re-POST on a 409, and a 409 after a 503 is the
-      same thing: a pool-exhaustion 503 leaves the key ``in_flight`` until the 95 s lease lapses, so a
-      resend before then is answered ``request_in_flight`` and the right response is to poll.
-      ``rolled_back`` means that attempt can no longer commit, not that the key is finished: the
+    * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``, at
+      most :data:`_RETRY_AFTER_BEFORE_POLL_MAX_S`: the managed edge answers its own 503 for a request
+      that never reached the engine), a socket timeout, a malformed response, or a connection failure
+      that does not prove the engine never ran the request, is ambiguous:
+      :func:`_poll_request_status` answers it, at the resend cap too (the 4th POST's timeout must not
+      surface as a failure when the ledger says committed). Never a re-POST on a 409, and a 409 after a
+      503 is the same thing: a pool-exhaustion 503 leaves the key ``in_flight`` until the 95 s lease
+      lapses, so a resend before then is answered ``request_in_flight`` and the right response is to
+      poll. ``rolled_back`` means that attempt can no longer commit, not that the key is finished: the
       same-key resend that follows may take the key over and commit.
     * Every other error is raised exactly as before.
 
-    At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An engine without a
-    ledger answers the status poll 404 and the original error surfaces, as it did before this existed.
+    At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An outcome the ledger
+    could not settle (the engine has no ledger, the polls failed, the budget ran out, the cap) surfaces
+    as the original error with a note naming the key and saying the sweep may have committed. A
+    ``committed`` status with no stored body returns :class:`CommittedWithUnknownCounts`.
     """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
+    not_run = _GATE_BUSY_503_DEFAULT_WAIT_S if gate_busy else _NOT_RUN_503_DEFAULT_WAIT_S
     key = new_request_key()
     resends = 0
     while True:
@@ -2196,9 +2231,13 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
             if _pop_idempotency_response_headers().get("Idempotency-Replayed") == "true":
                 _log.info("keyed_sweep_replayed", path=path, request_id=key)
             return result
-        except (VectorServiceError, urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        except (
+            VectorServiceError, urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException,
+        ) as exc:
             identity = _pop_idempotency_response_headers()
             wait_first: float | None = None
+            busy = False
+            error = ""
             if isinstance(exc, VectorServiceError) and exc.code is not None:
                 error = _engine_error(exc)
                 if (exc.code, error) in _KEY_REFUSALS:
@@ -2206,7 +2245,7 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                         str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
                         reason=exc.reason, engine_body=exc.engine_body,
                     ) from exc
-                busy = exc.code == 503 and error in _NOT_RUN_503_DEFAULT_WAIT_S
+                busy = exc.code == 503 and error in not_run
                 ambiguous = (
                     (exc.code == 409 and error == "request_in_flight")
                     or exc.code in (502, 504)
@@ -2217,17 +2256,19 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                 if exc.code == 503:
                     wait_first = _retry_after_seconds(identity)
                     if busy and wait_first is None:
-                        wait_first = _NOT_RUN_503_DEFAULT_WAIT_S[error]
-            elif isinstance(exc, VectorServiceError):
-                busy = False  # a transport failure reframed for a managed endpoint: ambiguous
+                        wait_first = not_run[error]
+                    elif not busy and wait_first is not None:
+                        wait_first = min(wait_first, _RETRY_AFTER_BEFORE_POLL_MAX_S)
             else:
-                if _proves_request_not_executed(exc):
+                # A transport failure: the raw exception, or one a managed endpoint reframed as a
+                # VectorServiceError with no code (its cause is the raw one).
+                raw = exc.__cause__ if isinstance(exc, VectorServiceError) else exc
+                if isinstance(raw, Exception) and _proves_request_not_executed(raw):
                     raise
-                busy = False
-            if resends >= _KEYED_MAX_RESENDS:
-                _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
-                raise
             if busy:
+                if resends >= _KEYED_MAX_RESENDS:
+                    _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
+                    raise
                 wait = wait_first if wait_first is not None else _SWEEP_GATE_BUSY_DEFAULT_WAIT_S
                 _log.info("keyed_sweep_not_run_503", path=path, request_id=key, error=error, wait_s=wait)
                 time.sleep(wait)
@@ -2235,11 +2276,25 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                 continue
             if wait_first:
                 time.sleep(wait_first)
-            verdict, stored = _poll_request_status(key, tenant, path)
+            verdict, detail = _poll_request_status(key, tenant, path)
             if verdict == "committed":
-                return stored
+                return detail
+            if verdict == "committed_unknown":
+                return CommittedWithUnknownCounts(committed_unknown_counts=True)
             if verdict == "surface":
+                _note_unresolved(exc, key, {
+                    "no_ledger": "this engine keeps no request ledger",
+                    "poll_failed": "the status polls kept failing",
+                    "budget": "the status poll budget ran out",
+                    "unknown_state": "the ledger answered a state this client does not know",
+                }[detail])
                 raise
+            if resends >= _KEYED_MAX_RESENDS:
+                _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
+                _note_unresolved(exc, key, f"the resend cap of {_KEYED_MAX_RESENDS} was reached, ledger last read {detail}")
+                raise
+            if detail == "in_flight":
+                time.sleep(_STATUS_POLL_INTERVAL_S)  # a still-held key: one interval before the resend, not a burst
             resends += 1
             _log.warning("keyed_sweep_resend", path=path, request_id=key, resends=resends)
 
@@ -4693,7 +4748,7 @@ class HttpVectorClient:
                 "row_limit": row_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
             },
-            tenant=self._tenant,
+            tenant=self._tenant, gate_busy=True,
         )
 
     def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
@@ -4732,7 +4787,7 @@ class HttpVectorClient:
                 "origin_collection": origin_collection,
                 "row_limit": row_limit,
             },
-            tenant=self._tenant,
+            tenant=self._tenant, gate_busy=False,
         )
 
     def gc_expire_quarantine(
