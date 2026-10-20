@@ -262,6 +262,15 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   lock timeout is what protects it. `_ccold` was not produced. *Source: local
   spike as above; `nexus_rdr/230-research-13`.*
 
+- **✅ Verified** (read-only production query, 2026-10-20). Of 36 chunks leaves
+  5 hold rows; two have churn: 6.1% and 10.4% dead, with 72,537 and 47,160
+  non-HOT updates against 16,009 and 1,843 deletes. Bytes per row: leaf graphs
+  7,782 to 8,449, `pci_` indexes 8,138 to 9,163 (the high one on the busiest
+  leaf). One engine container serves all search traffic; the logs do not name
+  the collection searched. *Source: conexus, T2
+  `conexus/rdr230-a4-a6-measurements-2026-10-20`;
+  `nexus_rdr/230-research-15`, `-16`.*
+
 ### Critical Assumptions
 
 These are the proposal's Unknowns that this design depends on. Each says how it
@@ -289,11 +298,16 @@ measurement.
   and brings it back to 1.000. The size rule therefore sees space (an unrefilled
   shrink, or churn that outran `VACUUM`), never vacuumed churn, which is why the
   deletes rule (Technical Design 3) does not rely on size.
-- [ ] **A4.** The managed instance's per-leaf state is in the range this design
+- [x] **A4.** The managed instance's per-leaf state is in the range this design
   assumes: dead fractions, `last_autovacuum`, HNSW `VACUUM` duration per leaf
-  after RDR-225, and leaf `REINDEX` time. **Status**: Unknown (not queried, per
-  the proposal's brief). **Method**: a read-only query by conexus in Phase 1;
-  leaf `REINDEX` time on a PITR fork in Phase 2 (Minimum Viable Validation).
+  after RDR-225, and leaf `REINDEX` time. **Status**: Verified in part by a
+  read-only conexus query on 2026-10-20 (`nexus_rdr/230-research-15`): dead
+  fractions 0 to 10.4%, every index valid, bytes per row 0.95 to 1.12 of the
+  8 KB page, no leaf reloptions yet (production runs 0.1.160; nexus-s9wav ships
+  in 0.1.161). `VACUUM` duration is not measurable from conexus tooling (the
+  server log is not reachable) and leaf `REINDEX` time stays with the PITR fork
+  in Phase 2 (Minimum Viable Validation). The measurement also showed that
+  non-HOT updates, not deletes, are most of the churn (Technical Design 3).
 - [x] **A5.** `REINDEX INDEX CONCURRENTLY` on a leaf's HNSW index keeps it
   attached to the partitioned parent index, and a comment on an index survives
   `REINDEX INDEX CONCURRENTLY`. **Status**: Verified by a local spike on
@@ -302,10 +316,13 @@ measurement.
   unchanged. The substrate tests in Phase 1 (comment) and Phase 2 (attachment)
   still pin it in the engine's own roles and schemas.
 - [ ] **A6.** Enough own-topic queries reach the lock holder for each indexed
-  collection to give a verdict at least daily. **Status**: Unverified; with
-  several engines behind a load balancer the holder sees about 1/N of the
-  queries, and a collection nobody queries is never measured. **Method**: the
-  status object's `unmeasured` count after a week of Phase 1 on the cloud.
+  collection to give a verdict at least daily. **Status**: Unverified, in part
+  answered (`nexus_rdr/230-research-16`): one engine container serves all
+  traffic today, so the holder sees every query; per-collection volume is not
+  in the logs (a search logs neither tenant nor collection). A collection nobody
+  queries is still never measured, and a second engine would bring back the
+  1/N share. **Method**: the status object's `unmeasured` count after a week of
+  Phase 1 on the cloud.
 
 Two Unknowns are not assumptions of this design and are named so they are not
 lost: per-path routing of scoped and hybrid searches onto leaf graphs was not
@@ -412,7 +429,12 @@ deleted again (in neither count), a maintenance update that is not HOT (heap-onl
 tuple: an update PostgreSQL can make without touching any index), which adds a
 graph entry without refreshing `last_written_at`, and a row moved in by a
 maintenance path that keeps `last_written_at`. All three make the rule fire
-later, never sooner.
+later, never sooner. The second may not be small: four maintenance paths update
+chunk rows and leave `last_written_at` alone (metadata updates, chash
+re-homing, quarantine retags and one catalog path; `nexus_rdr/230-research-17`),
+and on production non-HOT updates outnumber deletes 4.5 to 1 on the busiest
+leaf and 25 to 1 on the next (A4). How many of those are maintenance rather
+than client re-writes is not measured (Open Question 5).
 
 *The bulk-delete rule is detected, not signalled.* The delete sources (the
 reaper's quarantine move and expiry, `drop-orphan-collections`, purge-trash, a
@@ -748,7 +770,7 @@ near-tie noise.
   once-per-24-hours limit and the `red_after_reindex` state, which ends the
   loop and is itself the evidence that the cause is not graph age.
 - **Risk**: a leaf REINDEX on the managed instance takes long enough to matter
-  (unmeasured, A4). **Mitigation**: the Phase 2 fork rehearsal measures it; the
+  (unmeasured; A4 measured the leaf state but not this). **Mitigation**: the Phase 2 fork rehearsal measures it; the
   builder runs it one at a time under the 30-minute statement timeout; the
   migrator terminates it like a build.
 - **Risk**: a REINDEX cut off mid-way leaves an invalid duplicate that costs
@@ -914,6 +936,18 @@ All four answered by Sam on 2026-10-20 ("go with your recommendations").
    thresholds as constants changed by an engine cut. Settings per threshold are
    the alternative. *Decided:* one switch, thresholds as constants.
 
+5. **Maintenance churn the deletes rule does not count.** Measured after the
+   first four were answered (A4, `nexus_rdr/230-research-17`): non-HOT updates
+   are most of the churn on production, and the ones made by maintenance paths
+   add graph entries the deletes-since-build estimate never sees. (a) Leave the
+   rule as drafted: P02 found dead entries recall-neutral at `ef_search` 400 or
+   more, the canary is the recall detector, and the size rule already sees churn
+   that outran `VACUUM` (the busiest `pci_` index reads 1.12 today). (b) Add the
+   leaf's non-HOT update count since the build to the anchor and the rule,
+   attributed to the collection by its share of the leaf's rows; it fires
+   sooner and may over-fire on a leaf with several collections. Recommendation:
+   (a) for Phase 1, and revisit with the canary's first readings. *Open.*
+
 ## Finalization Gate
 
 ### Contradiction Check
@@ -926,8 +960,11 @@ not conflict: A3 measured pure ingest at 1.000 of the build.
 ### Assumption Verification
 
 A3 and A5 are verified by a local spike (2026-10-20); P1.5 and the tests in
-P1.1 and P2.3 pin them in the engine. A1, A2, A4 and A6 are unverified and are
-verified by Phase 1's cloud run.
+P1.1 and P2.3 pin them in the engine. A4 is verified in part by a read-only
+production query (2026-10-20); its `VACUUM` duration and leaf `REINDEX` time
+remain for the Phase 2 fork. A1, A2 and A6 are unverified and are verified by
+Phase 1's cloud run; A1's aged-index recall reading on the 0.1.161 fork is
+pending.
 
 #### API Verification
 
@@ -1002,3 +1039,7 @@ bulk delete, both on an existing session under an existing lock.
   `-13`); the size rule recorded as a space signal, and the lock timeout, not
   the `indisvalid` re-read, as what protects a running build from the leftover
   drop.
+- 2026-10-20: A4 verified in part and A6 answered in part by conexus's
+  read-only production query and log read (`nexus_rdr/230-research-15`, `-16`);
+  maintenance non-HOT updates recorded as a miss of the deletes rule that may
+  be most of the churn, Open Question 5 added (`nexus_rdr/230-research-17`).
