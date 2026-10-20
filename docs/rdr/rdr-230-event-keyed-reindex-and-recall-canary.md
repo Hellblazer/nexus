@@ -334,7 +334,8 @@ would need FORCE row-level security, grants, the four hand-kept tenant-table
 enumerations and a PITR-fork rehearsal of its changeset, to hold three numbers
 per index whose lifetime is the index's. If Sam prefers a table, it is one
 Liquibase changeset after `vectors-033`, and that changeset is rehearsed on a
-fork before the cloud deploy like every other (Open Question 2).
+fork before the cloud deploy like every other (Open Question 2; Sam chose the
+comment on 2026-10-20).
 
 **2. What the builder reads each pass.** For each leaf that holds a valid parsed
 `pci_` index, inside the leaf's existing counting transaction (same tenant
@@ -435,8 +436,11 @@ or is cut off (a migration terminates the builder backend) leaves an invalid
 For a leaf's own HNSW index that rule does not apply yet, because its name is
 not a `pci_` name: this RDR extends the leftover carve-out to an invalid `hnsw`
 index named `<the leaf's HNSW index>_cc(new|old)[0-9]*` with no predicate on a
-leaf the builder resolved, under the same re-read of `indisvalid` before the
-drop (Open Question 3). A `VACUUM` of a leaf holds `ShareUpdateExclusiveLock`
+leaf the builder resolved, through the same drop path as the `pci_` leftovers:
+the re-read of `indisvalid` before the drop and its 5 s lock timeout, so a build
+still running holds the heap lock and the drop times out instead of removing it
+(`PciBuilderSession.drop`; Open Question 3, approved by Sam on 2026-10-20 on that
+condition). A `VACUUM` of a leaf holds `ShareUpdateExclusiveLock`
 for its run, which makes autovacuum skip that leaf meanwhile; it scans every
 index on the leaf, including the leaf graph, which is the slow part (conexus-h2ol:
 367.6 s on the HNSW indexes of the pre-RDR-225 table).
@@ -554,7 +558,7 @@ value refuses boot, like the other `NX_SEARCH_PCI*` settings), stops REINDEX and
 maintenance without halting index builds. Thresholds are constants in one
 policy class, changed by an engine cut: tuning is evidence-driven and rare, and
 a setting per threshold would widen the configuration surface for no
-operational need (Open Question 4). The canary has no switch of its own; it
+operational need (Open Question 4; Sam kept one switch on 2026-10-20). The canary has no switch of its own; it
 runs whenever the holder runs a pass.
 
 ### The widened admin statement set
@@ -593,7 +597,7 @@ runs the serving and exact statements on the pool as nexus_svc.
 | REINDEX, comment, leaf VACUUM | `PciBuilderSession` (`runBuild`, `runDrop`, `render`, `run`) | Extend with three sanctioned methods and their name guards. |
 | Triggers | `PciReconcilePlanner` | Extend: a REINDEX action, planned after drops and builds, as a pure function of the anchor, the stats and the counts. |
 | Counts and stats | `PciReconciler` counting transaction | Extend with the uncapped count, `written_since` and the leaf stats row. |
-| Leaf leftovers | `PciCatalog` leftover rule (nexus-rn1yd) | Extend to the leaf's own HNSW index name (Open Question 3). |
+| Leaf leftovers | `PciCatalog` leftover rule (nexus-rn1yd) | Extend to the leaf's own HNSW index name, through the same drop path (Open Question 3, approved). |
 | Canary statements | `runPlainSearchStatement`, `disableIndexScanForExactFallback`, `PciPlanCheck` | Reuse unchanged; the canary calls the serving path, never a copy of it. |
 | Query vectors | `embedQuery` | Reuse: the ring takes the vector the search already computed. |
 | Status | `StatusHandler`, `PciReconciler.status()` | Extend `this_engine` with `maintenance`. |
@@ -741,8 +745,7 @@ near-tie noise.
 
 - [x] Sam's decisions on the proposal (T2 `nexus/4lnn1-decisions-2026-10-18`).
 - [x] The `pci_` leftover drop (nexus-rn1yd).
-- [ ] Sam's answers to Open Questions 1 to 4 before Phase 2 starts. Phase 1
-  depends only on Open Question 2.
+- [x] Sam's answers to Open Questions 1 to 4 (2026-10-20).
 
 ### Minimum Viable Validation
 
@@ -802,7 +805,7 @@ is test-first: its failing test lands first in the same branch.
   terminates a REINDEX and the next pass drops the leftover; `NX_SEARCH_PCI_REINDEX=0`
   builds and measures but never reindexes.
 - P2.3 Leaf HNSW index: identification in the catalog read, the size rule, the
-  leaf leftover extension (Open Question 3). Test: REINDEX of a leaf index keeps
+  leaf leftover extension through the shared drop path (Open Question 3). Test: REINDEX of a leaf index keeps
   it attached to the parent index (A5, second half).
 - P2.4 Fork rehearsal (Minimum Viable Validation, Phase 2).
 - P2.5 Engine cut; cloud enable after Sam's go, with conexus told first for the
@@ -859,20 +862,27 @@ outside a REINDEX's write amplification.
 
 ## Open Questions for Sam
 
+All four answered by Sam on 2026-10-20 ("go with your recommendations").
+
 1. **Thresholds.** The draft carries your provisional values (1.4, 25%, 10%,
    leaf 1.5, mean recall 0.99, any top-1 miss) and adds four limits of its own:
    at most two REINDEXes per pass, a red-canary REINDEX at most once per index
    per 24 hours, an autovacuum-triggered canary at most once per index per 6
-   hours, and a 60 s canary budget per pass. Confirm, or change after Phase 1.
+   hours, and a 60 s canary budget per pass. *Decided:* all confirmed as
+   provisional; P2.1 re-reads them against Phase 1's measurements.
 2. **Anchor storage.** The draft uses `COMMENT ON INDEX` (no changeset). A table
    would mean one changeset, row-level security and a fork rehearsal.
+   *Decided:* the comment.
 3. **Leaf leftovers.** A REINDEX of a leaf's own HNSW index can leave an invalid
    `_ccnew`/`_ccold` that is not a `pci_` name, so decision 4's carve-out does
    not cover it. The draft extends the carve-out to that one name pattern on
-   leaves the builder resolved. Approve, or keep leaf REINDEX out of scope.
+   leaves the builder resolved. *Decided:* approved, on the condition that the
+   leaf leftover goes through the same drop path as the `pci_` leftovers (the
+   `indisvalid` re-read and the 5 s lock timeout), so an index whose build is
+   still running is never dropped.
 4. **Settings.** The draft adds one switch, `NX_SEARCH_PCI_REINDEX`, and keeps
    thresholds as constants changed by an engine cut. Settings per threshold are
-   the alternative.
+   the alternative. *Decided:* one switch, thresholds as constants.
 
 ## Finalization Gate
 
@@ -919,8 +929,8 @@ deferred.
   is per tenant; the status carries no names; the counts carry an explicit
   `tenant_id` predicate.
 - **Deployment and rehearsal**: no Liquibase changeset, so nothing schema-wise
-  to rehearse; the first REINDEX on production is rehearsed on a fork (P2.4). A
-  table anchor (Open Question 2) would add a changeset and its fork rehearsal.
+  to rehearse; the first REINDEX on production is rehearsed on a fork (P2.4).
+  Sam chose the comment anchor (Open Question 2), so no changeset is added.
 - **Credentials**: unchanged from RDR-227 (restart-bound admin credentials).
 - **Versioning**: the status key is additive; the client half (doctor row) is
   nexus-dxsjc's and tolerates its absence.
@@ -954,3 +964,6 @@ bulk delete, both on an existing session under an existing lock.
 
 - 2026-10-18: Drafted from the proposal and Sam's decisions on develop
   `58056a574`.
+- 2026-10-20: Sam's answers to Open Questions 1 to 4 recorded (thresholds
+  confirmed as provisional, comment anchor, leaf leftover carve-out through the
+  shared drop path, one switch).
