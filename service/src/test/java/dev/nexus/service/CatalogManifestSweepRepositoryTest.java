@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -612,15 +613,7 @@ class CatalogManifestSweepRepositoryTest {
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(connA, TENANT_A, col2, 2000);
             int deletedByA;
-            try (var psA = connA.prepareStatement(SWEEP_GUARD_DELETE_SQL)) {
-                psA.setString(1, TENANT_A);
-                psA.setString(2, col2);
-                psA.setString(3, shared2);
-                psA.setString(4, TENANT_A);
-                psA.setString(5, col2);
-                psA.setString(6, shared2);
-                deletedByA = psA.executeUpdate();
-            }
+            deletedByA = sweepGuardDelete(connA, TENANT_A, col2, shared2);
             assertThat(deletedByA)
                 .as("A's guard, evaluated under the gate, sees B's now-committed reference")
                 .isEqualTo(0);
@@ -634,17 +627,30 @@ class CatalogManifestSweepRepositoryTest {
     /** The EXACT guard shape {@code sweepChunks} uses (both {@code NOT
      *  EXISTS} clauses) — driven manually so hand-written tests can control
      *  commit order around it. RDR-191 (nexus-o8dil.48): targets the unified
-     *  {@code nexus.chunks}, not the retired {@code chunks_384}. */
-    private static final String SWEEP_GUARD_DELETE_SQL =
-        "DELETE FROM nexus.chunks c "
-        + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
-        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
-        + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-        + "  WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash AND d.deleted_at IS NULL) "
-        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d2 "
-        + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
-        + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
-        + "  AND (d2.metadata ->> 'doc_id') = ?)";
+     *  {@code nexus.chunks}, not the retired {@code chunks_384}. Typed jOOQ
+     *  (nexus-cbo4a); returns the rows deleted. */
+    private static int sweepGuardDelete(Connection conn, String tenant, String collection, String chashHex) {
+        var c = CHUNKS.as("c");
+        var m = CATALOG_DOCUMENT_CHUNKS.as("m");
+        var d = CATALOG_DOCUMENTS.as("d");
+        var d2 = CATALOG_DOCUMENTS.as("d2");
+        return DSL.using(conn, SQLDialect.POSTGRES).deleteFrom(c)
+            .where(c.TENANT_ID.eq(tenant))
+            .and(c.COLLECTION.eq(collection))
+            .and(c.CHASH.eq(HexFormat.of().parseHex(chashHex)))
+            .andNotExists(DSL.selectOne().from(m)
+                .join(d).on(d.TENANT_ID.eq(m.TENANT_ID)).and(d.TUMBLER.eq(m.DOC_ID))
+                .where(m.TENANT_ID.eq(c.TENANT_ID))
+                .and(m.CHASH.eq(c.CHASH))
+                .and(d.DELETED_AT.isNull()))
+            .andNotExists(DSL.selectOne().from(d2)
+                .where(d2.TENANT_ID.eq(tenant))
+                .and(d2.PHYSICAL_COLLECTION.eq(collection))
+                .and(d2.DELETED_AT.isNull())
+                .and(d2.FILE_PATH.isNull().or(d2.FILE_PATH.eq("")))
+                .and(DSL.jsonbGetAttributeAsText(d2.METADATA, "doc_id").eq(chashHex)))
+            .execute();
+    }
 
     /** Writer B's manifest insert, on its own (already tenant-scoped) transaction connection. */
     private static void insertManifestRowOn(Connection conn, String docId, String chashHex, String collection) {
