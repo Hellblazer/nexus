@@ -100,6 +100,10 @@ def _taint(scope: ast.AST, inherited: set[str]) -> set[str]:
                 targets, value = [n.target], n.value
             else:
                 continue
+            # A spawn's RESULT is a process, not an argv: `p = popen_in_group([.., '-jar', ..])` must not
+            # make a later `subprocess.run(['kill', str(p.pid)])` look like a launch (confirmation critique).
+            if isinstance(value, ast.Call) and _call_name(value) in (_PRIMITIVES | _SPAWN_CALLS):
+                continue
             if not _holds_launch(value, tainted):
                 continue
             for t in targets:
@@ -287,6 +291,20 @@ def test_the_primitive_is_never_flagged_whatever_happens_to_its_result(src) -> N
 )
 def test_an_argv_that_reaches_no_spawn_is_not_a_site(src) -> None:
     assert _kinds(src) == []
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "def f(j):\n    p = popen_in_group([j, '-jar', 'x'])\n    subprocess.run(['kill', str(p.pid)])\n",
+        "def f(j):\n    p = popen_in_group([j, '-jar', 'x'])\n    with subprocess.Popen(['tail', '-f', 'l'], stdin=p.stdout) as q:\n        q.wait()\n",
+        "class C:\n    def f(self, j):\n        self.p = popen_in_group([j, '-jar', 'x'])\n        subprocess.run(['ps', str(self.p.pid)])\n",
+        "def f(j):\n    p = spawn_service([j, '-jar', 'x'])\n    subprocess.run(['kill', str(p.pid)])\n",
+    ],
+)
+def test_a_later_spawn_that_names_a_started_engine_is_not_a_bypass(src) -> None:
+    """The primitive's result (a process) is not an argv: only the primitive call is a site."""
+    assert [k for k, _ in _kinds(src)] == ["primitive"]
 
 
 def test_a_new_file_with_a_bypass_fails_the_tree_scan(tmp_path) -> None:
