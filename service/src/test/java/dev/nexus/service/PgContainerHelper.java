@@ -2631,7 +2631,11 @@ public final class PgContainerHelper {
      * with every bind value inlined ({@code ctx.renderInlined}): EXPLAIN cannot take bind parameters through the
      * function's EXECUTE, so this is the CUSTOM plan for those literal values, the plan the planner makes for the
      * first execution of a prepared statement whose parameters are known. A caller needing the GENERIC plan
-     * (plan_cache_mode) proves it separately. No string parameter exists, so text cannot be laundered through it.
+     * (plan_cache_mode) proves it separately. It takes no String, but a jOOQ Query can itself be plain SQL
+     * ({@code ctx.resultQuery(text)}), so the type alone does not keep Java SQL text out. Two callers pass one, and
+     * neither text is written in Java: ManifestLessCensusNotesGuardIndexPlanShapeTest explains the product constant
+     * PgVectorRepository.MANIFEST_LESS_CENSUS_SQL (SqlStringLiteralGateTest's PRODUCT_SQL map counts it), and
+     * TaxonomyAssignCrossLateralHnswTest explains assign_from_chashes_1024's deployed body read from pg_proc.
      *
      * <p>The function runs on {@code ctx}'s connection and in its open transaction, as its role, so a tenant GUC and any
      * SET LOCAL planner pin apply to the plan and ANALYZE executes the query under the caller's row-level security.
