@@ -170,13 +170,9 @@ jobs:
     # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
     timeout-minutes: 60
     env:
-      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
-      # (service/pom.xml, jooq-inputs). On the lab pool this changes nothing today: the
-      # lab-runner deletes the job's $work directory after every job, so the cache in .git
-      # starts empty each time and codegen always runs. The setting guards a runner that
-      # does keep its tree. A cache that SURVIVES jobs would have to live outside $work (a
-      # host directory under NX_LAB_CACHE_ROOT); that is a separate decision (nexus-km7ma),
-      # not made here.
+      # nexus-fkhd3: off for every step by default, so no step restores a tree from a cache
+      # in .git on a runner that keeps its checkout. The two Maven suite steps override it on
+      # the pool with the host cache the jooqcache step points at (nexus-km7ma).
       NX_JOOQ_CACHE: "off"
       # The pool job is confined to 16 of the host's 64 CPUs, and ONNX Runtime
       # sizes its thread pool from the HOST's cores unless told otherwise.
@@ -287,6 +283,33 @@ jobs:
         with:
           persistent-home: ${{ runner.environment == 'self-hosted' }}
 
+      # nexus-km7ma (Sam 2026-10-20): on the pool, generated jOOQ trees persist in a host cache
+      # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the jOOQ/JDBC/Testcontainers versions
+      # and the producer (service/pom.xml, jooq-inputs). A hit skips the codegen container and
+      # its changelog replay for inputs a fresh replay already generated; the suite still replays
+      # the changelog in every class (PgContainerHelper.applyProductSchema), and a db/ or pom
+      # change is a new key, so a new changelog always gets a fresh codegen replay here once.
+      # Step-scoped: the two Maven suite steps read this step's output; nothing is written to
+      # GITHUB_ENV, and hosted runners and every other step keep NX_JOOQ_CACHE=off.
+      - name: Point the jOOQ cache at the pool host cache
+        id: jooqcache
+        if: runner.environment == 'self-hosted'
+        run: |
+          root="${NX_LAB_CACHE_ROOT:-}"
+          if [ -z "$root" ] || [ ! -d "$root" ] || [ ! -w "$root" ]; then
+            echo "::notice::jOOQ host cache unused: NX_LAB_CACHE_ROOT is unset, missing or unwritable"
+            exit 0
+          fi
+          dir="$root/nexus/jooq"
+          if ! mkdir -p "$dir"; then
+            echo "::notice::jOOQ host cache unused: cannot create $dir"
+            exit 0
+          fi
+          # Keep the newest JOOQ_CACHE_KEEP entries of each kind; a prune failure never fails the job.
+          NX_JOOQ_CACHE="$dir" bash -c '. scripts/lib/gate-jar-cache.sh && gate_jar_cache_prune_jooq "$PWD"' || true
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "jOOQ host cache: $dir, $(find "$dir" -mindepth 1 -maxdepth 1 \( -name 'main-*' -o -name 'test-*' \) | wc -l) entries"
+
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
       # testcontainers-jooq-codegen-maven-plugin generates into
       # target/generated-sources/jooq at the generate-sources phase from the
@@ -306,6 +329,8 @@ jobs:
       # 16 GB) runs the local default of 4 forks (nexus-480wm).
       - name: Run Java test suite
         working-directory: service
+        env:
+          NX_JOOQ_CACHE: ${{ steps.jooqcache.outputs.dir || 'off' }}
         run: ./mvnw -q test -Dnexus.ddl.suite=main "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-main" -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # nexus-ekp7w: the bytes-written and DDL ratchet for this suite. ADVISORY until the Java
@@ -343,6 +368,8 @@ jobs:
       # wrong for the CI runner), across the classes carrying the tag (15 at 2026-10-12).
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
+        env:
+          NX_JOOQ_CACHE: ${{ steps.jooqcache.outputs.dir || 'off' }}
         run: ./mvnw -q test -Dnexus.ddl.suite=integration "-Dnexus.ddl.run=${NX_TEST_RUN_ID}-integration" -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # nexus-ekp7w: the same ratchet for the integration group; advisory for the same reason.

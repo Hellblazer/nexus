@@ -473,17 +473,45 @@ def _mvn_codegen_steps() -> list[tuple[str, str, str, dict[str, str]]]:
     return out
 
 
+#: nexus-km7ma (Sam 2026-10-20): the pool Java job's two suite steps, and only they, may restore from the
+#: host cache the jooqcache step points at; everywhere else, the release job above all, codegen replays fresh.
+_POOL_JOB = ("service-ci.yml", "java-test-and-drift-guard")
+_POOL_SUITE_STEPS = {"Run Java test suite", "Run Java integration group (SQL-vs-stitch parity fixtures)"}
+_POOL_OVERRIDE = "${{ steps.jooqcache.outputs.dir || 'off' }}"
+
+
 def test_no_ci_job_restores_a_cached_tree_over_the_codegen_it_exists_to_check() -> None:
     """A runner that keeps its tree between jobs keeps the shared cache in .git too, so a CI Maven run that
-    can restore from it would no longer replay the changelog it is gating. (The lab pool is not such a runner:
-    lab-runner deletes $work after every job, so there the setting is inert today; it guards the runners that
-    do keep a tree.) Every CI mvnw step that reaches jooq-inputs turns the cache off (NX_JOOQ_CACHE=off, or
-    -Dnexus.jooq.cache.dir=off / -Dnexus.jooq.regenerate=true)."""
+    can restore from it would skip the changelog replay. Every CI mvnw step that reaches jooq-inputs turns the
+    cache off (NX_JOOQ_CACHE=off, or -Dnexus.jooq.cache.dir=off / -Dnexus.jooq.regenerate=true), except the
+    pool Java job's two suite steps, which read the host cache only through the jooqcache step's output
+    (off when that step did not run or found no NX_LAB_CACHE_ROOT); the release job always replays fresh."""
     steps = _mvn_codegen_steps()
     assert len(steps) >= 6, f"the sweep examined only {len(steps)} Maven steps: the workflows moved, fix this census"
-    offenders = [f"{wf}:{job}:{name}" for wf, job, name, env in steps if env.get("NX_JOOQ_CACHE") != "off"]
+    allowed = [(wf, job, name) for wf, job, name, env in steps
+               if (wf, job) == _POOL_JOB and name in _POOL_SUITE_STEPS and env.get("NX_JOOQ_CACHE") == _POOL_OVERRIDE]
+    assert {name for *_, name in allowed} == _POOL_SUITE_STEPS, f"the pool suite steps lost their host-cache override: {allowed}"
+    offenders = [f"{wf}:{job}:{name}" for wf, job, name, env in steps
+                 if env.get("NX_JOOQ_CACHE") != "off" and (wf, job, name) not in allowed]
     assert offenders == [], f"Maven steps that may restore a cached jOOQ tree in CI: {offenders}"
     assert {wf for wf, *_ in steps} >= {"service-ci.yml", "engine-service-release.yml"}, "the pool job and the release job are the two that matter"
+
+
+def test_the_pool_host_cache_step_is_self_hosted_only_and_step_scoped() -> None:
+    """The override's source: one step, pool only, publishing a step output and never GITHUB_ENV (which would
+    reach every later step, the cache-off ones included); the job default stays off."""
+    import yaml
+
+    wf = _POM.parents[1] / (".gith" + "ub") / "workflows" / _POOL_JOB[0]
+    job = yaml.safe_load(wf.read_text(encoding="utf-8"))["jobs"][_POOL_JOB[1]]
+    assert job["env"]["NX_JOOQ_CACHE"] == "off"
+    [step] = [st for st in job["steps"] if st.get("id") == "jooqcache"]
+    assert step["if"] == "runner.environment == 'self-hosted'"
+    run = step["run"]
+    assert "GITHUB_ENV" not in run and "dir=$dir\" >> \"$GITHUB_OUTPUT\"" in run
+    assert "NX_LAB_CACHE_ROOT" in run and "gate_jar_cache_prune_jooq" in run
+    names = [st.get("name") or st.get("id") for st in job["steps"]]
+    assert names.index(step["name"]) < min(names.index(n) for n in _POOL_SUITE_STEPS), "the step must run before the suites"
 
 
 def test_the_pom_does_not_claim_ci_always_regenerates_from_a_clean_checkout() -> None:
