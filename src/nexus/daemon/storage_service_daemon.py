@@ -1443,6 +1443,36 @@ class StorageServiceSupervisor:
 
     # -- Internal helpers ---------------------------------------------------
 
+    def _spawned_engine_version(self) -> tuple[int, int, int] | None:
+        """The tag of the engine binary this supervisor is about to spawn, from its install receipt.
+
+        RDR-210 Technical Design 4: ``install_binary`` writes the tag beside the well-known binary
+        (``read_installed_provenance``). That sidecar describes THAT binary only, so it answers for
+        a native launch of the well-known path and for nothing else: a ``NEXUS_SERVICE_BIN``
+        override, a ``NEXUS_SERVICE_JAR`` launch, no sidecar, a corrupt one, or a tag that is not
+        ``engine-service-v<X.Y.Z>`` all read ``None`` ("unknown"), which callers treat as an
+        engine that may predate the dual router.
+        """
+        if self._launch_kind != "native":
+            return None
+        from nexus.daemon.binary_install import TAG_NAMESPACE_PREFIX  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            read_installed_provenance,
+            well_known_binary_path,
+        )
+        from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        try:
+            if Path(self._binary_path).resolve() != well_known_binary_path(self._config_dir).resolve():
+                return None
+        except OSError:
+            return None
+        provenance = read_installed_provenance(self._config_dir)
+        tag = provenance.get("tag") if provenance else None
+        if not isinstance(tag, str) or not tag.startswith(TAG_NAMESPACE_PREFIX):
+            return None
+        return parse_engine_version(tag[len(TAG_NAMESPACE_PREFIX):])
+
     def _spawn_service(self) -> tuple[subprocess.Popen[bytes], int]:
         """Spawn the native service process with env vars, returning (proc, port).
 
@@ -1578,19 +1608,35 @@ class StorageServiceSupervisor:
         # the configured model IS a voyage model, or when no choice was
         # recorded (pre-init / legacy voyage-local installs keep today's
         # behavior). Explicit NX_VOYAGE_API_KEY still always passes through.
+        #
+        # RDR-210 Phase 3 Step 1 (nexus-wypwq): the r5f3c rule exists because a key flipped an
+        # OLD engine Voyage-only. An engine at or above DUAL_EMBEDDER_FIRST_ENGINE_VERSION boots
+        # dual (bge and Voyage) when keyed and has bge files, and reads the profile from
+        # NX_EMBED_PROFILE (set below), so the key no longer moves new collections: it passes
+        # whenever the credential chain has one, whatever local.embed_model says. The tag is read
+        # from the spawned binary's install receipt; below it, or with no readable receipt, the
+        # r5f3c rule stands unchanged.
         if not env.get("NX_VOYAGE_API_KEY"):
             from nexus.config import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
                 get_credential,
                 local_embed_model_choice,
                 local_embed_model_is_voyage,
             )
+            from nexus.engine_version import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                DUAL_EMBEDDER_FIRST_ENGINE_VERSION,
+            )
 
             embed_choice = local_embed_model_choice() or ""
+            spawned_version = self._spawned_engine_version()
+            dual_engine = (
+                spawned_version is not None
+                and spawned_version >= DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+            )
             # nexus-35ok4: this condition and corpus.effective_embedding_model_for_writes'
             # local-mode branch both dispatch off local_embed_model_is_voyage() — the
             # single shared predicate — so "plumb the key into the engine" and "mint
             # voyage-* collection names" can never disagree again.
-            if embed_choice and not local_embed_model_is_voyage():
+            if embed_choice and not local_embed_model_is_voyage() and not dual_engine:
                 _log.info(
                     "storage_service_voyage_key_not_plumbed",
                     configured_embed_model=embed_choice,
@@ -1604,13 +1650,26 @@ class StorageServiceSupervisor:
                     _log.info(
                         "storage_service_voyage_key_resolved", source="credential_chain"
                     )
-                else:
+                elif not (embed_choice and not local_embed_model_is_voyage()):
+                    # A bge-choice install with no key never asked for Voyage: no warning (it
+                    # only reaches here at a dual tag, where the key is optional for it).
                     _log.warning(
                         "storage_service_no_voyage_key",
                         embedding_mode="onnx-local",
                         consequence="voyage-* collections will be refused (HTTP 422)",
                         hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
                     )
+
+        # RDR-210 Phase 3 Step 1 (nexus-wypwq, Technical Design 2): always tell the engine the
+        # profile, from the one function the client's write model reads, so the names the client
+        # mints and the profile the engine seeds agree. The engine reads NX_EMBED_PROFILE
+        # (EmbeddingProfile.ENV, Main.java) and an engine that predates it ignores the variable.
+        # An explicit value in the caller's env is the operator's choice and wins; a blank one is
+        # "unset", as the engine reads it.
+        if not env.get("NX_EMBED_PROFILE", "").strip():
+            from nexus.config import local_embed_profile  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+            env["NX_EMBED_PROFILE"] = local_embed_profile()
 
         # Launch artifact: native binary (argv[0] = binary) or, when explicitly
         # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The

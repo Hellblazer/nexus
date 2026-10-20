@@ -3926,6 +3926,8 @@ loaded, and the Voyage reranker, read true. The row warns when it is false, nami
 applicable (green) when the engine cannot be reached or an older engine does not report the key, which is "cannot tell", never "available".
 It works in local and managed mode alike, over HTTP only.
 
+**Embedding family (nexus-wypwq, RDR-210 Phase 3 Step 1).** `nx doctor`'s "Embedding family" row reads `GET /version`. An engine told a profile it cannot serve boots degraded, not refused: it seeds the profile, serves the family it can, and answers 422 for the other family's collections. The row takes the engine's own `embedding_profile` (an engine that does not report one is read against this client's `local_embed_profile()`, in local mode only) and warns when `embedding_models` has no model of that family: a `voyage` profile with no key (persist one with `nx config set voyage_api_key --stdin`, then restart the service) or a `bge` profile with no bge model files (`nx init --service`, then restart). Not applicable (green) when the engine cannot be reached, an older engine does not report `embedding_models`, or the profile cannot be determined, which is "cannot tell", never "served". A value that is not a list of strings warns. It works in local and managed mode alike, over HTTP only.
+
 **Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
 threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
 `NX_SEARCH_EXACT_MAX_ROWS` rows (default 20,000). At or below that count the router runs the collection exact; above it

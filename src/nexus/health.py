@@ -4773,6 +4773,89 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
     )]
 
 
+_EMBEDDING_FAMILY_LABEL = "Embedding family"
+
+#: The model-token prefix that names each profile's family in ``/version``'s ``embedding_models``
+#: (``bge-base-en-v15-768``, ``voyage-code-3``, ``voyage-context-3``).
+_PROFILE_FAMILY_PREFIX = {"voyage": "voyage", "bge": "bge"}
+
+
+def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-wypwq (RDR-210 Phase 3 Step 1, Technical Design 2): does the engine serve the family of its profile?
+
+    An engine told a profile it cannot serve (``voyage`` with no key, ``bge`` with no bge model files) boots
+    DEGRADED, not refused: it seeds the chosen profile, serves the family it can, and answers 422 for the other
+    family's collections. ``GET /version`` lists the model tokens it serves in ``embedding_models``. This row reads
+    the profile against that list and warns when the profile's family is absent.
+
+    The profile is the engine's own ``embedding_profile`` from the same ``/version`` body (what it seeded); an engine
+    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because a
+    managed engine has no bge files by design and the client's local intent says nothing about it.
+
+    * warn: ``embedding_models`` lacks the profile's family (the remedy names the key or the bge files, then a restart).
+    * warn: ``embedding_models`` is present but not a list of strings (never read as served).
+    * not applicable (ok): the engine cannot be reached, or an older engine does not report ``embedding_models``, or
+      the profile cannot be determined. "Cannot tell" is never "served" and never "degraded".
+    """
+    label = _EMBEDDING_FAMILY_LABEL
+    body: dict | None
+    if version_body is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to keep CLI startup fast
+            fetched = _get("/version", tenant=_process_default_tenant())
+            body = fetched if isinstance(fetched, dict) else None
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_embedding_family_probe_failed", error=str(exc))
+            body = None
+    else:
+        body = version_body if isinstance(version_body, dict) else None
+
+    if body is None:
+        return [HealthResult(label=label, ok=True, detail="not applicable: the engine's /version could not be read")]
+    if "embedding_models" not in body:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: this engine's /version does not report the embedding models it serves "
+            "(an older engine, or one that is still starting)"))]
+    models = body.get("embedding_models")
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"the engine's embedding_models could not be read (not a list of strings; got {repr(models)[:40]})",
+            fix_suggestions=["Check that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+
+    profile = body.get("embedding_profile")
+    if profile is None:
+        from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — deferred to avoid circular import
+        profile = local_embed_profile() if is_local_mode() else None
+    prefix = _PROFILE_FAMILY_PREFIX.get(profile) if isinstance(profile, str) else None
+    if prefix is None:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: the embedding profile could not be determined for this engine"))]
+
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred to avoid circular import
+
+    served = ", ".join(models) or "no model"
+    if any(m.startswith(prefix) for m in models):
+        return [HealthResult(label=label, ok=True, detail=f"profile {profile}: its family is served ({served})")]
+    if profile == "voyage":
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"profile voyage but the engine serves {served}: it booted degraded, and every Voyage "
+                    "collection answers 422 (the engine has no Voyage key)"),
+            fix_suggestions=["Persist the key with `nx config set voyage_api_key --stdin` (or export VOYAGE_API_KEY), "
+                             f"then restart the service: `{_SERVICE_RESTART_COMMAND}`",
+                             "Or choose the local embedder (`nx init`) if Voyage was not intended"],
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
+                "answers 422 (the engine found no bge model files)"),
+        fix_suggestions=["Run `nx init --service` to provision the bge model files, then restart the service: "
+                         f"`{_SERVICE_RESTART_COMMAND}`"],
+    )]
+
+
 def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
 
@@ -11325,6 +11408,7 @@ def run_health_checks(
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
     results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
     results.extend(_check_reranker(engine_status))  # nexus-yuh4a
+    results.extend(_check_embedding_family())  # nexus-wypwq
     results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
