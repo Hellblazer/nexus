@@ -174,6 +174,26 @@ class DdlLogParserTest {
         assertThat(DdlLogParser.tagOf("")).isEqualTo("UNKNOWN");
     }
 
+    /** nexus-7he0t: WAL is cluster-wide, so a class holding two databases at once over [100, 400] wrote
+     *  300 bytes, not (400-100) + (300-200) = 400; a later, separate database adds its own span. */
+    @Test
+    void a_class_holding_overlapping_databases_is_credited_one_merged_span() throws IOException {
+        DdlCounts.Totals totals = new DdlCounts.Totals();
+        totals.noteDatabase("db_a", "OverlapTest", false, 100L);
+        totals.noteDatabase("db_b", "OverlapTest", false, 200L);
+        totals.noteRelease("db_b", 300L);
+        totals.noteRelease("db_a", 400L);
+        totals.noteDatabase("db_c", "OverlapTest", false, 500L);
+        totals.noteRelease("db_c", 550L);
+        totals.noteDatabase("db_d", "OtherTest", false, 150L);
+        totals.noteRelease("db_d", 250L);
+        JsonNode out = asJson(totals.snapshot());
+        assertThat(out.at("/per_class/OverlapTest/wal_bytes").asLong()).isEqualTo(300 + 50);
+        assertThat(out.at("/per_class/OverlapTest/databases").asLong()).isEqualTo(3);
+        assertThat(out.at("/per_class/OtherTest/wal_bytes").asLong()).isEqualTo(100);
+        assertThat(out.at("/wal/unreleased_databases").asLong()).isZero();
+    }
+
     @Test
     void folding_logs_sums_into_buckets_and_attributes_databases_to_classes() throws IOException {
         DdlCounts.Totals totals = new DdlCounts.Totals(); // not the fork's: the real file must stay real

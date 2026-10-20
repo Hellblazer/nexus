@@ -335,6 +335,10 @@ final class DdlCounts {
         private final Map<String, List<DdlLogParser.Entry>> byBucket = new LinkedHashMap<>();
         private final Map<String, String> dbOwner = new HashMap<>();
         private final Map<String, Long> dbStartLsn = new HashMap<>();
+        /** Per class, its databases outstanding now and the LSN its current span opened at: WAL is
+         *  cluster-wide, so a class holding two databases at once is credited one merged span, not
+         *  one per database (nexus-7he0t). One SharedCluster per fork, so one LSN space. */
+        private final Map<String, long[]> openSpan = new HashMap<>();
         private final Set<String> emptyDbs = new java.util.HashSet<>();
         // {databases, containers, ddl, wal_bytes}
         private final Map<String, long[]> perClass = new TreeMap<>();
@@ -355,6 +359,9 @@ final class DdlCounts {
             dbOwner.put(dbName, owner);
             if (startLsn >= 0) {
                 dbStartLsn.put(dbName, startLsn);
+                long[] span = openSpan.computeIfAbsent(owner, k -> new long[2]);
+                span[1] = span[0] == 0 ? startLsn : Math.min(span[1], startLsn);
+                span[0]++;
             }
             if (empty) {
                 emptyDbs.add(dbName);
@@ -365,8 +372,12 @@ final class DdlCounts {
         synchronized void noteRelease(String dbName, long endLsn) {
             Long start = dbStartLsn.remove(dbName);
             String owner = dbOwner.get(dbName);
-            if (start != null && owner != null && endLsn >= start) {
-                perClass.computeIfAbsent(owner, k -> new long[4])[3] += endLsn - start;
+            long[] span = owner == null ? null : openSpan.get(owner);
+            if (start == null || span == null || span[0] == 0) {
+                return;
+            }
+            if (--span[0] == 0 && endLsn >= span[1]) {
+                perClass.computeIfAbsent(owner, k -> new long[4])[3] += endLsn - span[1];
             }
         }
 
