@@ -177,11 +177,8 @@ class DenseGateScanBudgetIntegrationTest {
             // segment ... No space left on device" on chas). Session-level, this connection only.
             DSL.using(su, SQLDialect.POSTGRES)
                 .set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
-            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index.xml",
-                "databasechangelog_test_hnsw_index", Map.of(
-                    "indexName", "idx_chunks_embedding_384",
-                    "tableName", DSL.using(su, SQLDialect.POSTGRES).render(CHUNKS),
-                    "column", CHUNKS.EMBEDDING_384.getName()));
+            PgContainerHelper.createHnswIndex(su, CHUNKS.getSchema().getName(), CHUNKS.getName(),
+                "idx_chunks_embedding_384", CHUNKS.EMBEDDING_384.getName());
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }

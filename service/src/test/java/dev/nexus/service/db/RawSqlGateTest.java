@@ -1631,6 +1631,10 @@ class RawSqlGateTest {
     // revoke, createSchema), existing helpers (createNologinRole, grantRoleWithAdminOption, alterTableOwner, dropRoleRevokingGrants,
     // lockTable) or the batch 11 PgContainerHelper methods over test changelogs that fix the statement and take only validated names
     // (see validatedParameterChangelogs_areNamedOnlyByPgContainerHelper) or per-fixture changelogs with no parameter.
+    // Review round 3 (still 23): the pins are now structural. testChangelogs_noSqlBodyIsAPlaceholderOrOpensWithOne reads every changelog-test
+    // <sql> body; everyParameterisedTestChangelog_isValidatedOrExempt derives completeness from the resources (every ${-bearing changelog is
+    // on VALIDATED_PARAMETER_CHANGELOGS or in EXEMPT_PARAMETERISED_CHANGELOGS with a reason); the named-only-by-PgContainerHelper pin matches
+    // the runSuperuserTestChangelog(<conn>, "db/changelog-test/<stem>.xml" call shape in comment-stripped code.
     private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 23;
 
     /**
@@ -3046,46 +3050,278 @@ class RawSqlGateTest {
     }
 
     /**
-     * The validated-parameter changelogs (nexus-cbo4a batch 11): each takes names or values the changelog substitutes
-     * into its statement, so each has one caller, a {@code PgContainerHelper} method that validates them first. A
-     * second test naming one would run it with arguments nobody validated. Only {@code PgContainerHelper.java} may
-     * name them; the needles are assembled so this file does not name them either. Non-vacuity: every one is named
-     * there, so a renamed changelog fails here instead of dropping out of the scan.
+     * The parameterised test changelogs whose every use is one {@code PgContainerHelper} method that validates its
+     * arguments first (nexus-cbo4a batch 11, widened in review). A changelog on this list is reached only by the call
+     * shape {@code runSuperuserTestChangelog(<conn>, "db/changelog-test/<stem>.xml", ...} inside PgContainerHelper,
+     * and no other test source names it in code. Stems, without {@code db.changelog-test-} and {@code .xml}.
+     */
+    private static final List<String> VALIDATED_PARAMETER_CHANGELOGS = List.of(
+        // batch 11
+        "role-application-name-poison", "role-granted-by", "schema-authorization", "table-storage-set",
+        "table-storage-reset", "hnsw-index-collection", "hnsw-index-collection-tenant", "hnsw-index",
+        "role-connection-limit", "schema-create-grant", "schema-create-revoke", "nologin-role-password",
+        "superuser-login-role", "create-policy", "drop-policy", "table-row-security",
+        "hnsw-index-collection-concurrently", "hnsw-index-builder-concurrently", "reindex-index-concurrently",
+        "vacuum-table", "auto-explain-reset",
+        // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
+        // else in code
+        "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",
+        "login-role", "role-admin-option", "product-schema-owner", "table-schema", "drop-exclusive-role",
+        "auto-explain");
+
+    /**
+     * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every
+     * one predates batch 11. Adding to this map is a decision a reviewer reads: a new parameterised changelog belongs
+     * on {@link #VALIDATED_PARAMETER_CHANGELOGS} behind a validating helper.
+     */
+    private static final Map<String, String> EXEMPT_PARAMETERISED_CHANGELOGS = Map.ofEntries(
+        Map.entry("role", "bootstrapServiceRole runs it through new Liquibase with the fixed service role and password; "
+            + "named by ChangelogBulkGrantConformanceTest's sanctioned-changelog set"),
+        Map.entry("admin-role", "bootstrapAdminRole runs it through new Liquibase with fixed literals; named by "
+            + "ChangelogBulkGrantConformanceTest's sanctioned-changelog set"),
+        Map.entry("rls-probe-harness", "seedRlsProbe runs it through new Liquibase; the one parameter is a token hash "
+            + "the caller derives, never SQL; ServiceIntegrationTest only mentions it in prose"),
+        Map.entry("nonsuper-owner", "provisionNonSuperuserOwner takes the admin role and password from fixtures; named "
+            + "by ExtensionBootstrapSiteConformanceTest's sanctioned-changelog set"),
+        Map.entry("role-membership", "grantRoleMembership: role names are fixed test literals, no validator"),
+        Map.entry("t1-schema-usage", "grantT1ScratchTo: the role is a fixed test literal, no validator"),
+        Map.entry("diag-view-foreign-owned", "Taxonomy011ForeignOwnedDiagViewTest runs it with fixed role literals"),
+        Map.entry("manifest-chunks-column-select", "CatalogManifestSweepRepositoryTest runs it with one fixed role "
+            + "literal"),
+        Map.entry("tuples-column-select", "NexusServiceTupleSweepIsolationTest runs it with one fixed role literal"),
+        Map.entry("poison-tuple-row-install", "TupleRepositoryTest runs it with the hex of a fixed byte string"),
+        Map.entry("role-search-path-poison", "SharedClusterMutationFalsifyTest runs it with a fixed role literal; the "
+            + "poison value is written literally in the changelog and pinned by "
+            + "testChangelogs_setSearchPathOnlyToThePoisonSchema"),
+        Map.entry("reindex-index", "named in code only by PgContainerHelperChangesetTextTest, as an input the "
+            + "changeset-text extractor must refuse; PgContainerHelper#reindexIndex validates its two names"),
+        Map.entry("p225-partition-squatter", "PartitionScratch#createSquatterLeaf runs it after "
+            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"));
+
+    private static final Pattern SQL_BODY = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
+
+    /** The SQL verbs a changelog statement may open with. */
+    private static final Pattern SQL_VERB = Pattern.compile(
+        "(?i)\\b(?:CREATE|ALTER|DROP|GRANT|REVOKE|SELECT|INSERT|UPDATE|DELETE|DO|SET|RESET|REINDEX|VACUUM|COMMENT|LOCK"
+            + "|TRUNCATE|ANALYZE|WITH|CALL|EXECUTE|BEGIN|COPY|REFRESH|CLUSTER)\\b");
+
+    record SqlBodyScan(int changelogs, int bodies, List<String> offenders) {}
+
+    /**
+     * Read every {@code <sql>} body of the given changelogs (XML comments and CDATA markers removed) and flag a
+     * body whose statement a placeholder could supply: after whitespace removal it is only {@code ${...}}
+     * placeholders, or a placeholder comes before the first SQL verb (or there is no verb at all). That is the shape
+     * of a changelog that launders a caller's SQL string into the database, the one thing the helpers deleted in
+     * batch 11 did, and it cannot be hidden by renaming a Java method.
+     */
+    static SqlBodyScan scanSqlBodiesForPlaceholderStatements(Map<String, String> xmlByName) {
+        List<String> offenders = new ArrayList<>();
+        int bodies = 0;
+        for (var entry : xmlByName.entrySet()) {
+            String text = entry.getValue().replaceAll("(?s)<!--.*?-->", "");
+            Matcher body = SQL_BODY.matcher(text);
+            while (body.find()) {
+                bodies++;
+                String sql = body.group(1).replace("<![CDATA[", "").replace("]]>", "");
+                String compact = sql.replaceAll("\\s+", "");
+                int placeholder = sql.indexOf("${");
+                if (placeholder < 0) {
+                    continue;
+                }
+                Matcher verb = SQL_VERB.matcher(sql);
+                boolean verbFirst = verb.find() && verb.start() < placeholder;
+                if (compact.matches("(?:\\$\\{[^}]*\\};?)+") || !verbFirst) {
+                    offenders.add(entry.getKey() + ": " + compact.substring(0, Math.min(80, compact.length())));
+                }
+            }
+        }
+        return new SqlBodyScan(xmlByName.size(), bodies, offenders);
+    }
+
+    private static Map<String, String> readTestChangelogs() throws IOException {
+        Path dir = Path.of("src", "test", "resources", "db", "changelog-test");
+        Map<String, String> byName = new TreeMap<>();
+        try (var list = Files.list(dir)) {
+            for (Path p : list.filter(f -> f.toString().endsWith(".xml")).toList()) {
+                byName.put(p.getFileName().toString(), Files.readString(p));
+            }
+        }
+        return byName;
+    }
+
+    /** Source text with {@code //} and block comments (Javadoc included) removed; string and char literals kept. */
+    static String stripJavaComments(String src) {
+        StringBuilder out = new StringBuilder(src.length());
+        int i = 0;
+        int n = src.length();
+        while (i < n) {
+            char c = src.charAt(i);
+            if (src.startsWith("\"\"\"", i)) {
+                int end = src.indexOf("\"\"\"", i + 3);
+                end = end < 0 ? n : end + 3;
+                out.append(src, i, end);
+                i = end;
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && src.charAt(j) != c) {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
+                }
+                j = Math.min(j + 1, n);
+                out.append(src, i, j);
+                i = j;
+            } else if (src.startsWith("//", i)) {
+                int end = src.indexOf('\n', i);
+                i = end < 0 ? n : end;
+            } else if (src.startsWith("/*", i)) {
+                int end = src.indexOf("*/", i + 2);
+                i = end < 0 ? n : end + 2;
+                out.append(' ');
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * No test changelog {@code <sql>} body is only placeholders, or lets a placeholder come before the statement's
+     * first SQL verb (nexus-cbo4a batch 11 review). Structural: it reads the changelogs, not the Java helper names,
+     * so a renamed helper over a new {@code <sql>${stmt}</sql>} changelog fails here. Non-vacuous: it must see every
+     * changelog and a floor of bodies.
+     */
+    @Test
+    void testChangelogs_noSqlBodyIsAPlaceholderOrOpensWithOne() throws IOException {
+        Map<String, String> changelogs = readTestChangelogs();
+        SqlBodyScan scan = scanSqlBodiesForPlaceholderStatements(changelogs);
+        assertThat(scan.changelogs()).as("test changelogs scanned").isGreaterThan(50);
+        assertThat(scan.bodies()).as("<sql> bodies scanned (a scan that saw none proved nothing)").isGreaterThan(70);
+        assertThat(scan.offenders())
+            .as("a <sql> body that is only placeholders, or a placeholder before the first SQL verb: the caller would "
+                + "supply the statement")
+            .isEmpty();
+    }
+
+    @Test
+    void sqlBodyScan_flagsAPlaceholderStatement_andPassesAFixedShape() {
+        String head = "<databaseChangeLog><changeSet id=\"x\" author=\"a\">";
+        String tail = "</changeSet></databaseChangeLog>";
+        Map<String, String> bad = new TreeMap<>();
+        bad.put("only.xml", head + "<sql>${stmt}</sql>" + tail);
+        bad.put("spaced.xml", head + "<sql>\n   ${a}\n   ${b};\n</sql>" + tail);
+        bad.put("verbless.xml", head + "<sql>${verb} TABLE x</sql>" + tail);
+        bad.put("cdata.xml", head + "<sql><![CDATA[${stmt}]]></sql>" + tail);
+        bad.put("second-body.xml", head + "<sql>CREATE TABLE a (i int)</sql><sql>${stmt}</sql>" + tail);
+        SqlBodyScan flagged = scanSqlBodiesForPlaceholderStatements(bad);
+        assertThat(flagged.bodies()).isEqualTo(6);
+        assertThat(flagged.offenders()).hasSize(5);
+
+        Map<String, String> good = new TreeMap<>();
+        good.put("fixed.xml", head + "<sql>CREATE ROLE ${role} NOLOGIN</sql>" + tail);
+        good.put("dollar.xml", head + "<sql>DO $$ BEGIN PERFORM 1; END $$</sql>" + tail);
+        good.put("commented.xml", "<!-- <sql>${stmt}</sql> -->" + head + "<sql>ALTER ROLE ${role} RESET x</sql>" + tail);
+        good.put("no-params.xml", head + "<sql>SELECT 1</sql>" + tail);
+        SqlBodyScan clean = scanSqlBodiesForPlaceholderStatements(good);
+        assertThat(clean.bodies()).isEqualTo(4);
+        assertThat(clean.offenders()).isEmpty();
+    }
+
+    /**
+     * Derived completeness (nexus-cbo4a batch 11 review): every test changelog that carries a {@code ${} (XML comments
+     * removed, so prose does not count) is on {@link #VALIDATED_PARAMETER_CHANGELOGS} or in
+     * {@link #EXEMPT_PARAMETERISED_CHANGELOGS} with a reason. A new parameterised changelog therefore fails here until
+     * someone puts it in one of the two, instead of passing because a hand-kept list never heard of it. The lists may
+     * not name a changelog that is absent or has no placeholder.
+     */
+    @Test
+    void everyParameterisedTestChangelog_isValidatedOrExempt() throws IOException {
+        String prefix = "db.changelog-test-";
+        Map<String, String> changelogs = readTestChangelogs();
+        List<String> parameterised = new ArrayList<>();
+        for (var e : changelogs.entrySet()) {
+            if (e.getValue().replaceAll("(?s)<!--.*?-->", "").contains("${")) {
+                parameterised.add(e.getKey().substring(prefix.length(), e.getKey().length() - ".xml".length()));
+            }
+        }
+        assertThat(parameterised.size()).as("parameterised changelogs seen (non-vacuity)").isGreaterThan(35);
+        List<String> unclassified = new ArrayList<>();
+        for (String stem : parameterised) {
+            if (!VALIDATED_PARAMETER_CHANGELOGS.contains(stem) && !EXEMPT_PARAMETERISED_CHANGELOGS.containsKey(stem)) {
+                unclassified.add(stem);
+            }
+        }
+        assertThat(unclassified)
+            .as("a changelog with a ${ placeholder is on neither the validated list nor the exempt map")
+            .isEmpty();
+        assertThat(VALIDATED_PARAMETER_CHANGELOGS).as("no duplicate stems").doesNotHaveDuplicates();
+        assertThat(VALIDATED_PARAMETER_CHANGELOGS).as("a stem in both lists")
+            .doesNotContainAnyElementsOf(EXEMPT_PARAMETERISED_CHANGELOGS.keySet());
+        assertThat(parameterised)
+            .as("every listed stem must be a changelog that really has a placeholder (a stale entry hides nothing)")
+            .containsAll(VALIDATED_PARAMETER_CHANGELOGS)
+            .containsAll(EXEMPT_PARAMETERISED_CHANGELOGS.keySet());
+        assertThat(EXEMPT_PARAMETERISED_CHANGELOGS.values()).as("each exemption carries a reason")
+            .allSatisfy(reason -> assertThat(reason).isNotBlank());
+        assertThat(EXEMPT_PARAMETERISED_CHANGELOGS.size()).as("the exempt set stays small").isLessThanOrEqualTo(15);
+    }
+
+    @Test
+    void javaCommentStripper_dropsComments_andKeepsLiterals() {
+        String src = String.join("\n",
+            "/** see \"db/changelog-test/x.xml\" */",
+            "// run(c, \"db/changelog-test/y.xml\"",
+            "run(c, \"db/changelog-test/z.xml\", \"http://host/q\"); /* gone */ int k = 'c';",
+            "String t = \"\"\"",
+            "    // not a comment\"\"\";");
+        String out = stripJavaComments(src);
+        assertThat(out).doesNotContain("x.xml").doesNotContain("y.xml").doesNotContain("gone")
+            .contains("run(c, \"db/changelog-test/z.xml\", \"http://host/q\");")
+            .contains("// not a comment");
+    }
+
+    /**
+     * The validated-parameter changelogs (nexus-cbo4a batch 11, tightened in review) each have one caller, a
+     * {@code PgContainerHelper} method that validates the arguments first. Positive: PgContainerHelper must contain the
+     * call shape {@code runSuperuserTestChangelog(<conn>, "db/changelog-test/db.changelog-test-<stem>.xml"} for every
+     * stem, in code with comments removed, so a Javadoc mention of a changelog nobody calls no longer satisfies it.
+     * Negative: no other test source (RawSqlGateTest, which lists the stems as data, aside) names the file in code.
      */
     @Test
     void validatedParameterChangelogs_areNamedOnlyByPgContainerHelper() throws IOException {
-        String prefix = "db.changelog-test-";
-        List<String> needles = new ArrayList<>();
-        for (String stem : List.of("role-application-name-poison", "role-granted-by", "schema-authorization",
-                "table-storage-" + "set", "table-storage-" + "reset", "hnsw-index-" + "collection",
-                "hnsw-index-collection-" + "tenant", "btree-index-where-" + "eq", "role-connection-" + "limit",
-                "schema-create-" + "grant", "schema-create-" + "revoke", "nologin-role-" + "password",
-                "superuser-login-" + "role", "create-" + "policy", "drop-" + "policy", "table-row-" + "security",
-                "hnsw-index-collection-" + "concurrently", "hnsw-index-builder-" + "concurrently",
-                "reindex-index-" + "concurrently", "vacuum-" + "table")) {
-            needles.add(prefix + stem + ".xml");
-        }
+        List<String> missingCall = new ArrayList<>();
         List<String> namers = new ArrayList<>();
-        boolean helperNamesAll = false;
         int scanned = 0;
+        boolean sawHelper = false;
         try (Stream<Path> files = Files.walk(Path.of("src", "test", "java"))) {
             for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
                 scanned++;
-                String text = Files.readString(p);
                 String name = p.getFileName().toString();
-                if (name.equals("PgContainerHelper.java")) {
-                    helperNamesAll = needles.stream().allMatch(text::contains);
+                if (name.equals("RawSqlGateTest.java")) {
                     continue;
                 }
-                for (String needle : needles) {
-                    if (text.contains(needle)) {
-                        namers.add(name + " names " + needle);
+                String code = stripJavaComments(Files.readString(p));
+                if (name.equals("PgContainerHelper.java")) {
+                    sawHelper = true;
+                    for (String stem : VALIDATED_PARAMETER_CHANGELOGS) {
+                        Pattern call = Pattern.compile("runSuperuserTestChangelog\\(\\s*\\w+,\\s*\"db/changelog-test/"
+                            + "db\\.changelog-test-" + Pattern.quote(stem) + "\\.xml\"");
+                        if (!call.matcher(code).find()) {
+                            missingCall.add(stem);
+                        }
+                    }
+                    continue;
+                }
+                for (String stem : VALIDATED_PARAMETER_CHANGELOGS) {
+                    if (code.contains("db.changelog-test-" + stem + ".xml")) {
+                        namers.add(name + " names " + stem);
                     }
                 }
             }
         }
         assertThat(scanned).as("test sources scanned").isGreaterThan(100);
-        assertThat(helperNamesAll).as("PgContainerHelper.java names every validated-parameter changelog").isTrue();
+        assertThat(sawHelper).as("PgContainerHelper.java was scanned").isTrue();
+        assertThat(missingCall).as("validated stems PgContainerHelper never passes to runSuperuserTestChangelog")
+            .isEmpty();
         assertThat(namers).as("a test naming a validated-parameter changelog directly").isEmpty();
     }
 

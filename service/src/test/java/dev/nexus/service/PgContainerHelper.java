@@ -947,8 +947,26 @@ public final class PgContainerHelper {
             "databasechangelog_test_nologin_role", Map.of("role", role));
     }
 
+    /** What a {@code Table<?>} may render to before it is substituted into a changelog: one or two quoted plain names. */
+    static final java.util.regex.Pattern RENDERED_TABLE = java.util.regex.Pattern.compile(
+        "^(\"[a-z_][a-z0-9_]*\"\\.)?\"[a-z_][a-z0-9_]*\"$");
+
+    /**
+     * Render {@code table} for a changelog parameter and refuse anything that is not a quoted, optionally
+     * schema-qualified plain name. A {@code Table} built by {@code DSL.table(String)} is plain SQL and renders as
+     * whatever text it was given, so the type alone does not make the parameter safe; the rendered form is checked.
+     * Package-private so a unit pin can call it with a context that has no connection.
+     */
+    static String renderTableParam(DSLContext ctx, Table<?> table) {
+        String rendered = ctx.render(table);
+        if (!RENDERED_TABLE.matcher(rendered).matches()) {
+            throw new IllegalArgumentException("table does not render as a quoted plain name: " + rendered);
+        }
+        return rendered;
+    }
+
     /** The batch 7 helpers substitute names into changelog SQL unquoted: accept only a plain lowercase identifier. */
-    private static void requireTestIdentifier(String name) {
+    static void requireTestIdentifier(String name) {
         if (name == null || !name.matches("[a-z_][a-z0-9_]*") || name.equals("public")) {
             throw new IllegalArgumentException("not a plain test identifier: " + name);
         }
@@ -1001,7 +1019,7 @@ public final class PgContainerHelper {
         requireTestIdentifier(owner);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-table-owner.xml",
             "databasechangelog_test_table_owner",
-            Map.of("table", DSL.using(su, SQLDialect.POSTGRES).render(table), "owner", owner));
+            Map.of("table", renderTableParam(DSL.using(su, SQLDialect.POSTGRES), table), "owner", owner));
     }
 
     /**
@@ -1054,7 +1072,7 @@ public final class PgContainerHelper {
         requireTestIdentifier(schema);
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-schema.xml",
             "databasechangelog_test_table_schema",
-            Map.of("table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "schema", schema));
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "schema", schema));
     }
 
     /**
@@ -1087,14 +1105,20 @@ public final class PgContainerHelper {
     /** The embedding columns of nexus.chunks, the only columns an index fixture may name. */
     private static final Set<String> EMBEDDING_COLUMNS = Set.of("embedding_384", "embedding_768", "embedding_1024");
 
+    /** What {@link #requireTestLiteral} admits; package-private so the unit pin names the same expression. */
+    static final java.util.regex.Pattern TEST_LITERAL = java.util.regex.Pattern.compile("[A-Za-z0-9_.'\\\\-]+");
+
     /**
-     * A value that goes inside a single-quoted literal of a test changelog: letters, digits, underscore, dot, hyphen
-     * and apostrophe only (no dollar, brace, backslash or whitespace, so nothing reaches the changelog's property
+     * A value that goes inside a single-quoted literal of a test changelog: letters, digits, underscore, dot, hyphen,
+     * apostrophe and backslash only (no dollar, brace or whitespace, so nothing reaches the changelog's property
      * syntax), with each apostrophe doubled. The apostrophe is admitted because PciCatalogIntegrationTest round-trips
-     * a collection name that has one.
+     * a collection name that has one. The backslash is admitted because the same class round-trips one that has a
+     * backslash, and it is a literal character there: the engine runs with {@code standard_conforming_strings = on}
+     * (that test asserts it), so a backslash in {@code '...'} is not an escape and apostrophe doubling is the only
+     * escaping a literal needs. Package-private so a unit pin can call it with no database.
      */
-    private static String requireTestLiteral(String value) {
-        if (value == null || !value.matches("[A-Za-z0-9_.'-]+")) {
+    static String requireTestLiteral(String value) {
+        if (value == null || !TEST_LITERAL.matcher(value).matches()) {
             throw new IllegalArgumentException("not a safe test literal: " + value);
         }
         return value.replace("'", "''");
@@ -1216,7 +1240,7 @@ public final class PgContainerHelper {
         }
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-storage-set.xml",
             "databasechangelog_test_table_storage_set", Map.of(
-                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "options", String.join(", ", parts)));
+                "table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "options", String.join(", ", parts)));
     }
 
     /**
@@ -1232,7 +1256,7 @@ public final class PgContainerHelper {
         }
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-storage-reset.xml",
             "databasechangelog_test_table_storage_reset", Map.of(
-                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "options", String.join(", ", names)));
+                "table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "options", String.join(", ", names)));
     }
 
     /**
@@ -1286,18 +1310,25 @@ public final class PgContainerHelper {
     }
 
     /**
-     * {@code CREATE INDEX index ON schema.table (column) WHERE column = 'value'} (nexus-cbo4a batch 11), through
-     * {@code db.changelog-test-btree-index-where-eq.xml}: an index the PCI catalog reader must not report.
+     * {@code CREATE INDEX index ON schema.table (column) WHERE column = 'value'} (nexus-cbo4a batch 11), typed
+     * jOOQ {@code createIndex(..).on(..).where(..)}: an index the PCI catalog reader must not report. Names are
+     * quoted by jOOQ and the value is rendered as an escaped literal, so no changelog and no value validator is
+     * involved; the names still go through {@link #requireTestIdentifier} like every sibling helper.
      */
     public static void createBtreeIndexWhereEquals(Connection su, String schema, String table, String index,
-                                                   String column, String value) throws Exception {
+                                                   String column, String value) {
+        btreeIndexWhereEqualsQuery(DSL.using(su, SQLDialect.POSTGRES), schema, table, index, column, value).execute();
+    }
+
+    /** The statement {@link #createBtreeIndexWhereEquals} runs, unexecuted so a unit pin can render it. */
+    static Query btreeIndexWhereEqualsQuery(DSLContext ctx, String schema, String table, String index,
+                                            String column, String value) {
         requireTestIdentifier(schema);
         requireTestIdentifier(table);
         requireTestIdentifier(index);
         requireTestIdentifier(column);
-        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-btree-index-where-eq.xml",
-            "databasechangelog_test_btree_index_where_eq", Map.of("schema", schema, "table", table, "index", index,
-                "column", column, "value", requireTestLiteral(value)));
+        Field<String> col = DSL.field(DSL.name(column), String.class);
+        return ctx.createIndex(DSL.name(index)).on(DSL.table(DSL.name(schema, table)), col).where(col.eq(value));
     }
 
     private static void requireEmbeddingColumn(String column) {
@@ -1410,7 +1441,7 @@ public final class PgContainerHelper {
         }
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-create-policy.xml",
             "databasechangelog_test_create_policy", Map.of(
-                "table", DSL.using(su, SQLDialect.POSTGRES).render(table), "policy", policy,
+                "table", renderTableParam(DSL.using(su, SQLDialect.POSTGRES), table), "policy", policy,
                 "kind", kind.name(), "command", command, "role", role));
     }
 
@@ -1422,7 +1453,7 @@ public final class PgContainerHelper {
         requireTestIdentifier(policy);
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy.xml",
             "databasechangelog_test_drop_policy",
-            Map.of("table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "policy", policy));
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
     }
 
     /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
@@ -1444,7 +1475,7 @@ public final class PgContainerHelper {
     public static void setRowSecurity(Connection conn, Table<?> table, RowSecurityMode mode) throws Exception {
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-table-row-security.xml",
             "databasechangelog_test_table_row_security", Map.of(
-                "table", DSL.using(conn, SQLDialect.POSTGRES).render(table), "mode", mode.keyword));
+                "table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "mode", mode.keyword));
     }
 
     /** {@code CREATE EXTENSION plpgsql_check} (nexus-cbo4a batch 11), through {@code db.changelog-test-extension-plpgsql-check.xml}. */

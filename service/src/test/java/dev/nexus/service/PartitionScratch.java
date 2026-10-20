@@ -64,16 +64,10 @@ final class PartitionScratch {
 
     // ── per-test fixtures on top of the scratch parents (each a test changelog, run on the owner's connection) ──
 
-    private static void requirePlainIdentifier(String name) {
-        if (name == null || !name.matches("[a-z_][a-z0-9_]*")) {
-            throw new IllegalArgumentException("not a plain identifier: " + name);
-        }
-    }
-
     /** A relation squatting on the name a tenant's leaf would get, bound to another tenant ('squatter'). */
     static void createSquatterLeaf(Connection admin, String leaf, String modelPartition) throws Exception {
-        requirePlainIdentifier(leaf);
-        requirePlainIdentifier(modelPartition);
+        PgContainerHelper.requireTestIdentifier(leaf);
+        PgContainerHelper.requireTestIdentifier(modelPartition);
         PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-partition-squatter.xml",
             "databasechangelog_test_p225_squatter", Map.of("leaf", leaf, "parent", modelPartition));
     }
