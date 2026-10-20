@@ -40,7 +40,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from concurrent.futures import Future
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
 import structlog
@@ -2041,6 +2041,19 @@ _STATUS_POLL_BUDGET_S = 180.0
 #: Wait before resending after a 503 ``sweep_gate_busy`` that carried no ``Retry-After``.
 _SWEEP_GATE_BUSY_DEFAULT_WAIT_S = 5.0
 
+#: 503 errors that mean the request did not run and the same key may be resent after ``Retry-After``:
+#: the sweep gate was busy (the two quarantine forms), or the ledger's claim loop was contended
+#: (``request_claim_contended``, ``Retry-After: 1``). Mapped to the wait used when the header is absent.
+_NOT_RUN_503_DEFAULT_WAIT_S: dict[str, float] = {
+    "sweep_gate_busy": _SWEEP_GATE_BUSY_DEFAULT_WAIT_S,
+    "request_claim_contended": 1.0,
+}
+
+#: How long past ``lease_until`` an ``in_flight`` status keeps being polled before the key is resent.
+#: While a marker transaction holds an expired row the status route can answer ``in_flight`` with a
+#: lease already in the past, so the poll does not stop exactly at ``lease_until``: one more interval.
+_STATUS_POLL_LEASE_GRACE_S = 5.0
+
 #: Longest ``Retry-After`` honoured, whatever the response asked for.
 _RETRY_AFTER_MAX_S = 60.0
 
@@ -2129,8 +2142,9 @@ def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, dict | 
                 return "resend", None
             if state == "in_flight":
                 lease = _parse_lease(body.get("lease_until"))
-                if lease is not None and _now() > lease:
-                    # This poll was taken after the lease ended: the one extra poll the rule asks for.
+                if lease is not None and _now() > lease + timedelta(seconds=_STATUS_POLL_LEASE_GRACE_S):
+                    # Still in flight a full grace past its lease: the holder is gone. A same-key resend
+                    # takes the key over or is told it is in flight, and either is safe.
                     return "resend", None
             else:
                 _log.warning("keyed_sweep_unknown_status_state", path=path, request_id=key, state=state)
@@ -2155,12 +2169,16 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
     * A 2xx is the result (a replay included).
     * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
       ``idempotency_key_unsupported`` raises :class:`IdempotencyKeyRefusedError`, never resent.
-    * A 503 ``sweep_gate_busy`` (the quarantine forms; nothing ran) waits ``Retry-After`` (5 s when
-      absent) and resends under the same key.
+    * A 503 ``sweep_gate_busy`` (the quarantine forms) or ``request_claim_contended``: nothing ran.
+      Waits ``Retry-After`` (5 s and 1 s when absent) and resends under the same key.
     * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``: the
       managed edge answers its own 503 for a request that never reached the engine), a socket timeout
       or a connection failure that does not prove the engine never ran the request, is ambiguous:
-      :func:`_poll_request_status` answers it. Never a re-POST on a 409.
+      :func:`_poll_request_status` answers it. Never a re-POST on a 409, and a 409 after a 503 is the
+      same thing: a pool-exhaustion 503 leaves the key ``in_flight`` until the 95 s lease lapses, so a
+      resend before then is answered ``request_in_flight`` and the right response is to poll.
+      ``rolled_back`` means that attempt can no longer commit, not that the key is finished: the
+      same-key resend that follows may take the key over and commit.
     * Every other error is raised exactly as before.
 
     At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An engine without a
@@ -2188,7 +2206,7 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                         str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
                         reason=exc.reason, engine_body=exc.engine_body,
                     ) from exc
-                busy = exc.code == 503 and error == "sweep_gate_busy"
+                busy = exc.code == 503 and error in _NOT_RUN_503_DEFAULT_WAIT_S
                 ambiguous = (
                     (exc.code == 409 and error == "request_in_flight")
                     or exc.code in (502, 504)
@@ -2198,6 +2216,8 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                     raise
                 if exc.code == 503:
                     wait_first = _retry_after_seconds(identity)
+                    if busy and wait_first is None:
+                        wait_first = _NOT_RUN_503_DEFAULT_WAIT_S[error]
             elif isinstance(exc, VectorServiceError):
                 busy = False  # a transport failure reframed for a managed endpoint: ambiguous
             else:
@@ -2209,7 +2229,7 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
                 raise
             if busy:
                 wait = wait_first if wait_first is not None else _SWEEP_GATE_BUSY_DEFAULT_WAIT_S
-                _log.info("keyed_sweep_gate_busy", path=path, request_id=key, wait_s=wait)
+                _log.info("keyed_sweep_not_run_503", path=path, request_id=key, error=error, wait_s=wait)
                 time.sleep(wait)
                 resends += 1
                 continue

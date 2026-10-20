@@ -189,7 +189,23 @@ def test_in_flight_keeps_polling_every_5_seconds_until_the_lease_passes(srv, cli
     assert len(_polls(srv)) == 3 and len(_posts(srv, path)) == 1
 
 
-def test_after_the_lease_has_passed_it_polls_once_more_then_resends_the_same_key(srv, client, clock):
+def test_an_in_flight_status_is_polled_a_grace_past_its_lease_then_the_same_key_is_resent(srv, client, clock):
+    """While a marker transaction holds an expired row the status route can answer in_flight with a
+    lease already in the past: polling does not stop exactly at lease_until."""
+    path, call, _ = _FORMS["quarantine"]
+    lease = (clock.now + timedelta(seconds=4)).isoformat()
+    in_flight = _status("in_flight", started_at=clock.now.isoformat(), lease_until=lease)
+    srv.script(f"POST {path}", sv.err(504, "gw"), sv.ok(_STORED))
+    srv.script(f"GET {_STATUS}", in_flight)  # in_flight forever: the holder is gone
+    assert call(client) == _STORED
+    # t=0 before the lease, t=5 one second past it (inside the grace), t=10 past lease + grace: resend.
+    assert clock.sleeps == [5.0, 5.0]
+    assert len(_polls(srv)) == 3
+    first, second = _posts(srv, path)
+    assert first["headers"][_KEY] == second["headers"][_KEY] and first["body"] == second["body"]
+
+
+def test_a_status_that_turns_rolled_back_inside_the_grace_resends_at_once(srv, client, clock):
     path, call, _ = _FORMS["quarantine"]
     lease = (clock.now + timedelta(seconds=4)).isoformat()
     srv.script(f"POST {path}", sv.err(504, "gw"), sv.ok(_STORED))
@@ -199,10 +215,28 @@ def test_after_the_lease_has_passed_it_polls_once_more_then_resends_the_same_key
         _status("rolled_back"),
     )
     assert call(client) == _STORED
-    assert clock.sleeps == [5.0], "one interval carried the clock past the lease"
-    assert len(_polls(srv)) == 2, "the poll after the lease passed is the last one before the resend"
-    first, second = _posts(srv, path)
-    assert first["headers"][_KEY] == second["headers"][_KEY] and first["body"] == second["body"]
+    assert clock.sleeps == [5.0] and len(_polls(srv)) == 2
+
+
+def test_a_pool_exhaustion_503_keeps_polling_in_flight_then_resends_and_a_409_after_it_is_a_poll_not_a_failure(
+    srv, client, clock,
+):
+    """The engine leaves a pool-exhaustion 503's key in_flight until the 95 s lease lapses (no failure
+    marker, no Retry-After). Poll it, never mint a new key; once it reads rolled_back the same-key
+    resend may be told request_in_flight by a racing holder, which is a poll, not an error."""
+    path, call, _ = _FORMS["quarantine"]
+    lease = (clock.now + timedelta(seconds=95)).isoformat()
+    in_flight = _status("in_flight", started_at=clock.now.isoformat(), lease_until=lease)
+    srv.script(
+        f"POST {path}", sv.err(503, "pool_exhausted"), sv.err(409, "request_in_flight"), sv.ok(_STORED),
+    )
+    srv.script(f"GET {_STATUS}", in_flight, in_flight, _status("rolled_back"), _committed("quarantine"))
+    assert call(client) == _STORED
+    posts = _posts(srv, path)
+    assert len(posts) == 2, "one resend after rolled_back; the 409 was answered by a poll, not a POST"
+    assert posts[0]["headers"][_KEY] == posts[1]["headers"][_KEY] and posts[0]["body"] == posts[1]["body"]
+    assert len(_polls(srv)) == 4
+    assert clock.sleeps == [5.0, 5.0], "no wait before the first poll of a 503 that carried no Retry-After"
 
 
 def test_a_404_from_the_status_route_surfaces_the_original_gateway_error(srv, client, clock):
@@ -246,6 +280,30 @@ def test_sweep_gate_busy_without_retry_after_waits_5_seconds(srv, client, clock,
     srv.script(f"POST {path}", sv.err(503, "sweep_gate_busy"), sv.ok(_stored(form)))
     call(client)
     assert clock.sleeps == [5.0]
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_request_claim_contended_waits_retry_after_and_resends_the_same_key_without_polling(
+    srv, client, clock, form,
+):
+    """The ledger's claim loop was contended: the request did not run (restore included: it is the
+    ledger, not the gate)."""
+    path, call, _ = _FORMS[form]
+    srv.script(
+        f"POST {path}", sv.err(503, "request_claim_contended", **{"Retry-After": "1"}), sv.ok(_stored(form)),
+    )
+    assert call(client) == _stored(form)
+    assert clock.sleeps == [1.0]
+    first, second = _posts(srv, path)
+    assert first["headers"][_KEY] == second["headers"][_KEY] and first["body"] == second["body"]
+    assert _polls(srv) == []
+
+
+def test_request_claim_contended_without_retry_after_waits_one_second(srv, client, clock):
+    path, call, _ = _FORMS["restore"]
+    srv.script(f"POST {path}", sv.err(503, "request_claim_contended"), sv.ok(_RESTORE_STORED))
+    call(client)
+    assert clock.sleeps == [1.0]
 
 
 def test_an_edge_503_waits_retry_after_then_asks_the_ledger_and_resends_the_same_key(srv, client, clock):
