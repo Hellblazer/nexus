@@ -613,7 +613,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
-    global _real_autostart_baseline, _real_manager_baseline
+    global _real_config_dir_baseline_dir, _real_autostart_baseline, _real_manager_baseline
     global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     # BEFORE the fence below replaces them: the guard's read-only manager probe
@@ -681,6 +681,7 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _real_config_dir_baseline_dir = _real_config_dir_for_guard()
         _real_autostart_baseline = _snapshot_real_autostart_units()
         _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
@@ -1079,6 +1080,34 @@ def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
 
 
 _real_config_dir_baseline: dict[str, tuple[int, int]] = {}
+#: The directory the baseline above was scanned from, so the finish-time scan
+#: can tell a leaked HOME or seam value from a real mutation (nexus-ys8a4).
+_real_config_dir_baseline_dir: Path | None = None
+
+
+def _end_snapshot_unusable_reason(
+    start_dir: Path | None,
+    end_dir: Path,
+    baseline: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+) -> str | None:
+    """Why the finish-time snapshot cannot be diffed against the baseline, or
+    None when it can. Either case used to surface as every baseline file
+    REMOVED (1788 of them on a 2026-09-29 serial run, all still present)."""
+    if start_dir is not None and end_dir != start_dir:
+        return (
+            f"it scanned {start_dir} at session start and {end_dir} at session end, "
+            f"so a test left HOME or {_REAL_CONFIG_DIR_ENV_OVERRIDE} pointing elsewhere"
+        )
+    watched = [rel for rel in baseline if not _is_allowlisted_config_dir_path(rel)]
+    if watched and not after:
+        return (
+            f"{end_dir} held {len(watched)} watched file(s) at session start "
+            f"({', '.join(sorted(watched)[:10])}{' ...' if len(watched) > 10 else ''}) and reads "
+            f"empty or missing at session end; check it by hand, since an intact directory means "
+            f"the scan could not read it"
+        )
+    return None
 
 #: nexus-b2eaw: this pytest session's own conexus package version, resolved
 #: once at session start (mirrors ``_real_config_dir_baseline``'s
@@ -1553,6 +1582,13 @@ def _check_real_config_dir_mutations(session) -> None:
     if not _is_controller_or_serial:
         return
     after = _snapshot_real_config_dir()
+    unusable = _end_snapshot_unusable_reason(
+        _real_config_dir_baseline_dir, _real_config_dir_for_guard(), _real_config_dir_baseline, after,
+    )
+    if unusable is not None:
+        session.exitstatus = 1
+        print(f"\n\nFAIL: nexus-pfuns real-config-dir mutation guard cannot compare: {unusable}.\n")
+        return
     changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
     if not changed:
         return

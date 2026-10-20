@@ -49,12 +49,8 @@ from pathlib import Path
 from tests.test_storage_touch_guard import assert_session_failed_for
 
 
-def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
-    pytester, tmp_path: Path, monkeypatch
-) -> None:
-    fake_real_home = tmp_path / "fake-real-home"
-    fake_real_home.mkdir()
-
+def _wire_real_conftest(pytester) -> None:
+    """A sandbox conftest that runs the REAL tests/conftest.py session hooks (see the module docstring)."""
     real_conftest_path = str(Path(__file__).resolve().parent / "conftest.py")
     repo_root = str(Path(__file__).resolve().parent.parent)
 
@@ -82,6 +78,15 @@ def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
         def pytest_sessionfinish(session, exitstatus):
             _real_conftest.pytest_sessionfinish(session, exitstatus)
     """)
+
+
+def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
+    pytester, tmp_path: Path, monkeypatch
+) -> None:
+    fake_real_home = tmp_path / "fake-real-home"
+    fake_real_home.mkdir()
+
+    _wire_real_conftest(pytester)
 
     pytester.makepyfile(test_leaky_write="""
         import os
@@ -136,3 +141,34 @@ def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
     # And the seam must be inert by default: nothing here ever touched the
     # real ~/.config/nexus/, only the fake tmp one.
     assert not (Path.home() / ".config" / "nexus" / "definitely_not_allowlisted.json").exists()
+
+
+def test_a_leaked_guard_directory_is_named_not_reported_as_mass_removal(
+    pytester, tmp_path: Path, monkeypatch
+) -> None:
+    """nexus-ys8a4 item 9: a test that leaves the guard pointed at another
+    directory used to fail the run with every baseline file REMOVED (1788 on a
+    2026-09-29 serial run, all still present). It still fails, naming the move."""
+    fake_real_home = tmp_path / "fake-real-home"
+    config = fake_real_home / ".config" / "nexus"
+    config.mkdir(parents=True)
+    for name in ("activate.sh", "config.yml", "memory.note"):
+        (config / name).write_text("kept")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    _wire_real_conftest(pytester)
+    pytester.makepyfile(test_leaky_env=f"""
+        import os
+
+        def test_leaves_the_guard_seam_pointing_elsewhere():
+            os.environ["NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"] = {str(elsewhere)!r}
+    """)
+    monkeypatch.setenv("NX_REAL_CONFIG_DIR_FOR_GUARD_TEST", str(fake_real_home))
+    monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "none")  # see the test above
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+    result.assert_outcomes(passed=1)
+    assert_session_failed_for(result, "cannot compare", str(config), str(elsewhere / ".config" / "nexus"))
+    assert "REMOVED" not in result.stdout.str()
+    assert sorted(p.name for p in config.iterdir()) == ["activate.sh", "config.yml", "memory.note"]

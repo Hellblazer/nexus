@@ -18,6 +18,7 @@ from unittest.mock import patch
 from tests.conftest import (
     _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES,
     _diff_config_dir_snapshots,
+    _end_snapshot_unusable_reason,
     _is_allowlisted_config_dir_path,
     _snapshot_real_config_dir,
 )
@@ -307,3 +308,34 @@ class TestAllowlist:
         # only -- the allowlist must reject it so a truncation reaches the
         # diff instead of being silently exempted.
         assert _is_allowlisted_config_dir_path("index.log") is False
+
+
+class TestEndSnapshotUnusableReason:
+    """nexus-ys8a4 item 9: a finish-time scan of a different or unreadable
+    directory is reported as that, not as every baseline file REMOVED."""
+
+    _BASE = {"a.json": (1, 1), "b.json": (2, 2)}
+
+    def test_same_directory_with_files_is_comparable(self, tmp_path: Path) -> None:
+        assert _end_snapshot_unusable_reason(tmp_path, tmp_path, self._BASE, {"a.json": (1, 1)}) is None
+
+    def test_a_moved_directory_names_both_paths(self, tmp_path: Path) -> None:
+        start, end = tmp_path / "real", tmp_path / "fence"
+        reason = _end_snapshot_unusable_reason(start, end, self._BASE, {})
+        assert reason is not None and str(start) in reason and str(end) in reason
+
+    def test_an_empty_end_scan_of_a_populated_directory_is_named(self, tmp_path: Path) -> None:
+        reason = _end_snapshot_unusable_reason(tmp_path, tmp_path, self._BASE, {})
+        assert reason is not None and "2 watched file(s)" in reason and "(a.json, b.json)" in reason
+
+    def test_allowlisted_files_that_vanish_are_comparable(self, tmp_path: Path) -> None:
+        """Only allowlisted files at start (the diff exempts them) is no reason to refuse."""
+        allowlisted = _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES[0] + "x"
+        assert _is_allowlisted_config_dir_path(allowlisted)
+        assert _end_snapshot_unusable_reason(tmp_path, tmp_path, {allowlisted: (1, 1)}, {}) is None
+
+    def test_an_empty_directory_that_stayed_empty_is_comparable(self, tmp_path: Path) -> None:
+        assert _end_snapshot_unusable_reason(tmp_path, tmp_path, {}, {}) is None
+
+    def test_no_recorded_start_directory_falls_back_to_the_diff(self, tmp_path: Path) -> None:
+        assert _end_snapshot_unusable_reason(None, tmp_path, self._BASE, {"a.json": (1, 1)}) is None
