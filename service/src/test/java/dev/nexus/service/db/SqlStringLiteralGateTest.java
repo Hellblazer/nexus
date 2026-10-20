@@ -98,13 +98,9 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 2),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/DdlCounts.java", 1),
-        // the reached-set EXPLAIN (batch D: needs the HNSW operator form) and its createStatement helper
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 2),
-        Map.entry("dev/nexus/service/SharedCluster.java", 3),
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 7));
+        Map.entry("dev/nexus/service/SharedCluster.java", 3));
 
-    private static final int EXECUTED_TOTAL = 25;
+    private static final int EXECUTED_TOTAL = 14;
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(
@@ -147,8 +143,6 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         // the statements counted in EXECUTED; held by another session
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 4),
-        // the EXPLAIN statement counted in EXECUTED
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 1),
         // replayChangeset: product changeset text run verbatim for its NOTICE chain (SANCTIONED RAW)
         Map.entry("dev/nexus/service/PgContainerHelper.java", 1),
         // plpgsql_check's own report query, read from its resource
@@ -158,7 +152,7 @@ class SqlStringLiteralGateTest {
         // a typed jOOQ insert rendered by ctx.render and bound by hand, for its lock order
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 1));
 
-    private static final int JDBC_ENTRY_TOTAL = 12;
+    private static final int JDBC_ENTRY_TOTAL = 11;
 
     /** References to a product {@code *_SQL} constant, per file, exact. */
     private static final Map<String, Integer> PRODUCT_SQL = Map.ofEntries(

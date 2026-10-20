@@ -921,7 +921,10 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3; batch 9: 3 -> 2 (setDeleted onto a typed update); batch C: 2 -> 1 (stitchedGraphOracle is DSL.withRecursive with an exact cosineDistance1 order; the 1 left is the reached-set EXPLAIN, which needs the HNSW operator form: batch D)
+        // GraphHopParityTest.java: RETIRED at zero in nexus-cbo4a batch D (history: 2026-10-18 seed INSERTs 16 -> 9, vector seeds
+        // 9 -> 6, 2026-10-19 SELECT probes 6 -> 4, setPlannerGuc 4 -> 3, batch 9 setDeleted 3 -> 2, batch C stitchedGraphOracle 2 -> 1;
+        // batch D: the reached-set EXPLAIN is a typed select ordered by nexus_test.cosine_order, explained through
+        // PgContainerHelper.explainPlanWith). No entry: actual count is 0.
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
@@ -972,7 +975,7 @@ class RawSqlGateTest {
         // for FORCE); SharedDatabaseHandle's own copy of the statement moved here, so the total does not move.
         // nexus-cbo4a batch 9: 5 -> 4. The bare CREATE DATABASE is jOOQ createDatabase; the four left are the role RESET loop, CREATE DATABASE ... TEMPLATE,
         // the DDL probe install and DROP DATABASE ... WITH (FORCE), none with a typed jOOQ form.
-        Map.entry("dev/nexus/service/SharedCluster.java", 4),
+        Map.entry("dev/nexus/service/SharedCluster.java", 4)
         // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
         // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
         // changeset SQL, read from the product changelog and executed as the admin role: no string in Java, but
@@ -1003,32 +1006,14 @@ class RawSqlGateTest {
         // (it asserts live_notes/rev_candidates materialize once and live_notes
         // uses idx_catalog_documents_collection_live), and the pg_proc
         // proleakproof probe for texteq and jsonb_object_field_text.
-        // RDR-192 Step 4 (bead nexus-wbfpw.9): 2 raw-SQL sites -- the
-        // EXISTS(chunk_live_owners(...))-filtered KNN query (chunkLiveOwnersFilteredKnn)
-        // and its EXPLAIN (ANALYZE, BUFFERS) twin (explainChunkLiveOwnersFilteredKnn).
-        // Both carry the vector-distance OPERATOR(nexus.<=>) ORDER BY, which has no
-        // jOOQ DSL operator (same reason GraphHopParityTest/
-        // TaxonomyAssignCrossLateralHnswTest use the identical raw-literal-SQL idiom
-        // for their own KNN plan-shape tests). Round-2 rework (T2
-        // nexus/review-wbfpw9-code): file renamed from ChunkIsLiveHnswExplainRecallIntegrationTest.java
-        // when the predicate itself was replaced with a set-returning function; same
-        // 2-site count, unchanged.
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java", 2),
-        // RDR-192 Step 4 round 2 (bead nexus-wbfpw.9, critique T2 nexus/critique-wbfpw9
-        // Critical): 3 raw-SQL sites -- the controlled before/after harness
-        // (runProd/runExact, same text-literal vector binding for both predicates) and
-        // its EXPLAIN (ANALYZE, BUFFERS) twin (explainProd), reproducing nexus-msz9i's
-        // own 76k-chunk/57k-manifest-row/1k-doc fixture shape with a tombstone-fraction
-        // sweep. Same OPERATOR(nexus.<=>)-has-no-jOOQ-DSL-form reason as the sibling
-        // entry above. Round 3 (coordinator instruction: control the recall numbers
-        // with an unfiltered baseline + the shipped predicate's own oracle, and confirm
-        // before/after agree on the live population): 3 -> 5, +2 -- the new
-        // countMatching(String) call site (used for the before/after/no-predicate full-
-        // population live COUNT queries -- one Java call site, three SQL constants) and
-        // the inline current_setting('hnsw.max_scan_tuples') read in the new recall
-        // test (production code never sets this GUC, so its value is read directly to
-        // report it, per the coordinator's explicit request).
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 4) // nexus-cbo4a batch 9: 5 -> 4 (the current_setting read is a select-list DSL.function; the 4 left are runHnsw, runExact, countMatching and explainProd)
+        // ChunkLiveOwnersInlineRecallIntegrationTest.java (2 sites: the live KNN and its EXPLAIN twin) and
+        // ChunkLiveOwnersMsz9iScaleIntegrationTest.java (4: runHnsw, runExact, countMatching, explainProd): RETIRED at zero in
+        // nexus-cbo4a batch D. Both built their KNN from the OPERATOR(nexus.<=>) ORDER BY, which the jOOQ DSL has no operator for.
+        // nexus_test.cosine_order is that operator as a LANGUAGE sql IMMUTABLE function with no SET clause, which Postgres inlines
+        // before it matches the ORDER BY to the HNSW index (NexusTestCosineOrderInliningTest pins the plans, bound and inlined), so
+        // each KNN is one typed Select (chunk_live_owners as an EXISTS over the generated table function, the dead-set anti-join as
+        // typed Conditions, the exact oracle as cosine_order(..) + 0) and the EXPLAINs run that same Select through
+        // PgContainerHelper.explainPlanWith.
         // ChunkLiveOwnersRecallExtendedIntegrationTest.java and ManifestLessCensusNotesGuardIndexPlanShapeTest.java: RETIRED
         // at zero in nexus-cbo4a batch C. The recall test's exact oracle, its EXPLAIN and its live count are typed jOOQ
         // (EXISTS over the generated chunk_live_owners table function, ORDER BY Routines.cosineDistance1(..) + 0, which no
@@ -1630,7 +1615,13 @@ class RawSqlGateTest {
     // CombinedQueryParityTest's three stitched oracles and GraphHopParityTest's recursive one are typed joins and DSL.withRecursive ordered
     // by Routines.cosineDistance1, and their runIds helpers are deleted. TaxonomyAssignCrossLateralHnswTest runs the statement cut from
     // assign_from_chashes_1024's deployed prosrc with the fixture's values substituted as jOOQ-rendered literals (a Java literal holds no SQL).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 17;
+    // nexus-cbo4a 2026-10-20 batch D, 17 -> 10 (6 -> 3 files; GraphHopParityTest, ChunkLiveOwnersInlineRecallIntegrationTest and
+    // ChunkLiveOwnersMsz9iScaleIntegrationTest removed outright, 1 + 2 + 4 sites): new test function nexus_test.cosine_order(nexus.vector,
+    // nexus.vector) RETURNS double precision (db.changelog-test-objects.xml, test-objects-cosine-order; LANGUAGE sql IMMUTABLE, no SET clause)
+    // is the HNSW operator as an inlinable function, so a typed ORDER BY reaches the index (NexusTestCosineOrderInliningTest). The three files'
+    // KNN statements, their EXPLAINs and the Msz9i full-population counts are typed Selects over it, run as a bootstrapServiceRole role
+    // (nexus_svc holds no USAGE on nexus_test); the EXPLAINs go through PgContainerHelper.explainPlanWith.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 10;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

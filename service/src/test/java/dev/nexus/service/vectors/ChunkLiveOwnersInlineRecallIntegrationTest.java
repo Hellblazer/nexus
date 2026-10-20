@@ -8,13 +8,15 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
-import org.jooq.Query;
-import org.jooq.Record;
-import org.jooq.Result;
+import org.jooq.Field;
+import org.jooq.Record1;
 import org.jooq.SQLDialect;
+import org.jooq.Select;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -34,6 +36,8 @@ import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -75,8 +79,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * exactly the class of chunk {@code nexus.chunk_live_owners} exists to
  * exclude.
  *
- * <p><b>Recall methodology (avoids needing an independent raw-SQL oracle
- * query, so this file's raw-SQL footprint stays small):</b> {@code
+ * <p><b>Recall methodology (avoids needing an independent oracle
+ * query):</b> {@code
  * nexus.plain_search_384} (today's shipped predicate) at {@code LIMIT
  * K+noise_count} on the FULL corpus (live + noise) gives every noise chunk
  * plus the true top-K live chunks in one call -- every noise chunk is
@@ -84,7 +88,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * guard, Gap 1 item 1) and guaranteed close (exact text match), so removing
  * ALL known noise chashes from that superset leaves exactly the live-only
  * oracle top-K. {@code plain_search_384} at {@code LIMIT K=10} (today's
- * actual production shape) is "before"; the raw {@code EXISTS(SELECT 1 FROM
+ * actual production shape) is "before"; the typed {@code EXISTS(SELECT 1 FROM
  * nexus.chunk_live_owners(...))}-filtered KNN at {@code LIMIT K=10} is
  * "after". Recall@10 is measured against that oracle for both.
  *
@@ -103,6 +107,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ChunkLiveOwnersInlineRecallIntegrationTest {
 
     private static final String TENANT = "chunkliveowners-explain";
+    /** A bootstrapServiceRole role, not nexus_svc: only it holds USAGE on nexus_test, home of cosine_order. */
+    private static final String SVC_ROLE = "svc_clo_inline_recall";
+    private static final String SVC_PASS = "svc_clo_inline_recall_pass";
     private static final String COLLECTION = "knowledge__chunkliveowners__minilm-l6-v2-384__v1";
 
     private static final int LIVE_COUNT =
@@ -139,10 +146,13 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+        }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername("nexus_svc");
-        cfg.setPassword("nexus_svc_pass");
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(6);
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
@@ -239,15 +249,6 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         return queryRouter.embedOneForCollection(tenantScope, TENANT, COLLECTION, text);
     }
 
-    private static String vectorLiteral(float[] v) {
-        StringBuilder sb = new StringBuilder(v.length * 8 + 2).append('[');
-        for (int i = 0; i < v.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(v[i]);
-        }
-        return sb.append(']').toString();
-    }
-
     /** "before": today's shipped predicate, {@code nexus.plain_search_384}, via the
      *  generated typed table function -- not raw SQL, native Vector binding. */
     private List<String> plainSearch384(float[] vec, int n) {
@@ -258,34 +259,36 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
     }
 
     /**
-     * "after": a raw KNN query with {@code EXISTS (SELECT 1 FROM
-     * nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))} in the
-     * WHERE clause -- Step 5's not-yet-wired shape, gathered here purely as
-     * evidence (this bead does not migrate any production call site).
-     * SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET): no typed-DSL vector
-     * KNN form exists in this codebase's test conventions (every sibling KNN
-     * plan-shape test -- GraphHopParityTest, TaxonomyAssignCrossLateralHnswTest
-     * -- uses the identical raw-literal-SQL idiom for the same reason: the
-     * {@code OPERATOR(nexus.<=>)} vector-distance ORDER BY has no jOOQ DSL
-     * operator).
+     * "after": the KNN query with {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id,
+     * c.collection, c.chash))} in the WHERE clause -- Step 5's wired shape, gathered here as evidence. Typed jOOQ
+     * (nexus-cbo4a batch D): the ORDER BY is {@code nexus_test.cosine_order(embedding_384, v)}, a LANGUAGE sql
+     * function whose body is the {@code OPERATOR(nexus.<=>)} distance, which Postgres inlines before it matches
+     * the ORDER BY to the HNSW index (NexusTestCosineOrderInliningTest pins that, bound and inlined).
      */
     private List<String> chunkLiveOwnersFilteredKnn(String collection, float[] vec, int n) {
         return knn(collection, vec, n, true);
     }
 
     private List<String> knn(String collection, float[] vec, int n, boolean liveOnly) {
-        Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> ctx.fetch(
-            "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
-            + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-            + (liveOnly
-                ? " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
-                : "")
-            + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
-            + " LIMIT ?",
-            collection, vectorLiteral(vec), n));
-        List<String> ids = new ArrayList<>(rows.size());
-        for (var rec : rows) ids.add(rec.get(0, String.class));
-        return ids;
+        return tenantScope.withTenant(TENANT, ctx -> knnQuery(ctx, collection, vec, n, liveOnly)
+            .fetch(r -> HexFormat.of().formatHex(r.value1())));
+    }
+
+    /** The one KNN statement every site below runs or explains: the chunk hashes nearest {@code vec}, nearest first. */
+    private static Select<Record1<byte[]>> knnQuery(DSLContext ctx, String collection, float[] vec, int n,
+                                                    boolean liveOnly) {
+        Condition where = CHUNKS.COLLECTION.eq(collection).and(CHUNKS.EMBEDDING_384.isNotNull());
+        if (liveOnly) {
+            where = where.and(DSL.exists(DSL.selectOne()
+                .from(CHUNK_LIVE_OWNERS.call(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH))));
+        }
+        return ctx.select(CHUNKS.CHASH).from(CHUNKS).where(where).orderBy(cosineOrder(vec).asc()).limit(n);
+    }
+
+    /** {@code nexus_test.cosine_order(embedding_384, vec)}; the vector binds through the generated VectorBinding. */
+    private static Field<Double> cosineOrder(float[] vec) {
+        return DSL.function(DSL.name("nexus_test", "cosine_order"), SQLDataType.DOUBLE, CHUNKS.EMBEDDING_384,
+            DSL.val(Vector.of(vec), CHUNKS.EMBEDDING_384.getDataType()));
     }
 
     /** {@link #chunkLiveOwnersFilteredKnn} without any liveness predicate: the
@@ -296,22 +299,11 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         return knn(collection, vec, n, false);
     }
 
-    /** EXPLAIN (ANALYZE, BUFFERS) twin of {@link #chunkLiveOwnersFilteredKnn} --
-     *  same statement body, ANALYZE-prefixed. SANCTIONED RAW (nexus-wbfpw.9,
-     *  TEST-TREE RATCHET). */
+    /** EXPLAIN (ANALYZE, BUFFERS) twin of {@link #chunkLiveOwnersFilteredKnn}: the SAME typed {@link #knnQuery}
+     *  object, explained through {@code nexus_test.explain_plan} (binds rendered inline, every plan row). */
     private String explainChunkLiveOwnersFilteredKnn(String collection, float[] vec, int n) {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            Result<Record> rows = ctx.fetch(
-                "EXPLAIN (ANALYZE, BUFFERS) SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
-                + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-                + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
-                + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
-                + " LIMIT ?",
-                collection, vectorLiteral(vec), n);
-            List<String> lines = new ArrayList<>();
-            for (var rec : rows) lines.add(rec.get(0, String.class));
-            return String.join("\n", lines);
-        });
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
+            knnQuery(ctx, collection, vec, n, true), PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
     }
 
     /** The live-only oracle top-{@link #K}: an UNFILTERED KNN at LIMIT K + the
@@ -439,16 +431,17 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
     /**
      * Reported for completeness on this fixture, but this is NOT the controlled
      * before/after comparison the bead's acceptance criteria asks for: {@link
-     * #plainSearch384} uses the typed jOOQ table-function call (native {@code
-     * Vector} binding) while {@link #chunkLiveOwnersFilteredKnn} is raw SQL
-     * with a text-literal vector cast -- two different serialization paths, an
-     * uncontrolled confound (T2 nexus/review-wbfpw9-code, Important-1). The
-     * genuinely controlled comparison (same raw-SQL harness, same text-literal
-     * binding, only the predicate differs) is
-     * ChunkLiveOwnersMsz9iScaleIntegrationTest's own latency sweep.
+     * #plainSearch384} is a call of the generated table function while {@link
+     * #chunkLiveOwnersFilteredKnn} is an inline typed select -- two different
+     * statement shapes, an uncontrolled confound (T2 nexus/review-wbfpw9-code,
+     * Important-1). Since nexus-cbo4a batch D both bind the vector through the
+     * generated VectorBinding; before it, the inline form bound a text literal
+     * with a hand-written cast, a second confound that is gone. The genuinely
+     * controlled comparison (same harness, same binding, only the predicate
+     * differs) is ChunkLiveOwnersMsz9iScaleIntegrationTest's own latency sweep.
      */
     @Test
-    void latency_p50_beforeAndAfter_reported_uncontrolledBindingCaveat() throws Exception {
+    void latency_p50_beforeAndAfter_reported_uncontrolledStatementShape() throws Exception {
         for (String q : queries) {
             float[] vec = embedQuery(q);
             plainSearch384(vec, K);
@@ -474,9 +467,9 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         long p50Before = p50(beforeMs);
         long p50After = p50(afterMs);
 
-        System.out.println("[nexus-wbfpw.9 LATENCY, small fixture, UNCONTROLLED BINDING] samples="
-            + beforeMs.size() + " plain_search_384(native-binding).p50=" + p50Before
-            + "ms chunk_live_owners(text-literal-binding).p50=" + p50After + "ms"
+        System.out.println("[nexus-wbfpw.9 LATENCY, small fixture, UNCONTROLLED STATEMENT SHAPE] samples="
+            + beforeMs.size() + " plain_search_384(table-function call).p50=" + p50Before
+            + "ms chunk_live_owners(inline select).p50=" + p50After + "ms"
             + " (fixture: " + (LIVE_COUNT + QUERY_COUNT) + " chunks, one collection)");
 
         // No hard bound asserted here -- evidence for the close note, not a regression

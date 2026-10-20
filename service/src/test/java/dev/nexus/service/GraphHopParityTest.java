@@ -10,17 +10,16 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
 import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
-import dev.nexus.service.vectors.DimTables;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
+import org.jooq.Query;
 import org.jooq.SQLDialect;
 import org.jooq.impl.SQLDataType;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
@@ -582,29 +581,35 @@ class GraphHopParityTest {
         // real function call at corpus scale — that recall/latency gate is conexus
         // xr7.8.9 / nexus-0zcn9, deferred per the houg9 audit. The disabled GUCs force
         // reachability, not representativeness.
-        String inner =
-            "SELECT d.tumbler " +
-            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
-            "  JOIN nexus.catalog_documents d " +
-            "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
-            "  JOIN (SELECT DISTINCT to_tumbler AS tumbler FROM nexus.catalog_links " +
-            "         WHERE from_tumbler = 'exseed' AND link_type = 'cites') rd " +
-            "    ON rd.tumbler = d.tumbler " +
-            // RDR-225: a literal tenant and model prune the plan to the one model/tenant leaf the
-            // fixture lives in, as the engine's own call does (it always knows both).
-            " WHERE c.tenant_id = '" + TENANT_A + "' AND c.embedding_model = 'voyage-context-3'" +
-            " AND c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
-            // RDR-191 repoint (nexus-o8dil.16/.48, Step G cluster-B triage): the unified
-            // nexus.chunks table carries three nullable embedding_384/768/1024 columns,
-            // not one bare `embedding` column - this test's own hand-rolled probe SQL
-            // (not production code; DimTables.CHUNKS_TABLE_NAME above already targets the
-            // unified table) was never updated post-repoint, so `c.embedding` no longer
-            // resolves (PSQLException: column c.embedding does not exist). The assertion
-            // below already targets idx_chunks_embedding_1024, so name that dim's column.
-            " ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) " + queryVecLiteral(1024) + " LIMIT 10";
-        String plan = explain(inner);
+        // The same shape as the SQL it replaces: chunks c JOIN manifest m JOIN documents d JOIN (the reached set,
+        // SELECT DISTINCT to_tumbler FROM catalog_links WHERE from = exseed AND type = cites) rd, rank by the HNSW
+        // operator, LIMIT 10. nexus_test.cosine_order is that operator as an inlinable function
+        // (NexusTestCosineOrderInliningTest). explainPlanWith renders every bind as a literal, so the tenant, model,
+        // collection and probe vector are plan-time constants exactly as the old text wrote them.
+        // RDR-225: a literal tenant and model prune the plan to the one model/tenant leaf the
+        // fixture lives in, as the engine's own call does (it always knows both).
+        var rd = DSL.selectDistinct(CATALOG_LINKS.TO_TUMBLER.as("tumbler"))
+            .from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.FROM_TUMBLER.eq("exseed").and(CATALOG_LINKS.LINK_TYPE.eq("cites")))
+            .asTable("rd");
+        String plan = explain(ctx -> ctx.select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CHUNKS)
+            .join(CATALOG_DOCUMENT_CHUNKS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(CHUNKS.COLLECTION))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH)))
+            .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+            .join(rd).on(rd.field("tumbler", String.class).eq(CATALOG_DOCUMENTS.TUMBLER))
+            .where(CHUNKS.TENANT_ID.eq(TENANT_A))
+            .and(CHUNKS.EMBEDDING_MODEL.eq("voyage-context-3"))
+            .and(CHUNKS.COLLECTION.eq(COLL_EXPLAIN))
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+            // RDR-191 repoint: the unified nexus.chunks table carries three nullable embedding_384/768/1024
+            // columns, so rank by the 1024 one, the dim the fixture lives in and the index asserted below.
+            .orderBy(DSL.function(DSL.name("nexus_test", "cosine_order"), SQLDataType.DOUBLE,
+                CHUNKS.EMBEDDING_1024,
+                DSL.val(VectorSeeds.vecXY(1024, 1f, 0f), CHUNKS.EMBEDDING_1024.getDataType())).asc())
+            .limit(10));
         assertThat(plan)
             .as("materialize-reached-then-rank must use the HNSW index "
                 + "idx_chunks_embedding_1024 (rank OUTSIDE the recursive CTE keeps the "
@@ -653,17 +658,21 @@ class GraphHopParityTest {
             .select(fn.field("id", String.class)).from(fn).fetch(r -> r.get(0, String.class));
     }
 
-    private String explain(String inner) throws Exception {
+    /**
+     * The plan of {@code query}, as raw lines (not {@code PgContainerHelper.explainPlan}, whose jOOQ table is
+     * '|'-bordered, nexus-ou2za), with the planner steered to reach the index: sequential and bitmap scans, sorts and
+     * hash joins off for the session. Runs as the superuser the fixture was built with.
+     */
+    private String explain(java.util.function.Function<DSLContext, Query> query) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
                 PgContainerHelper.setPlannerGuc(su, guc, "off", false);
             }
-            ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner);
-            StringBuilder sb = new StringBuilder();
-            while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            return sb.toString();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return PgContainerHelper.explainPlanWith(ctx, query.apply(ctx),
+                new PgContainerHelper.ExplainOptions(false, false, false, true)) + "\n";
         }
     }
 
@@ -813,22 +822,6 @@ class GraphHopParityTest {
     }
 
     // ── value helpers ────────────────────────────────────────────────────────
-
-    private static String queryVecLiteral(int dim) {
-        return vec2(dim, 1.0, 0.0) + "::nexus.vector";
-    }
-
-    private static String vec2(int dim, double x, double y) {
-        StringBuilder sb = new StringBuilder("'[");
-        sb.append(fmt(x)).append(',').append(fmt(y));
-        for (int i = 2; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
-    }
-
-    private static String fmt(double v) {
-        if (v == Math.rint(v)) return Integer.toString((int) v);
-        return Double.toString(v);
-    }
 
     /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the
      *  full sha256 digest is the canonical chash — the pre-flip [:32] truncation is
