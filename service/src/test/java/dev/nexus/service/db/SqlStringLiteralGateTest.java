@@ -42,7 +42,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SqlStringLiteralGateTest {
 
-    /** A plain or quoted identifier part, quoted as {@code "x"} in a text block or {@code \"x\"} in a string. */
     /** An identifier part: plain, or quoted as {@code "x"} in a text block or {@code \\"x\\"} in a string. */
     private static final String PART = "(?:\\\\?\"[^\"\\\\]*+\\\\?\"|[A-Za-z_][\\w$]*+)";
     /**
@@ -56,13 +55,14 @@ class SqlStringLiteralGateTest {
         "\\(?\\s*SELECT\\s+(?:\\S|$)",
         "(?:INSERT|MERGE)\\s+INTO\\s",
         "VALUES\\s*\\(",
-        "UPDATE\\s+(?:$|(?:ONLY\\s+)?" + ID + "\\s+(?:(?:AS\\s+)?[A-Za-z_]\\w*+\\s+)?SET\\s)",
+        "UPDATE\\s+(?:$|(?:ONLY\\s+)?" + ID + "(?:\\s*$|\\s+(?:(?:AS\\s+)?[A-Za-z_]\\w*+\\s+)?SET\\s))",
         "DELETE\\s+FROM\\s",
         "WITH\\s+(?:RECURSIVE\\s+)?" + ID + "(?:\\s*\\([^)]*+\\))?\\s+AS\\s*(?:(?:NOT\\s+)?MATERIALIZED\\s*)?\\(",
         // create or drop an object, also split right after the object word
         "(?:CREATE|DROP)\\s+(?:OR\\s+REPLACE\\s+)?(?:UNIQUE\\s+|TEMP(?:ORARY)?\\s+|UNLOGGED\\s+|MATERIALIZED\\s+)?(?:TABLE|INDEX|VIEW|FUNCTION|PROCEDURE|ROLE|USER|SCHEMA|EXTENSION|POLICY|TRIGGER|EVENT\\s+TRIGGER|RULE|SEQUENCE|TYPE|DATABASE|PUBLICATION|DOMAIN|AGGREGATE|OPERATOR|SERVER|STATISTICS|COLLATION|CAST|OWNED)\\s+(?:\\S|$)",
-        // alter needs an object name and a sub-verb, so "ALTER TABLE on chunks" prose does not match
-        "ALTER\\s+(?:DEFAULT\\s+PRIVILEGES\\s|SYSTEM\\s|(?:MATERIALIZED\\s+)?(?:TABLE|INDEX|VIEW|FUNCTION|PROCEDURE|ROLE|USER|SCHEMA|EXTENSION|POLICY|TRIGGER|EVENT\\s+TRIGGER|RULE|SEQUENCE|TYPE|DATABASE|PUBLICATION|DOMAIN|AGGREGATE|OPERATOR|SERVER|STATISTICS|COLLATION|CAST)\\s+(?:$|(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?" + ID + "(?:\\s*\\([^)]*+\\))?\\s+(?:ADD|DROP|ALTER|RENAME|SET|RESET|OWNER|ENABLE|DISABLE|FORCE|NO|ATTACH|DETACH|VALIDATE|INHERIT|NOINHERIT|CLUSTER|REPLICA|OF|NOT|WITH|IN|DEPENDS|REFRESH|CONNECTION|USING|OPTIONS|SUPERUSER|NOSUPERUSER|LOGIN|NOLOGIN|CREATEROLE|NOCREATEROLE|CREATEDB|NOCREATEDB|PASSWORD|BYPASSRLS|NOBYPASSRLS|VALID|UPDATE|ON|ALL|SECURITY|STABLE|IMMUTABLE|VOLATILE|STRICT|CALLED|COST|ROWS|PARALLEL|LEAKPROOF|NOT|RETURNS|TO)\\b))",
+        // alter needs an object name, then a sub-verb or the end of the literal, so "ALTER TABLE on chunks" prose
+        // does not match
+        "ALTER\\s+(?:DEFAULT\\s+PRIVILEGES\\s|SYSTEM\\s|(?:MATERIALIZED\\s+)?(?:TABLE|INDEX|VIEW|FUNCTION|PROCEDURE|ROLE|USER|SCHEMA|EXTENSION|POLICY|TRIGGER|EVENT\\s+TRIGGER|RULE|SEQUENCE|TYPE|DATABASE|PUBLICATION|DOMAIN|AGGREGATE|OPERATOR|SERVER|STATISTICS|COLLATION|CAST)\\s+(?:$|(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?" + ID + "(?:\\s*\\([^)]*+\\))?(?:\\s*$|\\s+(?:ADD|DROP|ALTER|RENAME|SET|RESET|OWNER|ENABLE|DISABLE|FORCE|NO|ATTACH|DETACH|VALIDATE|INHERIT|NOINHERIT|CLUSTER|REPLICA|OF|NOT|WITH|IN|DEPENDS|REFRESH|CONNECTION|USING|OPTIONS|SUPERUSER|NOSUPERUSER|LOGIN|NOLOGIN|CREATEROLE|NOCREATEROLE|CREATEDB|NOCREATEDB|PASSWORD|BYPASSRLS|NOBYPASSRLS|VALID|UPDATE|ON|ALL|SECURITY|STABLE|IMMUTABLE|VOLATILE|STRICT|CALLED|COST|ROWS|PARALLEL|LEAKPROOF|NOT|RETURNS|TO)\\b)))",
         "(?:GRANT|REVOKE)\\s++[\\w,\\s]*?\\s(?:ON|TO|FROM)\\s",
         "SET\\s+(?:(?:LOCAL|SESSION)\\s+(?:\\S|$)|ROLE\\s|TRANSACTION\\s|CONSTRAINTS\\s+(?:ALL\\b|" + ID + ")|[a-z_][\\w.]*+\\s*(?:=|TO\\s))",
         "RESET\\s+(?:ROLE|ALL|[a-z_][\\w.]*+)\\s*;?\\s*$",
@@ -73,7 +73,7 @@ class SqlStringLiteralGateTest {
         "REINDEX\\s+(?:\\([^)]*+\\)\\s*)?(?:INDEX|TABLE|SCHEMA|DATABASE|SYSTEM)\\b",
         "TRUNCATE\\s+(?:TABLE\\s+)?(?:$|(?:ONLY\\s+)?" + ID + "\\s*(?:[,;]|CASCADE\\b|RESTRICT\\b|RESTART\\b|CONTINUE\\b|$))",
         "DO\\s+[$']",
-        "COPY\\s+(?:\\(|" + ID + "(?:\\s*\\([^)]*+\\))?\\s+(?:FROM|TO)\\b)",
+        "COPY\\s+(?:\\(|" + ID + "(?:\\s*\\([^)]*+\\))?(?:\\s*$|\\s+(?:FROM|TO)\\b))",
         "LOCK\\s+(?:TABLE\\s+)?(?:$|(?:ONLY\\s+)?" + ID + "\\s*(?:IN\\b|NOWAIT\\b|[,;]|$))",
         "CALL\\s+" + ID + "\\s*\\(",
         "REFRESH\\s+MATERIALIZED\\s+VIEW\\s",
@@ -139,11 +139,11 @@ class SqlStringLiteralGateTest {
         // a pattern matched against changelog text
         Map.entry("dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java", 1),
         // expected substrings of the trigger function bodies
-        Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 2),
+        Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 3),
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 66;
+    private static final int TEXT_TOTAL = 67;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
@@ -433,9 +433,20 @@ class SqlStringLiteralGateTest {
                 NOTIFY nexus_events
                 CHECKPOINT
                 -- a leading comment\\nDROP INDEX i
+                ALTER TABLE nexus.
+                ALTER TABLE nexus.chunks\s
+                ALTER ROLE r\s
+                ALTER MATERIALIZED VIEW nexus.v OWNER TO r
+                UPDATE nexus.
+                COPY nexus.t\s
+                COMMIT AND CHAIN
+                ROLLBACK PREPARED 'x'
+                END;
+                ABORT;
+                UNLISTEN nexus_events
                 /* c */ ALTER TABLE a ADD COLUMN b int
                 """))
-            .hasSize(62)
+            .hasSize(73)
             .allMatch(SqlStringLiteralGateTest::isStatement);
         assertThat(fixtureLines("""
                 prose:
