@@ -673,7 +673,7 @@ BEGIN
         RAISE EXCEPTION 'nexus_test.explain_plan: no argument may be NULL';
     END IF;
     FOR v_line IN EXECUTE format('EXPLAIN (ANALYZE %s, VERBOSE %s, BUFFERS %s, COSTS %s) %s',
-                                 p_analyze, p_verbose, p_buffers, p_costs, p_stmt)
+                                 p_analyze::text, p_verbose::text, p_buffers::text, p_costs::text, p_stmt)
     LOOP
         RETURN NEXT v_line;
     END LOOP;
