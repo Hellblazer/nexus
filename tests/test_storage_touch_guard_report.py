@@ -540,6 +540,40 @@ def test_spawns_nothing():
     assert (c["touched_unprovisioned"], c["provisioned"], c["touch_events"]) == (1, 1, 4)
 
 
+def test_a_child_that_runs_its_own_pytest_is_attributed_to_the_test_that_spawned_it(pytester, monkeypatch) -> None:
+    """A nested pytest in the child rewrites PYTEST_CURRENT_TEST to its own test id. The
+    shim reads the variable the child started with, so the touch belongs to the spawner
+    and is not filed as a late touch of a same-named outer test (nexus-kt6kj census)."""
+    pytester.makepyfile(nested_child_helpers='''
+import subprocess, sys
+
+CODE = (
+    "import os\\n"
+    "os.environ['PYTEST_CURRENT_TEST'] = 'test_case.py::test_finished_long_ago (call)'\\n"
+    "from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\\n"
+    "E('child')\\n"
+)
+
+def run_child():
+    subprocess.run([sys.executable, "-c", CODE], check=True, timeout=120)
+''')
+    result = _run(pytester, monkeypatch, '''
+from nested_child_helpers import run_child
+
+def test_finished_long_ago():
+    pass
+
+def test_spawns_a_nested_session():
+    run_child()
+''', mode="report")
+    result.assert_outcomes(passed=2)
+    report = _report(result)
+    assert report["late_child_touches"] == [], report["late_child_touches"]
+    (finding,) = report["findings"]
+    assert finding["nodeid"].endswith("test_spawns_a_nested_session")
+    assert {t["source"] for t in finding["touches"]} == {"child"}
+
+
 def test_the_child_shim_is_on_pythonpath_only_while_an_optin_session_runs(pytester, monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", "/outer/path")
     monkeypatch.delenv(CHILD_LOG_ENV, raising=False)

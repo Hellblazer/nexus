@@ -65,6 +65,10 @@ _PEEK_HELPER_FILES = ("db/service_endpoint.py", "db/http_vector_client.py", "con
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _HERE_REAL = os.path.realpath(_HERE)
+#: The test that was running when this process started. Read once here: a child that
+#: runs its own pytest rewrites PYTEST_CURRENT_TEST to ITS test ids, which the parent
+#: would file as late touches of same-named tests of its own (nexus-kt6kj).
+_SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
 _real: dict[str, str] = {}  # filename -> realpath; a peek can fire thousands of times
 
 
@@ -98,7 +102,7 @@ def _base(kind: str) -> dict:
     return {
         "k": kind,
         "pid": os.getpid(),
-        "current_test": os.environ.get("PYTEST_CURRENT_TEST", ""),
+        "current_test": _SPAWNING_TEST,
         "argv0": sys.argv[0] if sys.argv else "",
     }
 
@@ -278,7 +282,7 @@ def _install() -> None:
             _patch(module)
     sys.meta_path.insert(0, _TouchFinder())
     atexit.register(_flush)
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if _SPAWNING_TEST:
         _append(_base("child_start"))
 
 
