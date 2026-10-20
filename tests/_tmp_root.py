@@ -510,7 +510,8 @@ def copy_failure_evidence(
     write ``SUMMARY.txt`` there, and return its note lines. Never raises.
 
     In order, until *cap* bytes: the engine logs and the cluster-root log from the run's
-    ``TMPDIR`` (``nexus-svc-*``, ``nexus-pg-roots-*``), then the ``tmp_path``
+    ``TMPDIR`` (``nexus-svc-*``, ``nexus-pg-roots-*``), up to half of *cap* so a wide run's
+    logs cannot crowd out the failing tests' own directories (nexus-ww33u), then the ``tmp_path``
     directories of the failed tests (:func:`failed_tmp_dirs`). The fenced home
     (``nx-suite-home-*``) is copied, uncapped, only when *keep_fenced_home* says the
     operator asked for it (``NX_KEEP_FENCED_HOME``). A crashing engine's hs_err report
@@ -518,11 +519,12 @@ def copy_failure_evidence(
     notes: list[str] = []
     used = 0
 
-    def take(src: Path, rel: Path, *, capped: bool = True) -> None:
+    def take(src: Path, rel: Path, *, capped: bool = True, limit: int | None = None) -> None:
         nonlocal used
         size = _size_of(src)
-        if capped and used + size > cap:
-            notes.append(f"skipped {rel} ({size // 1024} KiB): over the {cap // 1024**2} MiB cap")
+        bound = cap if limit is None else limit
+        if capped and used + size > bound:
+            notes.append(f"skipped {rel} ({size // 1024} KiB): over the {bound // 1024**2} MiB cap")
             return
         target = dest / rel
         try:
@@ -541,7 +543,7 @@ def copy_failure_evidence(
         for pattern in _ENGINE_EVIDENCE_GLOBS:
             for src in sorted((run / "t").glob(pattern)):
                 if not src.is_symlink():
-                    take(src, Path("engine-logs") / src.name)
+                    take(src, Path("engine-logs") / src.name, limit=cap // 2)
     try:
         for src in failed_tmp_dirs(run / "p", nodeids):
             take(src, Path("tmp_path") / src.relative_to(run / "p"))

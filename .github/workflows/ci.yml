@@ -1015,6 +1015,8 @@ jobs:
           path: ${{ runner.temp }}/tmp/nexus-test-reports-*/*/failed
           retention-days: 7
           if-no-files-found: ignore
+          # A re-run of all jobs keeps the first attempt's artifacts under the same names.
+          overwrite: true
 
       - name: Remove the bytecode prefix (pool only; nexus-m643n)
         # Last step, if: always(): the /dev/shm pages are charged to this job's

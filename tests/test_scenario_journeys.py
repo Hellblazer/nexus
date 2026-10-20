@@ -154,7 +154,7 @@ def _engine_log_on_failure(request: pytest.FixtureRequest):
             f"could not reach the engine substrate to tail engine.log: {exc}",
         )
         return
-    log_path = os.path.join(state["pgdata"], "engine.log")
+    log_path = state.get("engine_log") or os.path.join(state["pgdata"], "engine.log")
     try:
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()

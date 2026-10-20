@@ -840,6 +840,17 @@ class TestFailureEvidence:
         assert any("skipped" in n and "test_serial_failure0" in n and "cap" in n for n in notes)
         assert "skipped" in (dest / tr.FAILURE_SUMMARY_FILE).read_text()
 
+    def test_engine_logs_get_half_the_cap_so_a_failed_tests_dir_still_fits(self, tmp_path) -> None:
+        """nexus-ww33u: a wide run's kept logs must not crowd out the failing test's own tmp_path."""
+        run = _run_tree(tmp_path)
+        (run / "t" / "nexus-svc-logs-1").mkdir()
+        (run / "t" / "nexus-svc-logs-1" / "engine.log").write_bytes(b"0" * 3000)
+        dest = tmp_path / "out" / "failed"
+        notes = tr.copy_failure_evidence(run, dest, _FAILED, exitstatus=1, cap=4096)
+        assert not (dest / "engine-logs" / "nexus-svc-logs-1").exists(), "over half the cap"
+        assert any("nexus-svc-logs-1" in n and "skipped" in n for n in notes)
+        assert (dest / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_serial_failure0").is_dir()
+
     def test_a_socket_in_a_failed_dir_does_not_stop_the_copy(self, tmp_path, monkeypatch) -> None:
         import socket
 
@@ -1375,3 +1386,52 @@ def test_teardown_keeps_the_logs_before_it_removes_pgdata(tmp_path, monkeypatch)
     assert not Path(state["pgdata"]).exists()
     assert (keep / f"nexus-svc-logs-{os.getpid()}" / "pg.log").read_text() == "pg says"
     assert sub._state is None
+
+
+def test_preserve_logs_leaves_an_engine_log_already_written_in_place(tmp_path, monkeypatch) -> None:
+    """In a tmpfs run the engine logs straight into the keep dir; preserve copies pg.log beside it only."""
+    keep = tmp_path / "run-t"
+    dest = keep / f"nexus-svc-logs-{os.getpid()}"
+    dest.mkdir(parents=True)
+    (dest / "engine.log").write_text("written in place, all of it")
+    state = _fake_substrate(tmp_path, keep) | {"engine_log": str(dest / "engine.log")}
+    monkeypatch.setattr(sub, "_state", state)
+    monkeypatch.setattr(sub, "_LOG_KEEP_TAIL_BYTES", 3)
+    assert sub.preserve_logs() == dest
+    assert (dest / "engine.log").read_text() == "written in place, all of it"
+    assert (dest / "pg.log").read_text() == "ays"
+
+
+def test_the_sweep_keeps_a_killed_workers_cluster_logs_before_it_reaps_them(tmp_path, monkeypatch) -> None:
+    """A SIGKILLed worker never runs its teardown; the next boot's sweep keeps the dead cluster's log
+    tails in this run's TMPDIR before removing it (nexus-ww33u)."""
+    keep = tmp_path / "run-t"
+    keep.mkdir()
+    cluster = tmp_path / "nexus_t2_substrate_pg_dead"
+    cluster.mkdir()
+    (cluster / "pg.log").write_text("FATAL: out of memory")
+    monkeypatch.setattr(sub, "_log_keep_dir", lambda: str(keep))
+    sub._keep_swept_cluster_logs(cluster)
+    assert (keep / "nexus-svc-logs-swept-nexus_t2_substrate_pg_dead" / "pg.log").read_text() == "FATAL: out of memory"
+    monkeypatch.setattr(sub, "_log_keep_dir", lambda: None)
+    sub._keep_swept_cluster_logs(cluster)  # outside a tmpfs run: nothing, no error
+    assert len(list(keep.iterdir())) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake pg_ctl is a POSIX shell script")
+def test_a_failing_log_keep_never_leaks_the_cluster(tmp_path, monkeypatch) -> None:
+    state = _fake_substrate(tmp_path, None)
+    pg_bin = tmp_path / "bin"
+    pg_bin.mkdir()
+    (pg_bin / "pg_ctl").write_text("#!/bin/sh\nexit 0\n")
+    (pg_bin / "pg_ctl").chmod(0o755)
+    state |= {"pg_bin": pg_bin, "svc": object()}
+    monkeypatch.setattr(sub, "_state", state)
+    monkeypatch.setattr(sub, "stop_group", lambda *_a, **_k: None)
+
+    def boom() -> None:
+        raise RuntimeError("not an OSError")
+
+    monkeypatch.setattr(sub, "preserve_logs", boom)
+    sub._teardown()
+    assert not Path(state["pgdata"]).exists() and sub._state is None

@@ -172,11 +172,14 @@ _TMPFS_DIR_PREFIX = "nexus-test-pg"
 #: run's private directory).
 _TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
 
-#: A substrate's engine.log and pg.log live in its pgdata, outside the run's TMPDIR, and its atexit
-#: teardown deletes pgdata; in an xdist worker that is before the controller copies a failed run's
-#: evidence, so the logs were never kept (nexus-ww33u). Inside a tmpfs test run (tests/_tmp_root.py)
-#: :func:`preserve_logs` first copies each log's tail to ``<run TMPDIR>/nexus-svc-logs-<pid>``, where
-#: the failed-run copy finds it (its ``nexus-svc-*`` glob); the run directory goes with the run.
+#: A substrate's logs were in its pgdata, outside the run's TMPDIR, and its atexit teardown deletes
+#: pgdata; in an xdist worker that is before the controller copies a failed run's evidence, and a
+#: killed worker never runs atexit at all, so no failed run kept them (nexus-ww33u). Inside a tmpfs
+#: test run (tests/_tmp_root.py) the engine therefore writes its log straight into
+#: ``<run TMPDIR>/nexus-svc-logs-<pid>/engine.log`` (a kill cannot lose it), and pg.log, which the DDL
+#: counter reads from pgdata, has its tail copied there by the teardown and, for a killed worker's
+#: cluster, by the next boot's sweep (``nexus-svc-logs-swept-<cluster>``). The failed-run copy finds
+#: both through its ``nexus-svc-*`` glob; the run directory goes with the run.
 _LOG_KEEP_PREFIX = "nexus-svc-logs-"
 _LOG_KEEP_TAIL_BYTES = 4 * 1024**2
 
@@ -2161,7 +2164,15 @@ def _boot() -> dict:
     # total engine wedge. Evidence: jstack pin in FileOutputStream.writeBytes
     # from TokenStore.issueToken's log.info; draining exactly the pipe's
     # 65,702 buffered bytes instantly unwedged the next mint.
+    log_keep_dir = _log_keep_dir()
     svc_log_path = os.path.join(pgdata, "engine.log")
+    if log_keep_dir is not None:
+        # nexus-ww33u: in a tmpfs run the engine logs into the run's TMPDIR, where a killed worker's
+        # log survives for the failed-run copy (see _LOG_KEEP_PREFIX).
+        engine_log_dir = Path(log_keep_dir) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+        with contextlib.suppress(OSError):
+            engine_log_dir.mkdir(mode=0o700, exist_ok=True)
+            svc_log_path = str(engine_log_dir / "engine.log")
     for engine_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
         svc_port = _free_port()
         spawn_env = {**env, "NX_SERVICE_PORT": str(svc_port)}
@@ -2240,7 +2251,8 @@ def _boot() -> dict:
         # test that spawns its own engine can hand it the same models (nexus-o5xyx.2).
         "onnx_root": str(onnx_root) if onnx_root is not None else None,
         "svc": svc,
-        "log_keep_dir": _log_keep_dir(),
+        "log_keep_dir": log_keep_dir,
+        "engine_log": svc_log_path,
     }
     atexit.register(_teardown)
     return state
@@ -2256,20 +2268,13 @@ def _log_keep_dir() -> str | None:
     return tmp if tmp and os.path.isdir(tmp) else None
 
 
-def preserve_logs() -> Path | None:
-    """Copy the live substrate's engine.log and pg.log (the last :data:`_LOG_KEEP_TAIL_BYTES` of each)
-    to ``<run TMPDIR>/nexus-svc-logs-<pid>``; returns that directory, or None when no substrate is
-    up, no tmpfs run is active or the copy failed. Never raises (nexus-ww33u)."""
-    state = _state
-    keep = state.get("log_keep_dir") if state is not None else None
-    if not keep or not os.path.isdir(keep):
-        return None
-    dest = Path(keep) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+def _keep_log_tails(sources: Mapping[str, Path], dest: Path) -> bool:
+    """Copy the last :data:`_LOG_KEEP_TAIL_BYTES` of each existing source to ``dest/<name>``; a source
+    already in *dest* is the log itself and is left alone. False on an OSError (logged)."""
     try:
         dest.mkdir(mode=0o700, exist_ok=True)
-        for name in ("engine.log", "pg.log"):
-            src = Path(state["pgdata"]) / name
-            if not src.is_file():
+        for name, src in sources.items():
+            if not src.is_file() or src.parent == dest:
                 continue
             with open(src, "rb") as fh:
                 size = fh.seek(0, os.SEEK_END)
@@ -2277,8 +2282,33 @@ def preserve_logs() -> Path | None:
                 (dest / name).write_bytes(fh.read())
     except OSError as exc:
         _log.warning("substrate_log_keep_failed", dest=str(dest), error=repr(exc), bead="nexus-ww33u")
+        return False
+    return True
+
+
+def preserve_logs() -> Path | None:
+    """Keep the live substrate's logs in ``<run TMPDIR>/nexus-svc-logs-<pid>``: pg.log's tail is copied
+    (the engine log is already written there in a tmpfs run); returns that directory, or None when no
+    substrate is up, no tmpfs run is active or the copy failed. Never raises (nexus-ww33u)."""
+    state = _state
+    keep = state.get("log_keep_dir") if state is not None else None
+    if not keep or not os.path.isdir(keep):
         return None
-    return dest
+    dest = Path(keep) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+    pgdata = Path(state["pgdata"])
+    sources = {"engine.log": Path(state.get("engine_log") or pgdata / "engine.log"), "pg.log": pgdata / "pg.log"}
+    return dest if _keep_log_tails(sources, dest) else None
+
+
+def _keep_swept_cluster_logs(cluster_dir: Path) -> None:
+    """Before the sweep removes a dead owner's cluster (a killed worker never ran its teardown), keep
+    its pg.log and engine.log tails in this run's TMPDIR when a tmpfs run is active (nexus-ww33u)."""
+    keep = _log_keep_dir()
+    if keep:
+        _keep_log_tails(
+            {"engine.log": cluster_dir / "engine.log", "pg.log": cluster_dir / "pg.log"},
+            Path(keep) / f"{_LOG_KEEP_PREFIX}swept-{cluster_dir.name}",
+        )
 
 
 def _teardown() -> None:
@@ -2291,7 +2321,10 @@ def _teardown() -> None:
          "stop", "-m", "immediate"],
         capture_output=True,
     )
-    preserve_logs()  # both processes are down, so each log is complete
+    try:
+        preserve_logs()  # both processes are down, so each log is complete
+    except Exception as exc:  # noqa: BLE001 — keeping evidence must never leak the cluster
+        _log.warning("substrate_log_keep_failed", error=repr(exc), bead="nexus-ww33u")
     shutil.rmtree(_state["pgdata"], ignore_errors=True)
     _state = None
 
@@ -2725,6 +2758,8 @@ def _sweep_sidecar_cluster(
         result.live_untouched.append(str(cluster_dir))
         return
 
+    with contextlib.suppress(Exception):
+        _keep_swept_cluster_logs(cluster_dir)
     if _reap_cluster(cluster_dir, info, result):
         result.mismatch_refused.append(str(cluster_dir))
     else:
