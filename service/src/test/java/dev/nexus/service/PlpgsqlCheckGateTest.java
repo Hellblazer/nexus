@@ -92,14 +92,36 @@ class PlpgsqlCheckGateTest {
     static List<PlpgsqlCheck.Finding> findings;
     static long buildMillis;
 
+    /** What the plpgsql_check image adds to the product's Postgres image. */
+    static final String PLPGSQL_CHECK_INSTALL =
+        "apt-get update && apt-get install -y --no-install-recommends postgresql-17-plpgsql-check"
+            + " && rm -rf /var/lib/apt/lists/*";
+
+    /**
+     * The image's name: its recipe's hash, so a changed base or install line is a new image. It is kept
+     * after the run (Testcontainers deletes a built image at exit by default), so the daemon's build cache
+     * answers the next run instead of repeating the apt download and the layer write on every Service CI
+     * job (nexus-aca0q.2: about 40 MB of container writes per job on chas). The tag is a label only: the
+     * daemon's build cache keys on the local base image's ID plus the RUN line, so a re-pulled base rebuilds
+     * under the same tag, and the plpgsql_check package stays whatever apt served while that base is local.
+     */
+    static String plpgsqlCheckImageName() {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest((PgContainerHelper.IMAGE + "\n" + PLPGSQL_CHECK_INSTALL).getBytes(StandardCharsets.UTF_8));
+            return "nexus-test/pg17-plpgsql-check:" + java.util.HexFormat.of().formatHex(digest).substring(0, 16);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @BeforeAll
     static void walkAndCheck() throws Exception {
         long t0 = System.nanoTime();
-        var image = new ImageFromDockerfile()
+        var image = new ImageFromDockerfile(plpgsqlCheckImageName(), false)
             .withDockerfileFromBuilder(b -> b
                 .from(PgContainerHelper.IMAGE)
-                .run("apt-get update && apt-get install -y --no-install-recommends postgresql-17-plpgsql-check"
-                    + " && rm -rf /var/lib/apt/lists/*")
+                .run(PLPGSQL_CHECK_INSTALL)
                 .build());
         String imageName = image.get();
         buildMillis = (System.nanoTime() - t0) / 1_000_000;
