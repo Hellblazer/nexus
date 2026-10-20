@@ -90,17 +90,19 @@ public final class RequestLedger {
     private static final String LOCK_NOT_AVAILABLE = "55P03";
 
     /**
-     * Bound, in milliseconds, on every row-lock wait inside {@link #claim} (nexus-yye8l.22), set with
+     * Bound, in milliseconds, on every lock wait inside {@link #claim} (nexus-yye8l.22), set with
      * {@code lock_timeout} on each claim transaction. The claim's {@code INSERT ... ON CONFLICT DO NOTHING}
-     * waits on the row lock of a marker transaction that updated the same key and has not yet committed, and
+     * waits on the lock of a marker transaction that updated the same key and has not yet committed, and
      * the takeover UPDATE waits the same way. A marker that stalls between its UPDATE and its COMMIT would
      * otherwise hold the resend's admission permit and connection for as long as the stall lasts. 2 s is the
      * lock wait the bounded sweep forms already run under (RDR-222, "bounded forms run under lock_timeout
-     * 2000"); a healthy marker commits in milliseconds, so a resend that waits this long has found a stall,
-     * and the answer is {@link ClaimContendedException} (503 {@code request_claim_contended}, resend with the
-     * same key). A fixed constant, not an environment setting: it bounds a wait whose healthy value is
-     * milliseconds, and it is unrelated to the lease, which the claim stamps from the database clock at the
-     * statement that wins the row.
+     * 2000"); a healthy marker commits in milliseconds, so a resend that waits this long has found a stall.
+     * The trip is not an answer by itself: the stalled marker belongs to a live attempt that may still commit,
+     * so the claim reads the row once, without waiting, and answers what it would answer for any row it reads
+     * ({@link InFlight} for the held row, {@link Replay} or {@link KeyReused} if it settled meanwhile). Only a
+     * row that is absent or open to takeover is {@link ClaimContendedException}. A fixed constant, not an
+     * environment setting: it bounds a wait whose healthy value is milliseconds, and it is unrelated to the
+     * lease, which the claim stamps from the database clock at the statement.
      */
     static final int CLAIM_LOCK_TIMEOUT_MS = 2_000;
 
@@ -131,8 +133,9 @@ public final class RequestLedger {
      * taking or purging the row between this one's read and its write. Nothing was written for this attempt, so
      * it is safe to resend with the same key; the handler answers 503 with {@code Retry-After}, not the 422 an
      * {@link IllegalStateException} would get from the shared ladder (nexus-yye8l.20). It is also what a claim
-     * answers when its row-lock wait exceeded {@link #CLAIM_LOCK_TIMEOUT_MS}, because a marker transaction holds
-     * the row uncommitted (nexus-yye8l.22); that wait wrote nothing either.
+     * answers when its lock wait exceeded {@link #CLAIM_LOCK_TIMEOUT_MS} and the row it then reads is absent or
+     * open to takeover (nexus-yye8l.22); that wait wrote nothing either. A lock wait that trips on a row another
+     * attempt holds is {@link InFlight}, not this.
      */
     public static final class ClaimContendedException extends RuntimeException {
         public ClaimContendedException(String message) {
@@ -235,17 +238,22 @@ public final class RequestLedger {
         // row as it now stands. Three rounds cover both.
         for (int round = 0; round < MAX_CLAIM_ROUNDS; round++) {
             UUID nonce = UUID.randomUUID();
-            int inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
-                .set(REQUEST_LEDGER.TENANT_ID, tenant)
-                .set(REQUEST_LEDGER.REQUEST_ID, requestId)
-                .set(REQUEST_LEDGER.ROUTE, route)
-                .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
-                .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
-                .set(REQUEST_LEDGER.HOLDER, nonce)
-                .set(REQUEST_LEDGER.STARTED_AT, clock())
-                .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
-                .onConflictDoNothing()
-                .execute());
+            int inserted;
+            try {
+                inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.TENANT_ID, tenant)
+                    .set(REQUEST_LEDGER.REQUEST_ID, requestId)
+                    .set(REQUEST_LEDGER.ROUTE, route)
+                    .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
+                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                    .set(REQUEST_LEDGER.HOLDER, nonce)
+                    .set(REQUEST_LEDGER.STARTED_AT, clock())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                    .onConflictDoNothing()
+                    .execute());
+            } catch (ClaimLockTimeout timeout) {
+                return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
+            }
             if (inserted == 1) {
                 return new Claimed(requestId, nonce, false);
             }
@@ -255,40 +263,30 @@ public final class RequestLedger {
             if (row == null) {
                 continue;
             }
-            if (!row.route().equals(route) || !Arrays.equals(row.bodySha256(), bodySha256)) {
-                RequestLedgerActivity.recordKeyReused();
-                log.info("event=request_ledger_key_reused tenant={} request_id={} route={} stored_route={}",
-                    tenant, requestId, route, row.route());
-                return new KeyReused(requestId, row.route());
-            }
-            if (COMMITTED.equals(row.state())) {
-                RequestLedgerActivity.recordReplay();
-                log.info("event=request_ledger_replay tenant={} request_id={} route={} status={}",
-                    tenant, requestId, route, row.responseStatus());
-                return new Replay(requestId, row.responseStatus() == null ? 200 : row.responseStatus(),
-                    row.responseJson());
-            }
-            if (IN_FLIGHT.equals(row.state()) && row.live()) {
-                RequestLedgerActivity.recordInFlight();
-                log.info("event=request_ledger_in_flight tenant={} request_id={} route={} lease_until={}",
-                    tenant, requestId, route, row.leaseUntil());
-                return new InFlight(requestId, row.route(), row.startedAt(), row.leaseUntil(), row.dbNow());
+            Claim settled = classify(tenant, requestId, route, bodySha256, row);
+            if (settled != null) {
+                return settled;
             }
 
             // Takeover (nexus-zxgld gap 1): the failure marker leaves holder NULL, so the guard is
             // IS NOT DISTINCT FROM; an equality guard would never match a failed row.
             phase(ClaimPhase.BEFORE_TAKEOVER, round);
-            int taken = withClaimLockBound(tenant, requestId, ctx -> ctx.update(REQUEST_LEDGER)
-                .set(REQUEST_LEDGER.HOLDER, nonce)
-                .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
-                .set(REQUEST_LEDGER.STARTED_AT, clock())
-                .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
-                .setNull(REQUEST_LEDGER.FINISHED_AT)
-                .setNull(REQUEST_LEDGER.RESPONSE_STATUS)
-                .where(key(tenant, requestId))
-                .and(REQUEST_LEDGER.HOLDER.isNotDistinctFrom(row.holder()))
-                .and(REQUEST_LEDGER.STATE.eq(row.state()))
-                .execute());
+            int taken;
+            try {
+                taken = withClaimLockBound(tenant, requestId, ctx -> ctx.update(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.HOLDER, nonce)
+                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                    .set(REQUEST_LEDGER.STARTED_AT, clock())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                    .setNull(REQUEST_LEDGER.FINISHED_AT)
+                    .setNull(REQUEST_LEDGER.RESPONSE_STATUS)
+                    .where(key(tenant, requestId))
+                    .and(REQUEST_LEDGER.HOLDER.isNotDistinctFrom(row.holder()))
+                    .and(REQUEST_LEDGER.STATE.eq(row.state()))
+                    .execute());
+            } catch (ClaimLockTimeout timeout) {
+                return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
+            }
             if (taken == 1) {
                 RequestLedgerActivity.recordTakeover();
                 log.info("event=request_ledger_takeover tenant={} request_id={} route={} prior_state={}",
@@ -302,10 +300,69 @@ public final class RequestLedger {
     }
 
     /**
+     * What a row this claim has read means for {@code requestId}, or null when the row is open to takeover (a
+     * {@code failed} row, or an {@code in_flight} row whose lease is gone and that nothing holds): {@link KeyReused}
+     * when route or body differ, {@link Replay} when committed, {@link InFlight} when held or live.
+     */
+    private Claim classify(String tenant, UUID requestId, String route, byte[] bodySha256, LedgerRow row) {
+        if (!row.route().equals(route) || !Arrays.equals(row.bodySha256(), bodySha256)) {
+            RequestLedgerActivity.recordKeyReused();
+            log.info("event=request_ledger_key_reused tenant={} request_id={} route={} stored_route={}",
+                tenant, requestId, route, row.route());
+            return new KeyReused(requestId, row.route());
+        }
+        if (COMMITTED.equals(row.state())) {
+            RequestLedgerActivity.recordReplay();
+            log.info("event=request_ledger_replay tenant={} request_id={} route={} status={}",
+                tenant, requestId, route, row.responseStatus());
+            return new Replay(requestId, row.responseStatus() == null ? 200 : row.responseStatus(),
+                row.responseJson());
+        }
+        if (IN_FLIGHT.equals(row.state()) && row.live()) {
+            RequestLedgerActivity.recordInFlight();
+            log.info("event=request_ledger_in_flight tenant={} request_id={} route={} lease_until={}",
+                tenant, requestId, route, row.leaseUntil());
+            return new InFlight(requestId, row.route(), row.startedAt(), row.leaseUntil(), row.dbNow());
+        }
+        return null;
+    }
+
+    /**
+     * A claim statement tripped {@code lock_timeout} (nexus-yye8l.22): another transaction holds the key's row
+     * uncommitted, normally the commit marker of the key's own live attempt. The claim wrote nothing, so it
+     * reads the row once (no lock wait: a plain SELECT, then {@code FOR UPDATE SKIP LOCKED}, see {@code read()})
+     * and answers as it answers for any row it reads: {@link InFlight} for a held row, so the client polls the
+     * ledger and gets the attempt's outcome instead of a failure for a sweep that may still commit; {@link Replay}
+     * or {@link KeyReused} if the row settled in the meantime. A row that is absent (an uncommitted first insert
+     * of the same key) or open to takeover (a failure marker or another claim holds it) is
+     * {@link ClaimContendedException}: nothing ran, and the same key can be resent.
+     */
+    private Claim settleAfterLockTimeout(String tenant, UUID requestId, String route, byte[] bodySha256,
+                                         ClaimLockTimeout timeout) {
+        LedgerRow row = read(tenant, requestId);
+        Claim settled = row == null ? null : classify(tenant, requestId, route, bodySha256, row);
+        if (settled != null) {
+            log.info("event=request_ledger_claim_lock_timeout_settled tenant={} request_id={} outcome={}",
+                tenant, requestId, settled.getClass().getSimpleName());
+            return settled;
+        }
+        throw new ClaimContendedException("request_ledger claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS
+            + " ms and the row is " + (row == null ? "absent" : "open to takeover") + ": tenant=" + tenant
+            + " request_id=" + requestId, timeout.getCause());
+    }
+
+    /** A claim statement's {@code lock_timeout} tripped; {@link #claim} settles it by reading the row. */
+    private static final class ClaimLockTimeout extends RuntimeException {
+        ClaimLockTimeout(Throwable cause) {
+            super("claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS + " ms", cause);
+        }
+    }
+
+    /**
      * Run one claim statement in its own tenant transaction under {@code lock_timeout} =
      * {@link #CLAIM_LOCK_TIMEOUT_MS}, sent in the same round trip as the tenant stamp. A lock wait that trips
-     * (SQLSTATE 55P03) is {@link ClaimContendedException}: the statement was the claim's only write and it did
-     * not happen, so a resend with the same key is safe. Any other failure propagates unchanged.
+     * (SQLSTATE 55P03) is a {@link ClaimLockTimeout}: the statement was the claim's only write and it did not
+     * happen. Any other failure propagates unchanged.
      */
     private <T> T withClaimLockBound(String tenant, UUID requestId, Function<DSLContext, T> work) {
         try {
@@ -314,8 +371,7 @@ public final class RequestLedger {
             if (isLockNotAvailable(e)) {
                 log.warn("event=request_ledger_claim_lock_timeout tenant={} request_id={} lock_timeout_ms={}",
                     tenant, requestId, CLAIM_LOCK_TIMEOUT_MS);
-                throw new ClaimContendedException("request_ledger claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS
-                    + " ms: tenant=" + tenant + " request_id=" + requestId, e);
+                throw new ClaimLockTimeout(e);
             }
             throw e;
         }

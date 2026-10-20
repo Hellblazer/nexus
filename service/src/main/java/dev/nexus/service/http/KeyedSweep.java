@@ -33,9 +33,11 @@ import java.util.regex.Pattern;
  * 422 {@code idempotency_key_reused}; 409 {@code request_in_flight} with {@code Retry-After}; a replay is the
  * stored status and body with {@code Idempotency-Replayed: true}; 503 {@code sweep_gate_busy} with
  * {@code Retry-After} on the quarantine forms; 503 {@code request_claim_contended} with {@code Retry-After} when the
- * ledger's bounded claim rounds could not settle the key, or its row-lock wait ran past
- * {@code RequestLedger.CLAIM_LOCK_TIMEOUT_MS} behind a stalled marker transaction (nexus-yye8l.22); nothing was written
- * in either case, resend with the same key. Every
+ * ledger's bounded claim rounds could not settle the key, or its lock wait ran past
+ * {@code RequestLedger.CLAIM_LOCK_TIMEOUT_MS} and the row it then reads is absent or open to takeover
+ * (nexus-yye8l.22); nothing was written in either case, resend with the same key. A lock wait that trips on a row
+ * another attempt holds (a marker transaction that has not committed) is the 409 {@code request_in_flight} instead.
+ * Every
  * response for a request the ledger recorded echoes {@code Idempotency-Key}; the echo is telemetry, the client
  * never gates on it.
  *

@@ -631,10 +631,11 @@ class RequestLedgerTest {
             // The claim's INSERT ... ON CONFLICT waits on the marker transaction's uncommitted update of the
             // row, so a resend cannot take the row over underneath a marker that is about to commit.
             var resend = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(42), BOUND_MS));
-            Thread.sleep(700);
+            Thread.sleep(300);
             assertThat(resend.isDone()).as("the resend waits for the marker transaction").isFalse();
-            // The commit below lands at ~700 ms, inside RequestLedger.CLAIM_LOCK_TIMEOUT_MS (2 s): this test is
-            // the wait-then-replay side of the bound; the next test is the timeout side.
+            // The commit below lands at ~300 ms, well inside RequestLedger.CLAIM_LOCK_TIMEOUT_MS (2 s), so a
+            // host stall of over a second cannot turn this wait into a timeout: this test is the
+            // wait-then-replay side of the bound; the tests after it are the timeout side.
 
             tx.commit();
             assertThat(resend.get(10, java.util.concurrent.TimeUnit.SECONDS))
@@ -645,38 +646,188 @@ class RequestLedgerTest {
         }
     }
 
+    /** What the claim must leave alone: the columns a claim or takeover would rewrite. */
+    private record RowSnap(UUID holder, String state, OffsetDateTime startedAt, OffsetDateTime leaseUntil) {
+    }
+
+    /** A plain SELECT: it does not wait on a row lock, and sees the last committed version. */
+    private RowSnap rowOf(UUID key) {
+        return scope.withTenant(TENANT, ctx -> ctx.select(REQUEST_LEDGER.HOLDER, REQUEST_LEDGER.STATE,
+                REQUEST_LEDGER.STARTED_AT, REQUEST_LEDGER.LEASE_UNTIL).from(REQUEST_LEDGER)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+            .fetchOne(r -> new RowSnap(r.value1(), r.value2(), r.value3(), r.value4())));
+    }
+
+    private static final long GET_BOUND_SECONDS = 10;
+
+    /** Milliseconds since {@code startNanos}. */
+    private static long elapsedMs(long startNanos) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    }
+
+    private static void assertWaitedTheLockBound(long elapsedMs) {
+        assertThat(elapsedMs).as("it waited the lock bound (a trip before it would mean another cause)")
+            .isGreaterThanOrEqualTo(RequestLedger.CLAIM_LOCK_TIMEOUT_MS - 250L);
+        assertThat(elapsedMs).as("and no longer than the bound plus a pool borrow and a round trip")
+            .isLessThan(RequestLedger.CLAIM_LOCK_TIMEOUT_MS + 5_000L);
+    }
+
     @Test
-    void claimDuringAMarkerTransactionHeldPastTheLockBound_isContendedWhileTheMarkerIsStillOpen_andWritesNothing()
+    void claimDuringAMarkerTransactionHeldPastTheLockBound_isInFlightWhileTheMarkerIsStillOpen_andWritesNothing()
             throws Exception {
         // nexus-yye8l.22: a marker transaction that stalls between its UPDATE and its COMMIT used to hold the
         // resend's admission permit and connection for as long as the stall lasted. The claim now runs under
-        // lock_timeout, and the trip is the contended outcome (503 request_claim_contended), not a hang.
+        // lock_timeout. The stalled marker is a live attempt that may still commit, so the trip is not a
+        // failure: the claim reads the held row and answers InFlight (409 in_flight; the client polls the
+        // ledger and gets the committed outcome). The claim runs on its own thread with a bounded get, so a
+        // regression that removes the bound fails here instead of hanging the shard.
         UUID key = UUID.randomUUID();
         RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS);
         shortenLease(key, 1_500);
         OffsetDateTime lease = leaseOf(key);
+        RowSnap before = rowOf(key);
+        assertThat(before.holder()).isEqualTo(c.nonce());
+        var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
         try (java.sql.Connection tx = pg.createConnection("")) {
             tx.setAutoCommit(false);
-            ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200, "{}");
-            sleepPast(lease);
+            try {
+                ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200, "{}");
+                sleepPast(lease);
 
-            long start = System.nanoTime();
-            assertThatThrownBy(() -> ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS))
-                .as("the marker transaction is still open: the claim gives up at the bound, it does not hang")
-                .isInstanceOf(RequestLedger.ClaimContendedException.class)
-                .hasMessageContaining(key.toString());
-            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                long start = System.nanoTime();
+                var claim = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS));
+                RequestLedger.Claim answer = claim.get(GET_BOUND_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                long elapsed = elapsedMs(start);
 
-            assertThat(elapsedMs).as("it waited the lock bound (a trip before it would mean another cause)")
-                .isGreaterThanOrEqualTo(RequestLedger.CLAIM_LOCK_TIMEOUT_MS - 250L);
-            assertThat(elapsedMs).as("and no longer than the bound plus a pool borrow and a round trip")
-                .isLessThan(RequestLedger.CLAIM_LOCK_TIMEOUT_MS + 5_000L);
-
-            tx.commit();
+                assertThat(answer).as("the marker is still open: the held row reads in_flight, not contended")
+                    .isInstanceOf(RequestLedger.InFlight.class);
+                var inFlight = (RequestLedger.InFlight) answer;
+                assertThat(inFlight.requestId()).isEqualTo(key);
+                assertThat(inFlight.leaseUntil()).as("the lease is behind the reading: held, not live")
+                    .isBefore(inFlight.observedAt());
+                assertWaitedTheLockBound(elapsed);
+                assertThat(rowOf(key)).as("the timed-out claim wrote nothing: holder, state and times unchanged")
+                    .isEqualTo(before);
+            } finally {
+                tx.commit();
+                pool.shutdownNow();
+            }
         }
         assertThat(ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS))
             .as("the marker committed after the timed-out claim: the resend with the same key replays")
             .isInstanceOf(RequestLedger.Replay.class);
+    }
+
+    @Test
+    void claimBehindAnUncommittedFirstInsertOfTheSameKey_isContendedAtTheBound_andWritesNothing() throws Exception {
+        // The INSERT arm's other lock wait: an uncommitted INSERT of the same key. The claim cannot see that row
+        // (nothing committed), so it has nothing to classify and nothing to poll: contended, nothing ran.
+        UUID key = UUID.randomUUID();
+        var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            try {
+                mutate(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), key);
+
+                long start = System.nanoTime();
+                var claim = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(50), BOUND_MS));
+                assertThatThrownBy(() -> claim.get(GET_BOUND_SECONDS, java.util.concurrent.TimeUnit.SECONDS))
+                    .isInstanceOf(java.util.concurrent.ExecutionException.class)
+                    .hasCauseInstanceOf(RequestLedger.ClaimContendedException.class)
+                    .hasMessageContaining(key.toString())
+                    .hasMessageContaining("absent");
+                assertWaitedTheLockBound(elapsedMs(start));
+                assertThat(exists(key)).as("the other transaction has not committed and the claim wrote nothing")
+                    .isFalse();
+            } finally {
+                tx.rollback();
+                pool.shutdownNow();
+            }
+        }
+        assertThat(exists(key)).as("after the rollback there is still no row for the key").isFalse();
+        assertThat(ledger.claim(TENANT, key, ROUTE, sha(50), BOUND_MS)).isInstanceOf(RequestLedger.Claimed.class);
+    }
+
+    @Test
+    void aTakeoverUpdateBlockedByALockedExpiredRow_isBoundedAndClassifiedInFlight_andWritesNothing()
+            throws Exception {
+        // The takeover UPDATE is the claim's second bounded statement. The hook locks the row from another
+        // transaction after the claim's read classified it as open to takeover and before the UPDATE, so the
+        // UPDATE waits. Without the bound it waits for the lock; with it, 2 s later the claim re-reads: an
+        // expired in_flight row that something holds is InFlight (read()'s lock probe), the same answer a
+        // plain read gives.
+        UUID key = UUID.randomUUID();
+        ledger.claim(TENANT, key, ROUTE, sha(51), BOUND_MS);
+        forceLeaseExpired(key);
+        RowSnap before = rowOf(key);
+        var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.setClaimPhaseHookForTests(lockTheRowAtTheTakeover(tx, key));
+            try {
+                long start = System.nanoTime();
+                var claim = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(51), BOUND_MS));
+                RequestLedger.Claim answer = claim.get(GET_BOUND_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                long elapsed = elapsedMs(start);
+
+                assertThat(answer).isInstanceOf(RequestLedger.InFlight.class);
+                assertThat(((RequestLedger.InFlight) answer).leaseUntil())
+                    .as("the lease is behind the reading: held, not live")
+                    .isBefore(((RequestLedger.InFlight) answer).observedAt());
+                assertWaitedTheLockBound(elapsed);
+                assertThat(rowOf(key)).as("the blocked takeover wrote nothing").isEqualTo(before);
+            } finally {
+                ledger.setClaimPhaseHookForTests(null);
+                tx.rollback();
+                pool.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void aTakeoverUpdateBlockedByALockedFailedRow_isBoundedAndContended_andWritesNothing() throws Exception {
+        // A failed row is open to takeover and nothing marks it held, so the classification after the trip is
+        // still "open to takeover": contended (503), nothing ran, and the resend that follows takes it over.
+        UUID key = UUID.randomUUID();
+        RequestLedger.Claimed first = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(52), BOUND_MS);
+        ledger.failMarker(TENANT, key, first.nonce(), 500);
+        RowSnap before = rowOf(key);
+        assertThat(before.state()).isEqualTo("failed");
+        var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.setClaimPhaseHookForTests(lockTheRowAtTheTakeover(tx, key));
+            try {
+                long start = System.nanoTime();
+                var claim = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(52), BOUND_MS));
+                assertThatThrownBy(() -> claim.get(GET_BOUND_SECONDS, java.util.concurrent.TimeUnit.SECONDS))
+                    .isInstanceOf(java.util.concurrent.ExecutionException.class)
+                    .hasCauseInstanceOf(RequestLedger.ClaimContendedException.class)
+                    .hasMessageContaining("open to takeover");
+                assertWaitedTheLockBound(elapsedMs(start));
+                assertThat(rowOf(key)).as("the blocked takeover wrote nothing").isEqualTo(before);
+            } finally {
+                ledger.setClaimPhaseHookForTests(null);
+                tx.rollback();
+                pool.shutdownNow();
+            }
+        }
+        RequestLedger.Claim resend = ledger.claim(TENANT, key, ROUTE, sha(52), BOUND_MS);
+        assertThat(resend).isInstanceOf(RequestLedger.Claimed.class);
+        assertThat(((RequestLedger.Claimed) resend).takeover()).isTrue();
+    }
+
+    /** Lock {@code key}'s row from {@code tx} once the claim has read it and is about to take it over. */
+    private java.util.function.BiConsumer<RequestLedger.ClaimPhase, Integer> lockTheRowAtTheTakeover(
+            java.sql.Connection tx, UUID key) {
+        return (phase, round) -> {
+            if (phase == RequestLedger.ClaimPhase.BEFORE_TAKEOVER && round == 0) {
+                DSL.using(tx, org.jooq.SQLDialect.POSTGRES).select(REQUEST_LEDGER.REQUEST_ID)
+                    .from(REQUEST_LEDGER)
+                    .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(key)))
+                    .forUpdate().fetch();
+            }
+        };
     }
 
     @Test
