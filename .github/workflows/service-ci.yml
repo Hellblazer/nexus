@@ -214,7 +214,18 @@ jobs:
             echo "could not derive exactly one OLD_TAG from SchemaUpgradeRehearsalIntegrationTest.java: '$tag'" >&2
             exit 1
           fi
-          git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+          # A transient network failure must not fail the job (checkout used to carry the
+          # tags); a persistent one still does, after three tries.
+          for attempt in 1 2 3; do
+            if git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "git fetch of ${tag} failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           git rev-parse -q --verify "refs/tags/${tag}^{commit}"
 
       - name: Set up GraalVM JDK 25

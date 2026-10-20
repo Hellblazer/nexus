@@ -138,6 +138,55 @@ def test_the_fetch_step_really_fetches_only_the_old_tag(tmp_path: Path) -> None:
     assert r.returncode != 0 and "could not derive exactly one OLD_TAG" in r.stderr
 
 
+def test_the_fetch_retries_a_transient_failure_and_still_fails_loud_on_a_persistent_one(tmp_path: Path) -> None:
+    script = next(s["run"] for s in _steps() if s.get("name") == _FETCH_STEP)
+    assert "for attempt in 1 2 3" in script and "sleep" in script
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+    real = shutil.which("git")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    counter = tmp_path / "count"
+    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n")
+    # A wrapper whose first FAIL_FIRST fetches fail, then delegates; sleep is a no-op.
+    (bin_dir / "git").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = fetch ]; then n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"; '
+        'if [ "$n" -le "${FAIL_FIRST:-0}" ]; then exit 1; fi; fi\n'
+        f'exec "{real}" "$@"\n'
+    )
+    for f in ("sleep", "git"):
+        (bin_dir / f).chmod(0o755)
+    tag = _OLD_TAG_RE.search((_ROOT / _REHEARSAL).read_text(encoding="utf-8")).group(1)
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q", "--allow-empty", "-m", "x"],
+        ["tag", tag],
+    ):
+        subprocess.run([real, "-C", str(origin), *args], check=True, capture_output=True, env=env)
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run([real, "-C", str(work), "init", "-q"], check=True, capture_output=True, env=env)
+    subprocess.run([real, "-C", str(work), "remote", "add", "origin", f"file://{origin}"], check=True, env=env)
+    dest = work / _REHEARSAL
+    dest.parent.mkdir(parents=True)
+    shutil.copy(_ROOT / _REHEARSAL, dest)
+    run_env = {**env, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+    ok = subprocess.run(["bash", "-e", "-c", script], cwd=work, capture_output=True, text=True, env={**run_env, "FAIL_FIRST": "2"})
+    assert ok.returncode == 0, ok.stderr
+    assert counter.read_text().strip() == "3"
+
+    counter.unlink()
+    bad = subprocess.run(["bash", "-e", "-c", script], cwd=work, capture_output=True, text=True, env={**run_env, "FAIL_FIRST": "99"})
+    assert bad.returncode != 0 and "after 3 attempts" in bad.stderr
+    assert counter.read_text().strip() == "3"
+
+
 # --- A: Liquibase is quiet in the surefire forks only ------------------------------------------
 
 
@@ -177,8 +226,21 @@ def test_the_surefire_forks_turn_the_liquibase_update_summary_off() -> None:
 def test_quiet_liquibase_never_reaches_the_production_engine() -> None:
     """tests/daemon/test_readiness.py parses 'Running Changeset' from the engine console."""
     pom = _POM.read_text(encoding="utf-8")
-    assert pom.count("liquibase.command.showSummary") == 2, "one property, plus its closing tag, in the surefire block only"
-    assert pom.count(_JUL_FILE) == 1, "only the surefire argLine may name the quiet JUL file"
+    root = ET.fromstring(pom)  # comments are dropped, so prose naming a property never counts
+    surefire = [
+        p for p in root.iterfind(".//m:build/m:plugins/m:plugin", _NS)
+        if p.findtext("m:artifactId", namespaces=_NS) == "maven-surefire-plugin"
+    ]
+    assert len(surefire) == 1
+    inside = {id(e) for e in surefire[0].iter()}
+    setters = [
+        e for e in root.iter()
+        if e.tag.endswith("}liquibase.command.showSummary")
+        or (e.tag.endswith("}argLine") and "java.util.logging.config.file" in (e.text or ""))
+    ]
+    assert setters, "the quiet-Liquibase settings must exist in the surefire block"
+    outside = [e.tag for e in setters if id(e) not in inside]
+    assert outside == [], f"only the surefire configuration may set the quiet-Liquibase flags: {outside}"
     assert not (_ROOT / "service" / "src" / "main" / "resources" / _JUL_FILE).exists()
     main_hits = [
         p.name for p in (_ROOT / "service" / "src" / "main").rglob("*")
