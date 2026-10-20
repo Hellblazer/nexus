@@ -446,8 +446,10 @@ def _group_alive(pgid: int) -> bool:
     return group_alive(pgid)
 
 
-def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
-    """Return a reason if a service BUILD IS RUNNING, else ``None``.
+def build_in_progress_reason(
+    lease_root: Path | None = None, *, repo_root: Path | None = None,
+) -> str | None:
+    """Return a reason if a service BUILD IS RUNNING in this checkout, else ``None``.
 
     nexus-06fu4. Writers of the shaded jar take a lease
     (scripts/lib/build-lease.sh, resource "service"); readers never did.
@@ -477,6 +479,18 @@ def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
 
     Never raises: a malformed or half-written lease returns ``None`` rather
     than blocking the suite on the lease reader's own bug.
+
+    SCOPED TO THIS CHECKOUT (nexus-qt6q7). The lease is shared by every
+    worktree of the repo so that builds serialize box-wide (nexus-g6xpa), but
+    a build rewrites only the ``service/target`` of the checkout whose
+    scripts took the lease. A jar shared between worktrees is a read-only
+    gate-jar-cache link, which build-gate-jar.sh and mvnw-leased.sh unlink
+    before a package goal (and which a writer that does not would fail on,
+    not write through), and the cache publishes by rename. So a lease whose ``worktree`` file names another
+    checkout than *repo_root* (default: this one) is not a reason; before
+    this, a scoped mvnw-leased run in one worktree turned a full suite in
+    another into 197 setup errors. A lease without that file (an older
+    lib, or one still being populated) still counts: when unsure, refuse.
     """
     # Resolved per call, not at import: NX_BUILD_LEASE_ROOT set by a test
     # (or a box) after this module loaded must still win (nexus-pv93h —
@@ -498,6 +512,9 @@ def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
                 return None
         elif not _pid_alive(pid):
             return None  # holder is gone; the lease lib will reclaim it
+        builder = (lease / "worktree").read_text().strip() if (lease / "worktree").exists() else ""
+        if builder and Path(builder).resolve() != (repo_root or _REPO_ROOT).resolve():
+            return None  # another worktree's build: it never rewrites this jar
         holder = (lease / "label").read_text().strip() or "unknown"
         command = (lease / "command").read_text().strip() or "unknown command"
         since = (lease / "ts").read_text().strip() or "unknown time"

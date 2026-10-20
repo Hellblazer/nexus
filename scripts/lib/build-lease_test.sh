@@ -45,9 +45,10 @@ rc1=$?
 if [[ $rc1 -eq 0 ]]; then ok "acquire succeeded (rc 0)"; else bad "acquire failed (rc $rc1): $out1"; fi
 leasedir1="$repo1/service/.build-lease/smoke"
 if [[ -d "$leasedir1" ]]; then ok "lease dir exists after acquire"; else bad "lease dir missing after acquire"; fi
-for f in pid ts label command; do
+for f in pid ts label command worktree; do
     if [[ -f "$leasedir1/$f" ]]; then ok "lease has '$f' file"; else bad "lease missing '$f' file"; fi
 done
+if [[ "$(cat "$leasedir1/worktree" 2>/dev/null)" == "$(cd "$repo1" && pwd -P)" ]]; then ok "worktree names the taking checkout's physical path (nexus-qt6q7)"; else bad "worktree file: $(cat "$leasedir1/worktree" 2>&1)"; fi
 bash -c "source '$repo1/scripts/lib/build-lease.sh'; build_lease_acquire smoke >/dev/null 2>&1; build_lease_release smoke"
 if [[ ! -d "$leasedir1" ]]; then ok "lease dir gone after release"; else bad "lease dir still present after release"; fi
 
@@ -244,6 +245,7 @@ else
     rc6=$?
     if [[ $rc6 -eq 75 ]]; then ok "acquire from the worktree refuses (rc 75) while the primary holds"; else bad "worktree acquire rc $rc6 (expected 75): $out6"; fi
     if [[ "$out6" == *"primary-holder"* ]]; then ok "refusal names the primary's holder label"; else bad "refusal missing holder label: $out6"; fi
+    if [[ "$(cat "$root6/shared/worktree" 2>/dev/null)" == "$(cd "$repo6" && pwd -P)" ]]; then ok "the shared lease names the primary as the building checkout, not the worktree"; else bad "worktree file: $(cat "$root6/shared/worktree" 2>&1)"; fi
 fi
 kill -9 "$holder6" 2>/dev/null
 wait "$holder6" 2>/dev/null

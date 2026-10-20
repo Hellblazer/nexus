@@ -52,9 +52,11 @@
 # source or depend on tests/e2e/lib/lock.sh: that lib lives under tests/ and
 # a production script (scripts/build-gate-jar.sh, scripts/mvnw-leased.sh)
 # must not reach into test-only machinery for something it needs at build
-# time. The lease directory holds four flat files: `pid` (holder pid),
+# time. The lease directory holds five flat files: `pid` (holder pid),
 # `ts` (ISO-8601 UTC acquire time), `label` (holder identity — $NX_AGENT or
-# $USER), `command` (the acquiring command line, best-effort).
+# $USER), `command` (the acquiring command line, best-effort), and `worktree`
+# (the physical path of the checkout whose scripts took the lease, so a reader
+# in ANOTHER worktree knows the build does not rewrite its jar; nexus-qt6q7).
 #
 # ACQUIRE-PATH ATOMICITY — AND A PITFALL THIS FILE HAD TO UN-LEARN THE HARD
 # WAY. The first cut of this lib tried to gate BOTH the fresh-acquire and
@@ -270,7 +272,7 @@ _build_lease_group_alive() {
 }
 
 # _build_lease_populate <dir> <holder-label> <command-line> — fill an
-# already-`mkdir`'d (freshly claimed) lease dir with the four flat files.
+# already-`mkdir`'d (freshly claimed) lease dir with the flat files.
 # No `pgid` file is written here — see build_lease_track_pid, called
 # separately once (if ever) the real build child exists.
 #
@@ -279,6 +281,7 @@ _build_lease_group_alive() {
 # EVERYWHERE below).
 _build_lease_populate() {
     local dir="$1" holder_label="$2" command_line="$3"
+    (cd "$(_build_lease_repo_root)" && pwd -P) > "$dir/worktree" 2>/dev/null || true
     _build_lease_ts > "$dir/ts"
     printf '%s\n' "$holder_label" > "$dir/label"
     printf '%s\n' "$command_line" > "$dir/command"

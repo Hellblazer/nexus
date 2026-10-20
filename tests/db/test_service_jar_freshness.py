@@ -345,6 +345,46 @@ class TestBuildInProgressIsRefusedLoudly:
         assert build_in_progress_reason(tmp_path / "nope") is None
 
 
+class TestLeaseScopedToThisCheckout:
+    """nexus-qt6q7: the lease is shared by every worktree so builds serialize,
+    but a build rewrites only its own checkout's jar. A lease naming another
+    worktree is no reason to refuse; one naming this checkout, or naming none
+    (an older lib, or mid-populate), still is."""
+
+    @staticmethod
+    def _lease(tmp_path, worktree: str | None):
+        import os
+
+        root = TestBuildInProgressIsRefusedLoudly._lease(tmp_path, os.getpid())
+        if worktree is not None:
+            (root / "service" / "worktree").write_text(worktree + "\n")
+        return root
+
+    def test_another_worktrees_build_is_not_a_reason(self, tmp_path):
+        other = tmp_path / "other-worktree"
+        other.mkdir()
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        assert build_in_progress_reason(self._lease(tmp_path, str(other)), repo_root=here) is None
+
+    def test_this_checkouts_build_is_a_reason(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        reason = build_in_progress_reason(self._lease(tmp_path, str(here)), repo_root=here)
+        assert reason is not None and "BUILD IS IN PROGRESS" in reason
+
+    def test_the_same_checkout_through_a_symlink_is_still_a_reason(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        (tmp_path / "alias").symlink_to(here)
+        assert build_in_progress_reason(self._lease(tmp_path, str(tmp_path / "alias")), repo_root=here) is not None
+
+    def test_a_lease_naming_no_worktree_still_refuses(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        assert build_in_progress_reason(self._lease(tmp_path, None), repo_root=here) is not None
+
+
 @posix_only("the build lease names the ./mvnw build's POSIX process group (pgid; os.getpgid/os.killpg)")
 class TestLeaseHolderLiveness:
     """The lease directory in the git common dir never disappears on its own

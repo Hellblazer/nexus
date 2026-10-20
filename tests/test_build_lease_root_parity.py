@@ -72,3 +72,32 @@ def test_reader_sees_a_lease_the_shell_writes(monkeypatch: pytest.MonkeyPatch, t
     finally:
         holder.kill()
         holder.wait(timeout=10)
+
+
+def test_a_lease_from_another_worktree_does_not_stop_this_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """nexus-qt6q7, end to end: the shell lib records the checkout that took
+    the lease; the Python reader refuses for that checkout and not for any
+    other, so a build in one worktree no longer errors a suite in another."""
+    override = tmp_path / "lease-root"
+    monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(override))
+    env = dict(os.environ, NX_BUILD_LEASE_ROOT=str(override), NX_AGENT="scope-test")
+    holder = subprocess.Popen(
+        ["bash", "-c", f"source '{_LIB}'; build_lease_acquire service || exit 9; sleep 30"],
+        env=env,
+    )
+    try:
+        deadline = 100
+        while deadline and not (override / "service" / "label").exists():
+            deadline -= 1
+            subprocess.run(["sleep", "0.1"], check=False)
+        assert (override / "service" / "label").exists(), "shell holder never populated the lease"
+        assert Path((override / "service" / "worktree").read_text().strip()) == _REPO_ROOT.resolve()
+        assert _service_fixture.build_in_progress_reason(override, repo_root=_REPO_ROOT) is not None
+        other = tmp_path / "another-worktree"
+        other.mkdir()
+        assert _service_fixture.build_in_progress_reason(override, repo_root=other) is None
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
