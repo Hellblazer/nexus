@@ -62,6 +62,31 @@ class DdlLogParserTest {
         assertThat(wal.get("dbsize_growth_bytes")).isNull();
     }
 
+    private static String markedLog(String endDbsize) {
+        return "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
+            + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=250 dbsize=10\n"
+            + "2026-10-19 05:00:00.300 UTC [7] db=x LOG:  nx_ddl_mark: end wal=400 dbsize=" + endDbsize + "\n";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object dbsizeGrowth(DdlCounts.Totals totals) {
+        return ((java.util.Map<String, Object>) totals.snapshot().get("wal")).get("dbsize_growth_bytes");
+    }
+
+    /** nexus-mvr3t: one container whose database size was unreadable voids the fork's total (it was
+     *  folded in as 0, understating the growth), as the Python counter's _sum_known does. */
+    @Test
+    void an_unreadable_database_size_voids_the_growth_total_instead_of_counting_as_zero() {
+        DdlCounts.Totals readable = new DdlCounts.Totals();
+        readable.fold(markedLog("40"), true, "A");
+        readable.fold(markedLog("25"), true, "B");
+        assertThat(dbsizeGrowth(readable)).isEqualTo(45L);
+        DdlCounts.Totals oneUnreadable = new DdlCounts.Totals();
+        oneUnreadable.fold(markedLog("40"), true, "A");
+        oneUnreadable.fold(markedLog("-1"), true, "B");
+        assertThat(dbsizeGrowth(oneUnreadable)).isNull();
+    }
+
     @Test
     void statements_that_fire_no_event_hold_no_claim_over_a_later_nested_event() {
         for (String sql : List.of(

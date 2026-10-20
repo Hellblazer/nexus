@@ -348,6 +348,8 @@ final class DdlCounts {
         private long sharedTestsBytes;
         private long dedicatedBytes;
         private long dbsizeGrowthBytes;
+        /** A container whose database size was unreadable voids the total, as the Python counter's _sum_known does (nexus-mvr3t). */
+        private boolean dbsizeGrowthUnknown;
 
         synchronized void noteDatabase(String dbName, String owner, boolean empty, long startLsn) {
             dbOwner.put(dbName, owner);
@@ -388,7 +390,11 @@ final class DdlCounts {
                     sharedTestsBytes += tests;
                 }
                 Long growth = wal.get("dbsize_growth_bytes");
-                dbsizeGrowthBytes += growth == null ? 0 : growth;
+                if (growth == null) {
+                    dbsizeGrowthUnknown = true;
+                } else {
+                    dbsizeGrowthBytes += growth;
+                }
             } else {
                 dedicatedContainers++;
                 long[] row = perClass.computeIfAbsent(owner, k -> new long[4]);
@@ -449,7 +455,7 @@ final class DdlCounts {
             wal.put("shared_migration_bytes", sharedMigrationBytes);
             wal.put("shared_tests_bytes", sharedTestsBytes);
             wal.put("dedicated_bytes", dedicatedBytes);
-            wal.put("dbsize_growth_bytes", dbsizeGrowthBytes);
+            wal.put("dbsize_growth_bytes", dbsizeGrowthUnknown ? null : dbsizeGrowthBytes);
             wal.put("incomplete_containers", incompleteWal);
             wal.put("unreleased_databases", dbStartLsn.size());
             Map<String, Object> out = new LinkedHashMap<>();
