@@ -380,6 +380,48 @@ PY
 [[ "$(shasum -a 256 "$r7/k7/jar" | cut -c1-64)" == "$sum9" ]] && ok "WITH unshare the same in-place rewrite leaves the entry's bytes alone" || bad "entry was altered through the link"
 unset NX_GATE_JAR_CACHE
 
+echo "Test 10 (nexus-bjavr): two stores of one key never move a complete entry aside or nest staging inside it"
+r10="$WORKDIR/root10"; export NX_GATE_JAR_CACHE="$r10"
+j10="$WORKDIR/j10.jar"; _fake_jar "$j10" "ref-10"
+_publish_other() {  # <entry> <jar-content>: what a concurrent store of the same key leaves behind
+    mkdir -p "$1.pub"
+    if [[ "$2" == zip ]]; then _fake_jar "$1.pub/jar" "ref-10"; else echo 'not a zip' > "$1.pub/jar"; fi
+    echo ref-10 > "$1.pub/build_ref"; echo other > "$1.pub/sentinel"
+    command mv "$1.pub" "$1"
+}
+# The other store publishes after this one's first completeness check and before its rename:
+# chmod a-w on the staged jar runs in exactly that window.
+chmod() { [[ "$1" == a-w && "$2" == *"/.staging."*"/jar" && ! -e "$r10/k10" ]] && _publish_other "$r10/k10" "${_OTHER:-zip}"; command chmod "$@"; }
+gate_jar_cache_store "$repo" k10 "$j10" "ref-10" && ok "store rc 0 when a concurrent store wins the key" || bad "store failed"
+[[ -f "$r10/k10/sentinel" ]] && ok "the concurrent store's complete entry stays in place" || bad "the complete entry was moved aside: $(ls -A "$r10/k10" 2>&1)"
+[[ -z "$(ls -A "$r10/k10" | grep -E '^\.staging')" ]] && ok "no staging dir nested inside the entry" || bad "nested: $(ls -A "$r10/k10")"
+[[ -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] && ok "no staging or aside left in the root" || bad "leftovers: $(ls -A "$r10")"
+gate_jar_cache_lookup "$repo" k10 >/dev/null && ok "the kept entry hits" || bad "the kept entry misses"
+rm -rf "$r10/k10"; _OTHER=corrupt
+gate_jar_cache_store "$repo" k10 "$j10" "ref-10" 2>/dev/null && ok "store rc 0 over an incomplete entry that appeared mid-store" || bad "store failed"
+unset -f chmod; unset _OTHER
+[[ ! -e "$r10/k10/sentinel" && "$j10" -ef "$r10/k10/jar" ]] && ok "the incomplete entry is replaced by this store's" || bad "entry after store: $(ls -A "$r10/k10" 2>&1)"
+[[ -z "$(ls -A "$r10/k10" | grep -E '^\.staging')" && -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] \
+    && ok "and nothing nested or left over" || bad "leftovers: $(ls -A "$r10") / $(ls -A "$r10/k10")"
+# The primitive: rename(2) refuses a non-empty target; mv (the control) nests into it.
+mkdir -p "$WORKDIR/rn/src" "$WORKDIR/rn/dst"; echo s > "$WORKDIR/rn/src/f"; echo d > "$WORKDIR/rn/dst/f"
+_gate_jar_cache_rename "$WORKDIR/rn/src" "$WORKDIR/rn/dst" && bad "rename onto a non-empty directory succeeded" || ok "rename onto a non-empty directory fails"
+[[ "$(cat "$WORKDIR/rn/src/f")" == s && "$(cat "$WORKDIR/rn/dst/f")" == d && ! -e "$WORKDIR/rn/dst/src" ]] && ok "and leaves both directories as they were" || bad "rename disturbed a directory"
+_gate_jar_cache_rename "$WORKDIR/rn/src" "$WORKDIR/rn/new" && [[ -f "$WORKDIR/rn/new/f" ]] && ok "rename to an absent path publishes" || bad "rename to an absent path failed"
+mv "$WORKDIR/rn/new" "$WORKDIR/rn/dst"
+[[ -d "$WORKDIR/rn/dst/new" ]] && ok "control: mv onto an existing directory nests the source inside it" || bad "control: mv did not nest (the test no longer shows the hazard)"
+# Real concurrency: pairs of stores of one key, started together; each entry is read
+# before the next pair's prune can drop it (GATE_JAR_CACHE_KEEP).
+nested=0; incomplete=0
+for i in $(seq 1 12); do
+    gate_jar_cache_store "$repo" "c$i" "$j10" "ref-10" 2>/dev/null & gate_jar_cache_store "$repo" "c$i" "$j10" "ref-10" 2>/dev/null & wait
+    [[ -n "$(ls -A "$r10/c$i" 2>/dev/null | grep -E '^\.staging')" ]] && nested=$((nested + 1))
+    _gate_jar_cache_entry_complete "$r10/c$i" || incomplete=$((incomplete + 1))
+done
+[[ $nested -eq 0 && $incomplete -eq 0 ]] && ok "12 concurrent store pairs: every entry complete, none nested" || bad "concurrent pairs: nested=$nested incomplete=$incomplete"
+[[ -z "$(ls -A "$r10" | grep -E '^\.staging|\.old|\.discard')" ]] && ok "and no staging or aside left in the root" || bad "leftovers: $(ls -A "$r10")"
+unset NX_GATE_JAR_CACHE
+
 echo
 echo "gate-jar-cache_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

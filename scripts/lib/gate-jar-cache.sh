@@ -337,21 +337,37 @@ gate_jar_cache_store() {
         return 0
     fi
     chmod a-w "$staging/jar" 2>/dev/null || true
-    # Publish by rename: an existing entry is moved aside first (a reader
-    # sees the old complete entry or the new complete one, never a gap or
-    # a half-copied jar), then discarded.
-    local aside="$entry.old.$$"
-    [[ -d "$entry" ]] && mv "$entry" "$aside" 2>/dev/null
-    if ! mv "$staging" "$entry" 2>/dev/null; then
-        rm -rf "$staging"
-        [[ -d "$aside" ]] && mv "$aside" "$entry" 2>/dev/null
-        _gate_jar_cache_unwritable "$root"
-        return 0
+    # Publish by rename(2), which fails on an existing non-empty entry
+    # (nexus-bjavr): `mv` onto an existing directory moves staging INSIDE it,
+    # and moving an entry aside first can take out the one a concurrent store
+    # of the same key has just published. A complete entry is never moved; an
+    # incomplete one is re-checked, discarded, and the rename tried once more.
+    # A reader sees the complete entry or no entry, never a half-copied jar.
+    if ! _gate_jar_cache_rename "$staging" "$entry"; then
+        if ! _gate_jar_cache_entry_complete "$entry"; then
+            [[ -e "$entry" ]] && _gate_jar_cache_discard "$root" "$key"
+            _gate_jar_cache_rename "$staging" "$entry"
+        fi
+        if [[ -d "$staging" ]]; then
+            rm -rf "$staging"
+            if _gate_jar_cache_entry_complete "$entry"; then
+                touch "$entry" 2>/dev/null || true   # a concurrent store of this key won
+                return 0
+            fi
+            _gate_jar_cache_unwritable "$root"
+            return 0
+        fi
     fi
-    rm -rf "${aside:?}"
     printf '%s\n' "$key" > "$(_gate_jar_cache_marker "$jar")" 2>/dev/null || true
     _gate_jar_cache_prune "$root"
     return 0
+}
+
+# _gate_jar_cache_rename <src-dir> <dst> -- rename(2) <src-dir> to <dst>. Fails
+# when <dst> is a non-empty directory or a file, where mv would move <src-dir>
+# inside it (BSD mv has no -T).
+_gate_jar_cache_rename() {
+    python3 -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2" 2>/dev/null
 }
 
 _gate_jar_cache_unwritable() {
