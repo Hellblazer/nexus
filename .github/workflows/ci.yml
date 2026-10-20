@@ -1134,9 +1134,13 @@ jobs:
         # above already does this correctly; this one did not.
         # The non-vacuity floor below does not cover it: it asks whether
         # enough tests PASSED, which a pipefail-less tee would not make fatal.
+        # nexus-0h5a7: this job is develop CI's critical path (19-24 min serial on the hosted 4-vCPU runner,
+        # while the shard matrix ends by 12-14 min), so it runs under xdist on the same runner: no extra
+        # runner and no pool capacity. The whole lint selection is xdist-clean (`pytest -m lint -n 4`,
+        # ~2.1k tests in about 4 min on a dev laptop, repeatedly, 2026-10-20).
         run: |
           set -euo pipefail
-          uv run pytest -m lint -q | tee lint-output.txt
+          uv run pytest -m lint -q -n auto | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
