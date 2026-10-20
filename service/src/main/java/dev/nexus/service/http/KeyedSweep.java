@@ -39,8 +39,8 @@ import java.util.regex.Pattern;
  *
  * <p>The failure marker is best effort and never holds up the error response: skipped when the failure is pool
  * exhaustion, otherwise waited for at most {@link #FAIL_MARKER_WAIT_MS}. A row it did not mark reads
- * {@code in_flight} until its lease lapses, then {@code rolled_back}, and {@code rolled_back} is final (see
- * {@link RequestLedger}).
+ * {@code in_flight} until its lease lapses, then {@code rolled_back}; what {@code rolled_back} does and does not promise is in
+ * {@link RequestLedger}.
  */
 final class KeyedSweep {
 

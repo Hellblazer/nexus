@@ -46,14 +46,19 @@ import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
  * <p>Every time comparison and stamp uses {@code clock_timestamp()}, the wall clock at the
  * statement, never {@code now()}, which is the transaction's start (nexus-icdmw item 3).
  *
- * <p><b>{@code rolled_back} is final once reported (nexus-yye8l.19).</b> The commit marker checks the lease at
- * its UPDATE, not at its COMMIT, so a marker transaction that stalls between the two holds the row, uncommitted,
- * past the lease while a plain SELECT still sees the old expired {@code in_flight} version. Every read of an
- * expired {@code in_flight} row therefore probes the row lock ({@code FOR UPDATE SKIP LOCKED}, see {@code read()}):
- * a locked row is reported {@code in_flight}, and a row nothing holds can no longer be committed by any marker
- * (its lease is gone), so {@code rolled_back} cannot later turn into {@code committed}. The one wrong direction
- * left is the safe one: a concurrent probe sees the other's lock and answers {@code in_flight} once more, and the
- * client polls again.
+ * <p><b>What {@code rolled_back} promises (nexus-yye8l.19).</b> The commit marker checks the lease at its UPDATE,
+ * not at its COMMIT, so a marker transaction that stalls between the two holds the row, uncommitted, past the
+ * lease while a plain SELECT still sees the old expired {@code in_flight} version. Every read of an expired
+ * {@code in_flight} row therefore probes the row lock ({@code FOR UPDATE SKIP LOCKED}, see {@code read()}): a
+ * locked row is reported {@code in_flight}, and a row nothing holds can no longer be committed by the attempt
+ * that held it (its lease is gone). So once {@code rolled_back} is reported, that attempt cannot commit through
+ * the claim path. It is not terminal for the key: a same-key resend can still take the key over and commit.
+ *
+ * <p>Residual: a {@code status()} read can, in a window narrower than one statement, report
+ * {@code rolled_back} for a marker whose UPDATE had already scanned the row (PostgreSQL does not re-check the
+ * lease qual after a lock-only wait). The claim path stays safe, because the takeover re-checks holder and state
+ * and matches nothing against a row the marker has committed. A concurrent probe that sees another's lock answers
+ * {@code in_flight}, the safe direction; the client polls again.
  *
  * <p>A failure marker that is skipped or abandoned (the pool was exhausted, or the engine died) leaves the row
  * {@code in_flight}; the lease expiry then turns it into {@code rolled_back}, which is the RDR's backstop.
@@ -495,7 +500,7 @@ public final class RequestLedger {
      * the row, uncommitted, while a plain SELECT sees the old expired {@code in_flight} version: the old code
      * answered {@code rolled_back} there and then {@code committed}. The probe is {@code SELECT ... FOR UPDATE
      * SKIP LOCKED} of the same row. If it gets the row, nothing holds it, and since no marker can match an
-     * expired lease any more, {@code rolled_back} is final; the probe's own row is what is returned, so a marker
+     * expired lease any more, that attempt cannot commit; the probe's own row is what is returned, so a marker
      * that committed in between reads {@code committed}. If it gets nothing, the row is locked (or gone): a
      * plain re-read tells which, and a locked row is reported with {@code held}, i.e. in flight.
      *
