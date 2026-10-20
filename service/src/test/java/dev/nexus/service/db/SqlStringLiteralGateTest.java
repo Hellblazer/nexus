@@ -28,16 +28,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * "DO NOTHING", "ALTER TABLE on chunks leaves") does not. Every literal piece that opens a statement counts, so the
  * maps are literal counts and a statement assembled from several such pieces counts once per piece.
  *
- * <p>Two exact per-file literal maps. {@link #EXECUTED} is SQL the tests send to a database; it drains to zero.
- * {@link #TEXT} is SQL the tests never send: input to a parser or scanner under test, an expected substring of a
- * function body, changeset or error message. It is frozen per file, so a new executed statement in one of those
- * files still fails here. A file absent from both maps must have none.
+ * <p>Three exact per-file literal maps. {@link #EXECUTED} is SQL the tests send to a database; it drains to zero.
+ * {@link #EXEMPT} is executed SQL with no typed, changelog or function form, each entry with its reason (the six
+ * exemptions of the drain's design record, T2 nexus/cbo4a-remaining-58-classification). {@link #TEXT} is SQL the
+ * tests never send: input to a parser or scanner under test, an expected substring of a function body, changeset
+ * or error message. EXEMPT and TEXT are frozen per file, so a new executed statement in one of those files still
+ * fails here. A file absent from every map must have none.
  *
  * <p>Executed SQL that has no literal of its own reaches the database two ways, and each has its own exact map:
  * {@link #JDBC_ENTRY} counts {@code createStatement(}, {@code prepareStatement(} and {@code prepareCall(} calls (the
  * only JDBC routes that take SQL text: changeset or resource text replayed by hand arrives this way), and
  * {@link #PRODUCT_SQL} counts references to a product {@code *_SQL} constant. The drain is done when EXECUTED is
- * empty and every JDBC_ENTRY and PRODUCT_SQL entry left is one Sam has accepted. Lowercase SQL is outside the
+ * empty and every EXEMPT, JDBC_ENTRY and PRODUCT_SQL entry left is one Sam has accepted. Lowercase SQL is outside the
  * grammar; the tree has none executed today.
  */
 class SqlStringLiteralGateTest {
@@ -95,12 +97,25 @@ class SqlStringLiteralGateTest {
 
     /** SQL the tests execute, per file. Reduce-only and exact: lower an entry in the same edit that converts a site. */
     private static final Map<String, Integer> EXECUTED = Map.ofEntries(
+        // held by another session
+        Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 8));
+
+    private static final int EXECUTED_TOTAL = 8;
+
+    /** Executed SQL kept as a Java string, per file, frozen. Each entry says why no typed form exists. */
+    private static final Map<String, Integer> EXEMPT = Map.ofEntries(
+        // deliberately invalid SQL (two ON CONFLICT clauses) pinning the server's 42601; jOOQ cannot build it and
+        // its parser rejects it before the server would
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 2),
-        Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 8),
+        // the DO wrapper around the probe resource's own text (ddl/nx-ddl-probe.sql, shared with the container
+        // entrypoint), so the install is neither logged by log_statement=ddl nor seen by the trigger it creates
         Map.entry("dev/nexus/service/DdlCounts.java", 1),
+        // per-fork cluster control before any target database exists: the role-settings reset DO loop (no jOOQ
+        // ALTER ROLE), CREATE DATABASE .. TEMPLATE and DROP DATABASE .. WITH (FORCE) (jOOQ has neither clause;
+        // neither statement can run inside a function or transaction)
         Map.entry("dev/nexus/service/SharedCluster.java", 3));
 
-    private static final int EXECUTED_TOTAL = 14;
+    private static final int EXEMPT_TOTAL = 6;
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(
@@ -139,7 +154,7 @@ class SqlStringLiteralGateTest {
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
-        // the seed INSERT counted in EXECUTED
+        // the invalid INSERT counted in EXEMPT
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         // the statements counted in EXECUTED; held by another session
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 4),
@@ -147,7 +162,7 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/PgContainerHelper.java", 1),
         // plpgsql_check's own report query, read from its resource
         Map.entry("dev/nexus/service/PlpgsqlCheck.java", 1),
-        // cluster bootstrap: role reset DO block, CREATE and DROP DATABASE counted in EXECUTED
+        // cluster bootstrap: role reset DO block, CREATE and DROP DATABASE counted in EXEMPT
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         // a typed jOOQ insert rendered by ctx.render and bound by hand, for its lock order
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 1));
@@ -301,9 +316,12 @@ class SqlStringLiteralGateTest {
         }
         assertThat(files).as("test files scanned").isGreaterThanOrEqualTo(MIN_FILES);
         assertThat(examined).as("string literals examined").isGreaterThanOrEqualTo(MIN_LITERALS);
-        assertThat(EXECUTED.keySet()).as("a file sits in one literal map").doesNotContainAnyElementsOf(TEXT.keySet());
+        assertThat(EXECUTED.keySet()).as("a file sits in one literal map").doesNotContainAnyElementsOf(TEXT.keySet())
+            .doesNotContainAnyElementsOf(EXEMPT.keySet());
+        assertThat(EXEMPT.keySet()).as("a file sits in one literal map").doesNotContainAnyElementsOf(TEXT.keySet());
 
         Map<String, Integer> literalMaps = new TreeMap<>(EXECUTED);
+        literalMaps.putAll(EXEMPT);
         literalMaps.putAll(TEXT);
         List<String> violations = new ArrayList<>();
         diff("SQL statement literal", literalCounts, literalMaps,
@@ -314,6 +332,7 @@ class SqlStringLiteralGateTest {
             "run the product method that owns the constant, or register the use with its reason", violations);
         assertThat(violations).as("SQL text in service/src/test/java (nexus-cbo4a)").isEmpty();
         assertThat(sum(EXECUTED)).isEqualTo(EXECUTED_TOTAL);
+        assertThat(sum(EXEMPT)).isEqualTo(EXEMPT_TOTAL);
         assertThat(sum(TEXT)).isEqualTo(TEXT_TOTAL);
         assertThat(sum(JDBC_ENTRY)).isEqualTo(JDBC_ENTRY_TOTAL);
         assertThat(sum(PRODUCT_SQL)).isEqualTo(PRODUCT_SQL_TOTAL);
