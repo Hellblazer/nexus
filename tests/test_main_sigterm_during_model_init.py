@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.service_bge_model import service_bge_model_dir, service_bge_model_present
-from tests._engine_substrate import ensure_engine
+from tests._engine_substrate import ensure_engine, record_integration_child
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -93,10 +93,12 @@ def _spawn(state: dict, dbname: str, log_path: Path, extra_env: dict[str, str]):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_VOYAGE_API_KEY", None)  # local mode: bge loads at boot
     fh = open(log_path, "wb")  # noqa: SIM115 — closed by the caller after reaping
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [java, f"-XX:ErrorFile={log_path.parent}/hs_err_%p.log", "-jar", str(_JAR)],
         env=env, stdout=fh, stderr=fh,
-    ), fh
+    )
+    record_integration_child(proc)  # nexus-qsqc6: a killed run's sweep stops it with any recorded cluster
+    return proc, fh
 
 
 #: (extra engine env, offsets, the log event that proves the sweep reached the path under

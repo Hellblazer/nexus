@@ -1075,3 +1075,90 @@ class TestStopAndRemoveCluster:
         with pytest.raises(FileNotFoundError):
             cp.stop_and_remove_cluster("pg_ctl", pgdata, run=missing)
         assert not pgdata.exists()
+
+
+class TestSweepRemovesAStaleOwnerRecordTmp:
+    """``_flush_owner_record`` writes ``<record>.json.tmp`` then replaces it onto the record. A process killed
+    between the two leaves the ``.json.tmp``, which ``_OWNER_RECORD_GLOB`` (``*.json``) never matches, so
+    nothing swept it (nexus-qsqc6). The sweep removes one that is older than a safe age, only by its own
+    naming pattern, only a regular file of ours, only directly under the root it sweeps."""
+
+    _NOW = 1_800_000_000.0
+    _PID = 4242
+
+    @classmethod
+    def _tmp(cls, root: Path, *, age_s: float, name: str | None = None) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        p = root / (name or f"{sub._OWNER_RECORD_PREFIX}{cls._PID}.json.tmp")
+        p.write_text("{}")
+        os.utime(p, (cls._NOW - age_s, cls._NOW - age_s))
+        return p
+
+    def _sweep(self, root: Path) -> sub.SweepResult:
+        result = sub.SweepResult()
+        sub._sweep_owner_records(root, result, now=self._NOW)
+        return result
+
+    def test_a_tmp_older_than_the_safe_age_is_removed_and_reported(self, tmp_path) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        tmp = self._tmp(root, age_s=sub._OWNER_TMP_MIN_AGE_S + 1)
+        result = self._sweep(root)
+        assert not tmp.exists()
+        assert result.stale_tmp_removed == [str(tmp)]
+
+    def test_a_fresh_tmp_is_left_alone(self, tmp_path) -> None:
+        """A writer between its write and its replace owns it right now."""
+        root = tmp_path / "nexus-test-pg-1000"
+        tmp = self._tmp(root, age_s=1)
+        result = self._sweep(root)
+        assert tmp.exists() and result.stale_tmp_removed == []
+
+    def test_the_boundary_is_strictly_older_than_the_safe_age(self, tmp_path) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        tmp = self._tmp(root, age_s=sub._OWNER_TMP_MIN_AGE_S)
+        self._sweep(root)
+        assert tmp.exists()
+
+    @pytest.mark.parametrize("name", [
+        "other.json.tmp",                                    # not our prefix
+        f"{sub._OWNER_RECORD_PREFIX}abc.json.tmp",           # pid is not digits
+        f"{sub._OWNER_RECORD_PREFIX}4242.json.tmp.bak",      # extra suffix
+        f"{sub._OWNER_RECORD_PREFIX}4242.json",              # the record itself, old as it is
+        f"x{sub._OWNER_RECORD_PREFIX}4242.json.tmp",         # prefix not at the start
+    ])
+    def test_only_the_records_own_tmp_name_is_matched(self, tmp_path, name) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        keep = self._tmp(root, age_s=10 * sub._OWNER_TMP_MIN_AGE_S, name=name)
+        result = self._sweep(root)
+        assert keep.exists() and result.stale_tmp_removed == []
+
+    def test_a_tmp_below_the_root_is_not_reached(self, tmp_path) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        nested = self._tmp(root / "nexus_inttest_pg_abc", age_s=10 * sub._OWNER_TMP_MIN_AGE_S)
+        sibling = self._tmp(tmp_path / "elsewhere", age_s=10 * sub._OWNER_TMP_MIN_AGE_S)
+        root.mkdir(exist_ok=True)
+        self._sweep(root)
+        assert nested.exists() and sibling.exists()
+
+    def test_a_symlink_with_the_tmp_name_is_neither_followed_nor_removed(self, tmp_path) -> None:
+        root = tmp_path / "nexus-test-pg-1000"
+        root.mkdir()
+        victim = tmp_path / "victim.txt"
+        victim.write_text("keep")
+        link = root / f"{sub._OWNER_RECORD_PREFIX}{self._PID}.json.tmp"
+        link.symlink_to(victim)
+        os.utime(link, (self._NOW - 10 * sub._OWNER_TMP_MIN_AGE_S,) * 2, follow_symlinks=False)
+        result = self._sweep(root)
+        assert link.is_symlink() and victim.read_text() == "keep"
+        assert result.stale_tmp_removed == []
+
+    def test_the_real_sweep_removes_a_stale_tmp_under_its_root(self, tmp_path) -> None:
+        """The public path, real clock: an hour-old tmp goes, a just-written one stays."""
+        root = tmp_path / "nexus-test-pg-1000"
+        old = self._tmp(root, age_s=0, name=f"{sub._OWNER_RECORD_PREFIX}1.json.tmp")
+        os.utime(old, (time.time() - 3600,) * 2)
+        new = self._tmp(root, age_s=0, name=f"{sub._OWNER_RECORD_PREFIX}2.json.tmp")
+        os.utime(new, (time.time(),) * 2)
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert not old.exists() and new.exists()
+        assert result.stale_tmp_removed == [str(old)]

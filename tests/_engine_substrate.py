@@ -2427,6 +2427,8 @@ class SweepResult:
     untrusted: list[str] = field(default_factory=list)
     legacy_reported: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: Stale ``<owner record>.json.tmp`` leftovers the sweep removed (nexus-qsqc6).
+    stale_tmp_removed: list[str] = field(default_factory=list)
 
 
 def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResult:
@@ -2471,8 +2473,55 @@ def sweep_integration_owner_records() -> SweepResult:
     return result
 
 
-def _sweep_owner_records(root: Path, result: SweepResult) -> None:
-    """Reap the integration clusters of dead owners recorded under *root*."""
+#: ``_flush_owner_record`` writes ``<record>.json.tmp`` and replaces it onto the record within microseconds. A
+#: ``.json.tmp`` older than this is a write that never reached its replace (its process was killed between the
+#: two), not one in flight.
+_OWNER_TMP_MIN_AGE_S: float = 600.0
+
+#: The one name :func:`_flush_owner_record` gives its tmp: the record's own name plus ``.tmp``.
+_OWNER_TMP_NAME = re.compile(rf"{re.escape(_OWNER_RECORD_PREFIX)}\d+\.json\.tmp")
+
+
+def _sweep_stale_owner_tmps(root: Path, result: SweepResult, *, now: float | None = None) -> None:
+    """Remove ``<root>/nexus_integration_owner_<pid>.json.tmp`` files older than :data:`_OWNER_TMP_MIN_AGE_S`
+    (nexus-qsqc6). The glob ``*.json`` of the record sweep never matches them. Only a regular file of the
+    service identity, matched by :data:`_OWNER_TMP_NAME` directly under *root*: a symlink, a look-alike name,
+    another uid's file or anything below *root* is left alone."""
+    now = time.time() if now is None else now
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        if not _OWNER_TMP_NAME.fullmatch(p.name):
+            continue
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if os.name != "nt" and st.st_uid != int(_current_uid()):
+            continue
+        if now - st.st_mtime <= _OWNER_TMP_MIN_AGE_S:
+            continue
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            warnings.warn(
+                f"nexus test substrate sweep: cannot remove stale owner-record tmp {p}: {exc}",
+                stacklevel=2,
+            )
+            continue
+        result.stale_tmp_removed.append(str(p))
+
+
+def _sweep_owner_records(root: Path, result: SweepResult, *, now: float | None = None) -> None:
+    """Reap the integration clusters of dead owners recorded under *root*, and drop the stale ``.json.tmp``
+    a killed record write left (nexus-qsqc6)."""
+    _sweep_stale_owner_tmps(root, result, now=now)
     for rec in sorted(root.glob(_OWNER_RECORD_GLOB)):
         try:
             _sweep_owner_record(rec, root, result)
