@@ -539,12 +539,23 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  typed Query object the run methods execute, explained through {@code nexus_test.explain_plan} (binds
      *  rendered inline, every plan row). Returns the full plan text; {@link #parseExecutionTimeMs} extracts the
      *  server-side execution time from it. */
+    /**
+     * EXPLAIN (ANALYZE, BUFFERS) of the KNN under production settings, through nexus_test.explain_plan: a custom plan
+     * for these literal values. The timed statements in runProd are bound, and after about five executions on one
+     * connection the server may switch them to a generic plan, which this does not show. For the index-served form
+     * it also pins that nexus_test.cosine_order was inlined (its name never survives into an inlined plan), so a
+     * planner change that stopped inlining it fails here rather than turning a recall row exact.
+     */
     private String explainProd(Liveness live, boolean exact, float[] vec, int n) {
-        return tenantScope.withTenant(TENANT, ctx -> {
+        String plan = tenantScope.withTenant(TENANT, ctx -> {
             applyProfile(ctx, Profile.PROD);
             return PgContainerHelper.explainPlanWith(ctx, knnQuery(ctx, live, vec, n, exact),
                 PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS);
         });
+        if (!exact) {
+            assertThat(plan).as("nexus_test.cosine_order must be inlined. Plan:%n%s", plan).doesNotContain("cosine_order");
+        }
+        return plan;
     }
 
     private static final Pattern EXECUTION_TIME = Pattern.compile("Execution Time: ([0-9.]+) ms");
@@ -683,17 +694,6 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     // ── EXPLAIN + latency sweep across msz9i's own tombstone fractions ──────
 
     /**
-     * At every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}: both queries must reach
-     * the HNSW index ({@code idx_chunks_embedding_384}), and the "after" query's plan
-     * must never contain the literal function name (the same inlining pin as
-     * ChunkLiveOwnersInlineRecallIntegrationTest, now exercised at real msz9i scale
-     * and under a real dead-row fraction, closing critique-wbfpw9's Important-2: "the
-     * 5,000-row scale fixture is 100% live; it cannot exercise the actual risk case").
-     * Server EXPLAIN ANALYZE execution time and client JDBC wall-clock p50 are
-     * measured and printed SEPARATELY for before/after at each fraction -- never
-     * compared against each other, only against their own opposite number.
-     */
-    /**
      * RDR-225: the plan names the model/tenant leaf's inherited HNSW index
      * ({@code <leaf>_embedding_384_idx}), not the parent's {@code idx_chunks_embedding_384}. The
      * pattern anchors on the scan node, so the ORDER BY key text cannot satisfy it.
@@ -704,6 +704,17 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return java.util.regex.Pattern.compile(HNSW_SCAN_PATTERN).matcher(plan).find();
     }
 
+    /**
+     * At every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}: both queries must reach
+     * the HNSW index ({@code idx_chunks_embedding_384}), and the "after" query's plan
+     * must never contain the literal function name (the same inlining pin as
+     * ChunkLiveOwnersInlineRecallIntegrationTest, now exercised at real msz9i scale
+     * and under a real dead-row fraction, closing critique-wbfpw9's Important-2: "the
+     * 5,000-row scale fixture is 100% live; it cannot exercise the actual risk case").
+     * Server EXPLAIN ANALYZE execution time and client JDBC wall-clock p50 are
+     * measured and printed SEPARATELY for before/after at each fraction -- never
+     * compared against each other, only against their own opposite number.
+     */
     @Test
     void explainAndLatency_acrossTombstoneFractions() throws Exception {
         Random rnd = new Random(20260927102L);

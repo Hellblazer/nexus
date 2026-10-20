@@ -689,8 +689,8 @@ $$;
         (nexus.&lt;=&gt;) as a function, so a typed jOOQ ORDER BY can carry it (nexus-cbo4a batch D). jOOQ has no form
         for OPERATOR(nexus.&lt;=&gt;), and Routines.cosineDistance1 is pgvector's C function, which an HNSW index never
         serves. This one is meant to be served: LANGUAGE sql with a single-expression body, IMMUTABLE, PARALLEL SAFE,
-        not STRICT, no SET clause and SECURITY INVOKER (STRICT, a SET clause or SECURITY DEFINER each blocks
-        inline_function), so the planner substitutes the body before it matches ORDER BY pathkeys against the index
+        not STRICT, no SET clause and SECURITY INVOKER (a SET clause or SECURITY DEFINER blocks inline_function; the
+        SET-clause twin below shows the blocked form; whether STRICT would also block it is not tested), so the planner substitutes the body before it matches ORDER BY pathkeys against the index
         and the plan carries the operator, not this function's name. NexusTestCosineOrderInliningTest EXPLAINs it
         against a cosine_distance control; a plan that names nexus_test.cosine_order means the inlining failed.</comment>
         <sql splitStatements="false" stripComments="false">
