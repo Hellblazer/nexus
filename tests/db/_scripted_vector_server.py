@@ -104,7 +104,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
 
 def start() -> ScriptedServer:
     srv = ScriptedServer()
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     return srv
 
 

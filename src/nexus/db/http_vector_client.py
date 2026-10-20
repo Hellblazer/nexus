@@ -624,6 +624,12 @@ _IDEMPOTENCY_RESPONSE_HEADERS: tuple[str, ...] = (
 )
 
 
+def _now() -> datetime:
+    """The wall clock the keyed-sweep poll loop compares a ``lease_until`` against; a seam so a test
+    can advance it without waiting."""
+    return datetime.now(UTC)
+
+
 def new_request_key() -> str:
     """A fresh request key. ``uuid4``, not UUIDv7: ``uuid.uuid7`` is Python 3.14 and
     ``requires-python`` is ``>=3.12,<3.14`` (nexus-icdmw item 4). The engine reads any canonical UUID."""
@@ -2015,6 +2021,209 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
 
 
+# ── RDR-222 Phase 1: keyed sweeps (nexus-yye8l.12) ───────────────────────────
+
+#: Resends of one logical keyed request after an ambiguous outcome, a 503 ``sweep_gate_busy`` or
+#: a status of ``rolled_back``/``unknown``. The first attempt is not a resend: a request makes at
+#: most ``1 + _KEYED_MAX_RESENDS`` POSTs, then surfaces its last outcome.
+_KEYED_MAX_RESENDS = 3
+
+#: Seconds between status polls (RDR-222 Technical Design 4).
+_STATUS_POLL_INTERVAL_S = 5.0
+
+#: Consecutive status polls that fail (not a 404) before the original error surfaces.
+_STATUS_POLL_MAX_FAILURES = 3
+
+#: Longest one ambiguity may spend polling: the engine's 95 s sweep lease plus slack for a skewed
+#: clock. Past it the original error surfaces.
+_STATUS_POLL_BUDGET_S = 180.0
+
+#: Wait before resending after a 503 ``sweep_gate_busy`` that carried no ``Retry-After``.
+_SWEEP_GATE_BUSY_DEFAULT_WAIT_S = 5.0
+
+#: Longest ``Retry-After`` honoured, whatever the response asked for.
+_RETRY_AFTER_MAX_S = 60.0
+
+#: Socket read timeout of a keyed sweep POST. The engine bounds a bounded sweep at 25 s plus its
+#: gate wait; the edge cuts a request at about 30 s. A timeout is not an error here, it is the
+#: ambiguity the status poll resolves.
+_SWEEP_POST_TIMEOUT_S: float = 120
+
+#: (status, ``error`` field) pairs that mean the key itself is wrong: raised, never resent.
+_KEY_REFUSALS: frozenset[tuple[int, str]] = frozenset({
+    (422, "idempotency_key_reused"),
+    (400, "idempotency_key_malformed"),
+    (400, "idempotency_key_unsupported"),
+})
+
+
+def _engine_error(exc: VectorServiceError) -> str:
+    """The ``error`` field of the engine's body, ``""`` when there is none. Dispatch is on this, never
+    on the status alone: a class-23 conflict is also a 409."""
+    body = exc.engine_body
+    value = body.get("error") if isinstance(body, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _retry_after_seconds(headers: dict[str, str]) -> float | None:
+    """``Retry-After`` as seconds (clamped), or ``None`` when absent or not a number of seconds."""
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, min(float(raw), _RETRY_AFTER_MAX_S))
+    except ValueError:
+        return None
+
+
+def _parse_lease(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, dict | None]:
+    """Ask ``GET /v1/requests/<key>`` what became of a keyed request, until it can be answered.
+
+    Returns ``("committed", stored_response)``, ``("resend", None)`` (``rolled_back``, ``unknown``,
+    or an ``in_flight`` whose lease has passed: a resend under the SAME key is safe in every state),
+    or ``("surface", None)`` (the engine has no ledger, 404; or the polls kept failing; or the budget
+    ran out): the caller raises the original error.
+
+    ``in_flight`` is polled every :data:`_STATUS_POLL_INTERVAL_S` until the poll body's
+    ``lease_until`` has passed, then once more. The first poll is immediate.
+    """
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    started = _now()
+    failures = 0
+    polls = 0
+    while True:
+        polls += 1
+        try:
+            body = _get(f"/v1/requests/{key}", tenant=tenant)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                _log.info("keyed_sweep_status_route_absent", path=path, request_id=key)
+                return "surface", None
+            failures += 1
+            _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+            failures += 1
+            _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
+        else:
+            failures = 0
+            state = body.get("state") if isinstance(body, dict) else None
+            _log.info("keyed_sweep_status_poll", path=path, request_id=key, state=state, polls=polls)
+            if state == "committed":
+                response = body.get("response")
+                if isinstance(response, dict):
+                    return "committed", response
+                _log.warning("keyed_sweep_committed_without_response", path=path, request_id=key)
+                return "surface", None
+            if state in ("rolled_back", "unknown"):
+                return "resend", None
+            if state == "in_flight":
+                lease = _parse_lease(body.get("lease_until"))
+                if lease is not None and _now() > lease:
+                    # This poll was taken after the lease ended: the one extra poll the rule asks for.
+                    return "resend", None
+            else:
+                _log.warning("keyed_sweep_unknown_status_state", path=path, request_id=key, state=state)
+                return "surface", None
+        if failures >= _STATUS_POLL_MAX_FAILURES:
+            return "surface", None
+        if (_now() - started).total_seconds() > _STATUS_POLL_BUDGET_S:
+            _log.warning("keyed_sweep_status_poll_budget_spent", path=path, request_id=key, polls=polls)
+            return "surface", None
+        time.sleep(_STATUS_POLL_INTERVAL_S)
+
+
+def _keyed_sweep_post(path: str, body: dict, *, tenant: str) -> Any:
+    """POST *body* to a bounded sweep route under one fresh request key, and resolve an ambiguous
+    outcome through the ledger (RDR-222 Phase 1).
+
+    One call is one logical request: the key is minted here, once, and *body* is frozen (the engine
+    keys the request on the SHA-256 of the raw body, so a resend must be byte-identical; the same dict
+    serialises to the same bytes). The key is set around each POST attempt only
+    (:func:`_request_key`), so the status polls between attempts carry none.
+
+    * A 2xx is the result (a replay included).
+    * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
+      ``idempotency_key_unsupported`` raises :class:`IdempotencyKeyRefusedError`, never resent.
+    * A 503 ``sweep_gate_busy`` (the quarantine forms; nothing ran) waits ``Retry-After`` (5 s when
+      absent) and resends under the same key.
+    * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``: the
+      managed edge answers its own 503 for a request that never reached the engine), a socket timeout
+      or a connection failure that does not prove the engine never ran the request, is ambiguous:
+      :func:`_poll_request_status` answers it. Never a re-POST on a 409.
+    * Every other error is raised exactly as before.
+
+    At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An engine without a
+    ledger answers the status poll 404 and the original error surfaces, as it did before this existed.
+    """
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    key = new_request_key()
+    resends = 0
+    while True:
+        _pop_idempotency_response_headers()  # a socket timeout leaves no response to overwrite a stale one
+        try:
+            with _request_key(key):
+                result = _post(path, body, tenant=tenant, timeout=_SWEEP_POST_TIMEOUT_S)
+            if _pop_idempotency_response_headers().get("Idempotency-Replayed") == "true":
+                _log.info("keyed_sweep_replayed", path=path, request_id=key)
+            return result
+        except (VectorServiceError, urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+            identity = _pop_idempotency_response_headers()
+            wait_first: float | None = None
+            if isinstance(exc, VectorServiceError) and exc.code is not None:
+                error = _engine_error(exc)
+                if (exc.code, error) in _KEY_REFUSALS:
+                    raise IdempotencyKeyRefusedError(
+                        str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
+                        reason=exc.reason, engine_body=exc.engine_body,
+                    ) from exc
+                busy = exc.code == 503 and error == "sweep_gate_busy"
+                ambiguous = (
+                    (exc.code == 409 and error == "request_in_flight")
+                    or exc.code in (502, 504)
+                    or exc.code == 503
+                )
+                if not busy and not ambiguous:
+                    raise
+                if exc.code == 503:
+                    wait_first = _retry_after_seconds(identity)
+            elif isinstance(exc, VectorServiceError):
+                busy = False  # a transport failure reframed for a managed endpoint: ambiguous
+            else:
+                if _proves_request_not_executed(exc):
+                    raise
+                busy = False
+            if resends >= _KEYED_MAX_RESENDS:
+                _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
+                raise
+            if busy:
+                wait = wait_first if wait_first is not None else _SWEEP_GATE_BUSY_DEFAULT_WAIT_S
+                _log.info("keyed_sweep_gate_busy", path=path, request_id=key, wait_s=wait)
+                time.sleep(wait)
+                resends += 1
+                continue
+            if wait_first:
+                time.sleep(wait_first)
+            verdict, stored = _poll_request_status(key, tenant, path)
+            if verdict == "committed":
+                return stored
+            if verdict == "surface":
+                raise
+            resends += 1
+            _log.warning("keyed_sweep_resend", path=path, request_id=key, resends=resends)
+
+
 def _warn_skipped_collections(route: str, requested: list[str]) -> None:
     """RDR-204 Phase 3 item 5 (nexus-ft04v.26): log (never retry) when a
     fan-out read's response carried ``X-Nexus-Skipped-Collections``
@@ -2227,6 +2436,16 @@ class VectorServiceError(RuntimeError):
         #: response and the application never saw the request. Deterministic
         #: in the request body — a caller must not retry it.
         self.edge_refusal = edge_refusal
+
+
+class IdempotencyKeyRefusedError(VectorServiceError):
+    """The engine refused a keyed request's ``Idempotency-Key`` (RDR-222): 422
+    ``idempotency_key_reused`` (the key was first used with another body), or 400
+    ``idempotency_key_malformed`` / ``idempotency_key_unsupported``. Each is a client bug, and a
+    resend can only repeat it, so the keyed methods raise this and never resend. ``code`` and
+    ``engine_body["error"]`` say which. A :class:`VectorServiceError`, so a caller that catches that
+    still catches this.
+    """
 
 
 class PerCollectionEnvelopeError(VectorServiceError):
@@ -4435,8 +4654,16 @@ class HttpVectorClient:
         same request; an engine that honours them judges the floor under its sweep
         gate on the whole reapable set and may answer ``refused: true`` with nothing
         moved, ``remaining`` still naming the whole reapable set.
+
+        RDR-222 Phase 1: one call is one keyed request (``Idempotency-Key``, a fresh uuid4 minted
+        here). A gateway code or a socket timeout asks ``GET /v1/requests/<key>`` rather than
+        reporting failure: a committed sweep returns its stored response (a ``sample`` over the
+        engine's 64 KB cap comes back cut, with ``"sample_truncated": true``), a rolled-back or unknown
+        one is resent under the same key, and an engine with no ledger surfaces the original error.
+        A 503 ``sweep_gate_busy`` waits ``Retry-After`` and resends. Raises
+        :class:`IdempotencyKeyRefusedError` for a refused key (never resent). At most 3 resends.
         """
-        return _post(
+        return _keyed_sweep_post(
             "/v1/vectors/gc/quarantine-orphans",
             {
                 "collection": collection,
@@ -4473,8 +4700,12 @@ class HttpVectorClient:
         404) — it performs the UNBOUNDED restore regardless of what this
         call asked for. Callers detect that by the absent ``remaining`` key,
         never by inferring engine version.
+
+        RDR-222 Phase 1: one call is one keyed request, resolved through the ledger on an ambiguous
+        outcome exactly as :meth:`gc_quarantine_orphans_bounded` is (restore takes no sweep gate, so
+        it never sees ``sweep_gate_busy``).
         """
-        return _post(
+        return _keyed_sweep_post(
             "/v1/vectors/gc/restore-rereferenced",
             {
                 "quarantine_collection": quarantine_collection,

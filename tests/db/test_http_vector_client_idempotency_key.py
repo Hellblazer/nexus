@@ -19,7 +19,7 @@ from tests._module_seam import module_time
 from tests.db import _scripted_vector_server as sv
 
 _SWEEP = "/v1/vectors/gc/quarantine-orphans"
-_UPSERT = "/v1/vectors/upsert-chunks"
+_RETRYABLE = "/v1/vectors/search"  # a route the gateway-retry loop does resend
 _KEY_HEADER = "idempotency-key"
 
 
@@ -44,11 +44,11 @@ def test_a_keyed_attempt_sends_idempotency_key_on_every_post_attempt(srv, monkey
     """One key, every attempt: the gateway-retry loop re-invokes _request_once per attempt and the
     thread-local, set once around the POST, is read each time."""
     module_time(monkeypatch, hv).sleep = lambda s: None
-    srv.script(f"POST {_UPSERT}", sv.err(503, "gw"), sv.ok({"upserted": 1}))
+    srv.script(f"POST {_RETRYABLE}", sv.err(503, "gw"), sv.ok({"results": []}))
     key = str(uuid.uuid4())
     with hv._request_key(key):
-        assert _post(_UPSERT) == {"upserted": 1}
-    sent = [r["headers"].get(_KEY_HEADER) for r in srv.calls("POST", _UPSERT)]
+        assert _post(_RETRYABLE) == {"results": []}
+    sent = [r["headers"].get(_KEY_HEADER) for r in srv.calls("POST", _RETRYABLE)]
     assert sent == [key, key], "both attempts of one logical POST carry the one key"
 
 
