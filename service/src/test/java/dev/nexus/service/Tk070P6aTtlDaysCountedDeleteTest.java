@@ -12,17 +12,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.SQLWarning;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
@@ -45,9 +37,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * TWO with {@code ttl = 0} plus decoy rows ({@code ttl IS NULL},
  * {@code ttl = 30}) that must survive untouched, then re-executes the
  * changeset's OWN {@code <sql>} text (extracted from the changelog XML,
- * never duplicated inline) via a plain JDBC {@link Statement#execute
- * (String)} — which lets the test capture the RAISE NOTICE off the
- * driver's {@link SQLWarning} chain, unavailable to Liquibase's own
+ * never duplicated inline) via a plain JDBC {@code Statement.execute}
+ * ({@link PgContainerHelper#replayChangeset}) — which lets the test capture the RAISE NOTICE off the
+ * driver's {@code SQLWarning} chain, unavailable to Liquibase's own
  * internal migration connection.
  *
  * <p>Runs as the container superuser (implicit BYPASSRLS) — proving the
@@ -123,12 +115,7 @@ class Tk070P6aTtlDaysCountedDeleteTest {
                 .as("ground truth before re-running memory-003-1's SQL")
                 .isEqualTo(2);
 
-            String sql = extractChangesetSql(MEMORY_CHANGELOG, MEMORY_CHANGESET_ID);
-            List<String> notices;
-            try (Statement st = su.createStatement()) {
-                st.execute(sql);
-                notices = collectNotices(st.getWarnings());
-            }
+            List<String> notices = PgContainerHelper.replayChangeset(su, MEMORY_CHANGELOG, MEMORY_CHANGESET_ID);
 
             assertThat(notices)
                 .as("the counted-DELETE RAISE NOTICE must be captured")
@@ -173,12 +160,7 @@ class Tk070P6aTtlDaysCountedDeleteTest {
                 .as("ground truth before re-running plans-003-1's SQL")
                 .isEqualTo(2);
 
-            String sql = extractChangesetSql(PLANS_CHANGELOG, PLANS_CHANGESET_ID);
-            List<String> notices;
-            try (Statement st = su.createStatement()) {
-                st.execute(sql);
-                notices = collectNotices(st.getWarnings());
-            }
+            List<String> notices = PgContainerHelper.replayChangeset(su, PLANS_CHANGELOG, PLANS_CHANGESET_ID);
 
             assertThat(notices)
                 .as("the counted-DELETE RAISE NOTICE must be captured")
@@ -243,50 +225,5 @@ class Tk070P6aTtlDaysCountedDeleteTest {
 
     private static boolean checkConstraintExists(Connection c, String constraintName) {
         return PgCatalogProbes.constraintExists(DSL.using(c, SQLDialect.POSTGRES), constraintName);
-    }
-
-    // ── Shared extraction/notice helpers (mirrors
-    //    Taxonomy010BackfillDirectIntegrationTest's own private copies —
-    //    duplicated per this project's established per-test-class
-    //    convention rather than a shared utility class) ──────────────────
-
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        Document doc;
-        try (var in = Tk070P6aTtlDaysCountedDeleteTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            Element cs = (Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    Node n = children.item(j);
-                    if (n.getNodeType() == Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
-    }
-
-    private static List<String> collectNotices(SQLWarning first) {
-        List<String> out = new ArrayList<>();
-        SQLWarning w = first;
-        while (w != null) {
-            out.add(w.getMessage());
-            w = w.getNextWarning();
-        }
-        return out;
     }
 }

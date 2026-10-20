@@ -11,16 +11,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.SQLWarning;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -65,12 +57,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * DROPs the {@code NOT NULL} constraint back off (test-only relaxation),
  * seeds NULL-{@code source_collection} rows, then re-executes the changeset's
  * OWN {@code <sql>} text — read directly out of the changelog XML at test
- * time via {@link #extractChangesetSql} rather than duplicated inline —
+ * time via {@link PgContainerHelper#replayChangeset} rather than duplicated inline —
  * so there is no second copy of the SQL to drift out of sync with the
  * migration file. The extracted text is executed via a plain JDBC
- * {@link Statement#execute(String)} (not Liquibase), which lets this test
+ * {@code Statement.execute} (not Liquibase), which lets this test
  * additionally capture the changeset's {@code RAISE NOTICE} counts off the
- * driver's {@link SQLWarning} chain — direct proof of the bead's "BOTH
+ * driver's {@code SQLWarning} chain — direct proof of the bead's "BOTH
  * delete counts reported" requirement that the rehearsal leg's own comment
  * documents as unavailable to it (no warning listener on Liquibase's
  * internal migration connection).
@@ -130,7 +122,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
                 .execute();
             // RDR-194 P3c (nexus-tk070.p3c): startAll()'s full migration now
             // ALSO runs taxonomy-011-1, converting doc_id to bytea. This test
-            // replays taxonomy-010-1's OWN <sql> text unmodified (extractChangesetSql,
+            // replays taxonomy-010-1's OWN <sql> text unmodified (PgContainerHelper.replayChangeset,
             // see class javadoc) -- that text was written for a TEXT-typed doc_id
             // (`ta.doc_id ~ '^[0-9a-f]{64}$'`, `encode(c.chash,'hex') = ta.doc_id`)
             // and would fail to typecheck against bytea (`~` is not defined for
@@ -213,12 +205,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
                 .as("ground truth before re-running taxonomy-010-1's SQL: four rows total")
                 .isEqualTo(4);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
-            List<String> notices;
-            try (Statement st = su.createStatement()) {
-                st.execute(sql);
-                notices = collectNotices(st.getWarnings());
-            }
+            List<String> notices = PgContainerHelper.replayChangeset(su, CHANGELOG_FILE, CHANGESET_ID);
 
             // ── BOTH delete counts (plus the backfill count), read directly
             // off the driver's SQLWarning chain -- the RAISE NOTICE proof the
@@ -284,54 +271,6 @@ class Taxonomy010BackfillDirectIntegrationTest {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
-
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Deliberately NOT recursive ({@code getElementsByTagNameNS} would also
-     * pull in the {@code <rollback>} element's own nested {@code <sql>} children,
-     * since both are descendants of {@code <changeSet>}) -- only direct children
-     * are the changeset's FORWARD SQL.
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        Document doc;
-        try (var in = Taxonomy010BackfillDirectIntegrationTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            Element cs = (Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    Node n = children.item(j);
-                    if (n.getNodeType() == Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
-    }
-
-    private static List<String> collectNotices(SQLWarning first) {
-        List<String> out = new ArrayList<>();
-        SQLWarning w = first;
-        while (w != null) {
-            out.add(w.getMessage());
-            w = w.getNextWarning();
-        }
-        return out;
-    }
 
     private static void registerCollection(Connection c, String tenant, String name, String model) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection.

@@ -514,18 +514,15 @@ class SchemaRollbackRoundTripIntegrationTest {
             // taxonomy-011-8, upgrading through this exact changeset).
             // Direct-replay proof, bypassing Liquibase's own ordering
             // entirely — mirrors Taxonomy010BackfillDirectIntegrationTest's
-            // extractChangesetSql technique.
+            // PgContainerHelper.replayChangeset technique.
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 dsl(su).dropView(DSL.table(DSL.name("nexus", "diag_chash_conformance"))).execute();
-                // SANCTIONED RAW: replays grants-nexus-diag-1's own <sql> body verbatim
-                // (extractChangesetSql), byte-for-byte, to prove its LEGACY BRANCH logic is
-                // still correct even though it is now practically unreachable via a live
-                // walk (see this test's own javadoc above) -- a typed-DSL re-expression
-                // would no longer be the SAME statement Liquibase itself executes.
-                String sql = extractChangesetSql(
-                    "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
-                su.createStatement().execute(sql);
+                // Replays grants-nexus-diag-1's own <sql> body verbatim (read from the product changelog), to
+                // prove its LEGACY BRANCH logic is still correct even though it is now practically
+                // unreachable via a live walk (see this test's own javadoc above) -- a typed-DSL
+                // re-expression would no longer be the SAME statement Liquibase itself executes.
+                PgContainerHelper.replayChangeset(su, "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
                 assertThat(diagBaseTableGrants(su))
                     .as("grants-nexus-diag-1's own legacy-branch SQL, replayed directly "
                         + "against a connection where the view genuinely does not exist, "
@@ -537,44 +534,6 @@ class SchemaRollbackRoundTripIntegrationTest {
         } finally {
             pg.stop();
         }
-    }
-
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Same technique as
-     * {@code Taxonomy010BackfillDirectIntegrationTest#extractChangesetSql}
-     * (duplicated locally rather than shared — no common test-utility class
-     * exists for this yet).
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        org.w3c.dom.Document doc;
-        try (var in = SchemaRollbackRoundTripIntegrationTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        org.w3c.dom.NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            org.w3c.dom.Element cs = (org.w3c.dom.Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                org.w3c.dom.NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    org.w3c.dom.Node n = children.item(j);
-                    if (n.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
     }
 
     /**

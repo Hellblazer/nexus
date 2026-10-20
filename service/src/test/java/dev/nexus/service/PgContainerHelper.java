@@ -1866,6 +1866,113 @@ public final class PgContainerHelper {
             "databasechangelog_test_reindex_index", Map.of("schema", schema, "index", index));
     }
 
+    /** Which text of a product changeset {@link #replayPart} runs. */
+    private enum ChangesetPart { FORWARD, ROLLBACK }
+
+    /**
+     * Runs one product changeset's own forward SQL, read from the changelog XML on the classpath, on {@code conn}
+     * as that connection's current role, and returns the driver's {@code SQLWarning} messages (the
+     * {@code RAISE NOTICE} chain) in order (nexus-cbo4a batch 10). See {@link #replayPart} for the contract.
+     */
+    public static List<String> replayChangeset(Connection conn, String changelog, String changesetId)
+            throws Exception {
+        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD);
+    }
+
+    /** The forward text {@link #replayChangeset} would run, for a test that pins which statement it replays. */
+    public static String changesetForwardText(String changelog, String changesetId) throws Exception {
+        return changesetText(changelog, changesetId, ChangesetPart.FORWARD);
+    }
+
+    /** The {@code <rollback>} text {@link #replayChangesetRollback} would run. */
+    public static String changesetRollbackText(String changelog, String changesetId) throws Exception {
+        return changesetText(changelog, changesetId, ChangesetPart.ROLLBACK);
+    }
+
+    /** {@link #replayChangeset} for the changeset's {@code <rollback>} text instead of its forward SQL. */
+    public static List<String> replayChangesetRollback(Connection conn, String changelog, String changesetId)
+            throws Exception {
+        return replayPart(conn, changelog, changesetId, ChangesetPart.ROLLBACK);
+    }
+
+    /**
+     * The one sanctioned raw execute for the changeset-replay idiom (RawSqlGateTest's SANCTIONED_STATEMENTS): there
+     * is no SQL string in Java, the statement IS the product text. A Liquibase run of the file cannot stand in: it
+     * applies the changeset's siblings too, runs under the migration role, and its executor drops the notices. An
+     * error from the server surfaces unchanged ({@code SQLException}, SQLSTATE and message as the driver raised
+     * them); the connection's autoCommit, transaction and role are left as the caller set them.
+     *
+     * <p>FORWARD is the concatenation, in document order, of the changeset's DIRECT {@code <sql>} children;
+     * ROLLBACK is the direct {@code <sql>} children of its {@code <rollback>}, or that element's own text when it
+     * has none. Nested descendants are not followed, so a forward body never picks up the rollback's {@code <sql>}.
+     * A changeset that is not found, or whose selected part is empty (an empty {@code <rollback/>}), throws
+     * {@link IllegalStateException}: a replay of nothing would pass vacuously. XML entities are decoded, as
+     * Liquibase decodes them.
+     */
+    private static List<String> replayPart(Connection conn, String changelog, String changesetId,
+            ChangesetPart part) throws Exception {
+        String sql = changesetText(changelog, changesetId, part);
+        List<String> notices = new ArrayList<>();
+        try (java.sql.Statement st = conn.createStatement()) {
+            st.execute(sql);
+            for (java.sql.SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) {
+                notices.add(w.getMessage());
+            }
+        }
+        return notices;
+    }
+
+    private static final String LIQUIBASE_NS = "http://www.liquibase.org/xml/ns/dbchangelog";
+
+    private static String changesetText(String changelog, String changesetId, ChangesetPart part) throws Exception {
+        org.w3c.dom.Document doc;
+        try (var in = PgContainerHelper.class.getClassLoader().getResourceAsStream(changelog)) {
+            if (in == null) {
+                throw new IllegalStateException("changelog not found on classpath: " + changelog);
+            }
+            var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            doc = factory.newDocumentBuilder().parse(in);
+        }
+        org.w3c.dom.NodeList changeSets = doc.getElementsByTagNameNS(LIQUIBASE_NS, "changeSet");
+        for (int i = 0; i < changeSets.getLength(); i++) {
+            var cs = (org.w3c.dom.Element) changeSets.item(i);
+            if (!changesetId.equals(cs.getAttribute("id"))) {
+                continue;
+            }
+            String text = switch (part) {
+                case FORWARD -> directSql(cs);
+                case ROLLBACK -> {
+                    StringBuilder sb = new StringBuilder();
+                    for (var n = cs.getFirstChild(); n != null; n = n.getNextSibling()) {
+                        if (n instanceof org.w3c.dom.Element el && "rollback".equals(el.getLocalName())) {
+                            String inner = directSql(el);
+                            sb.append(inner.isBlank() ? el.getTextContent() : inner);
+                        }
+                    }
+                    yield sb.toString();
+                }
+            };
+            if (text.isBlank()) {
+                throw new IllegalStateException("changeset " + changesetId + " in " + changelog + " has no "
+                    + part + " SQL to replay");
+            }
+            return text;
+        }
+        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelog);
+    }
+
+    private static String directSql(org.w3c.dom.Element parent) {
+        StringBuilder sb = new StringBuilder();
+        for (var n = parent.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n instanceof org.w3c.dom.Element el && "sql".equals(el.getLocalName())) {
+                sb.append(el.getTextContent()).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
     /** jOOQ formats an EXPLAIN into a table whose column width comes from the first 50 rows; longer plans are cut. */
     private static final int EXPLAIN_WHOLE_PLAN_MAX_ROWS = 50;
 

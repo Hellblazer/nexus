@@ -11,12 +11,7 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.Test;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.Map;
@@ -35,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code DROP VIEW} was a no-op the first time — the view did not exist
  * yet). This class reconstructs the missing scenario directly: it replays
  * {@code taxonomy-011-1}'s OWN {@code <sql>} text (via
- * {@link #extractChangesetSql}, the same technique
+ * {@link PgContainerHelper#replayChangeset}, the same technique
  * {@link Taxonomy010BackfillDirectIntegrationTest} already established for
  * an otherwise-hard-to-stage changeset) against a connection that owns
  * {@code nexus.topic_assignments} but does NOT own a pre-existing,
@@ -100,10 +95,9 @@ class Taxonomy011ForeignOwnedDiagViewTest {
             su.setAutoCommit(true);
             migrateThenSeedForeignOwnedView(pg, su);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatThrownBy(() -> replay(admin, sql))
+                assertThatThrownBy(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("taxonomy-011-1's DROP VIEW must fail LOUD with the NAMED nexus-7ec4i "
                         + "remedy when the view is foreign-owned -- not a silent skip "
                         + "(structurally impossible for the ALTER to survive a surviving "
@@ -132,13 +126,14 @@ class Taxonomy011ForeignOwnedDiagViewTest {
             su.setAutoCommit(true);
             migrateThenSeedForeignOwnedView(pg, su);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatThrownBy(() -> replay(admin, sql))
+                // SQLException, not Exception: the changeset text is now read inside the replay, so a changeset
+                // that could not be found (IllegalStateException) must not satisfy this ground-truth failure.
+                assertThatThrownBy(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("ground truth: the same first failure as the sibling test, before "
                         + "the deploy-window remedy is applied")
-                    .isInstanceOf(Exception.class);
+                    .isInstanceOf(java.sql.SQLException.class);
             }
 
             // THE DEPLOY-WINDOW REMEDY (bead nexus-k1dgb): a superuser drops the
@@ -147,7 +142,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatCode(() -> replay(admin, sql))
+                assertThatCode(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("once the foreign-owned view is gone, the SAME extracted SQL must "
                         + "apply cleanly -- taxonomy-011-1's DROP VIEW IF EXISTS is now a "
                         + "true no-op (absent), and the ALTER converts doc_id to bytea")
@@ -192,61 +187,6 @@ class Taxonomy011ForeignOwnedDiagViewTest {
             .as("sanity: the seeded view must be foreign-owned relative to the replay role")
             .isNotNull()
             .isNotEqualTo(ADMIN_ROLE);
-    }
-
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Same technique as
-     * {@code Taxonomy010BackfillDirectIntegrationTest#extractChangesetSql} /
-     * {@code SchemaRollbackRoundTripIntegrationTest#extractChangesetSql}
-     * (duplicated locally rather than shared — no common test-utility class
-     * exists for this yet). Deliberately NOT recursive — only direct
-     * children are the changeset's FORWARD SQL, not the nested
-     * {@code <rollback>}'s.
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        Document doc;
-        try (var in = Taxonomy011ForeignOwnedDiagViewTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            Element cs = (Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    Node n = children.item(j);
-                    if (n.getNodeType() == Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
-    }
-
-    /**
-     * Kept raw (nexus-cbo4a batch 8): executes the text of taxonomy-011-1 exactly as the product changelog
-     * authors it ({@link #extractChangesetSql} reads it from the XML; there is no SQL string in Java), as
-     * the admin role on a connection of its own. The tests exist to run that one changeset's statements
-     * while a foreign-owned view is present, as the admin role, and see that one body fail or succeed. A
-     * Liquibase run of the product file cannot isolate it: the changeset sits among sibling changesets in
-     * the same file, and running the file (even with a bookkeeping table of the test's own) runs those too.
-     */
-    private static void replay(Connection admin, String sql) throws java.sql.SQLException {
-        try (var st = admin.createStatement()) {
-            st.execute(sql);
-        }
     }
 
     private static String columnUdtName(Connection c) throws Exception {

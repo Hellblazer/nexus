@@ -19,12 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.SQLWarning;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -74,6 +69,7 @@ class StagingSchemaDropLiquibaseTest {
 
     static final String MASTER = "db/changelog/db.changelog-master.xml";
     static final String DROP_CHANGESET = "staging-6-drop-landing-schema";
+    private static final String STAGING_DROP_CHANGELOG = "db/changelog/staging-003-drop-landing-schema.xml";
 
     private static final List<String> STAGING_TABLES = List.of(
         "chunks", "document_chunks", "topic_assignments",
@@ -403,11 +399,10 @@ class StagingSchemaDropLiquibaseTest {
     void nonOwnerRole_everyDropRaisesInsufficientPrivilege_andNothingIsDropped() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("staging_nonowner")) {
             migrateUpToDropChangeset(pg);
+            assertThat(PgContainerHelper.changesetForwardText(STAGING_DROP_CHANGELOG, DROP_CHANGESET))
+                .as("the replay runs the staging drop itself").contains("DROP SCHEMA staging");
 
-            String body = extractChangesetBody(DROP_CHANGESET);
-            assertThat(body).contains("DROP SCHEMA staging");
-
-            List<String> notices = new ArrayList<>();
+            List<String> notices;
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
@@ -416,17 +411,12 @@ class StagingSchemaDropLiquibaseTest {
                 PgContainerHelper.grantSchemaUsage(su, "staging", "staging_nonowner");
                 // SET ROLE is the GUC "role"; the value "none" is RESET ROLE.
                 ctx.set(DSL.name("role"), DSL.inline("staging_nonowner")).execute();
-                try (Statement st = su.createStatement()) {
-                    try {
-                        // The changeset's own body, read from the changelog: raw because the NOTICEs are read
-                        // off this statement's warning chain.
-                        st.execute(body); // must not throw: a refused drop is a NOTICE, never an error
-                        for (SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) {
-                            notices.add(w.getMessage());
-                        }
-                    } finally {
-                        ctx.set(DSL.name("role"), DSL.inline("none")).execute();
-                    }
+                try {
+                    // The changeset's own body, read from the changelog; the NOTICEs are read off the statement's
+                    // warning chain. Must not throw: a refused drop is a NOTICE, never an error.
+                    notices = PgContainerHelper.replayChangeset(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
+                } finally {
+                    ctx.set(DSL.name("role"), DSL.inline("none")).execute();
                 }
 
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
@@ -465,17 +455,19 @@ class StagingSchemaDropLiquibaseTest {
             }
             updateAll(pg);
 
-            String rollback = extractChangesetRollback(DROP_CHANGESET);
-            assertThat(rollback).contains("CREATE POLICY tenant_isolation");
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
                     .as("precondition: the tolerant drop left exactly one table behind")
                     .containsExactly("frecency");
 
-                st.execute(rollback); // over a partial drop: frecency and its policy already exist
-                st.execute(rollback); // and again over the complete structure
+                assertThat(PgContainerHelper.changesetRollbackText(STAGING_DROP_CHANGELOG, DROP_CHANGESET))
+                    .as("the rollback replay recreates the policy").contains("CREATE POLICY tenant_isolation");
+                // over a partial drop: frecency and its policy already exist
+                PgContainerHelper.replayChangesetRollback(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
+                // and again over the complete structure
+                PgContainerHelper.replayChangesetRollback(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
 
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
                     .containsExactlyInAnyOrderElementsOf(STAGING_TABLES);
@@ -507,40 +499,6 @@ class StagingSchemaDropLiquibaseTest {
                     .isEqualTo("MARK_RAN");
             }
         }
-    }
-
-    private static final Pattern SQL_BODY = Pattern.compile("<sql(?:\\s[^>]*)?>(.*?)</sql>", Pattern.DOTALL);
-
-    /** The {@code <sql>} text of one changeset, read from the changelog on the classpath. */
-    private static String extractChangesetBody(String changesetId) throws Exception {
-        String xml;
-        try (var in = StagingSchemaDropLiquibaseTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/staging-003-drop-landing-schema.xml")) {
-            assertThat(in).as("staging-003 changelog on the classpath").isNotNull();
-            xml = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        }
-        int at = xml.indexOf("<changeSet id=\"" + changesetId + "\"");
-        assertThat(at).as("changeset " + changesetId).isGreaterThanOrEqualTo(0);
-        Matcher m = SQL_BODY.matcher(xml);
-        assertThat(m.find(at)).isTrue();
-        return m.group(1);
-    }
-
-    private static final Pattern ROLLBACK_BODY = Pattern.compile("<rollback>(.*?)</rollback>", Pattern.DOTALL);
-
-    /** The {@code <rollback>} text of one changeset, read from the changelog on the classpath. */
-    private static String extractChangesetRollback(String changesetId) throws Exception {
-        String xml;
-        try (var in = StagingSchemaDropLiquibaseTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/staging-003-drop-landing-schema.xml")) {
-            assertThat(in).as("staging-003 changelog on the classpath").isNotNull();
-            xml = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        }
-        int at = xml.indexOf("<changeSet id=\"" + changesetId + "\"");
-        assertThat(at).as("changeset " + changesetId).isGreaterThanOrEqualTo(0);
-        Matcher m = ROLLBACK_BODY.matcher(xml);
-        assertThat(m.find(at)).isTrue();
-        return m.group(1);
     }
 
     private static String schemaOwner(DSLContext ctx) {

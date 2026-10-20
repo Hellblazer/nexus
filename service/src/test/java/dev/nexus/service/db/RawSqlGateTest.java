@@ -404,7 +404,16 @@ class RawSqlGateTest {
             "runBuild", Map.of(".execute(sql)", 1),
             // SANCTIONED RAW (RDR-227, nexus-43ulx.16): DROP INDEX CONCURRENTLY, same reasons as runBuild.
             // Single-homed: Pass#drop.
-            "runDrop", Map.of(".execute(sql)", 1)))
+            "runDrop", Map.of(".execute(sql)", 1))),
+        Map.entry("PgContainerHelper.java", Map.of(
+            // SANCTIONED RAW (nexus-cbo4a batch 10): replayPart is the one site of the changeset-replay idiom
+            // (PgContainerHelper#replayChangeset / #replayChangesetRollback). It executes ONE product changeset's
+            // text, read from the product changelog XML at run time and run verbatim: there is no SQL string in Java.
+            // The tests that use it need that exact statement's NOTICE chain (read off the driver's SQLWarning chain;
+            // Liquibase's executor closes its Statement and drops it), its role (the caller's connection), and its
+            // isolation from the sibling changesets of the same file (a Liquibase run of the file applies them all).
+            // A typed or test-changelog re-expression would duplicate the product text (drift) and lose the notices.
+            "replayPart", Map.of(".execute(sql)", 1)))
     );
 
     /**
@@ -947,7 +956,8 @@ class RawSqlGateTest {
         // (db.changelog-test-login-role.xml). What stays raw is the one execute(sql) that replays
         // grants-nexus-diag-1's own <sql> body verbatim (extractChangesetSql): a re-expression would no longer be the
         // SAME statement Liquibase executes.
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 1),
+        // nexus-cbo4a batch 10: 1 -> 0, SchemaRollbackRoundTripIntegrationTest.java entry removed outright (the replay is
+        // PgContainerHelper#replayChangeset, sanctioned once in SANCTIONED_STATEMENTS).
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-8zoyp seed-coverage follow-up: 104 -> 111 (seedTupleConsumedBodyCleanupRows'
@@ -964,7 +974,6 @@ class RawSqlGateTest {
         // nexus-cbo4a batch 9: 5 -> 4. The bare CREATE DATABASE is jOOQ createDatabase; the four left are the role RESET loop, CREATE DATABASE ... TEMPLATE,
         // the DDL probe install and DROP DATABASE ... WITH (FORCE), none with a typed jOOQ form.
         Map.entry("dev/nexus/service/SharedCluster.java", 4),
-        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7; nexus-cbo4a 2026-10-19 octet-CHECK / topic_assignments DDL: 7 -> 1 (the 1 left replays taxonomy-010-1's own changeset SQL, read from the product changelog)
         // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
         // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
         // changeset SQL, read from the product changelog and executed as the admin role: no string in Java, but
@@ -972,7 +981,8 @@ class RawSqlGateTest {
         // nexus-cbo4a batch 8: 3 -> 1. The three replays of taxonomy-011-1's own changeset SQL share one
         // replay(admin, sql) helper; its execute(sql) is the one left (the SQL is read from the product changelog,
         // no string in Java; the test needs that exact text run as the admin role, which Liquibase cannot do).
-        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 1),
+        // nexus-cbo4a batch 10: 1 -> 0, Taxonomy011ForeignOwnedDiagViewTest.java entry removed outright (replay(admin, sql)
+        // is PgContainerHelper#replayChangeset).
         // nexus-f3yxx (as first written): seedFixtures' raw chunk/centroid INSERTs (2),
         // plan-shape's raw hnsw-off session-var SETs for the second role bootstrap (2),
         // the recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
@@ -991,9 +1001,6 @@ class RawSqlGateTest {
         // converted (see the note above TEST_TREE_RAW_SQL_TOTAL_CEILING); the 2 left are
         // the two EXPLAIN-the-exact-statement-text resultQuery calls.
         Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 12 -> 11; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc and typed oracles: 11 -> 2
-        Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
-        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
-        Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 3), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5; batch 9: 5 -> 3 (the doc_count and assignment-count probes are typed selects; the 3 left are the two pre-fix trigger bodies and the barrier INSERT)
         // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
         // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
@@ -1604,7 +1611,20 @@ class RawSqlGateTest {
     // ctx.set plus PgContainerHelper.reindexIndex (db.changelog-test-reindex-index.xml, runInTransaction="false" because
     // REINDEX of a partitioned index refuses a transaction block: measured on PostgreSQL 17), and ManifestLess's pg_operator
     // join PgCatalogProbes.operatorFunctionLeakproof.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 32;
+    // nexus-cbo4a 2026-10-19 batch 10, 32 -> 23 (16 -> 10 files; six entries removed outright): the changeset-replay idiom is one
+    // PgContainerHelper method pair, replayChangeset / replayChangesetRollback, over a private replayPart whose single
+    // execute(sql) is registered in SANCTIONED_STATEMENTS ("PgContainerHelper.java"). It reads one changeset's forward SQL (or
+    // its rollback) from the product changelog XML, runs it verbatim on the caller's connection as that connection's role, and
+    // returns the SQLWarning messages; a server error surfaces as the driver raised it. Folded onto it, with their
+    // extractChangesetSql/collectNotices copies deleted: Taxonomy010BackfillDirectIntegrationTest (1), Taxonomy011ForeignOwnedDiagViewTest
+    // (1, its replay helper), Tk070P6aTtlDaysCountedDeleteTest (2), Tk070P6bTtlDaysCountedUpdateTest (1),
+    // SchemaRollbackRoundTripIntegrationTest (1, grants-nexus-diag-1) and TopicsDocCountDeadlockConcurrencyTest (2: the pre-fix
+    // trigger bodies are replays of taxonomy-003-1/-2, byte-identical to the hand copies once the XML indentation is stripped; the
+    // uncounted restore replays of taxonomy-017-1/-2 moved too). The barrier INSERT there is a typed jOOQ multi-row insert
+    // rendered with bind markers and prepared before the barrier, bound by hand, executed after it (gate-invisible: the text
+    // comes from ctx.render, not a literal). StagingSchemaDropLiquibaseTest's regex extractors and st.execute(body)/(rollback)
+    // (gate-invisible by variable name) are folded onto the same pair; the file carried no ceiling entry.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 23;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
