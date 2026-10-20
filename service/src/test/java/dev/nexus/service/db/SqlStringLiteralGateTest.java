@@ -456,7 +456,7 @@ class SqlStringLiteralGateTest {
                 ANALYZE ran on %s
                 TRUNCATE is refused here
                 LOCK is held by the other session
-                CREATE EXTENSION
+                CREATE INDEX
                 ALTER TABLE on chunks leaves during the heal
                 ALTER ROLE ... SET search_path must fail loud
                 ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY is DDL
