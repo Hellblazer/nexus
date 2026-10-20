@@ -574,6 +574,32 @@ def test_spawns_a_nested_session():
     assert {t["source"] for t in finding["touches"]} == {"child"}
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is POSIX-only")
+def test_a_forked_child_of_a_shim_loaded_process_is_charged_to_the_running_test(tmp_path) -> None:
+    """An xdist worker loads the shim at its start, when no test runs. A child it FORKS
+    inside a test inherits the worker's start-time value unless the shim refreshes it at
+    fork, and would charge its touch to no test (critique of nexus-kt6kj)."""
+    import subprocess
+    import sys
+
+    log = tmp_path / "children.jsonl"
+    code = (
+        "import os\n"
+        "os.environ['NX_STORAGE_TOUCH_GUARD_PID'] = str(os.getpid())\n"
+        "os.environ['PYTEST_CURRENT_TEST'] = 't.py::test_x (call)'\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError as E\n"
+        "    E('forked'); os._exit(0)\n"
+        "os.waitpid(pid, 0)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+    env.update({CHILD_LOG_ENV: str(log), "PYTHONPATH": os.pathsep.join([str(SHIM_DIR), env.get("PYTHONPATH", "")])})
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=120)
+    touches = [json.loads(line) for line in log.read_text().splitlines() if json.loads(line)["k"] == "touch"]
+    assert touches and {t["current_test"] for t in touches} == {"t.py::test_x (call)"}, touches
+
+
 def test_the_child_shim_is_on_pythonpath_only_while_an_optin_session_runs(pytester, monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", "/outer/path")
     monkeypatch.delenv(CHILD_LOG_ENV, raising=False)

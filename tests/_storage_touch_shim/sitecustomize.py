@@ -69,6 +69,17 @@ _HERE_REAL = os.path.realpath(_HERE)
 #: runs its own pytest rewrites PYTEST_CURRENT_TEST to ITS test ids, which the parent
 #: would file as late touches of same-named tests of its own (nexus-kt6kj).
 _SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
+
+
+def _refresh_spawning_test() -> None:
+    """A FORKED child has run no pytest of its own: the variable is still its spawner's, and
+    the value frozen at the parent's start (an xdist worker's is empty) would charge no test."""
+    global _SPAWNING_TEST
+    _SPAWNING_TEST = os.environ.get("PYTEST_CURRENT_TEST", "")
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_refresh_spawning_test)
 _real: dict[str, str] = {}  # filename -> realpath; a peek can fire thousands of times
 
 
