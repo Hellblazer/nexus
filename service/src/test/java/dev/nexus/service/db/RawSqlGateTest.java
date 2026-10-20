@@ -912,12 +912,10 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 5),
-        Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; review fold-in: 4 -> 3 (twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS); nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 3 -> 2
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3
+        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 21 -> 10; vector seeds 10 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; review fold-in: 4 -> 3 (twoStepAspectOracle's per-id document_aspects probe onto DOCUMENT_ASPECTS); nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 3 -> 2; batch 9: 2 -> 1 (setDeleted onto a typed update; the 1 left is runIds with its oracle SQL strings)
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 16 -> 9; vector seeds 9 -> 6; nexus-cbo4a 2026-10-19 SELECT probes: 6 -> 4; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 4 -> 3; batch 9: 3 -> 2 (setDeleted onto a typed update; the 2 left are the reached-set EXPLAIN and the stitchedGraphOracle runIds)
         // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
         // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
-        Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 3), // nexus-cbo4a 2026-10-18: 13 -> 10, three GRANT EXECUTE sites onto grantExecuteOnFunction; nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 10 -> 6; vector seeds 6 -> 3
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -963,7 +961,9 @@ class RawSqlGateTest {
         // inserts / alterTable / selects on named handles; the three pre-relocation vector seeds bind a real[]).
         // nexus-0ty8z fix round: 4 -> 5, SharedCluster.dropDatabase, the one DROP DATABASE ... WITH (FORCE) (no typed jOOQ form
         // for FORCE); SharedDatabaseHandle's own copy of the statement moved here, so the total does not move.
-        Map.entry("dev/nexus/service/SharedCluster.java", 5),
+        // nexus-cbo4a batch 9: 5 -> 4. The bare CREATE DATABASE is jOOQ createDatabase; the four left are the role RESET loop, CREATE DATABASE ... TEMPLATE,
+        // the DDL probe install and DROP DATABASE ... WITH (FORCE), none with a typed jOOQ form.
+        Map.entry("dev/nexus/service/SharedCluster.java", 4),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17; nexus-cbo4a 2026-10-19 SELECT probes: 17 -> 7; nexus-cbo4a 2026-10-19 octet-CHECK / topic_assignments DDL: 7 -> 1 (the 1 left replays taxonomy-010-1's own changeset SQL, read from the product changelog)
         // nexus-cbo4a 2026-10-19: 11 -> 3. The fixture DDL moved to db.changelog-test-diag-view-foreign-owned.xml
         // and the deploy-window DROP VIEW onto jOOQ dropView. The 3 left are the replays of taxonomy-011-1's own
@@ -991,15 +991,9 @@ class RawSqlGateTest {
         // converted (see the note above TEST_TREE_RAW_SQL_TOTAL_CEILING); the 2 left are
         // the two EXPLAIN-the-exact-statement-text resultQuery calls.
         Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 12 -> 11; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc and typed oracles: 11 -> 2
-        Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
-        Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 5), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5
-        // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): the ChashProbePlanShapeTest /
-        // TaxonomyCentroidAnnPlanShapeTest idiom -- 3 bulk INSERT...SELECT generate_series
-        // seeding statements, 1 EXPLAIN dispatch in the shared explain() helper, 1 raw
-        // count-cardinality JDBC query in seededCardinalityIsReal.
-        Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
+        Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 3), // nexus-cbo4a 2026-10-18 vector seeds: 7 -> 5; batch 9: 5 -> 3 (the doc_count and assignment-count probes are typed selects; the 3 left are the two pre-fix trigger bodies and the barrier INSERT)
         // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
         // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
@@ -1038,7 +1032,7 @@ class RawSqlGateTest {
         // the inline current_setting('hnsw.max_scan_tuples') read in the new recall
         // test (production code never sets this GUC, so its value is read directly to
         // report it, per the coordinator's explicit request).
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 5),
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 4), // nexus-cbo4a batch 9: 5 -> 4 (the current_setting read is a select-list DSL.function; the 4 left are runHnsw, runExact, countMatching and explainProd)
         // RDR-192 live(c) recall, extended (beads nexus-wbfpw.44/.45/.46): 2 raw-JDBC sites.
         // rawRows(String, Object...) is the one raw read -- the exact oracle
         // (ORDER BY (distance) + 0, so HNSW cannot serve it), its EXPLAIN and the live-count
@@ -1046,8 +1040,8 @@ class RawSqlGateTest {
         // sibling entries above. The production statement itself goes through the generated
         // plain_search_<dim> function table, not raw SQL. The second site is the opt-in
         // REINDEX (maintenance syntax with no jOOQ form).
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 2) // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 2
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 1), // nexus-cbo4a batch 9: 2 -> 1 (the opt-in REINDEX is ctx.set plus PgContainerHelper.reindexIndex; rawRows is the one left)
+        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 1) // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 2; batch 9: 2 -> 1 (the leakproof probe is PgCatalogProbes.operatorFunctionLeakproof; the EXPLAIN (ANALYZE, VERBOSE) of the product statement is the 1 left)
     );
 
     /**
@@ -1587,7 +1581,26 @@ class RawSqlGateTest {
     // (only the deliberately invalid statement stays raw, rawFailure's one caller: two ON CONFLICT clauses in one INSERT, a 42601
     // syntax error jOOQ cannot build; the 11 valid callers are typed jOOQ through failure(), which unwraps the DataAccessException
     // to the driver's SQLException, so every constraint name and SQLSTATE assertion is unchanged).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 58;
+    // nexus-cbo4a 2026-10-19 batch 9, 58 -> 32 (20 -> 16 files; four entries removed, seven lowered): plan-shape, probe and
+    // role shapes. ChashProbePlanShapeTest explains the product's own ChashRepository.PROBE_SQL through the new
+    // PgContainerHelper.explainPlan (ctx.explain over a jOOQ Query, which throws for a plan of more than 50 rows because
+    // jOOQ cuts the text past the 50th and a doesNotContain over it would pass vacuously), drops its indexes with
+    // dropIndexIfExists and counts with fetchCount. TupleSweepIndexPlanShapeTest explains the PRODUCT's own queries: the
+    // release, ack-lookup, purge, claim-log, rd-read and census arms are now public static factories in TupleRepository
+    // (releaseLapsedClaimsQuery, liveClaimRowQuery, purgeExpiredTuplesQuery, purgeOldClaimLogQuery, readCondition/readQuery,
+    // subspaceCensusQuery) that the repository itself calls, so the test no longer carries a twin of them; its three
+    // generate_series seeds are typed insertInto(..).select(..) with make_interval for the per-row offset; explainPlanInlined
+    // renders literals inline as the old getSQL(INLINED) did. PgVectorRepositoryRawSqlPlanShapeTest and
+    // TaxonomyCentroidAnnPlanShapeTest pin the second role's planner through PgContainerHelper.setRolePlannerGuc
+    // (db.changelog-test-role-planner-guc.xml, role through requireTestIdentifier, setting from PLANNER_GUC_ALLOWLIST, value
+    // on/off/digits; no search_path), and the latter's role and grants are bootstrapServiceRole. The setDeleted UPDATEs are
+    // typed updates, TopicsDocCountDeadlockConcurrencyTest's doc_count and assignment-count probes typed selects,
+    // SharedCluster's bare CREATE DATABASE is createDatabase (a DataAccessException is unwrapped back to the SQLException
+    // its callers saw), Msz9i's current_setting read a select-list DSL.function, ChunkLiveOwnersRecallExtendedIntegrationTest's opt-in REINDEX
+    // ctx.set plus PgContainerHelper.reindexIndex (db.changelog-test-reindex-index.xml, runInTransaction="false" because
+    // REINDEX of a partitioned index refuses a transaction block: measured on PostgreSQL 17), and ManifestLess's pg_operator
+    // join PgCatalogProbes.operatorFunctionLeakproof.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 32;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

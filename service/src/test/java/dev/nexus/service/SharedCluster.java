@@ -11,6 +11,7 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -409,8 +410,14 @@ final class SharedCluster {
 
     /** The one statement that makes an empty, default-template database (a clone source). */
     private static void createBareDatabase(Connection su, String name) throws SQLException {
-        try (var st = su.createStatement()) {
-            st.execute("CREATE DATABASE \"" + name + "\"");
+        try {
+            DSL.using(su, SQLDialect.POSTGRES).createDatabase(DSL.name(name)).execute();
+        } catch (DataAccessException e) {
+            // Callers see the driver's SQLException, as the plain Statement.execute gave them.
+            if (e.getCause() instanceof SQLException driver) {
+                throw driver;
+            }
+            throw e;
         }
     }
 

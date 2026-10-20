@@ -201,11 +201,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_REALCALL, SVC_PASS);
             // Planner GUCs, orthogonal to grants -- not part of bootstrapServiceRole's
-            // fixed grant set, kept as explicit ALTER ROLEs (nexus-cbo4a batch 1b).
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_bitmapscan = off");
+            // fixed grant set; ALTER ROLE has no jOOQ form, so they go through the validated
+            // role-GUC changelog helper (nexus-cbo4a batch 9).
+            PgContainerHelper.setRolePlannerGuc(su, SVC_ROLE_REALCALL, "enable_indexscan", "off");
+            PgContainerHelper.setRolePlannerGuc(su, SVC_ROLE_REALCALL, "enable_bitmapscan", "off");
         }
 
         var cfg = new HikariConfig();
@@ -728,13 +727,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void seededCardinalityIsReal() throws Exception {
-        try (Connection su = pg.createConnection("");
-             var rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = '" + TENANT + "'")) {
-            rs.next();
-            assertThat(rs.getLong(1))
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT)))
                 .as("the plan-shape claim is only meaningful at non-trivial cardinality")
-                .isEqualTo(3L * CHUNKS_PER_DIM + 3L);
+                .isEqualTo(3 * CHUNKS_PER_DIM + 3);
         }
     }
 }

@@ -919,12 +919,13 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
 
     private void reindex() throws Exception {
         long t0 = System.nanoTime();
-        try (Connection su = pg.createConnection(""); java.sql.Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
             // Serial build: a parallel build needs a /dev/shm segment of about maintenance_work_mem,
             // and the container's default shm is 64MB ("No space left on device").
-            String sql = "SET max_parallel_maintenance_workers = 0; SET maintenance_work_mem = '1GB'; "
-                + "REINDEX INDEX nexus.idx_chunks_embedding_" + DIM;
-            st.execute(sql);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
+            ctx.set(DSL.name("maintenance_work_mem"), DSL.inline("1GB")).execute();
+            PgContainerHelper.reindexIndex(su, "nexus", "idx_chunks_embedding_" + DIM);
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.analyzeTable(su, CHUNKS);

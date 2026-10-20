@@ -21,7 +21,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +37,8 @@ import java.util.concurrent.TimeoutException;
 
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -722,28 +723,20 @@ class TopicsDocCountDeadlockConcurrencyTest {
     }
 
     private int docCount(long topicId) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT doc_count FROM nexus.topics WHERE tenant_id = ? AND id = ?")) {
-            ps.setString(1, TENANT);
-            ps.setLong(2, topicId);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("topic %d must exist", topicId).isTrue();
-                return rs.getInt(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            Integer count = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPICS.DOC_COUNT).from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.ID.eq(topicId)))
+                .fetchOne(TOPICS.DOC_COUNT);
+            assertThat(count).as("topic %d must exist", topicId).isNotNull();
+            return count;
         }
     }
 
     private int actualAssignmentCount(long topicId) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id = ? AND topic_id = ?")) {
-            ps.setString(1, TENANT);
-            ps.setLong(2, topicId);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getInt(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(TOPIC_ASSIGNMENTS,
+                TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)));
         }
     }
 

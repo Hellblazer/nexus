@@ -17,8 +17,10 @@ import dev.nexus.service.jooq.test.Routines;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Name;
+import org.jooq.Query;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
+import org.jooq.conf.StatementType;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -1825,6 +1827,74 @@ public final class PgContainerHelper {
             .select(DSL.function("set_config", SQLDataType.VARCHAR,
                 DSL.val(guc), DSL.val(value, SQLDataType.VARCHAR), DSL.val(isLocal)))
             .fetch();
+    }
+
+    /**
+     * {@code ALTER ROLE role SET guc = value} for a planner setting (nexus-cbo4a batch 9), through
+     * {@code db.changelog-test-role-planner-guc.xml}: jOOQ has no ALTER ROLE. The role goes through
+     * {@link #requireTestIdentifier}, the setting through {@link #PLANNER_GUC_ALLOWLIST} and the value must be
+     * {@code on}, {@code off} or digits, so nothing else reaches the changelog's text. A role-level setting reaches
+     * only connections opened after this call. Never a {@code search_path} (not on the allowlist).
+     */
+    public static void setRolePlannerGuc(Connection su, String role, String guc, String value) throws Exception {
+        requireTestIdentifier(role);
+        if (!PLANNER_GUC_ALLOWLIST.contains(guc)) {
+            throw new IllegalArgumentException(
+                "planner guc not permitted: " + guc + " (allowed: " + PLANNER_GUC_ALLOWLIST + ")");
+        }
+        if (value == null || !value.matches("on|off|[0-9]+")) {
+            throw new IllegalArgumentException("not a plain planner setting value: " + value);
+        }
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-planner-guc.xml",
+            "databasechangelog_test_role_planner_guc", Map.of("role", role, "guc", guc, "value", value));
+    }
+
+    /**
+     * {@code REINDEX INDEX schema.index} (nexus-cbo4a batch 9), through {@code db.changelog-test-reindex-index.xml}:
+     * jOOQ has no REINDEX. Both name parts go through {@link #requireTestIdentifier}. The changeset runs with no
+     * enclosing transaction (REINDEX of a partitioned index refuses one) on {@code su} itself, so session settings
+     * made on {@code su} first (a {@code maintenance_work_mem} or {@code max_parallel_maintenance_workers} pin
+     * through {@code ctx.set}) still apply to it. Leaves {@code su} autoCommit.
+     */
+    public static void reindexIndex(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-reindex-index.xml",
+            "databasechangelog_test_reindex_index", Map.of("schema", schema, "index", index));
+    }
+
+    /** jOOQ formats an EXPLAIN into a table whose column width comes from the first 50 rows; longer plans are cut. */
+    private static final int EXPLAIN_WHOLE_PLAN_MAX_ROWS = 50;
+
+    /**
+     * The plan text of {@code EXPLAIN query} (nexus-cbo4a batch 9), the query bound as it would run. Runs on
+     * {@code ctx}'s connection and transaction, so a tenant GUC or SET LOCAL pin applies. jOOQ's
+     * {@code Explain.plan()} abbreviates rows past the 50th to the width of the first 50, so a
+     * {@code doesNotContain} over a longer plan would pass vacuously: this throws for a plan of more than 50 rows
+     * rather than return text a negative assertion cannot trust.
+     */
+    public static String explainPlan(DSLContext ctx, Query query) {
+        return requireWholePlan(ctx.explain(query).plan());
+    }
+
+    /**
+     * {@link #explainPlan} with every bind value rendered inline as a literal (jOOQ's static statement), the plan
+     * the planner makes for a statement carrying constants, as the sweep-shaped plan tests compare.
+     */
+    public static String explainPlanInlined(DSLContext ctx, Query query) {
+        DSLContext inline = ctx.configuration()
+            .deriveSettings(s -> s.withStatementType(StatementType.STATIC_STATEMENT)).dsl();
+        return requireWholePlan(inline.explain(query).plan());
+    }
+
+    private static String requireWholePlan(String plan) {
+        // Result.format() frames the rows with a top border, a header, a separator and a bottom border.
+        long rows = plan.lines().count() - 4;
+        if (rows > EXPLAIN_WHOLE_PLAN_MAX_ROWS) {
+            throw new IllegalStateException("EXPLAIN has " + rows + " rows; jOOQ cuts the text past "
+                + EXPLAIN_WHOLE_PLAN_MAX_ROWS + ", so a negative assertion over it would be vacuous");
+        }
+        return plan;
     }
 
     /**

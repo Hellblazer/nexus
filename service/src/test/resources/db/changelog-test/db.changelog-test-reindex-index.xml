@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 9: REINDEX INDEX ${schema}.${index}, in Liquibase XML instead of a Java SQL string (Sam's rule,
+    nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no REINDEX.
+
+    Rebuilds one index so a recall test can measure it freshly built (ChunkLiveOwnersRecallExtendedIntegrationTest,
+    opt-in REINDEX path). Run through PgContainerHelper#reindexIndex, which checks both names (plain identifiers) before
+    they reach this text. runInTransaction="false": REINDEX of a PARTITIONED index (nexus.chunks is partitioned, so its
+    idx_chunks_embedding_<dim> is) refuses to run inside a transaction block ("REINDEX INDEX cannot run inside a
+    transaction block", measured on PostgreSQL 17), because it reindexes each leaf in a transaction of its own. It
+    runs on the caller's own connection, so session settings the caller made first (maintenance_work_mem,
+    max_parallel_maintenance_workers) apply. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="reindex-index" author="nexus-cbo4a" runAlways="true" runInTransaction="false">
+        <sql>REINDEX INDEX ${schema}.${index}</sql>
+    </changeSet>
+</databaseChangeLog>

@@ -10,7 +10,9 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Typed jOOQ probes over {@code information_schema} and {@code pg_catalog} for
@@ -518,6 +520,35 @@ public final class PgCatalogProbes {
         }
         String[] config = r.get(proconfig);
         return new RoutineConfigAndSource(config == null ? new String[0] : config, r.get(prosrc));
+    }
+
+    /** An operator as {@code pg_operator} names it: its symbol and the type names of its two operands. */
+    public record OperatorSignature(String name, String leftType, String rightType) {
+    }
+
+    /**
+     * {@code pg_proc.proleakproof} of the function behind each listed operator, keyed by that function's name
+     * ({@code texteq} for text {@code =}). Operand types are resolved by {@code to_regtype}, as the
+     * {@code 'text'::regtype} casts of the statement this replaces did. An operator the catalog lacks is absent
+     * from the map.
+     */
+    public static Map<String, Boolean> operatorFunctionLeakproof(DSLContext ctx, List<OperatorSignature> operators) {
+        Condition any = DSL.falseCondition();
+        for (OperatorSignature op : operators) {
+            any = any.or(DSL.field(DSL.name("o", "oprname"), String.class).eq(op.name())
+                .and(DSL.field(DSL.name("o", "oprleft")).eq(DSL.function("to_regtype", Object.class, DSL.val(op.leftType()))))
+                .and(DSL.field(DSL.name("o", "oprright")).eq(DSL.function("to_regtype", Object.class, DSL.val(op.rightType())))));
+        }
+        Field<String> proname = DSL.field(DSL.name("p", "proname"), String.class);
+        Field<Boolean> proleakproof = DSL.field(DSL.name("p", "proleakproof"), Boolean.class);
+        Map<String, Boolean> out = new LinkedHashMap<>();
+        ctx.select(proname, proleakproof)
+            .from(DSL.table(DSL.name("pg_operator")).as("o"))
+            .join(DSL.table(DSL.name("pg_proc")).as("p"))
+            .on(DSL.field(DSL.name("p", "oid")).eq(DSL.field(DSL.name("o", "oprcode"))))
+            .where(any)
+            .forEach(r -> out.put(r.get(proname), r.get(proleakproof)));
+        return out;
     }
 
     /** {@code (pg_get_function_arguments, pg_get_function_result)} of one routine. */

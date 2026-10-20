@@ -12,6 +12,10 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
+import org.jooq.Record1;
+import org.jooq.Record8;
+import org.jooq.ResultQuery;
+import org.jooq.SelectLimitStep;
 import org.jooq.impl.DSL;
 import org.jooq.types.DayToSecond;
 import org.slf4j.Logger;
@@ -954,6 +958,35 @@ public final class TupleRepository {
     }
 
     /**
+     * The live-rows predicate of {@code rd}/{@code rdp} (nexus-cbo4a): tenant and subspace, unconsumed, unexpired,
+     * every {@code pattern} key matched. Shared by {@link #queryOnce} and the plan-shape test. Public only for that
+     * test.
+     */
+    public static Condition readCondition(String tenant, String subspace, Map<String, String> patternSafe) {
+        Condition cond = TUPLES.TENANT_ID.eq(tenant)
+                .and(TUPLES.SUBSPACE.eq(subspace))
+                .and(TUPLES.CONSUMED_AT.isNull())
+                .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
+        for (var e : patternSafe.entrySet()) {
+            cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
+        }
+        return cond;
+    }
+
+    /**
+     * The plain {@code rd}/{@code rdp} read scan (nexus-cbo4a): {@code cond} ordered by {@code (created_at, id)} in
+     * {@code order}, limited. Shared by {@link #queryOnce} and the plan-shape test. Public only for that test.
+     */
+    public static ResultQuery<TuplesRecord> readQuery(DSLContext ctx, Condition cond, ReadOrder order, int limit) {
+        return ctx.selectFrom(TUPLES)
+                .where(cond)
+                .orderBy(order == ReadOrder.DESC
+                        ? List.of(TUPLES.CREATED_AT.desc(), TUPLES.ID.desc())
+                        : List.of(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc()))
+                .limit(limit);
+    }
+
+    /**
      * {@code announce} (bead nexus-vsipz, RDR-213 engine half) is {@code null} for
      * every {@code rd}/{@code rdp} call and for a {@link WaitSpec} that does not
      * carry one -- exactly the 5-arg overload's prior behaviour, unchanged. When
@@ -982,13 +1015,7 @@ public final class TupleRepository {
         int limit = readLimit(n);
 
         return tenantScope.withTenant(tenant, ctx -> {
-            Condition cond = TUPLES.TENANT_ID.eq(tenant)
-                    .and(TUPLES.SUBSPACE.eq(subspace))
-                    .and(TUPLES.CONSUMED_AT.isNull())
-                    .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
-            for (var e : patternSafe.entrySet()) {
-                cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
-            }
+            Condition cond = readCondition(tenant, subspace, patternSafe);
             if (announce != null && announce.perSubscriber()) {
                 return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace, since);
             }
@@ -1001,13 +1028,7 @@ public final class TupleRepository {
             }
             // nexus-kp5q3: DESC is the exact reverse of ASC over the same filtered set,
             // so LIMIT trims the OLD end and a reader past the cap gets the real tail.
-            var rows = ctx.selectFrom(TUPLES)
-                    .where(cond)
-                    .orderBy(order == ReadOrder.DESC
-                            ? List.of(TUPLES.CREATED_AT.desc(), TUPLES.ID.desc())
-                            : List.of(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc()))
-                    .limit(limit)
-                    .fetch();
+            var rows = readQuery(ctx, cond, order, limit).fetch();
             List<TupleRow> out = new ArrayList<>();
             for (TuplesRecord r : rows) {
                 out.add(toRow(r));
@@ -2317,6 +2338,23 @@ public final class TupleRepository {
     // ── sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ──────────────────────
 
     /**
+     * The release arm's candidate SELECT, built once here so {@link #releaseLapsedClaimsBatch} and the plan-shape
+     * test explain the same {@link ResultQuery} object shape (nexus-cbo4a): {@code claimed}, unconsumed, lease
+     * lapsed, oldest-lapsed first, row-locked with {@code SKIP LOCKED}. Public only for that test.
+     */
+    public static ResultQuery<TuplesRecord> releaseLapsedClaimsQuery(DSLContext ctx, String tenant, int batchSize) {
+        return ctx.selectFrom(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(tenant)
+                        .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                        .and(TUPLES.CONSUMED_AT.isNull())
+                        .and(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
+                .orderBy(TUPLES.LEASE_UNTIL.asc(), TUPLES.ID.asc())
+                .limit(batchSize)
+                .forNoKeyUpdate()
+                .skipLocked();
+    }
+
+    /**
      * One BATCH, one transaction, of the scheduled sweep's release arm: selects up
      * to {@code batchSize} rows whose lease has lapsed — {@code claimed}, unconsumed,
      * {@code lease_until < now()}, oldest-lapsed first — and releases each with an
@@ -2341,16 +2379,7 @@ public final class TupleRepository {
     public ReleaseBatchResult releaseLapsedClaimsBatch(String tenant, int batchSize, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
-            var rows = ctx.selectFrom(TUPLES)
-                    .where(TUPLES.TENANT_ID.eq(tenant)
-                            .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
-                            .and(TUPLES.CONSUMED_AT.isNull())
-                            .and(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
-                    .orderBy(TUPLES.LEASE_UNTIL.asc(), TUPLES.ID.asc())
-                    .limit(batchSize)
-                    .forNoKeyUpdate()
-                    .skipLocked()
-                    .fetch();
+            var rows = releaseLapsedClaimsQuery(ctx, tenant, batchSize).fetch();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             int released = 0;
             int deadLettered = 0;
@@ -2410,6 +2439,21 @@ public final class TupleRepository {
     }
 
     /**
+     * The purge-tuples arm's candidate SELECT (nexus-cbo4a): expired rows, oldest first, row-locked with
+     * {@code SKIP LOCKED}. Built once here so {@link #purgeExpiredTuplesBatch} and the plan-shape test share it.
+     * Public only for that test.
+     */
+    public static ResultQuery<Record1<byte[]>> purgeExpiredTuplesQuery(DSLContext ctx, String tenant, int batchSize) {
+        return ctx.select(TUPLES.ID)
+                .from(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime())))
+                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                .limit(batchSize)
+                .forUpdate()
+                .skipLocked();
+    }
+
+    /**
      * One BATCH, one transaction, of the scheduled sweep's purge arm: deletes up to
      * {@code batchSize} rows whose {@code expires_at} has passed — covering BOTH a
      * never-claimed expired tuple and a consumed tuple past its retention ceiling in
@@ -2428,20 +2472,29 @@ public final class TupleRepository {
     public PurgeBatchResult purgeExpiredTuplesBatch(String tenant, int batchSize, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
-            List<byte[]> ids = ctx.select(TUPLES.ID)
-                    .from(TUPLES)
-                    .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime())))
-                    .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
-                    .limit(batchSize)
-                    .forUpdate()
-                    .skipLocked()
-                    .fetch(TUPLES.ID);
+            List<byte[]> ids = purgeExpiredTuplesQuery(ctx, tenant, batchSize).fetch(TUPLES.ID);
             if (ids.isEmpty()) {
                 return new PurgeBatchResult(0, 0);
             }
             int purged = ctx.deleteFrom(TUPLES).where(TUPLES.ID.in(ids)).execute();
             return new PurgeBatchResult(ids.size(), purged);
         });
+    }
+
+    /**
+     * The log-retention arm's candidate SELECT (nexus-cbo4a): rows whose own {@code expires_at} has passed, by
+     * {@code log_id}, row-locked with {@code SKIP LOCKED}. Built once here so {@link #purgeOldClaimLogBatch} and the
+     * plan-shape test share it. Public only for that test.
+     */
+    public static ResultQuery<Record1<Long>> purgeOldClaimLogQuery(DSLContext ctx, String tenant, int batchSize) {
+        return ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
+                .from(TUPLE_CLAIM_LOG)
+                .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                        .and(TUPLE_CLAIM_LOG.EXPIRES_AT.lt(DSL.currentOffsetDateTime())))
+                .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
+                .limit(batchSize)
+                .forUpdate()
+                .skipLocked();
     }
 
     /**
@@ -2467,15 +2520,7 @@ public final class TupleRepository {
     public PurgeBatchResult purgeOldClaimLogBatch(String tenant, int batchSize, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
-            List<Long> ids = ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
-                    .from(TUPLE_CLAIM_LOG)
-                    .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
-                            .and(TUPLE_CLAIM_LOG.EXPIRES_AT.lt(DSL.currentOffsetDateTime())))
-                    .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
-                    .limit(batchSize)
-                    .forUpdate()
-                    .skipLocked()
-                    .fetch(TUPLE_CLAIM_LOG.LOG_ID);
+            List<Long> ids = purgeOldClaimLogQuery(ctx, tenant, batchSize).fetch(TUPLE_CLAIM_LOG.LOG_ID);
             if (ids.isEmpty()) {
                 return new PurgeBatchResult(0, 0);
             }
@@ -2493,13 +2538,20 @@ public final class TupleRepository {
      * claim_id does.
      */
     private static TuplesRecord liveClaimRow(DSLContext ctx, String tenant, String claimId) {
+        return liveClaimRowQuery(ctx, tenant, claimId).fetchOne();
+    }
+
+    /**
+     * The ack/nack claim_id lookup's SELECT (nexus-cbo4a), built once so {@link #liveClaimRow} and the plan-shape
+     * test share it. Public only for that test.
+     */
+    public static ResultQuery<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_ID.eq(claimId))
                         .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
                         .and(TUPLES.CONSUMED_AT.isNull())
-                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())))
-                .fetchOne();
+                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())));
     }
 
     /**
@@ -2672,38 +2724,48 @@ public final class TupleRepository {
      */
     static volatile java.util.function.Consumer<DSLContext> TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK = ctx -> { };
 
+    /**
+     * The per-subspace census {@code GROUP BY} behind {@link #subspaceListPage} (nexus-cbo4a), before any
+     * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Public only for that
+     * test.
+     */
+    public static SelectLimitStep<Record8<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime>>
+            subspaceCensusQuery(DSLContext ctx, String tenant, String prefix, String after) {
+        Condition cond = TUPLES.TENANT_ID.eq(tenant);
+        if (prefix != null && !prefix.isBlank()) {
+            cond = cond.and(TUPLES.SUBSPACE.startsWith(prefix));
+        }
+        if (after != null && !after.isBlank()) {
+            cond = cond.and(TUPLES.SUBSPACE.gt(after));
+        }
+
+        Field<OffsetDateTime> now = DSL.currentOffsetDateTime();
+        Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(now));
+
+        return ctx.select(
+                        TUPLES.SUBSPACE,
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.isNull())).cast(Long.class),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED)))
+                                .cast(Long.class),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_DEAD)))
+                                .cast(Long.class),
+                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNotNull()).cast(Long.class),
+                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
+                                .cast(Long.class),
+                        DSL.min(TUPLES.CREATED_AT),
+                        DSL.max(TUPLES.CREATED_AT))
+                .from(TUPLES)
+                .where(cond)
+                .groupBy(TUPLES.SUBSPACE)
+                .orderBy(TUPLES.SUBSPACE.asc());
+    }
+
     private SubspacePage subspaceListPageUnguarded(String tenant, String prefix, String after, Integer effectiveLimit) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, Duration.ofSeconds(subspaceListTimeoutSeconds));
             TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK.accept(ctx);
 
-            Condition cond = TUPLES.TENANT_ID.eq(tenant);
-            if (prefix != null && !prefix.isBlank()) {
-                cond = cond.and(TUPLES.SUBSPACE.startsWith(prefix));
-            }
-            if (after != null && !after.isBlank()) {
-                cond = cond.and(TUPLES.SUBSPACE.gt(after));
-            }
-
-            Field<OffsetDateTime> now = DSL.currentOffsetDateTime();
-            Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(now));
-
-            var baseQuery = ctx.select(
-                            TUPLES.SUBSPACE,
-                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.isNull())).cast(Long.class),
-                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED)))
-                                    .cast(Long.class),
-                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_DEAD)))
-                                    .cast(Long.class),
-                            DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNotNull()).cast(Long.class),
-                            DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
-                                    .cast(Long.class),
-                            DSL.min(TUPLES.CREATED_AT),
-                            DSL.max(TUPLES.CREATED_AT))
-                    .from(TUPLES)
-                    .where(cond)
-                    .groupBy(TUPLES.SUBSPACE)
-                    .orderBy(TUPLES.SUBSPACE.asc());
+            var baseQuery = subspaceCensusQuery(ctx, tenant, prefix, after);
 
             var recs = (effectiveLimit != null) ? baseQuery.limit(effectiveLimit + 1).fetch() : baseQuery.fetch();
 

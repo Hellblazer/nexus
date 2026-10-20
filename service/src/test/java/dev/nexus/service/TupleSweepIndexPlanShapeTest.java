@@ -3,7 +3,15 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.TupleRepository;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Query;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.jooq.types.DayToSecond;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -11,7 +19,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.Statement;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.Map;
+import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
@@ -24,9 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * actually use, at a cardinality large enough that the planner's own cost
  * model prefers them over a sequential scan on real statistics — mirroring
  * {@code ChashProbePlanShapeTest}'s / {@code TaxonomyCentroidAnnPlanShapeTest}'s
- * methodology: EXPLAIN of the SHIPPED query shape (copied from {@code
- * TupleRepository}'s own jOOQ construction, not a hand-written duplicate)
- * through the real {@code nexus_svc}/FORCE-RLS path, asserting the expected
+ * methodology: EXPLAIN of the SHIPPED query, the very {@code Query} the
+ * repository builds through its static factories ({@code
+ * TupleRepository#releaseLapsedClaimsQuery} and its siblings; nexus-cbo4a: the
+ * test no longer carries a twin of them) through the real {@code nexus_svc}/FORCE-RLS path, asserting the expected
  * index name appears and {@code Seq Scan} does not.
  *
  * <p>Cardinality (5,000 rows each of "available", "claimed", and claim-log):
@@ -84,74 +96,107 @@ class TupleSweepIndexPlanShapeTest {
     private void seedAtCardinality() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Statement st = su.createStatement();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Field<OffsetDateTime> now = DSL.currentOffsetDateTime();
 
             // Available (unclaimed) rows -- the bulk far from expiry, a small
             // PAST_THRESHOLD subset already expired (arm 2's target).
-            st.execute(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, expires_at, created_at) " +
-                "SELECT decode(md5('avail-' || i), 'hex'), '" + TENANT + "', 'mailbox/planshape-avail', " +
-                "       'mailbox/<agent_id>', '{}'::jsonb, " +
-                "       CASE WHEN i <= " + PAST_THRESHOLD + " THEN now() - interval '1 hour' " +
-                "            ELSE now() + interval '30 days' END, " +
-                "       now() - (i || ' seconds')::interval " +
-                "FROM generate_series(1, " + AVAILABLE_ROWS + ") i");
+            var avail = DSL.generateSeries(1, AVAILABLE_ROWS).as("s", "i");
+            Field<Integer> availI = avail.field("i", Integer.class);
+            ctx.insertInto(TUPLES, TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE, TUPLES.KEYS,
+                    TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                .select(ctx.select(
+                        idOf("avail-", availI),
+                        DSL.val(TENANT, TUPLES.TENANT_ID),
+                        DSL.val("mailbox/planshape-avail", TUPLES.SUBSPACE),
+                        DSL.val("mailbox/<agent_id>", TUPLES.TEMPLATE),
+                        DSL.val(JSONB.valueOf("{}"), TUPLES.KEYS),
+                        pastOrAhead(availI, now, Duration.ofDays(30)),
+                        secondsAgo(now, availI))
+                    .from(avail))
+                .execute();
 
             // Claimed rows -- the bulk still within lease, a small PAST_THRESHOLD
             // subset already lapsed (arm 1's target). Every row a unique claim_id
             // (the ack/nack claim_id-lookup query's own target).
-            st.execute(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, claim_state, claimant, " +
-                "       claim_id, lease_until, expires_at, created_at) " +
-                "SELECT decode(md5('claimed-' || i), 'hex'), '" + TENANT + "', 'mailbox/planshape-claimed', " +
-                "       'mailbox/<agent_id>', '{}'::jsonb, 'claimed', 'worker-' || i, 'claim-' || i, " +
-                "       CASE WHEN i <= " + PAST_THRESHOLD + " THEN now() - interval '1 hour' " +
-                "            ELSE now() + interval '30 days' END, " +
-                "       now() + interval '30 days', now() - (i || ' seconds')::interval " +
-                "FROM generate_series(1, " + CLAIMED_ROWS + ") i");
+            var claimed = DSL.generateSeries(1, CLAIMED_ROWS).as("s", "i");
+            Field<Integer> claimedI = claimed.field("i", Integer.class);
+            ctx.insertInto(TUPLES, TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE, TUPLES.KEYS,
+                    TUPLES.CLAIM_STATE, TUPLES.CLAIMANT, TUPLES.CLAIM_ID, TUPLES.LEASE_UNTIL, TUPLES.EXPIRES_AT,
+                    TUPLES.CREATED_AT)
+                .select(ctx.select(
+                        idOf("claimed-", claimedI),
+                        DSL.val(TENANT, TUPLES.TENANT_ID),
+                        DSL.val("mailbox/planshape-claimed", TUPLES.SUBSPACE),
+                        DSL.val("mailbox/<agent_id>", TUPLES.TEMPLATE),
+                        DSL.val(JSONB.valueOf("{}"), TUPLES.KEYS),
+                        DSL.val("claimed", TUPLES.CLAIM_STATE),
+                        DSL.concat(DSL.inline("worker-"), asText(claimedI)),
+                        DSL.concat(DSL.inline("claim-"), asText(claimedI)),
+                        pastOrAhead(claimedI, now, Duration.ofDays(30)),
+                        now.add(DayToSecond.valueOf(Duration.ofDays(30))),
+                        secondsAgo(now, claimedI))
+                    .from(claimed))
+                .execute();
 
             // Claim-log rows -- the bulk within the log's own retention (expires_at
             // in the future), a small PAST_THRESHOLD subset past it (arm 3's
             // target: purgeOldClaimLogBatch filters on expires_at, the log row's
             // OWN retention deadline stamped at write time by insertClaimLog --
             // NOT on `at`, the write timestamp; nexus-xapt8 / tuples-005).
-            st.execute(
-                "INSERT INTO nexus.tuple_claim_log (tenant_id, subspace, template, transition, at, expires_at) " +
-                "SELECT '" + TENANT + "', 'mailbox/planshape-log', 'mailbox/<agent_id>', 'claim', " +
-                "       now() - (i || ' seconds')::interval, " +
-                "       CASE WHEN i <= " + PAST_THRESHOLD + " THEN now() - interval '1 hour' " +
-                "            ELSE now() + interval '180 days' END " +
-                "FROM generate_series(1, " + LOG_ROWS + ") i");
+            var log = DSL.generateSeries(1, LOG_ROWS).as("s", "i");
+            Field<Integer> logI = log.field("i", Integer.class);
+            ctx.insertInto(TUPLE_CLAIM_LOG, TUPLE_CLAIM_LOG.TENANT_ID, TUPLE_CLAIM_LOG.SUBSPACE,
+                    TUPLE_CLAIM_LOG.TEMPLATE, TUPLE_CLAIM_LOG.TRANSITION, TUPLE_CLAIM_LOG.AT,
+                    TUPLE_CLAIM_LOG.EXPIRES_AT)
+                .select(ctx.select(
+                        DSL.val(TENANT, TUPLE_CLAIM_LOG.TENANT_ID),
+                        DSL.val("mailbox/planshape-log", TUPLE_CLAIM_LOG.SUBSPACE),
+                        DSL.val("mailbox/<agent_id>", TUPLE_CLAIM_LOG.TEMPLATE),
+                        DSL.val("claim", TUPLE_CLAIM_LOG.TRANSITION),
+                        secondsAgo(now, logI),
+                        pastOrAhead(logI, now, Duration.ofDays(180)))
+                    .from(log))
+                .execute();
 
             PgContainerHelper.analyzeTable(su, TUPLES);
             PgContainerHelper.analyzeTable(su, TUPLE_CLAIM_LOG);
         }
     }
 
-    private String explain(java.util.function.Function<org.jooq.DSLContext, org.jooq.Query> queryBuilder) {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            String sql = queryBuilder.apply(ctx).getSQL(org.jooq.conf.ParamType.INLINED);
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
-        });
+    private static Field<String> asText(Field<Integer> i) {
+        return DSL.cast(i, SQLDataType.VARCHAR);
+    }
+
+    /** {@code decode(md5(prefix || i), 'hex')}: a 16-byte tuple id, unique per series value. */
+    private static Field<byte[]> idOf(String prefix, Field<Integer> i) {
+        return DSL.function("decode", SQLDataType.BLOB,
+            DSL.md5(DSL.concat(DSL.inline(prefix), asText(i))), DSL.inline("hex"));
+    }
+
+    /** One hour ago for the first {@link #PAST_THRESHOLD} series values, {@code ahead} from now for the rest. */
+    private static Field<OffsetDateTime> pastOrAhead(Field<Integer> i, Field<OffsetDateTime> now, Duration ahead) {
+        return DSL.when(i.le(PAST_THRESHOLD), now.sub(DayToSecond.valueOf(Duration.ofHours(1))))
+            .otherwise(now.add(DayToSecond.valueOf(ahead)));
+    }
+
+    /** {@code now() - i seconds}: a creation time that orders the series. */
+    private static Field<OffsetDateTime> secondsAgo(Field<OffsetDateTime> now, Field<Integer> i) {
+        return now.sub(DSL.function("make_interval", SQLDataType.INTERVALDAYTOSECOND,
+            DSL.inline(0), DSL.inline(0), DSL.inline(0), DSL.inline(0), DSL.inline(0), DSL.inline(0),
+            DSL.cast(i, SQLDataType.DOUBLE)));
+    }
+
+    /** The plan of the PRODUCT's own query (a {@link TupleRepository} factory), literals inline as the sweep plans it. */
+    private String explain(Function<DSLContext, Query> queryBuilder) {
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanInlined(ctx, queryBuilder.apply(ctx)));
     }
 
     // ── Arm 1: release lapsed claims — idx_tuples_claim_lease ───────────────
 
     @Test
     void releaseLapsedClaimsQuery_usesClaimLeaseIndex_noSeqScan() {
-        String plan = explain(ctx -> ctx.selectFrom(TUPLES)
-                .where(TUPLES.TENANT_ID.eq(TENANT)
-                        .and(TUPLES.CLAIM_STATE.eq("claimed"))
-                        .and(TUPLES.CONSUMED_AT.isNull())
-                        .and(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
-                .orderBy(TUPLES.LEASE_UNTIL.asc(), TUPLES.ID.asc())
-                .limit(300)
-                .forNoKeyUpdate()
-                .skipLocked());
+        String plan = explain(ctx -> TupleRepository.releaseLapsedClaimsQuery(ctx, TENANT, 300));
 
         assertThat(plan)
             .as("the sweep's release-arm scan must use idx_tuples_claim_lease at seeded cardinality")
@@ -163,12 +208,7 @@ class TupleSweepIndexPlanShapeTest {
 
     @Test
     void liveClaimRowLookup_usesClaimIdIndex_noSeqScan() {
-        String plan = explain(ctx -> ctx.selectFrom(TUPLES)
-                .where(TUPLES.TENANT_ID.eq(TENANT)
-                        .and(TUPLES.CLAIM_ID.eq("claim-4321"))
-                        .and(TUPLES.CLAIM_STATE.eq("claimed"))
-                        .and(TUPLES.CONSUMED_AT.isNull())
-                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime()))));
+        String plan = explain(ctx -> TupleRepository.liveClaimRowQuery(ctx, TENANT, "claim-4321"));
 
         assertThat(plan)
             .as("ack/nack's claim_id lookup must use idx_tuples_claim_id at seeded cardinality")
@@ -180,13 +220,7 @@ class TupleSweepIndexPlanShapeTest {
 
     @Test
     void purgeExpiredTuplesQuery_usesExpiresAtIndex_noSeqScan() {
-        String plan = explain(ctx -> ctx.select(TUPLES.ID)
-                .from(TUPLES)
-                .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime())))
-                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
-                .limit(300)
-                .forUpdate()
-                .skipLocked());
+        String plan = explain(ctx -> TupleRepository.purgeExpiredTuplesQuery(ctx, TENANT, 300));
 
         assertThat(plan)
             .as("the sweep's purge-tuples arm must use idx_tuples_expires_at at seeded cardinality")
@@ -210,14 +244,7 @@ class TupleSweepIndexPlanShapeTest {
      */
     @Test
     void purgeOldClaimLogQuery_usesTenantExpiresAtIndex_noSeqScan() {
-        String plan = explain(ctx -> ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
-                .from(TUPLE_CLAIM_LOG)
-                .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT)
-                        .and(TUPLE_CLAIM_LOG.EXPIRES_AT.lt(DSL.currentOffsetDateTime())))
-                .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
-                .limit(300)
-                .forUpdate()
-                .skipLocked());
+        String plan = explain(ctx -> TupleRepository.purgeOldClaimLogQuery(ctx, TENANT, 300));
 
         assertThat(plan)
             .as("the sweep's purge-log arm must use idx_tuple_claim_log_tenant_expires_at at seeded cardinality")
@@ -240,13 +267,9 @@ class TupleSweepIndexPlanShapeTest {
      */
     @Test
     void rdQuery_usesSubspaceScanIndex_noSeqScan() {
-        String plan = explain(ctx -> ctx.selectFrom(TUPLES)
-                .where(TUPLES.TENANT_ID.eq(TENANT)
-                        .and(TUPLES.SUBSPACE.eq("mailbox/planshape-avail"))
-                        .and(TUPLES.CONSUMED_AT.isNull())
-                        .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime())))
-                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
-                .limit(300));
+        String plan = explain(ctx -> TupleRepository.readQuery(ctx,
+                TupleRepository.readCondition(TENANT, "mailbox/planshape-avail", Map.of()),
+                TupleRepository.ReadOrder.ASC, 300));
 
         assertThat(plan)
             .as("rd/rdp's read scan must use idx_tuples_subspace_scan at seeded cardinality")
@@ -288,22 +311,7 @@ class TupleSweepIndexPlanShapeTest {
      */
     @Test
     void unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead() {
-        var now = DSL.currentOffsetDateTime();
-        var live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(now));
-        String plan = explain(ctx -> ctx.select(
-                        TUPLES.SUBSPACE,
-                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.isNull())).cast(Long.class),
-                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq("claimed"))).cast(Long.class),
-                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq("dead"))).cast(Long.class),
-                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNotNull()).cast(Long.class),
-                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
-                                .cast(Long.class),
-                        DSL.min(TUPLES.CREATED_AT),
-                        DSL.max(TUPLES.CREATED_AT))
-                .from(TUPLES)
-                .where(TUPLES.TENANT_ID.eq(TENANT))
-                .groupBy(TUPLES.SUBSPACE)
-                .orderBy(TUPLES.SUBSPACE.asc()));
+        String plan = explain(ctx -> TupleRepository.subspaceCensusQuery(ctx, TENANT, null, null));
 
         assertThat(plan)
                 .as("measured fact, not an assumption: the unfiltered census query does NOT use "
@@ -315,15 +323,12 @@ class TupleSweepIndexPlanShapeTest {
 
     @Test
     void seededCardinalityIsReal() throws Exception {
-        try (Connection su = pg.createConnection("");
-             var rs = su.createStatement().executeQuery(
-                "SELECT (SELECT count(*) FROM nexus.tuples WHERE tenant_id = '" + TENANT + "'), " +
-                "       (SELECT count(*) FROM nexus.tuple_claim_log WHERE tenant_id = '" + TENANT + "')")) {
-            rs.next();
-            assertThat(rs.getLong(1))
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.eq(TENANT)))
                 .as("the plan-shape claim is only meaningful at cardinality")
-                .isEqualTo((long) AVAILABLE_ROWS + CLAIMED_ROWS);
-            assertThat(rs.getLong(2)).isEqualTo((long) LOG_ROWS);
+                .isEqualTo(AVAILABLE_ROWS + CLAIMED_ROWS);
+            assertThat(ctx.fetchCount(TUPLE_CLAIM_LOG, TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT))).isEqualTo(LOG_ROWS);
         }
     }
 }

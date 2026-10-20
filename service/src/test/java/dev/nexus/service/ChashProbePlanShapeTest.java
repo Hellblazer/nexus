@@ -15,8 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -104,17 +102,16 @@ class ChashProbePlanShapeTest {
     private void seedAtCardinality() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Statement st = su.createStatement();
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // RDR-191 Phase 4 (lane D5): one unified nexus.chunks table now
             // carries all three embedding columns and ONE (tenant_id, chash)
             // index (idx_chunks_tenant_chash), not one per dim.
             for (int dim : new int[] {384, 768, 1024}) {
-                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_embedding_" + dim);
+                ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_embedding_" + dim)).execute();
             }
-            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_tsv");
-            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_trgm");
+            ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_tsv")).execute();
+            ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_trgm")).execute();
 
             for (int dim : new int[] {384, 768, 1024}) {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
@@ -158,14 +155,9 @@ class ChashProbePlanShapeTest {
     @Test
     void shippedProbeSqlKeepsTenantChashIndexUnderRlsAtScale() {
         byte[] bytes = Chash.fromHex(liveChash(768, 42)).toBytes();
-        String plan = tenantScope.withTenant(TENANT, ctx -> {
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery(
-                    "EXPLAIN " + ChashRepository.PROBE_SQL, bytes).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
-        });
+        // The product's own constant with the product's own bind (ChashRepository#lookup), explained as a whole plan.
+        String plan = tenantScope.withTenant(TENANT, ctx ->
+            PgContainerHelper.explainPlan(ctx, ctx.resultQuery(ChashRepository.PROBE_SQL, bytes)));
         // RDR-225: nexus.chunks is LIST-partitioned by model then tenant, so the plan names the tenant's
         // LEAF under each model partition (and each leaf's own copy of idx_chunks_tenant_chash, named
         // <leaf>_tenant_id_chash_idx by Postgres), not the parent index. The three leaves that hold the seeded rows must each be
@@ -194,13 +186,10 @@ class ChashProbePlanShapeTest {
 
     @Test
     void seededCardinalityIsReal() throws Exception {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.chunks")) {
-            rs.next();
-            assertThat(rs.getLong(1))
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS))
                 .as("the plan-shape claim is only meaningful at cardinality")
-                .isEqualTo(3L * CHUNKS_PER_DIM + 1);
+                .isEqualTo(3 * CHUNKS_PER_DIM + 1);
         }
     }
 

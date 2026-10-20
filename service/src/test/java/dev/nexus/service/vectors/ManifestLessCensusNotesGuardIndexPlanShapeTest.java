@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -310,15 +311,10 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
      */
     @Test
     void leakproofFlags_explainWhichQualsCanReachAnIndexUnderRls() {
-        Map<String, Boolean> flags = tenantScope.withTenant(TENANT, ctx -> {
-            Map<String, Boolean> out = new java.util.HashMap<>();
-            ctx.fetch("SELECT p.proname, p.proleakproof FROM pg_operator o "
-                    + "JOIN pg_proc p ON p.oid = o.oprcode "
-                    + "WHERE (o.oprname = '=' AND o.oprleft = 'text'::regtype AND o.oprright = 'text'::regtype) "
-                    + "   OR (o.oprname = '->>' AND o.oprleft = 'jsonb'::regtype AND o.oprright = 'text'::regtype)")
-               .forEach(r -> out.put(r.get(0, String.class), r.get(1, Boolean.class)));
-            return out;
-        });
+        Map<String, Boolean> flags = tenantScope.withTenant(TENANT, ctx ->
+            PgCatalogProbes.operatorFunctionLeakproof(ctx, List.of(
+                new PgCatalogProbes.OperatorSignature("=", "text", "text"),
+                new PgCatalogProbes.OperatorSignature("->>", "jsonb", "text"))));
         assertThat(flags)
             .containsEntry("texteq", true)
             .containsEntry("jsonb_object_field_text", false);

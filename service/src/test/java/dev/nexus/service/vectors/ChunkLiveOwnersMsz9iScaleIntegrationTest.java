@@ -14,6 +14,7 @@ import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -815,7 +816,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     @Test
     void recall_withControls_unfilteredBaseline_beforeVsAfter_acrossFractions() throws Exception {
         String maxScanTuples = tenantScope.withTenant(TENANT, ctx ->
-            ctx.fetch("SELECT current_setting('hnsw.max_scan_tuples')").get(0).get(0, String.class));
+            ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("hnsw.max_scan_tuples")))
+                .fetchOne(0, String.class));
 
         System.out.println("[nexus-wbfpw.9 RECALL CONTROLS] hnsw.max_scan_tuples=" + maxScanTuples
             + " (the connection default; production searches SET LOCAL their own budget, nexus-wbfpw.47)"

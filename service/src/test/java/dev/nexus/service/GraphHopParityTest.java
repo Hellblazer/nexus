@@ -17,6 +17,7 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
@@ -792,10 +793,12 @@ class GraphHopParityTest {
 
     private static void setDeleted(Connection su, String tenantId, String tumbler, boolean deleted)
             throws Exception {
-        su.createStatement().execute(
-            "UPDATE nexus.catalog_documents SET deleted_at = " +
-            (deleted ? "now()" : "NULL") +
-            " WHERE tenant_id = '" + tenantId + "' AND tumbler = '" + tumbler + "'");
+        Field<OffsetDateTime> deletedAt = deleted
+            ? DSL.currentOffsetDateTime() : DSL.val(null, CATALOG_DOCUMENTS.DELETED_AT);
+        DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenantId).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .execute();
     }
 
     // ── value helpers ────────────────────────────────────────────────────────
