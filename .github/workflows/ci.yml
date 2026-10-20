@@ -985,19 +985,15 @@ jobs:
       # 3.12 only: the 3.13 legs (PRs to main) are a second copy of the same suite, and the
       # fan-in expects exactly one report per shard. A shard whose report is missing fails
       # the upload (if-no-files-found), never reads as a clean one.
-      # Both steps are `continue-on-error` exactly while `[python_unit] measured_on` is absent from
-      # tests/ddl_ceiling.toml (tests/scripts/test_ddl_ratchet_wiring.py): until the gate is armed a
-      # missing python3 or script, an exception, a missing report or a transient artifact-upload
-      # failure must not fail the leg and with it pytest-gate. Arming drops both lines (the fan-in
-      # then fails on the missing report instead, exit 12).
+      # The gate is armed (`[python_unit] measured_on` is set in tests/ddl_ceiling.toml, 2026-10-20), so
+      # neither step is `continue-on-error` (tests/scripts/test_ddl_ratchet_wiring.py): a missing
+      # script or report fails here, and the fan-in fails on a missing report (exit 12).
       - name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)
         if: success() && matrix.python-version == '3.12'
-        continue-on-error: true
         run: python3 scripts/ddl_ratchet.py check --suite python_unit --report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory
 
       - name: Upload this shard's DDL report (read by the fan-in in pytest-gate)
         if: success() && matrix.python-version == '3.12'
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ddl-report-shard-${{ matrix.shard }}
@@ -1755,16 +1751,13 @@ jobs:
 
           echo "pytest-gate: PASS"
 
-      # nexus-ekp7w / nexus-2rhif: THE DDL AND BYTES-WRITTEN GATE, ADVISORY UNTIL IT IS ARMED. It runs only
+      # nexus-ekp7w / nexus-2rhif: THE DDL AND BYTES-WRITTEN GATE, armed 2026-10-20 from three Linux CI
+      # fan-ins (tests/ddl_ceiling.toml has the numbers and `[python_unit] measured_on`). It runs only
       # after the verdict above passed (a step's implicit success() skips it otherwise), so it sees a green
-      # shard matrix, and only when the shards ran (code=true). `--advisory` prints the whole comparison and
-      # exits 0: the python ceilings in tests/ddl_ceiling.toml were not measured on Linux CI, so enforcing
-      # them could turn develop red on a number nobody measured there. It stays advisory exactly while
-      # `[python_unit] measured_on` is absent from that file (tests/scripts/test_ddl_ratchet_wiring.py).
-      # To arm it, in one commit: paste this step's first Linux line into nexus-ekp7w, set the ceilings,
-      # add measured_on, and delete `--advisory` and the three `continue-on-error` lines below, and the
-      # two in the `test` job's DDL steps above (until then a wiring slip in the checkout, the download
-      # or the glob cannot red the gate job either).
+      # shard matrix, and only when the shards ran (code=true). A ceiling breach fails pytest-gate; the
+      # failure message names the metric, and a new Liquibase changeset bumps migration_ddl_per_worker in
+      # the same commit (tests/AGENTS.md). tests/scripts/test_ddl_ratchet_wiring.py keeps the flag and the
+      # continue-on-error lines consistent with the marker.
       # Fan-in sums every shard's report and judges the whole run against tests/ddl_ceiling.toml:
       # bytes and DDL per test over all tests, and the migration's per booted worker, which do not
       # move with the shard split, with -n (the pool runs 4 workers a shard, a hosted runner one)
@@ -1774,7 +1767,6 @@ jobs:
       # Ceilings are reduce-only: lower one in the commit that lowers the number.
       - name: Check out the ratchet and its ceilings
         if: needs.changes.outputs.code == 'true'
-        continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           persist-credentials: false
@@ -1785,7 +1777,6 @@ jobs:
 
       - name: Fetch every shard's DDL report
         if: needs.changes.outputs.code == 'true'
-        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: ddl-report-shard-*
@@ -1793,8 +1784,7 @@ jobs:
 
       - name: DDL/bytes ratchet over the whole run (fan-in)
         if: needs.changes.outputs.code == 'true'
-        continue-on-error: true
-        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --advisory --report ddl-reports/*/nx-ddl-report.json
+        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

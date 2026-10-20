@@ -224,16 +224,17 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
         (_DOWNLOAD_IF, "- name: Fetch every shard's DDL report\n        if: success()", "is not limited to runs whose shards ran"),
         (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: always() && needs.changes.outputs.code == 'true'",
          "can run after a failed verdict"),
-        (_FAN_IN_IF + "\n        continue-on-error: true", _FAN_IN_IF, "is not continue-on-error while the gate is advisory"),
-        (_DOWNLOAD_IF + "\n        continue-on-error: true", _DOWNLOAD_IF, "is not continue-on-error while the gate is advisory"),
-        (_CHECK_HEAD + "\n        continue-on-error: true", _CHECK_HEAD, "DDL/bytes ratchet, this shard"),
-        (_UPLOAD_IF + "\n        continue-on-error: true", _UPLOAD_IF, "Upload this shard's DDL report"),
+        (_FAN_IN_IF, _FAN_IN_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
+        (_DOWNLOAD_IF, _DOWNLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
+        (_CHECK_HEAD, _CHECK_HEAD + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
+        (_UPLOAD_IF, _UPLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
+        ("--suite python_unit --shards 6 --report", "--suite python_unit --shards 6 --advisory --report", "the gate is switched off"),
     ],
     ids=["fan-in gone", "shards drift", "shard check enforced", "no report dir", "artifact not a shard report",
          "missing report passes", "download pattern", "shard check on the 3.13 leg", "upload on the 3.13 leg",
          "fan-in runs on a skipped matrix", "download runs on a skipped matrix", "fan-in runs after a red verdict",
-         "advisory fan-in can red the job", "advisory download can red the job",
-         "advisory shard check can red the leg", "advisory report upload can red the leg"],
+         "armed fan-in swallows a red", "armed download swallows a red",
+         "armed shard check swallows a red", "armed report upload swallows a red", "armed fan-in back to advisory"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
     problems = python_wiring_problems(_mutate(CI_YML.read_text(), old, new), CEILINGS.read_text())
@@ -256,30 +257,32 @@ def test_the_fan_in_must_follow_the_verdict_step() -> None:
     assert any("fan-in runs before the verdict step" in p for p in problems), problems
 
 
-def _armed_ceilings() -> str:
-    return CEILINGS.read_text().replace("[python_unit]\n", '[python_unit]\nmeasured_on = "https://example.invalid/run/1"\n', 1)
+def _unarmed_ceilings() -> str:
+    text = CEILINGS.read_text()
+    lines = [ln for ln in text.splitlines(keepends=True) if not ln.startswith("measured_on = ")]
+    assert len(lines) == len(text.splitlines(keepends=True)) - 1, "expected exactly one measured_on line"
+    return "".join(lines)
 
 
 def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured_on_ci() -> None:
-    """Enforced on estimated ceilings, the fan-in could turn develop red; so could any failing per-shard step."""
+    """Armed 2026-10-20 (nexus-ekp7w) from three Linux CI fan-ins: the fan-in enforces and nothing in the
+    path swallows a failure. The same wiring on unmeasured ceilings could turn develop red on an estimate,
+    and the advisory wiring is still what an unarmed file requires."""
     text, ceilings = CI_YML.read_text(), CEILINGS.read_text()
-    assert not _armed(ceilings), "arming is a deliberate commit with a Linux measurement; this test pins today's unarmed state"
+    assert _armed(ceilings), "the python gate was armed on 2026-10-20; disarming is a deliberate, reviewed commit"
     assert python_wiring_problems(text, ceilings) == []
-    enforced = _mutate(_mutate(text, "--shards 6 --advisory ", "--shards 6 "), _FAN_IN_IF + "\n        continue-on-error: true", _FAN_IN_IF)
-    assert any("could turn develop red on an estimate" in p for p in python_wiring_problems(enforced, ceilings))
-    # armed: the same advisory wiring is a switched-off gate, and continue-on-error would swallow a red
-    problems = python_wiring_problems(text, _armed_ceilings())
-    assert any("the gate is switched off" in p for p in problems), problems
-    assert any("is continue-on-error but the gate is armed" in p for p in problems), problems
+    unarmed = _unarmed_ceilings()
+    problems = python_wiring_problems(text, unarmed)
+    assert any("could turn develop red on an estimate" in p for p in problems), problems
     for name in ("DDL/bytes ratchet, this shard", "Upload this shard's DDL report"):
-        assert any("is continue-on-error but the gate is armed" in p and name in p for p in problems), (name, problems)
-    armed_ok = text.replace("--shards 6 --advisory ", "--shards 6 ")
+        assert any("is not continue-on-error while the gate is advisory" in p and name in p for p in problems), (name, problems)
+    advisory_ok = _mutate(text, "--shards 6 --report", "--shards 6 --advisory --report")
     for head in (_CHECK_HEAD, _UPLOAD_IF):
-        armed_ok = _mutate(armed_ok, head + "\n        continue-on-error: true", head)
+        advisory_ok = _mutate(advisory_ok, head, head + "\n        continue-on-error: true")
     for step in ("- name: Check out the ratchet and its ceilings", _DOWNLOAD_IF.split("\n")[0], _FAN_IN_IF.split("\n")[0]):
-        armed_ok = _mutate(armed_ok, step + "\n        if: needs.changes.outputs.code == 'true'\n        continue-on-error: true\n",
-                           step + "\n        if: needs.changes.outputs.code == 'true'\n")
-    assert python_wiring_problems(armed_ok, _armed_ceilings()) == []
+        advisory_ok = _mutate(advisory_ok, step + "\n        if: needs.changes.outputs.code == 'true'\n",
+                              step + "\n        if: needs.changes.outputs.code == 'true'\n        continue-on-error: true\n")
+    assert python_wiring_problems(advisory_ok, unarmed) == []
 
 
 @pytest.mark.parametrize(

@@ -43,22 +43,16 @@
 # Once armed, a commit that adds a Liquibase changeset bumps migration_ddl_per_worker (tolerance 0) in the
 # same commit (tests/AGENTS.md says how; the failure message repeats it).
 #
-# HOW THE PYTHON NUMBERS WERE OBTAINED (2026-10-19, nexus-ekp7w), and what they are not. None of them was
-# measured on CI, and two are estimates:
-#   * ddl_per_test (19.02): ONE full macOS run (tests/ -n 4, 30235 tests) gave 19.0132. Measured, n=1, on a
-#     host that skips some tests Linux runs. DDL is deterministic (tests/db, 2283 tests, gave 31881 test DDL
-#     and 8404 migration DDL on three repeat runs at -n 4, again at -n 8, and on chas at -n auto: spread
-#     0.000%), so the ratio moves only with the test set; ddl_tolerance 0.05 is the allowance for that, not a
-#     measured variance.
-#   * migration_ddl_per_worker (2101): measured, the same on macOS and chas, so tolerance 0. It is the
-#     changelog's own count.
-#   * migration_wal_bytes_per_worker (11010048): measured on chas (Linux), 168 MiB over its 16 workers. A
-#     measurement on a different host than CI, not on CI.
-#   * wal_bytes_per_test (240000): an ESTIMATE. chas's tests/db figure (166912) times the laptop's full-run to
-#     tests/db ratio (1.43), rounded up. The host factor is not constant (about 1.8x per test, 1.61x on the
-#     migration), so the spread is of the order of bytes_tolerance (0.10), which is the margin for this
-#     estimate, not repeat variance (tests-phase WAL spread on one host: 0.50% over three runs).
-#   Replace the estimates and the chas figure with the first Linux fan-in's measurement (it prints them).
+# HOW THE PYTHON NUMBERS WERE OBTAINED (armed 2026-10-20, nexus-ekp7w): three Linux CI fan-ins on develop
+# (pool lab-6c18g, 6 shards x 4 workers, pytest-gate log), runs 39344928950 (e615ca68e), 39350826510
+# (51e9a4ae3) and 39361935431 (07ca0baf1):
+#   wal_bytes_per_test               232037 / 231805 / 232330   ceiling 232400 (max, rounded up; band 0.10)
+#   ddl_per_test                     18.7539 / 18.7533 / 18.7416 ceiling 18.76  (band 0.05: the test set moves)
+#   migration_wal_bytes_per_worker   11037918 / 11037914 / 11037916 ceiling 11038000. RAISED from 11010048:
+#                                    that was a chas hand run, not CI; the enforcing platform measures 0.25% more.
+#   migration_ddl_per_worker         2101 on all three, tolerance 0 (the changelog's own count)
+# tests 30635-30655, workers_booted 24, total_ddl 624949 on all three. The pre-arming estimates (240000 and
+# 19.02 from macOS and chas) are superseded.
 #
 # "measure" means no measurement exists yet. The check then prints the numbers it just measured and exits
 # 11 (not 0), and a ceiling nobody set must not pass a run. The Java sections are still "measure": their
@@ -67,11 +61,12 @@
 # and drop --advisory from its step in service-ci.yml in the same commit (a lint checks they agree).
 
 [python_unit]
+measured_on = "CI 39344928950 (e615ca68e), 39350826510 (51e9a4ae3), 39361935431 (07ca0baf1)"
 bytes_tolerance = 0.10
 ddl_tolerance = 0.05
-wal_bytes_per_test = 240000
-ddl_per_test = 19.02
-migration_wal_bytes_per_worker = 11010048
+wal_bytes_per_test = 232400
+ddl_per_test = 18.76
+migration_wal_bytes_per_worker = 11038000
 migration_ddl_per_worker = 2101
 migration_ddl_per_worker_tolerance = 0.0
 
