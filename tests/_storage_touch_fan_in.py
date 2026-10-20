@@ -22,8 +22,10 @@ from pathlib import Path
 REPORT_NAME = "nx-storage-touch-report.json"
 #: ``1`` asks the sweep-shape checks of a WHOLE run (some test provisioned, some
 #: test clean, some touch event): a scoped run of three provisioned tests has no
-#: clean one and is not vacuous. The census and the full-suite proof set it. A report
-#: written without it does not count the whole run, and the fan-in refuses it.
+#: clean one and is not vacuous. The census and the full-suite proof set it, and a run
+#: that collects at least ``SWEEP_AUTO_FLOOR`` tests (``tests/_storage_touch_guard.py``,
+#: a CI shard included) asks it by itself. A report written without it does not count
+#: the whole run, and the fan-in refuses it.
 SWEEP_ENV = "NX_STORAGE_TOUCH_SWEEP"
 #: The committed ceiling on the NUMBER of tests that mint a tenant, by suite section.
 DEFAULT_CEILING_FILE = Path(__file__).resolve().parent / "storage_touch_ceiling.toml"
@@ -64,7 +66,7 @@ def _read_fan_in_report(path: Path) -> tuple[dict | None, str | None]:
     if sweep is not True or not isinstance(run_id, str) or not run_id:
         return None, (
             f"{path}: not a whole-run report (sweep={sweep!r}, run_id={run_id!r}); only a run with "
-            f"{SWEEP_ENV}=1 counts every test it selected, and a scoped run would undercount"
+            f"{SWEEP_ENV}=1 (or one large enough to ask for it) counts every test it selected, and a scoped run would undercount"
         )
     return {"file": str(path), "run_id": run_id, "tests": tests, "provisioned": provisioned}, None
 

@@ -218,6 +218,37 @@ def test_an_existing_pytestmark_is_extended_not_replaced(tmp_path: pathlib.Path,
         assert "pytest.mark.t2_tenant" in text and "reason='x'" in text
 
 
+@pytest.mark.parametrize("existing", [
+    "pytestmark = [pytest.mark.integration, pytest.mark.slow]\n",
+    "pytestmark = (pytest.mark.integration, pytest.mark.slow)\n",
+], ids=["list", "tuple"])
+def test_a_list_or_tuple_pytestmark_is_marked_once_and_a_rerun_adds_nothing(
+    tmp_path: pathlib.Path, existing: str,
+) -> None:
+    """The list form gets ``pytestmark = [*pytestmark, MARK]`` on a SECOND line; the
+    module check looked only at the first assignment, so every rerun appended
+    another one (nexus-0ite2)."""
+    _write(tmp_path, "t/test_m.py", f"import pytest\n\n{existing}\n\ndef test_a():\n    pass\n")
+    census = _census([_rec("t/test_m.py::test_a", touched=True)])
+    plan = ann.plan_file("t/test_m.py", census, tmp_path, threshold=0.9)
+    assert plan.module_mark and ann.apply_plan(plan, tmp_path) is None
+    once = (tmp_path / "t/test_m.py").read_text()
+    assert once.count("pytest.mark.t2_tenant") == 1
+    for _ in range(2):
+        again = ann.plan_file("t/test_m.py", census, tmp_path, threshold=0.9)
+        assert not (again.module_mark or again.class_marks or again.func_marks) and again.already == 1
+        assert ann.apply_plan(again, tmp_path) is None
+        assert (tmp_path / "t/test_m.py").read_text() == once
+
+
+def test_the_docstring_says_only_the_mark_leaves_a_test_alone() -> None:
+    """Only the MARK (the test's, its class's or the module's) leaves a test alone: a
+    parameter does not (``db`` can touch storage first) and neither does ``usefixtures``."""
+    text = " ".join((ann.__doc__ or "").split())
+    assert "by parameter or ``usefixtures`` is left alone" not in text
+    assert "A parameter or ``usefixtures`` request does not count" in text
+
+
 def test_pytest_is_imported_when_the_module_lacks_it(tmp_path: pathlib.Path) -> None:
     _write(tmp_path, "t/test_m.py", '"""Doc."""\nimport os\n\n\ndef test_a():\n    pass\n')
     plan = ann.plan_file("t/test_m.py", _census([_rec("t/test_m.py::test_a", touched=True)]), tmp_path, threshold=0.9)

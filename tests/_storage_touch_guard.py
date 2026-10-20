@@ -23,7 +23,9 @@ the Python children a test starts (``children_spawned``). ``threading.Thread.__i
 record the test running when each thread was created: a thread a FINISHED test
 leaked is listed in ``late_thread_touches`` under its owner, never charged to
 the test that happens to be running (a thread with no recorded owner, created
-outside ``threading.Thread``, is attributed to the running test).
+outside ``threading.Thread``, is attributed to the running test, and so is a
+thread-pool worker: ``ThreadPoolExecutor`` / ``multiprocessing.pool.ThreadPool``
+workers outlive the test that created them, so they carry no owner).
 
 Nothing here raises into the code under test: the recorders swallow their own
 errors and count them (``guard_errors``; any is a vacuity problem).
@@ -63,11 +65,14 @@ it: fewer workers reported than started, fewer tests recorded than collected, a
 guard error, and an xfailed test that reached storage (xfail would otherwise
 swallow the teardown failure). The whole-run shape (some test provisioned, some
 clean, some touch event, and Python children that were spawned reached the shim) is
-asked only when ``NX_STORAGE_TOUCH_SWEEP=1``, which a full-suite run sets; a scoped
-run of three provisioned tests is not vacuous for having no clean one. A storage
-touch AFTER its test finished (a thread or child the test leaked) lands or not by
-thread timing, so it is a printed warning (``warnings`` in the report) in every
-mode and never changes the exit status. At start-up a canary
+asked when ``NX_STORAGE_TOUCH_SWEEP=1`` or when the run collects at least
+``SWEEP_AUTO_FLOOR`` tests (``NX_STORAGE_TOUCH_SWEEP_FLOOR`` overrides it; ``sweep_auto``
+in the report says which): a scoped run of three provisioned tests is not vacuous for
+having no clean one. A storage touch AFTER its test finished (a thread or child the test
+leaked) lands or not by thread timing, so in a scoped run it is a printed warning
+(``warnings`` in the report) that never changes the exit status; a run that asked the
+whole-run checks gates on it. A scoped run whose Python children never reached the shim
+prints a yellow warning for that too. At start-up a canary
 constructs each guarded class and checks the ``Thread``/``Popen`` patches, so a
 run that finds nothing is a run that could have found something.
 
@@ -146,6 +151,16 @@ REPORT_DIR_ENV = "NX_STORAGE_TOUCH_REPORT_DIR"
 CHILD_LOG_ENV = "NX_STORAGE_TOUCH_CHILD_LOG"
 GUARD_PID_ENV = "NX_STORAGE_TOUCH_GUARD_PID"
 RUN_ID_ENV = "NX_STORAGE_TOUCH_RUN_ID"
+SWEEP_FLOOR_ENV = "NX_STORAGE_TOUCH_SWEEP_FLOOR"
+#: A run that collects at least this many tests asks the whole-run checks without
+#: ``NX_STORAGE_TOUCH_SWEEP=1`` (nexus-0ite2 item 3). A CI shard collects about 5600
+#: (``tests/storage_touch_ceiling.toml``, 6 shards), so it qualifies with a margin for
+#: deselection; the docs-readers leg (1561 tests, all lint-marked, so nothing
+#: unprovisioned among them) and any one-directory run sit below it. The shape checks
+#: (some test provisioned, some clean, some touch event) hold of any run this large
+#: and of no small one. ``NX_STORAGE_TOUCH_SWEEP_FLOOR`` overrides it for a test or a
+#: bisect; ``NX_STORAGE_TOUCH_SWEEP=1`` stays the explicit switch for a run below it.
+SWEEP_AUTO_FLOOR = 4000
 EXEMPT_MARKER = "expects_unresolvable_endpoint"
 TENANT_MARKER = "t2_tenant"
 #: The fixtures that provision the tenant. A finding whose test already requests
@@ -179,6 +194,20 @@ _OWNER_ATTR = "_nx_storage_touch_owner"  # set on every Thread: the test running
 #: src/nexus files that only resolve the endpoint on a caller's behalf: a soft
 #: peek is attributed to the first src/nexus frame OUTSIDE them.
 _PEEK_HELPER_FILES = ("db/service_endpoint.py", "db/http_vector_client.py", "config.py")
+
+
+def _sweep_floor() -> int:
+    """The collected-test count from which a run asks the whole-run checks by itself."""
+    raw = os.environ.get(SWEEP_FLOOR_ENV)
+    if raw is None or raw == "":
+        return SWEEP_AUTO_FLOOR
+    try:
+        floor = int(raw)
+    except ValueError:
+        floor = 0
+    if floor < 1:
+        raise pytest.UsageError(f"{SWEEP_FLOOR_ENV} must be a positive integer, got {raw!r}")
+    return floor
 
 
 def substrate_value() -> str | None:
@@ -476,6 +505,20 @@ def _make_popen_init(original):
     return __init__
 
 
+#: (module, function) of the targets a stdlib thread pool runs its workers on. A
+#: pool worker outlives the test that happened to create it and runs whatever any
+#: later test submits, so "the test running when it was created" says nothing about
+#: whose work it is doing (nexus-0ite2).
+_POOL_WORKER_TARGETS = frozenset({("concurrent.futures.thread", "_worker"), ("multiprocessing.pool", "worker")})
+
+
+def _is_pool_worker(thread: threading.Thread) -> bool:
+    """True for a ``ThreadPoolExecutor`` / ``multiprocessing.pool.ThreadPool`` worker,
+    judged by the function it runs."""
+    target = getattr(thread, "_target", None)
+    return (getattr(target, "__module__", None), getattr(target, "__name__", None)) in _POOL_WORKER_TARGETS
+
+
 def _make_thread_init(original):
     @functools.wraps(original)
     def __init__(self, *args, **kwargs):  # noqa: N807 — replacing __init__ by name
@@ -483,7 +526,9 @@ def _make_thread_init(original):
         try:
             guard = _guards[-1] if _guards else None
             item = guard.item if guard is not None else None
-            setattr(self, _OWNER_ATTR, item.nodeid if item is not None else None)
+            # a pool worker has no owner: its touch is the running test's (see _is_pool_worker)
+            owner = None if item is None or _is_pool_worker(self) else item.nodeid
+            setattr(self, _OWNER_ATTR, owner)
         except Exception:  # noqa: BLE001 — see _record_touch
             pass
 
@@ -733,7 +778,11 @@ class Guard:
         #: outer session's report (the census of 2026-10-18 lost its merged
         #: report to exactly this).
         self.nested = not self.is_worker and any(os.environ.get(v) for v in _INHERITED_ENV)
+        #: whole-run checks asked: ``NX_STORAGE_TOUCH_SWEEP=1``, or (decided at session
+        #: finish, when the collected count is known) a run of at least ``sweep_floor`` tests
         self.sweep = os.environ.get(SWEEP_ENV) == "1"
+        self.sweep_auto = False
+        self.sweep_floor = _sweep_floor()
         self.canary_active = False
         self.canary_hits = 0
         self.guard_id = uuid.uuid4().hex[:8]
@@ -1119,6 +1168,7 @@ class Guard:
             "mode": self.mode,
             "run_id": self.run_id,
             "sweep": self.sweep,
+            "sweep_auto": self.sweep_auto,
             "workers_started": self.workers_started,
             "workers": len(self.reported),
             "recovered_files": [str(p) for p in recovered],
@@ -1138,8 +1188,9 @@ class Guard:
         the shim) is asked only when ``NX_STORAGE_TOUCH_SWEEP=1``: a scoped run of
         three provisioned tests is not vacuous for having no clean one, a scoped
         run whose children scrub PYTHONPATH is not unclean, and the start-up
-        canary already proved the recorder fires. A late touch is a warning, not
-        a verdict (``_warnings``): whether one lands depends on thread timing."""
+        canary already proved the recorder fires. Under a sweep a late touch is a
+        verdict too (``_warnings``); in a scoped run it is only a warning, because
+        whether one lands depends on thread timing."""
         c = report["counts"]
         problems = []
         if self.sweep:
@@ -1165,6 +1216,12 @@ class Guard:
                 f"vacuous sweep: {c['children_spawned']} Python child(ren) were spawned but the shim saw none "
                 "(PYTHONPATH scrubbed, or the shim could not load): child touches are unexamined"
             )
+        if self.sweep and not self.sweep_auto:
+            # the run that explicitly asked the whole-run checks leaves nothing unexamined: a
+            # late touch (a leaked thread or child) is a failure there. A run that qualified by
+            # size alone (every CI shard) only prints it: a full hellmini run on 2026-10-19 had
+            # late_child_touches=5, so gating on size would fail shards on thread timing.
+            problems += self._warnings(report)
         if report["xfail_touches"]:
             shown = ", ".join(report["xfail_touches"][:5])
             problems.append(
@@ -1175,19 +1232,31 @@ class Guard:
         return problems
 
     def _warnings(self, report: dict) -> list[str]:
-        """Findings printed in every mode that never change the exit status: a
-        construction after its test finished lands or not by thread timing, so
-        failing a session on it would turn a green run red at random."""
+        """Findings printed in every mode that never change the exit status of a scoped
+        run: a construction after its test finished lands or not by thread timing, so
+        failing a session on it would turn a green run red at random. A run that asked
+        the whole-run checks with ``NX_STORAGE_TOUCH_SWEEP=1`` gates on the late touch
+        through ``_vacuity``; one that qualified by size alone does not. The second line is the scoped-run counterpart of the sweep's
+        children check: Python children were started and the shim saw none, so their
+        touches went unexamined (a sweep makes that a verdict instead)."""
+        out = []
         late = report["late_child_touches"] + report["late_thread_touches"]
-        if not late:
-            return []
-        owners = sorted({r["nodeid"] for r in late})
-        shown = ", ".join(owners[:5]) + (f", ... {len(owners) - 5} more" if len(owners) > 5 else "")
-        return [
-            f"late storage touch: {sum(r.get('n', 1) for r in late)} construction(s) after their test finished, "
-            f"from {len(owners)} test(s) that leaked a thread or child: {shown}. "
-            "Join the thread or wait for the child inside the test."
-        ]
+        if late:
+            owners = sorted({r["nodeid"] for r in late})
+            shown = ", ".join(owners[:5]) + (f", ... {len(owners) - 5} more" if len(owners) > 5 else "")
+            out.append(
+                f"late storage touch: {sum(r.get('n', 1) for r in late)} construction(s) after their test finished, "
+                f"from {len(owners)} test(s) that leaked a thread or child: {shown}. "
+                "Join the thread or wait for the child inside the test."
+            )
+        c = report["counts"]
+        if not self.sweep and c["children_spawned"] and not c["children_seen"]:
+            out.append(
+                f"storage-touch guard is blind to child processes: {c['children_spawned']} Python child(ren) "
+                "were started and the child shim saw none (PYTHONPATH scrubbed, or the shim could not load), "
+                "so their storage touches are unexamined."
+            )
+        return out
 
     def run_canary(self) -> None:
         """Prove, at session start, that the patches are in and the recorder is
@@ -1230,10 +1299,13 @@ class Guard:
         if config.option.collectonly:
             return
         self.collected = session.testscollected
+        if not self.sweep and self.collected >= self.sweep_floor:
+            self.sweep = self.sweep_auto = True
         report = self.merged()
         report["collected"] = self.collected
-        self._verdict = report["vacuity"] = self._vacuity(report)
+        report["sweep"], report["sweep_auto"] = self.sweep, self.sweep_auto
         self._warned = report["warnings"] = self._warnings(report)
+        self._verdict = report["vacuity"] = self._vacuity(report)
         if self.mode == "fail" and self._verdict and not session.exitstatus:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
@@ -1294,8 +1366,14 @@ class Guard:
         for problem in self._verdict:
             # report mode shows the problem without changing the exit status
             tr.write_line(problem, red=self.mode == "fail", yellow=self.mode != "fail")
-        for warning in self._warned:
-            tr.write_line(warning, yellow=True)
+        if not self.sweep:  # under a sweep they are part of the verdict above
+            for warning in self._warned:
+                tr.write_line(warning, yellow=True)
+        if self.sweep_auto:
+            tr.write_line(
+                f"whole-run checks on by size: {report['collected']} collected >= {self.sweep_floor} "
+                f"({SWEEP_FLOOR_ENV}; NX_STORAGE_TOUCH_SWEEP=1 asks them of a smaller run)"
+            )
         tr.write_line(f"storage-touch report: {_summary_report_path(path)}")
 
 
@@ -1440,7 +1518,7 @@ def pytest_configure(config: pytest.Config) -> None:
     mode = os.environ.get(MODE_ENV, "fail")
     if mode not in ("report", "fail"):
         raise pytest.UsageError(f"{MODE_ENV} must be 'report' or 'fail', got {mode!r}")
-    guard = Guard(mode, config)
+    guard = Guard(mode, config)  # raises UsageError on a malformed sweep floor
     config.stash[_GUARD_KEY] = guard
     config.pluginmanager.register(guard, "nx-storage-touch-guard")
     # The run id travels to xdist workers through the environment; a worker reads it.

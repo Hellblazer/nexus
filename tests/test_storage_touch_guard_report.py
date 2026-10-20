@@ -1578,3 +1578,217 @@ def test_the_committed_ceiling_is_well_formed_and_still_unset() -> None:
         # nobody has run the full sweep to completion since the fan-in replaced the per-shard
         # share: the first number is a reviewed commit, so an int here arrived with its evidence
         assert ceiling == CEILING_UNSET or (isinstance(ceiling, int) and ceiling >= 1), name
+
+
+# ── nexus-0ite2: the whole-run checks fire on size, warnings gate a sweep, pool threads ──
+
+
+_WHOLE_RUN_SHAPE_BODY = '''
+def test_a():
+    pass
+
+def test_b():
+    pass
+
+def test_c():
+    pass
+'''
+
+
+def test_a_run_at_or_above_the_collected_floor_asks_the_whole_run_checks_by_itself(pytester, monkeypatch) -> None:
+    """No ``NX_STORAGE_TOUCH_SWEEP``: the count of collected tests decides. Three
+    clean tests under a floor of three hold no provisioned one and no touch event, so
+    the sweep checks (which only a whole run is asked) refuse it; two do not."""
+    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "3")
+    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=False)
+    assert_session_failed_for(result, "vacuous sweep: provisioned=0", "vacuous sweep: touch_events=0")
+    report = _report(result)
+    assert report["sweep"] is True and report["sweep_auto"] is True
+    below = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY.rsplit("def test_c", 1)[0], mode="fail", sweep=False)
+    assert below.ret == 0 and "vacuous sweep" not in below.stdout.str()
+    assert (_report(below)["sweep"], _report(below)["sweep_auto"]) == (False, False)
+
+
+def test_the_explicit_switch_still_asks_the_whole_run_checks_of_a_small_run(pytester, monkeypatch) -> None:
+    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "100000")
+    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=True)
+    assert_session_failed_for(result, "vacuous sweep: provisioned=0")
+    report = _report(result)
+    assert report["sweep"] is True and report["sweep_auto"] is False
+
+
+def test_the_floor_sits_between_the_docs_readers_leg_and_a_ci_shard() -> None:
+    """A CI shard (about 5600 tests in tests/storage_touch_ceiling.toml, 6 shards) must
+    qualify, so its report is a whole-run one for the fan-in; the docs-readers leg (1561
+    lint-marked tests, nothing unprovisioned among them) and any one-directory run must not."""
+    from tests._storage_touch_guard import SWEEP_AUTO_FLOOR
+
+    assert 1561 < SWEEP_AUTO_FLOOR <= 5000
+
+
+def test_a_malformed_floor_is_a_usage_error(pytester, monkeypatch) -> None:
+    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "lots")
+    result = _run(pytester, monkeypatch, "def test_x():\n    pass\n", mode="fail", sweep=False)
+    assert_session_failed_for(result, "NX_STORAGE_TOUCH_SWEEP_FLOOR")
+
+
+def test_children_that_never_reach_the_shim_print_a_yellow_warning_in_a_scoped_run(pytester, monkeypatch) -> None:
+    hidden = '''
+import os, subprocess, sys
+
+def test_hides_its_child():
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    subprocess.run([sys.executable, "-c", "pass"], env=env, check=True, timeout=120)
+'''
+    result = _run(pytester, monkeypatch, hidden, mode="fail", sweep=False, args=("--color=yes",))
+    assert result.ret == 0
+    out = result.stdout.str()
+    line = next(ln for ln in out.splitlines() if "Python child" in ln and "shim" in ln)
+    assert "\x1b[33m" in line, line  # yellow
+    assert "1 Python child(ren)" in line
+    assert any("Python child" in w for w in _report(result)["warnings"])
+    # control: a child that reaches the shim prints nothing, and a run with no children neither
+    ok = '''
+import subprocess, sys
+
+def test_spawns_openly():
+    subprocess.run([sys.executable, "-c", "pass"], check=True, timeout=120)
+'''
+    for body in (ok, "def test_nothing():\n    pass\n"):
+        result = _run(pytester, monkeypatch, body, mode="fail", sweep=False)
+        assert result.ret == 0 and _report(result)["warnings"] == []
+
+
+_LATE_THREAD_WITH_A_CLEAN_SHAPE = '''
+import leak
+
+def test_provisioned_toucher(t2_tenant):
+    from helpers import touch_storage_and_swallow
+    touch_storage_and_swallow()
+
+def test_1_leaks_a_thread():
+    leak.start()
+
+def test_2_lets_it_touch():
+    leak.GO.set()
+    assert leak.DONE.wait(30)
+    leak.THREADS[0].join()
+'''
+
+_LEAK = '''
+import threading
+from helpers import touch_storage_and_swallow
+
+GO = threading.Event()
+DONE = threading.Event()
+
+def _run():
+    GO.wait(30)
+    touch_storage_and_swallow()
+    DONE.set()
+
+THREADS = []
+
+def start():
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    THREADS.append(t)
+'''
+
+
+def test_a_late_touch_fails_a_sweep_and_stays_a_warning_otherwise(pytester, monkeypatch) -> None:
+    """Whether a late touch lands is thread timing, so a scoped run only prints it. A
+    run that explicitly asked the whole-run checks gates on it: the sweep is the run that
+    is meant to leave nothing unexamined. A run that qualified by size alone (a CI shard)
+    prints it and passes. The body is otherwise a clean
+    sweep (a provisioned test, a clean one, a touch event), so the late touch is the reason."""
+    pytester.makepyfile(leak=_LEAK)
+    scoped = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=False)
+    scoped.assert_outcomes(passed=3)
+    assert scoped.ret == 0 and _report(scoped)["vacuity"] == [] and _report(scoped)["warnings"]
+    swept = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=True)
+    assert_session_failed_for(swept, "late storage touch: 1 construction(s) after their test finished")
+    report = _report(swept)
+    assert any("late storage touch" in p for p in report["vacuity"])
+    assert "vacuous sweep" not in "".join(report["vacuity"])
+    # the same body by size, with no switch: the shape checks run, the late touch only prints
+    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "3")
+    by_size = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=False)
+    by_size.assert_outcomes(passed=3)
+    size_report = _report(by_size)
+    assert by_size.ret == 0 and size_report["sweep_auto"] is True
+    assert size_report["vacuity"] == [] and any("late storage touch" in w for w in size_report["warnings"])
+    # report mode prints it and never changes the exit status
+    reported = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="report", sweep=True)
+    assert reported.ret == 0 and "late storage touch" in reported.stdout.str()
+
+
+_POOL_WORKER_BODY = '''
+from concurrent.futures import ThreadPoolExecutor
+from helpers import touch_storage_and_swallow
+
+POOL = ThreadPoolExecutor(max_workers=1)
+
+def test_1_creates_the_pool_worker():
+    POOL.submit(lambda: None).result(timeout=30)   # the worker thread is created HERE
+
+def test_2_uses_it_without_a_tenant():
+    POOL.submit(touch_storage_and_swallow).result(timeout=30)
+
+def test_3_uses_it_with_a_tenant(t2_tenant):
+    POOL.submit(touch_storage_and_swallow).result(timeout=30)
+'''
+
+
+def test_a_pool_worker_created_by_one_test_charges_a_later_touch_to_the_test_that_ran_it(pytester, monkeypatch) -> None:
+    """A ``ThreadPoolExecutor`` worker lives across tests: the test that created it
+    is not the test that gave it work. The touch belongs to the running test, as a
+    ``thread_touch`` finding (the second test), not to the first as a late touch."""
+    result = _run(pytester, monkeypatch, _POOL_WORKER_BODY, mode="report")
+    result.assert_outcomes(passed=3)
+    report = _report(result)
+    assert report["late_thread_touches"] == []
+    (finding,) = report["findings"]
+    assert finding["kind"] == "thread_touch" and finding["nodeid"].endswith("::test_2_uses_it_without_a_tenant")
+    c = report["counts"]
+    assert (c["thread_touched"], c["provisioned"]) == (1, 1)
+
+
+def test_a_thread_that_is_not_a_pool_worker_is_still_charged_to_its_owner(pytester, monkeypatch) -> None:
+    """The pool rule is narrow: a bare ``Thread`` a finished test leaked stays a late touch."""
+    pytester.makepyfile(leak=_LEAK)
+    result = _run(pytester, monkeypatch, '''
+import leak
+
+def test_1_leaks_a_thread():
+    leak.start()
+
+def test_2_lets_it_touch():
+    leak.GO.set()
+    assert leak.DONE.wait(30)
+    leak.THREADS[0].join()
+''', mode="report", sweep=False)
+    report = _report(result)
+    assert report["findings"] == [] and len(report["late_thread_touches"]) == 1
+
+
+def test_which_threads_are_pool_workers() -> None:
+    import multiprocessing.pool
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tests._storage_touch_guard import _is_pool_worker
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        ex.submit(lambda: None).result(timeout=30)
+        (worker,) = ex._threads
+        assert _is_pool_worker(worker)
+    tp = multiprocessing.pool.ThreadPool(1)
+    try:
+        (worker,) = tp._pool
+        assert _is_pool_worker(worker)
+    finally:
+        tp.terminate()
+        tp.join()
+    assert not _is_pool_worker(threading.Thread(target=lambda: None))
+    assert not _is_pool_worker(threading.current_thread())

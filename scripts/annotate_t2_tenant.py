@@ -20,8 +20,11 @@ This script reads those lines and writes the marks:
 * a module whose needing tests are at least ``--module-threshold`` of the tests
   that would otherwise mint nothing gets one ``pytestmark``; otherwise a class
   whose every such test needs one gets a class mark; otherwise each test is marked;
-* a test that already asks for the tenant by parameter or ``usefixtures`` is left
-  alone, and so is anything already marked, so a rerun adds nothing.
+* a test, class or module already carrying the mark is left alone, so a rerun adds
+  nothing (a module whose ``pytestmark`` list was extended on a later line counts).
+  A parameter or ``usefixtures`` request does not count: the census saw that test
+  unprovisioned, which is how a fixture requested after one that touches storage
+  looks, and only the mark makes the autouse pin run first.
 
 Not marked, only listed: a test that leaked a thread or child which touched
 storage after the test finished (a mark cannot help; the test must join it), and
@@ -181,10 +184,15 @@ def _pytestmark_assignment(tree: ast.Module) -> ast.Assign | None:
 
 
 def _module_is_marked(tree: ast.Module, src_lines: list[str]) -> bool:
-    stmt = _pytestmark_assignment(tree)
-    if stmt is None:
-        return False
-    return "mark.t2_tenant" in "\n".join(src_lines[stmt.lineno - 1:stmt.end_lineno])
+    """Any top-level ``pytestmark`` statement carries the mark: the list-form edit
+    adds ``pytestmark = [*pytestmark, MARK]`` on a LATER line, so the first
+    assignment alone would read as unmarked on every rerun (nexus-0ite2)."""
+    for s in tree.body:
+        targets = s.targets if isinstance(s, ast.Assign) else [s.target] if isinstance(s, (ast.AugAssign, ast.AnnAssign)) else []
+        if any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
+            if "mark.t2_tenant" in "\n".join(src_lines[s.lineno - 1:s.end_lineno]):
+                return True
+    return False
 
 
 def _marked_in_scope(tree: ast.Module, src_lines: list[str], chain: list[str]) -> bool:
