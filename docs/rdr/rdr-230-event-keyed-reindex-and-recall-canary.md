@@ -271,6 +271,16 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   `conexus/rdr230-a4-a6-measurements-2026-10-20`;
   `nexus_rdr/230-research-15`, `-16`.*
 
+- **✅ Verified** (read-only recall run on a PITR fork of production,
+  2026-10-20). At k 10 and `ef_search` 600, with 200 seeded own-scope queries
+  per index against a sequential-scan baseline, all five `pci_` indexes
+  scored 1.0000 with no top-1 miss. Only one of them (on L14) was read as
+  aged; the four on L17 had been vacuumed on the fork about 50 minutes
+  before. The four leaf graphs scored 0.994 to 0.9995; the worst, L23, lost
+  the top-1 neighbour on one query in 200 with no churn behind it. The Gap 1
+  bar's k 40 to 120 was not measured. *Source: conexus, T2
+  `conexus/a1-recall-2026-10-20`; `nexus_rdr/230-research-18`.*
+
 ### Critical Assumptions
 
 These are the proposal's Unknowns that this design depends on. Each says how it
@@ -279,7 +289,11 @@ measurement.
 
 - [ ] **A1.** An aged `pci_` index on production data still meets the Gap 1 bar
   at serving `ef_search` (mean recall at least 0.99 at k 40 to 120, no top-1
-  miss). **Status**: Unverified; never measured. **Method**: the canary's first
+  miss). **Status**: Unverified at the bar, answered in part
+  (`nexus_rdr/230-research-18`): on a production fork every `pci_` index
+  scored 1.0000 at k 10 with no top-1 miss, but only one was read as aged
+  (the L17 ones had just been vacuumed), and k 40 to 120 was not measured.
+  **Method**: the canary's first
   runs on the cloud in Phase 1, with REINDEX not yet shipped, so the reading is
   of the indexes as they aged. A red result is the falsification of "aged `pci_`
   graphs are fine at `ef_search` 600" and is acted on by hand in Phase 1.
@@ -966,8 +980,8 @@ A3 and A5 are verified by a local spike (2026-10-20); P1.5 and the tests in
 P1.1 and P2.3 pin them in the engine. A4 is verified in part by a read-only
 production query (2026-10-20); its `VACUUM` duration and leaf `REINDEX` time
 remain for the Phase 2 fork. A1, A2 and A6 are unverified and are verified by
-Phase 1's cloud run; A1's aged-index recall reading on the 0.1.161 fork is
-pending.
+Phase 1's cloud run. A1 is answered in part by a recall run on a production
+fork (k 10, all `pci_` indexes 1.0000; one read as aged).
 
 #### API Verification
 
@@ -1048,3 +1062,6 @@ bulk delete, both on an existing session under an existing lock.
   be most of the churn, Open Question 5 added (`nexus_rdr/230-research-17`).
 - 2026-10-20: Open Question 5 answered: the deletes rule stays as drafted for
   Phase 1.
+- 2026-10-20: A1 answered in part by conexus's recall run on a production
+  fork (`nexus_rdr/230-research-18`); it stays unverified at the k 40 to 120
+  bar until Phase 1's canary.
