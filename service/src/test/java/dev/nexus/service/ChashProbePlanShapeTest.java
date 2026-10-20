@@ -99,6 +99,14 @@ class ChashProbePlanShapeTest {
         if (pg != null)    pg.stop();
     }
 
+    private static void dropExistingIndex(Connection su, DSLContext ctx, String index) throws Exception {
+        assertThat(PgCatalogProbes.indexExists(ctx, "nexus", index))
+            .as("nexus." + index + " exists before the seed drops it").isTrue();
+        PgContainerHelper.dropIndex(su, DSL.name("nexus", index));
+        assertThat(PgCatalogProbes.indexExists(ctx, "nexus", index))
+            .as("nexus." + index + " is gone after the drop").isFalse();
+    }
+
     private void seedAtCardinality() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -107,11 +115,14 @@ class ChashProbePlanShapeTest {
             // RDR-191 Phase 4 (lane D5): one unified nexus.chunks table now
             // carries all three embedding columns and ONE (tenant_id, chash)
             // index (idx_chunks_tenant_chash), not one per dim.
+            // jOOQ's dropIndexIfExists renders the index unqualified on POSTGRES, so it would skip these; the
+            // schema-qualified PgContainerHelper.dropIndex drops them, and an index the schema should carry but
+            // does not is a failure here, not a silent no-op.
             for (int dim : new int[] {384, 768, 1024}) {
-                ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_embedding_" + dim)).execute();
+                dropExistingIndex(su, ctx, "idx_chunks_embedding_" + dim);
             }
-            ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_tsv")).execute();
-            ctx.dropIndexIfExists(DSL.name("nexus", "idx_chunks_trgm")).execute();
+            dropExistingIndex(su, ctx, "idx_chunks_tsv");
+            dropExistingIndex(su, ctx, "idx_chunks_trgm");
 
             for (int dim : new int[] {384, 768, 1024}) {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.

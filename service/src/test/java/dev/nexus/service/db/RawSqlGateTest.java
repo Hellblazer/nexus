@@ -1584,15 +1584,19 @@ class RawSqlGateTest {
     // nexus-cbo4a 2026-10-19 batch 9, 58 -> 32 (20 -> 16 files; four entries removed, seven lowered): plan-shape, probe and
     // role shapes. ChashProbePlanShapeTest explains the product's own ChashRepository.PROBE_SQL through the new
     // PgContainerHelper.explainPlan (ctx.explain over a jOOQ Query, which throws for a plan of more than 50 rows because
-    // jOOQ cuts the text past the 50th and a doesNotContain over it would pass vacuously), drops its indexes with
-    // dropIndexIfExists and counts with fetchCount. TupleSweepIndexPlanShapeTest explains the PRODUCT's own queries: the
-    // release, ack-lookup, purge, claim-log, rd-read and census arms are now public static factories in TupleRepository
+    // jOOQ cuts the text past the 50th and a doesNotContain over it would pass vacuously), drops its indexes through
+    // PgContainerHelper.dropIndex (schema-qualified; jOOQ's dropIndexIfExists renders the name unqualified on POSTGRES and
+    // would skip them) after asserting each exists, and counts with fetchCount. Part of that file's drop is gate
+    // visibility, not conversion: resultQuery(ChashRepository.PROBE_SQL, ..) explains the product's sanctioned constant,
+    // which the counter does not see. TupleSweepIndexPlanShapeTest (moved to dev/nexus/service/db so the factories can be
+    // package-private) explains the PRODUCT's own queries: the
+    // release, ack-lookup, purge, claim-log, rd-read and census arms are now package-private static factories in TupleRepository
     // (releaseLapsedClaimsQuery, liveClaimRowQuery, purgeExpiredTuplesQuery, purgeOldClaimLogQuery, readCondition/readQuery,
     // subspaceCensusQuery) that the repository itself calls, so the test no longer carries a twin of them; its three
     // generate_series seeds are typed insertInto(..).select(..) with make_interval for the per-row offset; explainPlanInlined
     // renders literals inline as the old getSQL(INLINED) did. PgVectorRepositoryRawSqlPlanShapeTest and
     // TaxonomyCentroidAnnPlanShapeTest pin the second role's planner through PgContainerHelper.setRolePlannerGuc
-    // (db.changelog-test-role-planner-guc.xml, role through requireTestIdentifier, setting from PLANNER_GUC_ALLOWLIST, value
+    // (the role-planner-guc test changelog, role through requireTestIdentifier, setting from PLANNER_GUC_ALLOWLIST, value
     // on/off/digits; no search_path), and the latter's role and grants are bootstrapServiceRole. The setDeleted UPDATEs are
     // typed updates, TopicsDocCountDeadlockConcurrencyTest's doc_count and assignment-count probes typed selects,
     // SharedCluster's bare CREATE DATABASE is createDatabase (a DataAccessException is unwrapped back to the SQLException
@@ -2987,6 +2991,68 @@ class RawSqlGateTest {
         }
         assertThat(offenders).as("role-level search_path is retired (nexus-zrcj7)").isEmpty();
         assertThat(poisonHits).as("the poison changelog's one statement is what the scan must see").isEqualTo(1);
+    }
+
+    /**
+     * The parameterised role-GUC changelog (nexus-cbo4a batch 9) has one caller: {@code
+     * PgContainerHelper#setRolePlannerGuc}, which checks the role, the planner allowlist and the value before they
+     * reach the changeset's {@code ALTER ROLE ${role} SET ${guc} = ${value}}. A second test naming the changelog
+     * would run it with arguments nobody validated, so only PgContainerHelper.java may name it. The needle is
+     * assembled here so this file does not name it either.
+     */
+    @Test
+    void roleGucChangelog_isNamedOnlyByPgContainerHelper() throws IOException {
+        String needle = "db.changelog-test-role-" + "planner-guc.xml";
+        List<String> namers = new ArrayList<>();
+        int scanned = 0;
+        try (Stream<Path> files = Files.walk(Path.of("src", "test", "java"))) {
+            for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
+                scanned++;
+                if (Files.readString(p).contains(needle)) {
+                    namers.add(p.getFileName().toString());
+                }
+            }
+        }
+        assertThat(scanned).as("test sources scanned").isGreaterThan(100);
+        assertThat(namers).as("the only test source that may name the role-GUC changelog")
+            .containsExactly("PgContainerHelper.java");
+    }
+
+    /**
+     * No test changelog {@code <sql>} body other than the role-GUC changelog sets a parameterised GUC name
+     * ({@code SET ${...}}, with or without {@code LOCAL}) (nexus-cbo4a batch 9): a GUC name chosen by a changelog
+     * property is the allowlisted helper's job. XML comments are stripped first; only {@code <sql>} bodies are read.
+     * The role-GUC changelog itself must show exactly one such statement, so the scan is known to see.
+     */
+    @Test
+    void testChangelogs_parameterisedGucNameOnlyInTheRoleGucChangelog() throws IOException {
+        Path dir = Path.of("src", "test", "resources", "db", "changelog-test");
+        List<Path> xmls;
+        try (var walk = Files.list(dir)) {
+            xmls = walk.filter(p -> p.toString().endsWith(".xml")).toList();
+        }
+        assertThat(xmls).as("test changelogs found").hasSizeGreaterThan(20);
+        Pattern sqlBody = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
+        Pattern paramGuc = Pattern.compile("(?i)\\bSET\\s+(?:LOCAL\\s+)?\\$\\{");
+        String allowed = "db.changelog-test-role-" + "planner-guc.xml";
+        List<String> offenders = new ArrayList<>();
+        int allowedHits = 0;
+        for (Path xml : xmls) {
+            String text = Files.readString(xml).replaceAll("(?s)<!--.*?-->", "");
+            Matcher body = sqlBody.matcher(text);
+            while (body.find()) {
+                Matcher m = paramGuc.matcher(body.group(1));
+                while (m.find()) {
+                    if (xml.getFileName().toString().equals(allowed)) {
+                        allowedHits++;
+                    } else {
+                        offenders.add(xml.getFileName() + ": " + body.group(1).trim());
+                    }
+                }
+            }
+        }
+        assertThat(offenders).as("a parameterised GUC name outside the allowlisted helper's changelog").isEmpty();
+        assertThat(allowedHits).as("the role-GUC changelog's one statement is what the scan must see").isEqualTo(1);
     }
 
     /**

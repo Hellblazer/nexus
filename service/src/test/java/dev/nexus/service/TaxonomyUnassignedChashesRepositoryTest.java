@@ -391,7 +391,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
         // sequential scan of the WHOLE nexus.chunks table (which would touch every
         // OTHER tenant's/collection's rows too).
         Table<?> fn = TAXONOMY_UNASSIGNED_CHASHES_1024.call(col, 100, (String) null);
-        String plan = tenantScope.withTenant(TENANT_A, ctx -> ctx.explain(ctx.selectFrom(fn)).plan());
+        String plan = tenantScope.withTenant(TENANT_A, ctx -> PgContainerHelper.explainPlan(ctx, ctx.selectFrom(fn)));
         assertThat(plan)
             .as("must bind an index for the antijoin/scope scan, not a table-wide"
                 + " sequential scan. Plan was:%n%s", plan)

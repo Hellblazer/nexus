@@ -258,7 +258,7 @@ class HybridSelectiveGateTest {
             // gate assertion below stops being a meaningful proof at this scale.
             PgContainerHelper.setPlannerGuc(su, "enable_indexscan", "off", true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            String plan = ctx.explain(ctx.selectFrom(fn)).plan();
+            String plan = PgContainerHelper.explainPlan(ctx, ctx.selectFrom(fn));
             su.rollback();
             return plan;
         }

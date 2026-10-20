@@ -258,9 +258,11 @@ class CollectionVectorStatsSetBasedTest {
     @Test
     void thePlan_hasNoPerChunkProbe_andTheOldViewsPlanDoes() {
         String oldPlan = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.explain(ctx.selectFrom(DSL.table(DSL.name("nexus", "collection_vector_stats_v019")))).plan());
+            PgContainerHelper.explainPlan(ctx,
+                ctx.selectFrom(DSL.table(DSL.name("nexus", "collection_vector_stats_v019")))));
         String newPlan = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.explain(ctx.selectFrom(DSL.table(DSL.name("nexus", "collection_vector_stats")))).plan());
+            PgContainerHelper.explainPlan(ctx,
+                ctx.selectFrom(DSL.table(DSL.name("nexus", "collection_vector_stats")))));
         assertThat(oldPlan).as("control: the vectors-019-5 view correlates a probe per chunk:%n%s", oldPlan)
             .contains("SubPlan");
         assertThat(newPlan).as("the set-based view has no correlated SubPlan:%n%s", newPlan)

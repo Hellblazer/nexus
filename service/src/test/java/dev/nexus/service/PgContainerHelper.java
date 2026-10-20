@@ -1802,7 +1802,10 @@ public final class PgContainerHelper {
             .fetch();
     }
 
-    /** The planner settings plan-shape tests pin, the only names {@link #setPlannerGuc} accepts. */
+    /**
+     * The planner settings plan-shape tests pin, the only names {@link #setPlannerGuc} and
+     * {@link #setRolePlannerGuc} accept.
+     */
     private static final Set<String> PLANNER_GUC_ALLOWLIST = Set.of(
         "enable_seqscan", "enable_indexscan", "enable_bitmapscan", "enable_sort",
         "enable_hashjoin", "enable_mergejoin", "enable_nestloop", "hnsw.ef_search");
@@ -1878,8 +1881,11 @@ public final class PgContainerHelper {
     }
 
     /**
-     * {@link #explainPlan} with every bind value rendered inline as a literal (jOOQ's static statement), the plan
-     * the planner makes for a statement carrying constants, as the sweep-shaped plan tests compare.
+     * {@link #explainPlan} with every bind value rendered inline as a literal (jOOQ's static statement): the CUSTOM
+     * plan the planner makes for a statement carrying constants. It proves what the planner can do for those
+     * literals, not what production runs: production binds parameters, and a prepared statement can switch to a
+     * GENERIC plan (plan_cache_mode) whose row estimates ignore the bound values. Read a pass here as the best-case
+     * plan; a generic-plan test is a separate proof.
      */
     public static String explainPlanInlined(DSLContext ctx, Query query) {
         DSLContext inline = ctx.configuration()

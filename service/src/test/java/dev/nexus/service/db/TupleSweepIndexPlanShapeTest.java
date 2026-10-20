@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-package dev.nexus.service;
+package dev.nexus.service.db;
 
-import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TupleRepository;
+import dev.nexus.service.PgContainerHelper;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -187,7 +186,11 @@ class TupleSweepIndexPlanShapeTest {
             DSL.cast(i, SQLDataType.DOUBLE)));
     }
 
-    /** The plan of the PRODUCT's own query (a {@link TupleRepository} factory), literals inline as the sweep plans it. */
+    /**
+     * The plan of the PRODUCT's own query (a {@link TupleRepository} factory) with its binds rendered as literals: the
+     * custom plan only. Production binds parameters and may run a generic plan, so this proves the indexes are
+     * usable for these predicates, not that the running sweep always takes them.
+     */
     private String explain(Function<DSLContext, Query> queryBuilder) {
         return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanInlined(ctx, queryBuilder.apply(ctx)));
     }

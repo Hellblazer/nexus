@@ -430,7 +430,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     private String explain(Table<?> fn) throws Exception {
         return tenantScope.withTenant(TENANT, ctx -> {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.select(fn.field("id")).from(fn));
         });
     }
 
@@ -454,7 +454,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan", "enable_sort", "enable_hashjoin")) {
                 dev.nexus.service.db.PgSession.setLocal(ctx, guc, "off");
             }
-            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.select(fn.field("id")).from(fn));
         });
     }
 

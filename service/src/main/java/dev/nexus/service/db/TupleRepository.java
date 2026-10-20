@@ -959,10 +959,10 @@ public final class TupleRepository {
 
     /**
      * The live-rows predicate of {@code rd}/{@code rdp} (nexus-cbo4a): tenant and subspace, unconsumed, unexpired,
-     * every {@code pattern} key matched. Shared by {@link #queryOnce} and the plan-shape test. Public only for that
-     * test.
+     * every {@code pattern} key matched. Shared by {@link #queryOnce} and the plan-shape test (package-private for
+     * that test, which lives in this package).
      */
-    public static Condition readCondition(String tenant, String subspace, Map<String, String> patternSafe) {
+    static Condition readCondition(String tenant, String subspace, Map<String, String> patternSafe) {
         Condition cond = TUPLES.TENANT_ID.eq(tenant)
                 .and(TUPLES.SUBSPACE.eq(subspace))
                 .and(TUPLES.CONSUMED_AT.isNull())
@@ -975,9 +975,9 @@ public final class TupleRepository {
 
     /**
      * The plain {@code rd}/{@code rdp} read scan (nexus-cbo4a): {@code cond} ordered by {@code (created_at, id)} in
-     * {@code order}, limited. Shared by {@link #queryOnce} and the plan-shape test. Public only for that test.
+     * {@code order}, limited. Shared by {@link #queryOnce} and the plan-shape test (package-private for that test).
      */
-    public static ResultQuery<TuplesRecord> readQuery(DSLContext ctx, Condition cond, ReadOrder order, int limit) {
+    static ResultQuery<TuplesRecord> readQuery(DSLContext ctx, Condition cond, ReadOrder order, int limit) {
         return ctx.selectFrom(TUPLES)
                 .where(cond)
                 .orderBy(order == ReadOrder.DESC
@@ -2340,9 +2340,9 @@ public final class TupleRepository {
     /**
      * The release arm's candidate SELECT, built once here so {@link #releaseLapsedClaimsBatch} and the plan-shape
      * test explain the same {@link ResultQuery} object shape (nexus-cbo4a): {@code claimed}, unconsumed, lease
-     * lapsed, oldest-lapsed first, row-locked with {@code SKIP LOCKED}. Public only for that test.
+     * lapsed, oldest-lapsed first, row-locked with {@code SKIP LOCKED}. Package-private for that test.
      */
-    public static ResultQuery<TuplesRecord> releaseLapsedClaimsQuery(DSLContext ctx, String tenant, int batchSize) {
+    static ResultQuery<TuplesRecord> releaseLapsedClaimsQuery(DSLContext ctx, String tenant, int batchSize) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
@@ -2441,9 +2441,9 @@ public final class TupleRepository {
     /**
      * The purge-tuples arm's candidate SELECT (nexus-cbo4a): expired rows, oldest first, row-locked with
      * {@code SKIP LOCKED}. Built once here so {@link #purgeExpiredTuplesBatch} and the plan-shape test share it.
-     * Public only for that test.
+     * Package-private for that test.
      */
-    public static ResultQuery<Record1<byte[]>> purgeExpiredTuplesQuery(DSLContext ctx, String tenant, int batchSize) {
+    static ResultQuery<Record1<byte[]>> purgeExpiredTuplesQuery(DSLContext ctx, String tenant, int batchSize) {
         return ctx.select(TUPLES.ID)
                 .from(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime())))
@@ -2484,9 +2484,9 @@ public final class TupleRepository {
     /**
      * The log-retention arm's candidate SELECT (nexus-cbo4a): rows whose own {@code expires_at} has passed, by
      * {@code log_id}, row-locked with {@code SKIP LOCKED}. Built once here so {@link #purgeOldClaimLogBatch} and the
-     * plan-shape test share it. Public only for that test.
+     * plan-shape test share it. Package-private for that test.
      */
-    public static ResultQuery<Record1<Long>> purgeOldClaimLogQuery(DSLContext ctx, String tenant, int batchSize) {
+    static ResultQuery<Record1<Long>> purgeOldClaimLogQuery(DSLContext ctx, String tenant, int batchSize) {
         return ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
                 .from(TUPLE_CLAIM_LOG)
                 .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
@@ -2543,9 +2543,9 @@ public final class TupleRepository {
 
     /**
      * The ack/nack claim_id lookup's SELECT (nexus-cbo4a), built once so {@link #liveClaimRow} and the plan-shape
-     * test share it. Public only for that test.
+     * test share it. Package-private for that test.
      */
-    public static ResultQuery<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
+    static ResultQuery<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_ID.eq(claimId))
@@ -2726,10 +2726,10 @@ public final class TupleRepository {
 
     /**
      * The per-subspace census {@code GROUP BY} behind {@link #subspaceListPage} (nexus-cbo4a), before any
-     * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Public only for that
+     * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Package-private for that
      * test.
      */
-    public static SelectLimitStep<Record8<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime>>
+    static SelectLimitStep<Record8<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime>>
             subspaceCensusQuery(DSLContext ctx, String tenant, String prefix, String after) {
         Condition cond = TUPLES.TENANT_ID.eq(tenant);
         if (prefix != null && !prefix.isBlank()) {

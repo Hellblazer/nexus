@@ -577,7 +577,7 @@ class HybridSearchFunctionParityIntegrationTest {
             PgSession.setLocal(ctx, "enable_seqscan", "off");
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            String plan = ctx.explain(ctx.selectFrom(fn)).plan();
+            String plan = PgContainerHelper.explainPlan(ctx, ctx.selectFrom(fn));
             su.rollback();
             return plan;
         }

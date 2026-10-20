@@ -264,7 +264,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private String explain(Table<?> fn) {
         return tenantScope.withTenant(TENANT, ctx -> {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.explain(ctx.selectFrom(fn)).plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.selectFrom(fn));
         });
     }
 

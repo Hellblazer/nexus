@@ -1247,7 +1247,7 @@ class CombinedQueryParityTest {
                 PgContainerHelper.setPlannerGuc(su, guc, "off", false);
             }
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.select(fn.field("id")).from(fn));
         }
     }
 

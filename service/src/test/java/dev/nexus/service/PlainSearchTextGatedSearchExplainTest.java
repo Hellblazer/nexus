@@ -522,7 +522,7 @@ class PlainSearchTextGatedSearchExplainTest {
                     "enable_sort", "enable_hashjoin")) {
                 PgSession.setLocal(ctx, guc, "off");
             }
-            return ctx.explain(queryBuilder.apply(ctx)).plan();
+            return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
         });
     }
 
@@ -531,7 +531,7 @@ class PlainSearchTextGatedSearchExplainTest {
     private String explainSeqscanOff(Function<DSLContext, ? extends Query> queryBuilder) {
         return tenantScope.withTenant(TENANT, ctx -> {
             PgSession.setLocal(ctx, "enable_seqscan", "off");
-            return ctx.explain(queryBuilder.apply(ctx)).plan();
+            return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
         });
     }
 

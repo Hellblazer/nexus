@@ -286,6 +286,6 @@ class VectorsChashIndexLiquibaseTest {
     private static String explain(Connection c,
             java.util.function.Function<DSLContext, ? extends org.jooq.Query> queryBuilder) {
         DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
-        return ctx.explain(queryBuilder.apply(ctx)).plan();
+        return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
     }
 }

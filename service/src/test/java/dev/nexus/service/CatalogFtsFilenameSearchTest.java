@@ -254,12 +254,11 @@ class CatalogFtsFilenameSearchTest {
                 Routines.catalogFtsMatch(
                     CATALOG_DOCUMENTS.field("fts_vector").coerce(Object.class),
                     DSL.val(RARE_TERM), DSL.val(false)));
-            return ctx.explain(ctx.select(CATALOG_DOCUMENTS.TUMBLER)
-                    .from(CATALOG_DOCUMENTS)
-                    .where(ftsMatch)
-                    .orderBy(CATALOG_DOCUMENTS.TUMBLER)
-                    .limit(50))
-                .plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.select(CATALOG_DOCUMENTS.TUMBLER)
+                .from(CATALOG_DOCUMENTS)
+                .where(ftsMatch)
+                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                .limit(50));
         }
     }
 
