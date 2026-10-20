@@ -404,6 +404,14 @@ def test_restart_stale_actually_signals_a_generation_aspect_worker(
     )
     setattr_in(monkeypatch, ("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", _kill)
     module_time(monkeypatch, "nexus.upgrade_finish").sleep = lambda _s: None
+    # the real respawn reaches a storage client, which the storage-touch guard fails
+    # without a tenant (nexus-0ite2); a raising stub keeps the NEEDS HUMAN outcome
+    import nexus.daemon.aspect_worker_daemon as awd  # noqa: PLC0415 — file pattern: deferred imports
+
+    def _no_respawn(**_kw):
+        raise RuntimeError("respawn stubbed out")
+
+    monkeypatch.setattr(awd, "ensure_aspect_worker_daemon", _no_respawn)
 
     actions = upgrade_finish.restart_stale(report)
 
@@ -416,7 +424,7 @@ def test_restart_stale_actually_signals_a_generation_aspect_worker(
     # rather than only draining it. What this test is really pinning is
     # that DETECTION LEADS TO A SIGNAL (asserted on `calls` above); the
     # action line just has to name the worker and not claim a restart it
-    # did not perform -- this fixture stubs no respawn, so the honest
+    # did not perform -- this fixture's respawn stub raises, so the honest
     # outcome here is the NEEDS HUMAN line.
     assert any(
         "aspect-worker" in a and ("cycled" in a or "NEEDS HUMAN" in a)

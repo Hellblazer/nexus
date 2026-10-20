@@ -335,14 +335,17 @@ class TestRestartStale:
                 patch_time("nexus.upgrade_finish", "sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
-                patch("nexus.upgrade_finish.run_bounded", return_value=probe):
+                patch("nexus.upgrade_finish.run_bounded", return_value=probe), \
+                patch("nexus.daemon.aspect_worker_daemon.ensure_aspect_worker_daemon",
+                      side_effect=RuntimeError("respawn stubbed out")):
             actions = restart_stale(self._report())
         assert calls[0] == (200, signal.SIGTERM)
         # Wording changed when the branch started actually restarting the
         # worker instead of only draining it (see
-        # TestAspectWorkerIsRestartedNotJustStopped). This fixture does not
-        # stub ensure_aspect_worker_daemon, so the respawn raises and the
-        # branch must say so rather than claim a restart -- which is the
+        # TestAspectWorkerIsRestartedNotJustStopped). This fixture stubs
+        # ensure_aspect_worker_daemon to raise (the real one reaches a storage
+        # client, which the storage-touch guard fails without a tenant,
+        # nexus-0ite2), so the branch must say so rather than claim a restart -- which is the
         # behaviour that matters here: never report success it did not
         # observe.
         assert any(
