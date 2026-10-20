@@ -35,7 +35,8 @@ until docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
 sleep 2; echo "pg ready"
 
 # Build + smoke inside the linux/arm64 GraalVM container. Docker socket + host
-# override let the testcontainers jOOQ codegen reach the host daemon; the smoke
+# override let the jOOQ codegen runner (service/src/build/java/JooqCodegen.java)
+# reach the host daemon; the smoke
 # pgvector is reached by container name on $NET. ONNX model mounted from host cache.
 docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
   -v "$REPO:$REPO" -w "$REPO/service" \

@@ -721,3 +721,22 @@ def test_the_codegen_master_changelogs_live_under_db() -> None:
         assert path.startswith("db/"), f"codegen master changelog {path!r} is outside the hashed db/ tree"
         assert any((_SERVICE / root / path).is_file() for root in _changelog_roots(execution)), (
             f"codegen master changelog {path!r} is under none of the execution's roots")
+
+
+def test_the_ci_service_jar_key_hashes_every_source_tree_the_gate_jar_key_does() -> None:
+    """ci.yml caches the service jar with no restore-keys on a hashFiles key; a source tree the jar is built from
+    but the key misses (service/src/build after nexus-aca0q.3 moved the generator config out of the pom) restores
+    a stale jar. GATE_JAR_KEY_PATHS is the host cache's list of the same inputs, so the two must agree on every
+    service/src tree."""
+    repo = _POM.parents[1]
+    gate = (repo / "scripts" / "lib" / "gate-jar-cache.sh").read_text(encoding="utf-8")
+    gate_line = re.search(r"^GATE_JAR_KEY_PATHS=\(([^)]*)\)", gate, re.MULTILINE)
+    assert gate_line, "GATE_JAR_KEY_PATHS not found in scripts/lib/gate-jar-cache.sh"
+    src_trees = [p for p in gate_line.group(1).split() if p.startswith("service/src/")]
+    assert "service/src/main" in src_trees and "service/src/build" in src_trees, src_trees
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    key = re.search(r"key: service-jar-\$\{\{ runner\.os \}\}-\$\{\{ hashFiles\(([^)]*)\) \}\}", ci)
+    assert key, "ci.yml service-jar cache key not found"
+    hashed = {a.strip().strip("'\"") for a in key.group(1).split(",")}
+    missing = [t for t in src_trees if f"{t}/**" not in hashed]
+    assert not missing, f"ci.yml service-jar key misses {missing}; it hashes {sorted(hashed)}"

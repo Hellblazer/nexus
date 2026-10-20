@@ -47,7 +47,8 @@
 
             History: committed sources + -Pcodegen + a CI drift guard were chosen when
             the viable build-time mechanisms were GMaven Plus (broken on Java 25) and
-            hand-rolled exec classpaths (brittle). testcontainers-jooq-codegen-maven-plugin
+            hand-rolled exec classpaths (brittle); the runner answers the second with
+            exec-maven-plugin's own <classpath/>, not a hand-built one. testcontainers-jooq-codegen-maven-plugin
             removed both objections until nexus-aca0q.3, when its untunable on-disk Postgres
             made the runner above the better trade; Postgres-only DDL still rules out H2/
             LiquibaseDatabase codegen. Every build (and the IDE import) needs Docker,

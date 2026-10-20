@@ -50,8 +50,9 @@ import java.util.logging.Level;
  * trigger (a codegen run is not a counted suite), and FailFastPostgreSQLContainer (a foreign server squatting
  * the published port; it only shortens a failing start).
  *
- * <p>Container cleanup: try-with-resources stops the container on every exit path this process controls, and
- * Testcontainers' Ryuk reaps it when the JVM is killed (SIGKILL, a Maven build cancelled hard).
+ * <p>Container cleanup: try-with-resources stops the container on every exit path this process controls, and a
+ * shutdown hook stops it on SIGINT or SIGTERM (a Maven build cancelled), since this repo's fenced homes and some
+ * hosts set testcontainers.ryuk.disabled=true. Only a SIGKILL can leave it running then.
  */
 public final class JooqCodegen {
 
@@ -114,6 +115,8 @@ public final class JooqCodegen {
         quietLogging();
         long start = System.nanoTime();
         try (PostgreSQLContainer<?> pg = newContainer()) {
+            Thread stopOnSignal = new Thread(pg::stop, "jooq-codegen-container-stop");
+            Runtime.getRuntime().addShutdownHook(stopOnSignal);
             pg.start();
             long started = System.nanoTime();
             migrate(pg, master, roots);

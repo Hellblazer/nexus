@@ -63,6 +63,9 @@ _SERVICE_JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.j
 _SERVICE_SRC_DIRS = (
     _REPO_ROOT / "service" / "src" / "main" / "java",
     _REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog",
+    # nexus-aca0q.3: the jOOQ codegen runner and its generator config; an edit there regenerates the jar's
+    # generated classes.
+    _REPO_ROOT / "service" / "src" / "build",
 )
 
 

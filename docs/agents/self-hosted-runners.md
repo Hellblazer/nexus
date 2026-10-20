@@ -141,8 +141,8 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   existing one installs only what the lockfile changed. A new worktree is the
   only reason to pay a full sync.
 - **Why the build is now cheap, and what to check.** The gate-jar cache is keyed
-  on `service/pom.xml`, `service/src/main/**`, `service/mvnw` and `service/.mvn/**`
-  only, so a commit that touches `service/src/test` or docs prints `gate jar cache
+  on `service/pom.xml`, `service/src/main/**`, `service/src/build/**`, `service/mvnw`
+  and `service/.mvn/**` only, so a commit that touches `service/src/test` or docs prints `gate jar cache
   HIT` and runs no Maven. On a real MISS the jOOQ generated sources come from the
   jOOQ cache when the changelog, pom and jOOQ/PostgreSQL versions are unchanged
   since any worktree of this clone generated them, so no codegen container starts;

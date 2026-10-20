@@ -404,7 +404,8 @@ jobs:
     #
     # CI-COST SHAPE, per the standing directives:
     #  - ONE build for the whole matrix. The jar is a DETERMINISTIC ARTIFACT of
-    #    service/pom.xml + service/src/main/**, so it is CACHED on exactly that
+    #    service/pom.xml + service/src/main/** + service/src/build/** (the jOOQ
+    #    codegen runner and its generator config), so it is CACHED on exactly that
     #    input and rebuilt only on a key miss — which is precisely when a fresh
     #    build proves something.
     #  - The build step is skipped outright on a cache hit; the job then costs
@@ -455,7 +456,7 @@ jobs:
           # a partial-match jar would be built from different sources, which is
           # the stale-jar class tests/db/_service_fixture.py::
           # jar_freshness_skip_reason exists to catch.
-          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**') }}
+          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**', 'service/src/build/**') }}
 
       - name: Set up GraalVM 25.0.3
         if: steps.jar-cache.outputs.cache-hit != 'true'
@@ -790,7 +791,7 @@ jobs:
         # engine-substrate family for a reason that does not exist here.
         #
         # Touching is not a bypass. The service-jar cache key is
-        # hashFiles('service/pom.xml', 'service/src/main/**') with NO
+        # hashFiles('service/pom.xml', 'service/src/main/**', 'service/src/build/**') with NO
         # restore-keys, so a hit already proves the jar was built from exactly
         # these sources — a strictly stronger guarantee than the mtime proxy it
         # replaces.
