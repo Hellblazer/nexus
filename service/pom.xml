@@ -1969,6 +1969,13 @@
                                         <!-- nexus-9yrus (2) optimization level (see profile properties):
                                              -O2 for release, -Ob (quick-build) for PR/smoke. -->
                                         <buildArg>${native.image.opt}</buildArg>
+                                        <!-- nexus-j36wr: embed the pruned trust store the
+                                             prune-native-truststore step below writes, not the build
+                                             JDK's cacerts (see src/build/java/NativeTrustStore.java).
+                                             Set on the builder JVM (-J-D); a plain -D also reaches the
+                                             capture on GraalVM 25.0.3. The verify step below checks the
+                                             result either way. -->
+                                        <buildArg>-J-Djavax.net.ssl.trustStore=${project.build.directory}/native-truststore/cacerts</buildArg>
                                     </buildArgs>
                                     <metadataRepository>
                                         <enabled>true</enabled>
@@ -1978,6 +1985,46 @@
                                              is the correct set for our 3.20.11 and supersedes the
                                              3.18.2 entry that forced the gmiaf.9 exclusion. -->
                                     </metadataRepository>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- nexus-j36wr: the image embeds the build-time trust store and has no cacerts to
+                         fall back to, so prune it before the image is built and check the built
+                         executable afterwards. Both run src/build/java/NativeTrustStore.java on the JDK
+                         running Maven. Ordering: verify shares the package phase with build-native, and
+                         it runs second because the main build declares maven-antrun-plugin after
+                         native-maven-plugin (tests/test_native_truststore.py pins that). -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>prune-native-truststore</id>
+                                <phase>prepare-package</phase>
+                                <goals><goal>run</goal></goals>
+                                <configuration>
+                                    <target>
+                                        <exec executable="${java.home}/bin/java" failonerror="true">
+                                            <arg value="${project.basedir}/src/build/java/NativeTrustStore.java"/>
+                                            <arg value="prune"/>
+                                            <arg value="${project.build.directory}/native-truststore/cacerts"/>
+                                        </exec>
+                                    </target>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>verify-native-truststore</id>
+                                <phase>package</phase>
+                                <goals><goal>run</goal></goals>
+                                <configuration>
+                                    <target>
+                                        <exec executable="${java.home}/bin/java" failonerror="true">
+                                            <arg value="${project.basedir}/src/build/java/NativeTrustStore.java"/>
+                                            <arg value="verify"/>
+                                            <arg value="${project.build.directory}"/>
+                                        </exec>
+                                    </target>
                                 </configuration>
                             </execution>
                         </executions>
