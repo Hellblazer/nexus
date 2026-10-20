@@ -610,6 +610,12 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
 _TMPFS_FLOOR_WAIT_S = 45.0
 _TMPFS_FLOOR_POLL_S = 3.0
 
+#: Set when the floor tripped in this process: the next start looks once instead of
+#: polling again, since module- and function-scoped fixtures would otherwise each
+#: re-wait the full bound for the same verdict (nexus-gsjzh). Cleared by a start
+#: that finds room.
+_FLOOR_TRIPPED = False
+
 
 def _tmpfs_floor_cause(
     root: Path,
@@ -648,21 +654,30 @@ def _check_tmpfs_has_room(
 ) -> None:
     """Fail loud when a run that chose tmpfs cannot fit one more cluster, after
     polling for up to *wait_s* (default :data:`_TMPFS_FLOOR_WAIT_S`) for the
-    headroom to recover. Clock and sleep are injectable."""
-    wait = _TMPFS_FLOOR_WAIT_S if wait_s is None else wait_s
+    headroom to recover. Once that has failed in this process, later calls look
+    once and do not wait (:data:`_FLOOR_TRIPPED`). Clock and sleep are injectable."""
+    global _FLOOR_TRIPPED
+    latched = _FLOOR_TRIPPED
+    wait = 0.0 if latched else (_TMPFS_FLOOR_WAIT_S if wait_s is None else wait_s)
     poll = _TMPFS_FLOOR_POLL_S if poll_s is None else poll_s
     start = clock()
     while True:
         cause = _tmpfs_floor_cause(root, free_bytes, cgroup_headroom)
         if cause is None:
+            _FLOOR_TRIPPED = False
             return
         if clock() - start >= wait:
             break
         sleep(poll)
+    _FLOOR_TRIPPED = True
+    waited = (
+        "the floor already tripped in this process, so this start did not wait again"
+        if latched else f"it did not recover in {wait:g} s"
+    )
     raise SubstrateRootExhausted(
         f"nexus test substrate: no room for another cluster on tmpfs: {cause}, "
         f"below the {_TMPFS_HARD_FLOOR_BYTES // 1024**2} MiB floor a cluster start "
-        f"needs, and it did not recover in {wait:g} s. "
+        f"needs, and {waited}. "
         f"This run chose tmpfs at its start and will not fall back to disk mid-run "
         f"(that wrote 3.9 GB to the NVMe in 4 minutes, nexus-vo9qn). Read the cause "
         f"in the summary line ('clusters on tmpfs N, on disk M') and the "

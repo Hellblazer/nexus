@@ -991,6 +991,13 @@ class _FakeClock:
         self.now += s
 
 
+@pytest.fixture(autouse=True)
+def _fresh_floor_latch(monkeypatch) -> None:
+    """Every test here starts with the floor latch clear and leaves it as it found it, so
+    a test that trips it never shortens a later cluster start in this worker (nexus-gsjzh)."""
+    monkeypatch.setattr(sub, "_FLOOR_TRIPPED", False)
+
+
 class TestFloorPollsBeforeRaising:
     MIB = 1024**2
 
@@ -1024,6 +1031,40 @@ class TestFloorPollsBeforeRaising:
             cgroup_headroom=lambda: None, clock=fc.clock, sleep=fc.sleep,
         )
         assert fc.sleeps == []
+
+    def test_after_a_trip_the_next_start_looks_once_and_raises_without_waiting(self, tmp_path) -> None:
+        """nexus-gsjzh: module- and function-scoped fixtures each start a cluster; once the
+        floor has tripped in this process, re-waiting 45 s per start only delays the same
+        verdict."""
+        fc = _FakeClock()
+        low = dict(free_bytes=lambda _p: 64 * 1024**3, cgroup_headroom=lambda: 100 * self.MIB)
+        with pytest.raises(sub.SubstrateRootExhausted):
+            sub._check_tmpfs_has_room(tmp_path, wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep, **low)
+        fc.sleeps.clear()
+        with pytest.raises(sub.SubstrateRootExhausted) as ei:
+            sub._check_tmpfs_has_room(tmp_path, wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep, **low)
+        assert fc.sleeps == []
+        assert "already tripped in this process" in str(ei.value)
+
+    def test_room_coming_back_after_a_trip_clears_the_latch(self, tmp_path) -> None:
+        fc = _FakeClock()
+        with pytest.raises(sub.SubstrateRootExhausted):
+            sub._check_tmpfs_has_room(
+                tmp_path, free_bytes=lambda _p: 64 * 1024**3, cgroup_headroom=lambda: 100 * self.MIB,
+                wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep,
+            )
+        sub._check_tmpfs_has_room(
+            tmp_path, free_bytes=lambda _p: 64 * 1024**3, cgroup_headroom=lambda: None,
+            clock=fc.clock, sleep=fc.sleep,
+        )
+        assert sub._FLOOR_TRIPPED is False
+        readings = iter([100 * self.MIB, 4 * 1024 * self.MIB])
+        fc.sleeps.clear()
+        sub._check_tmpfs_has_room(
+            tmp_path, free_bytes=lambda _p: 64 * 1024**3, cgroup_headroom=lambda: next(readings),
+            wait_s=45.0, poll_s=3.0, clock=fc.clock, sleep=fc.sleep,
+        )
+        assert fc.sleeps == [3.0], "a cleared latch polls again"
 
     def test_the_shipped_bound_is_tens_of_seconds_and_polls_inside_it(self) -> None:
         import re
