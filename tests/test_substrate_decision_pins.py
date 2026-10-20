@@ -95,6 +95,8 @@ def _child(tmp_path: Path, substrate: str | None) -> tuple[subprocess.CompletedP
         if k not in _SCRUBBED and not k.startswith(_SCRUBBED_PREFIXES)
     }
     env["PROBE_LOG"] = str(log)
+    # its own build lease, so a Maven run elsewhere on the box cannot reach it (nexus-fam6l)
+    env["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "build-lease")
     if substrate is not None:
         env["NX_TEST_T2_SUBSTRATE"] = substrate
     proc = subprocess.run(
