@@ -573,7 +573,7 @@ public final class PgContainerHelper {
                 try (HikariDataSource owner = new HikariDataSource(cfg)) {
                     dev.nexus.service.db.SchemaMigrator.migrate(owner);
                     try (Connection oc = owner.getConnection()) {
-                        installTestObjects(oc);
+                        installTestObjectsAfterProductSchema(oc);
                     }
                 }
                 return c;
@@ -684,7 +684,7 @@ public final class PgContainerHelper {
         // (the other two tiers exist for a NOSUPERUSER migrating role, which `su`
         // here is not).
         liquibase.update(new Contexts());
-        installTestObjects(su);
+        installTestObjectsAfterProductSchema(su);
     }
 
     /**
@@ -718,6 +718,20 @@ public final class PgContainerHelper {
      *             on this database (the superuser for applyProductSchema-driven
      *             tests; the migrating role for SchemaMigrator-driven tests)
      */
+    /**
+     * {@link #installTestObjects} for a database whose product schema is already migrated, refusing if a test object
+     * that waits for a product type was skipped. nexus_test.cosine_order is declared on nexus.vector and its changeset
+     * carries a precondition (onFail CONTINUE) so a pre-walk install can run before that type exists; once the schema
+     * is in place a skip would be silent until a KNN test failed with "function does not exist", so this checks it.
+     */
+    public static void installTestObjectsAfterProductSchema(Connection conn) throws Exception {
+        installTestObjects(conn);
+        if (!PgCatalogProbes.routineExists(DSL.using(conn, SQLDialect.POSTGRES), "nexus_test", "cosine_order")) {
+            throw new IllegalStateException("nexus_test.cosine_order was not installed although the product schema is"
+                + " migrated: its nexus.vector precondition skipped it (nexus-cbo4a)");
+        }
+    }
+
     public static void installTestObjects(Connection conn) throws Exception {
         Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(conn));
         new Liquibase("db/changelog-test/db.changelog-test-objects.xml",

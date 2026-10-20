@@ -458,7 +458,7 @@ final class SharedCluster {
                 try (HikariDataSource owner = new HikariDataSource(cfg)) {
                     SchemaMigrator.migrate(owner);
                     try (Connection oc = owner.getConnection()) {
-                        PgContainerHelper.installTestObjects(oc);
+                        PgContainerHelper.installTestObjectsAfterProductSchema(oc);
                     }
                 }
                 Runnable fault = ownedTemplateBuildFault;
@@ -597,7 +597,7 @@ final class SharedCluster {
                     // nexus-0ty8z: the nexus_test objects every class installs after the master walk
                     // (PgContainerHelper#applyProductSchema) are part of the template, so a clone that asks for
                     // them again finds them done. They are the same superuser-run changelog a class would run.
-                    PgContainerHelper.installTestObjects(tsu);
+                    PgContainerHelper.installTestObjectsAfterProductSchema(tsu);
                     // nexus-sz651: DDL and WAL logged before this line are the template's
                     // migration; after it, the clones and the tests' own. Best effort: a missing
                     // mark leaves the run unmeasured (the ratchet refuses it), never fails the boot.

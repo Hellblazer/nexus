@@ -2970,7 +2970,11 @@ class CatalogRepositoryTest {
                     .execute()
             );
             assertThat(wrapped.getCause()).isInstanceOf(PSQLException.class);
-            assertThat(wrapped.getCause().getMessage()).containsIgnoringCase("violates row-level security");
+            assertThat(((PSQLException) wrapped.getCause()).getSQLState())
+                .as("insufficient_privilege, the SQLState of a row-level security WITH CHECK violation")
+                .isEqualTo("42501");
+            assertThat(wrapped.getCause().getMessage()).containsIgnoringCase("violates row-level security")
+                .contains("\"catalog_documents\"");
             conn.rollback();
         }
     }

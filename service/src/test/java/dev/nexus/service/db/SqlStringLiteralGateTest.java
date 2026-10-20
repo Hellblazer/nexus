@@ -29,8 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * maps are literal counts and a statement assembled from several such pieces counts once per piece.
  *
  * <p>Three exact per-file literal maps. {@link #EXECUTED} is SQL the tests send to a database; it has drained to zero.
- * {@link #EXEMPT} is executed SQL with no typed, changelog or function form, each entry with its reason (the six
- * exemptions of the drain's design record, T2 nexus/cbo4a-remaining-58-classification). {@link #TEXT} is SQL the
+ * {@link #EXEMPT} is executed SQL with no typed, changelog or function form, each entry with its reason (drawn from
+ * the drain's design record, T2 nexus/cbo4a-remaining-58-classification, whose other exemption, the changeset
+ * replay, is counted in JDBC_ENTRY). {@link #TEXT} is SQL the
  * tests never send: input to a parser or scanner under test, an expected substring of a function body, changeset
  * or error message. EXEMPT and TEXT are frozen per file, so a new executed statement in one of those files still
  * fails here. A file absent from every map must have none.
