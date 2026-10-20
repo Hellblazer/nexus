@@ -1223,6 +1223,11 @@ public final class PgSession {
         return new GucBatch(ctx);
     }
 
+    /** Bound every lock wait in the borrow's transaction to {@code timeoutMs} (SQLSTATE 55P03 when it trips). */
+    public static void setLockTimeout(GucBatch batch, int timeoutMs) {
+        batch.set("lock_timeout", Integer.toString(timeoutMs));
+    }
+
     /** {@link #setSearchStatementTimeout(DSLContext, int)} for a batch. */
     public static void setSearchStatementTimeout(GucBatch batch, int timeoutMs) {
         batch.set("statement_timeout", Integer.toString(timeoutMs));

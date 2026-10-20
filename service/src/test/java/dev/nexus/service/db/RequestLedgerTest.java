@@ -616,7 +616,7 @@ class RequestLedgerTest {
     }
 
     @Test
-    void claimDuringAMarkerTransactionHeldPastTheLease_waitsForTheCommit_thenReplays_neverTakesOver()
+    void claimDuringAMarkerTransactionHeldPastTheLease_waitsForTheCommitWithinTheBound_thenReplays_neverTakesOver()
             throws Exception {
         UUID key = UUID.randomUUID();
         RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(42), BOUND_MS);
@@ -633,6 +633,8 @@ class RequestLedgerTest {
             var resend = pool.submit(() -> ledger.claim(TENANT, key, ROUTE, sha(42), BOUND_MS));
             Thread.sleep(700);
             assertThat(resend.isDone()).as("the resend waits for the marker transaction").isFalse();
+            // The commit below lands at ~700 ms, inside RequestLedger.CLAIM_LOCK_TIMEOUT_MS (2 s): this test is
+            // the wait-then-replay side of the bound; the next test is the timeout side.
 
             tx.commit();
             assertThat(resend.get(10, java.util.concurrent.TimeUnit.SECONDS))
@@ -641,6 +643,40 @@ class RequestLedgerTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void claimDuringAMarkerTransactionHeldPastTheLockBound_isContendedWhileTheMarkerIsStillOpen_andWritesNothing()
+            throws Exception {
+        // nexus-yye8l.22: a marker transaction that stalls between its UPDATE and its COMMIT used to hold the
+        // resend's admission permit and connection for as long as the stall lasted. The claim now runs under
+        // lock_timeout, and the trip is the contended outcome (503 request_claim_contended), not a hang.
+        UUID key = UUID.randomUUID();
+        RequestLedger.Claimed c = (RequestLedger.Claimed) ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS);
+        shortenLease(key, 1_500);
+        OffsetDateTime lease = leaseOf(key);
+        try (java.sql.Connection tx = pg.createConnection("")) {
+            tx.setAutoCommit(false);
+            ledger.commitMarker(DSL.using(tx, org.jooq.SQLDialect.POSTGRES), TENANT, key, c.nonce(), 200, "{}");
+            sleepPast(lease);
+
+            long start = System.nanoTime();
+            assertThatThrownBy(() -> ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS))
+                .as("the marker transaction is still open: the claim gives up at the bound, it does not hang")
+                .isInstanceOf(RequestLedger.ClaimContendedException.class)
+                .hasMessageContaining(key.toString());
+            long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+            assertThat(elapsedMs).as("it waited the lock bound (a trip before it would mean another cause)")
+                .isGreaterThanOrEqualTo(RequestLedger.CLAIM_LOCK_TIMEOUT_MS - 250L);
+            assertThat(elapsedMs).as("and no longer than the bound plus a pool borrow and a round trip")
+                .isLessThan(RequestLedger.CLAIM_LOCK_TIMEOUT_MS + 5_000L);
+
+            tx.commit();
+        }
+        assertThat(ledger.claim(TENANT, key, ROUTE, sha(49), BOUND_MS))
+            .as("the marker committed after the timed-out claim: the resend with the same key replays")
+            .isInstanceOf(RequestLedger.Replay.class);
     }
 
     @Test
@@ -772,15 +808,32 @@ class RequestLedgerTest {
     }
 
     @Test
-    void theLeaseMarginReadsTheSameDefaultTimeoutAsTheAdmissionWait() {
-        // A DataSource that is not a Hikari pool: both the admission wait and the lease margin fall back to
-        // the one default TenantScope owns, so the margin cannot drift from the wait it covers.
-        javax.sql.DataSource plain = new org.postgresql.ds.PGSimpleDataSource();
-        RequestLedger l = new RequestLedger(new TenantScope(plain), plain);
+    void theLeaseMarginAndTheAdmissionWaitReadTheSameConnectionTimeout_byValue_underAChangedSetting() {
+        // Two independent observations of one configured value: the admission wait TenantScope applies and the
+        // wait the lease margin is built from (two of them plus the slack). The expected value is the setting
+        // the test chose, not either side's own reading, so a margin that stopped reading it, or a wait that
+        // read a different source, fails here.
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(pg.getUsername());
+        cfg.setPassword(pg.getPassword());
+        cfg.setMaximumPoolSize(2);
+        cfg.setConnectionTimeout(7_000);
+        try (HikariDataSource custom = new HikariDataSource(cfg)) {
+            TenantScope customScope = new TenantScope(custom);
+            RequestLedger l = new RequestLedger(customScope, custom);
 
-        assertThat(TenantScope.connectionTimeoutMs(plain)).isEqualTo(TenantScope.DEFAULT_TIMEOUT_MS);
-        assertThat(l.leaseMs(0)).isEqualTo(2 * TenantScope.DEFAULT_TIMEOUT_MS + RequestLedger.LEASE_SLACK_MS);
-        assertThat(TenantScope.connectionTimeoutMs(ds)).isEqualTo(ds.getConnectionTimeout());
+            assertThat(customScope.admissionTimeoutMs()).as("admission wait").isEqualTo(7_000L);
+            assertThat((l.leaseMs(0) - RequestLedger.LEASE_SLACK_MS) / 2).as("wait inside the lease margin")
+                .isEqualTo(7_000L);
+        }
+
+        // A DataSource that is not a Hikari pool: both fall back to the one default TenantScope owns.
+        javax.sql.DataSource plain = new org.postgresql.ds.PGSimpleDataSource();
+        TenantScope plainScope = new TenantScope(plain);
+        RequestLedger lp = new RequestLedger(plainScope, plain);
+        assertThat(plainScope.admissionTimeoutMs()).isEqualTo(30_000L);
+        assertThat((lp.leaseMs(0) - RequestLedger.LEASE_SLACK_MS) / 2).isEqualTo(30_000L);
     }
 
     @Test
@@ -793,5 +846,8 @@ class RequestLedgerTest {
         long remainingMs = Duration.between(inFlight.observedAt(), inFlight.leaseUntil()).toMillis();
         assertThat(remainingMs).as("lease left at the database's own reading")
             .isBetween(ledger.leaseMs(BOUND_MS) - 5_000, ledger.leaseMs(BOUND_MS));
+        // This test shares the JVM's host clock with the container, so it cannot tell a database reading from
+        // a JVM one by value; the Retry-After arithmetic is pinned against instants no host clock can match in
+        // KeyedSweepRetryAfterTest (nexus-yye8l.22).
     }
 }

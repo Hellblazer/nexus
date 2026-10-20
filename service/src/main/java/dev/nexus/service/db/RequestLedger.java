@@ -86,6 +86,24 @@ public final class RequestLedger {
     private static final int SHA256_BYTES = 32;
     private static final int MAX_CLAIM_ROUNDS = 3;
 
+    /** SQLSTATE {@code lock_not_available}: what PostgreSQL raises when {@code lock_timeout} trips. */
+    private static final String LOCK_NOT_AVAILABLE = "55P03";
+
+    /**
+     * Bound, in milliseconds, on every row-lock wait inside {@link #claim} (nexus-yye8l.22), set with
+     * {@code lock_timeout} on each claim transaction. The claim's {@code INSERT ... ON CONFLICT DO NOTHING}
+     * waits on the row lock of a marker transaction that updated the same key and has not yet committed, and
+     * the takeover UPDATE waits the same way. A marker that stalls between its UPDATE and its COMMIT would
+     * otherwise hold the resend's admission permit and connection for as long as the stall lasts. 2 s is the
+     * lock wait the bounded sweep forms already run under (RDR-222, "bounded forms run under lock_timeout
+     * 2000"); a healthy marker commits in milliseconds, so a resend that waits this long has found a stall,
+     * and the answer is {@link ClaimContendedException} (503 {@code request_claim_contended}, resend with the
+     * same key). A fixed constant, not an environment setting: it bounds a wait whose healthy value is
+     * milliseconds, and it is unrelated to the lease, which the claim stamps from the database clock at the
+     * statement that wins the row.
+     */
+    static final int CLAIM_LOCK_TIMEOUT_MS = 2_000;
+
     /** The outcome of {@link #claim}. */
     public sealed interface Claim permits Claimed, Replay, InFlight, KeyReused {
     }
@@ -112,11 +130,17 @@ public final class RequestLedger {
      * {@link #claim} could not settle the key in {@link #MAX_CLAIM_ROUNDS} rounds: other attempts kept
      * taking or purging the row between this one's read and its write. Nothing was written for this attempt, so
      * it is safe to resend with the same key; the handler answers 503 with {@code Retry-After}, not the 422 an
-     * {@link IllegalStateException} would get from the shared ladder (nexus-yye8l.20).
+     * {@link IllegalStateException} would get from the shared ladder (nexus-yye8l.20). It is also what a claim
+     * answers when its row-lock wait exceeded {@link #CLAIM_LOCK_TIMEOUT_MS}, because a marker transaction holds
+     * the row uncommitted (nexus-yye8l.22); that wait wrote nothing either.
      */
     public static final class ClaimContendedException extends RuntimeException {
         public ClaimContendedException(String message) {
             super(message);
+        }
+
+        public ClaimContendedException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 
@@ -211,7 +235,7 @@ public final class RequestLedger {
         // row as it now stands. Three rounds cover both.
         for (int round = 0; round < MAX_CLAIM_ROUNDS; round++) {
             UUID nonce = UUID.randomUUID();
-            int inserted = scope.withTenant(tenant, ctx -> ctx.insertInto(REQUEST_LEDGER)
+            int inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
                 .set(REQUEST_LEDGER.TENANT_ID, tenant)
                 .set(REQUEST_LEDGER.REQUEST_ID, requestId)
                 .set(REQUEST_LEDGER.ROUTE, route)
@@ -254,7 +278,7 @@ public final class RequestLedger {
             // Takeover (nexus-zxgld gap 1): the failure marker leaves holder NULL, so the guard is
             // IS NOT DISTINCT FROM; an equality guard would never match a failed row.
             phase(ClaimPhase.BEFORE_TAKEOVER, round);
-            int taken = scope.withTenant(tenant, ctx -> ctx.update(REQUEST_LEDGER)
+            int taken = withClaimLockBound(tenant, requestId, ctx -> ctx.update(REQUEST_LEDGER)
                 .set(REQUEST_LEDGER.HOLDER, nonce)
                 .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
                 .set(REQUEST_LEDGER.STARTED_AT, clock())
@@ -275,6 +299,36 @@ public final class RequestLedger {
         throw new ClaimContendedException(
             "request_ledger claim did not settle in " + MAX_CLAIM_ROUNDS + " rounds: tenant=" + tenant
                 + " request_id=" + requestId);
+    }
+
+    /**
+     * Run one claim statement in its own tenant transaction under {@code lock_timeout} =
+     * {@link #CLAIM_LOCK_TIMEOUT_MS}, sent in the same round trip as the tenant stamp. A lock wait that trips
+     * (SQLSTATE 55P03) is {@link ClaimContendedException}: the statement was the claim's only write and it did
+     * not happen, so a resend with the same key is safe. Any other failure propagates unchanged.
+     */
+    private <T> T withClaimLockBound(String tenant, UUID requestId, Function<DSLContext, T> work) {
+        try {
+            return scope.withTenant(tenant, batch -> PgSession.setLockTimeout(batch, CLAIM_LOCK_TIMEOUT_MS), work);
+        } catch (RuntimeException e) {
+            if (isLockNotAvailable(e)) {
+                log.warn("event=request_ledger_claim_lock_timeout tenant={} request_id={} lock_timeout_ms={}",
+                    tenant, requestId, CLAIM_LOCK_TIMEOUT_MS);
+                throw new ClaimContendedException("request_ledger claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS
+                    + " ms: tenant=" + tenant + " request_id=" + requestId, e);
+            }
+            throw e;
+        }
+    }
+
+    private static boolean isLockNotAvailable(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && LOCK_NOT_AVAILABLE.equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

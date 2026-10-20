@@ -33,7 +33,9 @@ import java.util.regex.Pattern;
  * 422 {@code idempotency_key_reused}; 409 {@code request_in_flight} with {@code Retry-After}; a replay is the
  * stored status and body with {@code Idempotency-Replayed: true}; 503 {@code sweep_gate_busy} with
  * {@code Retry-After} on the quarantine forms; 503 {@code request_claim_contended} with {@code Retry-After} when the
- * ledger's bounded claim rounds could not settle the key (nothing was written, resend with the same key). Every
+ * ledger's bounded claim rounds could not settle the key, or its row-lock wait ran past
+ * {@code RequestLedger.CLAIM_LOCK_TIMEOUT_MS} behind a stalled marker transaction (nexus-yye8l.22); nothing was written
+ * in either case, resend with the same key. Every
  * response for a request the ledger recorded echoes {@code Idempotency-Key}; the echo is telemetry, the client
  * never gates on it.
  *
@@ -331,7 +333,7 @@ final class KeyedSweep {
      * Whole seconds until the lease ends, never below 1. Both instants are the database's: {@code observedAt} is
      * its clock at the read, so a skewed JVM clock cannot stretch or cut the wait (nexus-yye8l.20).
      */
-    private static long retryAfterSeconds(OffsetDateTime observedAt, OffsetDateTime leaseUntil) {
+    static long retryAfterSeconds(OffsetDateTime observedAt, OffsetDateTime leaseUntil) {
         long millis = Duration.between(observedAt, leaseUntil).toMillis();
         return Math.max(1L, (millis + 999L) / 1000L);
     }

@@ -969,6 +969,9 @@ class KeyedSweepRouteTest {
         // RDR-222 minimum viable validation: "a committed request is followed by an exception". The edge has cut
         // the connection, so writing the 200 fails after the sweep committed; the handler's ladder then answers
         // 500 on the (dead) exchange. None of that may touch the row.
+        // nexus-yye8l.22: this pins the OUTCOME (the row stays committed, a resend replays it), not the code shape
+        // that gets there. It would pass for any implementation that keeps a committed row committed, including
+        // one that never reaches a failure marker for a different reason; that is intended.
         Fx f = fixture(form, 3);
         String key = newKey();
         var armed = new AtomicBoolean(true);

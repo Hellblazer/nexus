@@ -147,6 +147,11 @@ public final class TenantScope {
             dataSource, ds -> new Semaphore(admissionPermits, true));
     }
 
+    /** How long {@link #withTenant} waits for an admission permit; read by tests that pin it to the lease margin. */
+    long admissionTimeoutMs() {
+        return admissionTimeoutMs;
+    }
+
     /**
      * The pool size this scope sized its admission bound from (HikariCP's maximum pool
      * size, else {@link #DEFAULT_POOL_SIZE}). Read by the per-request search fan-out to

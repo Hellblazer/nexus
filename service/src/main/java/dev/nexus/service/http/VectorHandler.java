@@ -390,6 +390,8 @@ public final class VectorHandler implements HttpHandler {
             // other attempts kept taking or purging the row between this one's read and write. Nothing was
             // written for this attempt, so a resend with the same key is safe: 503, inside the client's gateway
             // retry codes, not the 422 ("do not resend") the IllegalStateException arm gave it before.
+            // nexus-yye8l.22: the same answer for a claim whose row-lock wait tripped lock_timeout behind a marker
+            // transaction that stalled between its UPDATE and its COMMIT; nothing was written either.
             log.warn("event=request_ledger_claim_contended op={} error={}", op, e.getMessage());
             exchange.getResponseHeaders().set("Retry-After", Integer.toString(KeyedSweep.CLAIM_CONTENDED_RETRY_AFTER_SECONDS));
             HttpUtil.send(exchange, 503, json(Map.of(

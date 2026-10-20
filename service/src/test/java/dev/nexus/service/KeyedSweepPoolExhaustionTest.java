@@ -245,14 +245,18 @@ class KeyedSweepPoolExhaustionTest {
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
-        assertThat(elapsedMs).as("the 503 does not wait behind the exhausted pool (connection timeout %d ms)",
-            CONNECTION_TIMEOUT_MS).isLessThan(CONNECTION_TIMEOUT_MS / 2);
+        // PRIMARY PIN (nexus-yye8l.22): the waiter count. The skip is what keeps the failure marker from queueing
+        // on the exhausted pool, and it is the only assertion here that fails when the skip is removed and the
+        // marker is merely quick. The elapsed-time assertion below is SECONDARY: a marker bounded by
+        // FAIL_MARKER_WAIT_MS would also answer inside CONNECTION_TIMEOUT_MS / 2, so it passes without the skip.
         var pool = svcDs.getHikariPoolMXBean();
         assertThat(pool.getActiveConnections()).as("the pool is still exhausted when the 503 is sent")
             .isEqualTo(POOL_SIZE);
         assertThat(pool.getThreadsAwaitingConnection())
             .as("the marker queued no waiter on the exhausted pool")
             .isZero();
+        assertThat(elapsedMs).as("secondary: the 503 does not wait behind the exhausted pool (connection timeout %d ms)",
+            CONNECTION_TIMEOUT_MS).isLessThan(CONNECTION_TIMEOUT_MS / 2);
         Row row = ledgerRow(key);
         assertThat(row.state()).as("no marker: the lease expiry covers the row").isEqualTo("in_flight");
         assertThat(row.responseStatus()).isNull();
