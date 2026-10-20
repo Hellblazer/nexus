@@ -1821,7 +1821,9 @@ jobs:
       - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)
         if: needs.changes.outputs.code == 'true'
         continue-on-error: true
-        run: python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6
+        run: |
+          python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6 \
+            || { echo "::warning::storage-touch fan-in (advisory) did not pass; its numbers are in this step's log (nexus-abcqb)"; exit 1; }
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

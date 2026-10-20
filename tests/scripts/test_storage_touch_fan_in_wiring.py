@@ -109,6 +109,14 @@ def test_an_armed_ceiling_is_a_number() -> None:
         ("tests._storage_touch_fan_in ddl-reports --suite python_unit",
          "tests._storage_touch_fan_in elsewhere --suite python_unit", "does not read the downloaded"),
         ("            tests/_storage_touch_fan_in.py\n", "", "does not bring tests/_storage_touch_fan_in.py"),
+        ("      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
+         "        if: needs.changes.outputs.code == 'true'\n",
+         "      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
+         "        if: always()\n", "not limited to runs whose shards ran"),
+        ("      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
+         "        if: needs.changes.outputs.code == 'true'\n",
+         "      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
+         "        if: always() && needs.changes.outputs.code == 'true'\n", "after a failed verdict"),
     ],
 )
 def test_each_rot_is_caught(old: str, new: str, expect: str) -> None:
@@ -126,3 +134,13 @@ def test_arming_and_continue_on_error_move_together() -> None:
                else ceilings.replace("[python_unit]\n", '[python_unit]\nmeasured_on = "test"\n', 1))
     assert _armed(flipped) is not armed
     assert any("continue-on-error" in p or "measured_on" in p for p in wiring_problems(text, flipped))
+
+
+def test_a_fan_in_moved_before_the_verdict_is_caught() -> None:
+    doc = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["pytest-gate"]["steps"]
+    fan_in = next(s for s in steps if _FAN_IN in str(s.get("run", "")))
+    steps.remove(fan_in)
+    steps.insert(0, fan_in)
+    problems = wiring_problems(yaml.safe_dump(doc), CEILINGS.read_text(encoding="utf-8"))
+    assert any("after the one verdict step" in p for p in problems), problems
