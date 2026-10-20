@@ -102,4 +102,17 @@ class PgContainerHelperExplainPlanTest {
         PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS);
         assertThat(seen.binds).containsSubsequence(true, false, true, true);
     }
+
+    @Test
+    void explainPlanWith_sendsEachBooleanInItsOwnSlot() {
+        // distinct values in every slot, so a swap of any two (buffers and costs included) fails here
+        Seen seen = new Seen();
+        DSLContext ctx = contextAnswering(1, seen);
+        PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), new PgContainerHelper.ExplainOptions(true, false, false, true));
+        assertThat(java.util.Arrays.copyOfRange(seen.binds, 1, 5)).containsExactly(true, false, false, true);
+        PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), new PgContainerHelper.ExplainOptions(false, true, true, false));
+        assertThat(java.util.Arrays.copyOfRange(seen.binds, 1, 5)).containsExactly(false, true, true, false);
+        PgContainerHelper.explainPlanWith(ctx, boundQuery(ctx), new PgContainerHelper.ExplainOptions(false, false, true, false));
+        assertThat(java.util.Arrays.copyOfRange(seen.binds, 1, 5)).containsExactly(false, false, true, false);
+    }
 }

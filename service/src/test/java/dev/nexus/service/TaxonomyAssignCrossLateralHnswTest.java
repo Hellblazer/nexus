@@ -697,6 +697,22 @@ class TaxonomyAssignCrossLateralHnswTest {
         java.util.regex.Pattern.compile("(?m)^\\s*(->\\s+)?Sort\\s+\\(cost=");
 
     /**
+     * Plain EXPLAIN through nexus_test.explain_plan, which returns the server's own lines. PgContainerHelper.explainPlan
+     * returns jOOQ's bordered table, every line opening with "|", so {@link #PLAIN_SORT_NODE}'s line anchor could never
+     * match it (batch C review). The deployed statement carries its values inlined, so this is the same plan.
+     */
+    private static final PgContainerHelper.ExplainOptions RAW_PLAN =
+        new PgContainerHelper.ExplainOptions(false, false, false, true);
+
+    @Test
+    void plainSortNodePattern_matchesASortLine_andNotAnIncrementalSort() {
+        assertThat(PLAIN_SORT_NODE.matcher("Limit  (cost=0.00..1.00 rows=1 width=4)\n  ->  Sort  (cost=1.00..2.00 rows=1 width=4)")
+            .find()).isTrue();
+        assertThat(PLAIN_SORT_NODE.matcher("Sort  (cost=1.00..2.00 rows=1 width=4)").find()).isTrue();
+        assertThat(PLAIN_SORT_NODE.matcher("  ->  Incremental Sort  (cost=1.00..2.00 rows=1 width=4)").find()).isFalse();
+    }
+
+    /**
      * Bead nexus-swam7: the PRIOR round of this test (see the class javadoc's
      * "What changed" section and {@link #FILLER_COLLECTION_COUNT}'s own
      * javadoc) ran a proxy SQL function ({@code taxonomy_ann_query_1024}) at a
@@ -752,7 +768,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             PgSession.setLocal(ctx, "hnsw.ef_search", "400");
             PgSession.setLocal(ctx, "enable_seqscan", "off");
             PgSession.setLocal(ctx, "enable_sort", "off");
-            return PgContainerHelper.explainPlan(ctx, ctx.resultQuery(deployedStatement));
+            return PgContainerHelper.explainPlanWith(ctx, ctx.resultQuery(deployedStatement), RAW_PLAN);
         });
 
         assertThat(plan)
@@ -806,7 +822,7 @@ class TaxonomyAssignCrossLateralHnswTest {
         String plan = tenantScope.withTenant(TENANT, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "strict_order");
             PgSession.setLocal(ctx, "hnsw.ef_search", "400");
-            return PgContainerHelper.explainPlan(ctx, ctx.resultQuery(deployedStatement));
+            return PgContainerHelper.explainPlanWith(ctx, ctx.resultQuery(deployedStatement), RAW_PLAN);
         });
 
         assertThat(plan)
