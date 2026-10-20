@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -44,6 +43,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Catalog034TumblerGrammarTest {
+
+    private static final String CHANGELOG = "db/changelog/catalog-034-tumbler-grammar.xml";
 
     private static final String TENANT   = "cat034-tenant";
     private static final String SVC_ROLE = "svc_cat034_test";
@@ -108,12 +109,7 @@ class Catalog034TumblerGrammarTest {
         // LIVE row directly (succeeds -- no CHECK), replay the changeset's
         // own <sql> text verbatim, and assert it gets tombstoned. A sibling
         // conforming (3-segment) row must survive untouched.
-        String xml = new String(
-            getClass().getClassLoader()
-                .getResourceAsStream("db/changelog/catalog-034-tumbler-grammar.xml")
-                .readAllBytes(),
-            StandardCharsets.UTF_8);
-        String dataStepSql = extractSql(xml, 0);
+        String dataStepSql = PgContainerHelper.changesetForwardText(CHANGELOG, "catalog-034-0");
         assertTrue(dataStepSql.contains("NO FORCE ROW LEVEL SECURITY"),
             "034-0 must carry the catalog-013-1b FORCE-RLS toggle");
         assertTrue(dataStepSql.contains("tumbler !~"),
@@ -129,15 +125,9 @@ class Catalog034TumblerGrammarTest {
                 .values(TENANT, "8888.1.1", "conforming-sibling")
                 .execute();
 
-            // splitStatements="false" in the shipped changeset -- this is a single
-            // DO $$ ... $$ block whose body contains internal semicolons, so it
-            // must be sent as ONE statement, not split on ';' (the PostgreSQL
-            // JDBC driver's simple-query protocol accepts multiple ;-separated
-            // top-level statements in one execute() call). Kept raw: this replays
-            // the shipped changeset's own <sql> text verbatim (same class as
-            // Catalog016SourceUriUniqueTest's identical technique) -- re-expressing
-            // it in jOOQ DSL would no longer be the SAME statement Liquibase executes.
-            su.createStatement().execute(dataStepSql);
+            // The shipped changeset's own <sql> text, sent verbatim as ONE simple-query string (its DO block holds
+            // internal semicolons; splitStatements="false"), through the shared replay helper (nexus-cbo4a).
+            PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-034-0");
 
             var violatorRows = DSL.using(su, SQLDialect.POSTGRES)
                 .select(CATALOG_DOCUMENTS.DELETED_AT)
@@ -157,14 +147,4 @@ class Catalog034TumblerGrammarTest {
         }
     }
 
-    /** Extract the Nth &lt;sql&gt; block's text content from changeset XML. */
-    private static String extractSql(String xml, int n) {
-        int idx = -1;
-        for (int i = 0; i <= n; i++) idx = xml.indexOf("<sql", idx + 1);
-        assertTrue(idx >= 0, "changeset <sql> block " + n + " not found");
-        int open = xml.indexOf('>', idx) + 1;
-        int close = xml.indexOf("</sql>", open);
-        return xml.substring(open, close)
-                  .replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
-    }
 }

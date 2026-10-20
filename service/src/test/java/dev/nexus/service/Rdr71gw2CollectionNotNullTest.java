@@ -21,19 +21,14 @@ import org.junit.jupiter.api.TestInstance;
 import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -63,7 +58,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * below needs a corpus that GENUINELY STARTS with NULL/dangling rows, so
  * each test temporarily {@code DROP}s the NOT NULL constraint, seeds its own
  * fixture, then re-executes the changeset's own {@code <sql>} block VERBATIM
- * (read from the changelog file at test time via {@link #changesetSql()},
+ * (read from the changelog at test time by {@link PgContainerHelper#replayChangeset},
  * never a hand-copied duplicate — the two can never drift apart) — proving
  * the ACTUAL production SQL converges on the fixture, not a stand-in for it.
  * The PostgreSQL JDBC simple-query protocol executes a semicolon-separated
@@ -77,8 +72,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr71gw2CollectionNotNullTest {
 
-    private static final Path CHANGESET_PATH = Path.of(
-        "src", "main", "resources", "db", "changelog", "catalog-025-collection-not-null.xml");
+    private static final String CHANGELOG = "db/changelog/catalog-025-collection-not-null.xml";
 
     PostgreSQLContainer<?> pg;
 
@@ -95,7 +89,7 @@ class Rdr71gw2CollectionNotNullTest {
             // Step G (RDR-191 repoint batch cluster A): stop BEFORE
             // vectors-004-1 (now real head, Step B registration) rather than
             // migrating to true head. catalog-025-0's own raw SQL (replayed
-            // verbatim below by runChangeset/changesetSql) reads
+            // verbatim below by runChangeset) reads
             // nexus.chunks_384/768/1024 DIRECTLY -- it ran historically
             // BEFORE the RDR-191 unify in changelog order (still true post-
             // Step B: catalog-025's <include> precedes vectors-004's in
@@ -175,18 +169,6 @@ class Rdr71gw2CollectionNotNullTest {
     // Changeset replay plumbing
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Reads {@code catalog-025-collection-not-null.xml} and returns the raw
-     *  SQL body of changeset {@code catalog-025-0}, XML-unescaped — the same
-     *  text Liquibase itself executes, never a hand-copied duplicate. */
-    private static String changesetSql() throws Exception {
-        String xml = Files.readString(CHANGESET_PATH);
-        Matcher m = Pattern.compile("<sql[^>]*>(.*?)</sql>", Pattern.DOTALL).matcher(xml);
-        assertThat(m.find()).as("catalog-025-0's <sql> block must be present in the changelog file").isTrue();
-        return m.group(1)
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&");
-    }
 
     /** Undo just the NOT NULL constraint (not the whole changeset) so a test
      *  can seed a genuinely-NULL corpus, mirroring this changeset's own
@@ -206,8 +188,8 @@ class Rdr71gw2CollectionNotNullTest {
     private static void runChangeset(Connection su) throws Exception {
         boolean priorAutoCommit = su.getAutoCommit();
         su.setAutoCommit(false);
-        try (Statement st = su.createStatement()) {
-            st.execute(changesetSql());
+        try {
+            PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-025-0");
             su.commit();
         } catch (Exception e) {
             su.rollback();

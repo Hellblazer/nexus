@@ -20,8 +20,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.SQLWarning;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -34,7 +32,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
-import javax.xml.parsers.DocumentBuilderFactory;
 
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -452,31 +449,11 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
         }
     }
 
-    /** The body of changeset vectors-034-2, read from the changelog the service ships. */
-    private static String selfHealSql() throws Exception {
-        try (var in = ChunkLeafAutovacuumReloptionsIntegrationTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/vectors-034-chunks-leaf-autovacuum.xml")) {
-            assertThat(in).as("the vectors-034 changelog on the classpath").isNotNull();
-            var sets = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(in).getElementsByTagName("changeSet");
-            for (int i = 0; i < sets.getLength(); i++) {
-                var cs = (org.w3c.dom.Element) sets.item(i);
-                if ("vectors-034-2".equals(cs.getAttribute("id"))) {
-                    return cs.getElementsByTagName("sql").item(0).getTextContent();
-                }
-            }
-        }
-        throw new AssertionError("changeset vectors-034-2 not found");
-    }
 
     /** Runs the self-heal DO block alone on {@code c} and returns every NOTICE/WARNING it raised. */
     private static List<String> runSelfHeal(Connection c) throws Exception {
         c.setAutoCommit(true);
-        try (Statement st = c.createStatement()) {
-            st.execute(selfHealSql());
-            List<String> out = new ArrayList<>();
-            for (SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) out.add(w.getMessage());
-            return out;
-        }
+        return PgContainerHelper.replayChangeset(c, "db/changelog/vectors-034-chunks-leaf-autovacuum.xml", "vectors-034-2");
     }
 
     @Test

@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -41,6 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Catalog016SourceUriUniqueTest {
+
+    private static final String CHANGELOG = "db/changelog/catalog-016-source-uri-unique.xml";
 
     private static final String TENANT   = "cat016-tenant";
     private static final String SVC_ROLE = "svc_cat016_test";
@@ -408,14 +409,8 @@ class Catalog016SourceUriUniqueTest {
         // Fidelity test of the SHIPPED 016-0 SQL: seed legacy-shaped dupes with
         // the index dropped, run the changeset's own <sql> text verbatim, and
         // assert the winner rule (most chunks, then earliest indexed_at, then
-        // lowest tumbler). Re-creates the index afterwards via 016-1's SQL.
-        String xml = new String(
-            getClass().getClassLoader()
-                .getResourceAsStream("db/changelog/catalog-016-source-uri-unique.xml")
-                .readAllBytes(),
-            StandardCharsets.UTF_8);
-        String dedupSql = extractSql(xml, 0);
-        String indexSql = extractSql(xml, 1);
+        // lowest tumbler). Re-creates the index afterwards by replaying 016-1.
+        String dedupSql = PgContainerHelper.changesetForwardText(CHANGELOG, "catalog-016-0");
         assertTrue(dedupSql.contains("NO FORCE ROW LEVEL SECURITY"),
             "016-0 must carry the catalog-013-1b FORCE-RLS toggle");
 
@@ -460,9 +455,7 @@ class Catalog016SourceUriUniqueTest {
                 // constraint matching the ON CONFLICT" report one layer up.
                 // Attach as suppressed instead of letting it propagate.
                 try {
-                    for (String stmt : indexSql.split(";")) {
-                        if (!stmt.isBlank()) su.createStatement().execute(stmt);
-                    }
+                    PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-016-1");
                 } catch (Exception recreateFailure) {
                     primary.addSuppressed(recreateFailure);
                 }
@@ -470,9 +463,7 @@ class Catalog016SourceUriUniqueTest {
             }
             // Success path: recreate the index normally — a genuine failure
             // here (not masking anything) surfaces as itself.
-            for (String stmt : indexSql.split(";")) {
-                if (!stmt.isBlank()) su.createStatement().execute(stmt);
-            }
+            PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-016-1");
         }
     }
 
@@ -514,14 +505,4 @@ class Catalog016SourceUriUniqueTest {
         }
     }
 
-    /** Extract the Nth &lt;sql&gt; block's text content from changeset XML. */
-    private static String extractSql(String xml, int n) {
-        int idx = -1;
-        for (int i = 0; i <= n; i++) idx = xml.indexOf("<sql", idx + 1);
-        assertTrue(idx >= 0, "changeset <sql> block " + n + " not found");
-        int open = xml.indexOf('>', idx) + 1;
-        int close = xml.indexOf("</sql>", open);
-        return xml.substring(open, close)
-                  .replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
-    }
 }
