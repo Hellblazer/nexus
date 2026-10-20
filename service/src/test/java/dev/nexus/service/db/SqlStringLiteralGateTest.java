@@ -64,7 +64,7 @@ class SqlStringLiteralGateTest {
         // does not match
         "ALTER\\s+(?:DEFAULT\\s+PRIVILEGES\\s|SYSTEM\\s|(?:MATERIALIZED\\s+)?(?:TABLE|INDEX|VIEW|FUNCTION|PROCEDURE|ROLE|USER|SCHEMA|EXTENSION|POLICY|TRIGGER|EVENT\\s+TRIGGER|RULE|SEQUENCE|TYPE|DATABASE|PUBLICATION|DOMAIN|AGGREGATE|OPERATOR|SERVER|STATISTICS|COLLATION|CAST)\\s+(?:$|(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?" + ID + "(?:\\s*\\([^)]*+\\))?(?:\\s*$|\\s+(?:ADD|DROP|ALTER|RENAME|SET|RESET|OWNER|ENABLE|DISABLE|FORCE|NO|ATTACH|DETACH|VALIDATE|INHERIT|NOINHERIT|CLUSTER|REPLICA|OF|NOT|WITH|IN|DEPENDS|REFRESH|CONNECTION|USING|OPTIONS|SUPERUSER|NOSUPERUSER|LOGIN|NOLOGIN|CREATEROLE|NOCREATEROLE|CREATEDB|NOCREATEDB|PASSWORD|BYPASSRLS|NOBYPASSRLS|VALID|UPDATE|ON|ALL|SECURITY|STABLE|IMMUTABLE|VOLATILE|STRICT|CALLED|COST|ROWS|PARALLEL|LEAKPROOF|NOT|RETURNS|TO)\\b)))",
         "(?:GRANT|REVOKE)\\s++[\\w,\\s]*?\\s(?:ON|TO|FROM)\\s",
-        "SET\\s+(?:(?:LOCAL|SESSION)\\s+(?:\\S|$)|ROLE\\s|TRANSACTION\\s|CONSTRAINTS\\s+(?:ALL\\b|" + ID + ")|[a-z_][\\w.]*+\\s*(?:=|TO\\s))",
+        "SET\\s+(?:(?:LOCAL|SESSION)\\s+(?:$|AUTHORIZATION\\s|ROLE\\s|[a-z_][\\w.]*+\\s*(?:=|TO\\s))|ROLE\\s|TRANSACTION\\s|CONSTRAINTS\\s+(?:ALL\\b|" + ID + ")|[a-z_][\\w.]*+\\s*(?:=|TO\\s))",
         "RESET\\s+(?:ROLE|ALL|[a-z_][\\w.]*+)\\s*;?\\s*$",
         "(?:EXPLAIN)(?:\\s*\\(|\\s+(?:ANALYZE|VERBOSE|SELECT|WITH|INSERT|UPDATE|DELETE)\\b|\\s*$)",
         "(?:VACUUM)(?:\\s*\\(|\\s+(?:ANALYZE|FULL|VERBOSE)\\b|\\s+" + ID + "\\s*;?\\s*$|\\s*;?\\s*$)",
@@ -390,6 +390,7 @@ class SqlStringLiteralGateTest {
                 REVOKE ADMIN OPTION FOR svc FROM bob
                 SET LOCAL statement_timeout = 0
                 SET LOCAL\s
+                SET SESSION AUTHORIZATION nexus_svc
                 SET ROLE nexus_svc
                 SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
                 SET CONSTRAINTS ALL DEFERRED
@@ -436,7 +437,7 @@ class SqlStringLiteralGateTest {
                 UNLISTEN nexus_events
                 /* c */ ALTER TABLE a ADD COLUMN b int
                 """))
-            .hasSize(73)
+            .hasSize(74)
             .allMatch(SqlStringLiteralGateTest::isStatement);
         assertThat(fixtureLines("""
                 prose:
@@ -446,6 +447,7 @@ class SqlStringLiteralGateTest {
                 SET NOT NULL on doc_id must reject a NULL
                 SET clause: CREATE FUNCTION ... SET hnsw.* is refused
                 SET LOCAL: reverts with the transaction
+                SET LOCAL in the caller's transaction reaches the function
                 SET CONSTRAINTS ... DEFERRED is transaction-control syntax
                 EXPLAIN cannot then see the index scan
                 DO NOTHING: still exactly one row
@@ -466,7 +468,7 @@ class SqlStringLiteralGateTest {
                 select 1
                 nexus.chunks
                 """))
-            .hasSize(25)
+            .hasSize(26)
             .noneMatch(SqlStringLiteralGateTest::isStatement);
     }
 
