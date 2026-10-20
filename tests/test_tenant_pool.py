@@ -714,3 +714,19 @@ def test_the_end_of_session_line_reports_the_pool_tenants_leaf_bloat(
     assert report["leaf_bytes"] == size and report["leaf_dead_tup"] >= 0
     line = _tenant_pool.summary_line(_tenant_pool.merge_reports([report]))
     assert f"leaf_bytes={size}" in line and "leaf_dead_tup=" in line, line
+
+
+def test_the_end_of_session_line_breaks_a_lease_down_by_step(
+    make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = make_pool()
+    monkeypatch.setattr(_tenant_pool, "_pool", pool)
+    with pool.lease():
+        pass
+    assert set(pool.step_s) == {"caches", "start_census", "wipe", "evict", "census", "reissue"}, pool.step_s
+    assert all(sec > 0 for sec in pool.step_s.values()), pool.step_s
+    merged = _tenant_pool.merge_reports([_tenant_pool.worker_report(), _tenant_pool.worker_report()])
+    assert merged["step_s"]["wipe"] == pytest.approx(2 * pool.step_s["wipe"])
+    line = _tenant_pool.summary_line(merged)
+    assert "per_lease[" in line and all(f"{step}=" in line for step in pool.step_s), line
+    assert "per_lease[" not in _tenant_pool.summary_line(_tenant_pool.merge_reports([]) | {"leases": 0}), "no leases, no breakdown"

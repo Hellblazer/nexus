@@ -44,6 +44,7 @@ import hashlib
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -308,6 +309,16 @@ class TenantPool:
         self.retired = 0
         self.mints = 0
         self.evicted: dict[str, int] = {}
+        self.step_s: dict[str, float] = {}
+
+    @contextlib.contextmanager
+    def _timed(self, step: str) -> Iterator[None]:
+        """Add the block's wall time to ``step_s[step]``; the A/B reads where a lease's cost goes from these."""
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.step_s[step] = self.step_s.get(step, 0.0) + (time.perf_counter() - t0)
 
     # -- engine calls -------------------------------------------------------------------------------------
 
@@ -340,11 +351,15 @@ class TenantPool:
 
     def reset(self, tenant: str) -> str:
         """The four teardown steps in order; returns the re-issued bearer. Raises :class:`TenantLeakError`."""
-        wipe(self.state, tenant)
+        with self._timed("wipe"):
+            wipe(self.state, tenant)
         if self.evict:
-            self._evict(tenant)
-        census(self.state, tenant)
-        return self._issue_token(tenant)
+            with self._timed("evict"):
+                self._evict(tenant)
+        with self._timed("census"):
+            census(self.state, tenant)
+        with self._timed("reissue"):
+            return self._issue_token(tenant)
 
     def retire(self, reason: str) -> None:
         """Forget the tenant (best-effort wipe and partition drop) so the next lease mints a new one. Counted."""
@@ -390,7 +405,8 @@ class TenantPool:
                 self._leased = False
                 raise
         try:
-            reset_client_caches()
+            with self._timed("caches"):
+                reset_client_caches()
             self._census_at_start(tenant, token, owner)
             completed = False
             try:
@@ -398,7 +414,8 @@ class TenantPool:
                 completed = True
             finally:
                 try:
-                    reset_client_caches()
+                    with self._timed("caches"):
+                        reset_client_caches()
                     self.token = self.reset(tenant)
                 except BaseException as exc:
                     self.retire(f"{type(exc).__name__}: {exc}")
@@ -422,7 +439,8 @@ class TenantPool:
         if not self.start_census:
             return
         try:
-            census(self.state, tenant, allow_token=token or "")
+            with self._timed("start_census"):
+                census(self.state, tenant, allow_token=token or "")
         except BaseException as exc:
             previous = self._last_owner or "(none recorded: a freshly minted tenant)"
             self.retire(f"lease-start census: {exc}")
@@ -519,6 +537,7 @@ def worker_report() -> dict[str, Any]:
         "retired": pool.retired if pool is not None else 0,
         "mints": pool.mints if pool is not None else 0,
         "evicted": dict(pool.evicted) if pool is not None else {},
+        "step_s": dict(pool.step_s) if pool is not None else {},
         "leaf_dead_tup": bloat[0] if bloat else 0,
         "leaf_live_tup": bloat[1] if bloat else 0,
         "leaf_bytes": bloat[2] if bloat else 0,
@@ -528,7 +547,7 @@ def worker_report() -> dict[str, Any]:
 
 def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {"workers": len(reports), "leases": 0, "retired": 0, "mints": 0, "fresh_tenant_entries": 0,
-                           "pooled_entries": 0, "evicted": {}, "violations": [],
+                           "pooled_entries": 0, "evicted": {}, "step_s": {}, "violations": [],
                            "leaf_dead_tup": 0, "leaf_live_tup": 0, "leaf_bytes": 0}
     for r in reports:
         for key in ("leases", "retired", "mints", "fresh_tenant_entries", "pooled_entries", "leaf_dead_tup",
@@ -536,15 +555,22 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             out[key] += r.get(key, 0)
         for name, n in r.get("evicted", {}).items():
             out["evicted"][name] = out["evicted"].get(name, 0) + n
+        for name, sec in r.get("step_s", {}).items():
+            out["step_s"][name] = out["step_s"].get(name, 0.0) + sec
         out["violations"].extend(r.get("violations", []))
     return out
 
 
 def summary_line(merged: dict[str, Any]) -> str:
+    leases = merged["leases"]
+    steps = " ".join(
+        f"{name}={1000 * sec / leases:.0f}ms" for name, sec in sorted(merged.get("step_s", {}).items())
+    ) if leases else ""
     return (
         f"tenant pool: leases={merged['leases']} mints={merged['mints']} retired={merged['retired']} "
         f"fresh_tenant={merged['fresh_tenant_entries']} workers={merged['workers']} "
         f"leaf_dead_tup={merged['leaf_dead_tup']} leaf_live_tup={merged['leaf_live_tup']} leaf_bytes={merged['leaf_bytes']}"
+        + (f" per_lease[{steps}]" if steps else "")
         + (f" VIOLATIONS={len(merged['violations'])}" if merged["violations"] else "")
     )
 
