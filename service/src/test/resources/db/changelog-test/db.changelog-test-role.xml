@@ -107,6 +107,10 @@ GRANT EXECUTE ON FUNCTION nexus_test.fts_matches(tsvector, text, text) TO ${svcR
 -- (PgContainerHelper#explainPlanWith), because the plan under row-level security is the plan that matters. SECURITY
 -- INVOKER, so the grant confers no more than ${svcRole} already holds on the statement it is handed.
 GRANT EXECUTE ON FUNCTION nexus_test.explain_plan(text, boolean, boolean, boolean, boolean) TO ${svcRole};
+-- nexus-cbo4a batch D: nexus_test.cosine_order is the typed ORDER BY of the HNSW KNN tests, run as ${svcRole}.
+-- PUBLIC already holds EXECUTE; the explicit grant keeps the role's needs listed in one place.
+GRANT EXECUTE ON FUNCTION nexus_test.cosine_order(nexus.vector, nexus.vector) TO ${svcRole};
+GRANT EXECUTE ON FUNCTION nexus_test.cosine_order_blocked(nexus.vector, nexus.vector) TO ${svcRole};
 -- nexus-wbfpw.48 (vectors-029): the gate probes are SECURITY DEFINER with EXECUTE revoked from PUBLIC and
 -- granted to nexus_svc only, so a per-class service role needs its own grant, exactly as nexus_svc has it.
 -- Guarded: this changelog also runs against schemas migrated before vectors-029 existed.
