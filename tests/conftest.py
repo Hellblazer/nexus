@@ -3261,10 +3261,10 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     # worker (tests/test_catalog_cli.py::TestVerifyCommand, five reds under
     # -n 8, green alone). Drop it after every test, unconditionally: the
     # next reader refetches, exactly as a fresh process would.
-    invalidate_rows()
     if mcp_infra._t1_instance is not t1_before[0] or mcp_infra._t1_isolated is not t1_before[1]:
         with mcp_infra._t1_lock:
             mcp_infra._t1_instance, mcp_infra._t1_isolated = t1_before
+    invalidate_rows()
     after = mcp_infra._t3_instance
     if after is before:
         return
