@@ -9,6 +9,7 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Record1;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -89,11 +90,11 @@ class ListCollectionsRegistryReadIntegrationTest {
         };
         repo = new PgVectorRepository(tenantScope, none, none);
         seed();
-        // The plan-shape test reads the planner's choice, which follows the statistics: without an explicit ANALYZE
-        // it depended on how far autoanalyze had got on a loaded runner (CI 304bd4611 planned a HashAggregate
-        // and Merge Join over the chunk leaves). Both tables are under the sample size, so ANALYZE reads every row.
+        // seed() vacuum-analyzes the chunks; catalog_collections (13 rows) sits under autovacuum's 50-row analyze
+        // threshold, so without this it is planned with no statistics at all. The plan-shape test reads the
+        // planner's choice; CI on 304bd4611 chose HashAggregate + Merge Join over the chunk leaves (leaf cost
+        // ~4x a local run's, unexplained), so its failure message also prints the planner's inputs.
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_COLLECTIONS);
         }
     }
@@ -236,9 +237,36 @@ class ListCollectionsRegistryReadIntegrationTest {
             ctx.explain(ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS).orderBy(1)).plan(),
             ctx.explain(PgVectorRepository.listCollectionsQuery(ctx, T1)).plan()});
         System.out.println("listCollections OLD plan:\n" + plans[0] + "\nlistCollections NEW plan:\n" + plans[1]);
-        assertThat(plans[0]).as("control: the old statement groups every chunk row").contains("HashAggregate");
-        assertThat(plans[1]).as("the new statement is a semi join from the registry:%n%s", plans[1])
+        String inputs = plannerInputs();
+        System.out.println(inputs);
+        assertThat(plans[0]).as("control: the old statement groups every chunk row:%n%s%n%s", plans[0], inputs)
+            .contains("HashAggregate");
+        assertThat(plans[1]).as("the new statement is a semi join from the registry:%n%s%n%s", plans[1], inputs)
             .contains("Semi Join").contains("catalog_collections").doesNotContain("HashAggregate");
+    }
+
+    /** What the planner costed from: server version and pg_class size/visibility for the registry and every chunk relation. */
+    private String plannerInputs() {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
+            var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+            var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+            Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+            StringBuilder out = new StringBuilder("planner inputs: ")
+                .append(dsl.select(DSL.function("version", String.class)).fetchOne(0, String.class));
+            dsl.select(relname, DSL.field(DSL.name("c", "relpages")), DSL.field(DSL.name("c", "reltuples")),
+                    DSL.field(DSL.name("c", "relallvisible")))
+                .from(cls.join(ns).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace")))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus")
+                    .and(relname.eq("catalog_collections").or(relname.like("chunks%")))
+                    .and(DSL.field(DSL.name("c", "relkind"), String.class).in("r", "p")))
+                .orderBy(relname)
+                .forEach(r -> out.append(String.format("%n  %s relpages=%s reltuples=%s relallvisible=%s",
+                    r.get(0), r.get(1), r.get(2), r.get(3))));
+            return out.toString();
+        } catch (Exception e) {
+            return "planner inputs unavailable: " + e;
+        }
     }
 
     /** Execution time of the old statement against the new one, printed (bounds nothing; -Dcli.rows=N sizes it). */
