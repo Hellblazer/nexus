@@ -704,6 +704,8 @@ _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
         _FROM_SCRATCH,
     "tests/test_native_smoke_scratch_dir_lint.py::test_trap_removes_dir_on_success_and_keeps_it_on_failure": _FROM_SCRATCH,
     "tests/test_tmp_root.py::_plugin": _IN_PROCESS + " (handed to TmpRootPlugin as its env)",
+    "tests/test_tmp_root.py::test_the_keep_dir_is_the_runs_tmpdir_only_while_a_tmpfs_run_is_active":
+        _IN_PROCESS + " (TMPDIR is the input _log_keep_dir reads)",
     "tests/test_tmp_root.py::TestPlugin.test_a_worker_imported_after_the_switch_still_keeps_its_boot_slots_on_the_original_tempdir":
         "drops every NX_TEST_TMP* key, then sets NX_TEST_TMP_ORIG to a value of its own",
     "tests/test_tmp_root.py::TestPlugin.test_a_forced_root_is_kept_and_never_swept": _IN_PROCESS,
@@ -868,7 +870,7 @@ class TestFailureEvidence:
         tr.copy_failure_evidence(run, not_asked, _FAILED, exitstatus=1)
         assert not (not_asked / "fenced-home").exists()
 
-    def _finished_plugin(self, tmp_path, exitstatus, *, env_extra=None):
+    def _finished_plugin(self, tmp_path, exitstatus, *, env_extra=None, session=None):
         orig = tmp_path / "orig"
         orig.mkdir(exist_ok=True)
         plug, env = _plugin(tmp_path, env={
@@ -883,8 +885,43 @@ class TestFailureEvidence:
         (plug.run / "t" / "nx-suite-home-q").mkdir()
         for nodeid, failed in (("t.py::test_boom", True), ("t.py::test_ok", False), ("t.py::test_boom", True)):
             plug.pytest_runtest_logreport(SimpleNamespace(nodeid=nodeid, failed=failed))
-        plug.pytest_sessionfinish(None, exitstatus)
+        plug.pytest_sessionfinish(session, exitstatus)
         return plug, orig
+
+    def test_a_guard_that_fails_the_session_after_sessionfinish_still_keeps_the_evidence(self, tmp_path) -> None:
+        """nexus-ww33u: a conftest guard sets session.exitstatus after this plugin's sessionfinish saw 0;
+        unconfigure reads the session's final value, so the guard-flipped run keeps its evidence."""
+        session = SimpleNamespace(exitstatus=0)
+        plug, _orig = self._finished_plugin(tmp_path, 0, session=session)
+        session.exitstatus = 1
+        plug.pytest_unconfigure(_config())
+        assert (plug._report_home() / tr.FAILED_SUBDIR / tr.FAILURE_SUMMARY_FILE).is_file()
+
+    def test_failed_runs_outlive_newer_clean_runs_and_prune_on_their_own_count(self, tmp_path) -> None:
+        """nexus-ww33u: three passing runs used to prune a failure's evidence away. Clean runs keep the
+        newest REPORT_KEEP, failed runs the newest FAILED_KEEP, each counted apart."""
+        plug, _orig = self._finished_plugin(tmp_path, 1)
+        home_parent = plug._report_home().parent
+        home_parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        failed_old = []
+        for i in range(tr.FAILED_KEEP):  # older than every clean run; the current run is the newest failed
+            d = home_parent / f"failed-{i}"
+            (d / tr.FAILED_SUBDIR).mkdir(parents=True)
+            os.utime(d, (now - 1000 - i, now - 1000 - i))
+            failed_old.append(d)
+        clean = []
+        for i in range(tr.REPORT_KEEP + 2):
+            d = home_parent / f"clean-{i}"
+            d.mkdir()
+            (d / "nx-ddl-report.json").write_text("{}")
+            os.utime(d, (now - 100 - i, now - 100 - i))
+            clean.append(d)
+        plug.pytest_unconfigure(_config())
+        assert [d.exists() for d in clean] == [True] * tr.REPORT_KEEP + [False] * 2
+        assert [d.exists() for d in failed_old] == [True] * (tr.FAILED_KEEP - 1) + [False], (
+            "the current failed run is the newest of FAILED_KEEP, so the oldest earlier one goes")
+        assert (plug._report_home() / tr.FAILED_SUBDIR).is_dir()
 
     def test_a_failed_run_keeps_its_evidence_under_the_report_home_before_the_run_goes(self, tmp_path) -> None:
         plug, orig = self._finished_plugin(tmp_path, 1)
@@ -897,6 +934,18 @@ class TestFailureEvidence:
         assert (failed / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_boom0" / "data.txt").read_text() == "evidence"
         assert "t.py::test_boom" in (failed / tr.FAILURE_SUMMARY_FILE).read_text()
         assert not (failed / "fenced-home").exists(), "removed unless NX_KEEP_FENCED_HOME is set"
+
+    def test_the_controllers_live_substrate_logs_are_kept_before_the_copy(self, tmp_path, monkeypatch) -> None:
+        """nexus-ww33u: a substrate the controller booted is still up at unconfigure (its teardown is
+        atexit); its logs live in pgdata, outside the run, so the harvest keeps them first."""
+        plug, _orig = self._finished_plugin(tmp_path, 1)
+        pgdata = tmp_path / "pgdata"
+        pgdata.mkdir()
+        (pgdata / "engine.log").write_text("controller engine")
+        monkeypatch.setattr(sub, "_state", {"pgdata": str(pgdata), "log_keep_dir": str(plug.run / "t")})
+        plug.pytest_unconfigure(_config())
+        kept = plug._report_home() / tr.FAILED_SUBDIR / "engine-logs" / f"nexus-svc-logs-{os.getpid()}" / "engine.log"
+        assert kept.read_text() == "controller engine"
 
     def test_keep_fenced_home_copies_the_home_out_of_the_run_dir(self, tmp_path) -> None:
         plug, _orig = self._finished_plugin(tmp_path, 1, env_extra={"NX_KEEP_FENCED_HOME": "1"})
@@ -1268,3 +1317,61 @@ class TestEndToEnd:
         (marker,) = list((failed / "tmp_path").glob("**/marker.txt"))
         assert marker.read_text().startswith("evidence-gw") and "popen-gw" in str(marker)
         assert (failed / "engine-logs" / "nexus-svc-log-e2e" / "engine.log").is_file()
+
+
+# ── nexus-ww33u: a substrate keeps its logs before its teardown deletes pgdata ───────────────
+
+
+def _fake_substrate(tmp_path: Path, keep: Path | None) -> dict:
+    pgdata = tmp_path / "pgdata"
+    pgdata.mkdir()
+    (pgdata / "engine.log").write_bytes(b"A" * 100 + b"engine tail")
+    (pgdata / "pg.log").write_text("pg says")
+    return {"pgdata": str(pgdata), "log_keep_dir": str(keep) if keep else None}
+
+
+def test_preserve_logs_keeps_each_logs_tail_under_the_runs_tmpdir(tmp_path, monkeypatch) -> None:
+    keep = tmp_path / "run-t"
+    keep.mkdir()
+    monkeypatch.setattr(sub, "_state", _fake_substrate(tmp_path, keep))
+    monkeypatch.setattr(sub, "_LOG_KEEP_TAIL_BYTES", 11)
+    dest = sub.preserve_logs()
+    assert dest == keep / f"nexus-svc-logs-{os.getpid()}"
+    assert (dest / "engine.log").read_bytes() == b"engine tail", "only the tail is kept"
+    assert (dest / "pg.log").read_text() == "pg says"
+    assert tr._ENGINE_EVIDENCE_GLOBS[0] == "nexus-svc-*" and dest.match("nexus-svc-*"), "the failed-run copy finds it"
+
+
+def test_preserve_logs_keeps_nothing_outside_a_tmpfs_run(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sub, "_state", _fake_substrate(tmp_path, None))
+    assert sub.preserve_logs() is None
+    monkeypatch.setattr(sub, "_state", None)
+    assert sub.preserve_logs() is None
+
+
+def test_the_keep_dir_is_the_runs_tmpdir_only_while_a_tmpfs_run_is_active(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.delenv(sub._TMP_ORIG_ENV, raising=False)
+    assert sub._log_keep_dir() is None, "outside a tmpfs run a kept log would land on disk for good"
+    monkeypatch.setenv(sub._TMP_ORIG_ENV, "/orig")
+    assert sub._log_keep_dir() == str(tmp_path)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "gone"))
+    assert sub._log_keep_dir() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake pg_ctl is a POSIX shell script")
+def test_teardown_keeps_the_logs_before_it_removes_pgdata(tmp_path, monkeypatch) -> None:
+    keep = tmp_path / "run-t"
+    keep.mkdir()
+    state = _fake_substrate(tmp_path, keep)
+    pg_bin = tmp_path / "bin"
+    pg_bin.mkdir()
+    (pg_bin / "pg_ctl").write_text("#!/bin/sh\nexit 0\n")
+    (pg_bin / "pg_ctl").chmod(0o755)
+    state |= {"pg_bin": pg_bin, "svc": object()}
+    monkeypatch.setattr(sub, "_state", state)
+    monkeypatch.setattr(sub, "stop_group", lambda *_a, **_k: None)
+    sub._teardown()
+    assert not Path(state["pgdata"]).exists()
+    assert (keep / f"nexus-svc-logs-{os.getpid()}" / "pg.log").read_text() == "pg says"
+    assert sub._state is None

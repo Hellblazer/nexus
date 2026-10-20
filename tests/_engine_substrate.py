@@ -172,6 +172,14 @@ _TMPFS_DIR_PREFIX = "nexus-test-pg"
 #: run's private directory).
 _TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
 
+#: A substrate's engine.log and pg.log live in its pgdata, outside the run's TMPDIR, and its atexit
+#: teardown deletes pgdata; in an xdist worker that is before the controller copies a failed run's
+#: evidence, so the logs were never kept (nexus-ww33u). Inside a tmpfs test run (tests/_tmp_root.py)
+#: :func:`preserve_logs` first copies each log's tail to ``<run TMPDIR>/nexus-svc-logs-<pid>``, where
+#: the failed-run copy finds it (its ``nexus-svc-*`` glob); the run directory goes with the run.
+_LOG_KEEP_PREFIX = "nexus-svc-logs-"
+_LOG_KEEP_TAIL_BYTES = 4 * 1024**2
+
 
 def _original_tempdir() -> Path:
     """The process tempdir as it was before ``tests/_tmp_root.py`` moved it."""
@@ -2232,9 +2240,45 @@ def _boot() -> dict:
         # test that spawns its own engine can hand it the same models (nexus-o5xyx.2).
         "onnx_root": str(onnx_root) if onnx_root is not None else None,
         "svc": svc,
+        "log_keep_dir": _log_keep_dir(),
     }
     atexit.register(_teardown)
     return state
+
+
+def _log_keep_dir() -> str | None:
+    """The run's TMPDIR when a tmpfs test run is active (tests/_tmp_root.py exported the original
+    tempdir), else None: outside one a kept log would land on disk and never be removed. Read at
+    boot, because the controller's own unconfigure restores TMPDIR before atexit runs."""
+    if not os.environ.get(_TMP_ORIG_ENV):
+        return None
+    tmp = os.environ.get("TMPDIR")
+    return tmp if tmp and os.path.isdir(tmp) else None
+
+
+def preserve_logs() -> Path | None:
+    """Copy the live substrate's engine.log and pg.log (the last :data:`_LOG_KEEP_TAIL_BYTES` of each)
+    to ``<run TMPDIR>/nexus-svc-logs-<pid>``; returns that directory, or None when no substrate is
+    up, no tmpfs run is active or the copy failed. Never raises (nexus-ww33u)."""
+    state = _state
+    keep = state.get("log_keep_dir") if state is not None else None
+    if not keep or not os.path.isdir(keep):
+        return None
+    dest = Path(keep) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+    try:
+        dest.mkdir(mode=0o700, exist_ok=True)
+        for name in ("engine.log", "pg.log"):
+            src = Path(state["pgdata"]) / name
+            if not src.is_file():
+                continue
+            with open(src, "rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, size - _LOG_KEEP_TAIL_BYTES))
+                (dest / name).write_bytes(fh.read())
+    except OSError as exc:
+        _log.warning("substrate_log_keep_failed", dest=str(dest), error=repr(exc), bead="nexus-ww33u")
+        return None
+    return dest
 
 
 def _teardown() -> None:
@@ -2247,6 +2291,7 @@ def _teardown() -> None:
          "stop", "-m", "immediate"],
         capture_output=True,
     )
+    preserve_logs()  # both processes are down, so each log is complete
     shutil.rmtree(_state["pgdata"], ignore_errors=True)
     _state = None
 

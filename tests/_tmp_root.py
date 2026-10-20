@@ -46,14 +46,15 @@ reports into the controller's basetemp by default, after the session finishes. T
 run dir therefore goes in ``pytest_unconfigure`` (after the terminal summary), and
 just before it the controller basetemp's top-level ``nx-*`` files are copied to
 ``<original tempdir>/nexus-test-reports-<uid>/<run>`` (newest three kept, like
-pytest's basetemp retention); their summary lines print that copy's path
+pytest's basetemp retention, plus the newest :data:`FAILED_KEEP` failed runs); their summary lines print that copy's path
 (:func:`kept_report_path`), not the tmpfs path that is gone by the time anyone reads
 the line. A run that sets ``NX_DDL_REPORT_DIR`` or ``NX_STORAGE_TOUCH_REPORT_DIR``
 keeps writing where it said.
 
 A run that EXITS NON-ZERO also copies its failure evidence into
 ``<report home>/failed/`` before the run dir goes (:func:`copy_failure_evidence`): the
-engine logs (``nexus-svc-*``), the ``tmp_path`` trees of the failed tests (found by
+engine logs (``nexus-svc-*``; an xdist worker's substrate copies its engine.log and pg.log
+there before its exit-time teardown, ``tests._engine_substrate.preserve_logs``), the ``tmp_path`` trees of the failed tests (found by
 name from the failed node ids, controller and xdist workers alike), up to
 :data:`FAILURE_COPY_CAP_BYTES`, and a ``SUMMARY.txt`` naming what was kept and what the
 cap skipped; ``NX_KEEP_FENCED_HOME`` also copies the fenced home (uncapped: the operator
@@ -111,6 +112,9 @@ _OWNER_FILE = "owner.json"
 BARE_MIN_AGE_S = 600.0
 #: Runs of ``nx-*`` report files kept on disk (as pytest keeps three basetemps).
 REPORT_KEEP = 3
+#: Failed runs kept besides those, so a failure's evidence outlives the next few clean runs
+#: (nexus-ww33u: one prune for both let three passing runs delete it).
+FAILED_KEEP = 5
 _REPORT_DIR_PREFIX = "nexus-test-reports"
 #: The cluster root's floors, reused so the two decisions cannot disagree.
 MIN_FREE_BYTES = sub._TMPFS_MIN_FREE_BYTES
@@ -620,6 +624,9 @@ class TmpRootPlugin:
         #: node ids that reported a failure; a failed run's evidence is copied from them.
         self.exitstatus: int | None = None
         self.failed_nodeids: list[str] = []
+        #: The session, kept from sessionfinish: a conftest guard can set its exitstatus after
+        #: this plugin's sessionfinish ran, so unconfigure reads the final value from it.
+        self._session = None
         #: What the failed-run copy kept or skipped (see :func:`copy_failure_evidence`).
         self.evidence_notes: list[str] = []
         self._orig_tempdir = sub._original_tempdir()
@@ -704,6 +711,7 @@ class TmpRootPlugin:
     def pytest_sessionfinish(self, session, exitstatus) -> None:  # noqa: ANN001
         if self.decided:
             self.exitstatus = int(exitstatus)
+            self._session = session
 
     @property
     def failed_run(self) -> bool:
@@ -751,6 +759,10 @@ class TmpRootPlugin:
             for f in files:
                 shutil.copy2(f, dest / f.name)
             if failed:
+                # A substrate this process booted is still up (its teardown is atexit): keep its
+                # logs where the copy looks (nexus-ww33u). Workers did theirs at exit.
+                with contextlib.suppress(Exception):
+                    sub.preserve_logs()
                 self.evidence_notes = copy_failure_evidence(
                     self.run, dest / FAILED_SUBDIR, self.failed_nodeids,
                     exitstatus=int(self.exitstatus or 0),
@@ -760,7 +772,9 @@ class TmpRootPlugin:
                 (d for d in dest.parent.iterdir() if d.is_dir() and not d.is_symlink()),
                 key=lambda d: d.stat().st_mtime, reverse=True,
             )
-            for old in kept[REPORT_KEEP:]:
+            with_evidence = [d for d in kept if (d / FAILED_SUBDIR).is_dir()]
+            reports_only = [d for d in kept if d not in with_evidence]
+            for old in (*reports_only[REPORT_KEEP:], *with_evidence[FAILED_KEEP:]):
                 _rm_tree(old)
         except OSError as exc:
             warnings.warn(f"nexus test tmp: could not keep the run's reports under {dest}: {exc}", stacklevel=2)
@@ -775,6 +789,9 @@ class TmpRootPlugin:
             return
         bt = getattr(getattr(config, "_tmp_path_factory", None), "_basetemp", None)
         self._basetemp = Path(bt) if bt is not None else None
+        final = getattr(self._session, "exitstatus", None)
+        if final is not None:
+            self.exitstatus = int(final)
         self._harvest()
         _rm_tree(self.run)
         env = self._env

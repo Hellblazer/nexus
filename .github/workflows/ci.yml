@@ -1003,6 +1003,19 @@ jobs:
           # A re-run of all jobs keeps the first attempt's artifacts under the same names.
           overwrite: true
 
+      # nexus-ww33u: a failed pool shard copies its evidence (engine and pg log tails, the failed
+      # tests' tmp_path trees, SUMMARY.txt) under its original tempdir, $RUNNER_TEMP/tmp, which is
+      # deleted with the job (tests/_tmp_root.py). Upload it so a load-dependent red can be read
+      # after the job; nothing is there on a hosted runner or a passing shard.
+      - name: Upload a failed shard's evidence (pool only)
+        if: failure() && runner.environment == 'self-hosted'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: failed-evidence-shard-${{ matrix.shard }}-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/tmp/nexus-test-reports-*/*/failed
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Remove the bytecode prefix (pool only; nexus-m643n)
         # Last step, if: always(): the /dev/shm pages are charged to this job's
         # grant and outlive it otherwise. Removes only a directory this job's
