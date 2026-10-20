@@ -20,10 +20,12 @@
 #
 # "measure" means no full-run measurement exists yet. The fan-in then fails and prints the number
 # to commit (a ceiling nobody set must not pass a run). The follow-up commit after the next full
-# chas run (every report from ONE run, NX_STORAGE_TOUCH_SWEEP=1) replaces each "measure" with that
-# total. No CI leg runs the fan-in yet. A shard (about 5600 tests) now asks the whole-run checks by
-# itself above the collected-count floor in tests/_storage_touch_guard.py (SWEEP_AUTO_FLOOR), so its report
-# already counts as a whole-run one for the fan-in; the docs-readers leg (1561) is below the floor and still needs
+# chas run (every report from ONE run, NX_STORAGE_TOUCH_SWEEP=1 with NX_STORAGE_TOUCH_GUARD_MODE=report:
+# a fail-mode full run exits non-zero on the known late child touches) replaces each "measure" with that
+# total. No CI leg runs the fan-in yet. A run that pytest-split is splitting (a CI shard, whatever
+# its size) or that collects at least SWEEP_AUTO_FLOOR tests (tests/_storage_touch_guard.py) turns the
+# whole-run checks on by itself, as advice only, and its report says sweep=true, so the fan-in
+# accepts it as a whole-run one; the docs-readers leg (1561) is neither split nor above the floor and still needs
 # the sweep switch exported on that leg (a CI change, left to nexus-0ite2's follow-up).
 # Earlier per-shard measurements, chas lab-m, 55c082c63, for orientation only (2 of 6 shards):
 #   shard1 409 of 5692, shard4 868 of 5615, docs-readers 581 of 1561.

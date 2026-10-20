@@ -340,7 +340,9 @@ A thread or child that touches storage after its test finished prints a yellow l
 warning naming that test and does not change the exit status of a scoped run (whether it lands is
 thread timing); a run that set `NX_STORAGE_TOUCH_SWEEP=1` (below) fails on it. Join it inside the test.
 A thread-pool worker (`ThreadPoolExecutor`, `multiprocessing.pool.ThreadPool`) outlives the test that
-created it, so its touch is charged to the test that was running, never to the creator.
+created it, so its touch is charged to the test that was running, never to the creator. A pool worker
+that touches while no test is running is a late touch, owned by the test that created the worker
+(`<no test running>` when it was created outside any test); it is never dropped.
 
 Tests marked `integration`, `slow` or `lint` keep a tenant per test: the default selection
 deselects them, so no census has said which of them touch storage.
@@ -351,12 +353,16 @@ deselects them, so no census has said which of them touch storage.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
   some touch event, and Python children that were spawned reached the shim: `children_seen` must be
   non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet below;
-  set it on a full-suite run, not a scoped one. A run that collects at least `SWEEP_AUTO_FLOOR` (4000,
-  `tests/_storage_touch_guard.py`) tests asks them by itself, so a CI shard (about 5600 tests) does
-  without the variable and the docs-readers leg (1561) and any one-directory run do not;
-  `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. An explicit sweep also fails on a late touch;
-  one by size prints it (a full run had 5 late child touches on 2026-10-19); a scoped run whose Python children never reached the shim prints a yellow warning
-  instead of a verdict.
+  set it on a full-suite run, not a scoped one. A run that pytest-split is splitting (`--splits`: a CI
+  shard, whatever its size) or that collects at least `SWEEP_AUTO_FLOOR` (4000,
+  `tests/_storage_touch_guard.py`) tests asks them by itself, so a CI shard needs no variable; the
+  docs-readers leg (1561, not split) and any one-directory run do not;
+  `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic run is advisory**: whatever the
+  shape checks or the late-touch check find is a yellow warning with the test names (and a `warnings`
+  entry in the report), never a `vacuity` entry, so it cannot change the exit status; its report still
+  says `sweep: true` so the fan-in accepts it. Only an explicit `NX_STORAGE_TOUCH_SWEEP=1` run fails on
+  them, late touch included (a full run had 5 late child touches on 2026-10-19). A scoped run whose
+  Python children never reached the shim prints a yellow warning instead of a verdict.
 - **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
   tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
   `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in
@@ -368,8 +374,9 @@ deselects them, so no census has said which of them touch storage.
   `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
   Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
   prints the number to commit. **No CI leg runs the fan-in yet, and both ceilings are still `"measure"`**:
-  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1` supplies the number. A shard's report is already a
-  whole-run one by size; the docs-readers leg still needs the variable exported. Marks only get added, so when the count rises, drop marks a test
+  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_GUARD_MODE=report` supplies the number
+  (in fail mode that run exits non-zero on the known late child touches). A split shard's report is
+  already a whole-run one; the docs-readers leg still needs the variable exported. Marks only get added, so when the count rises, drop marks a test
   no longer needs before raising the ceiling.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`

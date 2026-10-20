@@ -221,8 +221,9 @@ def test_an_existing_pytestmark_is_extended_not_replaced(tmp_path: pathlib.Path,
 @pytest.mark.parametrize("existing", [
     "pytestmark = [pytest.mark.integration, pytest.mark.slow]\n",
     "pytestmark = (pytest.mark.integration, pytest.mark.slow)\n",
-], ids=["list", "tuple"])
-def test_a_list_or_tuple_pytestmark_is_marked_once_and_a_rerun_adds_nothing(
+    "pytestmark = pytest.mark.integration\n",
+], ids=["list", "tuple", "single"])
+def test_a_list_tuple_or_single_pytestmark_is_marked_once_and_a_rerun_adds_nothing(
     tmp_path: pathlib.Path, existing: str,
 ) -> None:
     """The list form gets ``pytestmark = [*pytestmark, MARK]`` on a SECOND line; the

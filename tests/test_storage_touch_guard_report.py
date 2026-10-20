@@ -1595,40 +1595,59 @@ def test_c():
 '''
 
 
-def test_a_run_at_or_above_the_collected_floor_asks_the_whole_run_checks_by_itself(pytester, monkeypatch) -> None:
+def test_a_run_at_or_above_the_collected_floor_asks_the_whole_run_checks_but_only_warns(pytester, monkeypatch) -> None:
     """No ``NX_STORAGE_TOUCH_SWEEP``: the count of collected tests decides. Three
     clean tests under a floor of three hold no provisioned one and no touch event, so
-    the sweep checks (which only a whole run is asked) refuse it; two do not."""
-    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "3")
-    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=False)
-    assert_session_failed_for(result, "vacuous sweep: provisioned=0", "vacuous sweep: touch_events=0")
+    the shape checks have something to say, and an automatic run says it as a yellow
+    warning and a ``warnings`` entry: it never changes the exit status and never lands in
+    ``vacuity`` (only an explicit ``NX_STORAGE_TOUCH_SWEEP=1`` gates on them). Two tests
+    do not reach the floor and hold no warning."""
+    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=False, floor=3, args=("--color=yes",))
+    assert result.ret == 0
     report = _report(result)
     assert report["sweep"] is True and report["sweep_auto"] is True
-    below = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY.rsplit("def test_c", 1)[0], mode="fail", sweep=False)
+    assert report["vacuity"] == []
+    for name in ("provisioned", "touch_events"):
+        assert f"vacuous sweep: {name}=0" in "".join(report["warnings"])
+        line = next(ln for ln in result.stdout.str().splitlines() if f"vacuous sweep: {name}=0" in ln)
+        assert "\x1b[33m" in line, line  # yellow, not red
+    below = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY.rsplit("def test_c", 1)[0], mode="fail", sweep=False, floor=3)
     assert below.ret == 0 and "vacuous sweep" not in below.stdout.str()
     assert (_report(below)["sweep"], _report(below)["sweep_auto"]) == (False, False)
+    assert _report(below)["warnings"] == []
 
 
 def test_the_explicit_switch_still_asks_the_whole_run_checks_of_a_small_run(pytester, monkeypatch) -> None:
-    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "100000")
-    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=True)
+    result = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=True, floor=100000)
     assert_session_failed_for(result, "vacuous sweep: provisioned=0")
     report = _report(result)
     assert report["sweep"] is True and report["sweep_auto"] is False
+    assert any("vacuous sweep: provisioned=0" in p for p in report["vacuity"])
 
 
-def test_the_floor_sits_between_the_docs_readers_leg_and_a_ci_shard() -> None:
-    """A CI shard (about 5600 tests in tests/storage_touch_ceiling.toml, 6 shards) must
-    qualify, so its report is a whole-run one for the fan-in; the docs-readers leg (1561
-    lint-marked tests, nothing unprovisioned among them) and any one-directory run must not."""
+def test_a_run_pytest_split_is_splitting_is_a_whole_run_report_whatever_its_size(pytester, monkeypatch) -> None:
+    """A CI shard is one ``--splits N --group K`` slice of the suite, and a slice can
+    collect fewer tests than any size floor (shard 2 of the committed split collects
+    3040), so the split option decides, not the count. The default floor stays: the same
+    three tests without a split are not a whole run."""
+    split = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=False, args=("--splits", "2", "--group", "1"))
+    assert split.ret == 0
+    report = _report(split)
+    assert report["sweep"] is True and report["sweep_auto"] is True and report["collected"] < 4000
+    whole = _run(pytester, monkeypatch, _WHOLE_RUN_SHAPE_BODY, mode="fail", sweep=False)
+    assert (_report(whole)["sweep"], _report(whole)["sweep_auto"]) == (False, False)
+
+
+def test_the_unsplit_floor_stays_above_the_docs_readers_leg() -> None:
+    """The docs-readers leg collects 1561 tests, all lint-marked, with nothing
+    unprovisioned among them; an unsplit run that large must not ask the whole-run checks."""
     from tests._storage_touch_guard import SWEEP_AUTO_FLOOR
 
     assert 1561 < SWEEP_AUTO_FLOOR <= 5000
 
 
 def test_a_malformed_floor_is_a_usage_error(pytester, monkeypatch) -> None:
-    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "lots")
-    result = _run(pytester, monkeypatch, "def test_x():\n    pass\n", mode="fail", sweep=False)
+    result = _run(pytester, monkeypatch, "def test_x():\n    pass\n", mode="fail", sweep=False, floor="lots")
     assert_session_failed_for(result, "NX_STORAGE_TOUCH_SWEEP_FLOOR")
 
 
@@ -1699,8 +1718,8 @@ def start():
 def test_a_late_touch_fails_a_sweep_and_stays_a_warning_otherwise(pytester, monkeypatch) -> None:
     """Whether a late touch lands is thread timing, so a scoped run only prints it. A
     run that explicitly asked the whole-run checks gates on it: the sweep is the run that
-    is meant to leave nothing unexamined. A run that qualified by size alone (a CI shard)
-    prints it and passes. The body is otherwise a clean
+    is meant to leave nothing unexamined. A run that turned the checks on by itself (a
+    split shard, a large run) prints it, naming the test, and passes. The body is otherwise a clean
     sweep (a provisioned test, a clean one, a touch event), so the late touch is the reason."""
     pytester.makepyfile(leak=_LEAK)
     scoped = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=False)
@@ -1712,12 +1731,14 @@ def test_a_late_touch_fails_a_sweep_and_stays_a_warning_otherwise(pytester, monk
     assert any("late storage touch" in p for p in report["vacuity"])
     assert "vacuous sweep" not in "".join(report["vacuity"])
     # the same body by size, with no switch: the shape checks run, the late touch only prints
-    monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", "3")
-    by_size = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=False)
+    by_size = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="fail", sweep=False, floor=3)
     by_size.assert_outcomes(passed=3)
     size_report = _report(by_size)
     assert by_size.ret == 0 and size_report["sweep_auto"] is True
     assert size_report["vacuity"] == [] and any("late storage touch" in w for w in size_report["warnings"])
+    # and the terminal summary names the leaking test, not only the counts line
+    printed = [ln for ln in by_size.stdout.str().splitlines() if "late storage touch" in ln]
+    assert printed and "test_inner.py::test_1_leaks_a_thread" in printed[0], by_size.stdout.str()
     # report mode prints it and never changes the exit status
     reported = _run(pytester, monkeypatch, _LATE_THREAD_WITH_A_CLEAN_SHAPE, mode="report", sweep=True)
     assert reported.ret == 0 and "late storage touch" in reported.stdout.str()
@@ -1792,3 +1813,57 @@ def test_which_threads_are_pool_workers() -> None:
         tp.join()
     assert not _is_pool_worker(threading.Thread(target=lambda: None))
     assert not _is_pool_worker(threading.current_thread())
+
+
+_POOL_LEAK = '''
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from helpers import touch_storage_and_swallow
+
+GO = threading.Event()
+DONE = threading.Event()
+POOL = ThreadPoolExecutor(max_workers=1)
+
+def _task():
+    GO.wait(30)
+    touch_storage_and_swallow()
+    DONE.set()
+
+def submit_blocked():
+    return POOL.submit(_task)
+'''
+
+# runs after the named test's teardown has been recorded, so no test is running when the pool touches
+_RELEASE_AFTER_TEST_1 = '''
+import leak
+
+def pytest_runtest_logfinish(nodeid, location):
+    if nodeid.endswith("::test_1"):
+        leak.GO.set()
+        assert leak.DONE.wait(30)
+'''
+
+
+@pytest.mark.parametrize("created_in_a_test,owner", [
+    (True, "test_inner.py::test_1"),
+    (False, "<no test running>"),
+], ids=["creator-known", "creator-unknown"])
+def test_a_pool_worker_touching_between_tests_is_a_late_touch_not_a_dropped_one(
+    pytester, monkeypatch, created_in_a_test: bool, owner: str,
+) -> None:
+    """With no test running there is no test to charge a pool worker's touch to. It
+    was dropped; it is a late touch now, owned by the test that created the worker, or
+    by ``<no test running>`` when the worker was created outside any test."""
+    pytester.makepyfile(leak=_POOL_LEAK, gate_plugin=_RELEASE_AFTER_TEST_1)
+    pytester.syspathinsert()
+    if created_in_a_test:
+        body = "import leak\n\ndef test_1():\n    leak.submit_blocked()\n\ndef test_2():\n    pass\n"
+    else:
+        body = "import leak\nleak.submit_blocked()\n\ndef test_1():\n    pass\n\ndef test_2():\n    pass\n"
+    result = _run(pytester, monkeypatch, body, mode="report", sweep=False, args=("-p", "gate_plugin"))
+    result.assert_outcomes(passed=2)
+    report = _report(result)
+    assert report["findings"] == []
+    (late,) = report["late_thread_touches"]
+    assert late["nodeid"].endswith(owner) and late["running"] is None
+    assert "late storage touch" in result.stdout.str()

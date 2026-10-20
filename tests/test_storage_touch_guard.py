@@ -67,11 +67,13 @@ def touch_t1_and_swallow():
 def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
          *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = (),
          extra: dict[str, str] | None = None, substrate: str | None = "",
-         sweep: bool = True):
+         sweep: bool = True, floor: int | str | None = None):
     """Run ``body`` in a nested session. ``substrate`` names ``NX_TEST_T2_SUBSTRATE``
     (None leaves it unset: the default); by default ``optin`` picks ``optin`` and
     not ``optin`` picks ``per-test``, the escape hatch the guard is inert under.
-    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks."""
+    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks.
+    ``NX_STORAGE_TOUCH_SWEEP_FLOOR`` is deleted unless ``floor`` names it, so a floor
+    exported in the outer environment cannot turn a ``sweep=False`` run into a swept one."""
     if substrate == "":
         substrate = "optin" if optin else "per-test"
     if substrate is None:
@@ -82,6 +84,10 @@ def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
         monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP", "1")
     else:
         monkeypatch.delenv("NX_STORAGE_TOUCH_SWEEP", raising=False)
+    if floor is None:
+        monkeypatch.delenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", raising=False)
+    else:
+        monkeypatch.setenv("NX_STORAGE_TOUCH_SWEEP_FLOOR", str(floor))
     if mode:
         monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", mode)
     else:
