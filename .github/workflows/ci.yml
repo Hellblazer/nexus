@@ -1060,6 +1060,7 @@ jobs:
     # 6.8 to 9.6 min measured on develop 2026-09-26; runs 36268338775 and 36273704547 hit 10.
     # 2026-10-14: a08876f28's run hit 15 with all 1374 tests passed (tests alone 14:40) and its
     # rerun took 14:00, so the ceiling is 25 (nexus-2ziaz, folded in for nexus_637's ox0c0 work).
+    # Those are serial figures; since nexus-0h5a7 the job runs at -n 4 (lower this after a measured run).
     timeout-minutes: 25
     env:
       # nexus-wixar (2026-08-18): this job provisions NO service jar (by
@@ -1135,20 +1136,23 @@ jobs:
         # The non-vacuity floor below does not cover it: it asks whether
         # enough tests PASSED, which a pipefail-less tee would not make fatal.
         # nexus-0h5a7: this job is develop CI's critical path (19-24 min serial on the hosted 4-vCPU runner,
-        # while the shard matrix ends by 12-14 min), so it runs under xdist on the same runner: no extra
-        # runner and no pool capacity. The whole lint selection is xdist-clean (`pytest -m lint -n 4`,
-        # ~2.1k tests in about 4 min on a dev laptop, repeatedly, 2026-10-20).
+        # and job 119003409658 on 2026-10-21 was cancelled at the 25-min timeout, while the shard matrix
+        # ends by 12-14 min), so it runs under xdist on the same runner: no extra runner and no pool
+        # capacity. -n 4 is explicit because -n auto counts physical cores (psutil), likely 2 here. The
+        # lint selection is xdist-clean on a dev laptop (2154 passed in ~3.3 min at -n 8, 2026-10-21);
+        # the hosted wall time is unmeasured until the first run.
         run: |
           set -euo pipefail
-          uv run pytest -m lint -q -n auto | tee lint-output.txt
+          uv run pytest -m lint -q -n 4 | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
         # pytest failure) and reported SUCCESS on real CI -- the exact
         # vacuous-gate class this step exists to make structurally
         # impossible, not just less likely. Reads the PASSED count off
-        # pytest's own final summary line; the corpus is ~830 tests, so 400
-        # leaves headroom for shrinkage and still fails the bug's signature.
+        # pytest's own final summary line; the corpus was ~830 tests when this
+        # floor was set (about 2.1k on 2026-10-21), so 400 still fails the
+        # bug's signature (a near-total mass skip).
         run: |
           set -euo pipefail
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)" || summary=""
