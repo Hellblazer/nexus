@@ -36,7 +36,9 @@ import math
 import os
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any, NoReturn
@@ -603,16 +605,70 @@ def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> N
         manager.clear_remint_futile(base_url, tenant)
 
 
+#: RDR-222 Phase 1 (nexus-yye8l.11): the request key a keyed call wants sent as
+#: ``Idempotency-Key``. A thread-local for the reason :data:`_response_header_capture` is one, in
+#: the request direction: ``_request_once`` and ``_post`` take no new parameter (222-research-11),
+#: and the many test doubles that replace them keep their exact shape. It is set by
+#: :func:`_request_key` immediately before ONE POST attempt and cleared in a ``finally`` right
+#: after it, so the status-poll GETs a keyed method makes between attempts carry no key
+#: (nexus-zxgld gap 6). It is never set in ``_post``/``_request``/``_request_once``:
+#: ``_vector_with_retry`` and ``write_with_registration_retry`` re-invoke ``_post`` for each
+#: attempt, so a key minted there would change per attempt and defeat the design.
+_request_key_capture = threading.local()
+
+#: Response headers the keyed-request protocol reads (nexus-zxgld gap 3), captured on every
+#: response, 2xx or not: a keyed method reads ``Retry-After`` off a 409 or a 503, which reach it
+#: as an exception.
+_IDEMPOTENCY_RESPONSE_HEADERS: tuple[str, ...] = (
+    "Idempotency-Key", "Idempotency-Replayed", "Retry-After",
+)
+
+
+def new_request_key() -> str:
+    """A fresh request key. ``uuid4``, not UUIDv7: ``uuid.uuid7`` is Python 3.14 and
+    ``requires-python`` is ``>=3.12,<3.14`` (nexus-icdmw item 4). The engine reads any canonical UUID."""
+    return str(uuid.uuid4())
+
+
+@contextmanager
+def _request_key(key: str) -> Iterator[None]:
+    """Send *key* as ``Idempotency-Key`` on the requests made inside the block, then clear it.
+    Wrap ONE ``_post`` attempt, never a whole keyed method."""
+    _request_key_capture.value = key
+    try:
+        yield
+    finally:
+        _request_key_capture.value = None
+
+
 def _stash_response_headers(headers: object) -> None:
     """Best-effort: called from :func:`_request_once` right after a
-    successful response. Never raises -- header capture is a caller-
-    visibility nicety, not a correctness requirement, and must never be
-    the reason a real read fails."""
+    response, a 2xx and (RDR-222) a non-2xx alike. Never raises -- header
+    capture is a caller-visibility nicety, not a correctness requirement,
+    and must never be the reason a real read fails. Captures
+    ``X-Nexus-Skipped-Collections`` (:func:`_pop_response_headers`) and the
+    three request-identity headers (:func:`_pop_idempotency_response_headers`);
+    each call overwrites all of them, so none is ever stale."""
     try:
         value = headers.get("X-Nexus-Skipped-Collections")  # type: ignore[attr-defined]
+        identity = {
+            name: headers.get(name)  # type: ignore[attr-defined]
+            for name in _IDEMPOTENCY_RESPONSE_HEADERS
+        }
     except Exception:  # noqa: BLE001 — best-effort; see docstring
         return
     _response_header_capture.skipped_collections = value
+    _response_header_capture.idempotency = {k: v for k, v in identity.items() if v}
+
+
+def _pop_idempotency_response_headers() -> dict[str, str]:
+    """The request-identity headers (``Idempotency-Key``, ``Idempotency-Replayed``,
+    ``Retry-After``) of this thread's MOST RECENT response that carried any, then clear -- a pop,
+    like :func:`_pop_response_headers`. A keyed method pops once before an attempt (to clear a
+    stale capture: a socket timeout leaves no response to overwrite it) and reads after."""
+    value = getattr(_response_header_capture, "idempotency", None) or {}
+    _response_header_capture.idempotency = {}
+    return dict(value)
 
 
 def _pop_response_headers() -> dict[str, str]:
@@ -689,6 +745,11 @@ def _request_once(
     deadline_ms = _request_deadline_ms_for(path)
     if deadline_ms is not None:
         headers[_REQUEST_DEADLINE_HEADER] = str(deadline_ms)
+    # RDR-222 Phase 1 (nexus-yye8l.11): the key of a keyed POST attempt, set by _request_key. Absent
+    # for every other call, which sends exactly what it always sent.
+    request_key = getattr(_request_key_capture, "value", None)
+    if request_key:
+        headers["Idempotency-Key"] = request_key
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -724,6 +785,8 @@ def _request_once(
         # normal-return path is ever reached.
         if exc.code != 401:
             _note_data_token_response(base_url, tenant, exc.code)
+        # RDR-222: a keyed method reads Retry-After / Idempotency-* off a 409 or a 503.
+        _stash_response_headers(exc.headers)
         raise
 
 
