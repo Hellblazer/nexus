@@ -1803,7 +1803,9 @@ Two dispositions, per row:
 
 - **ghosts** — collections nothing references any more (no live row in any
   non-audit `COLLECTION_SCOPED_TABLES` entry). `--apply` physically deletes
-  the registry row.
+  the registry row. A rename's retired row whose successor is still registered
+  is a live redirect, not a ghost: it is left unchanged (counted in `scanned`
+  only); one whose successor is gone is a ghost (nexus-s80u9).
 - **referenced-but-empty (marked dormant)** — collections still referenced
   somewhere but with no `collection_vector_stats` row (nothing to embed or
   read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is

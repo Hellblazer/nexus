@@ -692,8 +692,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Deleting an origin also deletes its rows in its ``quarantine-`` siblings
         (``quarantine_chunks`` in the result; one gc_audit row per sibling).
         ``keep_quarantine=True`` (nexus-wbfpw.71) leaves them, for a caller that
-        re-registers the SAME name straight away (``nx collection reindex``); the
-        field is only sent when true, so an older engine and an older client see
+        re-registers the SAME name straight away (``nx collection reindex``), and
+        also keeps the empty retired rows that name *name* as successor (rename
+        redirects, nexus-s80u9); the field is only sent when true, so an older engine and an older client see
         no change. For a ``quarantine-*`` name the field is ignored and
         ``quarantine_chunks`` is the rows that collection held.
 

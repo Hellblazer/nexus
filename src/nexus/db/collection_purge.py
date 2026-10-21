@@ -89,7 +89,8 @@ def purge_collection_cascade(
     it (audited, nexus-wbfpw.71). ``keep_quarantine=True`` asks it not to: for
     a caller that re-registers the SAME name straight away
     (``nx collection reindex``), where taking the rows would destroy
-    restorable data for nothing.
+    restorable data for nothing. It also keeps the empty retired rows that
+    name the collection as successor (rename redirects, nexus-s80u9).
     """
     counts = CascadeCounts()
 
