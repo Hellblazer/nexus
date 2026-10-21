@@ -120,13 +120,17 @@ def merge_durations(directory: Path, shards: int) -> tuple[list[str], dict[str, 
     for path in sorted(directory.rglob(DURATIONS_NAME)):
         siblings = sorted(path.parent.glob(REPORT_GLOB))
         try:
-            group = json.loads(siblings[0].read_text()).get("group") if siblings else None
+            sibling = json.loads(siblings[0].read_text()) if siblings else {}
             seconds = json.loads(path.read_text())
         except (OSError, ValueError) as exc:
             problems.append(f"{path}: unreadable ({exc})")
             continue
+        group = sibling.get("group")
         if group is None:
             problems.append(f"{path}: no collection report beside it names its group")
+        elif len(seconds) != sibling.get("selected"):
+            # A green shard times every test it kept; fewer means the file is not that run's.
+            problems.append(f"group {group}: {len(seconds)} durations for {sibling.get('selected')} tests kept ({path})")
         elif group in groups:
             problems.append(f"group {group}: more than one durations file ({path})")
         else:

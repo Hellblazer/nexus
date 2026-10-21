@@ -215,6 +215,17 @@ def test_durations_are_written_only_from_a_whole_checked_run(tmp_path: Path) -> 
     assert target.read_text() == '{"x": 1.0}', "a failed check leaves the file unchanged"
 
     _write(reports, 2, IDS, IDS[1::3])
+    _durations(reports, 3, {})
+    assert sc.merge_durations(reports, 3)[0][0].startswith("group 3: 0 durations for 4 tests kept")
+    _durations(reports, 3, {i: 2.5 for i in IDS[2::3]})
+    twin = reports / "ddl-report-shard-3-again"
+    twin.mkdir()
+    (twin / "nx-shard-collection-gw0.json").write_text((reports / "ddl-report-shard-3" / "nx-shard-collection-gw0.json").read_text())
+    (twin / sc.DURATIONS_NAME).write_text(json.dumps({i: 2.5 for i in IDS[2::3]}))
+    assert any("more than one durations file" in p for p in sc.merge_durations(reports, 3)[0])
+    for f in twin.iterdir():
+        f.unlink()
+    twin.rmdir()
     (reports / "stray").mkdir()
     (reports / "stray" / sc.DURATIONS_NAME).write_text("{}")
     assert any("no collection report beside it" in p for p in sc.merge_durations(reports, 3)[0])
@@ -222,3 +233,20 @@ def test_durations_are_written_only_from_a_whole_checked_run(tmp_path: Path) -> 
     assert sc.main([str(reports), "--shards", "3", "--write-durations", str(target)]) == 0
     assert json.loads(target.read_text()) == {"x": 1.0, **{i: 1.5 for i in IDS[0::3] + IDS[1::3]},
                                               **{i: 2.5 for i in IDS[2::3]}}
+
+
+def test_a_tests_duration_is_its_setup_call_and_teardown(pytester: pytest.Pytester, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorded seconds sum the three phases, as pytest-split's --store-durations does (nexus-zkr7q)."""
+    pytester.makepyfile(test_slow_fixture=(
+        "import time, pytest\n\n"
+        "@pytest.fixture\ndef slow():\n    time.sleep(0.3)\n    yield\n    time.sleep(0.3)\n\n"
+        "def test_a(slow):\n    time.sleep(0.3)\n"
+    ))
+    pytester.makeconftest("pytest_plugins = ['tests._shard_collection_plugin']\n")
+    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.setenv("NX_DDL_REPORT_DIR", str(tmp_path))
+    pytester.runpytest_subprocess("--splits", "1", "--group", "1").assert_outcomes(passed=1)
+    seconds = json.loads((tmp_path / sc.DURATIONS_NAME).read_text())
+    assert list(seconds) == ["test_slow_fixture.py::test_a"] and seconds["test_slow_fixture.py::test_a"] >= 0.9, seconds
