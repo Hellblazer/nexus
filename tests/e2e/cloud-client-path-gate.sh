@@ -179,13 +179,18 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      checks, and the leg FAILS CLOSED on both: (N1) /v1/status (the body leg B fetched) must not report
 #      test_tenant_reset_route=true; the key is always present on an engine that has the route and omitted by one
 #      that predates it, so absent and false pass; it is on /v1/status because the conexus image smoke fails on any
-#      /version key outside the public contract. (N2) an UNAUTHENTICATED POST of the body {} to
-#      /v1/_test/tenant-reset through the edge must answer 404 (an engine that does not register the route has no
-#      context for it). A registered route answers 401 from the engine's auth filter; any other status (an edge
-#      403, a 5xx, a curl failure) is a violation too, because an absent key and a status that cannot be read as
-#      "no such route" must never read as "the route is not there". Read-only by construction: no bearer is sent,
-#      so a registered route refuses before it looks at the body. Pinned by the structural audit in
-#      tests/e2e/cloud_client_path_gate_b3_test.sh.
+#      /version key outside the public contract. (N2) a POST of the body {} to /v1/_test/tenant-reset through the
+#      edge, with the leg-B data bearer (the one legs K, L and M send), must answer 404 (an engine that does not
+#      register the route has no context for it). The probe carries the bearer because the edge answers an
+#      UNAUTHENTICATED /v1 request with 403 whether or not the route exists (leg B1 measures that for /health), so
+#      an unauthenticated probe would read 403 on every healthy engine. A registered route answers 403 (the
+#      bearer is not the root token), 400 (root, no tenant in the body) or 503 (NX_SEARCH_PCI=1); every other
+#      status (an auth 401, a 200, a 5xx, a curl failure) is a violation too, because a status that cannot be read
+#      as "no such route" must never read as "the route is not there". Read-only by construction: the body {} has
+#      no tenant, so a registered route refuses it before any eviction (TenantResetHandler.handle, lines 72-90 of
+#      service/src/main/java/dev/nexus/service/http/TenantResetHandler.java: 403 non-operator, 503 PCI, 400 from
+#      requestedTenant at 86-90, and the eviction loop only at 99). Leg N fails closed with no bearer, as K, L and
+#      M do. Pinned by the structural audit in tests/e2e/cloud_client_path_gate_b3_test.sh.
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
@@ -720,26 +725,34 @@ sys.exit(1)
 PY
 }
 
-# _tenant_reset_probe_verdict <http-code> <body>: the status of an UNAUTHENTICATED POST of {} to
-# /v1/_test/tenant-reset through the edge. 404 -> 0 (no such route). 401 -> 1: the engine's auth filter answered, so
-# the route is REGISTERED. Every other status -> 1 (an edge 403, a 5xx, a curl failure 000, an unexpected 200/400):
-# it cannot be read as "no such route", and a test-only route that is not shown absent is treated as present.
+# _tenant_reset_probe_verdict <http-code> <body>: the status of a POST of {} to /v1/_test/tenant-reset through the
+# edge WITH the leg-B data bearer. 404 -> 0 (no such route). 403, 400 and 503 -> 1: the engine's own refusals
+# (non-operator, no tenant in the body, NX_SEARCH_PCI=1), so the route is REGISTERED (a 403 could also be an edge
+# refusal of the path, which still does not show absence). Every other status -> 1 (a 401 the bearer should not
+# draw, a 200, a 405, a 5xx, a curl failure 000, an empty code): it cannot be read as "no such route", and a
+# test-only route that is not shown absent is treated as present. The body {} names no tenant, so none of these
+# evicts anything (TenantResetHandler.handle: operator and PCI guards at 72-83, 400 from requestedTenant at 86-90,
+# eviction loop at 99).
 _tenant_reset_probe_verdict() {
     "$E2E_PYTHON" - "$1" "$2" <<'PY'
 import sys
 
 code, body = sys.argv[1:3]
 head = body[:160].replace("\n", " ")
+what = "a POST of {} with the leg-B bearer to /v1/_test/tenant-reset"
 if code == "404":
-    print("ok [N2]: an unauthenticated POST to /v1/_test/tenant-reset answers 404: no such route on this engine")
+    print("ok [N2]: %s answers 404: no such route on this engine" % what)
     sys.exit(0)
-if code == "401":
-    print("N2: an unauthenticated POST to /v1/_test/tenant-reset answers 401 (body: %r): the engine's auth filter "
-          "answered, so the route is REGISTERED; NX_TEST_TENANT_RESET_ROUTE must never be set on the cloud engine" % (head,))
+if code in ("403", "400", "503"):
+    why = {"403": "the operator-only refusal (or an edge refusal of the path)",
+           "400": "the missing-tenant refusal of an operator request",
+           "503": "the NX_SEARCH_PCI=1 refusal"}[code]
+    print("N2: %s answers %s (body: %r): %s, so the route is REGISTERED; NX_TEST_TENANT_RESET_ROUTE must never be set "
+          "on the cloud engine" % (what, code, head, why))
     sys.exit(1)
-print("N2: an unauthenticated POST to /v1/_test/tenant-reset answers HTTP %s (body: %r), not the 404 of an absent route: "
-      "the route's absence is not shown (an edge refusal, an unreachable engine and a registered route all look like "
-      "this from here), so the leg fails closed" % (code, head))
+print("N2: %s answers HTTP %s (body: %r), not the 404 of an absent route: the route's absence is not shown (an "
+      "unexpected engine answer, an edge refusal, an unreachable engine and a registered route all look like this "
+      "from here), so the leg fails closed" % (what, code, head))
 sys.exit(1)
 PY
 }
@@ -1278,13 +1291,11 @@ K_QUARANTINE="quarantine-${K_COLLECTION}"
 K_CHASH="0000000000000000000000000000000000000000000000000000000000000000"
 EDGE_CODE=""
 EDGE_BODY=""
-# POST a JSON body through the edge with the leg-B bearer: sets EDGE_CODE and EDGE_BODY. The optional third
-# argument names a curl header file to send INSTEAD of the bearer; leg N passes an empty one so its probe is
-# unauthenticated (an empty header file adds no header).
+# POST a JSON body through the edge with the leg-B bearer: sets EDGE_CODE and EDGE_BODY.
 _edge_post() {
-    local path="$1" data="$2" hdrs="${3:-$BEARER_FILE}" out
+    local path="$1" data="$2" out
     out="$(mktemp)"
-    EDGE_CODE="$(curl -sS -m 30 -X POST -H @"$hdrs" -H 'Content-Type: application/json' \
+    EDGE_CODE="$(curl -sS -m 30 -X POST -H @"$BEARER_FILE" -H 'Content-Type: application/json' \
         --data "$data" -o "$out" -w '%{http_code}' "$SERVICE_URL$path")" || EDGE_CODE=000
     EDGE_BODY="$(cat "$out")"
     rm -f "$out"
@@ -1513,22 +1524,25 @@ PY
 fi
 rm -rf "$M_DIR"
 
-# ── Leg N: the test-only tenant-reset route is absent (nexus-0bl77) ───────────────────────────────────────
+# ── Leg N: the test-only tenant-reset route is absent (nexus-0bl77, probe authenticated by nexus-69be4) ──────
 # POST /v1/_test/tenant-reset is registered only with NX_TEST_TENANT_RESET_ROUTE=1, which must never reach the
 # cloud engine. FAIL CLOSED on both checks (the judges are above): N1 reads the flag the engine reports on the
-# /v1/status body leg B fetched, N2 sends an UNAUTHENTICATED POST of {} through the edge and requires the 404 of
-# an absent route. A flag alone is not enough: the check passes an absent key, and an edge that stubs a body
-# (/version, 2026-07-23, nexus-bwulw) would hide a registered route behind exactly that. No bearer goes out, so a
-# registered route refuses (401) before it reads the body; nothing is evicted, whatever the engine is. The empty
-# header file is what makes _edge_post send no Authorization.
-_leg_enter N "test-only tenant-reset route absent through the edge (status flag + unauthenticated probe; fails closed)"
-N_BAD=0
-N_NOAUTH="$(mktemp)"
-N1_LINE="$(_tenant_reset_status_verdict "$STATUS_BODY")" && echo "  $N1_LINE" || { echo "  VIOLATION [${N1_LINE%%:*}]:${N1_LINE#*:}" >&2; N_BAD=1; }
-_edge_post "/v1/_test/tenant-reset" '{}' "$N_NOAUTH"
-N2_LINE="$(_tenant_reset_probe_verdict "$EDGE_CODE" "$EDGE_BODY")" && echo "  $N2_LINE" || { echo "  VIOLATION [${N2_LINE%%:*}]:${N2_LINE#*:}" >&2; N_BAD=1; }
-rm -f "$N_NOAUTH"
-[ "$N_BAD" -eq 0 ] || _leg_fail "N: the test-only tenant-reset route is not shown absent from the engine (see above)"
+# /v1/status body leg B fetched, N2 sends a POST of {} with the leg-B bearer through the edge and requires the 404
+# of an absent route. A flag alone is not enough: the check passes an absent key, and an edge that stubs a body
+# (/version, 2026-07-23, nexus-bwulw) would hide a registered route behind exactly that. The probe is
+# authenticated because the edge refuses an unauthenticated /v1 request with 403 before the engine sees it, which
+# would read as a registered route on every healthy engine. The body {} names no tenant, so a registered route
+# refuses it (403, 400 or 503) before it evicts anything (TenantResetHandler.java:72-90 refuse, :99 evicts).
+_leg_enter N "test-only tenant-reset route absent through the edge (status flag + authenticated probe; fails closed)"
+if [ ! -s "$BEARER_FILE" ]; then
+    _leg_fail "N: no bearer (leg B could not resolve one), so the tenant-reset probe could not be sent"
+else
+    N_BAD=0
+    N1_LINE="$(_tenant_reset_status_verdict "$STATUS_BODY")" && echo "  $N1_LINE" || { echo "  VIOLATION [${N1_LINE%%:*}]:${N1_LINE#*:}" >&2; N_BAD=1; }
+    _edge_post "/v1/_test/tenant-reset" '{}'
+    N2_LINE="$(_tenant_reset_probe_verdict "$EDGE_CODE" "$EDGE_BODY")" && echo "  $N2_LINE" || { echo "  VIOLATION [${N2_LINE%%:*}]:${N2_LINE#*:}" >&2; N_BAD=1; }
+    [ "$N_BAD" -eq 0 ] || _leg_fail "N: the test-only tenant-reset route is not shown absent from the engine (see above)"
+fi
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
     # Distinct from a violation: "the gate did not run its full battery" is

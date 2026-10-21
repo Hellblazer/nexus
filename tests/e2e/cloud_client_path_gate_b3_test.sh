@@ -549,29 +549,24 @@ else:
             errs.append("%s: leg L body %r is not the allowlisted refused request %r" % (label, b, want[0]))
         if fragment != want[1]:
             errs.append("%s: leg L must expect the engine message fragment %r, got %r" % (label, want[1], fragment))
-# 7. Leg N (nexus-0bl77): exactly one probe, of the one test-only path, with the body {} and an EMPTY header file, so
-# no bearer goes out and a registered route refuses (401) before it reads the body. The header file must stay empty:
-# the only lines that may name it are its mktemp, the probe and its removal.
+# 7. Leg N (nexus-0bl77, authenticated by nexus-69be4): exactly one probe, of the one test-only path, with the body {}
+# and the default header file (the leg-B bearer, as K, L and M send it: the edge refuses an unauthenticated /v1
+# request with 403, so an unauthenticated probe would be a false red). Safe to send because {} names no tenant, so a
+# registered route refuses it before it evicts anything. The probe takes no third argument: nothing may redirect it
+# to another header file or smuggle a tenant into the body.
 n_probes = 0
 if "N" not in legs:
     errs.append("no leg N found")
 else:
     n_code = "\n".join(code(legs["N"]))
-    N_CALL = re.compile(r"^[ \t]*_edge_post\s+\"/v1/_test/tenant-reset\"\s+'\{\}'\s+\"\$N_NOAUTH\"[ \t]*$", re.M)
+    N_CALL = re.compile(r"^[ \t]*_edge_post\s+\"/v1/_test/tenant-reset\"\s+'\{\}'[ \t]*$", re.M)
     n_posted = len(re.findall(r"^[ \t]*_edge_post\s", n_code, re.M))
     n_probes = len(N_CALL.findall(n_code))
     if not (n_probes == n_posted == 1):
-        errs.append("leg N must hold exactly 1 _edge_post call, the unauthenticated tenant-reset probe with the body '{}' "
-                    "and the empty header file \"$N_NOAUTH\", got %d matching, %d posted" % (n_probes, n_posted))
-    N_ALLOWED = ('N_NOAUTH="$(mktemp)"', '_edge_post "/v1/_test/tenant-reset" \'{}\' "$N_NOAUTH"', 'rm -f "$N_NOAUTH"')
-    users = [ln.strip() for ln in code(text.split("\n")) if "N_NOAUTH" in ln]
-    for ln in users:
-        if ln not in N_ALLOWED:
-            errs.append("N_NOAUTH is used by %r, which is not one of its three allowed uses: the header file must stay "
-                        "empty so the probe sends no bearer" % ln)
-    for want in N_ALLOWED:
-        if users.count(want) != 1:
-            errs.append("N_NOAUTH use %r appears %d times, expected exactly once" % (want, users.count(want)))
+        errs.append("leg N must hold exactly 1 _edge_post call, the tenant-reset probe with the body '{}' and no "
+                    "header-file argument (the leg-B bearer), got %d matching, %d posted" % (n_probes, n_posted))
+    if not re.search(r'^if \[ ! -s "\$BEARER_FILE" \]; then\n\s*_leg_fail "N: no bearer', n_code, re.M):
+        errs.append("leg N must fail closed when leg B resolved no bearer (the K, L and M guard)")
 print("; ".join(errs) if errs else "OK %d" % (len(calls) + len(l_calls) + n_probes))
 PY
 K_AUDIT="$("$E2E_PYTHON" "$TMP/k_audit.py" "$GATE")"
@@ -749,7 +744,7 @@ uv run python -c '"'store.put(1)'"'
 '
 
 # ── Leg N: the test-only tenant-reset route is absent (nexus-0bl77) ───────────────────────────────────────
-# The two judges, extracted from the real script. The leg FAILS CLOSED: only a 404 from an unauthenticated POST
+# The two judges, extracted from the real script. The leg FAILS CLOSED: only a 404 from the bearer-authenticated POST
 # passes N2, and N1 passes only a readable status body that does not report the route registered.
 extract_fn() {   # <function-name> <outfile>: the function from the real gate, anchored like the others
   sed -n "/^$1() {/,/^}/p" "$GATE" > "$2"
@@ -792,14 +787,19 @@ run_n "N1: an empty status body -> violation, never a pass on a body that could 
 run_n "N1: an edge HTML page -> violation" 1 "no readable status body" "$TMP/n1fn.sh" _tenant_reset_status_verdict "<html>502</html>"
 run_n "N1: JSON that is not a status body (no embedding_mode) -> violation" 1 "no readable status body" \
   "$TMP/n1fn.sh" _tenant_reset_status_verdict '{"test_tenant_reset_route":false}'
-run_n "N2: an unauthenticated POST answering 404 -> ok (the route is absent)" 0 "ok [N2]" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
+run_n "N2: an authenticated POST answering 404 -> ok (the route is absent)" 0 "ok [N2]" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
   "<h1>404 Not Found</h1>No context found for request"
-run_n "N2: 401 -> violation, the engine's auth filter answered so the route is registered" 1 "route is REGISTERED" \
+run_n "N2: 403 -> violation, the operator-only refusal means the route is registered" 1 "route is REGISTERED" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"error":"operator privilege required: this operation needs the root token"}'
+run_n "N2: 403 names the operator refusal, not a bare status" 1 "operator-only refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}'
+run_n "N2: 400 -> violation, the missing-tenant refusal means the route is registered" 1 "missing-tenant refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
+run_n "N2: 503 -> violation, the PCI refusal means the route is registered" 1 "NX_SEARCH_PCI=1 refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused"}'
+run_n "N2: 401 -> violation, absence is not shown (fails closed), not read as registered" 1 "the leg fails closed" \
   "$TMP/n2fn.sh" _tenant_reset_probe_verdict 401 '{"error":"missing or invalid bearer"}'
-run_n "N2: an edge 403 -> violation, absence is not shown (fails closed)" 1 "the leg fails closed" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 \
-  '{"message":"Forbidden"}'
 run_n "N2: 200 -> violation" 1 "answers HTTP 200" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 200 '{"tenant":"x","evicted":{}}'
-run_n "N2: 400 -> violation" 1 "answers HTTP 400" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
 run_n "N2: 405 -> violation" 1 "answers HTTP 405" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 405 ''
 run_n "N2: 502 -> violation" 1 "answers HTTP 502" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 502 '<html>Bad Gateway</html>'
 run_n "N2: a curl failure (000) -> violation" 1 "answers HTTP 000" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 000 ''
@@ -808,27 +808,18 @@ run_n "N2: an empty status code -> violation" 1 "the leg fails closed" "$TMP/n2f
 check_wiring "N judges the /v1/status body leg B fetched" 'N1_LINE="\$\(_tenant_reset_status_verdict "\$STATUS_BODY"\)"'
 check_wiring "N judges the probe by its code and body" 'N2_LINE="\$\(_tenant_reset_probe_verdict "\$EDGE_CODE" "\$EDGE_BODY"\)"'
 check_wiring "N: a violation is a leg failure" '_leg_fail "N: the test-only tenant-reset route is not shown absent from the engine'
-check_wiring "N's header file is removed after the probe" '^rm -f "\$N_NOAUTH"$'
+check_wiring "N fails closed when leg B resolved no bearer" '_leg_fail "N: no bearer \(leg B could not resolve one\)'
 neg_case "a second leg-N probe" "leg N must hold exactly 1 _edge_post call" \
-  'rm -f "$N_NOAUTH"
-' 'rm -f "$N_NOAUTH"
-_edge_post "/v1/_test/tenant-reset" '"'{}'"' "$N_NOAUTH"
-'
+  '    N2_LINE="$(_tenant_reset_probe_verdict' '    _edge_post "/v1/_test/tenant-reset" '"'{}'"'
+    N2_LINE="$(_tenant_reset_probe_verdict'
 neg_case "a leg-N probe to another path" "leg N must hold exactly 1 _edge_post call" \
   '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/tenants/create" '"'{}'"
 neg_case "a leg-N probe with a body" "leg N must hold exactly 1 _edge_post call" \
   '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/_test/tenant-reset" '"'{\"tenant\":\"x\"}'"
-neg_case "a leg-N probe that sends the bearer (no header-file argument)" "leg N must hold exactly 1 _edge_post call" \
-  '_edge_post "/v1/_test/tenant-reset" '"'{}' \"\$N_NOAUTH\"" '_edge_post "/v1/_test/tenant-reset" '"'{}'"
-neg_case "a leg-N probe that passes the bearer file as its header file" "leg N must hold exactly 1 _edge_post call" \
-  '_edge_post "/v1/_test/tenant-reset" '"'{}' \"\$N_NOAUTH\"" '_edge_post "/v1/_test/tenant-reset" '"'{}' \"\$BEARER_FILE\""
-neg_case "the leg-N header file is filled from the bearer file" "N_NOAUTH is used by" \
-  'rm -f "$N_NOAUTH"
-' 'cp "$BEARER_FILE" "$N_NOAUTH"
-rm -f "$N_NOAUTH"
-'
-neg_case "the leg-N header file is rebound to the bearer file" "N_NOAUTH is used by" \
-  'N_NOAUTH="$(mktemp)"' 'N_NOAUTH="$BEARER_FILE"'
+neg_case "a leg-N probe redirected to another header file" "leg N must hold exactly 1 _edge_post call" \
+  '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/_test/tenant-reset" '"'{}' \"\$N_NOAUTH\""
+neg_case "leg N without the no-bearer guard" "leg N must fail closed when leg B resolved no bearer" \
+  '_leg_fail "N: no bearer' '_leg_fail "N: gone'
 neg_case "a raw curl -X POST inside leg N" "a curl with a write flag in leg N" \
   'N_BAD=0
 ' 'N_BAD=0
