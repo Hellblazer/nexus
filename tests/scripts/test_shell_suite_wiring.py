@@ -177,16 +177,18 @@ SUITES = [
         "tests/e2e/lib/commit_scope_audit_test.sh",
         19 if _bin_bash_is_pre_4() else 16,
     ),
-    # 66 as an ordinary user, 65 as root: Test 10 (the pgid-liveness pin) takes
+    # 71 as an ordinary user, 70 as root: Test 10 (the pgid-liveness pin) takes
     # one `ok` instead of two when the process is root (measured in
     # python:3.12-slim, which runs as root: "39 passed, 0 failed" before Test 13;
     # round-3 review L1). Same precedent as the /bin/bash floor above: the floor
     # follows the host, here the effective uid. Nothing known in CI runs as root; a
     # root hand run or container does. Deleting Test 10 still turns either floor red.
-    # Was 40/39; nexus-jqk5c added Test 13 (the lease-events log, 13 assertions) and
-    # the floor is lifted to what the suite now reports (66 measured, macOS bash 3.2
-    # and bash 5 alike), so deleting Test 13 turns it red too.
-    _Suite("scripts/lib/build-lease_test.sh", 65 if os.geteuid() == 0 else 66),
+    # Was 40/39; nexus-jqk5c added Test 13 (the lease-events log) and the floor is
+    # lifted to what the suite now reports (66 at the first commit, 71 after its fix
+    # round: the suite lease name, the lost mv race, the 0664 file mode, and the
+    # set -e check now run against both unwritable-log shapes), so deleting Test 13
+    # turns it red too.
+    _Suite("scripts/lib/build-lease_test.sh", 70 if os.geteuid() == 0 else 71),
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;

@@ -53,7 +53,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/local_service_gate_guard_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
-# Never the real per-host lease-events log (nexus-jqk5c).
+# Never the real per-user lease-events log (nexus-jqk5c).
 export NX_LEASE_EVENTS_LOG="$WORKDIR/lease-events.log"
 PASS=0; FAIL=0
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }

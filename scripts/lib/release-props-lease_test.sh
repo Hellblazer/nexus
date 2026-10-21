@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/release_props_lease_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
-# Never the real per-host lease-events log (nexus-jqk5c).
+# Never the real per-user lease-events log (nexus-jqk5c).
 export NX_LEASE_EVENTS_LOG="$WORKDIR/lease-events.log"
 
 PASS=0

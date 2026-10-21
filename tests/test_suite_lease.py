@@ -891,6 +891,170 @@ def test_the_early_refusal_in_the_conftest_gate_logs_a_refused_line(
     assert event["rest"] == f" holder_pid={os.getpid()} holder_label=peer-run"
 
 
+def _dead_pid() -> int:
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    return dead.pid
+
+
+def test_a_stale_reclaim_logs_only_after_the_reclaim_claim_has_succeeded(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Logging (a mkdir, an open, a write) between the set-aside and the re-claim would widen the two-holder window."""
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{_dead_pid()}\n")
+    (lease / "label").write_text("crashed run\n")
+    seen_at_claim: list[bool] = []
+    real_mkdir = os.mkdir
+
+    def watching_mkdir(path, *args, **kwargs):
+        if str(path) == str(lease):
+            seen_at_claim.append(events_log.exists())
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", watching_mkdir)
+    release = _suite_lease.acquire("taker", lease_root=lease_root)
+    monkeypatch.undo()
+    assert release is not None
+    release()
+    assert seen_at_claim == [False, False]  # the failed claim, then the re-claim: no line yet at either
+    (event,) = _events(events_log)
+    assert event["outcome"] == "stale_reclaimed"
+
+
+def test_nothing_is_read_between_the_liveness_decision_and_the_rename(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The holder label is read with the pid, before the decision, so the read-to-rename window stays as it was."""
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{_dead_pid()}\n")
+    (lease / "label").write_text("crashed run\n")
+    trace: list[str] = []
+    real_read, real_alive, real_aside = Path.read_text, _suite_lease._pid_alive, _suite_lease._set_aside
+
+    def read_text(self, *args, **kwargs):
+        trace.append(f"read:{self.name}")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(_suite_lease, "_pid_alive", lambda pid: (trace.append("alive?"), real_alive(pid))[1])
+    monkeypatch.setattr(_suite_lease, "_set_aside", lambda p: (trace.append("rename"), real_aside(p))[1])
+    release = _suite_lease.acquire("taker", lease_root=lease_root)
+    monkeypatch.undo()
+    assert release is not None
+    release()
+    assert "read:label" in trace[: trace.index("alive?")]
+    assert trace[trace.index("alive?") :][:2] == ["alive?", "rename"]
+
+
+def test_a_wait_that_ends_in_a_stale_reclaim_logs_one_stale_reclaimed_line_carrying_the_whole_wait(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _suite_lease.acquire("holder", lease_root=lease_root)
+    assert first is not None
+    lease = lease_root / _suite_lease.RESOURCE
+    dead = _dead_pid()
+    sleeps: list[float] = []
+
+    def die_on_second_sleep(_state: dict[str, float]) -> None:
+        sleeps.append(1.0)
+        if len(sleeps) == 2:
+            (lease / "pid").write_text(f"{dead}\n")
+
+    _fake_clock(monkeypatch, die_on_second_sleep)
+    release = _suite_lease.acquire("waiter", wait_seconds=60, lease_root=lease_root)
+    monkeypatch.undo()
+    assert release is not None
+    release()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "stale_reclaimed"
+    assert int(event["waited"]) > 0
+    assert event["waited"] == "2"
+    assert f"holder_pid={dead}" in event["rest"]
+    assert "holder_label=holder" in event["rest"]
+
+
+def test_a_reclaim_that_loses_the_reclaim_race_logs_only_the_final_outcome(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set the dead lease aside, lose the re-claim to a peer, run out of budget: one refused line, no stale_reclaimed."""
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{_dead_pid()}\n")
+    real_mkdir = os.mkdir
+    claims: list[int] = []
+
+    def losing_mkdir(path, *args, **kwargs):
+        if str(path) == str(lease):
+            claims.append(1)
+            if len(claims) == 2:  # the re-claim after the set-aside: a peer got there first
+                raise FileExistsError(path)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", losing_mkdir)
+    assert _suite_lease.acquire("taker", lease_root=lease_root) is None
+    monkeypatch.undo()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "refused"
+
+
+def test_a_lost_reclaim_race_followed_by_a_won_wait_logs_acquired_after_wait_not_stale_reclaimed(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The set-aside that did not yield the lease is not what ended the wait: one line, the real outcome, the whole wait."""
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{_dead_pid()}\n")
+    real_mkdir = os.mkdir
+    claims: list[int] = []
+
+    def losing_once(path, *args, **kwargs):
+        if str(path) == str(lease):
+            claims.append(1)
+            if len(claims) == 2:
+                raise FileExistsError(path)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", losing_once)
+    _fake_clock(monkeypatch)
+    release = _suite_lease.acquire("taker", wait_seconds=60, lease_root=lease_root)
+    monkeypatch.undo()
+    assert release is not None
+    release()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "acquired_after_wait"
+    assert event["waited"] == "1"
+
+
+def test_a_run_that_proceeds_unguarded_after_a_refusal_says_so_in_the_line(
+        lease_root: Path, events_log: Path) -> None:
+    first = _suite_lease.acquire("peer", lease_root=lease_root)
+    assert first is not None
+    try:
+        assert _suite_lease.acquire("hand run", lease_root=lease_root, unguarded=True) is None
+        assert _suite_lease.acquire("blocked run", lease_root=lease_root) is None
+    finally:
+        first()
+    unguarded, blocked = _events(events_log)
+    assert unguarded["rest"].endswith(" unguarded=1")
+    assert "unguarded" not in blocked["rest"]
+
+
+def test_a_new_events_log_is_group_writable_whatever_the_umask_and_an_existing_one_is_left_alone(
+        events_log: Path) -> None:
+    old = os.umask(0o077)
+    try:
+        _suite_lease.record_event("suite", "refused", 0)
+    finally:
+        os.umask(old)
+    assert events_log.stat().st_mode & 0o777 == 0o664
+    events_log.chmod(0o600)
+    _suite_lease.record_event("suite", "refused", 0)
+    assert events_log.stat().st_mode & 0o777 == 0o600
+    assert len(_events(events_log)) == 2
+
+
+def test_the_recovery_hint_names_the_events_log(lease_root: Path, events_log: Path) -> None:
+    assert str(events_log) in _suite_lease.recovery_hint(lease_root)
+
+
 @pytest.mark.parametrize("how", ["parent-is-a-file", "log-is-a-directory"])
 def test_an_unwritable_log_changes_nothing(lease_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
     if how == "parent-is-a-file":

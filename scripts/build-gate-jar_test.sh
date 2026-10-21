@@ -18,7 +18,7 @@ unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY LAB_CPUS GI
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_gate_jar_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
-# Never the real per-host lease-events log (nexus-jqk5c).
+# Never the real per-user lease-events log (nexus-jqk5c).
 export NX_LEASE_EVENTS_LOG="$WORKDIR/lease-events.log"
 PASS=0; FAIL=0; SKIP=0
 ok() { echo "  [ok] $1"; PASS=$((PASS + 1)); }

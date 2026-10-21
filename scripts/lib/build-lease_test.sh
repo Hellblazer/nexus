@@ -20,7 +20,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_lease_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
-# Never the real per-host lease-events log (nexus-jqk5c): Test 13 points it at its own files.
+# Never the real per-user lease-events log (nexus-jqk5c): Test 13 points it at its own files.
 export NX_LEASE_EVENTS_LOG="$WORKDIR/events.log"
 
 PASS=0
@@ -569,10 +569,59 @@ for _ in $(seq 1 50); do [[ -f "$leasedir13/busy2/pid" ]] && break; sleep 0.1; d
 good13="$(NX_LEASE_EVENTS_LOG="$WORKDIR/ev13-good.log" bash -c "source '$lib13'; build_lease_acquire busy2" 2>&1)"; goodrc13=$?
 badout13="$(NX_LEASE_EVENTS_LOG="$bad_log13" bash -c "source '$lib13'; build_lease_acquire busy2" 2>&1)"; badrc13=$?
 if [[ $badrc13 -eq $goodrc13 && "$badout13" == "$good13" ]]; then ok "an unwritable log changes neither rc nor stderr"; else bad "rc $badrc13 vs $goodrc13; stderr: $badout13 vs $good13"; fi
-badout13="$(NX_LEASE_EVENTS_LOG="$bad_log13" bash -c "set -e; source '$lib13'; build_lease_acquire_wait busy2 0 || echo SURVIVED-\$?" 2>&1)"
-if [[ "$badout13" == *SURVIVED-75* ]]; then ok "an unwritable log under set -e does not abort the caller"; else bad "set -e caller: $badout13"; fi
+# A SUCCESS path under set -e: a stale reclaim whose log write fails. errexit is ignored in
+# `||` and `if` context, so the call is bare, in its own set -e subshell; only a log writer that
+# leaks a non-zero status would end the subshell before SURVIVED.
+# Both ways a log can be unwritable: the mkdir fails (parent is a file) and the append fails
+# (the log is a directory; the mkdir succeeds, so only the guard stops errexit there).
+mkdir -p "$WORKDIR/a-dir-log"
+for how13 in "$bad_log13" "$WORKDIR/a-dir-log"; do
+    mkdir -p "$leasedir13/corpse2"
+    sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+    printf '%s\n' "$dead13" > "$leasedir13/corpse2/pid"; echo dead-agent > "$leasedir13/corpse2/label"
+    badout13="$(NX_LEASE_EVENTS_LOG="$how13" bash -c "set -e; source '$lib13'; build_lease_acquire corpse2 >/dev/null 2>&1; build_lease_release corpse2; echo SURVIVED" 2>&1)"
+    if [[ "$badout13" == SURVIVED ]]; then ok "an unwritable log (${how13##*/}) under set -e does not abort a successful stale reclaim"; else bad "set -e caller (${how13##*/}): [$badout13]"; fi
+done
 kill -9 "$holder13" 2>/dev/null; wait "$holder13" 2>/dev/null
 rm -rf "$leasedir13/busy2"
+
+# 13i: the lease named suite logs as lease=suite (tests/e2e/macos-guest/host.sh takes it through build_lease_acquire)
+rm -f "$ev13"
+sleep 25 & peer13=$!
+mkdir -p "$leasedir13/suite"; printf '%s\n' "$peer13" > "$leasedir13/suite/pid"; echo peer-suite > "$leasedir13/suite/label"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire suite" >/dev/null 2>&1
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ "$line13" == *" lease=suite name=suite "* && "$line13" == *" outcome=refused "* ]]; then ok "the suite lease logs lease=suite ($line13)"; else bad "suite lease line: $line13"; fi
+kill -9 "$peer13" 2>/dev/null; wait "$peer13" 2>/dev/null
+rm -rf "$leasedir13/suite"
+
+# 13j: a stale reclaim that loses the mv race names the CURRENT holder, never the dead one it read
+rm -f "$ev13"
+sleep 25 & peer13=$!
+mkdir -p "$leasedir13/raced" "$WORKDIR/fakebin13"
+sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+printf '%s\n' "$dead13" > "$leasedir13/raced/pid"; echo dead-agent > "$leasedir13/raced/label"
+# a peer wins the reclaim between our read and our mv: the lease is the peer's by the time ours fails
+cat > "$WORKDIR/fakebin13/mv" <<MV
+#!/bin/sh
+rm -rf "\$1"; mkdir "\$1"; echo $peer13 > "\$1/pid"; echo racing-peer > "\$1/label"; exit 1
+MV
+chmod +x "$WORKDIR/fakebin13/mv"
+NX_LEASE_EVENTS_LOG="$ev13" PATH="$WORKDIR/fakebin13:$PATH" bash -c "source '$lib13'; build_lease_acquire raced" >/dev/null 2>&1; rc13=$?
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 75 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" outcome=refused "* && "$line13" == *" holder_pid=$peer13 holder_label=racing-peer"* && "$line13" != *"$dead13"* ]]; then ok "a lost reclaim race logs refused naming the current holder ($line13)"; else bad "lost race: rc $rc13 lines=$(_ev_lines "$ev13"): $line13 (dead=$dead13)"; fi
+kill -9 "$peer13" 2>/dev/null; wait "$peer13" 2>/dev/null
+rm -rf "$leasedir13/raced"
+
+# 13k: a new log is group-writable whatever the caller's umask, an existing one keeps its mode
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "umask 077; source '$lib13'; _build_lease_log_event modes modes 0" >/dev/null 2>&1
+mode13="$(stat -c %a "$ev13" 2>/dev/null || stat -f %Lp "$ev13" 2>/dev/null)"
+if [[ "$mode13" == 664 ]]; then ok "a new events log is mode 664 under umask 077"; else bad "new log mode: $mode13"; fi
+chmod 600 "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "umask 077; source '$lib13'; _build_lease_log_event modes modes 0" >/dev/null 2>&1
+mode13="$(stat -c %a "$ev13" 2>/dev/null || stat -f %Lp "$ev13" 2>/dev/null)"
+if [[ "$mode13" == 600 && "$(_ev_lines "$ev13")" == 2 ]]; then ok "an existing events log keeps its mode"; else bad "existing log mode: $mode13 lines=$(_ev_lines "$ev13")"; fi
 
 # 13h: concurrent writers never interleave a line
 rm -f "$ev13"

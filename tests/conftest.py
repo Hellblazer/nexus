@@ -355,6 +355,7 @@ def _take_suite_lease() -> None:
         _suite_lease_release = _suite_lease.acquire(
             _suite_lease_label(),
             wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
+            unguarded=_suite_lease_unguarded(),  # nexus-jqk5c: marks a bypassed refusal in the events log
         )
         if _suite_lease_release is None:
             # Held past the wait, or another run took it between the check
@@ -3364,7 +3365,7 @@ def _isolate_lease_events_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     """Point the lease-contention log (nexus-jqk5c) at a per-test tmp file.
 
     ``tests/_suite_lease.py`` and ``scripts/lib/build-lease.sh`` append a line per
-    contended lease event to a per-host log under the user's state dir. A test that
+    contended lease event to a per-user, per-host log under the user's state dir. A test that
     contends a tmp-root lease, or a child process it spawns, would otherwise write
     into the real one and show labrun contention that never happened. The session's
     own lease (taken before any fixture runs) is real and logs to the real path.

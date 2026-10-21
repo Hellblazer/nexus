@@ -136,10 +136,14 @@
 #       no-op — safe to call unconditionally from an EXIT trap.
 #
 # CONTENTION TELEMETRY (nexus-jqk5c). Every CONTENDED event appends one
-# key=value line to a per-host log, so a lease wait that today scrolls past on
-# stderr can be measured afterwards: $NX_LEASE_EVENTS_LOG, default
+# key=value line to a per-user, per-host log, so a lease wait that today scrolls
+# past on stderr can be measured afterwards: $NX_LEASE_EVENTS_LOG, default
 # ${XDG_STATE_HOME:-$HOME/.local/state}/nexus/lease-events.log (the suite lease,
-# tests/_suite_lease.py, writes the same file, `lease=suite`). Fields, in order:
+# tests/_suite_lease.py, writes the same file, `lease=suite`). The default path is
+# under the CALLING USER's home, so two users on one box write two files; a
+# measurement that must see both sets NX_LEASE_EVENTS_LOG to one shared path, and a
+# file this writer creates is group-writable (umask 002) so users of one group can
+# append to it (an existing file's mode is never changed). Fields, in order:
 # ts (ISO-8601 UTC), lease (service|suite), name, host, pid, waited_s, outcome
 # (acquired_after_wait | refused | stale_reclaimed | gave_up), then holder_pid and
 # holder_label when known. refused is a live holder met with no wait budget
@@ -202,22 +206,28 @@ _build_lease_kv_quote() {
 }
 
 # _build_lease_log_event <name> <outcome> <waited_s> [holder_pid] [holder_label]
-# — append ONE line to the per-host lease-events log (see CONTENTION TELEMETRY).
+# — append ONE line to the per-user, per-host lease-events log (see CONTENTION
+# TELEMETRY). The lease field is `suite` for the lease named suite (the pytest
+# suite's, taken through build_lease_acquire by tests/e2e/macos-guest/host.sh) and
+# `service` for every other.
 # Always returns 0 and prints nothing: the telemetry must never change a caller.
 _build_lease_log_event() {
     local name="$1" outcome="$2" waited="${3:-0}" hpid="${4:-}" hlabel="${5:-}"
-    local log="${NX_LEASE_EVENTS_LOG:-}" state host line
+    local log="${NX_LEASE_EVENTS_LOG:-}" state host line kind=service
+    [[ "$name" == suite ]] && kind=suite
     if [[ -z "$log" ]]; then
         state="${XDG_STATE_HOME:-${HOME:+$HOME/.local/state}}"
         [[ -n "$state" ]] || return 0
         log="$state/nexus/lease-events.log"
     fi
     host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
-    line="ts=$(_build_lease_ts) lease=service name=$(_build_lease_kv_quote "$name") host=${host:-unknown} pid=$$ waited_s=$waited outcome=$outcome"
+    line="ts=$(_build_lease_ts) lease=$kind name=$(_build_lease_kv_quote "$name") host=${host:-unknown} pid=$$ waited_s=$waited outcome=$outcome"
     [[ "$hpid" =~ ^[0-9]+$ ]] && line+=" holder_pid=$hpid"
     [[ -n "$hlabel" && "$hlabel" != unknown ]] && line+=" holder_label=$(_build_lease_kv_quote "$hlabel")"
     # One printf, one O_APPEND write: concurrent writers do not interleave lines.
-    { mkdir -p "$(dirname "$log")" && printf '%s\n' "$line" >> "$log"; } 2>/dev/null || true
+    # umask 002 in a subshell: a file this creates is 0664 (a shared path works for a
+    # group); an existing file keeps its mode, and the caller's umask is untouched.
+    { mkdir -p "$(dirname "$log")" && ( umask 002; printf '%s\n' "$line" >> "$log" ); } 2>/dev/null || true
     return 0
 }
 
@@ -482,7 +492,8 @@ build_lease_acquire() {
     local capture="${dir}.reclaim.$$.$RANDOM"
     if ! mv "$dir" "$capture" 2>/dev/null; then
         echo "build_lease_acquire: REFUSED — $_BUILD_LEASE_LOST_RACE reclaiming stale build lease '$name'; another process is already reclaiming it. Retry." >&2
-        [[ "${_BUILD_LEASE_POLLING:-0}" == 1 ]] || _build_lease_log_event "$name" refused 0 "$existing_pid" "$existing_label"
+        # The dead holder we read is no longer the lease's holder: name whoever the directory records now.
+        [[ "${_BUILD_LEASE_POLLING:-0}" == 1 ]] || _build_lease_log_held_event "$name" refused 0
         return 75
     fi
     rm -rf "$capture" 2>/dev/null
