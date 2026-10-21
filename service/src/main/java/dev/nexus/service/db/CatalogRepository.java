@@ -8274,7 +8274,7 @@ public final class CatalogRepository {
      *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact. The rows removed are reported under
      *       both {@code chunks} and {@code quarantine_chunks}.</li>
      * </ul>
-     * Not closed here: store-put and update-metadata on a {@code quarantine-*} name are not guarded, and the
+     * Not closed here: update-metadata on a {@code quarantine-*} name is not guarded, and the
      * RDR-162 cross-model COPY keeps the source's quarantine rows with the source.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {

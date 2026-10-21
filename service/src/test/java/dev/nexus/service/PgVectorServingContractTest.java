@@ -45,7 +45,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <pre>
  *   upsert-chunks   {"upserted": N}
  *   search          flat row list (id, content, distance, collection, metadata...)
- *   store-put       {"id": "..."}
  *   get             {"ids": [...], "documents": [...], "metadatas": [...]}
  *   store-get       {"ids": [...], "documents": [...], "metadatas": [...]}
  *   store-list      {"ids": [...], "metadatas": [...]}
@@ -233,8 +232,8 @@ class PgVectorServingContractTest {
     /**
      * Seed {@code ids} as OWNED chunks of {@code COL} for {@code tenant}, with the vectors the
      * fake embedder gives {@code texts}, through substrate SQL (RDR-223 P3.1, nexus-z0o2p.23).
-     * From Phase 3 the engine refuses an ownerless write on upsert-chunks and store-put, so
-     * the tests below that POST to those routes POST a chunk that already has an owner (a
+     * From Phase 3 the engine refuses an ownerless write on upsert-chunks, so
+     * the tests below that POST to that route POST a chunk that already has an owner (a
      * re-upsert: same text, so the existence partition keeps the stored vector and refreshes
      * the metadata) instead of making the route insert it.
      */
@@ -402,22 +401,13 @@ class PgVectorServingContractTest {
 
     @Test
     @Order(3)
-    void storePut_singleChunk() throws Exception {
-        // Same text (so the stored vector, which the search tests rank on, is already the
-        // embedder's) but STALE metadata: the existing-chash write path refreshes metadata, so the
-        // POST is asserted to have changed it. store-put has no force_re_embed.
+    void seedsTheSingleChunkTheLaterTestsRead() throws Exception {
+        // The /store-put route is gone (nexus-nt76j); the later tests (store-get, stats, update-metadata)
+        // still read this fifth chunk of COL, so it is seeded owned, through substrate SQL, with the
+        // metadata the retired route's test used to leave on it.
         seedOwned(TENANT_A, List.of(PUT1), List.of("single put chunk about tenant isolation policy"),
-            List.of(Map.of("kind", "stale")));
-        Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
-            "collection", COL,
-            "doc_id",     PUT1,
-            "content",    "single put chunk about tenant isolation policy",
-            "metadata",   Map.of("kind", "put")));
-        assertThat(resp.get("id"))
-            .as("store-put envelope {\"id\": ...} preserved")
-            .isEqualTo(PUT1);
+            List.of(Map.of("kind", "put")));
         assertThat(stored(TENANT_A, PUT1, "kind"))
-            .as("store-put refreshed the stored metadata of the chunk, not just echoed the id")
             .containsExactly("single put chunk about tenant isolation policy", "put");
     }
 
@@ -571,7 +561,7 @@ class PgVectorServingContractTest {
             .as("operator-form $ne must serve 200 (got: %s)", resp.body())
             .isEqualTo(200);
         List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
-        // Mutation-robust (this is an ordered class; an earlier store-put added a
+        // Mutation-robust (this is an ordered class; the seeded PUT1 chunk is a
         // lang-less chunk that $ne correctly keeps): assert only the contract claim —
         // the py chunk is excluded, both java chunks are kept.
         assertThat(rows.stream().map(r -> r.get("id")).toList())
@@ -684,7 +674,7 @@ class PgVectorServingContractTest {
         // RDR-156 P3 (nexus-70r3c.12): GET /v1/vectors/stats serves
         // nexus.collection_vector_stats — one round-trip, all collections,
         // tombstone-filtered live counts. State here: 4 chunks in COL
-        // (3 upserted + 1 store-put), each given a live own-collection manifest
+        // (3 upserted + 1 seeded), each given a live own-collection manifest
         // owner (RDR-192 Step 5, nexus-wbfpw.10: collection_vector_stats now
         // requires live(c) too — a manifest-less chunk no longer counts).
         var resp = get("/v1/vectors/stats", TOKEN_A);

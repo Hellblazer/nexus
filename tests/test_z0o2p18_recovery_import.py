@@ -27,6 +27,13 @@ from tests._module_seam import module_time
 _RECORDED = "knowledge__z0o2p18__bge-base-en-v15-768__v1"
 
 
+def _vector_write_suffixes(hvc) -> tuple[str, ...]:
+    """The client's write-path suffixes plus ``/store-put``: that route is retired (nexus-nt76j) and
+    left the client's own table, but a raw post to it is still an ownerless chunk write this file's
+    tripwires must see."""
+    return (*hvc._T3_WRITE_PATH_SUFFIXES, "/store-put")
+
+
 class ClientDied(BaseException):
     """The simulated death of the client process: not an Exception, so nothing catches it."""
 
@@ -150,7 +157,7 @@ def test_client_dies_after_the_first_request_no_chunk_is_without_an_owner(t3, ve
 
     def vector_post(path, *a, **k):
         out = real_hvc_post(path, *a, **k)
-        if any(path.endswith(s) for s in hvc._T3_WRITE_PATH_SUFFIXES):
+        if any(path.endswith(s) for s in _vector_write_suffixes(hvc)):
             die_after_the_first_write(path)
         return out
 
@@ -244,8 +251,9 @@ def test_a_clean_bundle_exits_zero(t3, tmp_path):
 
 
 def test_the_import_makes_no_ownerless_chunk_write(t3, tmp_path, monkeypatch):
-    """No call to a /v1/vectors route that writes chunks (/upsert-chunks, /store-put, ...), and no
-    T3 ``put``: the pieces reach the engine only as the ``chunks`` of the one owner-carrying request."""
+    """No call to a /v1/vectors route that writes chunks (/upsert-chunks, or a raw post to the retired
+    /store-put), and no T3 ``put`` (``HttpVectorClient.put`` no longer exists; the stub guards a
+    revival): the pieces reach the engine only as the ``chunks`` of the one owner-carrying request."""
     import nexus.catalog.http_catalog_client as hcc
     import nexus.db.http_vector_client as hvc
 
@@ -254,7 +262,7 @@ def test_the_import_makes_no_ownerless_chunk_write(t3, tmp_path, monkeypatch):
     real_hvc_post, real_hcc_post = hvc._post, hcc.HttpCatalogClient._post
 
     def hvc_post(path, *a, **k):
-        if any(path.endswith(s) for s in hvc._T3_WRITE_PATH_SUFFIXES):
+        if any(path.endswith(s) for s in _vector_write_suffixes(hvc)):
             vector_writes.append(path)
         return real_hvc_post(path, *a, **k)
 
@@ -267,7 +275,7 @@ def test_the_import_makes_no_ownerless_chunk_write(t3, tmp_path, monkeypatch):
 
     monkeypatch.setattr(hvc, "_post", hvc_post)
     monkeypatch.setattr(hcc.HttpCatalogClient, "_post", hcc_post)
-    monkeypatch.setattr(type(t3), "put", no_put)
+    monkeypatch.setattr(type(t3), "put", no_put, raising=False)  # raising=False: HttpVectorClient.put is retired (nexus-nt76j)
 
     bundle = _bundle(tmp_path, [_rec("z0o2p18-nopin-a", _body("np")), _rec("z0o2p18-nopin-b", _body("nq"))])
     summary = import_bundle(None, None, t3, bundle)
@@ -356,7 +364,7 @@ def test_a_first_touch_collection_is_registered_by_the_notes_own_request(t2_serv
     real_hvc_post, real_hcc_post = hvc._post, hcc.HttpCatalogClient._post
 
     def hvc_post(path, *a, **k):
-        if any(path.endswith(s) for s in hvc._T3_WRITE_PATH_SUFFIXES):
+        if any(path.endswith(s) for s in _vector_write_suffixes(hvc)):
             vector_writes.append(path)
         return real_hvc_post(path, *a, **k)
 

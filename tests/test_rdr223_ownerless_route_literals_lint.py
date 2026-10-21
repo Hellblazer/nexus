@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-223 P3.1 (nexus-z0o2p.23): no test reaches the three ownerless routes unless it says why.
 
-The engine refuses a write to ``/v1/vectors/upsert-chunks``, ``/store-put`` and
-``/upsert-reference-only`` whose chashes have no live manifest row (P3.2). A test that builds a chunk
+The engine refuses a write to ``/v1/vectors/upsert-chunks`` whose chashes have no live manifest row
+(P3.2); ``/store-put`` and ``/upsert-reference-only`` are retired and answer 410 Gone. A test that builds a chunk
 ahead of its owner, or an orphan on purpose, uses ``tests/_chunk_seed.py`` instead. A dynamic probe
 over the suite cannot prove that: it only sees the client's own request layer, in one process, so
 raw ``httpx``/``urllib`` posts (two files, ``test_http_chash_integration`` and
@@ -52,7 +52,7 @@ _ALLOWED: dict[str, str] = {
     "tests/db/test_write_seam_gate_integration.py": _OWNED + " (_seed_owned_chunks into the hermetic container)",
     "tests/db/test_http_vector_client.py": _STUBBED,
     "tests/db/test_production_write_guard.py": "asserts the production-write guard fires on a write-shaped path; the guard is patched to raise before any request",
-    "service/native-smoke.sh": _OWNED + " (re-posts chashes the same script owned through write_many)",
+    "service/native-smoke.sh": _OWNED + " (re-posts chashes the same script owned through write_many), and probes the retired store-put route for its 410 (nexus-nt76j)",
     "tests/e2e/local-service-gate.sh": _OWNED + " (re-posts a chash its own write_many owned), sends ONE deliberate ownerless upsert-chunks as the nexus-z0o2p.24 negative control, and carries fixture text that tests the gate's own log parsing",
     "tests/integration/test_rdr223_index_document_journey.py": _SPY,
     "tests/integration/test_rdr223_pdf_journey.py": _SPY,
@@ -70,6 +70,7 @@ _ALLOWED: dict[str, str] = {
     "tests/test_t3.py": _STUBBED + " (in-memory T3Database)",
     "tests/test_vector_retry.py": _STUBBED,
     "tests/test_z0o2p16_store_put_note_writer.py": _SPY,
+    "tests/test_z0o2p18_recovery_import.py": _SPY + " (its tripwire records a raw post to the retired store-put route, asserting the import makes none)",
     "tests/test_z0o2p19_nxexp_import_combined_write.py": _SPY,
     "tests/test_z0o2p24_client_version_header.py": _STUBBED + " (the opener is replaced; the request is captured, never sent)",
     "tests/test_z0o2p24_reembed_concurrent_supersede.py": _OWNED + "; the one chash that loses its owner mid-run is refused by the engine by design and the client resends the rest (a fake db covers the other branches)",

@@ -1744,7 +1744,7 @@ def _index_document(
     # the incremental-sync pre-check below is a READ that runs before this
     # document's first write. A brand-new collection's first `nx index md`
     # therefore has to register BEFORE that read, with the same call the
-    # write path uses (HttpVectorClient.put/upsert_chunks), so the row is
+    # write path uses (HttpVectorClient.upsert_chunks), so the row is
     # byte-identical to the one a write would have created. Never treat
     # the 422 as "nothing indexed yet": that is the silent fallback RDR-204
     # forbids.

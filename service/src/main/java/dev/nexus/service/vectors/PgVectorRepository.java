@@ -3365,42 +3365,6 @@ public final class PgVectorRepository {
     }
 
     /**
-     * Single-chunk put (MCP {@code store_put} path) — embed + upsert one chunk.
-     *
-     * <p>RDR-155 P4a.2 (bead nexus-1k8s1): mirrors the Chroma
-     * {@code VectorRepository.put} envelope (returns the chunk ID verbatim).
-     * Delegates to {@link #upsertChunks} so dim dispatch, router-aware embedding,
-     * and the fail-loud dimension check are identical to the batch path.
-     *
-     * @return the chunk ID, unchanged
-     */
-    public String put(String tenant, String collection, String docId,
-                      String content, Map<String, Object> metadata) {
-        putWithTokens(tenant, collection, docId, content, metadata);
-        return docId;
-    }
-
-    /**
-     * Token-aware sibling of {@link #put} (bead nexus-ehc4q).
-     * Delegates to {@link #upsertChunksWithTokens}; the token count is the
-     * embedding cost for the single chunk.
-     */
-    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
-                                          String content, Map<String, Object> metadata) {
-        return putWithTokens(tenant, collection, docId, content, metadata, null);
-    }
-
-    /** Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24); {@code null} guard is the plain put. */
-    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
-                                          String content, Map<String, Object> metadata,
-                                          OwnershipGuard guard) {
-        Tokened<Integer> result = upsertChunksWithTokens(
-            tenant, collection, List.of(docId), List.of(content),
-            List.of(metadata != null ? metadata : Map.of()), false, List.of(), guard);
-        return new Tokened<>(docId, result.tokens());
-    }
-
-    /**
      * Get chunks matching a metadata {@code where} equality filter, paginated in
      * chash order (RDR-155 P4a.2, bead nexus-1k8s1).
      *

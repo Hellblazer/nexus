@@ -971,7 +971,7 @@ the one function every HTTP storage client's write path calls:
 `RefreshableHttpStoreMixin._send` for every non-`GET` verb (the T2 domain
 stores and the catalog client, which share this one transport),
 `http_vector_client._post` for T3's write-shaped endpoint suffixes
-(`store-put`, `store-delete`, `update-metadata`, `upsert-chunks`, the
+(`store-delete`, `update-metadata`, `upsert-chunks`, the
 `gc/*` mutation routes), and — since neither rides the mixin, each being a
 bespoke bearer-header-baked client — `HttpTokenStore._post` and
 `HttpScratchStore._post` (T1) call it directly. Reads are never guarded.

@@ -485,9 +485,9 @@ if [ -f "$BGE_MODEL" ]; then
   CHASH2="$(printf 'f%.0s' {1..64})"
   RTEXT1="Mix flour and water, ferment the dough, bake the bread in a hot oven."
   RTEXT2="Quantum chromodynamics describes the strong interaction between quarks."
-  # RDR-223 P3: the engine refuses an ownerless chunk write (store-put and
-  # upsert-chunks), and RDR-192 Step 5 makes every T3 content read go through
-  # live(c) -- nexus.chunk_live_owners(tenant, collection, chash) must find a
+  # RDR-223 P3: the engine refuses an ownerless chunk write (upsert-chunks), and
+  # RDR-192 Step 5 makes every T3 content read go through live(c) --
+  # nexus.chunk_live_owners(tenant, collection, chash) must find a
   # catalog_document_chunks manifest row owned by a non-tombstoned document, or
   # the chunk is invisible to search no matter how well it scores. So the
   # fixture is written the way the real client writes it: register the owning
@@ -520,8 +520,8 @@ print(json.dumps({
   if [ "$rdoc" = "200" ] && [ "$rman" = "200" ] \
      && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-man.out')).get('chunks_written')==2 else 1)" 2>/dev/null; then
     # Raw-route coverage on the native binary: re-post the SAME, now owned,
-    # chashes through /v1/vectors/upsert-chunks and /v1/vectors/store-put (the
-    # only native-image probe of the two chunk-write routes). Owned writes are
+    # chashes through /v1/vectors/upsert-chunks (the only native-image probe of
+    # the chunk-write route). Owned writes are
     # valid before and after the RDR-223 P3.2 refusal of ownerless writes. Same
     # texts as the write_many above, so the ranking conditions below do not move.
     RCOL="$RCOL" CHASH1="$CHASH1" CHASH2="$CHASH2" RTEXT1="$RTEXT1" RTEXT2="$RTEXT2" python3 -c "
@@ -536,19 +536,8 @@ json.dump({'collection': e['RCOL'], 'ids': [e['CHASH1'], e['CHASH2']],
     else
       echo "  FAIL upsert-chunks (owned chashes) -> $rup: $(head -c200 "$SMOKE_TMP/ns-rerank-up.out")"; fail=1
     fi
-    RCOL="$RCOL" CHASH1="$CHASH1" RTEXT1="$RTEXT1" python3 -c "
-import json, os
-e = os.environ
-json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1']}, open(e['SMOKE_TMP'] + '/ns-rerank-sp.in', 'w'))"
-    rsp=$(curl -s -o "$SMOKE_TMP/ns-rerank-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      --data-binary "@$SMOKE_TMP/ns-rerank-sp.in" "$U/v1/vectors/store-put")
-    if [ "$rsp" = "200" ]; then
-      echo "  ok   store-put (owned chash) -> 200"
-    else
-      echo "  FAIL store-put (owned chash) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-rerank-sp.out")"; fail=1
-    fi
     # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. A chash with no manifest row is refused 422
-    # by both chunk-write routes, with the typed reason a client keys on and the combined routes
+    # by the chunk-write route, with the typed reason a client keys on and the combined routes
     # named; the retired reference-only route answers 410. Also the only native-image probe of the
     # refusal path (a new exception type, a record and a new JSON arm).
     ORPHAN="$(printf 'd%.0s' {1..64})"
@@ -556,10 +545,8 @@ json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1'
 import json, os
 e = os.environ
 json.dump({'collection': e['RCOL'], 'ids': [e['ORPHAN']], 'documents': ['an ownerless chunk'],
-           'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))
-json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerless chunk'},
-          open(e['SMOKE_TMP'] + '/ns-orphan-sp.in', 'w'))"
-    # The would-refuse counter on /v1/status, read around the two ownerless writes: the log-only
+           'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))"
+    # The would-refuse counter on /v1/status, read around the ownerless write: the log-only
     # branch below must see it move, not only the 200 (a log-only engine that stopped counting
     # would still answer 200). -1 when the status read fails or the field is absent.
     ownerless_would_refuse_total() {
@@ -574,21 +561,17 @@ except Exception:
     wr_before=$(ownerless_would_refuse_total)
     oup=$(curl -s -o "$SMOKE_TMP/ns-orphan-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       --data-binary "@$SMOKE_TMP/ns-orphan-up.in" "$U/v1/vectors/upsert-chunks")
-    osp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      --data-binary "@$SMOKE_TMP/ns-orphan-sp.in" "$U/v1/vectors/store-put")
-    for leg in up sp; do
-      ocode=$([ "$leg" = up ] && echo "$oup" || echo "$osp")
+    for leg in up; do
+      ocode="$oup"
       if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
         # Writer-census posture: the engine inherits the mode and accepts the write.
         if [ "$ocode" = "200" ]; then echo "  ok   $leg ownerless chash -> 200 (log-only)"; else
           echo "  FAIL $leg ownerless chash (want 200 in log-only) -> $ocode"; fail=1; fi
-        if [ "$leg" = sp ]; then
-          wr_after=$(ownerless_would_refuse_total)
-          if [ "$wr_before" -ge 0 ] && [ "$wr_after" -eq $((wr_before + 2)) ]; then
-            echo "  ok   would-refuse counter moved by 2 ($wr_before -> $wr_after)"
-          else
-            echo "  FAIL would-refuse counter (want +2 over two log-only ownerless writes) -> $wr_before -> $wr_after"; fail=1
-          fi
+        wr_after=$(ownerless_would_refuse_total)
+        if [ "$wr_before" -ge 0 ] && [ "$wr_after" -eq $((wr_before + 1)) ]; then
+          echo "  ok   would-refuse counter moved by 1 ($wr_before -> $wr_after)"
+        else
+          echo "  FAIL would-refuse counter (want +1 over one log-only ownerless write) -> $wr_before -> $wr_after"; fail=1
         fi
       elif [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
 import json, os, sys
@@ -605,6 +588,14 @@ sys.exit(0 if b.get('reason') == 'ownerless_chunk_write' and '/v1/catalog/manife
       echo "  ok   upsert-reference-only (retired) -> 410"
     else
       echo "  FAIL upsert-reference-only (want 410) -> $rro: $(head -c200 "$SMOKE_TMP/ns-orphan-ro.out")"; fail=1
+    fi
+    # nexus-nt76j: the single-chunk store-put route is retired; it answers 410 Gone like upsert-reference-only.
+    rsp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$ORPHAN\",\"content\":\"x\"}" "$U/v1/vectors/store-put")
+    if [ "$rsp" = "410" ]; then
+      echo "  ok   store-put (retired) -> 410"
+    else
+      echo "  FAIL store-put (want 410) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-orphan-sp.out")"; fail=1
     fi
     rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \

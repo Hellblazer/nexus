@@ -624,9 +624,9 @@ clone after a real second apply) and the edges.
 
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
-The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and
-`/upsert-reference-only` whose chashes have no live manifest row in the
-collection. A test that needs such a chunk (an orphan on purpose: the RDR-192
+The engine refuses a write to `/v1/vectors/upsert-chunks` whose chashes have no live
+manifest row in the collection (`/store-put` and `/upsert-reference-only` are retired
+and answer 410 Gone). A test that needs such a chunk (an orphan on purpose: the RDR-192
 census, reaper and gc tests, the `nx store import` tests; or the chunk that must
 exist before its manifest row because `fk_catalog_chunks_chunk` wants it first)
 builds it with `tests/_chunk_seed.py::seed_chunks_direct`, never with

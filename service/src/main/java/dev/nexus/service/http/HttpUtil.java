@@ -368,7 +368,7 @@ public final class HttpUtil {
      *       {@code (tenant, collection)} with no catalog row
      *       ({@link #UNREGISTERED_COLLECTION_REASON}); the body also carries
      *       {@code tenant}, {@code collection} and {@code remedy}.</li>
-     *   <li>{@code ownerless_chunk_write} (422): {@code upsert-chunks} or {@code store-put}
+     *   <li>{@code ownerless_chunk_write} (422): {@code upsert-chunks}
      *       was asked to write a chash with no live manifest row in the collection
      *       ({@link #OWNERLESS_CHUNK_WRITE_REASON}, RDR-223 Phase 3 Step 2); the body also
      *       carries {@code unowned_count}, {@code requested_count} and {@code unowned_chashes}

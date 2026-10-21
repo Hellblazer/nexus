@@ -3,7 +3,7 @@
 """RDR-152 bead nexus-gmiaf.20 — Seam B HTTP vector client.
 
 Thin Python bridge that routes T3 vector operations (search, query,
-upsert-chunks, store_put, store_get, store_list, store_delete) through
+upsert-chunks, store_get, store_list, store_delete) through
 the Java nexus-service HTTP endpoints rather than hitting a vector
 store / Voyage AI directly from Python.
 
@@ -30,7 +30,6 @@ from __future__ import annotations
 import base64
 import binascii
 import gzip
-import hashlib
 import json
 import math
 import os
@@ -1775,7 +1774,6 @@ def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
 #: `/v1/vectors/*` route that mutates (as opposed to merely querying)
 #: server-side state.
 _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
-    "/store-put",
     "/store-delete",
     "/update-metadata",
     "/upsert-chunks",
@@ -3078,7 +3076,6 @@ class HttpVectorClient:
 
     - :meth:`upsert_chunks` / :meth:`upsert_chunks_with_embeddings`
     - :meth:`search`
-    - :meth:`put`
     - :meth:`get_by_id`
     - :meth:`delete_by_id`
     - :meth:`list_collections`
@@ -3107,8 +3104,8 @@ class HttpVectorClient:
     ) -> None:
         self._tenant = tenant
         # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
-        # auto-registers a collection on first write. ``put``/
-        # ``upsert_chunks`` ensure registration before writing; the
+        # auto-registers a collection on first write. ``upsert_chunks``
+        # ensures registration before writing; the
         # registrar is injectable (zero-arg catalog-writer factory, see
         # ``nexus.corpus.ensure_collection_registered``) so this
         # low-level HTTP client never hard-couples to
@@ -3358,9 +3355,9 @@ class HttpVectorClient:
         # already surfaces (RDR-195, ``cda82c8a5``) rather than a silent
         # client-side drop. MAX_DOCUMENT_BYTES is a ChromaDB-era STORAGE
         # quota, not a Voyage EMBED quota — the two must not be conflated
-        # here. ``put()``'s own ``fail_on_oversized=True`` check (this
-        # method's single-chunk, non-paginated sibling, where the 9-row
-        # evidence actually pointed) is untouched by this revert.
+        # here. (The 9-row evidence pointed at ``put()``, the single-chunk,
+        # non-paginated sibling, which enforced its own ``fail_on_oversized=True``
+        # check and has since been retired, nexus-nt76j.)
         n = len(ids)
         byte_budget = (
             None if embeddings is not None
@@ -3539,155 +3536,6 @@ class HttpVectorClient:
             collection_name, ids, documents, metadatas=metadatas,
             force_re_embed=force_re_embed, delete_keys=delete_keys,
         )
-
-    def put(
-        self,
-        collection: str,
-        content: str,
-        title: str = "",
-        tags: str = "",
-        category: str = "",
-        session_id: str = "",
-        source_agent: str = "",
-        store_type: str = "knowledge",
-        ttl_days: int | None = None,
-        catalog_doc_id: str = "",
-    ) -> str:
-        """Upsert *content* into *collection*. Returns the document ID.
-
-        Drop-in parity with ``T3Database.put`` (nexus-7zuzz): same parameter
-        list, same doc_id derivation (the FULL ``sha256(content).hexdigest()``,
-        RDR-180 / nexus-jxizy.3), and metadata built
-        via the SAME :func:`nexus.metadata_schema.make_chunk_metadata` factory
-        that T3Database.put uses — parity by construction, not by duplication.
-        ``ttl_days`` validation is likewise byte-identical to
-        ``T3Database.put``'s own (nexus-tk070.p6b fix-pass, nexus-24rof,
-        RDR-194 D5): ``None``/omitted means permanent; an explicit ``0`` or
-        negative value raises :exc:`ValueError` naming the fix, before any
-        HTTP call is made — see ``T3Database.put``'s docstring for the full
-        derivation.
-
-        ``store_type`` is accepted for API symmetry but intentionally not
-        forwarded: T3Database also ignores it (RDR-101 Phase 5c dropped
-        store_type from ALLOWED_TOP_LEVEL; content_type derives from the
-        collection prefix, identical logic is applied here).
-
-        ``catalog_doc_id`` is an HTTP-path superset: T3Database.put() accepts
-        the param but normalize() strips it from the Chroma write (not in
-        ALLOWED_TOP_LEVEL); on the T3 path catalog association is via the hook
-        chain, not chunk metadata. HttpVectorClient stamps it into the service
-        request body so the Java layer can persist the tumbler cross-reference
-        if the service endpoint accepts it. This is a documented divergence, not
-        a parity gap — see EXCLUSIONS comment in the parity test.
-
-        Single-chunk: one HTTP call per put() call. T3Database.put uses
-        ``fail_on_oversized=True``; this method enforces the SAME check
-        client-side (nexus-xzyr3) before the HTTP call is ever made —
-        the server does NOT reject oversized content on this path (see
-        ``VectorHandler.handleStorePut`` / ``PgVectorRepository
-        .upsertChunksInternal``, neither of which validates byte length).
-        """
-        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
-            embedding_model_for_collection_name,
-            index_model_for_collection,
-            write_with_registration_retry,
-        )
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
-
-        # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): reject an
-        # explicit non-positive ttl_days LOUDLY, before any HTTP call —
-        # never silently reinterpreted. Byte-identical check to
-        # T3Database.put's own (see this method's docstring).
-        if ttl_days is not None and ttl_days <= 0:
-            raise ValueError(
-                f"ttl_days={ttl_days} is invalid: omit the argument or pass "
-                "None for a permanent entry — ttl_days must be a positive "
-                "integer number of days (0 does NOT mean permanent; None does)"
-            )
-
-        # RDR-180 (nexus-p78a0 rehearsal catch, run 4): the natural id is the
-        # FULL digest — this mirror kept the retired [:32] truncation after
-        # T3Database.put was converted, so every service-mode store_put wrote
-        # a 16-byte key and 409'd on the cohort engine's octet CHECK
-        # (chunks_*_chash_octet_check, sqlstate 23514). Parity with
-        # T3Database.put is pinned by test_store_put_id_is_the_full_digest.
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        doc_id = content_hash
-        now_iso = datetime.now(UTC).isoformat()
-
-        # nexus-xzyr3: fail_on_oversized=True parity with T3Database.put()
-        # (t3.py's _write_batch), enforced HERE rather than assumed
-        # server-side. This docstring used to claim "the server is
-        # responsible for rejecting oversized content on the HTTP path" —
-        # that was never true: VectorHandler.handleStorePut and
-        # PgVectorRepository.upsertChunksInternal admit any byte count, so
-        # nine knowledge__knowledge notes up to 32,735 bytes were written
-        # this way between 2026-07-10 and 2026-09-04 (T2
-        # nexus/xzyr3-oversize-rows-2026-09-05). Refuse client-side, before
-        # the HTTP call, exactly like the put path's local-mode twin.
-        doc_bytes = len(content.encode())
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits), matches this module's other call sites
-
-        if doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES:
-            from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-            raise PutOversizedError(
-                doc_id=doc_id,
-                doc_bytes=doc_bytes,
-                max_bytes=QUOTAS.MAX_DOCUMENT_BYTES,
-                collection=collection,
-            )
-
-        # Derive content_type from collection prefix — mirrors T3Database.put
-        # at t3.py:860-870 exactly.
-        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
-
-        content_type = chunk_content_type_for_collection(collection)
-
-        metadata = make_chunk_metadata(
-            content_type=content_type,
-            chunk_text_hash=content_hash,
-            content_hash=content_hash,
-            chunk_start_char=0,
-            chunk_end_char=len(content),
-            indexed_at=now_iso,
-            embedding_model=(
-                embedding_model_for_collection_name(collection)
-                or index_model_for_collection(collection)
-            ),
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            source_agent=source_agent,
-            session_id=session_id,
-        )
-
-        # catalog_doc_id: HTTP-path superset (see docstring). Stamp when present;
-        # omit when empty to keep the body clean for the legacy/no-catalog path.
-        if catalog_doc_id:
-            metadata["catalog_doc_id"] = catalog_doc_id
-
-        body: dict[str, Any] = {
-            "collection": collection,
-            "doc_id": doc_id,
-            "content": content,
-            "metadata": metadata,
-        }
-        # RDR-204 Phase 1 (nexus-f5wwx): this is the ``nx store put`` /
-        # MCP ``store_put`` write path — the primary caller that had no
-        # register_collection call anywhere in its chain and relied
-        # entirely on the engine's now-retired auto-registration.
-        # Cached after the first call per (process, collection); retries
-        # once if the engine's per-tenant boot sweep (bead .3) reaped a
-        # registered-but-chunkless row between registration and this
-        # write.
-        result = write_with_registration_retry(
-            collection,
-            lambda: _post("/v1/vectors/store-put", body, tenant=self._tenant),
-            registrar=self._collection_registrar,
-        )
-        return result.get("id", doc_id)
 
     # ── Read path ────────────────────────────────────────────────────────────
 
@@ -5925,8 +5773,8 @@ class HttpVectorClient:
         was excluded by ``$ne: 0``, so no behavior change for legacy rows
         either). The only row shape where the two predicates would ever
         diverge — a row explicitly written as JSON null — IS now producible:
-        the p6b fix-pass (nexus-24rof) made ``HttpVectorClient.put`` /
-        ``T3Database.put`` pass ``None`` through for "permanent" (rejecting
+        the p6b fix-pass (nexus-24rof) made ``T3Database.put`` (and the
+        since-retired ``HttpVectorClient.put``) pass ``None`` through for "permanent" (rejecting
         an explicit ``ttl_days <= 0`` loudly), while ``make_chunk_metadata``
         keeps its ``0`` factory default for the indexer pipelines that have
         no --ttl concept. Both null-shaped and 0-shaped permanent rows are

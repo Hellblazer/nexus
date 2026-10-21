@@ -1944,7 +1944,7 @@ def ensure_collection_registered(
     RDR-204 Phase 1 client half (nexus-f5wwx). Call this from every
     write path that used to rely on the engine's now-retired
     auto-registration on first write: the T3 chunk write path
-    (``HttpVectorClient.put`` / ``.upsert_chunks``, which covers
+    (``HttpVectorClient.upsert_chunks``, which covers
     ``nx store put``, MCP ``store_put``, the indexer, ``nx index md``/
     ``pdf``/``rdr``, ``nx dt import`` and ``nx memory promote`` in one
     place), the aspects store (``HttpDocumentAspectsStore.upsert``),
@@ -2024,7 +2024,7 @@ def ensure_collection_registered(
 
     - T3 chunk writes / aspects / taxonomy persist/rebuild/import
       (:func:`write_with_registration_retry`, this function's own
-      primary caller — ``HttpVectorClient.put``/``.upsert_chunks``,
+      primary caller — ``HttpVectorClient.upsert_chunks``,
       ``HttpDocumentAspectsStore.upsert``, ``HttpTaxonomyStore``'s
       ``assign_topic``/``persist_discovered_topics``/
       ``persist_rebuild_topics``/``import_topic``/``import_topic_link``/

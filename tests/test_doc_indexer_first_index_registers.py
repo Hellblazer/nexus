@@ -86,7 +86,7 @@ def test_index_document_registers_before_the_incremental_read(tmp_path: Path):
 
 def test_registration_uses_the_db_registrar_the_write_path_honours(tmp_path: Path):
     """The registrar comes from the vector client (``_collection_registrar``),
-    exactly as ``HttpVectorClient.put`` passes it, so a fake writer in a test
+    exactly as ``HttpVectorClient.upsert_chunks`` passes it, so a fake writer in a test
     and the real catalog writer in production are the same seam."""
     events: list[str] = []
     db = _ordered_db(events)

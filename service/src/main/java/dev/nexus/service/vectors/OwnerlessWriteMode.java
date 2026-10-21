@@ -6,7 +6,7 @@ import java.util.Locale;
 
 /**
  * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what the engine does with a chunk write on
- * {@code /v1/vectors/upsert-chunks} or {@code /store-put} whose chashes are not all owned
+ * {@code /v1/vectors/upsert-chunks} whose chashes are not all owned
  * (a chash with no live manifest row in the collection).
  *
  * <ul>

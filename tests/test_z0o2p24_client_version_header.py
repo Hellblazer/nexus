@@ -8,14 +8,14 @@ a request without the header comes from a client older than the release that add
 product). A transport that dropped the header would make a current client look old, so each
 transport the client uses has its own test:
 
-* urllib: ``HttpVectorClient`` (``/v1/vectors/upsert-chunks``, ``/store-put`` and every other vector route);
+* urllib: ``HttpVectorClient`` (``/v1/vectors/upsert-chunks`` and every other vector route);
 * httpx: the T2 stores and the catalog client (``RefreshableHttpStoreMixin``), the token store (its own
   client) and the T1 scratch store.
 
 The hook path (``mailbox_drain``) and ``db/http_engine_status`` send no
 version header; none of them writes a chunk.
 
-The only writers of ``upsert-chunks`` and ``store-put`` in this repository are on the urllib transport.
+The only writer of ``upsert-chunks`` in this repository is on the urllib transport.
 Callers outside the repository (a conexus tool on httpx, say) send whatever they send; the engine's
 log names them by the ABSENCE of this header.
 """
@@ -66,7 +66,7 @@ class _FakeResponse:
         return b'{"upserted": 1}'
 
 
-@pytest.mark.parametrize("path", ["/v1/vectors/upsert-chunks", "/v1/vectors/store-put", "/v1/vectors/search"])
+@pytest.mark.parametrize("path", ["/v1/vectors/upsert-chunks", "/v1/vectors/search"])
 def test_the_urllib_transport_sends_the_version_on_every_vector_route(
     monkeypatch: pytest.MonkeyPatch, path: str,
 ) -> None:

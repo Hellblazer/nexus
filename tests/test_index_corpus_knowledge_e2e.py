@@ -205,8 +205,8 @@ class TestMarkerSurvivesGenericWrites:
     -- not just avoid being written blank at opt-in time. Two named sites:
 
     - A T3 chunk write's ``corpus.ensure_collection_registered(kwargs=None)``
-      (the generic derivation branch every ``HttpVectorClient.put``/
-      ``upsert_chunks`` call reaches) -- exercised here with the
+      (the generic derivation branch every ``HttpVectorClient.upsert_chunks``
+      call reaches) -- exercised here with the
       module-level registration CACHE explicitly cleared first, simulating
       a genuinely fresh process (a real fresh process has an empty cache by
       construction; clearing it here is what makes this test reach the

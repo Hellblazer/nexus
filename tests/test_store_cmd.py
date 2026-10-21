@@ -13,6 +13,15 @@ from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 
+def _t3_double() -> MagicMock:
+    """``MagicMock(spec=HttpVectorClient)`` plus a ``put``: ``HttpVectorClient.put`` is retired
+    (nexus-nt76j), but the note-write double (``tests/_note_write_double.py``) lands a note in the
+    mocked T3 through ``t3.put``, as ``T3Database.put`` does, so the double carries one."""
+    db = MagicMock(spec=HttpVectorClient)
+    db.put = MagicMock(name="put")
+    return db
+
+
 def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
@@ -96,7 +105,7 @@ def mock_store(env_creds):
     # here — the real _t3() would hand back an HttpVectorClient, not a
     # T3Database. spec= it so a method missing from HttpVectorClient
     # (e.g. the gc/_dir class of bug) fails the mocked test too.
-    db = MagicMock(spec=HttpVectorClient)
+    db = _t3_double()
     with patch("nexus.commands.store._t3", return_value=db):
         yield db
 
@@ -157,7 +166,7 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     src.write_text("content")
     _seed_for_store_put("content")
     with patch("nexus.commands.store._t3") as mt3:
-        db = MagicMock(spec=HttpVectorClient)
+        db = _t3_double()
         db.__enter__ = MagicMock(return_value=db)
         db.__exit__ = MagicMock(return_value=False)
         db.put.return_value = "doc-id-1"

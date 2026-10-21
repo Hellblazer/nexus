@@ -102,7 +102,7 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # Lifecycle / scoring (5) — ``expires_at`` removed; expiry is
     # derived from ``indexed_at + ttl_days`` Python-side. ``ttl_days=0``
     # is the "permanent" sentinel THIS FIELD's OWN write default still
-    # uses (T3Database.put / HttpVectorClient.put / make_chunk_metadata,
+    # uses (T3Database.put / make_chunk_metadata,
     # unchanged — RDR-194 D5 / nexus-tk070.p6b scopes the None-sentinel
     # flip to the SQL nexus.frecency table and this field's own READ path
     # (T3Database.expire / HttpVectorClient.expire), not to this write
@@ -354,8 +354,8 @@ def validate(metadata: dict[str, Any]) -> None:
 # ── Factory ─────────────────────────────────────────────────────────────────
 
 
-#: Content type a chunk written straight to a collection (a note, ``HttpVectorClient.put``) is stamped
-#: with, by collection prefix. The ONE copy: ``put``, ``T3Database.put`` and the note writer share it.
+#: Content type a chunk written straight to a collection (a note) is stamped
+#: with, by collection prefix. The ONE copy: ``T3Database.put`` and the note writer share it.
 _PREFIX_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
     ("code__", "code"),
     ("docs__", "prose"),
@@ -408,8 +408,8 @@ def make_chunk_metadata(
     bib_citation_count: int = 0,
     bib_semantic_scholar_id: str = "",
     # Lifecycle. Type widened to accept None (nexus-tk070.p6b fix-pass,
-    # nexus-24rof, RDR-194 D5): T3Database.put/HttpVectorClient.put now
-    # validate and pass None through for "permanent" rather than 0 — see
+    # nexus-24rof, RDR-194 D5): T3Database.put now
+    # validates and passes None through for "permanent" rather than 0 — see
     # those methods' own docstrings. The DEFAULT stays 0 deliberately,
     # unchanged: non-put() callers (code/prose/pdf indexers via
     # upsert_chunks*) have no --ttl concept at all and rely on this
@@ -486,8 +486,8 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     ``None``/absent ``ttl_days`` is the canonical permanent sentinel
     (RDR-194 D5, nexus-tk070.p6b — matching ``nexus.memory.ttl_days`` /
     ``nexus.plans.ttl_days`` / ``nexus.frecency.ttl_days``'s CHECK-enforced
-    contract). ``T3Database.put``/``HttpVectorClient.put`` (fix-pass,
-    nexus-24rof) now REJECT an explicit ``ttl_days=0`` loudly at write
+    contract). ``T3Database.put`` (and, until its retirement, ``HttpVectorClient.put``; fix-pass,
+    nexus-24rof) REJECT an explicit ``ttl_days=0`` loudly at write
     time — 0 can no longer be freshly written by either write path. A
     ``ttl_days == 0`` reaching this function is therefore always LEGACY
     data (written before that fix, or by a caller outside those two
@@ -509,7 +509,7 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
             hint=(
                 "ttl_days=0 predates the None-sentinel migration (RDR-194 D5, "
                 "nexus-tk070.p6b/nexus-24rof) and is legacy-compat-tolerated as "
-                "permanent on read; T3Database.put/HttpVectorClient.put reject "
+                "permanent on read; T3Database.put rejects "
                 "0 on write, so this metadata was written before that fix (or "
                 "by a caller outside those two methods)"
             ),

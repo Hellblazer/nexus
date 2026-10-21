@@ -825,7 +825,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
 
   # RDR-223 P3: the chunk and its owner land in ONE request. The engine refuses
-  # an ownerless chunk write (upsert-chunks / store-put), so this leg no longer
+  # an ownerless chunk write (upsert-chunks), so this leg no longer
   # posts the raw route and then a manifest write: it posts the combined write
   # the real client uses (write_many with an inline `chunks` array), reusing the
   # smoke document registered in step c. RDR-192 Step 5 still applies: a chunk is

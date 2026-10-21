@@ -279,8 +279,8 @@ def test_is_expired_null_ttl_days_never_expires() -> None:
 
 
 def test_is_expired_legacy_ttl_days_zero_treated_as_permanent_with_warning() -> None:
-    """nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): T3Database.put/
-    HttpVectorClient.put now REJECT an explicit ttl_days=0 on write, so a
+    """nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): T3Database.put
+    (and, until it was retired, HttpVectorClient.put) REJECT an explicit ttl_days=0 on write, so a
     ttl_days=0 reaching is_expired() is always LEGACY data (written before
     that fix, or by a caller outside those two methods). Reads are not
     writes: this function still treats a legacy 0 as permanent (no

@@ -429,8 +429,8 @@ def _vector_with_retry(
     after it): 5 x 17s + 4 x 60s = 325s, call it about 5.5 minutes, for
     502/503 on any route or a 504 on a NON-embed-write route.
 
-    nexus-r46u9: on an embed-write route (``/v1/vectors/upsert-chunks`` /
-    ``/store-put``) under a SUSTAINED 504 storm, the inner gateway retry's
+    nexus-r46u9: on an embed-write route (``/v1/vectors/upsert-chunks``)
+    under a SUSTAINED 504 storm, the inner gateway retry's
     three sleeps are each floored at
     :data:`nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S`
     (30s), so the inner total rises from 17s to 3 x 30s = 90s. This

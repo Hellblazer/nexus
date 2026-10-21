@@ -30,7 +30,7 @@ class OwnerlessLogLimiterTest {
         var limiter = new OwnerlessLogLimiter(now::get);
         assertThat(limiter.tryAcquire("upsert-chunks|a")).isEqualTo(0);
         assertThat(limiter.tryAcquire("upsert-chunks|b")).as("another collection").isEqualTo(0);
-        assertThat(limiter.tryAcquire("store-put|a")).as("another route").isEqualTo(0);
+        assertThat(limiter.tryAcquire("other-route|a")).as("another route").isEqualTo(0);
         assertThat(limiter.tryAcquire("upsert-chunks|a")).isEqualTo(-1);
     }
 

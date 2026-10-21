@@ -34,7 +34,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): {@code upsert-chunks} and {@code store-put} refuse a
+ * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): {@code upsert-chunks} refuses a
  * write whose chashes are not all owned, i.e. whose chashes do not each have a live manifest
  * row in the collection. The check is in the HANDLERS (a guard passed to the repository), so a
  * repository method called directly stays unguarded.
@@ -69,7 +69,8 @@ class OwnerlessWriteRefusalTest {
         "knowledge__owr-owner-forge__voyage-context-3__v1 tenant=evil4 suppressed_since_last=77"
             + " event=forged\u001b[0m\n";
     private static final String COLLECTION_INTX = "knowledge__owr-owner-intx__voyage-context-3__v1";
-    private static final String COLLECTION_INTX_PUT = "knowledge__owr-owner-intxput__voyage-context-3__v1";
+    private static final String COLLECTION_INTX_ENFORCE = "knowledge__owr-owner-intxenforce__voyage-context-3__v1";
+    private static final String COLLECTION_NOHDR = "knowledge__owr-owner-nohdr__voyage-context-3__v1";
     private static final String SVC_ROLE = "svc_owr";
     private static final String SVC_PASS = "svc_owr_pass";
     private static final String TENANT   = "owr-tenant";
@@ -132,7 +133,8 @@ class OwnerlessWriteRefusalTest {
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_GATE);
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_FORGE);
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_INTX);
-            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_INTX_PUT);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_INTX_ENFORCE);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_NOHDR);
             PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION);
         }
     }
@@ -324,15 +326,6 @@ class OwnerlessWriteRefusalTest {
         }
     }
 
-    @Test
-    void storePut_aChashWithNoLiveManifestRow_isRefused422NamingTheCombinedRoutes() throws Exception {
-        String text = "owr-store-put-ownerless-text";
-        var resp = post("/v1/vectors/store-put", Map.of(
-            "collection", COLLECTION, "doc_id", chash(text), "content", text, "metadata", Map.of()));
-        assertNamesTheCombinedRoutes(resp);
-        assertThat(storedCount(chash(text))).isZero();
-    }
-
     // ── 2. owned writes are accepted as today ────────────────────────────────
 
     @Test
@@ -402,15 +395,6 @@ class OwnerlessWriteRefusalTest {
         assertThat(((Number) json(resp).get("requested_count")).intValue()).isEqualTo(1);
     }
 
-    @Test
-    void storePut_anOwnedChash_isAccepted() throws Exception {
-        String text = "seed";   // insertOwnedChunks seeds the text "seed"; the chash is the caller's identity
-        String h = owned("owr-owned-store-put");
-        var resp = post("/v1/vectors/store-put", Map.of(
-            "collection", COLLECTION, "doc_id", h, "content", text, "metadata", Map.of("k", "v")));
-        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
-    }
-
     // ── 3. the order of the three 4xx checks ─────────────────────────────────
 
     @Test
@@ -421,9 +405,6 @@ class OwnerlessWriteRefusalTest {
         String legacy = "0123456789abcdef0123456789abcdef";
         var up = upsert(UNREGISTERED, List.of(legacy), List.of("text"));
         assertThat(up.statusCode()).as("upsert-chunks, body: %s", up.body()).isEqualTo(400);
-        var sp = post("/v1/vectors/store-put", Map.of(
-            "collection", UNREGISTERED, "doc_id", legacy, "content", "text", "metadata", Map.of()));
-        assertThat(sp.statusCode()).as("store-put, body: %s", sp.body()).isEqualTo(400);
         assertThat(OwnerlessWriteActivity.refusedTotal()).isZero();
     }
 
@@ -465,17 +446,11 @@ class OwnerlessWriteRefusalTest {
     }
 
     @Test
-    void logOnly_storePutIsCountedToo_andAnOwnedWriteIsNot() throws Exception {
+    void logOnly_anOwnedWriteIsNotCounted() throws Exception {
         service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
-        String text = "owr-log-only-store-put";
-        assertThat(post("/v1/vectors/store-put", Map.of(
-            "collection", COLLECTION, "doc_id", chash(text), "content", text, "metadata", Map.of()))
-            .statusCode()).isEqualTo(200);
-        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).isEqualTo(1);
-
         String h = owned("owr-log-only-owned");
         assertThat(upsert(COLLECTION, List.of(h), List.of("seed")).statusCode()).isEqualTo(200);
-        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).as("an owned write is not counted").isEqualTo(1);
+        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).as("an owned write is not counted").isZero();
     }
 
     @Test
@@ -713,14 +688,15 @@ class OwnerlessWriteRefusalTest {
             .contains("source_path=/p/a.py;").contains("title=a.py:1-1;").contains("source_agent=indexer;")
             .doesNotContain("file:///secret");
 
-        // The limiter is keyed on route, tenant and collection: use another route to get a fresh line, header absent.
+        // The limiter is keyed on route, tenant and collection: use another collection to get a fresh line, header absent.
         var absent = captureRepositoryWarnings(() -> {
-            post(TOKEN, "/v1/vectors/store-put", Map.of("collection", COLLECTION_LOG,
-                "doc_id", chash("owr-log-2"), "content", "t", "metadata", Map.of()), Map.of("User-Agent", "old/1"));
+            post(TOKEN, "/v1/vectors/upsert-chunks", Map.of("collection", COLLECTION_NOHDR,
+                "ids", List.of(chash("owr-log-2")), "documents", List.of("t"), "metadatas", List.of(Map.of())),
+                Map.of("User-Agent", "old/1"));
             return null;
         });
         assertThat(absent).hasSize(1);
-        assertThat(absent.get(0)).contains("route=store-put").contains("client_version=\"absent\"").contains("user_agent=\"old/1\"");
+        assertThat(absent.get(0)).contains("route=upsert-chunks").contains("client_version=\"absent\"").contains("user_agent=\"old/1\"");
     }
 
     @Test
@@ -905,29 +881,16 @@ class OwnerlessWriteRefusalTest {
     }
 
     @Test
-    void storePut_aChashThatLosesItsOwnerDuringTheEmbed_isRefusedInEnforce_andCountedAndLandsInLogOnly() throws Exception {
-        // store-put reaches the same write transaction through putWithTokens: its in-tx recheck, both modes.
-        String text = "owr-store-put-in-tx";
-        String h = chash(text);
-        ownedIn(COLLECTION_INTX_PUT, h);
-        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX_PUT, h);
-        var enforce = post("/v1/vectors/store-put", Map.of("collection", COLLECTION_INTX_PUT,
-            "doc_id", h, "content", "store-put text that differs from the stored seed", "metadata", Map.of()));
+    void aChashThatLosesItsOwnerDuringTheEmbed_isRefusedInEnforce_andNothingLands() throws Exception {
+        // The in-transaction recheck in enforce mode (the log-only leg is the test above).
+        String h = chash("owr-enforce-in-tx");
+        ownedIn(COLLECTION_INTX_ENFORCE, h);
+        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX_ENFORCE, h);
+        var enforce = upsert(COLLECTION_INTX_ENFORCE, List.of(h), List.of("text that differs from the stored seed"));
         assertNamesTheCombinedRoutes(enforce);
         assertThat(embedder.calls.get()).isEqualTo(1);
         assertThat(OwnerlessWriteActivity.refusedTotal()).isEqualTo(1);
-        assertThat(physicalRow(TENANT, COLLECTION_INTX_PUT, h)).as("enforce: no chunk row was created").isNull();
-
-        // The refusal rolled back; seed the chash owned again, lose it again, now in log-only.
-        service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
-        ownedIn(COLLECTION_INTX_PUT, h);
-        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX_PUT, h);
-        var logOnly = post("/v1/vectors/store-put", Map.of("collection", COLLECTION_INTX_PUT,
-            "doc_id", h, "content", "store-put text that differs again", "metadata", Map.of()));
-        assertThat(logOnly.statusCode()).as("body: %s", logOnly.body()).isEqualTo(200);
-        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).isEqualTo(1);
-        assertThat(OwnerlessWriteActivity.refusedTotal()).as("unchanged since the enforce leg").isEqualTo(1);
-        assertThat(physicalRow(TENANT, COLLECTION_INTX_PUT, h)).as("log-only: the write landed").isNotNull();
+        assertThat(physicalRow(TENANT, COLLECTION_INTX_ENFORCE, h)).as("enforce: no chunk row was created").isNull();
     }
 
     @Test

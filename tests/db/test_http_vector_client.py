@@ -242,32 +242,6 @@ class TestSearch:
         assert "where" not in calls[1]
 
 
-class TestPut:
-    def test_store_put_id_is_the_full_digest(self, monkeypatch):
-        """put() matches T3Database.put(): doc_id is the FULL
-        sha256(content) hexdigest (RDR-180 / nexus-jxizy.3). The
-        nexus-p78a0 rehearsal (run 4) caught this mirror still slicing
-        [:32] — every service-mode store_put then wrote a 16-byte key and
-        409'd on the cohort engine's octet CHECK. This test previously
-        EXPECTED the truncation, pinning the bug in place."""
-        import hashlib
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append((path, body))
-            return {"id": body.get("doc_id", "fallback")}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        content = "content here"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
-        assert len(expected_doc_id) == 64
-        returned_id = client.put("col", content, title="my-title")
-        path, body = calls[0]
-        assert path == "/v1/vectors/store-put"
-        assert body["doc_id"] == expected_doc_id
-        assert body["content"] == content
-        assert returned_id == expected_doc_id
-
-
 class TestExistingIdsAndGetByIdStayTruncationSafe:
     """nexus-hdx2u: existing_ids and get_by_id call ``_post`` directly
     (not through ``_ServiceCollectionStub.get``) and were ALREADY safe
@@ -2628,12 +2602,9 @@ class TestEmbedWrite504BackoffFloor:
             fp=io.BytesIO(body),
         )
 
-    @pytest.mark.parametrize("path", [
-        "/v1/vectors/upsert-chunks",
-        "/v1/vectors/store-put",
-    ])
-    def test_504_on_embed_write_route_floors_every_sleep(self, monkeypatch, path):
+    def test_504_on_embed_write_route_floors_every_sleep(self, monkeypatch):
         import nexus.db.http_vector_client as hv
+        path = "/v1/vectors/upsert-chunks"
         calls: list[int] = []
         sleeps: list[float] = []
 
@@ -2722,7 +2693,7 @@ class TestEmbedWrite504BackoffFloor:
                             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
         module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
-            hv._request("POST", "/v1/vectors/store-put",
+            hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=120, body={})
         assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
 

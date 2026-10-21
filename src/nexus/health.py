@@ -4168,7 +4168,7 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
 
     The engine refuses (``enforce``) or counts (``log-only``) a write to
-    ``/v1/vectors/upsert-chunks`` or ``/v1/vectors/store-put`` whose chash no
+    ``/v1/vectors/upsert-chunks`` (or the since-retired ``/v1/vectors/store-put``) whose chash no
     live manifest row owns. Only a client released before the RDR-223 Phase 2
     migration writes that way, so a non-zero counter means some machine that
     writes to this engine runs old code: not yet upgraded, or upgraded but a

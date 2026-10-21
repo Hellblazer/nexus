@@ -271,7 +271,7 @@ public final class NexusService {
         chunksLeafBloat;
 
     /**
-     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
      * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
      * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
      * initialiser throws out of the constructor). Mutable only through the holder, for tests.

@@ -89,3 +89,5 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/_lib.py` (nexus-ujbf8): `_engine_endpoint` returns `(None, None)` for a `service_url` that carries `user:password@` instead of sending routing telemetry to it. Deferred with the rest of the bead (it also changes the wheel).
 
 - `conexus/hooks/scripts/mailbox_drain.py` (nexus-ujbf8): `_post` refuses a base URL with userinfo before building a request, and its worker thread now catches `http.client.HTTPException` (an `InvalidURL` used to kill the thread, so `_post` returned `None` and its callers read a confirmed negative, which clears the pending-ack record). The SKIP line for a transport error withholds text that holds an `@`, and the no-credential SKIP names `host[:port]` instead of the resolved URL. Deferred with the rest of the bead (it also changes the wheel).
+
+- `conexus/resources/agent-shared/ERROR_HANDLING.md` (nexus-nt76j): the T3 TTL paragraph no longer says `HttpVectorClient.put` computes expiry; the method is retired with the engine's `store-put` route. Deferred because the bead also changes the wheel (`src/nexus/`), which the plugin cut cannot hold apart.

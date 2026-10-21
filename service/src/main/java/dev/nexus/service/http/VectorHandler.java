@@ -35,6 +35,7 @@ import java.util.Map;
  * <pre>
  *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
  *   POST /v1/vectors/upsert-reference-only  410 Gone (retired, RDR-223 Phase 3 Step 2, nexus-z0o2p.24)
+ *   POST /v1/vectors/store-put               410 Gone (retired, nexus-nt76j)
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
@@ -42,7 +43,6 @@ import java.util.Map;
  *   POST /v1/vectors/search-topic-scoped     combined topic-scoped query (chunk-level) — RDR-156 P4
  *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
  *   POST /v1/vectors/search-aspect-scoped    combined aspect-filtered query (vector rank + document_aspects predicate) — RDR-156 D5
- *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check);
  *                                    include_non_live=true returns ids+metadata physically stored, ignoring
  *                                    live(c) (RDR-192 Step 5 amendment, nexus-wbfpw.10)
@@ -182,7 +182,7 @@ public final class VectorHandler implements HttpHandler {
     /**
      * Full wiring plus the ownerless-write policy (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
      *
-     * @param ownerlessWritePolicy what {@code upsert-chunks} and {@code store-put} do with a chash that
+     * @param ownerlessWritePolicy what {@code upsert-chunks} does with a chash that
      *                             has no live manifest row: refuse it (the default) or log and count it
      */
     public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
@@ -229,6 +229,7 @@ public final class VectorHandler implements HttpHandler {
             switch (op) {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
                 case "/upsert-reference-only" -> handleUpsertReferenceOnlyGone(exchange); // RDR-223 P3.2: retired
+                case "/store-put"     -> handleStorePutGone(exchange);   // nexus-nt76j: retired
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/search-per-collection" -> handleSearchPerCollection(exchange, method);  // nexus-tu8wp.1
@@ -237,7 +238,6 @@ public final class VectorHandler implements HttpHandler {
                 case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
                 case "/search-graph-hop"       -> handleSearchGraphHop(exchange, method);        // RDR-156 P4 (houg9)
                 case "/search-aspect-scoped"   -> handleSearchAspectScoped(exchange, method);    // RDR-156 D5 (ubnwk)
-                case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/get-all-metadata" -> handleGetAllMetadata(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
@@ -262,7 +262,7 @@ public final class VectorHandler implements HttpHandler {
         } catch (dev.nexus.service.vectors.UpstreamAuthException e) {
             // nexus-pmhpc: upstream (Voyage) rejected OUR credentials — an
             // operator/config problem on every embedding-bearing route
-            // (store-put, search, query, hybrid). 502 Bad Gateway with the
+            // (search, query, hybrid, upsert-chunks). 502 Bad Gateway with the
             // actionable detail, never an opaque 500.
             log.error("event=vector_upstream_auth_failed op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 502, json(Map.of("error", e.getMessage())));
@@ -587,6 +587,22 @@ public final class VectorHandler implements HttpHandler {
             "error", "POST /v1/vectors/upsert-reference-only is retired: it wrote chunks no document owns. "
                 + "Write chunks and their manifest rows together through POST /v1/catalog/manifest/write_many "
                 + "and POST /v1/catalog/manifest/append")));
+    }
+
+    /**
+     * POST /v1/vectors/store-put: RETIRED (nexus-nt76j).
+     *
+     * <p>The single-chunk put had no caller left once RDR-223 Phase 3.3 moved every note writer onto
+     * the combined chunk-plus-owner write, and the engine already refused its ownerless writes. No
+     * client from v7.68.0 on sends it; an older one does, so the answer is 410 Gone with the fix named,
+     * as {@link #handleUpsertReferenceOnlyGone} answers its retired route, not the default arm's bare 404.
+     */
+    private void handleStorePutGone(HttpExchange ex) throws IOException {
+        HttpUtil.send(ex, 410, json(Map.of(
+            "error", "POST /v1/vectors/store-put is retired: the single-chunk put wrote chunks no document owns. "
+                + "Upgrade conexus (v7.68.0 or later writes chunks and their manifest rows together through "
+                + "POST /v1/catalog/manifest/write_many and POST /v1/catalog/manifest/append) and restart "
+                + "long-lived nx-mcp and Claude Code sessions so they stop running the old client")));
     }
 
     /**
@@ -979,42 +995,6 @@ public final class VectorHandler implements HttpHandler {
         var aspectResult = repo.searchAspectScopedWithTokens(
             tenant, queryText, collections, field, pattern, minConfidence, where, nResults);
         sendSearchResult(ex, body, queryText, aspectResult);
-    }
-
-    /**
-     * POST /v1/vectors/store-put
-     *
-     * <p>Request:
-     * <pre>
-     * {
-     *   "collection": "knowledge__...",
-     *   "doc_id":     "sha256hex...",   // chunk ID
-     *   "content":    "chunk text",
-     *   "metadata":   {...}              // optional
-     * }
-     * </pre>
-     *
-     * <p>Response 200: {"id": "..."}
-     */
-    private void handleStorePut(HttpExchange ex, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var repo   = requirePgRepo(ex);
-        var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
-        String collection  = requireString(body, "collection");
-        String docId       = requireString(body, "doc_id");
-        // RDR-223 P3.2: a non-canonical id is a 400 BEFORE the repository resolves the collection or
-        // asks about ownership, as on upsert-chunks (the id IS the chash).
-        dev.nexus.service.db.Chash.requireCanonical(docId, "doc_id");
-        String content     = requireString(body, "content");
-        Map<String, Object> metadata = optMap(body, "metadata");
-        if (metadata == null) metadata = Map.of();
-
-        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata,
-                ownershipGuard(ex, "store-put"));
-        // Emit token count from the doc-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, putResult.tokens());
-        HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));
     }
 
     /**

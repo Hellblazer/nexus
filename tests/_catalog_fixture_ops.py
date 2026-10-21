@@ -333,7 +333,7 @@ def bypass_fk_seed_chunk(
 
     ``fk_catalog_chunks_chunk`` itself does not care about collection-name
     conformance, only chash PRESENCE — but every real ``/v1/vectors/*`` T3
-    write endpoint (``upsert_chunks``, ``put``/``store-put``, WITH or
+    write endpoint (``upsert_chunks``, and the since-retired ``put``/``store-put``, WITH or
     WITHOUT the same-model passthrough) enforces RDR-103 four-segment
     naming server-side, unconditionally. A genuinely non-conformant LEGACY
     2-segment collection (the nexus-hmxi grandfathering scenario:

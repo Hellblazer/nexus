@@ -1028,7 +1028,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
     with an inline ``chunks=`` field) was the HEADLINE failure mode of the
     duplicate-re-embed production incident -- 77 of 101 edge timeouts -- so
     it gets the SAME 504 floor as ``http_vector_client._request``'s
-    ``/v1/vectors/upsert-chunks``/``/store-put`` routes, via the shared
+    ``/v1/vectors/upsert-chunks`` route, via the shared
     :mod:`nexus.db.gateway_backoff`. Mirrors
     ``tests/db/test_http_vector_client.py::TestEmbedWrite504BackoffFloor``.
 

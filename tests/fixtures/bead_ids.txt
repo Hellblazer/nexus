@@ -5312,6 +5312,7 @@ nexus-nrxs9
 nexus-nsh
 nexus-nsh.1
 nexus-nsqs
+nexus-nt76j
 nexus-ntacy
 nexus-ntbg
 nexus-ntkr5

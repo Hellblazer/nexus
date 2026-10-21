@@ -5,7 +5,7 @@ package dev.nexus.service.vectors;
 import java.util.List;
 
 /**
- * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): {@code upsert-chunks} or {@code store-put} was asked
+ * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): {@code upsert-chunks} was asked
  * to write a chash that has no live manifest row in the collection, and the engine is in
  * {@link OwnerlessWriteMode#ENFORCE}. The whole request is refused before anything is embedded
  * or written. {@code VectorHandler} maps it to 422.

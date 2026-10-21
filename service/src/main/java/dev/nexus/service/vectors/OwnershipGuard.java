@@ -12,9 +12,9 @@ import java.util.Objects;
  * <p>The check is requested by the HANDLER, through this guard, and is not part of the
  * repository's write methods: a repository method called without a guard (the contract and
  * fixture tests, the migration ingest) writes ownerless chunks as it always did.
- * {@code OwnershipGuardCoverageScan} scans the main sources, by name, for the four guarded
+ * {@code OwnershipGuardCoverageScan} scans the main sources, by name, for the three guarded
  * repository methods ({@code upsertChunksWithTokens}, {@code upsertChunksWithVectors},
- * {@code putWithTokens}, {@code upsertChunks}), so a handler cannot call one of them with a null
+ * {@code upsertChunks}), so a handler cannot call one of them with a null
  * guard. It matches direct calls and method references as text, so it also reads comments: name a
  * guarded method in prose without the call or the double-colon syntax. It does not see a chunk
  * write that goes through another method or through direct SQL. Known writers outside the guard are

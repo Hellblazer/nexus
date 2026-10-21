@@ -2110,8 +2110,8 @@ public final class PgContainerHelper {
     /**
      * Seed {@code nexus.chunks} rows with NO manifest row, through generated jOOQ DSL
      * rather than the write routes (RDR-223 P3.1, nexus-z0o2p.23). From Phase 3 the
-     * engine refuses an ownerless write on {@code /v1/vectors/upsert-chunks},
-     * {@code /store-put} and {@code /upsert-reference-only}, so a test that needs a
+     * engine refuses an ownerless write on {@code /v1/vectors/upsert-chunks}
+     * (and the retired {@code /store-put} and {@code /upsert-reference-only} routes are gone), so a test that needs a
      * chunk before its owner exists (the manifest FK wants the chunk first) or an
      * orphan on purpose builds it here. The Python twin is {@code tests/_chunk_seed.py}.
      *

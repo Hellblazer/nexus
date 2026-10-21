@@ -442,7 +442,7 @@ class TestHttpVectorClientGuardWiring:
         monkeypatch.setattr(service_endpoint, "guard_production_write", _fake_guard)
 
         with pytest.raises(service_endpoint.ProductionWriteGuardError):
-            hvc._post("/v1/vectors/store-put", {"ids": ["x"]})
+            hvc._post("/v1/vectors/upsert-chunks", {"ids": ["x"]})
 
         assert calls == ["http://127.0.0.1:1"]
 

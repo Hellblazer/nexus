@@ -568,8 +568,8 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
     """Refuse an over-quota single-chunk store BEFORE any catalog work.
 
     nexus-xzyr3 fold-in (code-review-nexus-xzyr3-26edb6662 [24586] /
-    critique-nexus-xzyr3-26edb6662 [24589]): both ``T3Database.put`` and
-    ``HttpVectorClient.put`` already refuse an over-quota document with
+    critique-nexus-xzyr3-26edb6662 [24589]): ``T3Database.put`` (and, until it
+    was retired, ``HttpVectorClient.put``) already refuses an over-quota document with
     ``PutOversizedError`` (``fail_on_oversized=True``) — but ONLY once
     called, which is AFTER ``catalog_store_hook_tracked`` has already
     minted a catalog row for every one of the note producers (MCP

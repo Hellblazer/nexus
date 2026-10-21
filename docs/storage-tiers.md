@@ -351,7 +351,7 @@ T3 has no separate `expires_at` field: expiry is computed client-side as `indexe
 | NULL (permanent) | `None` |
 | N days | The *remaining* window, not a reset N: computed from the entry's original timestamp so a promote does not silently extend its life |
 
-`ttl_days=0` is rejected outright by both `T3Database.put` and `HttpVectorClient.put` (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
+`ttl_days=0` is rejected outright by `T3Database.put` and, until nexus-nt76j retired it, `HttpVectorClient.put` (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
 
 ## When to Use Each Tier
 
