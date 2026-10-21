@@ -1,5 +1,9 @@
 # Changelog
 
+## [7.83.1] - 2026-10-21
+
+Plugin version aligned with conexus 7.83.1. No plugin-side changes: 7.83.0 was tagged but never published, and 7.83.1 is that tree plus a release record. The 7.83.0 entries below become live at this pin.
+
 ## [7.83.0] - 2026-10-21
 
 Plugin version aligned with conexus 7.83.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
