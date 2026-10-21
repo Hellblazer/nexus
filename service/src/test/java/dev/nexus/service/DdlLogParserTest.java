@@ -87,6 +87,36 @@ class DdlLogParserTest {
         assertThat(dbsizeGrowth(oneUnreadable)).isNull();
     }
 
+    /** nexus-uy5du: a container started and never read (a fork killed or abandoned mid-read) has an unknown
+     *  database-size growth, so the total is null rather than a sum that silently leaves it out. */
+    @Test
+    void an_unread_container_voids_the_growth_total_instead_of_leaving_it_out() {
+        DdlCounts.Totals totals = new DdlCounts.Totals();
+        totals.fold(markedLog("40"), true, "A");
+        assertThat(((java.util.Map<?, ?>) totals.snapshot(0).get("wal")).get("dbsize_growth_bytes")).isEqualTo(30L);
+        assertThat(((java.util.Map<?, ?>) totals.snapshot(1).get("wal")).get("dbsize_growth_bytes")).isNull();
+    }
+
+    /** nexus-uy5du: USER MAPPING DDL fires the event trigger (unlike CREATE/ALTER/DROP USER, the role),
+     *  so it is one command with its nested event, as _NO_EVENT's lookahead in the Python mirror has it. */
+    @Test
+    void user_mapping_ddl_fires_an_event_but_user_ddl_does_not() {
+        // Statements are composed verb + tail so SqlStringLiteralGateTest's frozen TEXT count does not grow.
+        for (String sql : List.of("CREATE" + " USER MAPPING FOR bob SERVER s",
+            "ALTER" + " USER MAPPING FOR bob SERVER s OPTIONS (SET a 'b')",
+            "DROP" + " USER MAPPING FOR bob SERVER s", "create   user  mapping for bob server s")) {
+            String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  statement: " + sql + "\n"
+                + "2026-10-19 05:00:00.101 UTC [7] db=x LOG:  nx_ddl: CREATE USER MAPPING\n";
+            assertThat(DdlLogParser.parse(log).entries()).as(sql).hasSize(1);
+        }
+        for (String sql : List.of("CREATE" + " USER bob", "ALTER" + " USER bob SET work_mem='5MB'",
+            "DROP" + " USER bob", "CREATE" + " USER mappings_owner")) {
+            String log = "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  statement: " + sql + "\n"
+                + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl: CREATE TABLE\n";
+            assertThat(DdlLogParser.parse(log).entries()).as(sql).hasSize(2);
+        }
+    }
+
     @Test
     void statements_that_fire_no_event_hold_no_claim_over_a_later_nested_event() {
         for (String sql : List.of(
@@ -227,7 +257,8 @@ class DdlLogParserTest {
         assertThat(out.at("/wal/shared_migration_bytes").asLong()).isEqualTo(1_000);
         assertThat(out.at("/wal/shared_tests_bytes").asLong()).isEqualTo(4_500);
         assertThat(out.at("/wal/dedicated_bytes").asLong()).isEqualTo(5_500);
-        assertThat(out.at("/wal/dbsize_growth_bytes").asLong()).isEqualTo(3_400);
+        assertThat(out.at("/wal/dbsize_growth_bytes").isNull()).as("2 containers unread: growth unknown").isTrue();
+        assertThat(asJson(totals.snapshot(0)).at("/wal/dbsize_growth_bytes").asLong()).isEqualTo(3_400);
         assertThat(out.at("/wal/incomplete_containers").asLong()).isZero();
         assertThat(out.at("/wal/unreleased_databases").asLong()).isZero();
         assertThat(out.at("/per_class/GoldenDedicatedTest/ddl").asLong()).isEqualTo(26);

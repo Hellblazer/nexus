@@ -485,7 +485,9 @@ final class DdlCounts {
             wal.put("shared_migration_bytes", sharedMigrationBytes);
             wal.put("shared_tests_bytes", sharedTestsBytes);
             wal.put("dedicated_bytes", dedicatedBytes);
-            wal.put("dbsize_growth_bytes", dbsizeGrowthUnknown ? null : dbsizeGrowthBytes);
+            // An unread container's growth is unknown too, and so is one whose log read failed (counted in
+            // log_errors, never folded), so either voids the total as an unreadable size does (nexus-uy5du).
+            wal.put("dbsize_growth_bytes", dbsizeGrowthUnknown || unread > 0 || logErrors > 0 ? null : dbsizeGrowthBytes);
             wal.put("incomplete_containers", incompleteWal);
             wal.put("unreleased_databases", dbStartLsn.size());
             Map<String, Object> out = new LinkedHashMap<>();

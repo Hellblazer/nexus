@@ -56,7 +56,7 @@ final class DdlLogParser {
      * logged, so it is counted once, as nested. Mirrors _NO_EVENT in tests/_ddl_counter.py.
      */
     private static final Pattern NO_EVENT = Pattern.compile(
-        "^(?:CREATE|ALTER|DROP)\\s+(?:DATABASE|ROLE|USER|GROUP|TABLESPACE|EVENT\\s+TRIGGER)\\b"
+        "^(?:CREATE|ALTER|DROP)\\s+(?:DATABASE|ROLE|USER(?!\\s+MAPPING\\b)|GROUP|TABLESPACE|EVENT\\s+TRIGGER)\\b"
             + "|^ALTER\\s+SYSTEM\\b"
             + "|^REASSIGN\\s+OWNED\\b"
             + "|^CLUSTER\\b"
