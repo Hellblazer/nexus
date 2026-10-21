@@ -1071,14 +1071,14 @@ jobs:
     # (median 13.7, the spread is runner speed) and was develop CI's longest
     # Python leg in 6 of 9 runs, against 10.9-12.0 for the slowest shard. The
     # repo is public, so the second hosted job costs nothing and takes no pool
-    # capacity. The split is applied after `-m lint` deselects, keyed off the
-    # committed .test_durations_lint.json (its own file: lint ids added to the
-    # shards' .test_durations.json would move pytest-split's average for
-    # unknown shard tests). By count alone the first run split 1082 + 1081
-    # tests into 298 s + 571 s of test time; the durations balance it (local
-    # estimate 478 s + 475 s). Refresh: uv run pytest -m lint -n 4
-    # --store-durations --durations-path=.test_durations_lint.json; a new or
-    # renamed lint test only takes the average until then.
+    # capacity. The split is applied after `-m lint` deselects. It interleaves:
+    # --splitting-algorithm least_duration with no recorded durations gives every
+    # test the same weight, so each test goes to the lighter group and the two get
+    # alternate tests (1088 + 1087 on 2026-10-21) with the slow scans spread
+    # across both. The default contiguous split put 298 s and 571 s of test time
+    # in the two groups (b036d0ce4), and balancing by durations recorded on a
+    # laptop put 1795 and 373 tests in them, under the per-group floor
+    # (5c99d3609), because laptop call times do not weigh CI's per-test cost.
     #
     # test_marker_selection_coverage.py's own non-vacuity check
     # (test_marker_is_wired_to_a_real_invocation) requires a REAL
@@ -1181,7 +1181,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run pytest -m lint -q -n 4 --splits 2 --group ${{ matrix.group }} \
-            --durations-path=.test_durations_lint.json | tee lint-output.txt
+            --splitting-algorithm least_duration | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
