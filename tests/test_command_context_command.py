@@ -1326,7 +1326,10 @@ def test_nx_preflight_has_no_node_section(
 
     result = runner.invoke(main, ["command-context", "nx-preflight"])
     assert "### 4. uv (package manager)" in result.output
-    assert "npx" not in result.output
+    # As a word: the output prints the test's own temp paths, whose random
+    # names can contain the letters (rnpxft_dg on PR #1618, py3.13 shard 1).
+    import re  # noqa: PLC0415 — test-local, as elsewhere in this file
+    assert re.search(r"\bnpx\b", result.output) is None
     assert "Node.js" not in result.output
 
 
