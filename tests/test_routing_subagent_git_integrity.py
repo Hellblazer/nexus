@@ -787,7 +787,15 @@ def test_the_documented_gaps_are_real_gaps(box: Box) -> None:
 
 
 def _docs() -> dict[str, str]:
-    pending = next(ln for ln in PENDING.read_text().splitlines() if "(nexus-i93tz): phase 1" in ln)
+    # The pending-ledger line lives until a release empties the ledger; from then the
+    # plugin changelog's entry carries the same limits and cost (release 7.83.0).
+    pending = next(
+        (ln for ln in PENDING.read_text().splitlines() if "(nexus-i93tz): phase 1" in ln),
+        None,
+    ) or next(
+        ln for ln in (PENDING.parent / "CHANGELOG.md").read_text().splitlines()
+        if "(nexus-i93tz)." in ln
+    )
     docstring = SCRIPT.read_text().split('"""')[1]
     registry = REGISTRY.read_text().split("subagent_git_integrity_check:")[1]
     return {"pending": pending, "docstring": docstring, "registry": registry}
