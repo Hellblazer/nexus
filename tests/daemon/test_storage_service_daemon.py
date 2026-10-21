@@ -2696,7 +2696,25 @@ class TestExitReasonReaders:
         assert ssd.last_engine_error_line(log, log.stat().st_size) is None
         assert ssd.last_supervisor_error_line(tmp_path / "absent.log", 0) is None
 
-    _INFO = "2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
+    def test_a_signal_death_with_only_info_lines_has_no_reason(self, tmp_path: Path) -> None:
+        """nexus-pmq9y: an engine killed by a signal during start logs no ERROR,
+        and its last line is a logback INFO line (pci_builders_terminated in the
+        7.77.1 shakeout). That line is not why it died: no reason, so the caller
+        says neither process left one. Output outside logback still counts."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            "2026-10-11 02:10:03,000 WARN  [main] d.n.service.Main - slow start\n"
+            "2026-10-11 02:10:04,000 INFO  [pci] d.n.service.Pci - event=pci_builders_terminated\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_error_line(log, 0) is None
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write("Unrecognized option: --bogus\n")
+        assert ssd.last_engine_error_line(log, 0) == "Unrecognized option: --bogus"
+
+    _INFO ="2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
 
     def test_boot_failure_reason_reports_only_a_final_error(self, tmp_path: Path) -> None:
         """nexus-pbway: ``nx doctor`` finds the engine down some time later. The log's end must be the error

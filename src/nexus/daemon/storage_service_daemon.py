@@ -1005,9 +1005,12 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
     *start_offset*: its last ERROR-level line, joined with its last line of
     output when that is a later line outside the logback format (a root
     ``Caused by:``, a JVM or native fatal banner), which an earlier ERROR
-    would otherwise hide. With no ERROR line, the last line that is not a
-    stack frame. ``None`` when the engine wrote nothing readable. Credential
-    values are redacted (the line is printed to terminals and CI logs).
+    would otherwise hide. With no ERROR line, the last line outside the
+    logback format that is not a stack frame (a crash before logback is up);
+    a logback line at another level is not a reason (an engine killed by a
+    signal ends on INFO, nexus-pmq9y). ``None`` when the engine wrote nothing
+    readable. Credential values are redacted (the line is printed to
+    terminals and CI logs).
     """
     lines = _log_lines_since(log_path, start_offset)
     last_error: int | None = next(
@@ -1019,7 +1022,14 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
         None,
     )
     if last_error is None:
-        return None if last_output is None else _reason_text(lines[last_output])
+        last_plain: int | None = next(
+            (
+                i for i in range(len(lines) - 1, -1, -1)
+                if not _ENGINE_FRAME_LINE.match(lines[i]) and not _ENGINE_LOGBACK_LINE.match(lines[i])
+            ),
+            None,
+        )
+        return None if last_plain is None else _reason_text(lines[last_plain])
     reason = _reason_text(lines[last_error])
     if (
         last_output is not None
