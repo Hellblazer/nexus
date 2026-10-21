@@ -9,7 +9,7 @@
 #   python -m tests._storage_touch_fan_in <dir holding the reports> --suite python_unit --shards 6
 #
 # The metric is a COUNT, summed across shards. A per-shard share against a worst-shard ceiling
-# (the first design) flaps when a file crosses a chunk boundary and lets every lighter shard regress
+# (the first design) flaps when a file moves to another shard and lets every lighter shard regress
 # freely (nexus-2rhif recorded the same refutation for the DDL ratchet); the total does not depend
 # on how the run was split. Each shard's own share stays in the fan-in output as advice.
 #

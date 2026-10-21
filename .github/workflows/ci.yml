@@ -916,6 +916,19 @@ jobs:
         # shard's tests first and xdist spreads them, so the split is the same
         # on both.
         #
+        # nexus-zkr7q: least_duration, not pytest-split's default duration_based_chunks.
+        # Chunks are contiguous runs of the collection order, so an accurate durations file
+        # puts a slow contiguous cluster (the shell-suite wiring tests) in a shard of its own:
+        # the 2026-10-20 refresh (f442ab0c7) left shard 2 with 526 tests, under the executed
+        # floor below, and was reverted. least_duration hands each test to the lightest group
+        # (ids sorted first, so every leg computes the same split from the same collection) and
+        # keeps collection order inside a group. Hand runs on chas, one shard at a time and
+        # uncontended (lab-l grants, -n 4 on 6 pinned cores, 2026-10-21, refreshed file): about
+        # 5095 passed per shard and 343 to 447 s each. Develop CI with chunks ran 290 to 652 s
+        # (bdc81dac0); the CI figures under least_duration are read on the first runs after it
+        # lands (nexus-zkr7q), and the durations are regenerated from CI's own shards if the
+        # tail or the spread misses.
+        #
         # TMPDIR on the pool: /tmp there is tmpfs, so every worker's Postgres
         # data directory and every tmp_path lived in memory and was charged to
         # the job's 18 GB cap. Measured on the first -n 5 run (2026-10-11): 3.3
@@ -964,7 +977,7 @@ jobs:
             export NX_ONNX_INTRA_OP_THREADS=2
           fi
           uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} \
-            --splits 6 --group ${{ matrix.shard }} \
+            --splits 6 --group ${{ matrix.shard }} --splitting-algorithm least_duration \
             --durations-path=.test_durations.json | tee shard-output.txt
 
       # nexus-lemv5: per-shard executed-count floor — the same backstop the
@@ -976,7 +989,8 @@ jobs:
       # failure already failed the run step above), not the collected count.
       # Measured on the 6-shard runs of 2026-09-30 (nexus-qzxzh, runs 36782096550,
       # 36784801648, 36785966097): 3406 to 5946 executed per shard, about 27.7k
-      # default-selected tests in all. 1500 is 44% of the smallest shard: it
+      # default-selected tests in all; since least_duration (nexus-zkr7q, 2026-10-21) every
+      # shard passes about 5100 of about 30.6k. 1500 is under a third of a shard: it
       # catches a shard that skipped its corpus down to near zero, not half a
       # shard vanishing, and not a dropped group (a shard that never ran has no
       # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).

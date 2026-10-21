@@ -1406,8 +1406,8 @@ def test_the_total_over_every_shard_is_compared_with_the_ceiling(tmp_path: Path)
 
 def test_a_light_shard_cannot_regress_freely_and_a_rebalance_is_not_a_regression(tmp_path: Path) -> None:
     """The per-shard share against the worst shard's ceiling (the first design) failed both ways:
-    shard 1 could triple its mints while staying under shard 2's share, and moving a file across a
-    chunk boundary moved the shares with no code change."""
+    shard 1 could triple its mints while staying under shard 2's share, and moving a file to another
+    shard moved the shares with no code change."""
     from tests._storage_touch_fan_in import fan_in
 
     ceiling = _ceiling_file(tmp_path, "450")
