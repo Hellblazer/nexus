@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -4442,6 +4443,14 @@ def reset_singletons():
     _default_t2_slot.reset_for_tests()
     clear_search_traces()
     reset_plan_cache_for_tests()
+    # The search page cache lives in nexus.mcp.core and outlived this reset: a page an earlier
+    # test cached for the same query and target answered the next test's search for up to its
+    # 120 s TTL, so the engine was never called (develop CI 38952af7f, shard 6:
+    # test_fanout_floor_keeps_single_tiny_collection_under_prefix got 0 calls, and passed alone).
+    # Cleared only when that module is loaded, so the reset imports nothing.
+    core = sys.modules.get("nexus.mcp.core")
+    if core is not None:
+        core._reset_page_cache_for_tests()
     # nexus-5en9j: also reset the shared SERVICE-mode catalog client singleton
     try:
         from nexus.catalog.factory import reset_shared_service_catalog_client_for_tests  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
