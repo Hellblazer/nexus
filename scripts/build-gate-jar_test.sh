@@ -491,6 +491,17 @@ echo "Test 11n: sourcing leased-build.sh before build-lease.sh fails fast, namin
 out11n="$(bash -c "source '$repo/scripts/lib/leased-build.sh'; echo SOURCED" 2>&1)"; rc11n=$?
 [[ $rc11n -ne 0 && "$out11n" == *"source scripts/lib/build-lease.sh first"* && "$out11n" != *SOURCED* ]] && ok "out-of-order source fails fast (rc $rc11n)" || bad "rc $rc11n: $out11n"
 
+echo "Test 12: -h and --help print the usage and exit 0 without a lease, a stamp or a build, in any position"
+for help_args in "--help" "-h" "--lab-run lab-m --help" "-Dx=1 -h"; do
+    : > "$MVNW_COUNT"
+    # shellcheck disable=SC2086 # word splitting is the point: each case is an argv
+    out12="$(cd "$repo" && scripts/build-gate-jar.sh $help_args 2>&1)"; rc12=$?
+    [[ $rc12 -eq 0 && "$out12" == *"usage: scripts/build-gate-jar.sh"* ]] && ok "'$help_args' prints the usage, rc 0" || bad "'$help_args' rc $rc12: $out12"
+    [[ ! -s "$MVNW_COUNT" ]] && ok "'$help_args' ran no build" || bad "'$help_args' invoked mvnw"
+    [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "'$help_args' left release.properties alone" || bad "'$help_args' stamped release.properties: $(cat "$repo/$props_rel")"
+    [[ ! -e "$repo/service/.build-lease" || -z "$(ls -A "$repo/service/.build-lease" 2>/dev/null)" ]] && ok "'$help_args' took no lease" || bad "'$help_args' left a lease"
+done
+
 echo
 skipnote=""; (( SKIP == 0 )) || skipnote=", $SKIP skipped"
 echo "build-gate-jar_test.sh: $PASS passed, $FAIL failed$skipnote"

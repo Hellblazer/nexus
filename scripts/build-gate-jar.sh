@@ -98,6 +98,15 @@
 
 set -euo pipefail
 
+# -h/--help anywhere prints this header and exits before any lease, stamp or build. Other arguments go to
+# Maven, which treats --help as its own help and still ran this script's stamp-and-build around it.
+for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+        sed -n '4,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
+        exit 0
+    fi
+done
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 props="$repo_root/service/src/main/resources/META-INF/nexus/release.properties"
 
