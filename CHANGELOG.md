@@ -6,13 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The supervisor passes the Voyage key to a dual-capable engine whatever `local.embed_model` says, and always passes `NX_EMBED_PROFILE`; `nx doctor` warns when the engine serves no model of its profile's family** (nexus-wypwq, RDR-210 Phase 3 Step 1). The supervisor reads the spawned binary's install receipt (the provenance sidecar beside `nexus-service`). At or above `DUAL_EMBEDDER_FIRST_ENGINE_VERSION` (`engine-service-v0.1.161`, the first tag that boots dual) it passes the key whenever the credential chain has one, so a bge choice with a key now boots a dual engine; below that tag, with no receipt, with a receipt for a different binary (`NEXUS_SERVICE_BIN`, `NEXUS_SERVICE_JAR`), with an unreadable one, or with a binary on disk that no longer matches its receipt (`verify_installed_binary`), the nexus-r5f3c rule stands. `NX_EMBED_PROFILE` comes from `local_embed_profile()`, the function the client's write model reads, so the names the client mints and the profile the engine seeds agree; a `NX_EMBED_PROFILE` in the caller's environment is ignored, and a `config.yml` the client cannot read falls back to `bge` with a warning instead of failing the spawn. The new "Embedding family" row reads `/version`'s `embedding_models` against the profile and warns on a degraded boot (a Voyage profile with no key, a bge profile with no bge files); it probes `/version` with a 3 s timeout and does not read a voyage-mode engine that reports no profile against the client's profile. A test fails while `REQUIRED_ENGINE_VERSION` is below that first dual tag; the pin is already `(0, 1, 162)` since 7.83.0.
+
 ### Changed
 
 - **`NX_TEST_T2_SUBSTRATE=per-test` (and its older spelling `engine`) is retired** (nexus-llo7w). The escape hatch back to a tenant for every test shipped in 7.83.0 for one release; either value now errors every test at setup, naming the variable. A test that touches storage asks for a tenant with `pytest.mark.t2_tenant` or a `t2_tenant` parameter; `none` still provisions nothing. Affected: anyone with the variable exported in a shell or a script.
+- **A `bge` choice with a Voyage key now sends the key to an engine at or above `engine-service-v0.1.161`** (nexus-wypwq, RDR-210 Phase 3 Step 1). Before, the supervisor withheld the key from a bge-choice install (nexus-r5f3c) because it flipped older engines Voyage-only. The engine from `0.1.161` boots dual, so Voyage-named collections on such an install are served now, and a query that touches them calls Voyage with that key. A bge-choice install that has a key but no bge model files boots degraded (Voyage served, bge collections answer 422) instead of failing to start; `nx doctor`'s "Embedding family" row names it. Engines below `0.1.161`, and any spawn without a verified install receipt, keep the old rule.
 
 ## [7.83.1] - 2026-10-21
 
 Pairs with engine-service-v0.1.162, unchanged from 7.83.0. 7.83.0 was tagged but never published: the release workflow's engine-floor check refused it because the data-effect relay attestation for engine-service-v0.1.162 (`docs/data-effect-relay/engine-service-v0.1.162.json`, the record that the vectors-036-1 drop was relayed to the cloud operator) was committed to develop and not to the tagged tree. 7.83.1 is the 7.83.0 tree plus that file; there is no code change. Install 7.83.1; the 7.83.0 notes below describe what it contains.
+
 
 ## [7.83.0] - 2026-10-21
 
