@@ -1695,6 +1695,11 @@ def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) ->
     under real ``time.sleep``). Fixed by faking ``time.monotonic`` so the
     two candidate elapsed values (53s "since arm" vs. 3s "since touch")
     are unambiguous in the tick text itself.
+
+    The tick is driven by hand and the thread's interval is an hour, so the
+    thread never ticks during the test: with a 0.02s interval it could tick
+    between ``arm()`` and ``touch()`` on a loaded runner and report
+    "0/2 files ... (0s elapsed)" (develop CI at 6f6cd6564, shard 3).
     """
     import nexus.commands.index as index_mod
 
@@ -1703,7 +1708,7 @@ def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) ->
 
     calls: list[str] = []
     hb = index_mod._PhaseHeartbeat(
-        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02,
+        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=3600.0,
     )
     hb.arm("0/2 files")  # _start_mono captured at fake_now[0] == 0.0
     thread_after_arm = hb._thread  # noqa: SLF001 -- white-box: proving no thread churn
@@ -1711,10 +1716,10 @@ def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) ->
     hb.touch("1/2 files")  # _start_mono reset to fake_now[0] == 50.0
     assert hb._thread is thread_after_arm, "touch() must not spawn a new thread"  # noqa: SLF001
     fake_now[0] = 53.0  # 3s since touch(), 53s since the original arm()
-    time.sleep(0.05)  # real wall-clock wait so the 0.02s-interval thread ticks at least once
+    hb._tick()  # noqa: SLF001 -- the one tick, at a known fake time
     hb.disarm()
     ticks = [c for c in calls if "still running" in c]
-    assert ticks, "expected at least one tick"
+    assert len(ticks) == 1, ticks
     for msg in ticks:
         assert "1/2 files" in msg
         assert "0/2 files" not in msg
