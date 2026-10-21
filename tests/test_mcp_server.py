@@ -1295,6 +1295,27 @@ def test_fanout_floor_excludes_thin_collection_beside_healthy_sibling():
     assert "code__thin" not in captured[0]
 
 
+def test_reset_singletons_drops_a_cached_search_page():
+    """The search page cache (nexus.mcp.core) does not outlive reset_singletons(): a page an
+    earlier test cached for the same query and target otherwise answers the next test's search
+    without calling the engine (develop CI 38952af7f, shard 6, the test below got 0 calls)."""
+    from nexus import mcp_infra
+    from nexus.mcp import core as mcp_core
+
+    _mock_t3([{"name": "knowledge__notes", "count": 1}])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="knowledge")
+        assert len(captured) == 1
+        _search_render("test query", corpus="knowledge")
+        assert len(captured) == 1, "the second identical search is served from the page cache"
+        mcp_infra.reset_singletons()
+        _mock_t3([{"name": "knowledge__notes", "count": 1}])
+        _search_render("test query", corpus="knowledge")
+    assert len(captured) == 2, "after the reset the search reaches the engine again"
+    assert mcp_core._page_cache_get(("absent",), 1) is None
+
+
 def test_fanout_floor_keeps_single_tiny_collection_under_prefix():
     """A lone collection under a prefix -- however thin -- has no healthy
     sibling to be noise beside, so it is never excluded. This is the
