@@ -218,7 +218,7 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
 
 
 def test_grouped_combined_query_reorders_a_single_family_voyage_code_plus_docs_target(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cloud_mode: None,
 ) -> None:
     """nexus-ndr0t B1, pinned deliberately (Technical Design 12): a cloud or
     ``voyage`` query over ``code__`` plus ``docs__`` spans TWO models
