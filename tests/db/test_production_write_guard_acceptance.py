@@ -99,7 +99,7 @@ class TestDefaultConfigResolutionWriteRefused:
         assert "WRITE-SUCCEEDED" not in proc.stdout
         assert "ProductionWriteGuardError" in proc.stderr
         assert "NX_ALLOW_PROD_WRITE" in proc.stderr
-        assert "http://127.0.0.1:1" in proc.stderr
+        assert "127.0.0.1:1" in proc.stderr  # host:port only since nexus-ujbf8
 
 
 class TestScriptOutsideTestsImportingFixtureOpsRefused:

@@ -16,6 +16,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+from nexus._log_safe_url import log_endpoint
 from nexus.db.t2.http_token_store import HttpTokenStore, TokenAdminAuthError
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
@@ -38,7 +39,7 @@ def test_dead_static_token_names_itself_and_the_remedy(engine, monkeypatch) -> N
     assert isinstance(err, httpx.HTTPStatusError), "T1 session callers catch HTTPStatusError"
     assert err.response.status_code == 401
     msg = str(err)
-    assert msg.startswith(f"401 Unauthorized from {engine['base_url']}/v1/service-tokens/issue")
+    assert msg.startswith(f"401 Unauthorized from {log_endpoint(engine['base_url'])}/v1/service-tokens/issue")
     assert "sent: the static token from NX_SERVICE_TOKEN env" in msg
     assert hashlib.sha256(_DEAD.encode()).hexdigest()[:8] in msg
     assert "expired, revoked, or was issued for a different endpoint" in msg
