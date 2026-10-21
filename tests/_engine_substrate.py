@@ -630,8 +630,12 @@ _RUN_LOG_NAME = re.compile(r"nexus-pg-roots-(\d+)-[^/]*\.log")
 def _sweep_dead_run_logs(tmpdir: Path | None = None) -> int:
     """Remove cluster logs left by controllers that died before their summary
     (SIGKILL, OOM). Only regular files this uid owns whose name carries a pid that
-    is no longer alive; a log without a pid in its name is left alone. Returns how
-    many were removed (nexus-t71bk)."""
+    is no longer alive; a log without a pid in its name is left alone. Windows has
+    no numeric uid, so the owner check is POSIX only, as in the stale-dir sweeps.
+    A pid is read in this process's pid namespace: two containers sharing one
+    tempdir under one uid would take each other's live controller for dead. A
+    name that cannot be probed (a planted, out-of-range pid) skips that file only.
+    Returns how many were removed (nexus-t71bk)."""
     d = Path(tempfile.gettempdir()) if tmpdir is None else tmpdir
     removed = 0
     try:
@@ -640,14 +644,18 @@ def _sweep_dead_run_logs(tmpdir: Path | None = None) -> int:
         return 0
     for p in candidates:
         m = _RUN_LOG_NAME.fullmatch(p.name)
-        if m is None or int(m[1]) == os.getpid() or pid_alive(int(m[1])):
+        if m is None:
             continue
         try:
+            if int(m[1]) == os.getpid() or pid_alive(int(m[1])):
+                continue
             st = p.lstat()
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != int(_current_uid()):
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if os.name != "nt" and st.st_uid != int(_current_uid()):
                 continue
             p.unlink()
-        except OSError:
+        except (OSError, ValueError, OverflowError):
             continue
         removed += 1
     return removed
@@ -706,7 +714,9 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
     """The one-line "where did the clusters go" answer for this run, or None when
     no cluster started. The controller that opened the cluster log reads every
     worker's rows from it; any other process, a serial run or a nested pytest that
-    inherited an outer run's log, reads its own (nexus-t71bk). With ``finish`` the
+    inherited an outer run's log, reads its own (nexus-t71bk). So a nested ``-n``
+    run reports nothing of its workers' starts; their rows count in the outer
+    run's line instead. With ``finish`` the
     controller also removes the log it created."""
     path = os.environ.get(_PG_ROOT_LOG_ENV)
     rows = list(_LOCAL_ROWS)
@@ -934,11 +944,13 @@ def pg_cluster_parent() -> str | None:
     except OSError as exc:
         if explicit:
             raise
-        warnings.warn(
-            f"nexus test substrate: cannot use {root} for clusters ({exc}); "
-            f"falling back to the tempdir",
-            stacklevel=2,
-        )
+        if not _REFUSAL_WARNED:  # the same permissions fact at every start: say it once
+            _REFUSAL_WARNED.append(True)
+            warnings.warn(
+                f"nexus test substrate: cannot use {root} for clusters ({exc}); "
+                f"falling back to the tempdir",
+                stacklevel=2,
+            )
         _log_cluster_root(None, f"cannot use {root} ({exc})")
         return None
     _log_cluster_root(root, None)

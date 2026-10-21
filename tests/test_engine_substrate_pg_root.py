@@ -1359,6 +1359,36 @@ class TestSessionEndsCleanAndSaysOnlyWhatItSaw:
             assert (tmp_path / names[k]).exists(), k
         assert (tmp_path / f"nexus-pg-roots-{dead}-dir.log").is_dir()
 
+    @staticmethod
+    def _dead_pid() -> int:
+        done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                              capture_output=True, text=True, check=True)
+        return int(done.stdout)
+
+    @pytest.mark.skipif(os.name == "nt", reason="the owner check is POSIX only")
+    def test_another_uids_dead_log_is_left_alone(self, tmp_path, monkeypatch) -> None:
+        log = tmp_path / f"nexus-pg-roots-{self._dead_pid()}-abc.log"
+        log.write_text("")
+        monkeypatch.setattr(sub, "_current_uid", lambda: str(log.stat().st_uid + 1))
+        assert sub._sweep_dead_run_logs(tmp_path) == 0
+        assert log.exists()
+
+    def test_an_unprobeable_name_skips_that_file_not_the_sweep(self, tmp_path) -> None:
+        planted = tmp_path / "nexus-pg-roots-99999999999999999999999-x.log"
+        planted.write_text("")
+        dead = tmp_path / f"nexus-pg-roots-{self._dead_pid()}-abc.log"
+        dead.write_text("")
+        assert sub._sweep_dead_run_logs(tmp_path) >= 1
+        assert not dead.exists()
+
+    def test_windows_sweeps_without_a_numeric_uid(self, tmp_path, monkeypatch) -> None:
+        log = tmp_path / f"nexus-pg-roots-{self._dead_pid()}-abc.log"
+        log.write_text("")
+        setattr_in(monkeypatch, sub, "os.name", "nt")  # this module's os only
+        monkeypatch.setattr(sub, "_current_uid", lambda: "S-1-5-21-1-2-3-1001")
+        assert sub._sweep_dead_run_logs(tmp_path) == 1
+        assert not log.exists()
+
     def test_the_controllers_log_carries_its_pid(self, monkeypatch) -> None:
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
         monkeypatch.setattr(sub, "_OWNED_LOGS", set())
