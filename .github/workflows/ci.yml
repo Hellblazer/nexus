@@ -1024,6 +1024,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ddl-report/nx-ddl-report.json
             ${{ runner.temp }}/ddl-report/nx-storage-touch-report.json
+            ${{ runner.temp }}/ddl-report/nx-shard-collection-*.json
           retention-days: 7
           if-no-files-found: error
           # A re-run of all jobs keeps the first attempt's artifacts under the same names.
@@ -1851,6 +1852,7 @@ jobs:
             tests/__init__.py
             tests/_storage_touch_fan_in.py
             tests/storage_touch_ceiling.toml
+            tests/_shard_collection.py
           sparse-checkout-cone-mode: false
 
       - name: Fetch every shard's DDL report
@@ -1874,6 +1876,16 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         run: |
           python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6
+
+      # nexus-bo5lv: every shard must split the SAME collection. least_duration (nexus-zkr7q) sorts the
+      # ids and fills the lightest group, so one test missing from one leg's collection moves most of the
+      # split, and the legs would run overlapping groups with a gap while each still passed. Each shard's
+      # workers record the split's input and the group they kept (tests/_shard_collection_plugin.py); this
+      # checks the inputs agree and the groups partition them.
+      - name: Every shard split the same collection
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python3 -m tests._shard_collection ddl-reports --shards 6
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

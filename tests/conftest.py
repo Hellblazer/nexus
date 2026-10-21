@@ -37,7 +37,11 @@ import sys as _sys  # noqa: E402
 # tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
 # guard; active in the default substrate (optin), inert under none and per-test.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
-pytest_plugins = ["pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool"]
+# tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
+pytest_plugins = [
+    "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
+    "tests._shard_collection_plugin",
+]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
 
