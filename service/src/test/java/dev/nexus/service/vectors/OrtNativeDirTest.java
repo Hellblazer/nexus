@@ -395,6 +395,20 @@ class OrtNativeDirTest {
     }
 
     @Test
+    void aSymlinkedRootToAnOwnedUnwritableDirectoryIsRefusedToo(@TempDir Path base) throws Exception {
+        assumePosix(base);
+        Path target = Files.createDirectory(base.resolve("target"));
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path link = Files.createSymbolicLink(base.resolve("link"), target);
+
+        assertThat(warnings(() -> assertThat(OrtNativeDir.trusted(link, System.getProperty("user.name"))).isFalse()))
+                .anySatisfy(w -> assertThat(w).contains("reason=symlink"));
+        OrtNativeDir.Result r = OrtNativeDir.ensure(link, OS, ARCH, small());
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(names(target)).as("nothing extracted through a link").isEmpty();
+    }
+
+    @Test
     void aSymlinkedRootToAWritableDirectoryIsRefusedAndTheTargetIsNotChanged(@TempDir Path base) throws Exception {
         assumePosix(base);
         Path target = Files.createDirectory(base.resolve("target"));
@@ -1148,6 +1162,33 @@ class OrtNativeDirTest {
 
         assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
         assertThat(mode(moved)).as("never chmod through a link").isEqualTo("rwxrwxrwx");
+    }
+
+    /**
+     * nexus-z9jpg: the refusal used to be reached only for a group/world-writable target, because the
+     * attributes are read through the link; a link to a directory the engine user owns at 0755 read as
+     * TRUSTED and was reused. A symbolic link is refused whatever it points at.
+     */
+    @Test
+    void aFinalDirectoryThatIsASymlinkToAnOwnedUnwritableDirectoryIsRefusedToo(@TempDir Path root)
+            throws Exception {
+        assumePosix(root);
+        Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        Path moved = Files.move(dir, root.resolve("elsewhere"));
+        Files.setPosixFilePermissions(moved, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.createSymbolicLink(dir, moved);
+        String me = System.getProperty("user.name");
+
+        var trust = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Trust>();
+        List<String> warnings = warnings(() -> trust.set(
+                OrtNativeDir.versionDirTrust(dir, OrtNativeDir.Identity.named(me), true)));
+        assertThat(trust.get()).isEqualTo(OrtNativeDir.Trust.UNTRUSTED);
+        assertThat(warnings).anySatisfy(w -> assertThat(w).contains("reason=symlink"));
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(mode(moved)).as("never chmod through a link").isEqualTo("rwxr-xr-x");
     }
 
     @Test

@@ -767,20 +767,22 @@ public final class OrtNativeDir {
             PosixFileAttributes a = view.readAttributes();
             String owner = a.owner().getName();
             Set<PosixFilePermission> perms = a.permissions();
+            String mode = PosixFilePermissions.toString(perms);
+            String user = who.describe();
+            // Read through a link, a live symbolic link to a directory this user owns at 0755 would look
+            // trusted: refuse a link first, whatever it points at (nexus-z9jpg, as for the version directory).
+            if (Files.isSymbolicLink(dir)) {
+                return refuse(dir, "symlink", owner, user, mode, "");
+            }
             boolean ownerOk = !who.known() || who.owns(dir, owner);
             if (ownerOk && !writableByGroupOrOthers(perms)) {
                 return true;
             }
-            String mode = PosixFilePermissions.toString(perms);
-            String user = who.describe();
             if (who.known() && !ownerOk) {
                 return refuse(dir, "foreign_owner", owner, user, mode, who.ownerNote(dir));
             }
             if (!who.known()) {
                 return refuse(dir, "unknown_user", owner, user, mode, "");
-            }
-            if (Files.isSymbolicLink(dir)) {
-                return refuse(dir, "symlink", owner, user, mode, "");
             }
             int special = specialBits(dir);
             if (special != 0) {
@@ -889,6 +891,13 @@ public final class OrtNativeDir {
             String mode = PosixFilePermissions.toString(a.permissions());
             boolean writable = writableByGroupOrOthers(a.permissions());
             String user = who.describe();
+            // The attributes above were read through a link, so a live symbolic link to a directory this
+            // user owns at 0755 looks trusted: refuse a link first, whatever it points at (a dangling one
+            // threw NoSuchFileException above and is classified by the caller; nexus-z9jpg).
+            if (Files.isSymbolicLink(dir)) {
+                refuse(announce, dir, "symlink", owner, user, mode, "");
+                return Trust.UNTRUSTED;
+            }
             if (who.known() && !who.owns(dir, owner)) {
                 refuse(announce, dir, "foreign_owner", owner, user, mode, who.ownerNote(dir));
                 return Trust.UNTRUSTED;
@@ -898,10 +907,6 @@ public final class OrtNativeDir {
             }
             if (!who.known()) {
                 refuse(announce, dir, "unknown_user", owner, user, mode, "");
-                return Trust.UNTRUSTED;
-            }
-            if (Files.isSymbolicLink(dir)) {
-                refuse(announce, dir, "symlink", owner, user, mode, "");
                 return Trust.UNTRUSTED;
             }
             if (announce) log.warn("event=ort_native_dir_writable_replaced dir=\"{}\" owner=\"{}\" mode={} "
