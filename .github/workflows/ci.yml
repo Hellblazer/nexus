@@ -1079,6 +1079,9 @@ jobs:
     # in the two groups (b036d0ce4), and balancing by durations recorded on a
     # laptop put 1795 and 373 tests in them, under the per-group floor
     # (5c99d3609), because laptop call times do not weigh CI's per-test cost.
+    # The interleaved groups still ran 571 s and 349 s of tests at a6937b1c2;
+    # --durations=20 names each group's slowest tests on CI (the floor below
+    # reads the final summary line, which prints after that table).
     #
     # test_marker_selection_coverage.py's own non-vacuity check
     # (test_marker_is_wired_to_a_real_invocation) requires a REAL
@@ -1181,7 +1184,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run pytest -m lint -q -n 4 --splits 2 --group ${{ matrix.group }} \
-            --splitting-algorithm least_duration | tee lint-output.txt
+            --splitting-algorithm least_duration --durations=20 | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
