@@ -1308,6 +1308,41 @@ def test_the_cache_script_writes_only_under_its_folder_and_removes_by_exact_name
     assert "Checkpoint-VM" not in code and "Restore-VM" not in code
 
 
+def test_keys_txt_is_written_only_under_an_exclusive_lock_that_re_reads_and_merges() -> None:
+    # Two guests harvest into one folder at once; the read of keys.txt at the top and the write at the end are
+    # minutes apart, so an unlocked write drops the other guest's lines (nexus-ndsei). Static pin: pwsh is not
+    # available where this suite runs, so the lock's behaviour is read from the source, not executed.
+    code = "\n".join(_code_lines(_read("cache.ps1")))
+    # the single writer of keys.txt is Save-Keys; the old end-of-harvest Set-Content is gone
+    assert "Save-Keys $keep $have" in code
+    # no cmdlet writes keys.txt; Save-Keys writes it whole beside it and swaps it in with File.Replace (or File.Move
+    # when absent), so the unlocked seed read never sees a torn file and a failed write throws
+    assert not re.findall(r"(Set-Content|Add-Content|Out-File|Move-Item|Copy-Item)[^\n]*\$keys\b", code)
+    assert re.findall(r"\[System\.IO\.File\]::(\w+)\(\"\$keys\.tmp\"", code) == ["WriteAllLines", "Replace", "Move"]
+    fn = _between(code, "function Save-Keys", "function ClaudeBin")
+    # exclusive lock: FileShare.None, a bounded retry on IOException, released in finally
+    assert "[System.IO.FileShare]::None" in fn and '"$keys.lock"' in fn and "-is [System.IO.IOException]" in fn and "if (-not $e) { throw }" in fn
+    assert re.search(r"\$i -ge \d+\) \{ throw", fn) and "Start-Sleep" in fn
+    assert fn.index("$lock = New-Object") < fn.index("try {\n        $added") and "} finally { $lock.Dispose() }" in fn
+    # inside the lock: re-read keys.txt, merge, then write, in that order
+    held = fn[fn.index("try {\n        $added"):fn.index("} finally { $lock.Dispose() }")]
+    assert held.index("Get-Content $keys") < held.index("$merged = ") < held.index("::WriteAllLines(") < held.index("::Replace(")
+    assert re.search(r"catch \{ if \(\$j -ge \d+\) \{ throw \}; Start-Sleep", held)
+    # the merge keeps another harvest's line for every kind this run did not touch, and this run's line for the rest
+    for line in (
+        "$added = @($mine | Where-Object { $before -notcontains $_ })",
+        "$dropped = @($before | Where-Object { $mine -notcontains $_ })",
+        "$touched = @(@($added) + @($dropped) | ForEach-Object { & $kindOf $_ } | Sort-Object -Unique)",
+        "$merged = @($fresh | Where-Object { $touched -notcontains (& $kindOf $_) }) + $added",
+    ):
+        assert line in held, line
+    # the script's own top-of-run read stays the only other read of keys.txt, outside the lock
+    assert re.findall(r"Get-Content \$keys\b", code) == ["Get-Content $keys", "Get-Content $keys"]
+    # the lock file is never removed (a delete would let a waiter lock a different file than a holder)
+    removes = "".join(ln for ln in code.splitlines() if "Remove-Item" in ln)
+    assert "$keys" not in removes and "keys.txt" not in removes
+
+
 def test_the_model_cache_is_seeded_only_for_the_conexus_version_that_filled_it() -> None:
     # nx init reuses a model file found in place by its size alone, so a model archive left over from an
     # older release could stand in for a changed pinned model. The archive carries the key of the install
@@ -1561,7 +1596,7 @@ def test_seed_copies_each_payload_the_keys_name_and_the_python_archive_only_with
 def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_one_of_each() -> None:
     code = "\n".join(_code_lines(_read("cache.ps1")))
     assert "'^(conexus|claude|models|uv|portablegit|winget-git|python)=[A-Za-z0-9._+-]+$'" in code
-    harvest = _between(code, "$gp = Invoke-Command", "$keep | Sort-Object -Unique | Set-Content")
+    harvest = _between(code, "$gp = Invoke-Command", "Save-Keys $keep $have")
     # none of the new keys is the conexus version: each is the payload's own (the models' mistake, not repeated)
     assert "$Key" not in harvest
     # the guest tells what it downloaded (record.txt) and which Python archive it has
@@ -1616,7 +1651,7 @@ def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_on
 
 def test_the_python_archive_is_harvested_only_after_ok_with_a_sidecar_and_a_guest_side_hash() -> None:
     code = "\n".join(_code_lines(_read("cache.ps1")))
-    harvest = _between(code, "$gp = Invoke-Command", "$keep | Sort-Object -Unique | Set-Content")
+    harvest = _between(code, "$gp = Invoke-Command", "Save-Keys $keep $have")
     # the guest says whether the install reported ok (inst.ps1's marker); without it nothing is copied and the line says why
     assert 'ok = [bool](Test-Path -LiteralPath "$d\\install-ok.txt")' in harvest
     skip = harvest.index("-not $gp.ok")

@@ -112,6 +112,44 @@ function Open-GuestSession($Name) {
 }
 New-Item -ItemType Directory -Force $root | Out-Null
 $have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude|models|uv|portablegit|winget-git|python)=[A-Za-z0-9._+-]+$' })
+# keys.txt is read once at the top ($have) and written once at the end of a harvest, minutes apart, and two guests
+# that harvest at once share it (nexus-ndsei). Save-Keys takes an exclusive lock (keys.txt.lock, opened with
+# FileShare.None, 500 ms retries for up to 60 s, released in finally) and, under it, re-reads keys.txt and merges:
+# every kind this run added or replaced ($mine against $before) takes this run's line, every other kind keeps the
+# line another harvest wrote in the meantime. keys.txt.lock stays in the folder; it holds nothing.
+function Save-Keys($mine, $before) {
+    $keyRx = '^(conexus|claude|models|uv|portablegit|winget-git|python)=[A-Za-z0-9._+-]+$'
+    $kindOf = { param($l) $l.Substring(0, $l.IndexOf('=')) }
+    $lock = $null
+    for ($i = 0; ; $i++) {
+        try { $lock = New-Object System.IO.FileStream("$keys.lock", [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); break }
+        catch {
+            # New-Object wraps the constructor's IOException; retry only when one is in the chain
+            $e = $_.Exception; while ($e -and -not ($e -is [System.IO.IOException])) { $e = $e.InnerException }
+            if (-not $e) { throw }
+            if ($i -ge 120) { throw "keys.txt stayed locked for 60 s ($keys.lock); the keys of this harvest are not recorded" }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    try {
+        $added = @($mine | Where-Object { $before -notcontains $_ })
+        $dropped = @($before | Where-Object { $mine -notcontains $_ })
+        $touched = @(@($added) + @($dropped) | ForEach-Object { & $kindOf $_ } | Sort-Object -Unique)
+        $fresh = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match $keyRx })
+        $merged = @($fresh | Where-Object { $touched -notcontains (& $kindOf $_) }) + $added
+        # Written whole beside keys.txt (an empty merge still writes the file), then swapped in with File.Replace,
+        # so a seed reading keys.txt without the lock sees the old file or the new one, never a torn write. The
+        # .NET calls throw on failure, so a failed write leaves keys.txt as it was and fails the harvest loudly.
+        [System.IO.File]::WriteAllLines("$keys.tmp", [string[]]@($merged | Sort-Object -Unique), (New-Object System.Text.UTF8Encoding $true))
+        # A seed's unlocked read can hold keys.txt open without delete-share for a moment; retry the swap briefly.
+        for ($j = 0; ; $j++) {
+            try {
+                if (Test-Path -LiteralPath $keys) { [System.IO.File]::Replace("$keys.tmp", $keys, $null) } else { [System.IO.File]::Move("$keys.tmp", $keys) }
+                break
+            } catch { if ($j -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
+        }
+    } finally { $lock.Dispose() }
+}
 function ClaudeBin($v) { Join-Path $root "claude-$v-win32-x64.exe" }
 # One cached install payload per kind, named by its own version: the path under payloads\ that keys.txt's
 # "<kind>=<value>" line stands for (the same relative path in the guest's nx-gate\payloads).
@@ -325,7 +363,7 @@ try {
                 }
             } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; "harvest payload ($rec): $($_.Exception.Message)" }
         }
-        $keep | Sort-Object -Unique | Set-Content -Encoding UTF8 $keys
+        Save-Keys $keep $have
     }
 } finally { Remove-PSSession $s }
 "cache $Mode took $([int]((Get-Date)-$t0).TotalSeconds)s"
