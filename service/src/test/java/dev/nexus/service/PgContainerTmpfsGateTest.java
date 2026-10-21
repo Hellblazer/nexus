@@ -245,29 +245,123 @@ class PgContainerTmpfsGateTest {
     void a_started_container_runs_on_tmpfs_with_the_settings_and_the_limit() throws Exception {
         try (PostgreSQLContainer<?> c = PgContainerHelper.newContainer()) {
             c.start();
-            ExecResult mounts = c.execInContainer("cat", "/proc/mounts");
-            assertThat(mounts.getStdout().lines()
-                .filter(l -> l.split(" ").length > 2 && l.split(" ")[1].equals(PgContainerHelper.PGDATA))
-                .map(l -> l.split(" ")[2]))
-                .as("PGDATA mount type")
-                .containsExactly("tmpfs");
-            ExecResult pgdata = c.execInContainer("sh", "-c", "echo $PGDATA");
-            assertThat(pgdata.getStdout().strip()).isEqualTo(PgContainerHelper.PGDATA);
-            try (Connection conn = c.createConnection("")) {
-                assertThat(show(conn, "synchronous_commit")).isEqualTo("off");
-                assertThat(show(conn, "full_page_writes")).isEqualTo("off");
-                assertThat(show(conn, "max_wal_size")).isEqualTo("64MB");
-                assertThat(show(conn, "min_wal_size")).isEqualTo("32MB");
-                assertThat(show(conn, "wal_keep_size")).isEqualTo("0");
-            }
-            var inspect = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec();
-            assertThat(inspect.getHostConfig().getMemory()).isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
-            assertThat(inspect.getHostConfig().getMemorySwap())
-                .as("swap capped too, so the limit is not doubled by swap")
-                .isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
-            assertThat(inspect.getConfig().getLabels())
-                .containsEntry("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
+            assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, PgContainerHelper.MEMORY_LIMIT_BYTES);
         }
+    }
+
+    /** The jOOQ code generator's source program (nexus-aca0q.3), compiled by the next test; it cannot be called at build time of the tests. */
+    private static final Path RUNNER = Path.of("src", "build", "java", "JooqCodegen.java");
+
+    /**
+     * nexus-lywcf: the codegen runner copies PgContainerHelper's container recipe (it runs before the test classes
+     * compile, so it cannot call the helper), and a text pin alone lets the copy drift. This compiles the runner's
+     * source with the JDK compiler on the test classpath, loads it, takes the container from its own
+     * {@code newContainer()}, and holds that running container to the same live assertions as the helper's, plus
+     * the runner's limit and tmpfs size to the helper's. A JRE-only JVM (no compiler) or a missing source file
+     * fails here; it does not skip.
+     */
+    @Test
+    void the_codegen_runners_started_container_runs_on_tmpfs_with_the_settings_and_the_limit() throws Exception {
+        assertThat(RUNNER).as("the codegen runner source, relative to service/").isRegularFile();
+        javax.tools.JavaCompiler compiler = javax.tools.ToolProvider.getSystemJavaCompiler();
+        assertThat(compiler)
+            .as("the test JVM must be a JDK: a JRE-only JVM has no compiler, and this gate does not skip")
+            .isNotNull();
+        String classpath = System.getProperty("java.class.path");
+        String surefire = System.getProperty("surefire.test.class.path");
+        if (surefire != null && !surefire.isBlank()) {
+            classpath = classpath + java.io.File.pathSeparator + surefire;
+        }
+        Path out = Files.createTempDirectory("jooq-codegen-runner-gate");
+        try {
+            java.io.StringWriter diagnostics = new java.io.StringWriter();
+            Boolean compiled = compiler.getTask(diagnostics, null, null,
+                List.of("-proc:none", "-nowarn", "-d", out.toString(), "-classpath", classpath),
+                null, List.of(new SourceFile(RUNNER))).call();
+            assertThat(compiled).as("the runner compiles on the test classpath: %s", diagnostics).isTrue();
+            try (java.net.URLClassLoader loader = new java.net.URLClassLoader(
+                    new java.net.URL[] {out.toUri().toURL()}, PgContainerTmpfsGateTest.class.getClassLoader())) {
+                Class<?> runner = loader.loadClass("JooqCodegen");
+                assertThat(runner.getClassLoader()).as("the runner class is the freshly compiled one").isSameAs(loader);
+                String image = (String) runnerConstant(runner, "IMAGE");
+                String tmpfsSize = (String) runnerConstant(runner, "TMPFS_SIZE");
+                long memory = (Long) runnerConstant(runner, "MEMORY_LIMIT_BYTES");
+                assertThat(image).as("runner image").isEqualTo(PgContainerHelper.IMAGE);
+                assertThat(runnerConstant(runner, "PGDATA")).as("runner PGDATA").isEqualTo(PgContainerHelper.PGDATA);
+                assertThat(tmpfsSize).as("runner tmpfs cap").isEqualTo(PgContainerHelper.TMPFS_SIZE);
+                assertThat(memory).as("runner memory limit").isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
+
+                java.lang.reflect.Method factory = runner.getDeclaredMethod("newContainer");
+                factory.setAccessible(true);
+                try (PostgreSQLContainer<?> c = (PostgreSQLContainer<?>) factory.invoke(null)) {
+                    // Configured state, before any container starts: the same tmpfs mapping and server flags as the helper's.
+                    PostgreSQLContainer<?> reference = PgContainerHelper.newContainer();
+                    assertThat(c.getDockerImageName()).isEqualTo(reference.getDockerImageName());
+                    assertThat(c.getTmpFsMapping()).isEqualTo(reference.getTmpFsMapping());
+                    assertThat(reference.getCommandParts()).as("the helper's server flags include every one the runner sets")
+                        .containsAll(List.of(c.getCommandParts()));
+                    c.start();
+                    assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, memory);
+                }
+            }
+        } finally {
+            try (Stream<Path> s = Files.walk(out)) {
+                s.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
+    }
+
+    private static Object runnerConstant(Class<?> runner, String name) throws ReflectiveOperationException {
+        java.lang.reflect.Field f = runner.getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(null);
+    }
+
+    /** A source file on disk as a compilation unit. */
+    private static final class SourceFile extends javax.tools.SimpleJavaFileObject {
+        private final Path path;
+
+        SourceFile(Path path) {
+            super(path.toAbsolutePath().toUri(), Kind.SOURCE);
+            this.path = path;
+        }
+
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) throws IOException {
+            return Files.readString(path);
+        }
+    }
+
+    /**
+     * The live properties every test Postgres container must have, for the helper's container and the codegen
+     * runner's alike: PGDATA a tmpfs mount, the relaxed server settings in force, and the Docker memory and swap
+     * limits both equal to {@code expectedMemory}.
+     */
+    private static void assertRunsOnTmpfsWithTheSettingsAndTheLimit(PostgreSQLContainer<?> c, long expectedMemory)
+            throws Exception {
+        ExecResult mounts = c.execInContainer("cat", "/proc/mounts");
+        assertThat(mounts.getStdout().lines()
+            .filter(l -> l.split(" ").length > 2 && l.split(" ")[1].equals(PgContainerHelper.PGDATA))
+            .map(l -> l.split(" ")[2]))
+            .as("PGDATA mount type")
+            .containsExactly("tmpfs");
+        ExecResult pgdata = c.execInContainer("sh", "-c", "echo $PGDATA");
+        assertThat(pgdata.getStdout().strip()).isEqualTo(PgContainerHelper.PGDATA);
+        try (Connection conn = c.createConnection("")) {
+            assertThat(show(conn, "fsync")).isEqualTo("off");
+            assertThat(show(conn, "synchronous_commit")).isEqualTo("off");
+            assertThat(show(conn, "full_page_writes")).isEqualTo("off");
+            assertThat(show(conn, "max_wal_size")).isEqualTo("64MB");
+            assertThat(show(conn, "min_wal_size")).isEqualTo("32MB");
+            assertThat(show(conn, "wal_keep_size")).isEqualTo("0");
+        }
+        var inspect = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec();
+        assertThat(inspect.getHostConfig().getMemory()).isEqualTo(expectedMemory);
+        assertThat(inspect.getHostConfig().getMemorySwap())
+            .as("swap capped too, so the limit is not doubled by swap")
+            .isEqualTo(expectedMemory);
+        assertThat(inspect.getConfig().getLabels())
+            .containsEntry("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
     }
 
     /** A server setting as SHOW renders it, read through typed jOOQ (RawSqlGateTest forbids raw SQL here). */
