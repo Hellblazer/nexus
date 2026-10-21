@@ -453,8 +453,14 @@ def test_a_container_that_died_mid_tick_adds_no_log_bytes(world: dict[str, Path]
 def test_the_sampler_loop_ends_when_the_script_is_killed(world: dict[str, Path]) -> None:
     # The command SIGKILLs its parent (the script), which cannot clean up after itself. The orphaned loop must
     # notice and stop on its own: its tick counter freezes. Without the liveness check it ticks forever.
+    # The command waits for the loop's first tick before the kill (up to 30 s): a fixed 0.6 s sleep lost that
+    # race under a loaded -n auto run (nexus-ys8a4).
+    first_tick = (
+        f"for _ in $(seq 300); do for f in '{world['tmp']}'/nx-io-sampler.*/samples; do [ -s \"$f\" ] && break 2; done; "
+        "sleep 0.1; done; kill -9 $PPID; sleep 0.2"
+    )
     proc = subprocess.Popen(
-        ["bash", str(SCRIPT), "-i", "0.1", "-r", str(world["root"]), "--", "bash", "-c", "sleep 0.6; kill -9 $PPID; sleep 0.2"],
+        ["bash", str(SCRIPT), "-i", "0.1", "-r", str(world["root"]), "--", "bash", "-c", first_tick],
         env=_env(world), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     states: list[Path] = []

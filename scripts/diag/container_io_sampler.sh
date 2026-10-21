@@ -404,7 +404,7 @@ sampler_loop() {
     while [[ ! -e $state/stop ]] && kill -0 "$parent" 2>/dev/null; do
         sample_once "$state" "$root"
         n=$((n + 1))
-        echo "$n" >"$state/samples"
+        echo "$n" >"$state/samples.tmp" && mv -f "$state/samples.tmp" "$state/samples"  # a reader never sees it empty
         sleep "$interval"
     done
 }
