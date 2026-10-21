@@ -433,8 +433,8 @@ public final class Main {
                 localOnnxAdmission);
         if (plan.crossEncoderFilesMissing()) {
             log.warn("event=cross_encoder_files_absent rerank=SKIPPED_PER_REQUEST voyage_rerank_calls=NONE "
-                    + "cross_encoder=\"{}\" hint=\"run `{}` to provision the reranker, then restart the engine\"",
-                    presence.crossEncoderDetail(), dev.nexus.service.vectors.BootPlan.PROVISION_COMMAND);
+                    + "cross_encoder=\"{}\" hint=\"{}\"",
+                    presence.crossEncoderDetail(), plan.crossEncoderProvisionHint());
         }
         // nexus-pebfx.2: LOUD one-line embedding-mode banner. The 2026-06-10 migration ran for hours against
         // silent ONNX-384 fallback because the mode was invisible. RDR-210 Step 4: it names both families

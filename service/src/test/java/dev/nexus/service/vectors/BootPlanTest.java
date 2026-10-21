@@ -34,6 +34,25 @@ class BootPlanTest {
                 crossEncoder, "ce-detail", crossEncoder ? List.of() : List.of("/models/ce/model.onnx"));
     }
 
+    // ── late cross-encoder provision (nexus-mrsgp) ───────────────────────────────────────────
+
+    /**
+     * Measured on the native image: with bge built at boot, cross-encoder files provisioned while the
+     * engine runs load on the next rerank, no restart. With no local model loaded the restart stays.
+     */
+    @Test
+    void theCrossEncoderHint_saysNoRestartOnlyWhenBgeWasBuiltAtBoot() {
+        var withBge = BootPlan.decide(presence(true, false, false, false), EmbeddingProfile.BGE);
+        assertThat(withBge.buildsBge()).isTrue();
+        assertThat(withBge.crossEncoderFilesMissing()).isTrue();
+        assertThat(withBge.crossEncoderProvisionHint()).contains("next rerank loads them").doesNotContain("restart the engine");
+        assertThat(withBge.bannerHint()).contains(withBge.crossEncoderProvisionHint());
+
+        var noLocalModel = BootPlan.decide(presence(false, false, true, false), EmbeddingProfile.BGE);
+        assertThat(noLocalModel.buildsBge()).isFalse();
+        assertThat(noLocalModel.crossEncoderProvisionHint()).contains("restart the engine").contains("no local ONNX model");
+    }
+
     // ── the three-way bge decision, plus its failures (nexus-ngvxb) ────────────────────────────
 
     @Test
