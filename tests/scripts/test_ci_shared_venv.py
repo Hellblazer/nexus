@@ -404,9 +404,11 @@ def test_concurrent_jobs_result_in_exactly_one_build(tmp_path: Path, project_tem
         assert j.used and j.outputs["key"] == entry.name
         res = subprocess.run([str(j.thin / "bin" / "fxdep-tool")], capture_output=True, text=True, env=_clean_env())
         assert res.stdout.strip() == "fxdep ok"
-    # ONE build, not one winner among several builders
-    assert _build_count(outs) == 1, outs
-    assert sum("published shared venv" in o for o in outs) == 1, outs
+    # ONE build, not one winner among several builders. The message is a joined string, not
+    # the list: pytest truncates a list repr, which hid the second build's job (nexus-6xlce).
+    full = "\n".join(f"--- job c{i} ---\n{o}" for i, o in enumerate(outs))
+    assert _build_count(outs) == 1, full
+    assert sum("published shared venv" in o for o in outs) == 1, full
 
 
 def test_waiters_retake_the_lock_when_the_holder_never_publishes(
