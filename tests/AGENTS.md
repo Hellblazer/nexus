@@ -24,8 +24,8 @@ out. Diagnose with `ipcs -m` before suspecting the code.
 `tests/_xdist_cap.py`): workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 3264
 MiB (about 3.2 GiB). That is the measured per-worker peak of a FULL Python suite
 (engine JVM + Postgres cluster + the cluster's tmpfs pages, charged to the
-grant): lab-l, 48 GiB, 16 workers peaked 47.8 GB, 1.4 GB from exit 137
-(2026-10-21). So `-n auto` runs 15 on lab-l and 5 on lab-m; the clamp prints its
+grant): lab-l, 16 workers peaked 47,795 MiB of the 49,152 MiB grant, 1,357 MiB
+from exit 137 (2026-10-21, labrun sampler). So `-n auto` runs 15 on lab-l and 5 on lab-m; the clamp prints its
 reason. Nothing applies without a
 visible limit (a laptop). `NX_XDIST_NO_CAP=1` opts out of both caps. The cost on
 lab-m is real: `-n auto` goes from 8 workers to 5 (37% less parallelism, a longer

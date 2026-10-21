@@ -235,10 +235,11 @@ def effective_cap() -> int | None:
 #: 16 workers peaked 39.4 GB anon including shmem = 2.46 GB per worker; lab-m
 #: (8 cores, 16 GB) at ``-n 8`` peaked 14.5 GB = 1.81 GB per worker. Those were
 #: subsets. The FULL suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f) at
-#: ``-n auto`` = 16 workers on lab-l peaked 47.8 GB of the 48 GiB grant, about
-#: 3.0 GB per worker, 1.4 GB from an OOM kill (exit 137). The budget is 3264 MiB
-#: (about 3.2 GiB), so lab-l runs 15 workers (about 45 GB at that peak, 3 GB free)
-#: and lab-m 5. Without this a grant fills as workers grow, the run used to fall
+#: ``-n auto`` = 16 workers on lab-l peaked 47,795 MiB of the 49,152 MiB grant,
+#: 2,987 MiB a worker, 1,357 MiB from an OOM kill (exit 137). The budget is 3264
+#: MiB (about 3.2 GiB), so lab-l runs 15 workers (about 44,800 MiB at that peak,
+#: about 4.2 GiB free) and lab-m 5. The per-worker model is kept: the 10-19 subset
+#: points fit no positive fixed cost, so per-worker cost grows with the run. Without this a grant fills as workers grow, the run used to fall
 #: back to disk for later clusters (3.9 GB written in 4 minutes); the session now
 #: never does, so the worker count has to keep the grant from filling. Per class,
 #: from the grant alone: lab-s (4 GiB) 1, lab-m (16) 5, lab-6c18g (18) 5 (CI's

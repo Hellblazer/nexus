@@ -239,15 +239,22 @@ class TestMemoryCap:
         assert BYTES_PER_WORKER >= 39.4e9 / 16
         # lab-m, 16 GB, -n 8 peaked 14.5 GB: the budget must not exceed what fits
         assert BYTES_PER_WORKER >= 14.5e9 / 8
-        # The FULL Python suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f): lab-l at -n auto =
-        # 16 workers peaked 47.8 GB of the 48 GiB grant, about 3.0 GB per worker, 1.4 GB from exit 137.
-        assert BYTES_PER_WORKER >= 47.8e9 / 16
+        # The FULL Python suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f, figures in MiB): lab-l
+        # at -n auto = 16 workers peaked 47,795 MiB of the 49,152 MiB grant, 2,987 MiB a worker, 1,357 MiB
+        # from exit 137.
+        assert BYTES_PER_WORKER >= self.FULL_SUITE_PEAK_MIB * self.MIB / 16
+
+    MIB = 1024**2
+    FULL_SUITE_PEAK_MIB = 47_795
 
     def test_a_full_suite_in_lab_l_keeps_two_gib_of_its_grant_free(self) -> None:
+        """Proportional: the measured peak scaled to the capped worker count must leave 2 GiB of the grant.
+        Red at the old 2560 MiB budget, whose 16 workers are the measured 47,795 MiB (1,357 MiB free)."""
         from tests._xdist_cap import cap_from_memory
 
         grant = 48 * self.GIB
-        assert cap_from_memory(grant_bytes=grant) * (47.8e9 / 16) <= grant - 2 * self.GIB
+        per_worker = self.FULL_SUITE_PEAK_MIB * self.MIB / 16
+        assert cap_from_memory(grant_bytes=grant) * per_worker <= grant - 2 * self.GIB
 
     @pytest.mark.parametrize(
         "cls,grant_gib,workers",
