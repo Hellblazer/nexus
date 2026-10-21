@@ -18,6 +18,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Two source-scanning censuses over the Java test tree (nexus-dscbd, follow-up to nexus-7xfh7). No database.
@@ -29,7 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * acquire, dropped at stop); or a member of a named family allowlisted below with its reason. The creating calls are
  * {@code bootstrapNonSuperuserOwner}, {@code bootstrapAdminRole}, {@code bootstrapServiceRole} (also a test-local
  * wrapper of the same name) and the bare-role helpers {@code createLoginRole}, {@code createNologinRole},
- * {@code createNologinRoleWithPassword}, {@code createSuperuserLoginRole}. The role argument is resolved through
+ * {@code createNologinRoleWithPassword}, {@code createSuperuserLoginRole}, and {@code grantRoleMembership}, which
+ * creates its MEMBER role (argument index 2, not 1) when absent. The role argument is resolved through
  * string literals, {@code String} constants and locals of the same file, and {@code Class.CONSTANT} of another test
  * class, joined by {@code +}; a part that cannot be resolved (a method parameter, say) becomes {@code *}. A role that
  * resolves to nothing but {@code *} fails: the census cannot attribute it. Calls spanning lines are parsed, and a
@@ -44,10 +46,32 @@ import static org.assertj.core.api.Assertions.assertThat;
  * through the helpers above. A string literal that holds such a statement is reported unless its file is in
  * {@link #BARE_CREATE_ROLE_FILES}.
  *
- * <p>What it does NOT check: exclusivity is read per class, not per test method (a class that declares the role in
- * one method and creates it in another passes); an exclusive declaration is matched by name, so a role declared
- * exclusive but never dropped by a path outside {@code stop()} is not found; and a family's passing proves only
- * that every user derives the same password from the role name.
+ * <p><b>Limits.</b> What the census does NOT see or prove:
+ * <ul>
+ *   <li>Parameter tracing follows the callers of a test-local method in the SAME FILE only (by method name, so
+ *       overloads are merged). A shared helper that has both an internal caller and a caller in another class loses
+ *       the other class's roles; the roles it creates for them are not attributed.</li>
+ *   <li>{@code STRING_DECL} reads only {@code String x = ...} initialisers. A later reassignment ({@code x = ...}),
+ *       a field set in a constructor, or a value returned by a method is not seen; such a part becomes {@code *} or
+ *       resolves to the initialiser alone.</li>
+ *   <li>A family's labels are read only from literal arguments of the family's {@code newRig("...")} calls. A label
+ *       built at run time, or passed through another method, is not enumerated, so the cross-check of
+ *       {@code nexus_admin_<label>} against other classes' literals does not cover it.</li>
+ *   <li>Roles created inside {@code src/test/resources/db/changelog-test/*.xml} with a fixed name ({@code svc_test}
+ *       in the RLS probe harness, {@code nexus_svc} in the role and non-superuser-owner changelogs) are not scanned:
+ *       the scan reads Java only. The parameterised creations in those files are reached through the helpers above.</li>
+ *   <li>Exclusivity is read per class, not per test method (a class that declares the role in one method and creates
+ *       it in another passes); a declaration is matched by name, so a role declared exclusive but never dropped by a
+ *       path outside {@code stop()} is not found; and a family's passing proves only that every user calls the
+ *       3-argument {@code bootstrapNonSuperuserOwner} with the password derived from the role name.</li>
+ *   <li>The roster ratchet covers {@code startDedicated()} callers only. A {@code newContainer()} boot is classified
+ *       (a kind and a reason of at least 25 characters, from a closed vocabulary) by
+ *       {@code DbStartClassificationGateTest}, together with the {@code startEmptyDatabase} and {@code startDedicated}
+ *       callers, but that gate does not check the classes' roles or the reason against what the class does; and
+ *       {@code PgContainerTmpfsGateTest} keeps every other way of building a Postgres container ({@code new
+ *       PostgreSQLContainer}, a Postgres image name, {@code jdbc:tc:}) out of every file but the factory. No gate
+ *       compares {@code newContainer} callers to a roster, so a new one needs only a table row.</li>
+ * </ul>
  *
  * <p><b>Roster ratchet.</b> The callers of {@code PgContainerHelper.startDedicated} (both overloads, direct calls and
  * method references) must equal the roster in that method's javadoc plus {@link #INFRA_CALLERS}, in both directions,
@@ -89,6 +113,10 @@ class TestRoleUniquenessScanTest {
                 "VectorsRepointFunctionsIntegrationTest"),
             "newRig",
             "same helper, password derived from the role name in every user, so a shared name is the same role"));
+
+    /** The one call every family use must be: the same helper with its defaults, so every user creates the same role. */
+    private static final String FAMILY_HELPER = "bootstrapNonSuperuserOwner";
+    private static final int FAMILY_ARGC = 3;
 
     /** Files that hold a bare create-role statement in a string literal, each with why. */
     private static final Map<String, String> BARE_CREATE_ROLE_FILES = Map.of(
@@ -344,12 +372,24 @@ class TestRoleUniquenessScanTest {
 
     // ── the role census ────────────────────────────────────────────────────────────────────────────────────────
 
-    private static final Pattern ROLE_CALL = Pattern.compile(
-        "\\b(bootstrapNonSuperuserOwner|bootstrapAdminRole|bootstrapServiceRole|createLoginRole"
-            + "|createNologinRoleWithPassword|createNologinRole|createSuperuserLoginRole)\\s*\\(");
-    private static final Pattern ROLE_METHOD_REF = Pattern.compile(
-        "::\\s*(bootstrapNonSuperuserOwner|bootstrapAdminRole|bootstrapServiceRole|createLoginRole"
-            + "|createNologinRoleWithPassword|createNologinRole|createSuperuserLoginRole)\\b");
+    /** Where a role-creating helper takes its role and its password; {@code passIdx} -1 for a helper with no
+     *  caller-chosen password. {@code grantRoleMembership(su, granted, member, inherit, bypassRls)} creates its
+     *  MEMBER role (argument 2) when it does not exist, with the fixed password {@code MEMBER_PASSWORD}. */
+    record Helper(int roleIdx, int passIdx) {}
+
+    private static final Map<String, Helper> HELPERS = Map.of(
+        "bootstrapNonSuperuserOwner", new Helper(1, 2),
+        "bootstrapAdminRole", new Helper(1, 2),
+        "bootstrapServiceRole", new Helper(1, 2),
+        "createLoginRole", new Helper(1, 2),
+        "createNologinRoleWithPassword", new Helper(1, 2),
+        "createNologinRole", new Helper(1, -1),
+        "createSuperuserLoginRole", new Helper(1, 2),
+        "grantRoleMembership", new Helper(2, -1));
+    private static final String HELPER_NAMES = String.join("|", new TreeSet<>(HELPERS.keySet()));
+
+    private static final Pattern ROLE_CALL = Pattern.compile("\\b(" + HELPER_NAMES + ")\\s*\\(");
+    private static final Pattern ROLE_METHOD_REF = Pattern.compile("::\\s*(" + HELPER_NAMES + ")\\b");
     private static final Pattern START_EMPTY = Pattern.compile("\\bstartEmptyDatabase\\s*\\(");
     private static final Pattern DEDICATED = Pattern.compile(
         "\\bPgContainerHelper\\s*(?:\\.|::)\\s*(?:startDedicated|newContainer)\\b");
@@ -358,8 +398,9 @@ class TestRoleUniquenessScanTest {
         Pattern.compile("(?:final\\s+)?[A-Za-z_][\\w.<>?\\[\\]]*\\s+([A-Za-z_]\\w*)");
     private static final Pattern BARE_CREATE_ROLE = Pattern.compile("(?i)create\\s+" + "role\\b");
 
-    /** One role-creating call: the class, the helper, the role values it can take and the password values. */
-    record Use(String clazz, String helper, Set<String> roles, Set<String> passwords) {}
+    /** One role-creating call: the class, the helper, its argument count, the role values it can take and the
+     *  password values. */
+    record Use(String clazz, String helper, int argc, Set<String> roles, Set<String> passwords) {}
 
     record Census(List<Use> uses, Map<String, Set<String>> exclusive, Set<String> dedicated, List<String> problems) {}
 
@@ -377,22 +418,25 @@ class TestRoleUniquenessScanTest {
             Matcher m = ROLE_CALL.matcher(s.code);
             while (m.find()) {
                 String helper = m.group(1);
+                Helper h = HELPERS.get(helper);
                 List<String> args = argsAt(s.lit, m.end() - 1);
-                if (args.size() < 2) {
-                    problems.add(name + ": " + helper + " call with fewer than two arguments, cannot read the role");
+                if (args.size() <= h.roleIdx()) {
+                    problems.add(name + ": " + helper + " call with fewer than " + (h.roleIdx() + 1)
+                        + " arguments, cannot read the role");
                     continue;
                 }
-                if (DECLARATION.matcher(args.get(1)).matches()) {
+                String roleArg = args.get(h.roleIdx());
+                if (DECLARATION.matcher(roleArg).matches()) {
                     continue; // the declaration of a test-local wrapper such as Hygiene001's bootstrapAdminRole
                 }
-                Set<String> roles = new TreeSet<>(eval(args.get(1), s, all, 0));
-                Set<String> passwords = args.size() > 2 && !helper.equals("createNologinRole")
-                    ? eval(args.get(2), s, all, 0) : Set.of();
-                if (roles.contains("*") && roles.size() == 1 && IDENT.matcher(args.get(1)).matches()) {
-                    roles = new TreeSet<>(throughEnclosingMethod(s, all, m.start(), args.get(1), problems, helper));
+                Set<String> roles = new TreeSet<>(eval(roleArg, s, all, 0));
+                Set<String> passwords = h.passIdx() >= 0 && args.size() > h.passIdx()
+                    ? eval(args.get(h.passIdx()), s, all, 0) : Set.of();
+                if (roles.contains("*") && roles.size() == 1 && IDENT.matcher(roleArg).matches()) {
+                    roles = new TreeSet<>(throughEnclosingMethod(s, all, m.start(), roleArg, problems, helper));
                 }
                 if (!roles.isEmpty()) {
-                    uses.add(new Use(name, helper, roles, passwords));
+                    uses.add(new Use(name, helper, args.size(), roles, passwords));
                 }
             }
             Matcher se = START_EMPTY.matcher(s.code);
@@ -559,6 +603,11 @@ class TestRoleUniquenessScanTest {
             Set<String> users = new TreeSet<>();
             for (Use u : e.getValue()) {
                 users.add(u.clazz());
+                if (!u.helper().equals(FAMILY_HELPER) || u.argc() != FAMILY_ARGC) {
+                    problems.add(u.clazz() + ": family " + e.getKey() + " is allowlisted for " + FAMILY_HELPER + " with "
+                        + FAMILY_ARGC + " arguments (su, role, pass), so every user creates the same role; got "
+                        + u.helper() + " with " + u.argc() + " arguments");
+                }
                 if (!u.passwords().equals(Set.of(e.getKey() + "_pass"))) {
                     problems.add(u.clazz() + ": family " + e.getKey() + " needs the password <role>_pass, got "
                         + u.passwords());
@@ -673,10 +722,27 @@ class TestRoleUniquenessScanTest {
         try (Stream<Path> s = Files.walk(TEST_ROOT)) {
             files = s.filter(p -> p.toString().endsWith(".java")).sorted().toList();
         }
+        Map<String, String> sources = new java.util.LinkedHashMap<>();
         for (Path p : files) {
-            String n = p.getFileName().toString();
+            sources.put(p.toString(), Files.readString(p));
+        }
+        return index(sources);
+    }
+
+    /** Sources by simple class name, from a map of path to text. Two files with one simple name would silently
+     *  overwrite each other (and the scan resolves {@code Class.CONSTANT} by simple name), so it fails loud. */
+    static Map<String, Src> index(Map<String, String> sourcesByPath) {
+        Map<String, Src> all = new TreeMap<>();
+        Map<String, String> pathOf = new TreeMap<>();
+        for (var e : sourcesByPath.entrySet()) {
+            String n = Path.of(e.getKey()).getFileName().toString();
             String simple = n.substring(0, n.length() - ".java".length());
-            all.put(simple, new Src(simple, Files.readString(p)));
+            String earlier = pathOf.put(simple, e.getKey());
+            if (earlier != null) {
+                throw new IllegalStateException("two test classes share the simple name " + simple + ": " + earlier
+                    + " and " + e.getKey() + "; the scan keys classes by simple name, so one would hide the other");
+            }
+            all.put(simple, new Src(simple, e.getValue()));
         }
         return all;
     }
@@ -722,6 +788,7 @@ class TestRoleUniquenessScanTest {
         System.out.println("TestRoleUniquenessScan: javadoc roster (" + roster.size() + "): " + roster
             + " + infra " + new TreeSet<>(INFRA_CALLERS.keySet()));
 
+        INFRA_CALLERS.forEach((cls, reason) -> assertThat(reason).as("the reason for INFRA_CALLERS entry " + cls).isNotBlank());
         assertThat(roster.size()).as("names read from the javadoc roster").isGreaterThanOrEqualTo(MIN_JAVADOC_ROSTER);
         assertThat(callers.size()).as("startDedicated callers found").isGreaterThanOrEqualTo(MIN_START_DEDICATED_CALLERS);
         problems.addAll(rosterDiff(callers, roster, INFRA_CALLERS));
@@ -897,10 +964,79 @@ class TestRoleUniquenessScanTest {
 
     @Test
     void a_huge_literal_lexes_without_overflowing_the_stack() {
-        String big = "x".repeat(200_000);
-        String src = "class X { String a = \"" + big + "\"; String b = \"\"\"\n" + big + "\"\"\"; }";
-        assertThat(mask(src, false)).hasSize(src.length());
-        assertThat(mask(src, true)).isEqualTo(src);
+        // The lexer's literal branches are possessive loops over an alternation, which Java matches by recursing once
+        // per iteration. Plain characters are one iteration in total; an escape, or a quote inside a text block, is
+        // one iteration each, so the pins below put 200,000 of those in a single literal.
+        String plain = "x".repeat(200_000);
+        String escapes = "\\n".repeat(200_000);
+        String quotes = "\"\"a".repeat(200_000);
+        for (String body : List.of(plain, escapes)) {
+            String src = "class X { String a = \"" + body + "\"; String b = \"\"\"\n" + body + "\"\"\"; }";
+            assertThat(mask(src, false)).hasSize(src.length());
+            assertThat(mask(src, true)).isEqualTo(src);
+        }
+        String text = "class X { String t = \"\"\"\n" + quotes + "\"\"\"; int after = 1; }";
+        String masked = mask(text, false);
+        assertThat(masked).hasSize(text.length());
+        assertThat(masked.substring(masked.indexOf("t =") + 3, masked.indexOf(';'))).as("the literal is blanked").isBlank();
+        assertThat(masked).endsWith("; int after = 1; }");
+        assertThat(mask(text, true)).isEqualTo(text);
+    }
+
+    @Test
+    void two_classes_with_one_simple_name_fail_loud_instead_of_one_hiding_the_other() {
+        Map<String, String> files = new java.util.LinkedHashMap<>();
+        files.put("src/test/java/a/Dup.java", "class Dup {}");
+        files.put("src/test/java/b/Other.java", "class Other {}");
+        assertThat(index(files)).containsOnlyKeys("Dup", "Other");
+        files.put("src/test/java/b/Dup.java", "class Dup {}");
+        assertThatThrownBy(() -> index(files)).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("share the simple name Dup")
+            .hasMessageContaining("src/test/java/a/Dup.java").hasMessageContaining("src/test/java/b/Dup.java");
+    }
+
+    @Test
+    void grantRoleMembership_creates_its_member_role_argument_two_not_the_granted_role() {
+        String grant = "class %s { void f() { PgContainerHelper.grantRoleMembership(su, \"%s\", \"%s\", true, false); } }";
+        // Same member role in two classes: the second keeps the first's password and BYPASSRLS flag.
+        assertThat(roles(fixture("A", grant.formatted("A", "nexus_admin", "r_member"),
+            "B", grant.formatted("B", "nexus_admin", "r_member"))))
+            .singleElement().asString().contains("r_member").contains("[A, B]").contains("do not declare it exclusive");
+        // Same granted role, different members: the granted role is not created here, so no collision.
+        assertThat(roles(fixture("A", grant.formatted("A", "nexus_admin", "r_one"),
+            "B", grant.formatted("B", "nexus_admin", "r_two")))).isEmpty();
+        // A class naming the member of another's grant as a role of its own creation collides too.
+        assertThat(roles(fixture("A", grant.formatted("A", "nexus_admin", "svc_x"), "B", serviceClass("svc_x"))))
+            .singleElement().asString().contains("svc_x").contains("[A, B]");
+        assertThat(roles(fixture("A", "class A { void f() { PgContainerHelper.grantRoleMembership(su, \"g\"); } }")))
+            .singleElement().asString().contains("fewer than 3 arguments");
+    }
+
+    @Test
+    void a_family_use_must_be_the_three_argument_bootstrapNonSuperuserOwner() {
+        String rig = """
+            class %s {
+                static void newRig(String label) {
+                    String role = "nexus_admin_" + label;
+                    PgContainerHelper.%s;
+                }
+            }
+            """;
+        String three = "bootstrapNonSuperuserOwner(su, role, role + \"_pass\")";
+        String adminRole = "bootstrapAdminRole(su, role, role + \"_pass\")";
+        String five = "bootstrapNonSuperuserOwner(su, role, role + \"_pass\", true, true)";
+        Map<String, Family> fam = Map.of("nexus_admin_*", new Family(Set.of("A", "B"), "newRig", "r"));
+        Map<String, Src> ok = fixture("A", rig.formatted("A", three), "B", rig.formatted("B", three));
+        Set<String> both = new TreeSet<>(ok.keySet());
+        assertThat(roleProblems(ok, both, fam, Set.of(), Map.of(), null, null)).isEmpty();
+        Map<String, Src> switched = fixture("A", rig.formatted("A", three), "B", rig.formatted("B", adminRole));
+        assertThat(roleProblems(switched, both, fam, Set.of(), Map.of(), null, null))
+            .singleElement().asString().contains("B: family nexus_admin_* is allowlisted for bootstrapNonSuperuserOwner")
+            .contains("got bootstrapAdminRole with 3 arguments");
+        Map<String, Src> overload = fixture("A", rig.formatted("A", three), "B", rig.formatted("B", five));
+        assertThat(roleProblems(overload, both, fam, Set.of(), Map.of(), null, null))
+            .singleElement().asString().contains("B: family nexus_admin_* is allowlisted for bootstrapNonSuperuserOwner")
+            .contains("got bootstrapNonSuperuserOwner with 5 arguments");
     }
 
     @Test
