@@ -127,9 +127,11 @@ class TenantResetRouteTest {
 
     @Test
     void anUnauthenticatedProbeSeparatesAbsentFromRegistered() throws Exception {
-        // What the cloud gate's fail-closed leg sends through the edge: no bearer. An engine without the flag has
-        // no context for the path (the JDK server's own 404, not a JSON body); one with it answers 401 from the
-        // auth filter. Nothing else separates the two without a credential.
+        // A probe with NO credential against the local engine (not what the cloud gate sends: through the edge the
+        // gate carries the leg-B data bearer, because the edge answers an unauthenticated /v1 request with 403
+        // whether or not the route exists, nexus-69be4). An engine without the flag has no context for the path
+        // (the JDK server's own 404, not a JSON body); one with it answers 401 from the auth filter. The method
+        // name says "unauthenticated" and that is all it pins.
         var absent = TestHttp.request(base(off) + PATH).POST(HttpRequest.BodyPublishers.ofString("{}")).build();
         assertThat(http.send(absent, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(404);
         var registered = TestHttp.request(base(on) + PATH).POST(HttpRequest.BodyPublishers.ofString("{}")).build();

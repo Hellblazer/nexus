@@ -789,14 +789,53 @@ run_n "N1: JSON that is not a status body (no embedding_mode) -> violation" 1 "n
   "$TMP/n1fn.sh" _tenant_reset_status_verdict '{"test_tenant_reset_route":false}'
 run_n "N2: an authenticated POST answering 404 -> ok (the route is absent)" 0 "ok [N2]" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
   "<h1>404 Not Found</h1>No context found for request"
-run_n "N2: 403 -> violation, the operator-only refusal means the route is registered" 1 "route is REGISTERED" \
+run_n "N2: the 404 ok line prints the body head, so the first live run records the real 404 body" 0 \
+  "body: '<h1>404 Not Found</h1>No context found for request'" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
+  "<h1>404 Not Found</h1>No context found for request"
+run_n "N2: the 404 body head is cut at 80 chars and kept on one line" 0 "body: '$(printf 'a%.0s' $(seq 1 79)) '" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 "$(printf 'a%.0s' $(seq 1 79))
+$(printf 'b%.0s' $(seq 1 40))"
+# run_nx <label> <want-rc> <want-text> <forbidden-text> <args...>: like run_n against the probe judge, and the output
+# must NOT contain the forbidden text (an edge-shaped body must never print the REGISTERED verdict).
+run_nx() {
+  local label="$1" want_rc="$2" want_text="$3" forbid="$4" out rc
+  shift 4
+  # shellcheck disable=SC1090
+  out="$(source "$TMP/n2fn.sh"; _tenant_reset_probe_verdict "$@")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]] && [[ "$out" != *"$forbid"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text' without '$forbid', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+run_n "N2: 403 with the engine's operator refusal -> REGISTERED, names the operator-only refusal" 1 "route is REGISTERED" \
   "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"error":"operator privilege required: this operation needs the root token"}'
-run_n "N2: 403 names the operator refusal, not a bare status" 1 "operator-only refusal" \
-  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}'
-run_n "N2: 400 -> violation, the missing-tenant refusal means the route is registered" 1 "missing-tenant refusal" \
+run_n "N2: 403 engine body names the operator refusal" 1 "operator-only refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"error":"operator privilege required: this operation needs the root token"}'
+run_n "N2: 400 with the engine's missing-tenant body -> REGISTERED, names the missing-tenant refusal" 1 "route is REGISTERED" \
   "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
-run_n "N2: 503 -> violation, the PCI refusal means the route is registered" 1 "NX_SEARCH_PCI=1 refusal" \
-  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused"}'
+run_n "N2: 400 engine body names the missing-tenant refusal" 1 "missing-tenant refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
+run_n "N2: 503 with the engine's PCI body -> REGISTERED, names the NX_SEARCH_PCI=1 refusal" 1 "route is REGISTERED" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused: NX_SEARCH_PCI=1 builds per-collection indexes, which are DDL a data reset does not drop"}'
+run_n "N2: 503 engine body names the NX_SEARCH_PCI=1 refusal" 1 "NX_SEARCH_PCI=1 refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused: NX_SEARCH_PCI=1 builds per-collection indexes, which are DDL a data reset does not drop"}'
+run_nx "N2: 403 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 403 '{"message":"Forbidden"}'
+run_nx "N2: 400 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 400 '{"message":"Bad Request"}'
+run_nx "N2: 503 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 503 '{"message":"Service Unavailable"}'
+run_nx "N2: 403 with an empty body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 403 ''
+run_nx "N2: a 400 body carrying the 403 fragment is not a match (each code has its own fragment)" 1 "INCONCLUSIVE" "REGISTERED" \
+  400 '{"error":"operator privilege required"}'
+run_n "N2: an inconclusive code without an N1 line points at the N1 line above" 1 "read the N1 line above" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}'
+run_n "N2: an inconclusive code with N1 ok says the refusal is the edge's" 1 "N1 reported the flag absent or false: the refusal is the edge's" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}' "ok [N1]: /v1/status reports test_tenant_reset_route=false"
+run_n "N2: an inconclusive code with N1 ok (key omitted) says the refusal is the edge's" 1 "the refusal is the edge's" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"message":"Bad Request"}' "ok [N1]: /v1/status carries no test_tenant_reset_route (an engine that predates the route; N2 judges the route itself)"
+run_n "N2: an inconclusive code with N1 failed points at the N1 line" 1 "N1 did not pass: read the N1 line above" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"message":"Service Unavailable"}' "N1: /v1/status reports test_tenant_reset_route=true: x"
 run_n "N2: 401 -> violation, absence is not shown (fails closed), not read as registered" 1 "the leg fails closed" \
   "$TMP/n2fn.sh" _tenant_reset_probe_verdict 401 '{"error":"missing or invalid bearer"}'
 run_n "N2: 200 -> violation" 1 "answers HTTP 200" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 200 '{"tenant":"x","evicted":{}}'
@@ -806,7 +845,7 @@ run_n "N2: a curl failure (000) -> violation" 1 "answers HTTP 000" "$TMP/n2fn.sh
 run_n "N2: an empty status code -> violation" 1 "the leg fails closed" "$TMP/n2fn.sh" _tenant_reset_probe_verdict "" ''
 
 check_wiring "N judges the /v1/status body leg B fetched" 'N1_LINE="\$\(_tenant_reset_status_verdict "\$STATUS_BODY"\)"'
-check_wiring "N judges the probe by its code and body" 'N2_LINE="\$\(_tenant_reset_probe_verdict "\$EDGE_CODE" "\$EDGE_BODY"\)"'
+check_wiring "N judges the probe by its code, body and the N1 line" 'N2_LINE="\$\(_tenant_reset_probe_verdict "\$EDGE_CODE" "\$EDGE_BODY" "\$N1_LINE"\)"'
 check_wiring "N: a violation is a leg failure" '_leg_fail "N: the test-only tenant-reset route is not shown absent from the engine'
 check_wiring "N fails closed when leg B resolved no bearer" '_leg_fail "N: no bearer \(leg B could not resolve one\)'
 neg_case "a second leg-N probe" "leg N must hold exactly 1 _edge_post call" \

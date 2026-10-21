@@ -184,9 +184,13 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      register the route has no context for it). The probe carries the bearer because the edge answers an
 #      UNAUTHENTICATED /v1 request with 403 whether or not the route exists (leg B1 measures that for /health), so
 #      an unauthenticated probe would read 403 on every healthy engine. A registered route answers 403 (the
-#      bearer is not the root token), 400 (root, no tenant in the body) or 503 (NX_SEARCH_PCI=1); every other
-#      status (an auth 401, a 200, a 5xx, a curl failure) is a violation too, because a status that cannot be read
-#      as "no such route" must never read as "the route is not there". Read-only by construction: the body {} has
+#      bearer is not the root token), 400 (root, no tenant in the body) or 503 (NX_SEARCH_PCI=1), and is called
+#      REGISTERED only when the body carries the engine's own text for that code ("operator privilege required",
+#      "missing required string field: tenant", "NX_SEARCH_PCI"); the same codes with any other body (an edge
+#      refusal of the authenticated path) print INCONCLUSIVE, absence not shown. Every other status (an auth 401,
+#      a 200, a 5xx, a curl failure) is a violation too, because a status that cannot be read as "no such route"
+#      must never read as "the route is not there". The 404 ok line prints the body head so the first live run
+#      records it; the pass is still the bare 404 until nexus-69be4 tightens it to the JDK server's own body. Read-only by construction: the body {} has
 #      no tenant, so a registered route refuses it before any eviction (TenantResetHandler.handle, lines 72-90 of
 #      service/src/main/java/dev/nexus/service/http/TenantResetHandler.java: 403 non-operator, 503 PCI, 400 from
 #      requestedTenant at 86-90, and the eviction loop only at 99). Leg N fails closed with no bearer, as K, L and
@@ -725,30 +729,51 @@ sys.exit(1)
 PY
 }
 
-# _tenant_reset_probe_verdict <http-code> <body>: the status of a POST of {} to /v1/_test/tenant-reset through the
-# edge WITH the leg-B data bearer. 404 -> 0 (no such route). 403, 400 and 503 -> 1: the engine's own refusals
-# (non-operator, no tenant in the body, NX_SEARCH_PCI=1), so the route is REGISTERED (a 403 could also be an edge
-# refusal of the path, which still does not show absence). Every other status -> 1 (a 401 the bearer should not
-# draw, a 200, a 405, a 5xx, a curl failure 000, an empty code): it cannot be read as "no such route", and a
-# test-only route that is not shown absent is treated as present. The body {} names no tenant, so none of these
-# evicts anything (TenantResetHandler.handle: operator and PCI guards at 72-83, 400 from requestedTenant at 86-90,
-# eviction loop at 99).
+# _tenant_reset_probe_verdict <http-code> <body> [<N1 verdict line>]: the status of a POST of {} to
+# /v1/_test/tenant-reset through the edge WITH the leg-B data bearer. 404 -> 0 (no such route); its ok line prints
+# the first 80 chars of the body so the first live run records it. Exit 1 on everything else:
+#   - REGISTERED: 403, 400 or 503 whose body carries the engine's OWN refusal text (TenantResetHandler.handle):
+#     403 "operator privilege required" (non-operator), 400 "missing required string field: tenant" (operator, no
+#     tenant in the body), 503 "NX_SEARCH_PCI" (NX_SEARCH_PCI=1). Those strings exist only in the engine's handler,
+#     so the route is compiled in; NX_TEST_TENANT_RESET_ROUTE must never be set on the cloud engine.
+#   - INCONCLUSIVE: the same three codes with any other body. A bare 403/400/503 can be the edge refusing the
+#     authenticated path itself (an expired bearer, a WAF rule), which says nothing about the route, so it never
+#     prints REGISTERED. Absence is not shown, so the leg still fails closed.
+#   - every other status (a 401 the bearer should not draw, a 200, a 405, a 5xx, a curl failure 000, an empty code):
+#     it cannot be read as "no such route", and a test-only route that is not shown absent is treated as present.
+# The optional third argument is the N1 line, folded into the INCONCLUSIVE message. The body {} names no tenant, so
+# none of these evicts anything (TenantResetHandler.handle: operator and PCI guards at 72-83, 400 from
+# requestedTenant at 86-90, eviction loop at 99).
 _tenant_reset_probe_verdict() {
-    "$E2E_PYTHON" - "$1" "$2" <<'PY'
+    "$E2E_PYTHON" - "$1" "$2" "${3:-}" <<'PY'
 import sys
 
-code, body = sys.argv[1:3]
+code, body, n1 = sys.argv[1:4]
 head = body[:160].replace("\n", " ")
 what = "a POST of {} with the leg-B bearer to /v1/_test/tenant-reset"
 if code == "404":
-    print("ok [N2]: %s answers 404: no such route on this engine" % what)
+    # The engine's own 404 for an unregistered path is the JDK HttpServer HTML ("No context found for request").
+    # Tighten this pass to that body once the first live run is recorded in nexus-69be4; until then 404 alone passes.
+    print("ok [N2]: %s answers 404 (body: %r): no such route on this engine" % (what, body[:80].replace("\n", " ")))
     sys.exit(0)
-if code in ("403", "400", "503"):
-    why = {"403": "the operator-only refusal (or an edge refusal of the path)",
-           "400": "the missing-tenant refusal of an operator request",
-           "503": "the NX_SEARCH_PCI=1 refusal"}[code]
-    print("N2: %s answers %s (body: %r): %s, so the route is REGISTERED; NX_TEST_TENANT_RESET_ROUTE must never be set "
-          "on the cloud engine" % (what, code, head, why))
+engine = {"403": ("operator privilege required", "the operator-only refusal"),
+          "400": ("missing required string field: tenant", "the missing-tenant refusal of an operator request"),
+          "503": ("NX_SEARCH_PCI", "the NX_SEARCH_PCI=1 refusal")}
+if code in engine:
+    fragment, why = engine[code]
+    if fragment in body:
+        print("N2: %s answers %s (body: %r): %s, text only the engine's handler emits, so the route is REGISTERED; "
+              "NX_TEST_TENANT_RESET_ROUTE must never be set on the cloud engine" % (what, code, head, why))
+        sys.exit(1)
+    if n1.startswith("ok [N1]"):
+        n1_note = "N1 reported the flag absent or false: the refusal is the edge's"
+    elif n1:
+        n1_note = "N1 did not pass: read the N1 line above"
+    else:
+        n1_note = "read the N1 line above"
+    print("N2: INCONCLUSIVE: %s answers %s (body: %r), which lacks the engine's own refusal text %r: absence not "
+          "shown, likely an edge refusal of the authenticated path (%s), so the leg fails closed"
+          % (what, code, head, fragment, n1_note))
     sys.exit(1)
 print("N2: %s answers HTTP %s (body: %r), not the 404 of an absent route: the route's absence is not shown (an "
       "unexpected engine answer, an edge refusal, an unreachable engine and a registered route all look like this "
@@ -1528,7 +1553,8 @@ rm -rf "$M_DIR"
 # POST /v1/_test/tenant-reset is registered only with NX_TEST_TENANT_RESET_ROUTE=1, which must never reach the
 # cloud engine. FAIL CLOSED on both checks (the judges are above): N1 reads the flag the engine reports on the
 # /v1/status body leg B fetched, N2 sends a POST of {} with the leg-B bearer through the edge and requires the 404
-# of an absent route. A flag alone is not enough: the check passes an absent key, and an edge that stubs a body
+# of an absent route (a 403, 400 or 503 is REGISTERED only with the engine's own body text, else INCONCLUSIVE;
+# the N1 line is passed in so the message can say whether the flag was absent). A flag alone is not enough: the check passes an absent key, and an edge that stubs a body
 # (/version, 2026-07-23, nexus-bwulw) would hide a registered route behind exactly that. The probe is
 # authenticated because the edge refuses an unauthenticated /v1 request with 403 before the engine sees it, which
 # would read as a registered route on every healthy engine. The body {} names no tenant, so a registered route
@@ -1540,7 +1566,7 @@ else
     N_BAD=0
     N1_LINE="$(_tenant_reset_status_verdict "$STATUS_BODY")" && echo "  $N1_LINE" || { echo "  VIOLATION [${N1_LINE%%:*}]:${N1_LINE#*:}" >&2; N_BAD=1; }
     _edge_post "/v1/_test/tenant-reset" '{}'
-    N2_LINE="$(_tenant_reset_probe_verdict "$EDGE_CODE" "$EDGE_BODY")" && echo "  $N2_LINE" || { echo "  VIOLATION [${N2_LINE%%:*}]:${N2_LINE#*:}" >&2; N_BAD=1; }
+    N2_LINE="$(_tenant_reset_probe_verdict "$EDGE_CODE" "$EDGE_BODY" "$N1_LINE")" && echo "  $N2_LINE" || { echo "  VIOLATION [${N2_LINE%%:*}]:${N2_LINE#*:}" >&2; N_BAD=1; }
     [ "$N_BAD" -eq 0 ] || _leg_fail "N: the test-only tenant-reset route is not shown absent from the engine (see above)"
 fi
 
