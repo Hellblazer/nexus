@@ -50,6 +50,11 @@ EXEMPT_TESTS = {
         "a stub container that is counter-on by construction (ddlCounted defaults to true); starts no server, "
         "so it runs the same with the switch off (nexus-t4y7b)"
     ),
+    "dev/nexus/service/PgContainerTmpfsGateTest.java::the_codegen_runners_started_container_runs_on_tmpfs_with_the_settings_and_the_limit": (
+        "names log_statement only to find where the helper's DDL-counter extras begin, and compares the runner's "
+        "command with the part before them; with the counter off there are no extras and the whole command is "
+        "compared, so it asserts the same thing in both states (nexus-lywcf)"
+    ),
 }
 
 # The scan must have examined at least this many counter-dependent tests: a pass over an empty set is a failure.
