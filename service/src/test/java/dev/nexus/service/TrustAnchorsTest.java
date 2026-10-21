@@ -27,7 +27,7 @@ class TrustAnchorsTest {
     }
 
     @Test
-    void printsTheCountThenOneSubjectLinePerAcceptedIssuer() throws Exception {
+    void printsTheCountThenOneFingerprintAndSubjectLinePerAcceptedIssuer() throws Exception {
         var bytes = new ByteArrayOutputStream();
         TrustAnchors.print(new PrintStream(bytes, true, StandardCharsets.UTF_8));
         List<String> lines = bytes.toString(StandardCharsets.UTF_8).lines().toList();
@@ -36,6 +36,6 @@ class TrustAnchorsTest {
         assertThat(accepted).as("the JVM's default trust store is not empty").isPositive();
         assertThat(lines.get(0)).isEqualTo("trust_anchors count=" + accepted);
         assertThat(lines.subList(1, lines.size())).hasSize(accepted)
-            .allMatch(l -> l.startsWith("trust_anchor ") && l.length() > "trust_anchor ".length());
+            .allMatch(l -> l.matches("trust_anchor sha256=[0-9a-f]{64} .+"));
     }
 }

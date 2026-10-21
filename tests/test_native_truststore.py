@@ -233,7 +233,8 @@ public class Probe {
         System.out.println("engine log line before the protocol");
         System.out.println("trust_anchors count=" + issuers.size());
         for (java.security.cert.X509Certificate c : issuers) {
-            System.out.println("trust_anchor " + c.getSubjectX500Principal().getName());
+            String fp = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(c.getEncoded()));
+            System.out.println("trust_anchor sha256=" + fp + " " + c.getSubjectX500Principal().getName());
         }
     }
 }
@@ -273,6 +274,20 @@ def test_anchors_fails_an_executable_that_does_not_trust_a_required_root(tmp_pat
     assert run.returncode == 1
     assert "does not trust required root gtsrootcar1 [jdk]" in run.stderr
     assert "extra [CN=Swapped Root,O=Test,C=US]" in run.stderr
+
+
+def test_anchors_fails_an_executable_that_trusts_a_different_certificate_under_the_same_subject(
+    tmp_path: Path, source: Path
+) -> None:
+    # A re-keyed root: every subject and the count match the pruned store, only the certificate
+    # differs. Subject equality passes it; the fingerprint comparison must not.
+    roots = {a: s for a, s in _ROOTS.items() if a not in DROP}
+    rekeyed = _store(tmp_path / "rekeyed", roots)
+    run = _anchors(tmp_path, source, _ANCHORS_PROBE % rekeyed.as_posix())
+    assert run.returncode == 1
+    assert "subjects differ" not in run.stderr
+    assert "certificates differ from the pruned store" in run.stderr
+    assert "does not trust required root globalsignca [jdk]" in run.stderr
 
 
 def test_anchors_fails_an_executable_that_prints_no_count(tmp_path: Path, source: Path) -> None:

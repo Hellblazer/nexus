@@ -8,8 +8,10 @@ import javax.net.ssl.X509TrustManager;
 import java.io.PrintStream;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 
 /**
@@ -23,7 +25,8 @@ import java.util.List;
  * {@link TrustManagerFactory} of the default algorithm initialised with no key store.
  *
  * <p>Output, one line each, on stdout: {@code trust_anchors count=<n>}, then
- * {@code trust_anchor <subject>} per accepted issuer in RFC 2253 form. Stdout is the protocol
+ * {@code trust_anchor sha256=<hex> <subject>} per accepted issuer: the SHA-256 of its DER encoding,
+ * then its subject in RFC 2253 form. Stdout is the protocol
  * channel here; logging may share it, so the reader keys on the line prefixes.
  */
 final class TrustAnchors {
@@ -56,8 +59,13 @@ final class TrustAnchors {
         List<X509Certificate> issuers = accepted();
         out.println("trust_anchors count=" + issuers.size());
         for (X509Certificate issuer : issuers) {
-            out.println("trust_anchor " + issuer.getSubjectX500Principal().getName());
+            out.println("trust_anchor sha256=" + sha256(issuer.getEncoded()) + " "
+                + issuer.getSubjectX500Principal().getName());
         }
         out.flush();
+    }
+
+    static String sha256(byte[] der) throws GeneralSecurityException {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(der));
     }
 }

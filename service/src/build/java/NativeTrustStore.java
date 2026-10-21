@@ -22,8 +22,8 @@
 //                            `nexus-service --trust-anchors`, which prints the issuers its default
 //                            TrustManager accepts, and require exactly the certificates of
 //                            <dir>/native-truststore/cacerts (the store prune wrote): the same count,
-//                            the same subjects, no subject of the distrusted hierarchy, every KEEP
-//                            root present. This is what the engine's TLS trusts, not alias strings.
+//                            the same SHA-256 fingerprints and subjects, no subject of the distrusted
+//                            hierarchy, every KEEP root present. This is what the engine's TLS trusts, not alias strings.
 //
 // Run as a source-file program: java NativeTrustStore.java prune|verify|anchors <path>.
 
@@ -164,8 +164,10 @@ public class NativeTrustStore {
             expected.add(pruned.getCertificate(alias));
         }
         Set<String> expectedSubjects = new TreeSet<>();
+        Set<String> expectedFingerprints = new TreeSet<>();
         for (Certificate cert : expected) {
             expectedSubjects.add(((X509Certificate) cert).getSubjectX500Principal().getName());
+            expectedFingerprints.add(sha256(cert));
         }
 
         // nexus.truststore.probe exists for the tests: a Java source file that stands in for the
@@ -174,25 +176,36 @@ public class NativeTrustStore {
         List<String> command = probe != null
                 ? List.of(new File(System.getProperty("java.home"), "bin/java").getPath(), probe, "--trust-anchors")
                 : List.of(binary(dir).toString(), "--trust-anchors");
+        String text;
         Path captured = Files.createTempFile("nexus-trust-anchors", ".txt");
-        Process process = new ProcessBuilder(command).redirectErrorStream(true)
-                .redirectOutput(captured.toFile()).start();
-        if (!process.waitFor(120, TimeUnit.SECONDS)) {
-            process.destroyForcibly();
-            fail(command + " did not exit within 120 s");
-        }
-        String text = Files.readString(captured, StandardCharsets.UTF_8);
-        Files.delete(captured);
-        if (process.exitValue() != 0) {
-            fail(command + " exited " + process.exitValue() + ": " + text);
+        try {
+            Process process = new ProcessBuilder(command).redirectErrorStream(true)
+                    .redirectOutput(captured.toFile()).start();
+            boolean exited = process.waitFor(120, TimeUnit.SECONDS);
+            if (!exited) {
+                process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+            }
+            text = new String(Files.readAllBytes(captured), StandardCharsets.UTF_8);
+            if (!exited) {
+                fail(command + " did not exit within 120 s; output so far: " + text);
+            }
+            if (process.exitValue() != 0) {
+                fail(command + " exited " + process.exitValue() + ": " + text);
+            }
+        } finally {
+            Files.deleteIfExists(captured);
         }
         int reported = -1;
         List<String> subjects = new ArrayList<>();
+        Set<String> fingerprints = new TreeSet<>();
         for (String line : text.split("\\R")) {
             if (line.startsWith("trust_anchors count=")) {
                 reported = Integer.parseInt(line.substring("trust_anchors count=".length()).trim());
-            } else if (line.startsWith("trust_anchor ")) {
-                subjects.add(line.substring("trust_anchor ".length()));
+            } else if (line.startsWith("trust_anchor sha256=")) {
+                String rest = line.substring("trust_anchor sha256=".length());
+                int space = rest.indexOf(' ');
+                fingerprints.add(space < 0 ? rest : rest.substring(0, space));
+                subjects.add(space < 0 ? "" : rest.substring(space + 1));
             }
         }
 
@@ -211,9 +224,10 @@ public class NativeTrustStore {
             }
         }
         for (String alias : KEEP) {
-            String subject = ((X509Certificate) jdk.getCertificate(alias)).getSubjectX500Principal().getName();
-            if (!subjects.contains(subject)) {
-                problems.add("does not trust required root " + alias + " (" + subject + ")");
+            Certificate keep = jdk.getCertificate(alias);
+            if (!fingerprints.contains(sha256(keep))) {
+                problems.add("does not trust required root " + alias + " ("
+                        + ((X509Certificate) keep).getSubjectX500Principal().getName() + ")");
             }
         }
         if (!new TreeSet<>(subjects).equals(expectedSubjects)) {
@@ -223,11 +237,23 @@ public class NativeTrustStore {
             missing.removeAll(subjects);
             problems.add("subjects differ from the pruned store: extra " + extra + ", missing " + missing);
         }
+        if (!fingerprints.equals(expectedFingerprints)) {
+            Set<String> extra = new TreeSet<>(fingerprints);
+            extra.removeAll(expectedFingerprints);
+            Set<String> missing = new TreeSet<>(expectedFingerprints);
+            missing.removeAll(fingerprints);
+            problems.add("certificates differ from the pruned store: extra sha256 " + extra + ", missing sha256 " + missing);
+        }
         if (!problems.isEmpty()) {
             fail(command.get(command.size() - 2) + " " + String.join("; ", problems));
         }
-        System.out.printf("native trust anchors verified: the executable trusts %d roots, exactly %s, none distrusted, %d required present%n",
+        System.out.printf("native trust anchors verified: the executable trusts %d roots, exactly the certificates of %s, none distrusted, %d required present%n",
                 subjects.size(), storeFile, KEEP.size());
+    }
+
+    static String sha256(Certificate cert) throws GeneralSecurityException {
+        return java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(cert.getEncoded()));
     }
 
     static Path binary(Path path) {
