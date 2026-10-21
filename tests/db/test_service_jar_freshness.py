@@ -423,6 +423,80 @@ class TestLeaseScopedToThisCheckout:
         assert wait_for_build_lease(0, announce=lambda _m: None) is None
 
 
+class TestLeaseReaderMatchesTheShell:
+    """nexus-m5vb3: the reader reads a lease as scripts/lib/build-lease.sh does.
+    The lib creates pid and pgid empty (``set -C``) before writing them and
+    writes pid after the mkdir, so an empty or missing pid is a claim in
+    progress for its populate grace and a dead claimer after it, and an empty
+    pgid falls back to the pid. A byte that is not UTF-8 in a descriptive file
+    is not a reason to stop reading."""
+
+    @staticmethod
+    def _dir(tmp_path, *, age_s: float = 0.0):
+        import time
+
+        d = tmp_path / "root" / "service"
+        d.mkdir(parents=True)
+        return d, age_s and (lambda: os.utime(d, (time.time() - age_s,) * 2))
+
+    def test_an_empty_or_missing_pid_in_a_fresh_lease_is_a_claim_in_progress(self, tmp_path):
+        d, _ = self._dir(tmp_path)
+        assert build_in_progress_reason(tmp_path / "root") is not None, "mkdir done, pid not yet created"
+        (d / "pid").write_text("")
+        assert build_in_progress_reason(tmp_path / "root") is not None, "pid created empty, not yet written"
+
+    def test_an_empty_pid_past_the_populate_grace_is_a_dead_claimer(self, tmp_path):
+        d, age = self._dir(tmp_path, age_s=60)
+        (d / "pid").write_text("")
+        age()
+        assert build_in_progress_reason(tmp_path / "root") is None
+
+    def test_an_empty_pgid_falls_back_to_the_pid(self, tmp_path):
+        d, _ = self._dir(tmp_path)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "pgid").write_text("")
+        assert build_in_progress_reason(tmp_path / "root") is not None
+        (d / "pid").write_text("4194304\n")  # above pid_max on darwin and linux
+        assert build_in_progress_reason(tmp_path / "root") is None
+
+    def test_a_byte_that_is_not_utf8_in_a_descriptive_file_is_still_a_build(self, tmp_path):
+        d, _ = self._dir(tmp_path)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "label").write_bytes(b"caf\xe9\n")
+        (d / "command").write_bytes(b"mvn \xff package\n")
+        reason = build_in_progress_reason(tmp_path / "root")
+        assert reason is not None and "caf" in reason and "package" in reason
+        (d / "worktree").write_bytes(b"/no/such/\xff/checkout\n")
+        assert build_in_progress_reason(tmp_path / "root", repo_root=tmp_path) is not None
+
+    @staticmethod
+    def _checkout_jar(tmp_path, name: str) -> tuple[Path, Path]:
+        checkout = tmp_path / name
+        (checkout / "service" / "target").mkdir(parents=True)
+        return checkout, checkout / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+
+    def test_a_jar_is_checked_against_the_lease_of_its_own_checkout(self, tmp_path, monkeypatch):
+        other, jar = self._checkout_jar(tmp_path, "other-checkout")
+        d, _ = self._dir(tmp_path)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "worktree").write_text(f"{other}\n")
+        monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(tmp_path / "root"))
+        reason = jar_freshness_skip_reason(jar)
+        assert reason is not None and "BUILD IS IN PROGRESS" in reason, reason
+
+    def test_a_build_in_this_checkout_does_not_hold_another_checkouts_jar(self, tmp_path, monkeypatch):
+        _, jar = self._checkout_jar(tmp_path, "other-checkout")
+        here = tmp_path / "this-checkout"
+        here.mkdir()
+        d, _ = self._dir(tmp_path)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "worktree").write_text(f"{here}\n")
+        monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(tmp_path / "root"))
+        monkeypatch.setattr("tests.db._service_fixture._REPO_ROOT", here)
+        reason = jar_freshness_skip_reason(jar)
+        assert reason is not None and "BUILD IS IN PROGRESS" not in reason, reason
+
+
 @posix_only("the build lease names the ./mvnw build's POSIX process group (pgid; os.getpgid/os.killpg)")
 class TestLeaseHolderLiveness:
     """The lease directory in the git common dir never disappears on its own
