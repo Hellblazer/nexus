@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 
+import dev.nexus.build.PgContainerRecipe;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.Scope;
@@ -16,7 +17,6 @@ import org.jooq.meta.jaxb.Configuration;
 import org.jooq.meta.jaxb.Jdbc;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.utility.DockerImageName;
 
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -43,27 +43,21 @@ import java.util.logging.Level;
  *
  * <p>Why not the plugin: it keeps PGDATA on the image's anonymous docker volume (about 52 MB written to the
  * host disk on every codegen cache miss) and has no setting for tmpfs, memory or server flags. The container
- * recipe below is {@code PgContainerHelper.newContainer(DockerImageName, String, long)} in
- * src/test/java/dev/nexus/service/PgContainerHelper.java: the same tmpfs PGDATA and server flags, the same
- * memory limit, sslmode=disable and three start attempts. It is copied, not called: this runs before the test
- * classes compile. Keep the two in step. Left out on purpose: the DDL counter's logging collector and event
- * trigger (a codegen run is not a counted suite), and FailFastPostgreSQLContainer (a foreign server squatting
- * the published port; it only shortens a failing start).
+ * comes from {@link PgContainerRecipe} (src/build/java/dev/nexus/build/PgContainerRecipe.java), the same class
+ * {@code PgContainerHelper} in the test tree configures its containers with: tmpfs PGDATA, memory limit, server
+ * flags, sslmode=disable, three start attempts (nexus-llba1). The JDK source launcher (JEP 458, multi-file mode,
+ * JDK 22 and later) compiles the recipe with this file by finding it under this file's directory by package, so
+ * it must stay at dev/nexus/build/ beside this file, and this file must be launched by its path, as the pom does.
+ * The recipe is a class and not a copy because this runs before the test classes compile and cannot call the
+ * helper. Left out on purpose: the DDL counter's logging collector and event trigger (a codegen run is not a
+ * counted suite), and FailFastPostgreSQLContainer (a foreign server squatting the published port; it only
+ * shortens a failing start).
  *
  * <p>Container cleanup: try-with-resources stops the container on every exit path this process controls, and a
  * shutdown hook stops it on SIGINT or SIGTERM (a Maven build cancelled), since this repo's fenced homes and some
  * hosts set testcontainers.ryuk.disabled=true. Only a SIGKILL can leave it running then.
  */
 public final class JooqCodegen {
-
-    // Copied from PgContainerHelper (see the class comment).
-    private static final String IMAGE = "pgvector/pgvector:pg17";
-    private static final String DATABASE = "postgres";
-    private static final String USERNAME = "postgres";
-    private static final String PASSWORD = "postgres";
-    private static final String PGDATA = "/var/lib/postgresql/data";
-    private static final String TMPFS_SIZE = "2g";
-    private static final long MEMORY_LIMIT_BYTES = 2560L * 1024 * 1024;
 
     /** Held so the JUL logger (weakly referenced by the LogManager) keeps the level set on it. */
     private static final java.util.logging.Logger LIQUIBASE_LOG = java.util.logging.Logger.getLogger("liquibase");
@@ -130,34 +124,9 @@ public final class JooqCodegen {
         return 0;
     }
 
-    /** PgContainerHelper.newContainer(image, tmpfsSize, memoryBytes) without the DDL counter. */
+    /** The recipe's container, without the DDL counter. PgContainerTmpfsGateTest compiles this and holds the result to the test factory's. */
     static PostgreSQLContainer<?> newContainer() {
-        PostgreSQLContainer<?> container = new PostgreSQLContainer<>(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"));
-        container
-            .withDatabaseName(DATABASE)
-            .withUsername(USERNAME)
-            .withPassword(PASSWORD)
-            .withUrlParam("sslmode", "disable")
-            .withStartupAttempts(3)
-            // PGDATA on a capped tmpfs, nothing a throwaway cluster needs to survive a crash written durably, pg_wal held
-            // near 64 MB (max_wal_size is a soft target; the tmpfs size is the hard bound).
-            .withTmpFs(Map.of(PGDATA, "rw,size=" + TMPFS_SIZE))
-            .withCommand("postgres",
-                "-c", "fsync=off",
-                "-c", "synchronous_commit=off",
-                "-c", "full_page_writes=off",
-                "-c", "max_wal_size=64MB",
-                "-c", "min_wal_size=32MB",
-                "-c", "wal_keep_size=0",
-                "-c", "log_checkpoints=off",
-                "-c", "checkpoint_warning=0")
-            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
-                .withMemory(MEMORY_LIMIT_BYTES)
-                .withMemorySwap(MEMORY_LIMIT_BYTES))
-            // The labels the test containers carry, so a host can count a run's containers: docker ps --filter label=dev.nexus.test.run=<id>.
-            .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""))
-            .withLabel("dev.nexus.test.caller", "JooqCodegen");
-        return container;
+        return PgContainerRecipe.newContainer("JooqCodegen");
     }
 
     private static void migrate(PostgreSQLContainer<?> pg, String master, List<Path> roots) throws Exception {

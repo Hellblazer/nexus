@@ -340,6 +340,15 @@
                 <version>3.13.0</version>
                 <configuration>
                     <release>25</release>
+                    <!-- nexus-llba1: src/build/java is a test source root (build-helper, add-test-source-build-recipe) for the
+                         container recipe dev/nexus/build/PgContainerRecipe.java. The unnamed-package source programs beside
+                         it are run by `java <file>` and are not test code: JooqCodegen needs the jOOQ generator's main() and
+                         exits the JVM; NativeTrustStore is a native-image build tool. Every file directly in the root is
+                         listed; tests/test_service_jooq_codegen_skip_lint.py checks the list against the directory. -->
+                    <testExcludes>
+                        <testExclude>JooqCodegen.java</testExclude>
+                        <testExclude>NativeTrustStore.java</testExclude>
+                    </testExcludes>
                 </configuration>
             </plugin>
 
@@ -431,8 +440,9 @@
                 jOOQ codegen (generate-sources and generate-test-sources phases, beads nexus-9qvam
                 and nexus-aca0q.3). Our own runner, service/src/build/java/JooqCodegen.java, run
                 as a Java source-file program by exec-maven-plugin: it boots an ephemeral
-                pgvector/pgvector:pg17 container configured like PgContainerHelper.newContainer()
-                (PGDATA on a capped tmpfs, fsync off, a memory limit), applies the master Liquibase
+                pgvector/pgvector:pg17 container configured by the same class PgContainerHelper
+                configures its containers with, src/build/java/dev/nexus/build/PgContainerRecipe.java
+                (PGDATA on a capped tmpfs, fsync off, a memory limit; nexus-llba1), applies the master Liquibase
                 changelog (sole schema authority; the role-001-nexus-svc bootstrap changeset makes
                 it self-contained) and runs jOOQ's GenerationTool with the generator configuration
                 beside it (service/src/build/jooq/jooq-main.xml, jooq-test.xml) into
@@ -448,9 +458,14 @@
                 versions this pom pins, so codegen and runtime jOOQ stay aligned). That JVM
                 negotiates the Docker API version the way Surefire's forks do, so the Maven-JVM
                 workaround the plugin needed (-Dapi.version in service/.mvn/jvm.config) is gone.
-                The runner source is outside src/main and src/test, so neither compiles it.
-                Generation inputs: this pom, the runner source, the two generator files and the
-                changelog trees; the jooq-inputs antrun step below hashes them.
+                The runner source is outside src/main and src/test, so neither compiles it. The
+                recipe it shares with the tests sits beside it in package dev.nexus.build: the
+                JDK source launcher (JEP 458, JDK 22+; the build is on 25) finds it under the
+                runner's own directory, and the build-helper entry below adds src/build/java as a
+                test source root (the unnamed-package programs there are testExcludes of the
+                compiler plugin above).
+                Generation inputs: this pom, the runner source, the recipe, the two generator
+                files and the changelog trees; the jooq-inputs antrun step below hashes them.
             -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
@@ -528,6 +543,19 @@
                         <configuration>
                             <sources>
                                 <source>${jooq.generated.dir}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                    <!-- nexus-llba1: the container recipe PgContainerHelper shares with the codegen runner. -->
+                    <execution>
+                        <id>add-test-source-build-recipe</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/src/build/java</source>
                             </sources>
                         </configuration>
                     </execution>
@@ -769,6 +797,7 @@
                                     <include name="pom.xml"/>
                                     <include name="src/main/resources/db/**"/>
                                     <include name="src/build/java/JooqCodegen.java"/>
+                                    <include name="src/build/java/dev/nexus/build/**"/>
                                     <include name="src/build/jooq/jooq-main.xml"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.main.names" pathsep="&#10;" dirsep="/">
@@ -966,6 +995,7 @@
                                     <include name="src/main/resources/db/**"/>
                                     <include name="src/test/resources/db/**"/>
                                     <include name="src/build/java/JooqCodegen.java"/>
+                                    <include name="src/build/java/dev/nexus/build/**"/>
                                     <include name="src/build/jooq/jooq-test.xml"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.test.names" pathsep="&#10;" dirsep="/">

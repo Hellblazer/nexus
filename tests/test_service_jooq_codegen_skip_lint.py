@@ -8,8 +8,11 @@ gave the build no handle on the container (an image, a user, a password and a da
 name: no tmpfs, no memory limit, no command), so PGDATA sat on Docker's overlay, the host
 NVMe, with no memory cap (measured on chas 2026-10-19; about 52 MB per cache miss, labrun
 2026-10-20). The executions are now ``exec-maven-plugin`` runs of our own runner,
-``service/src/build/java/JooqCodegen.java``, whose container mirrors ``PgContainerHelper``
-(PGDATA on a tmpfs, a memory limit, the same server flags).
+``service/src/build/java/JooqCodegen.java``. The runner and ``PgContainerHelper`` build their
+container from ONE class, ``dev.nexus.build.PgContainerRecipe`` (nexus-llba1): PGDATA on a tmpfs,
+a memory limit, the server flags. It lives beside the runner in a named package so the JDK
+source launcher (JEP 458, multi-file) compiles it with the runner, and the test tree takes the
+same directory as a test source root (with the unnamed-package runner excluded).
 
 Not booting the container when the generated sources are already current stays the other
 lever. An ``initialize``-phase Ant step hashes the codegen inputs (``pom.xml``, the runner
@@ -183,7 +186,7 @@ def test_the_codegen_is_our_runner_not_the_retired_plugin() -> None:
         args = _args(execution)
         assert _rel(args[0]) == _RUNNER and (_SERVICE / _RUNNER).is_file()
         assert (_SERVICE / _generator_file(execution)).is_file()
-    # the runner is not compiled into the product or the tests
+    # the runner is not compiled into the product or the tests (test_the_recipe_is_a_test_source_root_... pins the test side)
     assert not list((_SERVICE / "src" / "main").rglob("JooqCodegen*")) and not list((_SERVICE / "src" / "test").rglob("JooqCodegen*"))
 
 
@@ -198,40 +201,65 @@ def test_the_codegen_classpath_has_the_generator_at_the_pinned_version() -> None
         assert deps[artifact].findtext("m:scope", namespaces=_NS) == "test", "the generator must not reach the product jar"
 
 
-def _java_constants(text: str) -> dict[str, str]:
-    consts = dict(re.findall(r'\bString (IMAGE|DATABASE|USERNAME|PASSWORD|PGDATA|TMPFS_SIZE) = "([^"]*)";', text))
-    memory = re.search(r"\blong MEMORY_LIMIT_BYTES = ([^;]+);", text)
-    assert memory and len(consts) == 6, f"constants not found: {consts}, {memory}"
-    return {**consts, "MEMORY_LIMIT_BYTES": memory.group(1).strip()}
+_RECIPE = "src/build/java/dev/nexus/build/PgContainerRecipe.java"
+
+#: What the recipe owns. Neither the runner nor the helper may spell any of it (a copy is what nexus-llba1 removed).
+_RECIPE_SPELLINGS = (
+    '"pgvector/pgvector', '"fsync=off"', '"max_wal_size=64MB"', ".withTmpFs(", ".withMemory(", ".withMemorySwap(",
+    '.withUrlParam("sslmode"', ".withStartupAttempts(", ".withCommand(", "new PostgreSQLContainer",
+)
 
 
-def _server_flags(block: str) -> set[str]:
-    return set(re.findall(r'"-c",\s*"([a-z_]+=[^"]+)"', block))
-
-
-def test_the_runner_container_mirrors_pg_container_helper() -> None:
-    """The runner cannot call PgContainerHelper (it runs before the test classes compile), so it copies the recipe;
-    this keeps the copy in step: same image, credentials, tmpfs PGDATA and cap, memory limit and server flags."""
+def test_the_runner_and_the_helper_build_their_container_from_one_recipe() -> None:
+    """nexus-llba1: the runner cannot call PgContainerHelper (it runs before the test classes compile), so both call
+    ``dev.nexus.build.PgContainerRecipe``. This keeps a second copy from growing back in either."""
+    recipe_path = _SERVICE / _RECIPE
+    assert recipe_path.is_file(), f"{_RECIPE} is missing"
+    recipe = recipe_path.read_text(encoding="utf-8")
     runner = (_SERVICE / _RUNNER).read_text(encoding="utf-8")
     helper = _HELPER.read_text(encoding="utf-8")
-    assert _java_constants(runner) == _java_constants(helper)
-    helper_block = helper[helper.index('List<String> command = new ArrayList<>(List.of("postgres",'):]
-    helper_block = helper_block[:helper_block.index("if (counted) {")]
-    runner_block = runner[runner.index('.withCommand("postgres",'):]
-    runner_block = runner_block[:runner_block.index(".withCreateContainerCmdModifier")]
-    flags = _server_flags(helper_block)
-    assert {"fsync=off", "max_wal_size=64MB"} <= flags, f"the helper's flag block moved: {flags}"
-    assert _server_flags(runner_block) == flags, "the runner's server flags differ from PgContainerHelper's"
-    # (the helper takes the size and the limit as parameters; the runner has them as the constants checked above)
-    for in_runner, in_helper in (
-        ('.withTmpFs(Map.of(PGDATA, "rw,size=" + TMPFS_SIZE))', '.withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))'),
-        (".withMemory(MEMORY_LIMIT_BYTES)", ".withMemory(memoryBytes)"),
-        (".withMemorySwap(MEMORY_LIMIT_BYTES)", ".withMemorySwap(memoryBytes)"),
-        ('.withUrlParam("sslmode", "disable")', '.withUrlParam("sslmode", "disable")'),
-        (".withStartupAttempts(3)", ".withStartupAttempts(3)"),
-    ):
-        assert in_runner in runner, f"{in_runner} is not in the runner"
-        assert in_helper in helper, f"{in_helper} is not in PgContainerHelper: the recipe moved, move the runner with it"
+    # JEP 458 multi-file launch finds a class by package, relative to the main file's directory: the recipe's path under
+    # the runner's directory must be its package, or `java ... JooqCodegen.java` cannot find it.
+    assert re.search(r"^package dev\.nexus\.build;$", recipe, re.MULTILINE), "the recipe is not in package dev.nexus.build"
+    assert recipe_path == (_SERVICE / _RUNNER).parent / "dev" / "nexus" / "build" / "PgContainerRecipe.java"
+    # the recipe holds every piece of it
+    for spelling in _RECIPE_SPELLINGS:
+        assert spelling in recipe, f"{spelling} is not in the recipe: the recipe moved, move this pin with it"
+    # the runner builds its container through it and spells none of it
+    assert re.search(r"^import dev\.nexus\.build\.PgContainerRecipe;$", runner, re.MULTILINE)
+    assert "PgContainerRecipe.newContainer(" in runner, "the runner does not build its container from the recipe"
+    assert not [x for x in _RECIPE_SPELLINGS if x in runner], "the runner spells the container recipe itself"
+    assert not re.search(r"\b(IMAGE|TMPFS_SIZE|MEMORY_LIMIT_BYTES|PGDATA) =", runner), "the runner holds recipe constants"
+    # the helper configures its container through it and spells none of it
+    assert "PgContainerRecipe.configure(" in helper, "PgContainerHelper does not configure its container from the recipe"
+    assert not [x for x in _RECIPE_SPELLINGS if x in helper and x != "new PostgreSQLContainer"], (
+        "PgContainerHelper spells the container recipe itself")
+
+
+def test_the_recipe_is_a_test_source_root_and_the_runner_is_not_compiled_into_the_tests() -> None:
+    """The test tree (PgContainerHelper) needs the recipe, so ``src/build/java`` is a test source root; the files
+    beside it in the unnamed package (the runner, which main() exits the JVM and needs the jOOQ generator, and every
+    other source program there) must stay out of the test compile (testExcludes)."""
+    root = _pom()
+    helper_plugin = next(
+        p for p in root.findall("m:build/m:plugins/m:plugin", _NS)
+        if p.findtext("m:artifactId", namespaces=_NS) == "build-helper-maven-plugin")
+    sources = [
+        (e.findtext("m:id", namespaces=_NS), s.text.strip())
+        for e in helper_plugin.findall("m:executions/m:execution", _NS)
+        if "add-test-source" in [g.text for g in e.findall("m:goals/m:goal", _NS)]
+        for s in e.findall("m:configuration/m:sources/m:source", _NS)
+    ]
+    assert "${project.basedir}/src/build/java" in [s for _, s in sources], f"src/build/java is no test source root: {sources}"
+    compiler = next(
+        p for p in root.findall("m:build/m:plugins/m:plugin", _NS)
+        if p.findtext("m:artifactId", namespaces=_NS) == "maven-compiler-plugin")
+    excluded = {t.text.strip() for t in compiler.findall("m:configuration/m:testExcludes/m:testExclude", _NS)}
+    programs = {f.name for f in (_SERVICE / "src/build/java").glob("*.java")}
+    assert "JooqCodegen.java" in programs, "the non-vacuity of this pin: the runner is where it was"
+    assert excluded == programs, (
+        f"every unnamed-package source program under src/build/java must be a testExclude (and nothing else): "
+        f"programs {sorted(programs)}, excluded {sorted(excluded)}")
 
 
 _JOOQ_NS = {"j": "http://www.jooq.org/xsd/jooq-codegen-3.20.0.xsd"}
@@ -294,6 +322,8 @@ def test_the_hash_covers_every_changelog_root_the_execution_reads(exec_id: str) 
             "a changelog edit there would skip regeneration and ship stale generated sources")
     # nexus-aca0q.3: the runner and the generator file are generation inputs too
     assert _rel(_args(execution)[0]) in includes, f"{exec_id}: the runner source is not hashed"
+    # nexus-llba1: and so is the container recipe the runner compiles with it (a change of image or flags regenerates)
+    assert "src/build/java/dev/nexus/build/**" in includes, f"{exec_id}: the container recipe is not hashed"
     assert _generator_file(execution) in includes, f"{exec_id}: its generator XML is not hashed"
     other = _generator_file(_codegen_config(root)["generate-jooq-test-sources" if exec_id == MAIN else MAIN])
     assert other not in includes, f"{exec_id}: the other tree's generator file would regenerate this one for nothing"

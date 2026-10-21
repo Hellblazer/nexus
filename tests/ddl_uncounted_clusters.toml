@@ -24,7 +24,7 @@
 sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 
 [uncounted]
-"service/src/build/java/JooqCodegen.java::PostgreSQLContainer" = 1
+"service/src/build/java/dev/nexus/build/PgContainerRecipe.java::PostgreSQLContainer" = 1
 "tests/_engine_substrate.py::throwaway_pg_cluster::pg_ctl_start" = 1
 "tests/benchmarks/test_retrieval_drift_gate.py::<module>::initdb" = 1
 "tests/benchmarks/test_retrieval_drift_gate.py::pg_instance::pg_ctl_start" = 1

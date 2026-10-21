@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.build.PgContainerRecipe;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenHashing;
 import liquibase.Contexts;
@@ -67,23 +68,23 @@ import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 public final class PgContainerHelper {
 
     /** Image used for all service-module test containers. */
-    public static final String IMAGE = "pgvector/pgvector:pg17";
+    public static final String IMAGE = PgContainerRecipe.IMAGE;
 
     /** Superuser database name (matches io.zonky default). */
-    public static final String DATABASE = "postgres";
+    public static final String DATABASE = PgContainerRecipe.DATABASE;
 
     /** Superuser username (matches io.zonky default). */
-    public static final String USERNAME = "postgres";
+    public static final String USERNAME = PgContainerRecipe.USERNAME;
 
     /** Superuser password. */
-    public static final String PASSWORD = "postgres";
+    public static final String PASSWORD = PgContainerRecipe.PASSWORD;
 
     /**
      * The image's data directory. nexus-xynce: it is mounted as tmpfs, because in
      * Docker's overlay it sat on the host disk and the engine suites wrote about
      * 50 MB/s to chas's NVMe (measured 2026-10-19).
      */
-    public static final String PGDATA = "/var/lib/postgresql/data";
+    public static final String PGDATA = PgContainerRecipe.PGDATA;
 
     /**
      * nexus-sz651: the server log's directory, inside the tmpfs {@link #PGDATA}. The DDL counter needs
@@ -104,7 +105,7 @@ public final class PgContainerHelper {
      * (most of it WAL before the max_wal_size=64MB setting below, a soft target). 1 GB was too tight: on CI the shared per-fork cluster hit ENOSPC in ChashVectorConcurrencyTest (72k concurrent vector re-upserts on top of the fork's other databases, run 39193706997), so the cap is 2 GB; a cluster that outgrows this fails
      * with "No space left on device" instead of eating host memory.
      */
-    public static final String TMPFS_SIZE = "2g";
+    public static final String TMPFS_SIZE = PgContainerRecipe.TMPFS_SIZE;
 
     /**
      * Container memory limit (swap included). tmpfs pages are charged to the
@@ -113,7 +114,7 @@ public final class PgContainerHelper {
      * this limit is what bounds each one, and the pool reserves limit times the most
      * containers a run holds.
      */
-    public static final long MEMORY_LIMIT_BYTES = 2560L * 1024 * 1024;
+    public static final long MEMORY_LIMIT_BYTES = PgContainerRecipe.MEMORY_LIMIT_BYTES;
 
     static long tmpfsSizeBytes() {
         return gibibytes(TMPFS_SIZE);
@@ -121,10 +122,7 @@ public final class PgContainerHelper {
 
     /** {@code "<n>g"} in bytes; the only form these sizes are written in. */
     static long gibibytes(String size) {
-        if (!size.matches("[1-9][0-9]*g")) {
-            throw new IllegalArgumentException("tmpfs size must be <n>g, got " + size);
-        }
-        return Long.parseLong(size.substring(0, size.length() - 1)) * 1024 * 1024 * 1024;
+        return PgContainerRecipe.gibibytes(size);
     }
 
     /**
@@ -200,22 +198,11 @@ public final class PgContainerHelper {
      * limit must exceed the tmpfs size, because tmpfs pages are charged to the container.
      */
     public static PostgreSQLContainer<?> newContainer(DockerImageName image, String tmpfsSize, long memoryBytes) {
-        if (memoryBytes <= gibibytes(tmpfsSize)) {
-            throw new IllegalArgumentException("memory limit " + memoryBytes + " must exceed tmpfs " + tmpfsSize);
-        }
         boolean counted = DdlCounts.enabled();
-        List<String> command = new ArrayList<>(List.of("postgres",
-            "-c", "fsync=off",
-            "-c", "synchronous_commit=off",
-            "-c", "full_page_writes=off",
-            "-c", "max_wal_size=64MB",
-            "-c", "min_wal_size=32MB",
-            "-c", "wal_keep_size=0",
-            // The smaller max_wal_size checkpoints every ~25 MB of WAL; do not log each one.
-            "-c", "log_checkpoints=off",
-            "-c", "checkpoint_warning=0"));
+        // The recipe's own base command comes first (PgContainerRecipe.configure); these follow it.
+        List<String> extraServerArgs = new ArrayList<>();
         if (counted) {
-            command.addAll(List.of(
+            extraServerArgs.addAll(List.of(
                 // nexus-sz651: count DDL per run (DdlLogParser). log_statement=ddl logs the
                 // top-level statements; the event trigger the init script installs logs every
                 // DDL command, including the ones a function runs through EXECUTE.
@@ -236,26 +223,10 @@ public final class PgContainerHelper {
         FailFastPostgreSQLContainer container = new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
             .ddlCounted(counted)
             .ddlOwner(DdlCounts.callerClass());
-        container
-            .withDatabaseName(DATABASE)
-            .withUsername(USERNAME)
-            .withPassword(PASSWORD)
-            .withUrlParam("sslmode", "disable")
-            .withStartupAttempts(3)
-            // nexus-xynce: PGDATA on a capped tmpfs, nothing a throwaway cluster
-            // needs to survive a crash written durably, pg_wal held near 64 MB
-            // (max_wal_size is a soft target; the tmpfs size is the hard bound).
-            .withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))
-            .withCommand(command.toArray(new String[0]))
-            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
-                .withMemory(memoryBytes)
-                .withMemorySwap(memoryBytes))
-            // Lets a host count one run's containers among everyone else's:
-            // docker ps --filter label=dev.nexus.test.run=<id>.
-            .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""))
-            // nexus-7xfh7: which test class asked for this boot, so `docker events` can rank call sites:
-            // docker events --filter label=dev.nexus.test.run=<id> --format '{{index .Actor.Attributes "dev.nexus.test.caller"}}'
-            .withLabel("dev.nexus.test.caller", callerClass());
+        // Image aside, everything about the boot is the recipe's, shared with the jOOQ codegen runner (nexus-llba1):
+        // credentials, sslmode, start attempts, tmpfs PGDATA, memory limit, the base server flags, the run labels.
+        // (nexus-7xfh7: the caller label ranks call sites in `docker events`.)
+        PgContainerRecipe.configure(container, tmpfsSize, memoryBytes, extraServerArgs, callerClass());
         if (counted) {
             // The image's init runs a temp server on a unix socket only; pg_isready on TCP passes only for
             // the real server, once init is done. (The default wait reads Docker's log for the ready line,

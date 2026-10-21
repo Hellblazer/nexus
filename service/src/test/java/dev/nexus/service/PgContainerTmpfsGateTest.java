@@ -36,8 +36,14 @@ class PgContainerTmpfsGateTest {
 
     private static final Path PKG = Path.of("src", "test", "java", "dev", "nexus", "service");
 
-    /** The factory, the only file that may construct a container or name a Postgres image. */
+    /** The test factory: builds the FailFast container and hands it to the recipe. It names no image and sets no flag itself. */
     private static final Path FACTORY = PKG.resolve("PgContainerHelper.java");
+
+    /**
+     * nexus-llba1: the one recipe both the factory and the codegen runner build their container from. The only file that
+     * names a Postgres image or a server flag, and the only one besides the factory that may construct a container.
+     */
+    private static final Path RECIPE = Path.of("src", "build", "java", "dev", "nexus", "build", "PgContainerRecipe.java");
 
     /**
      * The subclasses that may exist. SharedDatabaseHandle never starts a container of its own; PgServerLogTest's
@@ -144,9 +150,18 @@ class PgContainerTmpfsGateTest {
         // Non-vacuity: the scan sees the test tree, and the factory trips its own patterns.
         assertThat(files.size()).isGreaterThan(300);
         assertThat(files).contains(FACTORY);
+        assertThat(RECIPE).as("the recipe, relative to service/").isRegularFile();
         String factory = stripComments(Files.readString(FACTORY));
         assertThat(BYPASSES.stream().filter(b -> b.matcher(factory).find()).count())
-            .as("the factory's own construction and image literal").isGreaterThanOrEqualTo(2);
+            .as("the factory's own construction (its image literal moved to the recipe)").isGreaterThanOrEqualTo(1);
+        String recipe = stripComments(Files.readString(RECIPE));
+        assertThat(BYPASSES.stream().filter(b -> b.matcher(recipe).find()).count())
+            .as("the recipe's own construction and image literal").isGreaterThanOrEqualTo(2);
+        // The factory hands everything about the boot to the recipe: it spells none of the recipe's flags or settings.
+        for (String owned : List.of("fsync=off", "withTmpFs", "withMemory", "withStartupAttempts", "withUrlParam", "withCommand")) {
+            assertThat(factory).as("the factory must not spell '%s': that is the recipe's (nexus-llba1)", owned).doesNotContain(owned);
+            assertThat(recipe).as("the recipe holds '%s'", owned).contains(owned);
+        }
         List<String> offenders = new ArrayList<>();
         for (Path p : files) {
             if (p.equals(FACTORY) || p.getFileName().toString().equals("PgContainerTmpfsGateTest.java")) {
@@ -252,13 +267,18 @@ class PgContainerTmpfsGateTest {
     /** The jOOQ code generator's source program (nexus-aca0q.3), compiled by the next test; it cannot be called at build time of the tests. */
     private static final Path RUNNER = Path.of("src", "build", "java", "JooqCodegen.java");
 
+    /** The directory the JDK source launcher resolves the runner's sibling classes from: the runner's own. */
+    private static final Path RUNNER_SOURCE_ROOT = RUNNER.getParent();
+
     /**
-     * nexus-lywcf: the codegen runner copies PgContainerHelper's container recipe (it runs before the test classes
-     * compile, so it cannot call the helper), and a text pin alone lets the copy drift. This compiles the runner's
-     * source with the JDK compiler on the test classpath, loads it, takes the container from its own
-     * {@code newContainer()}, and holds that running container to the same live assertions as the helper's, plus
-     * the runner's limit and tmpfs size to the helper's. A JRE-only JVM (no compiler) or a missing source file
-     * fails here; it does not skip.
+     * nexus-lywcf, nexus-llba1: the codegen runner builds its container from {@link dev.nexus.build.PgContainerRecipe},
+     * the recipe the factory uses, and the runner is a separate program that runs before the test classes compile. This
+     * compiles the runner's source with the JDK compiler on the test classpath, its source path the runner's directory
+     * (as the source launcher resolves a sibling, JEP 458), loads it, takes the container from its own
+     * {@code newContainer()}, and holds that container to the factory's: same image, tmpfs mapping and server command,
+     * and the same live assertions once started. If either side stops going through the recipe (an override, a flag
+     * added in one place) the equality fails here. A JRE-only JVM (no compiler) or a missing source file fails; it
+     * does not skip.
      */
     @Test
     void the_codegen_runners_started_container_runs_on_tmpfs_with_the_settings_and_the_limit() throws Exception {
@@ -276,39 +296,32 @@ class PgContainerTmpfsGateTest {
         try {
             java.io.StringWriter diagnostics = new java.io.StringWriter();
             Boolean compiled = compiler.getTask(diagnostics, null, null,
-                List.of("-proc:none", "-nowarn", "-d", out.toString(), "-classpath", classpath),
+                List.of("-proc:none", "-nowarn", "-d", out.toString(), "-classpath", classpath,
+                    "-sourcepath", RUNNER_SOURCE_ROOT.toString()),
                 null, List.of(new SourceFile(RUNNER))).call();
             assertThat(compiled).as("the runner compiles on the test classpath: %s", diagnostics).isTrue();
             try (java.net.URLClassLoader loader = new java.net.URLClassLoader(
                     new java.net.URL[] {out.toUri().toURL()}, PgContainerTmpfsGateTest.class.getClassLoader())) {
                 Class<?> runner = loader.loadClass("JooqCodegen");
                 assertThat(runner.getClassLoader()).as("the runner class is the freshly compiled one").isSameAs(loader);
-                String image = (String) runnerConstant(runner, "IMAGE");
-                String tmpfsSize = (String) runnerConstant(runner, "TMPFS_SIZE");
-                long memory = (Long) runnerConstant(runner, "MEMORY_LIMIT_BYTES");
-                assertThat(image).as("runner image").isEqualTo(PgContainerHelper.IMAGE);
-                assertThat(runnerConstant(runner, "PGDATA")).as("runner PGDATA").isEqualTo(PgContainerHelper.PGDATA);
-                assertThat(tmpfsSize).as("runner tmpfs cap").isEqualTo(PgContainerHelper.TMPFS_SIZE);
-                assertThat(memory).as("runner memory limit").isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
-
                 java.lang.reflect.Method factory = runner.getDeclaredMethod("newContainer");
                 factory.setAccessible(true);
                 try (PostgreSQLContainer<?> c = (PostgreSQLContainer<?>) factory.invoke(null)) {
-                    // Configured state, before any container starts: the same tmpfs mapping and server flags as the helper's.
+                    // Configured state, before any container starts: the same tmpfs mapping and server flags as the factory's.
                     PostgreSQLContainer<?> reference = PgContainerHelper.newContainer();
                     assertThat(c.getDockerImageName()).isEqualTo(reference.getDockerImageName());
                     assertThat(c.getTmpFsMapping()).isEqualTo(reference.getTmpFsMapping());
-                    // Equality, not containment (nexus-lywcf review): the runner's command must be exactly the helper's
+                    assertThat(c.getLabels()).containsEntry("dev.nexus.test.caller", "JooqCodegen");
+                    // Equality, not containment (nexus-lywcf review): the runner's command must be exactly the factory's
                     // base command, the part before the DDL counter's extras (present only when DdlCounts is on), so a
                     // flag dropped or added on either side fails here, not only the ones the live SHOW checks read.
-                    // tests/test_service_jooq_codegen_skip_lint.py pins the same recipe as text.
-                    List<String> helperParts = List.of(reference.getCommandParts());
-                    int counterStart = helperParts.indexOf("log_statement=ddl");
-                    List<String> helperBase = counterStart < 0 ? helperParts : helperParts.subList(0, counterStart - 1);
-                    assertThat(List.of(c.getCommandParts())).as("the runner's server command equals the helper's base command")
-                        .isEqualTo(helperBase);
+                    List<String> factoryParts = List.of(reference.getCommandParts());
+                    int counterStart = factoryParts.indexOf("log_statement=ddl");
+                    List<String> factoryBase = counterStart < 0 ? factoryParts : factoryParts.subList(0, counterStart - 1);
+                    assertThat(List.of(c.getCommandParts())).as("the runner's server command equals the factory's base command")
+                        .isEqualTo(factoryBase);
                     c.start();
-                    assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, memory);
+                    assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, PgContainerHelper.MEMORY_LIMIT_BYTES);
                 }
             }
         } finally {
@@ -316,12 +329,6 @@ class PgContainerTmpfsGateTest {
                 s.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
             }
         }
-    }
-
-    private static Object runnerConstant(Class<?> runner, String name) throws ReflectiveOperationException {
-        java.lang.reflect.Field f = runner.getDeclaredField(name);
-        f.setAccessible(true);
-        return f.get(null);
     }
 
     /** A source file on disk as a compilation unit. */

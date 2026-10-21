@@ -82,9 +82,10 @@ EXCEPTIONS = Path(__file__).resolve().parent / "pg_data_dir_exceptions.toml"
 #: Sites whose cluster ``tests/_ddl_counter.py`` reads (the engine substrate's ``_boot``).
 COUNTED: tuple[str, ...] = ("tests/_engine_substrate.py::_boot::pg_ctl_start",)
 
-#: The jOOQ code generator boots a Postgres container at build time (service/pom.xml runs this source file through
-#: exec-maven-plugin, nexus-aca0q.3); no counter reads it. Its data directory is a tmpfs, like PgContainerHelper's.
-CODEGEN_RUNNER = "service/src/build/java/JooqCodegen.java"
+#: The jOOQ code generator boots a Postgres container at build time (service/pom.xml runs JooqCodegen.java through
+#: exec-maven-plugin, nexus-aca0q.3); no counter reads it. Its data directory is a tmpfs. The runner builds the container
+#: from the recipe class it shares with PgContainerHelper (nexus-llba1), so the literal construction site is the recipe.
+CODEGEN_RUNNER = "service/src/build/java/dev/nexus/build/PgContainerRecipe.java"
 CODEGEN_SITE = f"{CODEGEN_RUNNER}::PostgreSQLContainer"
 _CODEGEN_MARKER = "new PostgreSQLContainer<"
 
