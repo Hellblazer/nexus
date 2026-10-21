@@ -10,6 +10,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`NX_TEST_T2_SUBSTRATE=per-test` (and its older spelling `engine`) is retired** (nexus-llo7w). The escape hatch back to a tenant for every test shipped in 7.83.0 for one release; either value now errors every test at setup, naming the variable. A test that touches storage asks for a tenant with `pytest.mark.t2_tenant` or a `t2_tenant` parameter; `none` still provisions nothing. Affected: anyone with the variable exported in a shell or a script.
 
+## [7.83.1] - 2026-10-21
+
+Pairs with engine-service-v0.1.162, unchanged from 7.83.0. 7.83.0 was tagged but never published: the release workflow's engine-floor check refused it because the data-effect relay attestation for engine-service-v0.1.162 (`docs/data-effect-relay/engine-service-v0.1.162.json`, the record that the vectors-036-1 drop was relayed to the cloud operator) was committed to develop and not to the tagged tree. 7.83.1 is the 7.83.0 tree plus that file; there is no code change. Install 7.83.1; the 7.83.0 notes below describe what it contains.
+
 ## [7.83.0] - 2026-10-21
 
 Pairs with engine-service-v0.1.162 (`REQUIRED_ENGINE_VERSION` 0.1.160 to 0.1.162; no client release pinned 0.1.161, which ran in the cloud only). A local install's first start on this engine applies four changesets (vectors-033 to vectors-036): the RDR-222 request ledger, leaf autovacuum settings, the bounded quarantine expiry and the drop of the pre-walk tables the RDR-225 walk kept (`chunks_retired_225`, `taxonomy_centroids_retired_225`). The drop is irreversible; those tables have been the recovery source since the install took engine 0.1.160. The engine's `POST /v1/vectors/store-put` now answers 410 Gone; no client since v7.68.0 calls it, so only an nx or long-lived nx-mcp older than v7.68.0 is affected (upgrade, then restart long-lived sessions).
