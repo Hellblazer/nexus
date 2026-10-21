@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -522,24 +523,30 @@ class PciCatalogIntegrationTest {
 
     /**
      * The read touches {@code pg_catalog.pg_am}; a superuser holding ACCESS EXCLUSIVE on it makes the statement wait.
-     * The holder is one transaction that takes the lock (nexus_test.lock_table) and then sleeps 8 s with the literal 8
-     * in its text, which the monitor below looks for, so the lock is held for a known window. With the bound the read ends at the statement timeout (SQLSTATE 57014) well inside
-     * that window; unbounded, it would return only after the holder let go.
+     * The holder is one transaction that takes the lock (nexus_test.lock_table), counts down a latch, and then sleeps
+     * 8 s, so the lock is held for a known window. With the bound the read ends at the statement timeout (SQLSTATE
+     * 57014) well inside that window; unbounded, it would return only after the holder let go.
+     *
+     * <p>nexus-td7yu: no connection may be opened while the lock is held, because backend startup reads pg_am and
+     * blocks on it until the holder commits (measured on pgvector:pg17, warm relcache init file or not; a connection
+     * opened before the lock is unaffected). The test used to poll pg_stat_activity from a monitor connection opened
+     * after starting the holder; when the holder's LOCK won that race the monitor's connect hung for the whole 8 s
+     * and the test failed with "the holder ended before the read began" (develop 123b2d088). The latch replaces the
+     * monitor, and the read's pool is warmed before the lock so the bounded read reuses an open connection.
      */
     @Test
     void aReadBlockedByALock_failsAtTheStatementBound_whileTheLockIsStillHeld() throws Exception {
         PciCatalog bounded = new PciCatalog(svcDs, Duration.ofMillis(500));
         assertThat(bounded.readBound()).isEqualTo(Duration.ofMillis(500));
-        var activityPid = DSL.field(DSL.name("pid"), Integer.class);
-        var activityWait = DSL.field(DSL.name("wait_event"), String.class);
-        var activityQuery = DSL.field(DSL.name("query"), String.class);
-        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+        assertThat(bounded.read().leaves()).as("warm the pool before the lock").isNotEmpty();
 
+        CountDownLatch locked = new CountDownLatch(1);
         CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(false);
                 PgContainerHelper.lockTable(su, DSL.table(DSL.name("pg_catalog", "pg_am")),
                     PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+                locked.countDown();
                 DSL.using(su, SQLDialect.POSTGRES)
                     .select(DSL.function("pg_sleep", Object.class, DSL.inline(8))).fetch();
                 su.commit();
@@ -547,17 +554,13 @@ class PciCatalogIntegrationTest {
                 throw new IllegalStateException(e);
             }
         });
-        try (Connection monitor = pg.createConnection("")) {
-            monitor.setAutoCommit(true);
-            DSLContext asSuperuser = DSL.using(monitor, SQLDialect.POSTGRES);
-            await("the holder to sleep while holding the lock", () -> {
+        try {
+            await("the holder to take the lock", () -> {
                 if (holder.isDone()) {
                     holder.join();   // surfaces the holder's failure instead of timing out
                     throw new AssertionError("the holder ended before the read began");
                 }
-                return asSuperuser.fetchCount(activity,
-                    activityWait.eq("PgSleep").and(activityQuery.like("%pg_sleep(8)%"))
-                        .and(activityPid.ne(DSL.function("pg_backend_pid", Integer.class)))) > 0;
+                return locked.getCount() == 0;
             });
 
             long began = System.nanoTime();
