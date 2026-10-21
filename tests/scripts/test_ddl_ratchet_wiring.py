@@ -286,7 +286,11 @@ def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured
     unarmed = _unarmed_ceilings()
     problems = python_wiring_problems(text, unarmed)
     assert any("could turn develop red on an estimate" in p for p in problems), problems
-    for name in ("DDL/bytes ratchet, this shard", "Upload this shard's DDL report"):
+    # Every advisory step, the two per-shard ones and the three in pytest-gate (nexus-aca0q.1): a missing
+    # continue-on-error on any one of them in an unarmed file must be reported by name.
+    for name in ("DDL/bytes ratchet, this shard", "Upload this shard's DDL report",
+                 "Check out the ratchet and its ceilings", "Fetch every shard's DDL report",
+                 "DDL/bytes ratchet over the whole run (fan-in)"):
         assert any("is not continue-on-error while the gate is advisory" in p and name in p for p in problems), (name, problems)
     advisory_ok = _mutate(text, "--shards 6 --report", "--shards 6 --advisory --report")
     for head in (_CHECK_HEAD, _UPLOAD_IF):
