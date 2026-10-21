@@ -450,7 +450,7 @@ class HttpScratchStore:
         if recovered is None:
             return False
         new_url, new_token = recovered
-        _log.warning("http_scratch_store.rebind", old=self._base_url, new=new_url)
+        _log.warning("http_scratch_store.rebind", old=log_endpoint(self._base_url), new=log_endpoint(new_url))
         self._base_url = new_url
         if new_token:
             self._headers["Authorization"] = f"Bearer {new_token}"

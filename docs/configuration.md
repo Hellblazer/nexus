@@ -45,7 +45,7 @@ As of 6.0, managed-cloud mode points `nx` at a hosted nexus service that owns it
 
 | Env var | Required | Notes |
 |---|---|---|
-| `NX_SERVICE_URL` | No | Managed nexus service base URL. Defaults to `https://api.conexus-nexus.com`; override for a self-hosted or staging deployment. |
+| `NX_SERVICE_URL` | No | Managed nexus service base URL. Defaults to `https://api.conexus-nexus.com`; override for a self-hosted or staging deployment. A URL carrying `user:password@` is refused (here and by `nx config set service_url`); the credential is `NX_SERVICE_TOKEN`. |
 | `NX_SERVICE_TOKEN` | Cloud mode | Bearer token for the managed service. |
 
 Export both in your shell profile or process manager. You do not supply a Voyage key in managed-cloud mode (the service owns it).

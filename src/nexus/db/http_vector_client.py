@@ -45,6 +45,7 @@ from typing import Any, NoReturn
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.db.gateway_backoff import (
     _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES,
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
@@ -306,9 +307,9 @@ def _resolve_endpoint() -> tuple[str, str]:
     # a greenfield managed user who ran `nx config set service_url/service_token`
     # must reach a resolvable endpoint with no env exported). get_credential
     # encodes env>config.yml precedence, so an exported env var still wins.
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    env_url = get_service_url() or None
     env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
     if url is None:
@@ -1730,7 +1731,7 @@ def _managed_remedy() -> str | None:
     if not base:
         return None
     return (
-        f"the managed nexus service at {base} could not be reached/authenticated "
+        f"the managed nexus service at {log_endpoint(base)} could not be reached/authenticated "
         "— check NX_SERVICE_URL is reachable and NX_SERVICE_TOKEN is valid "
         "(verify with `nx service probe` or `nx doctor`)."
     )

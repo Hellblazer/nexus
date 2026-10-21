@@ -502,6 +502,10 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
     if not url:
         url = yaml_creds.get("service_url", "").strip().rstrip("/")
     if url:
+        if _ep.has_userinfo(url):
+            # The CLI refuses a service_url carrying user:password@ (nexus-ujbf8);
+            # a routing hook neither sends to it nor echoes it.
+            return None, None
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token

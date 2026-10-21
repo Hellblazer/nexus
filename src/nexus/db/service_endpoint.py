@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
+
 if TYPE_CHECKING:
     from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
@@ -558,9 +560,13 @@ def resolve_service_endpoint(
     here so a managed TLS endpoint survives end-to-end. Resolution order mirrors
     the T3 data path (:func:`nexus.db.http_vector_client._resolve_endpoint`):
 
-      1. ``service_url`` — the authoritative FULL endpoint, used VERBATIM
-         (scheme + host + port preserved). Resolved via
-         :func:`nexus.config.get_credential`, i.e. ``NX_SERVICE_URL`` env FIRST,
+      1. ``service_url`` — the authoritative FULL endpoint, used as written
+         (scheme + host + port preserved) once it passes the one check on it:
+         a URL carrying ``user:password@`` is REFUSED with
+         :class:`~nexus._log_safe_url.ServiceUrlUserinfoError` (nexus-ujbf8;
+         the engine's credential is the bearer token, and the message names
+         the source, never the URL). Resolved via
+         :func:`nexus.config.get_service_url`, i.e. ``NX_SERVICE_URL`` env FIRST,
          then the persisted ``config.yml`` credential a greenfield user set with
          ``nx config set service_url`` (RDR-166 nexus-v3p0x). This is the ONLY
          scheme source: ``https://api.conexus-nexus.com:443`` stays ``https``;
@@ -579,9 +585,9 @@ def resolve_service_endpoint(
     call. This is the bead's "never for the managed-cloud URL path" contract
     enforced structurally rather than by a caller-side guard.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    url = get_service_url() or None
     if url is not None:
         token = (get_credential("service_token") or "").strip() or None
         if token is None:
@@ -627,11 +633,12 @@ def is_endpoint_env_pinned() -> bool:
     fallback this returns ``False`` for benefits from — and needs —
     memoization.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    # Same normalization as resolve_service_endpoint's leg 1, so the two
-    # never disagree on a value like "/" (fix-check round 2).
-    url = (get_credential("service_url") or "").strip().rstrip("/")
+    # Same normalization (and the same userinfo refusal) as
+    # resolve_service_endpoint's leg 1, so the two never disagree on a value
+    # like "/" (fix-check round 2).
+    url = get_service_url()
     if url:
         token = (get_credential("service_token") or "").strip()
         return bool(token)
@@ -910,13 +917,13 @@ def guard_production_write(base_url: str) -> None:
         # "auditable after the fact" claim false again by construction.
         _log.warning(
             "guard_production_write.opt_in_accepted",
-            base_url=base_url,
+            base_url=log_endpoint(base_url),
             checkout_root=str(checkout_root),
             reason=reason,
         )
         return
     raise ProductionWriteGuardError(
-        f"STOP: refusing a WRITE to {base_url!r}. This process's nexus "
+        f"STOP: refusing a WRITE to {log_endpoint(base_url)!r}. This process's nexus "
         f"package resolves from a dev checkout ({checkout_root}), so this "
         "write is presumed to target the OPERATOR'S REAL, LIVE STORE — "
         "the same substrate a real install reaches — regardless of how "

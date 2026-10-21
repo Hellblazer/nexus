@@ -13,6 +13,11 @@ any layer may import it.
 * :func:`scrub_transport_error`: the text of an exception a transport raised
   about the URL, or a fixed substitute when that text quotes any form of the
   URL's credentials.
+
+It also holds the userinfo gate (nexus-ujbf8): :func:`has_userinfo` and
+:func:`require_no_userinfo` refuse a ``service_url`` that carries
+``user:password@``. The engine's credential is a bearer token, so userinfo is
+incoherent, and the refusal names the SOURCE of the URL, never the URL.
 """
 from __future__ import annotations
 
@@ -20,6 +25,48 @@ import re
 import urllib.parse
 
 UNPARSEABLE_ENDPOINT = "<unparseable-endpoint>"
+
+
+class ServiceUrlUserinfoError(ValueError):
+    """A ``service_url`` carries ``user:password@``. The message names where
+    the URL came from and never the URL."""
+
+
+def has_userinfo(url: str) -> bool:
+    """True when *url* has an ``@`` in its authority.
+
+    The authority is everything after ``://`` up to the first ``/``, NOT
+    ``urlsplit``'s netloc: a raw ``#``, ``?`` or ``\\`` in a password ends the
+    parsed netloc early (``https://user:pw#x@host`` has netloc ``user:pw``), so
+    the parsed form would call that URL clean. An ``@`` in a path is fine.
+    """
+    rest = url.split("://", 1)[1] if "://" in url else url
+    return "@" in rest.partition("/")[0]
+
+
+#: The repair a refusal names when its caller has no better one.
+_DEFAULT_REPAIR = (
+    "re-save the address without them with `nx config set service_url <url without user:password@>`"
+)
+
+
+def require_no_userinfo(url: str, *, source: str, repair: str | None = None) -> str:
+    """Return *url* unchanged, or raise :class:`ServiceUrlUserinfoError`.
+
+    *source* is a fixed label for where the URL came from (``NX_SERVICE_URL``,
+    ``config.yml credentials.service_url``); it is the only thing the error
+    says about the URL. *repair* is the clause that tells the operator what to
+    do about that source (default: re-save the address with
+    ``nx config set service_url``).
+    """
+    if has_userinfo(url):
+        raise ServiceUrlUserinfoError(
+            f"{source} carries credentials in the URL (user:password@). "
+            "The nexus service authenticates with a bearer token, not URL "
+            f"credentials. To fix: {repair or _DEFAULT_REPAIR}; the token goes in "
+            "`nx config set service_token --stdin` (or NX_SERVICE_TOKEN)."
+        )
+    return url
 
 #: A secret piece shorter than this is matched only as a whole token, so a
 #: one-letter user name does not withhold every error that contains the letter.

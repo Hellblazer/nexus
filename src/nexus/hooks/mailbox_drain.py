@@ -85,6 +85,7 @@ import secrets
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,6 +94,7 @@ from typing import Any
 
 from nexus._hook_runtime._io import HookResult, stream
 from nexus._locking import lock_fd, unlock_fd
+from nexus._log_safe_url import has_userinfo, log_endpoint
 
 #: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
 #: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
@@ -614,6 +616,17 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
     _save_pending(config_dir, address, keep)
 
 
+def _transport_error_text(exc: BaseException) -> str:
+    """The exception's class and message for a SKIP line, or the class alone when
+    the message carries an ``@`` (a URL with userinfo, nexus-ujbf8): ``http.client``
+    quotes a tail of the password in ``InvalidURL``, and a redirect target is
+    echoed by ``URLError``."""
+    text = str(exc)
+    if "@" in text:
+        return type(exc).__name__ + " (detail withheld: it carries an '@')"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
@@ -631,6 +644,10 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     is already consumed, and the message is gone with nobody having seen it.
     Raising ``_Skip`` instead keeps the record and lets the next prompt recover.
     """
+    if has_userinfo(base_url):
+        # Resolution refuses such a URL (nexus-ujbf8); this is the backstop for a
+        # caller that got one anyway. No request is built, so nothing can echo it.
+        raise _Skip(f"{route}: the service URL carries credentials (user:password@); not sent")
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{route}"
     req = urllib.request.Request(
@@ -658,7 +675,10 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
                 outcome["body"] = None      # ClaimNotFound: a confirmed negative
             else:
                 outcome["status"] = exc.code
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
+            # HTTPException (InvalidURL, BadStatusLine, IncompleteRead...) is neither
+            # an OSError nor a ValueError: uncaught, it killed this thread, the
+            # outcome stayed empty and the caller read None as a confirmed negative.
             outcome["error"] = exc
 
     thread = threading.Thread(target=_do, daemon=True)
@@ -669,7 +689,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
             f"{route} exceeded its {call_timeout:.1f}s deadline; the prompt is not waiting for it",
         )
     if "error" in outcome:
-        raise _Skip(f"transport failure on {route}: {outcome['error']}")
+        raise _Skip(f"transport failure on {route}: {_transport_error_text(outcome['error'])}")
     if "status" in outcome:
         raise _Skip(
             f"engine returned HTTP {outcome['status']} on {route}; the outcome is "
@@ -1061,10 +1081,16 @@ def _resolve_base_url() -> tuple[str, bool]:
     the endpoint came purely from the lease file -- naming either field via
     env is an explicit pin, never treated as "the lease backed this".
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid a heavy import on every call
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid a heavy import on every call
     from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, same reason
 
-    url = (get_credential("service_url") or "").strip().rstrip("/")
+    try:
+        url = get_service_url()
+    except ServiceUrlUserinfoError as exc:
+        # A hook never raises into the session: the loud failure is a _Skip,
+        # and the message names the source, never the URL (nexus-ujbf8).
+        raise _Skip(str(exc)) from exc
     if url:
         return url, False
 
@@ -1204,7 +1230,7 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
             token = ""
     if not token:
         raise _Skip(
-            f"resolved {base_url} but found no credential: no data-token lease, no "
+            f"resolved {log_endpoint(base_url)} but found no credential: no data-token lease, no "
             "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
         )
     return base_url, token, is_local

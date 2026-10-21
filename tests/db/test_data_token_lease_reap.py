@@ -371,70 +371,16 @@ def test_the_reaper_does_not_unlink_a_lease_replaced_after_it_read_it(
     assert "tok-fresh" in dead.read_text()
 
 
-def test_documented_residual_a_lockless_publish_in_the_check_to_unlink_gap_costs_one_remint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A DOCUMENTED RESIDUAL, not a guarantee (nexus-fcwbd).
-
-    The guarded mint publishes under the same-key lock; the refresh path in
-    ``bearer_for`` and the unguarded mint do not. A lease they replace after
-    the reaper's inode check and before its ``os.unlink`` is unlinked with
-    the dead one. This pins what the cost is: the fresh lease is lost, the
-    reap reports it removed, and the next cold process simply mints once
-    more. No error, no stale token served. If this test starts failing because
-    the fresh lease survives, the residual was closed (nexus-fcwbd): delete
-    this test and the residual wording in the docstring, CHANGELOG entry and
-    the comment at the re-read.
-    """
-    key_lease = _data_token_lease_path(BASE_URL, TENANT, tmp_path)
-    key_lease.write_text(json.dumps({
-        "format_version": data_token._LEASE_FORMAT_VERSION, "token": "tok-dead", "tenant": TENANT,
-        "base_url_digest": data_token._lease_key(BASE_URL, TENANT),
-        "expires_at": time.time() - 3600, "ttl_seconds": 3600.0,
-    }))
-    old = time.time() - 7200
-    os.utime(key_lease, (old, old))
-
-    lockless = _manager(tmp_path)  # stands in for a refreshing process holding no lock
-    fresh = data_token._CachedToken(
-        token="tok-fresh", minted_at=lockless._clock(), expires_at=lockless._clock() + 3000, ttl_seconds=3600.0,
-    )
-    real_unlink = os.unlink
-    published: list[bool] = []
-
-    def publish_then_unlink(path: Any, *a: Any, **kw: Any) -> None:
-        if Path(path) == key_lease and not published:
-            published.append(True)
-            lockless._write_lease(BASE_URL, TENANT, fresh)  # the refresh path's publish, no lock
-        real_unlink(path, *a, **kw)
-
-    setattr_in(monkeypatch, data_token, "os.unlink", publish_then_unlink)
-    assert _reap_expired_leases(tmp_path, now=time.time()) == 1
-    assert published == [True]
-    assert not key_lease.exists()  # the fresh lease went with the dead one
-
-    posts: list[str] = []
-
-    def counting(url: str, headers: dict, body: dict) -> tuple[int, dict, dict]:
-        posts.append(url)
-        return 200, {"data_token": "tok-reminted", "expires_in_seconds": 300}, {}
-
-    cold = DataTokenManager(
-        poster=counting, mint_credential=lambda: "mintcred", mint_tenant=lambda: "",
-        config_dir=tmp_path, sleep=lambda s: None,
-    )
-    assert cold.bearer_for(BASE_URL, TENANT) == "tok-reminted"  # one extra mint, not an error
-    assert len(posts) == 1
-
-
-def test_the_reaper_docstring_states_the_lockless_publishers_and_the_cost() -> None:
+def test_the_reaper_docstring_states_that_every_publish_is_under_the_lock() -> None:
     """The safety argument is prose, and it was once wrong ("a minter publishes
-    only under that lock"). Pin the true statement: which paths hold the lock,
-    which do not, and what the gap costs."""
+    only under that lock", then "the refresh path publishes WITHOUT the lock").
+    Pin the true statement (nexus-fcwbd): every publish holds the lock, and the
+    unopenable-lock fallback is the one unlocked write."""
     doc = " ".join((_reap_expired_leases.__doc__ or "").split())
-    assert "guarded mint publishes its lease only while holding that lock" in doc
-    assert "refresh path" in doc and "WITHOUT" in doc
-    assert "one extra mint" in doc and "nexus-fcwbd" in doc
+    assert "Every publish of a lease happens under that lock" in doc
+    assert "_publish_lease_locked" in doc
+    assert "The one unlocked write is the fallback" in doc
+    assert "WITHOUT" not in doc and "residual" not in doc
     assert "a minter publishes its lease only while holding" not in doc
 
 

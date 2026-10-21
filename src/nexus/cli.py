@@ -90,6 +90,7 @@ class _StorageBackendGuardGroup(click.Group):
     def invoke(self, ctx: click.Context):
         import urllib.error  # noqa: PLC0415 — deferred: keep CLI import surface light
 
+        from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -108,6 +109,11 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-sis0m.1: no service to talk to (a stopped local service,
             # no managed endpoint). The message names the remedy; a
             # traceback buried it (shakeout 7.64.1 F6).
+            raise click.ClickException(str(exc)) from exc
+        except ServiceUrlUserinfoError as exc:
+            # nexus-ujbf8: a service_url carrying user:password@ is refused at
+            # every read. The message names the source and the repair and
+            # never the URL; a traceback buried it.
             raise click.ClickException(str(exc)) from exc
         except VectorServiceError as exc:
             # nexus-sis0m.1: the service answered with an error mid-run (a 5xx,

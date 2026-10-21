@@ -116,6 +116,13 @@ def _save(**credentials: str) -> None:
         set_credential(key, value)
 
 
+def _save_raw(**credentials: str) -> None:
+    """Write ``config.yml`` directly. ``set_credential`` refuses a URL with userinfo
+    (nexus-ujbf8), and a hand-edited file is the case the agreement must hold for."""
+    body = "credentials:\n" + "".join(f"  {key}: {value}\n" for key, value in credentials.items())
+    (_config() / "config.yml").write_text(body, encoding="utf-8")
+
+
 def _env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -149,6 +156,13 @@ CASES: list[tuple[str, Case, bool]] = [
     ("saved url, token only in the lease of a stopped service", lambda m: (_save(service_url="https://svc.example"), _lease(ttl=10.0, clock=100.0)), False),
     ("saved url is a slash, live lease", lambda m: (_save(service_url="/"), _lease()), True),
     ("saved token without a url", lambda m: _save(service_token="t"), False),
+    # -- a service_url carrying user:password@ is refused by the CLI (nexus-ujbf8), so it is not usable --
+    ("env url with userinfo, env token", lambda m: _env(m, NX_SERVICE_URL="https://user:pw@svc.example", NX_SERVICE_TOKEN="t"), False),
+    ("env url with userinfo, live lease", lambda m: (_env(m, NX_SERVICE_URL="https://user:pw@svc.example"), _lease()), False),
+    ("env url with a '#' in the userinfo, env token", lambda m: _env(m, NX_SERVICE_URL="https://user:pw#x@svc.example", NX_SERVICE_TOKEN="t"), False),
+    ("saved url with userinfo, saved token", lambda m: _save_raw(service_url="https://user:pw@svc.example", service_token="t"), False),
+    ("saved url with userinfo, mint token", lambda m: _save_raw(service_url="https://user:pw@svc.example", mint_token="m"), False),
+    ("env url wins over a saved url with userinfo", lambda m: (_env(m, NX_SERVICE_URL="https://svc.example", NX_SERVICE_TOKEN="t"), _save_raw(service_url="https://user:pw@other.example")), True),
     # -- leg 3: NX_SERVICE_HOST / NX_SERVICE_PORT --
     ("host, port, token in env", lambda m: _env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123", NX_SERVICE_TOKEN="t"), True),
     ("host and port, no token", lambda m: _env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123"), False),

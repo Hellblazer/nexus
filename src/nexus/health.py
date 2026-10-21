@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Callable
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
@@ -1403,13 +1404,21 @@ def _check_managed_service_probe() -> list[HealthResult]:
     warn only — reachability fatals are ``_check_vector_service``'s domain, so this
     surfaces the version/remedy signal without a duplicate fatal on a down service.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     # env (NX_SERVICE_URL) FIRST, then config.yml — so a greenfield user who set
     # the endpoint with `nx config set service_url` (no shell export) still gets
     # the probe (RDR-166 nexus-v3p0x). Empty in BOTH → no explicit managed
     # endpoint, never default-probe the public one.
-    base = (get_credential("service_url") or "").strip()
+    try:
+        base = get_service_url()
+    except ServiceUrlUserinfoError as exc:
+        return [HealthResult(
+            label="Managed/remote service (version)", ok=False, detail=str(exc),
+            fix_suggestions=["Remove the user:password@ part of service_url "
+                             "(`nx config set service_url <url>`, or fix NX_SERVICE_URL)."],
+        )]
     if not base:
         return []
 
@@ -1445,7 +1454,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     return [HealthResult(
         label="Managed/remote service (version)",
         ok=True,
-        detail=f"{caps.base_url} — release_version {caps.release_version} (app_version {caps.app_version})",
+        detail=f"{log_endpoint(caps.base_url)} — release_version {caps.release_version} (app_version {caps.app_version})",
     )]
 
 
@@ -3568,9 +3577,7 @@ def _check_mint_token() -> list[HealthResult]:
             detail=f"mint_token is configured but the engine endpoint is not resolvable: {exc}",
         )]
 
-    import urllib.parse  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
-
-    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    host = log_endpoint(base_url)
     tenant = "default"
     # critic S3 (nexus-ssqk9, residue class nexus-lgiqw): the PROCESS-WIDE
     # singleton, never a throwaway DataTokenManager() -- constructing a
@@ -3632,10 +3639,18 @@ def _check_static_service_token() -> list[HealthResult]:
     commands are unaffected) and a failure on an unarmed one (every command
     sends it); a probe that cannot complete is a warning, never a pass.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     label = "Static service_token"
-    url = (get_credential("service_url") or "").strip().rstrip("/")
+    try:
+        url = get_service_url()
+    except ServiceUrlUserinfoError as exc:
+        return [HealthResult(
+            label=label, ok=False, detail=str(exc),
+            fix_suggestions=["Remove the user:password@ part of service_url "
+                             "(`nx config set service_url <url>`, or fix NX_SERVICE_URL)."],
+        )]
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
@@ -3645,11 +3660,9 @@ def _check_static_service_token() -> list[HealthResult]:
                              detail="not applicable — no static service_token configured")]
 
     import hashlib  # noqa: PLC0415 — branch-local
-    import urllib.parse  # noqa: PLC0415 — branch-local
-
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
 
-    host = urllib.parse.urlsplit(url).netloc or url
+    host = log_endpoint(url)
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:

@@ -221,8 +221,10 @@ docker run --rm \
     <image>
 ```
 
-`NX_SERVICE_URL` is used verbatim — scheme included — so `https`
-survives end-to-end. An explicitly set `NX_SERVICE_URL` is
+`NX_SERVICE_URL` is used as written — scheme included — so `https`
+survives end-to-end. It must not carry `user:password@`: the service
+authenticates with the bearer token, and a URL with userinfo is refused
+with an error that names the variable and never the URL. An explicitly set `NX_SERVICE_URL` is
 authoritative: it is never silently rebound to a locally discovered
 supervisor lease.
 

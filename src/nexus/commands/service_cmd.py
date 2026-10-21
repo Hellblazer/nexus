@@ -39,16 +39,19 @@ def probe(url: str | None) -> None:
     incompatible. Performs no Postgres connection — this is the HTTPS client
     contract only.
     """
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
     from nexus.db.managed_endpoint import (  # noqa: PLC0415 — circular-dep avoidance; managed_endpoint imports config
         ManagedServiceError,
         probe_managed_service,
         resolve_managed_endpoint,
     )
 
-    base = url or resolve_managed_endpoint(require_token=False)[0]
     try:
+        base = url or resolve_managed_endpoint(require_token=False)[0]
         caps = probe_managed_service(base_url=base)
-    except ManagedServiceError as exc:
+    except (ManagedServiceError, ServiceUrlUserinfoError) as exc:
+        # ServiceUrlUserinfoError (nexus-ujbf8): the message names the source
+        # and the repair, never the URL.
         raise click.ClickException(str(exc)) from exc
 
     click.echo(f"✓ managed nexus service reachable: {caps.base_url}")

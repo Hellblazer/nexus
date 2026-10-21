@@ -146,9 +146,15 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
     key = key.strip().lower().replace("-", "_")
     if "." in key:
         from nexus.config import set_config_value  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        set_config_value(key, value.strip())
+        try:
+            set_config_value(key, value.strip())
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
     else:
-        set_credential(key, value.strip())
+        try:
+            set_credential(key, value.strip())
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
     click.echo(f"Set {key}  →  {_global_config_path()}")
     if inline and value.strip() and _is_secret(key):
         click.echo(
@@ -340,7 +346,10 @@ def config_init() -> None:
             "\n  Enter value", default=current or "", show_default=bool(current), prompt_suffix=" > ",
         )
         if val and val != current:
-            set_credential("service_url", val)
+            try:
+                set_credential("service_url", val)
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
 
     # -- the token, hidden, then its kind
     click.echo(_SEP)

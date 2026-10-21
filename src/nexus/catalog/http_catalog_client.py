@@ -87,6 +87,7 @@ import time
 import httpx
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
@@ -545,7 +546,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         #: silently zero the auto-linker for any owner registered later
         #: by another process.
         self._resolve_path_owner_cache: dict[str, dict] = {}
-        _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
+        _log.debug("http_catalog_client.init", endpoint=log_endpoint(self._base_url), tenant=tenant)
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent).

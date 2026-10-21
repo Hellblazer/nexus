@@ -16,6 +16,7 @@ import structlog
 import yaml
 
 from nexus._locking import lock_fd, unlock_fd
+from nexus._log_safe_url import require_no_userinfo
 from nexus._winsec import restrict_to_owner
 
 _log = structlog.get_logger(__name__)
@@ -1363,6 +1364,28 @@ def get_credential(name: str) -> str:
     return ""
 
 
+def get_service_url() -> str:
+    """The configured ``service_url``, stripped of whitespace and a trailing
+    slash, or ``""``: env ``NX_SERVICE_URL`` first, then ``config.yml``.
+
+    The one validated read of the URL (nexus-ujbf8). A value carrying
+    ``user:password@`` raises :class:`~nexus._log_safe_url.ServiceUrlUserinfoError`,
+    whose message names the source and never the URL. The env path cannot be
+    policed at set time, so this is where it is refused. A caller that only
+    asks "is a service_url set at all" may keep using :func:`get_credential`.
+    """
+    raw = (get_credential("service_url") or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    env_var = CREDENTIALS["service_url"]
+    if os.environ.get(env_var, ""):
+        return require_no_userinfo(
+            raw, source=env_var,
+            repair=f"unset {env_var}, or export it without user:password@",
+        )
+    return require_no_userinfo(raw, source="config.yml credentials.service_url")
+
+
 def persisted_credentials(config_dir: Path) -> dict[str, str]:
     """Credentials persisted in *config_dir*'s ``config.yml``, file only.
 
@@ -1415,6 +1438,9 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     section shape (nexus-s4a98). The replacement is logged with the
     discarded value.
     """
+    if dotted_key == "credentials.service_url" and isinstance(value, str):
+        # The dotted spelling reaches the same key set_credential guards.
+        require_no_userinfo(value.strip(), source="the service_url value")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parts = dotted_key.split(".")
@@ -1458,6 +1484,8 @@ def set_credential(name: str, value: str) -> None:
     if name not in CREDENTIALS:
         known = ", ".join(sorted(CREDENTIALS))
         raise ValueError(f"Unknown credential '{name}'. Known: {known}")
+    if name == "service_url":
+        require_no_userinfo(value.strip(), source="the service_url value")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock covers the entire read-modify-write unit so two concurrent calls,

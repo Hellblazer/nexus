@@ -126,6 +126,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+from nexus._log_safe_url import scrub_transport_error
 from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
@@ -573,7 +574,7 @@ def _probe_serving_engine_version() -> tuple[int, int, int] | None:
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — best-effort: a transport blip or a pre-/version engine means "don't know"
-        _log.debug("channel_waiter_version_probe_failed", error=str(exc))
+        _log.debug("channel_waiter_version_probe_failed", error=scrub_transport_error(exc, base_url))
         return None
 
     if not isinstance(body, dict):

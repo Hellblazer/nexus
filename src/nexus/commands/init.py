@@ -836,6 +836,7 @@ def _managed_onboarding(ctx: click.Context) -> None:
     wrapper over it). The managed path NEVER provisions locally: it returns on
     probe success and fails loud (SystemExit 1, actionable remedy) on failure.
     """
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.commands.config_cmd import config_init  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.managed_endpoint import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         ManagedServiceError,
@@ -870,7 +871,12 @@ def _managed_onboarding(ctx: click.Context) -> None:
         )
         raise SystemExit(1)
 
-    base = resolve_managed_endpoint(require_token=False)[0]
+    try:
+        base = resolve_managed_endpoint(require_token=False)[0]
+    except ServiceUrlUserinfoError as exc:
+        # nexus-ujbf8: names the source and the repair, never the URL.
+        click.echo(f"\nManaged setup cannot proceed: {exc}", err=True)
+        raise SystemExit(1) from exc
     try:
         caps = probe_managed_service(base_url=base)
     except ManagedServiceError as exc:

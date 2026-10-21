@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus._install.winproc_core import executable_stem
 from nexus.bounded_subprocess import run_bounded
 from nexus.daemon.binary_lifecycle import well_known_binary_path
@@ -1384,14 +1385,14 @@ def _running_engine(config_dir: Path) -> RunningEngine:
     if not payload:
         return RunningEngine(
             up=True, version=None,
-            reason=f"{base_url}/version did not answer",
+            reason=f"{log_endpoint(base_url)}/version did not answer",
         )
     raw = payload.get("release_version")
     parsed = parse_engine_version(raw if isinstance(raw, str) else None)
     if parsed is None:
         return RunningEngine(
             up=True, version=None,
-            reason=f"{base_url}/version reported no usable release_version ({raw!r})",
+            reason=f"{log_endpoint(base_url)}/version reported no usable release_version ({raw!r})",
         )
     return RunningEngine(up=True, version=parsed)
 

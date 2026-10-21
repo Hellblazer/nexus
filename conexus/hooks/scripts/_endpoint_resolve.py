@@ -80,6 +80,31 @@ class EndpointUnresolvable(Exception):
     names every leg that was checked and why, never a bare 'not found'."""
 
 
+def has_userinfo(url: str) -> bool:
+    """True when *url* has an ``@`` in its authority (nexus-ujbf8).
+
+    Stdlib copy of ``nexus._log_safe_url.has_userinfo``, which this module
+    cannot import; ``tests/hooks/test_service_url_userinfo_plugin.py`` holds the
+    two to the same answers. The authority is everything after ``://`` up to
+    the first ``/``, not ``urlsplit``'s netloc: a raw ``#``, ``?`` or ``\\`` in a
+    password ends the parsed netloc early, so the parsed form would call
+    ``https://user:pw#x@host`` clean.
+    """
+    rest = url.split("://", 1)[1] if "://" in url else url
+    return "@" in rest.partition("/")[0]
+
+
+def _userinfo_reason(source: str) -> str:
+    """The refusal text for a ``service_url`` that carries userinfo: it names the
+    SOURCE of the URL and the repair, never the URL."""
+    return (
+        f"{source} carries credentials in the URL (user:password@), which the nexus "
+        "service does not accept: it authenticates with a bearer token. Remove them "
+        "from the URL (`nx config set service_url <url without user:password@>`, or "
+        "unset NX_SERVICE_URL) and set the token with `nx config set service_token --stdin`."
+    )
+
+
 def default_config_dir() -> Path:
     """Stdlib-only counterpart of ``nexus.config.nexus_config_dir``, not a mirror: this also honours
     ``NX_CONFIG_DIR`` (after ``NEXUS_CONFIG_DIR``), which the CLI's function does not. Whether the CLI should
@@ -896,9 +921,15 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     directly rather than infer it from this flag.
     """
     url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
+    source = "NX_SERVICE_URL"
     if not url:
         url = read_config_yml_credentials(config_dir).get("service_url", "").strip().rstrip("/")
+        source = "config.yml credentials.service_url"
     if url:
+        if has_userinfo(url):
+            # The CLI refuses this URL (nexus-ujbf8); resolving it here would
+            # hand it to an HTTP stack that echoes the password in an error.
+            raise EndpointUnresolvable(_userinfo_reason(source))
         return url, False
 
     host_str = os.environ.get("NX_SERVICE_HOST", "").strip()
@@ -989,6 +1020,8 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, gr
         saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
         url = _credential("service_url", "NX_SERVICE_URL", saved).rstrip("/")
         if url:
+            if has_userinfo(url):
+                return False  # the CLI raises ServiceUrlUserinfoError here (nexus-ujbf8)
             if _credential("service_token", "NX_SERVICE_TOKEN", saved):
                 return True
             lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
