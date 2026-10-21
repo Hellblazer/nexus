@@ -358,14 +358,18 @@ deselects them, so no census has said which of them touch storage.
   non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet below;
   set it on a full-suite run, not a scoped one. A run that pytest-split is splitting (`--splits`: a CI
   shard, whatever its size) or that collects at least `SWEEP_AUTO_FLOOR` (4000,
-  `tests/_storage_touch_guard.py`) tests asks them by itself, so a CI shard needs no variable; the
-  docs-readers leg (1561, not split) and any one-directory run do not;
-  `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic run is advisory**: whatever the
-  shape checks or the late-touch check find is a yellow warning with the test names (and a `warnings`
-  entry in the report), never a `vacuity` entry, so it cannot change the exit status; its report still
-  says `sweep: true` so the fan-in accepts it. Only an explicit `NX_STORAGE_TOUCH_SWEEP=1` run fails on
-  them, late touch included (a full run had 5 late child touches on 2026-10-19). A scoped run whose
-  Python children never reached the shim prints a yellow warning instead of a verdict.
+  `tests/_storage_touch_guard.py`) tests asks them by itself; the docs-readers leg (1561, not split)
+  and any one-directory run do not; `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic
+  run is advisory**: whatever the shape checks or the late-touch check find is a yellow warning with
+  the test names (and a `warnings` entry in the report), never a `vacuity` entry, so it cannot change
+  the exit status; its report still says `sweep: true` so the fan-in accepts it. Only an explicit
+  `NX_STORAGE_TOUCH_SWEEP=1` run fails on them, late touch included. **The CI shards export it**
+  (nexus-ey246), so on CI each shard gates; a split run outside CI is advisory. The late touches seen
+  before (5 on a hellmini full run, 2026-10-19; 1 per CI run until 2026-10-20 15:40Z) had deterministic
+  causes, since fixed. **Downgrade trigger:** the first shard red on a late touch that passes on a rerun
+  with no code change moves late touches back to a warning (`_vacuity` in the guard, one line); the
+  shape, children-seen and guard-error checks keep gating. A scoped run whose Python children never
+  reached the shim prints a yellow warning instead of a verdict.
 - **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
   tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
   `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in

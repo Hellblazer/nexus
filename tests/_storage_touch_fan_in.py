@@ -22,10 +22,10 @@ from pathlib import Path
 REPORT_NAME = "nx-storage-touch-report.json"
 #: ``1`` asks the sweep-shape checks of a WHOLE run (some test provisioned, some
 #: test clean, some touch event): a scoped run of three provisioned tests has no
-#: clean one and is not vacuous. The census and the full-suite proof set it, and a run
-#: that pytest-split is splitting (a CI shard) or that collects at least
-#: ``SWEEP_AUTO_FLOOR`` tests (``tests/_storage_touch_guard.py``) turns it on by itself,
-#: as advice only (its report says ``sweep: true`` and nothing gates). A report written
+#: clean one and is not vacuous. The CI shards, the census and the full-suite proof set
+#: it (nexus-ey246: on CI it gates); a run that pytest-split is splitting outside CI or that
+#: collects at least ``SWEEP_AUTO_FLOOR`` tests (``tests/_storage_touch_guard.py``) turns
+#: it on by itself, as advice only (its report says ``sweep: true`` and nothing gates). A report written
 #: without it does not count the whole run, and the fan-in refuses it.
 SWEEP_ENV = "NX_STORAGE_TOUCH_SWEEP"
 #: The committed ceiling on the NUMBER of tests that mint a tenant, by suite section.

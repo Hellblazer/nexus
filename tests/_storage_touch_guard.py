@@ -69,7 +69,7 @@ swallow the teardown failure). The whole-run shape (some test provisioned, some
 clean, some touch event, and Python children that were spawned reached the shim) is
 asked when ``NX_STORAGE_TOUCH_SWEEP=1`` (it gates: a problem is in ``vacuity`` and
 fails the session in fail mode). It is also asked, as ADVICE ONLY, when pytest-split is
-splitting the run (``--splits``: a CI shard) or the run collects at least
+splitting the run (``--splits``; the CI shards export the variable, so they gate) or the run collects at least
 ``SWEEP_AUTO_FLOOR`` tests (``NX_STORAGE_TOUCH_SWEEP_FLOOR`` overrides it; ``sweep_auto``
 in the report says an automatic run): every problem such a run finds is a yellow warning
 and a ``warnings`` entry, never ``vacuity``, so it can never change the exit status, and
@@ -1243,9 +1243,10 @@ class Guard:
             )
         if self.explicit_sweep:
             # the run that explicitly asked the whole-run checks leaves nothing unexamined: a
-            # late touch (a leaked thread or child) is a failure there. An automatic run (a
-            # pytest-split shard, a large unsplit run) only prints it: a full hellmini run on
-            # 2026-10-19 had late_child_touches=5, so gating there would fail on thread timing.
+            # late touch (a leaked thread or child) is a failure there, and the CI shards ask
+            # (nexus-ey246). Whether one lands can depend on thread timing, so an automatic run
+            # only prints it; the late touches seen before had deterministic causes, since fixed.
+            # tests/AGENTS.md names the trigger that moves them back to a warning here.
             problems += self._warnings(report)
         if report["xfail_touches"]:
             shown = ", ".join(report["xfail_touches"][:5])
