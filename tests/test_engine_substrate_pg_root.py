@@ -1268,7 +1268,10 @@ class TestTmpfsHardening:
         assert sub._quota_headroom(hard, soft, used, valid) == expected
 
     def test_free_space_is_the_smaller_of_the_filesystem_and_the_quota(self, tmp_path, monkeypatch) -> None:
-        fs_free = shutil.disk_usage(tmp_path).free
+        # Pinned: a live filesystem's free space moves between two reads (8 KiB on a pool
+        # shard at abf10a306: 63169908736 against 63169916928), so the test fixes it.
+        fs_free = 5 * 1024**3
+        setattr_in(monkeypatch, sub, "shutil.disk_usage", lambda _p: shutil._ntuple_diskusage(10 * 1024**3, 0, fs_free))
         monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 4096)
         assert sub._tmpfs_free_bytes(tmp_path) == min(fs_free, 4096)
         monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: None)

@@ -1192,10 +1192,10 @@ jobs:
         # vacuous-gate class this step exists to make structurally
         # impossible, not just less likely. Reads the PASSED count off
         # pytest's own final summary line; the corpus was ~830 tests when this
-        # floor was set (about 2.1k on 2026-10-21). Since the duration-balanced
-        # two-group split a group runs about 370 to 1800 of them (373 and 1796 on
-        # 5c99d3609, where a 400 floor failed group 2), so the floor is 200 per
-        # group: still far above the bug's signature (0 executed).
+        # floor was set (about 2.1k on 2026-10-21). The two interleaved groups run
+        # about 1.1k each; a laptop-durations split once put 373 in one (5c99d3609),
+        # under the 400 floor then, so the floor is 200 per group: still far above
+        # the bug's signature (0 executed).
         run: |
           set -euo pipefail
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)" || summary=""
