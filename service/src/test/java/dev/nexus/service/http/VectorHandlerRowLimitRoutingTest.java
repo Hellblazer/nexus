@@ -57,6 +57,45 @@ class VectorHandlerRowLimitRoutingTest {
     }
 
     @Test
+    void aFractionalRowLimit_isRefused_neverTruncated() {
+        // Number.intValue() took 1.5 as 1 and 0.5 as 0 (then "must be >= 1" named the wrong value).
+        for (Object bad : new Object[] {1.5, 0.5, 2.0000001, Double.NaN}) {
+            assertThatThrownBy(() -> VectorHandler.resolveRowLimit(Map.of("row_limit", bad)))
+                .as("row_limit=%s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("row_limit must be a positive integer");
+        }
+    }
+
+    @Test
+    void aRowLimitPastTheIntRange_isRefused_neverWrapped() {
+        // intValue() wrapped 4294967297 to 1 and 4294967296 to 0 (the same wrap resolveFloor guards for
+        // floor_min_chunks).
+        for (Object bad : new Object[] {4294967297L, 4294967296L, 2147483648L, Long.MAX_VALUE,
+                                        new java.math.BigInteger("99999999999999999999")}) {
+            assertThatThrownBy(() -> VectorHandler.resolveRowLimit(Map.of("row_limit", bad)))
+                .as("row_limit=%s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("row_limit must be <= " + Integer.MAX_VALUE);
+        }
+        assertThat(VectorHandler.resolveRowLimit(Map.of("row_limit", (long) Integer.MAX_VALUE)))
+            .as("the int ceiling itself is a number").isEqualTo(Integer.MAX_VALUE);
+    }
+
+    @Test
+    void aNegativeRowLimitPastTheIntRange_isStillTheBelowOneError() {
+        assertThatThrownBy(() -> VectorHandler.resolveRowLimit(Map.of("row_limit", -4294967297L)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("row_limit must be >= 1");
+    }
+
+    @Test
+    void anIntegralFloat_isAccepted() {
+        // A JSON 2.0 is the integer 2; only a fractional part is refused.
+        assertThat(VectorHandler.resolveRowLimit(Map.of("row_limit", 2.0))).isEqualTo(2);
+    }
+
+    @Test
     void presentNonNumber_isRefused() {
         assertThatThrownBy(() -> VectorHandler.resolveRowLimit(Map.of("row_limit", "2000")))
             .isInstanceOf(IllegalArgumentException.class)

@@ -1611,9 +1611,11 @@ public final class VectorHandler implements HttpHandler {
     /**
      * {@code row_limit} routing for {@code handleGcQuarantineOrphans} (nexus-a6mon,
      * code-review finding on a990fe8f1): ABSENT means the unbounded sweep (0);
-     * PRESENT must be a positive integer, and a present zero or negative value
-     * is a 400, never silently the unbounded transaction the bound exists to
-     * prevent. The first cut folded "present but non-positive" into "absent",
+     * PRESENT must be an integral number from 1 to {@code Integer.MAX_VALUE}, and a
+     * present zero or negative value is a 400, never silently the unbounded transaction
+     * the bound exists to prevent; so is a fractional value or one past the int range
+     * (RDR-222 A1 review fold-in, nexus-1579m: they had been truncated and wrapped).
+     * The first cut folded "present but non-positive" into "absent",
      * so the SQL function's own refusal was unreachable through the route.
      * Pinned by {@code VectorHandlerRowLimitRoutingTest}.
      */
@@ -1626,13 +1628,22 @@ public final class VectorHandler implements HttpHandler {
             throw new IllegalArgumentException(
                 "row_limit must be a positive integer, got: " + raw);
         }
-        int rowLimit = n.intValue();
-        if (rowLimit <= 0) {
+        // The bound is a safety bound, so a malformed one is a 400, never a different one: intValue() truncated
+        // 1.5 to 1 and wrapped 4294967297 to 1 (the same guard resolveFloor keeps for floor_min_chunks).
+        double d = n.doubleValue();
+        if (Double.isNaN(d) || d != Math.rint(d)) {
             throw new IllegalArgumentException(
-                "row_limit must be >= 1 when present (omit it for the unbounded sweep), got: "
-                + rowLimit);
+                "row_limit must be a positive integer, got: " + raw);
         }
-        return rowLimit;
+        if (d < 1) {
+            throw new IllegalArgumentException(
+                "row_limit must be >= 1 when present (omit it for the unbounded sweep), got: " + raw);
+        }
+        if (d > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                "row_limit must be <= " + Integer.MAX_VALUE + ", got: " + raw);
+        }
+        return n.intValue();
     }
 
     /**

@@ -64,9 +64,9 @@ class _PollSpy:
         monkeypatch.setattr(hvc, "_get", spy)
 
 
-def _hold(sql: str) -> subprocess.Popen:
+def _hold(sql: str, hold_s: float = HOLD_S) -> subprocess.Popen:
     """Run *sql* in a separate Postgres session as the cluster owner, and return once it is inside
-    its ``pg_sleep(HOLD_S)`` -- the lock before it is then held."""
+    its ``pg_sleep(hold_s)`` (``HOLD_S`` unless given) -- the lock before it is then held."""
     state = _pg_state()
     proc = subprocess.Popen(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
@@ -82,7 +82,7 @@ def _hold(sql: str) -> subprocess.Popen:
         if _psql_superuser(
             state,
             "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND pid <> pg_backend_pid() "
-            f"AND query LIKE '%pg_sleep({HOLD_S})%'",
+            f"AND query LIKE '%pg_sleep({hold_s})%'",
         ) != "0":
             return proc
         time.sleep(0.02)

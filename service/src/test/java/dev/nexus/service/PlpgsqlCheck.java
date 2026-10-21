@@ -44,6 +44,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+
 /**
  * Runs the {@code plpgsql_check} static analyser over the PL/pgSQL routines in a set of schemas. The database
  * must have the {@code plpgsql_check} extension installed. Findings come from
@@ -82,5 +86,45 @@ final class PlpgsqlCheck {
             schemaArray.free();
         }
         return findings;
+    }
+
+    /**
+     * The {@code schema.function} names {@link #findFindings} examines: the same selection (schema, kind,
+     * language; a trigger function only when attached to a relation), typed jOOQ over the catalogs, with no
+     * analyser call. A routine the analyser finds nothing in is absent from the findings, so a "no finding for f"
+     * test must also assert f is in this set, or a rename or a gap in the scan passes it. Keep the selection in
+     * step with plpgsql-check-findings.sql.
+     */
+    static java.util.Set<String> scannedRoutines(Connection connection, Collection<String> schemas) {
+        var p = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var l = DSL.table(DSL.name("pg_catalog", "pg_language")).as("l");
+        var t = DSL.table(DSL.name("pg_catalog", "pg_type")).as("t");
+        var tg = DSL.table(DSL.name("pg_catalog", "pg_trigger")).as("tg");
+        Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+        Field<String> proname = DSL.field(DSL.name("p", "proname"), String.class);
+        Field<Long> prorettype = DSL.field(DSL.name("p", "prorettype"), Long.class);
+        Field<Long> procOid = DSL.field(DSL.name("p", "oid"), Long.class);
+        var triggerType = DSL.select(DSL.field(DSL.name("t", "oid"), Long.class)).from(t)
+            .where(DSL.field(DSL.name("t", "typname"), String.class).eq("trigger")
+                .and(DSL.field(DSL.name("t", "typnamespace"), Long.class).eq(
+                    DSL.select(DSL.field(DSL.name("pn", "oid"), Long.class))
+                        .from(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("pn"))
+                        .where(DSL.field(DSL.name("pn", "nspname"), String.class).eq("pg_catalog")))));
+        var attached = DSL.selectOne().from(tg)
+            .where(DSL.field(DSL.name("tg", "tgfoid"), Long.class).eq(procOid));
+        java.util.Set<String> out = new java.util.TreeSet<>();
+        for (var r : DSL.using(connection, SQLDialect.POSTGRES)
+                .selectDistinct(nspname, proname).from(p)
+                .join(n).on(DSL.field(DSL.name("n", "oid"), Long.class).eq(DSL.field(DSL.name("p", "pronamespace"), Long.class)))
+                .join(l).on(DSL.field(DSL.name("l", "oid"), Long.class).eq(DSL.field(DSL.name("p", "prolang"), Long.class)))
+                .where(nspname.in(schemas)
+                    .and(DSL.field(DSL.name("p", "prokind"), String.class).in("f", "p"))
+                    .and(DSL.field(DSL.name("l", "lanname"), String.class).eq("plpgsql"))
+                    .and(prorettype.ne(DSL.field(triggerType)).or(DSL.exists(attached))))
+                .fetch()) {
+            out.add(r.get(nspname) + "." + r.get(proname));
+        }
+        return out;
     }
 }

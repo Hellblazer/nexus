@@ -93,16 +93,6 @@ class KeyedSweepRouteTest {
         boolean quarantine() {
             return this == BOUNDED || this == FLOORED;
         }
-
-        /** The sweep gate (503 sweep_gate_busy) applies to the quarantine shapes and to expire. */
-        boolean takesTheGate() {
-            return this != RESTORE;
-        }
-
-        /** The terminator field a replay carries: {@code remaining}, or {@code more} for expire. */
-        String restField() {
-            return this == EXPIRE ? "more" : "remaining";
-        }
     }
 
     private PostgreSQLContainer<?> pg;
@@ -1166,6 +1156,28 @@ class KeyedSweepRouteTest {
         assertThat(MAPPER.readValue(r.body(), Map.class).keySet()).as("byte-compatible with the pre-A1 route")
             .containsExactlyInAnyOrder("expired", "refused");
         assertThat(count(f.source())).as("the unbounded form expired everything").isZero();
+    }
+
+    /**
+     * {@code resolveRowLimit} is shared by quarantine-orphans, restore-rereferenced and expire-quarantine. A
+     * fractional bound or one past the int range is a 400 on each, never a truncated or wrapped one (1.5 had been
+     * taken as 1, and 4294967297 wrapped to 1): the row bound is a safety bound, so a malformed value must not
+     * quietly become a different one. Released clients send ints only (the defaults in chunk_quarantine.py).
+     */
+    @ParameterizedTest
+    @EnumSource(value = Form.class, names = {"BOUNDED", "RESTORE", "EXPIRE"})
+    void aFractionalOrOutOfRangeRowLimitIs400OnEverySweepRoute_andNothingRuns(Form form) throws Exception {
+        Fx f = fixture(form, 3);
+        var all = new org.assertj.core.api.SoftAssertions();
+        for (Object bad : new Object[] {1.5, 4294967297L, 2147483648L}) {
+            var req = body(f, 2);
+            req.put("row_limit", bad);
+            HttpResponse<String> r = post(form.path, req, null);
+            all.assertThat(r.statusCode()).as("%s row_limit=%s: %s", form, bad, r.body()).isEqualTo(400);
+            all.assertThat(r.body()).as("%s row_limit=%s", form, bad).contains("row_limit must be");
+        }
+        all.assertAll();
+        assertThat(count(f.source())).as("nothing ran: every row is still where it started").isEqualTo(3);
     }
 
     @Test

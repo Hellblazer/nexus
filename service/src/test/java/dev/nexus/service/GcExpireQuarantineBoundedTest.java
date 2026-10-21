@@ -407,17 +407,30 @@ class GcExpireQuarantineBoundedTest {
 
     // ── a row that changed while the page waited on its lock ─────────────────
 
-    @Test
-    void aVictimRequarantinedWhileThePageWaitsOnItsRowLockSurvives() throws Exception {
+    /**
+     * The DELETE restates the eligibility predicates so a victim that changed and committed while the page waited on
+     * its row lock is re-checked against its new version (READ COMMITTED, EvalPlanQual). Each test below changes the
+     * locked victim in the one way a single predicate refuses, so each can fail on that clause alone: the cutoff,
+     * the engine-ownership test and the origin tag. The manifest {@code NOT EXISTS} clause is NOT reachable this
+     * way: EvalPlanQual re-evaluates the locked table's row against its new version but keeps the other relations'
+     * rows as the statement saw them, so a manifest row committed during the wait is invisible to the re-check and
+     * no lock-wait test can turn that clause red. It is held by the selection (the same predicate ahead of the
+     * LIMIT, see {@code protectedAndEngineOwnedRowsThatSortFirstDoNotStallTheLoop}).
+     *
+     * <p>The holder rewrites the first victim's metadata to {@code changed} and holds it uncommitted; the page then
+     * selects its victims from the committed snapshot (all ten), blocks on the row lock in its DELETE, and on commit
+     * deletes the other nine.
+     */
+    private void aVictimChangedUnderItsRowLockSurvives(java.util.function.Function<Fx, Map<String, Object>> changed)
+            throws Exception {
         Fx fx = newFx();
         List<String> victims = eligible(fx, "80", 10);
         String locked = victims.get(0);
 
         try (Connection holder = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            // Re-quarantined with a fresh stamp, as a quarantine run that moved the chash again would leave it.
             var holderCtx = DSL.using(holder, SQLDialect.POSTGRES);
-            holderCtx.update(CHUNKS).set(CHUNKS.METADATA, JSONB.jsonb(MAPPER.writeValueAsString(meta(fx, NEW, false))))
+            holderCtx.update(CHUNKS).set(CHUNKS.METADATA, JSONB.jsonb(MAPPER.writeValueAsString(changed.apply(fx))))
                 .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(fx.sibling()))
                     .and(CHUNKS.CHASH.eq(Chash.fromHex(locked).toBytes())))
                 .execute();
@@ -441,8 +454,37 @@ class GcExpireQuarantineBoundedTest {
             assertThat(p.expired()).as("the other nine").isEqualTo(9L);
         }
 
-        assertThat(chashesIn(fx.sibling())).as("the re-quarantined victim survived").containsExactly(locked);
+        assertThat(chashesIn(fx.sibling())).as("the changed victim survived").containsExactly(locked);
         assertThat(audits(fx).get(0).chashes()).as("and is not in the audit row").doesNotContain(locked).hasSize(9);
+    }
+
+    @Test
+    void aVictimRequarantinedWhileThePageWaitsOnItsRowLockSurvives() throws Exception {
+        // Re-quarantined with a fresh stamp, as a quarantine run that moved the chash again would leave it: the
+        // cutoff clause refuses it.
+        aVictimChangedUnderItsRowLockSurvives(fx -> meta(fx, NEW, false));
+    }
+
+    @Test
+    void aVictimTakenByTheReaperWhileThePageWaitsOnItsRowLockSurvives() throws Exception {
+        // Engine-owned: quarantined_by = engine-reaper with reaper_quarantined_at equal to quarantined_at (here the
+        // old stamp, so the cutoff still passes and only the ownership clause refuses it).
+        aVictimChangedUnderItsRowLockSurvives(fx -> {
+            Map<String, Object> m = meta(fx, OLD, true);
+            assertThat(m.get("reaper_quarantined_at")).isEqualTo(m.get("quarantined_at"));
+            return m;
+        });
+    }
+
+    @Test
+    void aVictimRewrittenToAnotherOriginWhileThePageWaitsOnItsRowLockSurvives() throws Exception {
+        // The row now says it was quarantined out of a different origin; the stamp is still old and the row is not
+        // engine-owned, so only the origin-tag clause refuses it.
+        aVictimChangedUnderItsRowLockSurvives(fx -> {
+            Map<String, Object> m = meta(fx, OLD, false);
+            m.put("origin_collection", "code__elsewhere__" + MODEL + "__v1");
+            return m;
+        });
     }
 
     // ── bounds and arguments ─────────────────────────────────────────────────
@@ -522,6 +564,23 @@ class GcExpireQuarantineBoundedTest {
         assertThat(counted.refused()).as("the past-cutoff rows the origin's manifest names").isEqualTo(6L);
         assertThat(audits(fx).get(0).details().has("refused")).as("an uncounted page records none").isFalse();
         assertThat(audits(fx).get(1).details().get("refused").asInt()).isEqualTo(6);
+    }
+
+    @Test
+    void underTheRouteDefaultFloorRefusedIsANumberEvenWithCountRefusedFalse() {
+        Fx fx = newFx();
+        eligible(fx, "80", 4);
+        protectedRows(fx, "10", 6);
+
+        // The route's defaults (0.5 / 50): 4 eligible of 10 client rows is under both bounds, so the floor scan
+        // runs and passes. That scan counts the protected rows as a by-product, so refused is NOT null although
+        // count_refused is false: it is null only when neither the floor scan nor count_refused counted it.
+        Page p = call(fx, 10, false, 0.5, 50, false);
+
+        assertThat(p.floorRefused()).isFalse();
+        assertThat(p.expired()).isEqualTo(4L);
+        assertThat(p.refused()).as("numeric, the floor scan's protected count").isNotNull().isEqualTo(6L);
+        assertThat(audits(fx).get(0).details().get("refused").asInt()).as("and recorded").isEqualTo(6);
     }
 
     @Test

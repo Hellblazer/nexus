@@ -107,8 +107,9 @@ record now carries to implementation.
   resend floor after a 504.
 - The quarantine and restore sweeps run one SQL function inside one
   `withTenant` transaction under the RDR-191 sweep gate (an advisory lock)
-  and write a `nexus.gc_audit` row in that same transaction. Expire takes no
-  gate, and `quarantine-restore` commits once per quarantine sibling
+  and write a `nexus.gc_audit` row in that same transaction. The unbounded
+  expire takes no gate (the bounded form of Amendment A1 takes the sibling's,
+  7.2), and `quarantine-restore` commits once per quarantine sibling
   (222-research-10, -14).
 - One managed engine instance today (open question 7, answered 2026-10-17).
 
@@ -670,9 +671,9 @@ New function `nexus.gc_expire_quarantine_bounded(dim, p_tenant_id,
 p_quarantine_collection, p_origin_collection, p_cutoff, p_floor_fraction,
 p_floor_min_chunks, p_force, p_row_limit, p_count_refused)` returning
 `TABLE(expired bigint, refused bigint, more boolean, floor_refused boolean)`,
-in a new changeset (next free id at implementation; vectors-034 is the last
-included today, `db.changelog-master.xml:1812`). The unbounded function is not
-touched. "Eligible" below is vectors-026's predicate, unchanged: tagged for
+in changeset `vectors-035-gc-expire-quarantine-bounded.xml` (vectors-034 was
+the last included when this was drafted, `db.changelog-master.xml:1812`). The
+unbounded function is not touched. "Eligible" below is vectors-026's predicate, unchanged: tagged for
 this origin (or untagged), `reaper_owns_quarantined_row IS NOT TRUE`,
 `quarantined_at <= p_cutoff`, and no manifest row in the origin names the
 chash. Body, in order:
@@ -710,8 +711,12 @@ chash. Body, in order:
    narrows the select-to-delete window for a new reference without closing
    it; 7.2 says why that is safe.
 7. `expired` = rows the DELETE returned, one per model row of a chash, as
-   vectors-026 counts. A page holds at most `v_row_limit` distinct chashes, so
-   it can delete more rows than that when a chash is stored under two models.
+   vectors-026 counts. A page holds at most `v_row_limit` distinct chashes.
+   Today a chash has one row in a sibling: `chunks_collection_fk` is
+   `(tenant_id, collection, embedding_model)` (vectors-030:1063), which allows
+   one model per collection. Counting rows and listing the chash once is
+   therefore defensive, for the day that constraint loosens; the test drops the
+   constraint to reach it.
 8. One `gc_audit` row per page that deleted anything: operation
    `gc_expire_quarantine_bounded`, collection = the sibling (the convention
    the ghost sweep relies on, `CatalogRepository.java:10017-10022`),
@@ -754,23 +759,31 @@ because an absent field means the route's defaults (0.5 / 50,
 "floor on the first batch only" convention (`chunk_quarantine.py:509-513`)
 does not carry over.
 
-**Cost per page, and the 25 s bound.** A client page pays the ordered walk of
-step 5 (sibling rows in chash order until `v_row_limit + 1` eligible chashes
-are found) and, on the page that asks for it, the `refused` count; it never
-counts the whole sibling for the floor. The walk re-reads the non-eligible
-rows (protected, not yet past cutoff, engine-owned) below each page's last
-victim, so a drain costs pages times that population, not pages times the
-sibling. The chunks primary key `(tenant_id, collection, chash,
-embedding_model)` (vectors-030:677) serves the order per leaf, merged across
-model partitions; `EXPLAIN` on the largest live sibling is the 1a measurement,
-not assumed. If one page's walk or `refused` count cannot finish inside 25 s,
-a smaller `row_limit` does not help (the cost is the rows walked past, not the
-rows deleted): every page fails 57014 and rolls back, the loop stops loud
+**Cost per page, and the 25 s bound.** A client page pays the victim walk of
+step 5 and, on a page that asks for it (or runs the floor scan), the
+`refused` count; it never counts the whole sibling for the floor unless the
+caller sent a floor. Measured in Phase 1a (2026-10-21, a PITR fork of
+production, read only, torn down): the largest live sibling is
+`quarantine-code__1-27` with 81 rows (the next 33, 22, 13, 9) against an origin
+manifest of 3,570 rows; the walk took 4.77 ms cold and 2.37 ms warm and the
+`refused` count 2.1 ms, about 7 ms together against the 5 s bar. The plan
+sorts the whole eligible set, so `LIMIT` does not cut the scan, and the
+manifest probe uses `idx_catalog_chunks_chash` `(tenant_id, chash)` and
+filters on collection. A page therefore costs the sibling's eligible rows and
+a drain costs pages times that, not an early-stopping ordered walk over the
+chunks primary key `(tenant_id, collection, chash, embedding_model)` as first
+assumed. Linear extrapolation at about 0.026 ms per sibling row (warm): 10k
+rows about 0.5 s for walk plus count, 100k rows about 5 s (at the bar), cold
+about twice that. If one page's walk or `refused` count cannot finish inside
+25 s, a smaller `row_limit` does not help (the cost is the rows scanned, not
+the rows deleted): every page fails 57014 and rolls back, the loop stops loud
 (7.5) and nothing is deleted, which is where an unbounded expiry too large for
-the edge stands today. The fallback is an expression index serving the
-eligible predicate, `(tenant_id, collection, (metadata->>'quarantined_at'))`,
-with victims selected in that order, in a changeset of its own. The 1a
-measurement decides before any code whether it ships with 1a.
+the edge stands today. The index to add when a sibling approaches 10^5 rows is
+`(tenant_id, collection, chash)` on `catalog_document_chunks` (bead
+nexus-hu0pw): it serves this manifest probe and the unbounded form's anti-join,
+and chash-ordered selection would then let `LIMIT` stop early. It is a
+follow-up, not part of Phase 1a. The `quarantined_at` expression index this
+paragraph first proposed is not what the measurement points at.
 
 ##### 7.2 Statement bound and sweep gate
 
@@ -871,14 +884,22 @@ Request: today's fields plus optional `row_limit` and `count_refused`
 (boolean, default true, so a single hand call answers `refused` as the
 unbounded form does). Without `row_limit` the route is the unbounded form,
 byte-identical to today (`{"expired", "refused"}`); with it, `row_limit` must
-be a positive integer (400 otherwise). Response of the bounded form:
+be an integral number from 1 to 2,147,483,647 (400 otherwise: zero, negative,
+fractional, past the int range, or not a number; the same parse as the other
+two sweep routes), and a value above 5,000 is clamped. Response of the bounded
+form:
 
 ```json
 {"expired": N, "refused": M, "more": true, "row_limit": L, "floor_refused": false}
 ```
 
 `expired` is this page's rows. `refused` describes the sibling as of this page
-and is `null` when not counted. `more` says the page found eligible chashes
+and is `null` only when neither the floor scan nor `count_refused` counted it.
+Under the route's default floor (0.5 / 50, the unbounded form's) the floor scan
+runs on every page and counts the protected rows as a by-product, so `refused`
+is a number even with `count_refused` false; a caller that sends the inert floor
+(fraction 1.0, as both released callers do) sees `null` exactly when
+`count_refused` is false. `more` says the page found eligible chashes
 past its own; it is not a count. `row_limit` is the clamped value. A caller
 sums `expired` and takes `refused` from the first page that carries it.
 
@@ -1088,15 +1109,17 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
   no pinned pairing meets v0.1.161. Choreography (a) applies: deploy the
   engine before the client tag.
 - **Bounded expire (Amendment A1).** `POST /v1/vectors/gc/expire-quarantine`
-  gains optional `row_limit` (positive integer; 400 otherwise) and
-  `count_refused`; with `row_limit` the response adds `more`, `row_limit`
-  (as clamped, at most 5,000) and `floor_refused`, `refused` may be `null`,
+  gains optional `row_limit` (an integral number, 1 to 2,147,483,647; 400
+  otherwise) and `count_refused`; with `row_limit` the response adds `more`,
+  `row_limit` (as clamped, at most 5,000) and `floor_refused`, and `refused`
+  is `null` only when neither the floor scan nor `count_refused` counted it,
   an `Idempotency-Key` is accepted, and the keyed form can answer 503
   `sweep_gate_busy`. Without `row_limit` the route is byte-identical and a
   key on it is 400 `idempotency_key_unsupported`. `[additive]` both
-  directions (Technical Design 7.6). The engine entry is in
-  `docs/wire-contract-pending.md` under `## Unshipped`, with the client
-  entry beside it.
+  directions (Technical Design 7.6). The engine entry is added to
+  `docs/wire-contract-pending.md` under `## Unshipped` with the push, once its
+  sha is published (`test_cited_commit_shas_resolve` resolves cited shas), with
+  the client entry beside it.
 - **Run fence.** OLD client + NEW engine: no `doc_id`/`run_id`, no check, today's
   merge. NEW client + OLD engine: the fields are ignored by the schemaless body
   map; `stale_run` is absent and the client treats absence as "not stale".
@@ -1340,11 +1363,14 @@ is never refused.
 - Measure first, on a PITR fork, never production: read-only
   `EXPLAIN (ANALYZE)` of one page's victim walk at `row_limit` 2,000 and of
   the `refused` count against the largest live client sibling. Under 5 s
-  together (a fifth of the bound): proceed with the PK order and keep the
-  2,000 default. Over it: add the `quarantined_at` expression index changeset
-  and select in that order (Technical Design 7.1); a lower `row_limit` is not
-  the remedy.
-- Changeset: `nexus.gc_expire_quarantine_bounded` (Technical Design 7.1-7.2),
+  together (a fifth of the bound): proceed and keep the 2,000 default. Over
+  it: add an index changeset (Technical Design 7.1); a lower `row_limit` is
+  not the remedy. **Done 2026-10-21:** largest live sibling 81 rows, walk plus
+  count about 7 ms, so the function ships with no new index and the 2,000
+  default; the plan sorts the whole eligible set, about 5 s at 100k sibling
+  rows by linear extrapolation, and the follow-up index is nexus-hu0pw
+  (Technical Design 7.1).
+- Changeset `vectors-035`: `nexus.gc_expire_quarantine_bounded` (Technical Design 7.1-7.2),
   `GRANT EXECUTE ... TO nexus_svc` in the changeset as catalog-042 does for
   the bounded restore (`catalog-042-gc-restore-rereferenced-bounded.xml:300`);
   rollback drops it. DDL only, no row DML, so not in the rehearsal seed set;
@@ -1368,6 +1394,8 @@ is never refused.
   entry per half in `docs/wire-contract-pending.md` (bead nexus-1579m, engine
   tag engine-service-v0.1.162, `[additive]` with old-client and new-engine
   direction prose, as `tests/test_wire_contract_pairing_lint.py` requires).
+  The engine entry is added with the push, once the engine commit's sha is
+  published (`test_cited_commit_shas_resolve`); the client entry is already in.
 - Housekeeping found in the confirmation pass: the
   `afterSweepSqlHookForTests` javadoc in `PgVectorRepository` (`:253-259`) lists three
   methods and gains `expireQuarantineBounded`; the `expire_quarantine_across_serverside`
@@ -1479,10 +1507,12 @@ Java, SQL function (`GcExpireQuarantineBoundedTest`, real Postgres):
   window, since it runs after the function returns.
 - `row_limit <= 0` raises `invalid_parameter_value`; 6,000 is clamped to
   5,000 and the audit row lists every chash it deleted.
-- A chash stored under two models: `expired` counts both rows, the audit row
-  lists the chash once, `details.rows` is 2.
-- `count_refused` false answers `refused` NULL; true answers the protected
-  count; a fraction of 1.0 or `force` gives the same `expired` and `refused`
+- A chash stored under two models (a state `chunks_collection_fk` does not
+  allow, reached with the constraint dropped; a defensive check): `expired`
+  counts both rows, the audit row lists the chash once, `details.rows` is 2.
+- `count_refused` false answers `refused` NULL under the inert floor, and the
+  protected count under the route's default floor (0.5 / 50), where the floor
+  scan counts it; true answers the protected count; a fraction of 1.0 or `force` gives the same `expired` and `refused`
   as the unbounded function on the same data.
 - Floor (fraction below 1): a first page over the floor returns
   `floor_refused = true`, `expired = 0`, deletes nothing, writes no audit row;
@@ -1501,8 +1531,9 @@ Java, route and ledger (`VectorHandlerRowLimitRoutingTest`, `KeyedSweepRouteTest
 
 - A `count_refused=false` page answers `"refused": null`, stores that body in
   the ledger and replays it unchanged (status poll and `Idempotency-Replayed`).
-- `row_limit` absent answers exactly `{"expired","refused"}`; 0, negative or a
-  string is 400; 6,000 answers `row_limit: 5000`; a key without `row_limit`
+- `row_limit` absent answers exactly `{"expired","refused"}`; 0, negative, a
+  string, 1.5 and 4294967297 are 400 (the last two on every route that shares
+  the parse: quarantine-orphans, restore-rereferenced, expire-quarantine); 6,000 answers `row_limit: 5000`; a key without `row_limit`
   is 400 `idempotency_key_unsupported`.
 - `KeyedRoutesCensusTest` fails until `EXPIRE_ROUTE` is in `KEYED_ROUTES`
   (the handler calls `keyedRequest`).

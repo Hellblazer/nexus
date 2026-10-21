@@ -90,6 +90,7 @@ class PlpgsqlCheckGateTest {
 
     static PostgreSQLContainer<?> pg;
     static List<PlpgsqlCheck.Finding> findings;
+    static java.util.Set<String> scanned;
     static long buildMillis;
 
     /** What the plpgsql_check image adds to the product's Postgres image. */
@@ -181,6 +182,7 @@ class PlpgsqlCheckGateTest {
             su.setAutoCommit(true);
             PgContainerHelper.createPlpgsqlCheckExtension(su);
             findings = PlpgsqlCheck.findFindings(su, List.of("nexus"));
+            scanned = PlpgsqlCheck.scannedRoutines(su, List.of("nexus"));
         }
     }
 
@@ -244,10 +246,23 @@ class PlpgsqlCheckGateTest {
      */
     @Test
     void gcExpireQuarantineBounded_hasNoFindingAtAnyLevel() throws Exception {
-        var mine = findings.stream().filter(f -> f.function().equals("gc_expire_quarantine_bounded"))
+        // Non-vacuity: "no finding" says nothing about a function the scan never reached (a rename, a changed
+        // selection). The control is that the function is in the scanned set; it is red with the name misspelt.
+        assertThat(scanned).as("the scan examined the function (positive control)").contains("nexus." + GC_EXPIRE_BOUNDED);
+        var mine = findings.stream().filter(f -> f.function().equals(GC_EXPIRE_BOUNDED))
             .map(PlpgsqlCheck.Finding::describe).toList();
         assertThat(mine).as("plpgsql_check findings in nexus.gc_expire_quarantine_bounded (all_warnings on)").isEmpty();
     }
+
+    @Test
+    void theScannedSetCoversEveryFindingTheAnalyserReported() {
+        // The scanned-set query is a typed copy of the findings query's selection; a finding for a routine it
+        // misses means the copy has drifted and its positive controls mean less than they say.
+        var withFindings = findings.stream().map(f -> f.schema() + "." + f.function()).collect(Collectors.toCollection(TreeSet::new));
+        assertThat(scanned).as("scanned set").isNotEmpty().containsAll(withFindings);
+    }
+
+    static final String GC_EXPIRE_BOUNDED = "gc_expire_quarantine_bounded";
 
     @Test
     void everyOtherLivePlpgsqlRoutineInNexus_hasNoFindingAtLevelError() throws Exception {
