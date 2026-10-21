@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
+import liquibase.Scope;
 import liquibase.changelog.ChangeSet;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
@@ -12,6 +13,7 @@ import liquibase.lockservice.DatabaseChangeLogLock;
 import liquibase.lockservice.LockService;
 import liquibase.lockservice.LockServiceFactory;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import liquibase.ui.LoggerUIService;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record4;
@@ -184,6 +186,17 @@ public final class SchemaMigrator {
 
     /** Classpath location of the master changelog bundled in the service jar. */
     static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
+
+    /**
+     * nexus-64kwn: set to {@value #UI_LOGGER} to send Liquibase's UI messages ("Running Changeset: ...",
+     * one per changeset) to its logger instead of stdout. Only the surefire test forks set it: every test
+     * class that migrates printed the whole changelog, about 75,000 lines per Service CI run. The engine
+     * never sets it, because its readiness probe reads "Running Changeset" from the engine console
+     * (tests/daemon/test_readiness.py). Test classes that call Liquibase themselves are covered by the
+     * test-only LiquibaseLoggerUiSession, which reads the same property.
+     */
+    static final String UI_PROPERTY = "nexus.liquibase.ui";
+    static final String UI_LOGGER = "logger";
 
     private SchemaMigrator() { /* static utility */ }
 
@@ -613,7 +626,7 @@ public final class SchemaMigrator {
                     orderExecutedWatermark = null;
                 }
 
-                liquibase.update(new Contexts(), new LabelExpression());
+                update(liquibase);
                 afterUpdateHook.run();
                 repairPartitionAccessDrift(conn);
                 // nexus-s9wav: the operator-visible outcome of vectors-034-2 (a skipped leaf, a leaf with
@@ -698,6 +711,26 @@ public final class SchemaMigrator {
             throw new MigrationException("Failed to obtain DB connection for migration", e);
         } catch (LiquibaseException e) {
             throw new MigrationException("Liquibase migration failed", e);
+        }
+    }
+
+    /**
+     * Runs the walk, under a {@link LoggerUIService} scope when {@link #UI_PROPERTY} asks for one.
+     * Liquibase's root scope is per thread and always binds a ConsoleUIService, so a child scope
+     * around the call is the only place the UI can be swapped for every caller of migrate().
+     */
+    private static void update(Liquibase liquibase) throws LiquibaseException {
+        if (!UI_LOGGER.equals(System.getProperty(UI_PROPERTY))) {
+            liquibase.update(new Contexts(), new LabelExpression());
+            return;
+        }
+        try {
+            Scope.child(Scope.Attr.ui, new LoggerUIService(),
+                    () -> liquibase.update(new Contexts(), new LabelExpression()));
+        } catch (LiquibaseException | RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LiquibaseException(e);
         }
     }
 

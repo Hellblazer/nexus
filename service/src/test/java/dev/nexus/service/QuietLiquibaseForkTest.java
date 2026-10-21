@@ -2,6 +2,7 @@
 package dev.nexus.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import java.util.logging.Level;
@@ -28,5 +29,13 @@ class QuietLiquibaseForkTest {
     @Test
     void liquibaseUpdateSummaryIsOff() {
         assertEquals("OFF", System.getProperty("liquibase.command.showSummary"));
+    }
+
+    /** nexus-64kwn: the per-changeset console lines go to Liquibase's logger in the forks. */
+    @Test
+    void liquibaseUiGoesToTheLogger() {
+        assertEquals("logger", System.getProperty("nexus.liquibase.ui"));
+        // LiquibaseLoggerUiSession: a test's own Liquibase.update on this thread inherits this UI.
+        assertInstanceOf(liquibase.ui.LoggerUIService.class, liquibase.Scope.getCurrentScope().getUI());
     }
 }

@@ -215,6 +215,14 @@
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- nexus-64kwn: compiles LiquibaseLoggerUiSession, a LauncherSessionListener. Surefire puts the
+             launcher on the fork classpath anyway; this pins it to the Jupiter release above. -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>1.11.4</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
@@ -436,6 +444,11 @@
                              stdout through its UI service; every test class that migrates
                              prints one. Test forks only: the engine's console keeps it. -->
                         <liquibase.command.showSummary>OFF</liquibase.command.showSummary>
+                        <!-- nexus-64kwn: the per-changeset "Running Changeset" lines go to Liquibase's
+                             logger (quieted to WARNING by the argLine's JUL file) instead of stdout,
+                             about 75,000 lines per run. See SchemaMigrator.UI_PROPERTY; the engine's
+                             console keeps the lines. -->
+                        <nexus.liquibase.ui>logger</nexus.liquibase.ui>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

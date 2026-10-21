@@ -222,6 +222,21 @@ def test_the_surefire_forks_turn_the_liquibase_update_summary_off() -> None:
     assert props.findtext("m:liquibase.command.showSummary", namespaces=_NS) == "OFF"
 
 
+def test_the_surefire_forks_send_liquibase_ui_messages_to_its_logger() -> None:
+    """nexus-64kwn: the per-changeset 'Running Changeset' lines, about 75,000 per run."""
+    props = _surefire_config().find("m:systemPropertyVariables", _NS)
+    assert props is not None
+    assert props.findtext("m:nexus.liquibase.ui", namespaces=_NS) == "logger"
+    migrator = (_ROOT / "service/src/main/java/dev/nexus/service/db/SchemaMigrator.java").read_text(encoding="utf-8")
+    assert 'UI_PROPERTY = "nexus.liquibase.ui"' in migrator and 'UI_LOGGER = "logger"' in migrator
+    # A test's own Liquibase.update on the fork's test thread is covered by a session listener,
+    # registered on the TEST classpath only.
+    services = "META-INF/services/org.junit.platform.launcher.LauncherSessionListener"
+    registered = (_ROOT / "service/src/test/resources" / services).read_text(encoding="utf-8").split()
+    assert "dev.nexus.service.db.LiquibaseLoggerUiSession" in registered
+    assert not (_ROOT / "service/src/main/resources" / services).exists()
+
+
 def test_quiet_liquibase_never_reaches_the_production_engine() -> None:
     """tests/daemon/test_readiness.py parses 'Running Changeset' from the engine console."""
     pom = _POM.read_text(encoding="utf-8")
@@ -235,6 +250,7 @@ def test_quiet_liquibase_never_reaches_the_production_engine() -> None:
     setters = [
         e for e in root.iter()
         if e.tag.endswith("}liquibase.command.showSummary")
+        or e.tag.endswith("}nexus.liquibase.ui")
         or (e.tag.endswith("}argLine") and "java.util.logging.config.file" in (e.text or ""))
     ]
     assert setters, "the quiet-Liquibase settings must exist in the surefire block"
@@ -247,3 +263,9 @@ def test_quiet_liquibase_never_reaches_the_production_engine() -> None:
         and "java.util.logging.config.file" in p.read_text(encoding="utf-8", errors="ignore")
     ]
     assert main_hits == [], f"production code must not set the JUL config file: {main_hits}"
+    ui_hits = [
+        p.name for p in (_ROOT / "service" / "src" / "main").rglob("*")
+        if p.is_file() and p.suffix in {".java", ".xml", ".properties", ".json"}
+        and "nexus.liquibase.ui" in p.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert ui_hits == ["SchemaMigrator.java"], f"only SchemaMigrator may name the UI property: {ui_hits}"
