@@ -31,14 +31,32 @@ SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-smoke.XXXXXX") \
   || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }
 export SMOKE_TMP
 
+# nexus-ub4ge: bounded docker and psql calls. GNU timeout on Linux runners; gtimeout from
+# Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs unbounded as before.
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
 OWN_PG=0
 if [ -z "${NX_DB_URL:-}" ]; then
   OWN_PG=1
+  # nexus-ub4ge: a per-run container name, so this run's `docker rm -f` can never remove a
+  # concurrent smoke's database (the fixed name lp2qo-smoke-pg could), published on loopback
+  # only (its password is nexus:nexus).
+  PGNAME="nx-smoke-pg-$$-${RANDOM}"
   PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
-  docker rm -f lp2qo-smoke-pg >/dev/null 2>&1 || true
-  docker run -d --name lp2qo-smoke-pg -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
-    -e POSTGRES_PASSWORD=nexus -p ${PGPORT}:5432 pgvector/pgvector:pg17 >/dev/null
-  until docker exec lp2qo-smoke-pg pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
+  _bounded 600 docker run -d --name "$PGNAME" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+    -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGPORT}:5432" pgvector/pgvector:pg17 >/dev/null \
+    || { echo "FAIL: could not start the throwaway pgvector container $PGNAME"; exit 2; }
+  PG_UP=0
+  for _ in $(seq 1 90); do
+    _bounded 10 docker exec "$PGNAME" pg_isready -U nexus >/dev/null 2>&1 && { PG_UP=1; break; }
+    sleep 1
+  done
+  [ "$PG_UP" = "1" ] || { echo "FAIL: throwaway pgvector $PGNAME not ready after 90 s"; docker rm -f "$PGNAME" >/dev/null 2>&1; exit 2; }
   sleep 2
   export NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/nexus"
   export NX_DB_USER=nexus NX_DB_PASS=nexus
@@ -74,7 +92,7 @@ NATIVE_SMOKE_CLEANUP_ROWS=0
 cleanup() {
   local rc=$?
   [ -n "${SVCPID:-}" ] && kill "$SVCPID" 2>/dev/null
-  [ "$OWN_PG" = "1" ] && docker rm -f lp2qo-smoke-pg >/dev/null 2>&1
+  [ "$OWN_PG" = "1" ] && _bounded 60 docker rm -f "$PGNAME" >/dev/null 2>&1
   # nexus-rxqqd review follow-up (code-review-expert): the real-Python-client
   # blocks below create their own mktemp -d NEXUS_CONFIG_DIR isolation dirs
   # and rm -rf them on their own normal-path exit, but a Ctrl-C (or any other
@@ -748,7 +766,7 @@ kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null
 if [ "$OWN_PG" != "1" ]; then
   echo "  skip   voyage-mode phase (external NX_DB_URL — needs a clean DB)"
 else
-  docker exec lp2qo-smoke-pg psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
+  _bounded 60 docker exec "$PGNAME" psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
   DEADPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
   # RDR-210 P2.1: a keyed engine that finds the bge model files boots `dual`, so this
   # cloud-shape boot points the model directory at an EMPTY one: it is the Voyage-only
@@ -791,7 +809,7 @@ fi  # end voyage-mode phase (OWN_PG)
 echo "boot shapes (cloud shape + the two failure boots):"
 [ -n "${SVCPID:-}" ] && { kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null; SVCPID=""; }
 if [ "$OWN_PG" = "1" ]; then
-  BOOT_SHAPES_PG_CONTAINER=lp2qo-smoke-pg BOOT_SHAPES_PG_PORT="$PGPORT" BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
+  BOOT_SHAPES_PG_CONTAINER="$PGNAME" BOOT_SHAPES_PG_PORT="$PGPORT" BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
 else
   BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
 fi

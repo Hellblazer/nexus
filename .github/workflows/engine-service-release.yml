@@ -453,6 +453,10 @@ jobs:
         # Needs Docker: linux-{amd64,arm64} always have it; mac-arm64 has it too
         # when running on hellmini (colima), but not on the macos-14 fallback —
         # matrix.target.smoke is false there (nexus-yd9po).
+        # nexus-ub4ge: the boot-shapes phase exits 3 instead of skipping if an
+        # NX_DB_URL ever reaches this step, so it cannot pass silently.
+        env:
+          NATIVE_SMOKE_REQUIRE_SHAPES: "1"
         run: ./native-smoke.sh
 
       - name: Developer ID codesign (mac-arm64; nexus-27i0m)
@@ -874,6 +878,9 @@ jobs:
 
       - name: Native smoke test (boot against throwaway pgvector)
         working-directory: service
+        # nexus-ub4ge: see the build leg's smoke step.
+        env:
+          NATIVE_SMOKE_REQUIRE_SHAPES: "1"
         run: ./native-smoke.sh
 
   # RDR-161 P2 (nexus-9yt2p): publish the relocatable PostgreSQL+pgvector bundle
