@@ -54,6 +54,8 @@ making a killed battery reap its own clusters.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from tests._xdist_cap import (
@@ -253,6 +255,21 @@ class TestMemoryCap:
         assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[1] is None
         assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 6
 
+    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 4)])
+    def test_cap_per_mac_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
+
+    def test_the_clamp_note_names_tmpfs_only_on_linux(self) -> None:
+        # nexus-pnyfq: macOS lab grants carry LAB_MEM_MB, but their clusters are not on tmpfs.
+        from tests._xdist_cap import memory_clamp_note
+
+        linux = memory_clamp_note(requested=8, cap=6, platform="linux")
+        mac = memory_clamp_note(requested=8, cap=4, platform="darwin")
+        assert "tmpfs" in linux and "8 -> 6" in linux
+        assert "tmpfs" not in mac and "no cgroups" in mac and "8 -> 4" in mac
+
     def test_never_below_one(self) -> None:
         from tests._xdist_cap import cap_from_memory
 
@@ -321,7 +338,9 @@ class TestMemoryCap:
         _clamp_xdist_workers(cfg)
         assert cfg.option.numprocesses == 6
         out = capsys.readouterr().out
-        assert "8 -> 6" in out and "NX_XDIST_NO_CAP" in out and "tmpfs" in out
+        assert "8 -> 6" in out and "NX_XDIST_NO_CAP" in out
+        # nexus-pnyfq: the tmpfs explanation is Linux's; a macOS grant has no tmpfs clusters.
+        assert ("tmpfs" in out) == sys.platform.startswith("linux"), out
 
     def test_conftest_leaves_a_request_within_the_memory_cap(
         self, monkeypatch: pytest.MonkeyPatch,

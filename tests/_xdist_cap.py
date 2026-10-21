@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 
 #: Measured, not assumed (2026-09-12, 16-core macOS box): one Postgres cluster
@@ -237,7 +238,10 @@ def effective_cap() -> int | None:
 #: 48 GiB) and lab-m runs 6 (15 of 16 GiB) instead of 8 (14.5 of 16 GB, no room).
 #: Without this a grant fills as workers grow, the run used to fall back to disk
 #: for later clusters (3.9 GB written in 4 minutes); the session now never does,
-#: so the worker count has to keep the grant from filling.
+#: so the worker count has to keep the grant from filling. Per class, from the
+#: grant alone: lab-s (4 GiB) 1, lab-m (16) 6, lab-6c18g (18) 7, lab-l (48) 19
+#: (its 16 cores bind first), lab-xl (96) 38; on hellmini lab-mac-s (4) 1 and
+#: lab-mac-m (10) 4 (nexus-pnyfq).
 BYTES_PER_WORKER = 2560 * 1024**2
 
 
@@ -282,12 +286,17 @@ def effective_memory_cap() -> int | None:
     return None if grant is None else cap_from_memory(grant_bytes=grant)
 
 
-def memory_clamp_note(*, requested: int, cap: int) -> str:
-    return (
-        f"xdist workers clamped {requested} -> {cap}: this run's memory grant "
-        f"fits {cap} workers at {BYTES_PER_WORKER // 1024**2} MiB each (engine "
-        f"JVM + Postgres cluster + its tmpfs pages). The run keeps every cluster on "
-        f"the tmpfs it chose at the start rather than spilling to disk, so the "
-        f"workers must fit the grant (nexus-vo9qn). Set {NO_CAP_ENV}=1 to run "
-        f"uncapped."
-    )
+def memory_clamp_note(*, requested: int, cap: int, platform: str = sys.platform) -> str:
+    head = (f"xdist workers clamped {requested} -> {cap}: this run's memory grant "
+            f"fits {cap} workers at {BYTES_PER_WORKER // 1024**2} MiB each ")
+    if platform.startswith("linux"):
+        why = ("(engine JVM + Postgres cluster + its tmpfs pages). The run keeps every cluster on "
+               "the tmpfs it chose at the start rather than spilling to disk, so the "
+               "workers must fit the grant (nexus-vo9qn). ")
+    else:
+        # nexus-pnyfq: a macOS lab grant (lab-mac-s/-m) carries LAB_MEM_MB but no cgroup and
+        # no tmpfs clusters: the clamp keeps the run inside what lab-run booked.
+        why = ("(engine JVM + Postgres cluster). This platform has no cgroups, so the grant is "
+               "admission and accounting only; the clamp keeps the run inside what lab-run booked. ")
+    return f"{head}{why}Set {NO_CAP_ENV}=1 to run uncapped."
+

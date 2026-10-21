@@ -928,6 +928,12 @@ jobs:
         # and keeps this one as the original tempdir (crash reports, the kept
         # nx-* reports and a failed run's evidence land under it). When a gate
         # refuses, the summary line says why and this directory is used as is.
+        # The Postgres clusters follow the same rule (tests/_engine_substrate.py,
+        # nexus-vo9qn): the run decides tmpfs or disk ONCE from the grant's cgroup
+        # headroom (3 GiB), and a run that chose tmpfs keeps every cluster on
+        # /dev/shm, charged to the 18 GB cap. A later cluster start under 512 MiB of
+        # headroom waits 45 s and then fails with SubstrateRootExhausted rather than
+        # spilling to disk (measured shard peak 13.7 GB, about 4.7 GB of margin).
         env:
           UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
           # With the shared venv uv must not sync: the shared packages are invisible to its scan
