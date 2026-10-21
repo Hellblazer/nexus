@@ -90,7 +90,8 @@ of every shard of a run, is checked against ``tests/storage_touch_ceiling.toml``
 ``python -m tests._storage_touch_fan_in <dir> --suite <name> --shards <N>`` (stdlib only: CI
 runs it on a runner with no pytest). One
 session never gates: it sees only its file neighbourhood of the suite, so its
-``provisioned_per_test`` is printed as advice. No CI leg runs the fan-in yet.
+``provisioned_per_test`` is printed as advice. pytest-gate runs the fan-in over the CI shards' reports,
+and the shards export ``NX_STORAGE_TOUCH_SWEEP=1``, so each one gates on the whole-run checks.
 
 The guard is active under the default substrate and ``optin``; under ``none`` and
 ``per-test`` it installs nothing and records nothing. Two things are unconditional:
