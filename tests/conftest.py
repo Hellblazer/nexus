@@ -2185,8 +2185,9 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     `test_mode_declarations_are_explicit`'s own body. By the time a test's
     body executes, `_pytest/runner.py`'s `pytest_runtest_setup` has ALREADY
     called `item.setup()`, which resolves every fixture the item depends
-    on -- including the autouse `_pin_t2_substrate` fixture, which boots
-    the engine substrate for EVERY test unless `NX_TEST_T2_SUBSTRATE=none`.
+    on -- including the autouse `_pin_t2_substrate` fixture, which (before
+    the nexus-j23ni opt-in flip) booted the engine substrate for EVERY test
+    unless `NX_TEST_T2_SUBSTRATE=none`.
     Locally this was invisible (the box happily absorbed a second engine
     boot from the subprocess probe's nested pytest invocation); under a
     REAL `--splits`/`--group` CI shard, the nested invocation's engine boot

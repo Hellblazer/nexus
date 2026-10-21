@@ -5,8 +5,6 @@ Not collected by the suite (the file name matches no ``python_files`` pattern):
 the end-to-end test passes this path to a child pytest that runs under
 ``NX_TEST_T2_SUBSTRATE=optin`` (the default substrate) with THIS repo's real
 ``tests/conftest.py``, so the cases assert the opt-in fixtures' real behaviour.
-Under ``per-test`` the "unprovisioned" cases would fail by design: every test
-has a tenant there.
 """
 import os
 

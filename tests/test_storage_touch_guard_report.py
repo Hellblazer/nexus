@@ -476,7 +476,7 @@ def test_an_internal_error_is_counted_and_swallowed(pytester, monkeypatch) -> No
 
     monkeypatch.setattr(g, "_short_stack", boom)
     monkeypatch.setattr(g, "_peek_consumer", boom)
-    # the outer test may carry its own tenant (under per-test), which makes the peek read both variables
+    # the outer test may carry its own tenant (a t2_tenant test), which makes the peek read both variables
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     result = _run(pytester, monkeypatch, '''
