@@ -2044,7 +2044,8 @@ _SWEEP_GATE_BUSY_DEFAULT_WAIT_S = 5.0
 #: 503 errors that mean the request did not run and the same key may be resent after ``Retry-After``,
 #: mapped to the wait used when the header is absent: the ledger's claim loop was contended
 #: (``request_claim_contended``, ``Retry-After: 1``), on any keyed form; and, on the two quarantine
-#: forms only (restore takes no sweep gate), the sweep gate was busy (``sweep_gate_busy``).
+#: forms and the bounded expire only (restore takes no sweep gate), the sweep gate was busy
+#: (``sweep_gate_busy``).
 _CLAIM_CONTENDED_DEFAULT_WAIT_S = 1.0
 _NOT_RUN_503_DEFAULT_WAIT_S: dict[str, float] = {
     "request_claim_contended": _CLAIM_CONTENDED_DEFAULT_WAIT_S,
@@ -2192,7 +2193,8 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
     keys the request on the SHA-256 of the raw body, so a resend must be byte-identical; the same dict
     serialises to the same bytes). The key is set around each POST attempt only
     (:func:`_request_key`), so the status polls between attempts carry none. *gate_busy* is true for
-    the two quarantine forms, the only ones that can meet the sweep gate.
+    the two quarantine forms and the bounded expire (Amendment A1), the only ones that can meet the sweep
+    gate.
 
     * A 2xx is the result (a replay included).
     * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
@@ -4664,6 +4666,47 @@ class HttpVectorClient:
                 "force": force,
             },
             tenant=self._tenant,
+        )
+
+    def gc_expire_quarantine_bounded(
+        self, quarantine_collection: str, origin_collection: str, cutoff: str,
+        floor_fraction: float, floor_min_chunks: int, force: bool, row_limit: int,
+        *, count_refused: bool = True,
+    ) -> dict:
+        """POST /v1/vectors/gc/expire-quarantine with ``row_limit`` (RDR-222 Amendment A1, nexus-1579m):
+        the bounded form of :meth:`gc_expire_quarantine`, selected by the same additive per-route toggle
+        as :meth:`gc_restore_rereferenced_bounded`.
+
+        Returns ``{"expired": N, "refused": M | None, "more": bool, "row_limit": L,
+        "floor_refused": bool}`` from an engine that has the bounded form. ``expired`` is this page's
+        rows, ``refused`` describes the sibling as of this page and is ``None`` when ``count_refused``
+        was false, and ``more`` says the page found eligible chashes past its own. An engine that
+        predates the ledger ignores the key and ``row_limit`` and runs the UNBOUNDED expire, answering
+        ``{"expired": N, "refused": M}``: callers detect that by the absent ``more`` key, never by
+        inferring engine version. An engine that has the ledger but not this form answers 400
+        ``idempotency_key_unsupported``, which is raised as :class:`IdempotencyKeyRefusedError` and
+        never resent (no keyless resend: a refused key is a stop).
+
+        One call is one keyed page (a fresh uuid4 ``Idempotency-Key`` minted here, resolved through the
+        ledger on an ambiguous outcome exactly as :meth:`gc_quarantine_orphans_bounded` is); a drain is
+        a loop of these (:func:`nexus.catalog.chunk_quarantine.expire_quarantine_bounded_serverside`).
+        The engine takes the sweep gate for this form, so a 503 ``sweep_gate_busy`` waits ``Retry-After``
+        and resends. The unbounded :meth:`gc_expire_quarantine` stays for hand use and as the capability
+        fallback.
+        """
+        return _keyed_sweep_post(
+            "/v1/vectors/gc/expire-quarantine",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "cutoff": cutoff,
+                "floor_fraction": floor_fraction,
+                "floor_min_chunks": floor_min_chunks,
+                "force": force,
+                "row_limit": row_limit,
+                "count_refused": count_refused,
+            },
+            tenant=self._tenant, gate_busy=True,
         )
 
     def gc_quarantine_restore(

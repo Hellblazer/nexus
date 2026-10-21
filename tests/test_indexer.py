@@ -1103,7 +1103,7 @@ def test_prune_collection_serverside_never_registers_the_quarantine_sibling(
     calls: list[str] = []
     monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: calls.append("restore") or 0)
     monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: calls.append("quarantine") or (0, []))
-    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: calls.append("expire") or (0, 0))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: calls.append("expire") or (0, 0, True))
 
     origin = "code__nexus-1-1__voyage-code-3__v1"
     qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
@@ -1127,7 +1127,7 @@ def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quara
 
     monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: 3)
     monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: (0, []))
-    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0, True))
 
     origin = "code__nexus-1-1__voyage-code-3__v1"
     qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"

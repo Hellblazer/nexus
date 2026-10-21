@@ -34,6 +34,7 @@ from tests.db import _scripted_vector_server as sv
 
 _QUARANTINE = "/v1/vectors/gc/quarantine-orphans"
 _RESTORE = "/v1/vectors/gc/restore-rereferenced"
+_EXPIRE = "/v1/vectors/gc/expire-quarantine"
 _STATUS = "/v1/requests/"
 _KEY = "idempotency-key"
 _QUARANTINED_AT = "2026-10-20T00:00:00Z"
@@ -57,14 +58,23 @@ _FORMS = {
         lambda c: c.gc_restore_rereferenced_bounded("col__q", "col", 100),
         False,
     ),
+    # RDR-222 Amendment A1 (nexus-1579m): the bounded expire shares the quarantine forms' sweep gate.
+    "expire": (
+        _EXPIRE,
+        lambda c: c.gc_expire_quarantine_bounded("col__q", "col", _QUARANTINED_AT, 1.0, 100, False, 100),
+        True,
+    ),
 }
 _QUARANTINE_FORMS = [n for n, f in _FORMS.items() if f[2]]
 _STORED = {"moved": 7, "sample": [{"chash": "ab"}], "remaining": 0, "row_limit": 100}
 _RESTORE_STORED = {"restored": 7, "remaining": 0, "row_limit": 100}
 
 
+_EXPIRE_STORED = {"expired": 7, "refused": 2, "more": False, "row_limit": 100, "floor_refused": False}
+
+
 def _stored(form: str) -> dict:
-    return _RESTORE_STORED if form == "restore" else _STORED
+    return {"restore": _RESTORE_STORED, "expire": _EXPIRE_STORED}.get(form, _STORED)
 
 
 class FakeClock:
@@ -492,6 +502,11 @@ _PRE_CHANGE_BODIES = {
         "force": False,
     },
     "restore": {"quarantine_collection": "col__q", "origin_collection": "col", "row_limit": 100},
+    "expire": {
+        "quarantine_collection": "col__q", "origin_collection": "col", "cutoff": _QUARANTINED_AT,
+        "floor_fraction": 1.0, "floor_min_chunks": 100, "force": False, "row_limit": 100,
+        "count_refused": True,
+    },
 }
 
 
@@ -716,3 +731,96 @@ def test_each_batch_of_the_restore_drain_carries_its_own_key(srv, client, clock)
     assert cq.restore_rereferenced_bounded_serverside(client, "col__q", "col", row_limit=100) == 105
     k1, k2 = (p["headers"][_KEY] for p in _posts(srv, _RESTORE))
     assert k1 != k2
+
+
+# ── the bounded expire drain (RDR-222 Amendment A1, nexus-1579m) ─────────────
+
+
+def _expire_page(expired: int, *, more: bool, refused: int | None = None, row_limit: int = 100) -> dict:
+    return {"expired": expired, "refused": refused, "more": more, "row_limit": row_limit, "floor_refused": False}
+
+
+def _drain(client, *, strict: bool = False):
+    return cq.expire_quarantine_bounded_serverside(
+        client, "col__q", "col", _QUARANTINED_AT, row_limit=100, strict=strict,
+    )
+
+
+def test_each_page_of_the_expire_drain_carries_its_own_key_and_sums_the_pages(srv, client, clock):
+    srv.script(
+        f"POST {_EXPIRE}",
+        sv.ok(_expire_page(100, more=True)),
+        sv.ok(_expire_page(40, more=False)),
+    )
+    assert _drain(client) == (140, None, True)
+    k1, k2 = (p["headers"][_KEY] for p in _posts(srv, _EXPIRE))
+    assert k1 != k2
+    assert [json.loads(p["body"])["row_limit"] for p in _posts(srv, _EXPIRE)] == [100, 100]
+
+
+def test_a_non_strict_drain_never_asks_for_the_refused_count_and_a_strict_one_stops_asking_once_it_has_it(
+    srv, client, clock,
+):
+    srv.script(f"POST {_EXPIRE}", sv.ok(_expire_page(100, more=True)), sv.ok(_expire_page(1, more=False)))
+    _drain(client)
+    assert [json.loads(p["body"])["count_refused"] for p in _posts(srv, _EXPIRE)] == [False, False]
+
+    srv.requests.clear()
+    srv.script(
+        f"POST {_EXPIRE}",
+        sv.ok(_expire_page(100, more=True, refused=3)),
+        sv.ok(_expire_page(50, more=True, refused=None)),
+        sv.ok(_expire_page(1, more=False, refused=None)),
+    )
+    assert _drain(client, strict=True) == (151, 3, True)
+    assert [json.loads(p["body"])["count_refused"] for p in _posts(srv, _EXPIRE)] == [True, False, False]
+
+
+def test_an_engine_that_ignores_row_limit_runs_the_unbounded_expire_and_its_answer_is_the_total(
+    srv, client, clock,
+):
+    """No `more` in the answer: an engine before the bounded form (and before the ledger, so it ignored the key
+    too) already did the whole expiry. The loop stops after that one POST."""
+    srv.script(f"POST {_EXPIRE}", sv.ok({"expired": 7, "refused": 2}))
+    assert _drain(client) == (7, 2, True)
+    assert len(_posts(srv, _EXPIRE)) == 1
+
+
+def test_a_page_committed_with_unknown_counts_does_not_end_the_drain(srv, client, clock):
+    for strict in (False, True):
+        srv.requests.clear()
+        srv.script(f"POST {_EXPIRE}", sv.err(504, "gw"), sv.ok(_expire_page(3, more=False)))
+        srv.script(f"GET {_STATUS}", _status("committed", response_status=200, response=None))
+        expired, _refused, complete = _drain(client, strict=strict)
+        assert (expired, complete) == (3, False)
+        assert len(_posts(srv, _EXPIRE)) == 2
+
+
+def test_a_strict_drain_whose_later_page_could_not_be_settled_names_the_key(srv, client, clock):
+    srv.script(f"POST {_EXPIRE}", sv.ok(_expire_page(100, more=True, refused=0)), sv.err(504, "gw"))
+    with pytest.raises(cq.BoundedDrainIncomplete) as exc:
+        _drain(client, strict=True)
+    assert exc.value.reason == "page failed" and exc.value.moved == 100 and exc.value.batches == 1
+    assert exc.value.kind == "expire"
+    assert isinstance(exc.value.__cause__, hv.VectorServiceError)
+    _assert_unresolved_note(exc.value.__cause__, "this engine keeps no request ledger")
+
+
+def test_a_refused_key_on_the_first_page_is_raised_unchanged_when_strict_and_never_resent(srv, client, clock):
+    for strict in (True, False):
+        srv.requests.clear()
+        srv.script(f"POST {_EXPIRE}", sv.err(400, "idempotency_key_unsupported"), sv.ok(_expire_page(1, more=False)))
+        if strict:
+            with pytest.raises(hv.IdempotencyKeyRefusedError):
+                _drain(client, strict=True)
+        else:
+            assert _drain(client) == (0, None, False), "non-strict: a warning, never a raise"
+        assert len(_posts(srv, _EXPIRE)) == 1, "a refused key is never resent"
+
+
+def test_a_malformed_page_body_propagates_in_both_modes(srv, client, clock):
+    """A 200 that is not JSON is a data defect, not an ambiguity the ledger settles: it propagates."""
+    srv.script(f"POST {_EXPIRE}", sv.Reply(200, b"{not json"))
+    for strict in (False, True):
+        with pytest.raises(ValueError):
+            _drain(client, strict=strict)

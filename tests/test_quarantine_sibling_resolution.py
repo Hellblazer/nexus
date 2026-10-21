@@ -546,6 +546,19 @@ class _IndexDb:
         self._hit("move", quarantine)
         return {"moved": 2, "sample": [], "remaining": 0}
 
+    def gc_expire_quarantine_bounded(
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+    ):
+        # RDR-222 Amendment A1: the real client's bounded, keyed expiry (what the indexer's prune drives).
+        self._hit("expire", quarantine)
+        return {"expired": 3, "refused": None, "more": False, "row_limit": row_limit, "floor_refused": False}
+
+
+class _LegacyIndexDb(_IndexDb):
+    """A client object with the unbounded expiry only: the capability fallback, reachable by a double alone."""
+
+    gc_expire_quarantine_bounded = None
+
     def gc_expire_quarantine(self, quarantine, origin, cutoff, fraction, minimum, force):
         self._hit("expire", quarantine)
         return {"expired": 3, "refused": 0}
@@ -576,9 +589,17 @@ def test_a_failing_extra_sibling_never_costs_the_move_or_the_primary(rewritten_r
         assert _prune(db) is True
 
     assert ("move", ROW_NAME) in db.calls and ("expire", ROW_NAME) in db.calls
-    events = {c.args[0]: c.kwargs["sibling"] for c in log.warning.call_args_list}
-    assert events == {
-        "quarantine_sibling_restore_failed": REAPER_NAME, "quarantine_sibling_expire_failed": REAPER_NAME,
+    assert _failed_siblings(log) == {
+        "quarantine_sibling_restore_failed": REAPER_NAME, "gc_expire_bounded_page_failed": REAPER_NAME,
+    }
+
+
+def _failed_siblings(log) -> dict[str, str]:
+    """event -> the sibling it names. The restore wrapper logs ``sibling=``; the bounded expiry loop logs
+    ``quarantine_collection=`` (it never raises a page outcome, so it is the one that names the failure)."""
+    return {
+        c.args[0]: c.kwargs.get("sibling") or c.kwargs.get("quarantine_collection")
+        for c in log.warning.call_args_list
     }
 
 
@@ -592,26 +613,95 @@ def test_an_extra_sibling_transport_failure_never_costs_the_move_or_the_primary(
         assert _prune(db) is True
 
     assert ("move", ROW_NAME) in db.calls and ("expire", ROW_NAME) in db.calls
-    events = {c.args[0]: c.kwargs["sibling"] for c in log.warning.call_args_list}
-    assert events == {
-        "quarantine_sibling_restore_failed": REAPER_NAME, "quarantine_sibling_expire_failed": REAPER_NAME,
+    assert _failed_siblings(log) == {
+        "quarantine_sibling_restore_failed": REAPER_NAME, "gc_expire_bounded_page_failed": REAPER_NAME,
     }
 
 
-def test_a_primary_transport_failure_still_raises(rewritten_row) -> None:
+def test_a_primary_expiry_failure_no_longer_raises_or_costs_the_siblings_after_it(rewritten_row) -> None:
+    """RDR-222 Amendment A1: the bounded expiry loop never raises a page outcome, the first page's included,
+    so a failing primary sibling is a warning and the next sibling's expiry still runs. (Before the bounded
+    loop the primary's failure propagated to ``_prune_deleted_files``, which skipped the collection's remaining
+    siblings; the unbounded fallback below still does.)"""
+    for error in (TimeoutError, None):
+        db = _IndexDb(fail=frozenset({("expire", ROW_NAME)}), error=error)
+        with patch.object(cq, "_log") as log:
+            result = cq.expire_quarantine_across_serverside(
+                db, [ROW_NAME, REAPER_NAME], ORIGIN, "2026-01-01T00:00:00Z", best_effort=True,
+            )
+        assert result == (3, None), "only the second sibling expired; the failed one's refused is unknown"
+        assert db.calls == [("expire", ROW_NAME), ("expire", REAPER_NAME)]
+        assert _failed_siblings(log) == {"gc_expire_bounded_page_failed": ROW_NAME}
+
+
+def test_a_client_with_only_the_unbounded_expiry_still_raises_on_a_primary_failure(rewritten_row) -> None:
+    """The capability fallback keeps today's behaviour: the primary's failure propagates."""
     with pytest.raises(TimeoutError):
         cq.expire_quarantine_across_serverside(
-            _IndexDb(fail=frozenset({("expire", ROW_NAME)}), error=TimeoutError), [ROW_NAME, REAPER_NAME], ORIGIN,
-            "2026-01-01T00:00:00Z", best_effort=True,
+            _LegacyIndexDb(fail=frozenset({("expire", ROW_NAME)}), error=TimeoutError), [ROW_NAME, REAPER_NAME],
+            ORIGIN, "2026-01-01T00:00:00Z", best_effort=True,
         )
+    with pytest.raises(VectorServiceError):
+        _prune(_LegacyIndexDb(fail=frozenset({("expire", ROW_NAME)})))
 
 
-def test_a_failing_primary_sibling_still_raises(rewritten_row) -> None:
-    """The primary's failure behaviour is today's: it propagates (``_prune_deleted_files`` logs and goes on)."""
+def test_a_failing_primary_restore_still_raises(rewritten_row) -> None:
+    """Restore is unchanged by the bounded expiry: the primary's failure propagates
+    (``_prune_deleted_files`` logs and goes on)."""
     with pytest.raises(VectorServiceError):
         _prune(_IndexDb(fail=frozenset({("restore", ROW_NAME)})))
-    with pytest.raises(VectorServiceError):
-        _prune(_IndexDb(fail=frozenset({("expire", ROW_NAME)})))
+
+
+class _ScriptedExpiryDb:
+    """``gc_expire_quarantine_bounded`` answers per sibling from a script: a list of pages (a dict is returned,
+    an exception instance raised), consumed in order."""
+
+    def __init__(self, scripts: dict[str, list]) -> None:
+        self.scripts, self.calls = scripts, []
+
+    def gc_expire_quarantine_bounded(
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+    ):
+        self.calls.append(quarantine)
+        entry = self.scripts[quarantine].pop(0)
+        if isinstance(entry, BaseException):
+            raise entry
+        return entry
+
+
+def _page(expired: int, *, more: bool, refused: int | None = None) -> dict:
+    return {"expired": expired, "refused": refused, "more": more, "row_limit": 100, "floor_refused": False}
+
+
+def test_three_siblings_best_effort_still_reaches_the_third_when_one_page_outcome_is_unknown(rewritten_row) -> None:
+    """The first sibling fails on its second page with an ``http.client.IncompleteRead`` (an HTTPException that
+    is not an OSError, the shape of a body lost after an unsettled poll) and the second sibling answers a 500.
+    Neither may cut the third short (the indexer's outer handler would skip it), and the call returns."""
+    import http.client
+
+    db = _ScriptedExpiryDb({
+        "a": [_page(100, more=True), http.client.IncompleteRead(b"x")],
+        "b": [VectorServiceError("engine error", code=500)],
+        "c": [_page(5, more=False)],
+    })
+    with patch.object(cq, "_log") as log:
+        result = cq.expire_quarantine_across_serverside(
+            db, ["a", "b", "c"], ORIGIN, "2026-01-01T00:00:00Z", best_effort=True,
+        )
+    assert db.calls == ["a", "a", "b", "c"]
+    assert result == (105, None), "100 + 0 + 5 expired; no sibling's refused is known"
+    assert [c.args[0] for c in log.warning.call_args_list] == ["gc_expire_bounded_page_failed"] * 2
+
+
+def test_across_sums_the_known_refused_counts_and_is_none_when_none_is_known(rewritten_row) -> None:
+    mixed = _ScriptedExpiryDb({
+        "a": [VectorServiceError("engine error", code=500)],
+        "b": [_page(2, more=False, refused=3)],
+        "c": [_page(1, more=False, refused=4)],
+    })
+    assert cq.expire_quarantine_across_serverside(mixed, ["a", "b", "c"], ORIGIN, "2026-01-01T00:00:00Z") == (3, 7)
+    none_known = _ScriptedExpiryDb({"a": [_page(2, more=False)], "b": [_page(1, more=False)]})
+    assert cq.expire_quarantine_across_serverside(none_known, ["a", "b"], ORIGIN, "2026-01-01T00:00:00Z") == (3, None)
 
 
 # ── nx t3 gc: one line per sibling, and what earlier siblings did survives a later failure ──
@@ -678,3 +768,101 @@ def test_a_handle_with_no_expire_route_says_so_on_stderr(capsys: pytest.CaptureF
 
     cap = capsys.readouterr()
     assert "did NOT run" in cap.err and "gc_expire_quarantine" in cap.err and cap.out == ""
+
+
+# ── nx t3 gc with the bounded, keyed expiry (RDR-222 Amendment A1, nexus-1579m) ──
+
+class _BoundedGcDb:
+    """A handle whose expiry is the bounded method; ``expire`` maps a sibling to its pages (a dict is returned,
+    an exception instance raised). Records every call's ``count_refused``."""
+
+    def __init__(self, siblings: list[str], expire: dict[str, list]) -> None:
+        self.siblings, self.expire, self.calls = siblings, expire, []
+
+    def gc_quarantine_restore(self, origin, **kwargs):
+        return {"quarantine_collections": self.siblings}
+
+    def gc_expire_quarantine(self, *a):
+        raise AssertionError("the bounded method is present: the unbounded call must not be used")
+
+    def gc_expire_quarantine_bounded(
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+    ):
+        self.calls.append((quarantine, count_refused))
+        entry = self.expire[quarantine].pop(0)
+        if isinstance(entry, BaseException):
+            raise entry
+        return entry
+
+
+def _run_t3_expiry(db, capsys, *, moved: int = 0):
+    from click.exceptions import Exit
+
+    from nexus.commands.t3 import _expire_client_quarantine
+
+    try:
+        _expire_client_quarantine(db, ORIGIN, ROW_NAME, moved=moved)
+    except Exit as exc:
+        return exc.exit_code, capsys.readouterr()
+    return 0, capsys.readouterr()
+
+
+def test_nx_t3_gc_expires_strictly_and_asks_for_the_refused_count(rewritten_row, capsys) -> None:
+    db = _BoundedGcDb([REAPER_NAME], {
+        ROW_NAME: [_page(100, more=True, refused=2), _page(4, more=False, refused=2)],
+        REAPER_NAME: [_page(0, more=False, refused=0)],
+    })
+    code, cap = _run_t3_expiry(db, capsys)
+    assert code == 0
+    assert db.calls == [(ROW_NAME, True), (ROW_NAME, False), (REAPER_NAME, True)]
+    assert "104 expired, 2 refused (kept: the manifest references them again)" in cap.out
+
+
+def test_nx_t3_gc_says_at_least_for_an_incomplete_count_and_unknown_for_a_missing_refused(
+    rewritten_row, capsys,
+) -> None:
+    lost = {"committed_unknown_counts": True}
+    db = _BoundedGcDb([], {
+        ROW_NAME: [lost, _page(9, more=False, refused=None)],
+        REAPER_NAME: [_page(1, more=False, refused=None)],
+    })
+    code, cap = _run_t3_expiry(db, capsys)
+    assert code == 0
+    lines = [ln for ln in cap.out.splitlines() if ln.startswith("  Client expiry of")]
+    assert "at least 9 expired, refused unknown" in lines[0]
+    assert "1 expired, refused unknown" in lines[1] and "at least" not in lines[1]
+
+
+def test_nx_t3_gc_exits_1_on_a_drain_that_stopped_and_names_the_request_key_of_the_unknown_page(
+    rewritten_row, capsys,
+) -> None:
+    unsettled = VectorServiceError("HTTP 504", code=504)
+    unsettled.add_note("request 33333333-3333-4333-8333-333333333333: outcome unknown (the status polls kept failing)")
+    db = _BoundedGcDb([], {ROW_NAME: [_page(100, more=True, refused=0), unsettled]})
+    code, cap = _run_t3_expiry(db, capsys, moved=7)
+    assert code == 1
+    assert "the move succeeded (7 chunk(s) quarantined)" in cap.err
+    assert f"expiry of {ROW_NAME} FAILED" in cap.err
+    assert "page failed" in cap.err and "100 row(s) expired" in cap.err and "1 page(s)" in cap.err
+    assert "33333333-3333-4333-8333-333333333333" in cap.err
+    assert "Re-run this verb" in cap.err
+
+
+def test_nx_t3_gc_exits_1_on_a_bare_os_error_or_an_http_client_error_and_says_the_move_stands(
+    rewritten_row, capsys,
+) -> None:
+    import http.client
+
+    for error in (TimeoutError("timed out"), http.client.IncompleteRead(b"x")):
+        db = _BoundedGcDb([], {ROW_NAME: [error]})
+        code, cap = _run_t3_expiry(db, capsys, moved=3)
+        assert code == 1, type(error).__name__
+        assert "the move succeeded (3 chunk(s) quarantined)" in cap.err
+        assert f"expiry of {ROW_NAME} FAILED" in cap.err
+
+
+def test_nx_t3_gc_names_the_key_note_of_a_first_page_error_too(rewritten_row, capsys) -> None:
+    unsettled = TimeoutError("timed out")
+    unsettled.add_note("request 44444444-4444-4444-8444-444444444444: outcome unknown (no ledger)")
+    code, cap = _run_t3_expiry(_BoundedGcDb([], {ROW_NAME: [unsettled]}), capsys)
+    assert code == 1 and "44444444-4444-4444-8444-444444444444" in cap.err

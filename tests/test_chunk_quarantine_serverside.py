@@ -341,7 +341,7 @@ def test_expire_serverside_success_returnsExpiredAndRefused():
     result = expire_quarantine_serverside(
         db, "quarantine-code__x", "code__x", now_stamp(),
     )
-    assert result == (0, 12)
+    assert result == (0, 12, True)
 
 
 def test_expire_serverside_sends_a_floor_that_can_never_trip_and_no_force():
@@ -355,7 +355,7 @@ def test_expire_serverside_sends_a_floor_that_can_never_trip_and_no_force():
             seen.append(args)
             return {"expired": 5, "refused": 0}
 
-    assert expire_quarantine_serverside(Db(), "quarantine-code__x", "code__x", "2026-01-01T00:00:00Z") == (5, 0)
+    assert expire_quarantine_serverside(Db(), "quarantine-code__x", "code__x", "2026-01-01T00:00:00Z") == (5, 0, True)
     ((qname, origin, cutoff, fraction, minimum, force),) = seen
     assert (qname, origin, cutoff) == ("quarantine-code__x", "code__x", "2026-01-01T00:00:00Z")
     assert fraction == 1.0 and force is False

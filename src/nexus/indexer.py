@@ -4165,6 +4165,9 @@ def _prune_collection_serverside(
     # the restore window that nothing owns. NX_GC_FLOOR_FRACTION / NX_GC_FORCE govern
     # the MOVE (here and in `nx t3 gc`) and not this expiry; the engine reaper's move
     # carries NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
+    # RDR-222 Amendment A1 (nexus-1579m): the expiry is a bounded, keyed drain run NON-strict, which never
+    # raises a page outcome (a failed or unsettled page is a warning naming its request key), so every
+    # sibling's expiry runs; `nx t3 gc` runs the same drain strict. A ValueError still propagates (below).
     expired = expire_quarantine_across_serverside(
         db, siblings, collection_name, cutoff, best_effort=True,
     )
