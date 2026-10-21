@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -368,9 +369,11 @@ class TestTmpfsRootIsAPrivateRealDirectory:
         with pytest.warns(UserWarning, match="falling back"):
             assert sub.pg_cluster_parent() is None
 
-    def test_a_plain_file_in_place_of_the_root_is_refused(
+    def test_a_plain_file_in_place_of_the_root_falls_back_because_mkdir_refuses_it(
         self, tmp_path, monkeypatch,
     ) -> None:
+        # mkdir(exist_ok=True) raises on a plain file before the real-directory check is
+        # reached; that check guards the symlink case above.
         f = tmp_path / "nexus-test-pg-me"
         f.write_text("x")
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
@@ -1221,3 +1224,104 @@ class TestCleanupAndTmpfsLogging:
         assert row["log_level"] == "info"
         assert row["on"] == "tmpfs" and row["root"] == "/dev/shm/nexus-test-pg-1000"
         assert sub._LOCAL_ROWS[-1]["kind"] == "tmpfs"
+
+
+class TestTmpfsHardening:
+    """nexus-bmjet: the leftovers of the me3gm confirmation review."""
+
+    def test_the_sweep_does_not_follow_a_symlink_planted_as_the_tmpfs_root(self, tmp_path) -> None:
+        shm = tmp_path / "shm"
+        shm.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (shm / "nexus-test-pg-1000").symlink_to(elsewhere)
+        roots = sub.substrate_pg_roots(env={}, system="Linux", uid=1000, shm_dir=shm, tempdir=tmp_path / "base")
+        assert [r for r in roots if r.name == "nexus-test-pg-1000"] == [], roots
+
+    def test_a_real_tmpfs_root_directory_is_still_swept(self, tmp_path) -> None:
+        shm = tmp_path / "shm"
+        (shm / "nexus-test-pg-1000").mkdir(parents=True)
+        roots = sub.substrate_pg_roots(env={}, system="Linux", uid=1000, shm_dir=shm, tempdir=tmp_path / "base")
+        assert shm / "nexus-test-pg-1000" in roots
+
+    def test_an_unreadable_mount_table_falls_back_and_says_why(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_read_mounts", lambda: None)
+        root, refusal = sub.decide_pg_root(env={}, system="Linux")
+        assert (root, refusal) == (None, "cannot read /proc/mounts")
+        with pytest.warns(UserWarning, match="cannot read /proc/mounts"):
+            assert sub.choose_pg_root(env={}, system="Linux") is None
+
+    @pytest.mark.parametrize(
+        ("hard", "soft", "used", "valid", "expected"),
+        [
+            (51_850_486, 51_850_486, 671_744, 0x3F, 51_850_486 * 1024 - 671_744),  # chas nxtest, 2026-10-21
+            (2048, 1024, 0, 0x3F, 1024 * 1024),  # the tighter limit wins
+            (0, 1024, 0, 0x3F, 1024 * 1024),  # 0 means no limit
+            (0, 0, 5, 0x3F, None),  # no block limit at all
+            (1024, 0, 2 * 1024 * 1024, 0x3F, 0),  # over the limit: no room, never negative
+            (1024, 0, 0, 0x3E, None),  # limits not reported
+            (1024, 0, 0, 0x1 | 0x2, 1024 * 1024),  # exactly QIF_BLIMITS | QIF_SPACE (linux/quota.h)
+            (1024, 0, 0, 0x1 | 0x4, None),  # QIF_ILIMITS is not the space bit
+        ],
+    )
+    def test_quota_headroom(self, hard, soft, used, valid, expected) -> None:
+        assert sub._quota_headroom(hard, soft, used, valid) == expected
+
+    def test_free_space_is_the_smaller_of_the_filesystem_and_the_quota(self, tmp_path, monkeypatch) -> None:
+        fs_free = shutil.disk_usage(tmp_path).free
+        monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 4096)
+        assert sub._tmpfs_free_bytes(tmp_path) == min(fs_free, 4096)
+        monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: None)
+        assert sub._tmpfs_free_bytes(tmp_path) == fs_free
+
+    def test_a_small_quota_trips_the_mid_run_floor(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
+        cause = sub._tmpfs_floor_cause(tmp_path, None, lambda: None)
+        assert cause is not None and "64 MiB free for this user" in cause, cause
+
+    def test_a_small_quota_sends_the_tmp_root_to_disk(self, monkeypatch) -> None:
+        from tests import _tmp_root
+
+        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
+        d = _tmp_root.decide_tmp_root(
+            env={"LAB_CPUS": "8"}, system="Linux", mounts_text=_TMPFS_MOUNTS, writable=_writable,
+            uid=1000, cgroup_headroom=lambda: None,
+        )
+        assert d.root is None and "64 MiB free for this user" in d.reason, d
+
+    def test_the_quota_struct_matches_the_kernels_if_dqblk(self) -> None:
+        import ctypes
+
+        dq = sub._dqblk_type()
+        assert ctypes.sizeof(dq) == 72
+        assert [getattr(dq, f).offset for f in (*sub._DQBLK_FIELDS, "valid")] == [0, 8, 16, 24, 32, 40, 48, 56, 64]
+
+    def test_a_small_quota_sends_the_cluster_root_to_disk(self, monkeypatch) -> None:
+        # A roomy filesystem but a 64 MiB quota: the real default probe (no free_bytes injected) must refuse.
+        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
+        root, refusal = sub.decide_pg_root(
+            env={}, system="Linux", mounts_text=_TMPFS_MOUNTS, writable=_writable, uid=1000,
+            cgroup_headroom=lambda: None,
+        )
+        assert root is None and refusal is not None and "64 MiB free" in refusal, refusal
+
+    def test_a_probe_that_breaks_answers_none(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_dqblk_type", lambda: (_ for _ in ()).throw(AttributeError("no syscall")))
+        monkeypatch.setattr(sub.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(sub.platform, "machine", lambda: "x86_64")
+        assert sub._user_quota_headroom(Path(sys.prefix)) is None
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="quotactl_fd is Linux-only")
+    def test_the_live_quota_probe_reads_a_real_figure_where_there_is_a_quota(self) -> None:
+        got = sub._user_quota_headroom(Path("/dev/shm"))
+        if got is None:
+            # A host that mounts /dev/shm with usrquota (chas) must answer: None there is a broken probe.
+            assert not any(
+                f[1] == "/dev/shm" and "usrquota" in f[3].split(",")
+                for f in (line.split() for line in Path("/proc/mounts").read_text().splitlines()) if len(f) > 3
+            ), "/dev/shm has usrquota but the quota probe answered None"
+            pytest.skip("no user quota on /dev/shm here")
+        assert 0 <= got <= shutil.disk_usage("/dev/shm").total

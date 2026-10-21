@@ -199,13 +199,13 @@ def decide_tmp_root(
     if not can_write(shm_dir):
         return TmpDecision(None, f"{shm_dir} is not writable by this user", expected_tmpfs=True)
     try:
-        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(shm_dir)
+        free = (free_bytes or sub._tmpfs_free_bytes)(shm_dir)
     except OSError as exc:
         return TmpDecision(None, f"cannot read free space of {shm_dir} ({exc})", expected_tmpfs=True)
     if free < MIN_FREE_BYTES:
         return TmpDecision(
             None,
-            f"{shm_dir} has {free // 1024**2} MiB free, below the {MIN_FREE_BYTES // 1024**2} MiB floor",
+            f"{shm_dir} has {free // 1024**2} MiB free for this user (free space or user quota), below the {MIN_FREE_BYTES // 1024**2} MiB floor",
             expected_tmpfs=True,
         )
     headroom = (cgroup_headroom or (lambda: sub._cgroup_headroom(credit_reclaimable=True)))()
@@ -664,8 +664,10 @@ class TmpRootPlugin:
                     (run / "t").mkdir(mode=0o700, parents=True, exist_ok=True)
                     (run / "p").mkdir(mode=0o700, parents=True, exist_ok=True)
                 else:
-                    if decision.root.is_dir():
-                        sweep_stale_runs(decision.root, drain=self._drain)
+                    # lstat: a symlink planted under our name in world-writable /dev/shm is not our root (nexus-bmjet).
+                    with contextlib.suppress(OSError):
+                        if stat.S_ISDIR(decision.root.lstat().st_mode):
+                            sweep_stale_runs(decision.root, drain=self._drain)
                     run = make_run_dir(decision.root)
             except OSError as exc:
                 if decision.forced:

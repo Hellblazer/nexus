@@ -256,6 +256,73 @@ def _tmpfs_candidate(uid: int | str, shm_dir: Path = _SHM_DIR) -> Path:
     return shm_dir / f"{_TMPFS_DIR_PREFIX}-{uid}"
 
 
+#: quotactl_fd(2), the asm-generic syscall number shared by x86_64 and arm64 (Linux 5.14+).
+_QUOTACTL_FD_NR: int = 443
+#: QCMD(Q_GETQUOTA, USRQUOTA).
+_Q_GETQUOTA_USR: int = 0x800007 << 8
+#: if_dqblk.dqb_valid bits (linux/quota.h): QIF_BLIMITS, QIF_SPACE.
+_QIF_BLIMITS: int = 1
+_QIF_SPACE: int = 2
+#: struct if_dqblk: eight __u64 and a __u32, 72 bytes with the trailing padding.
+_DQBLK_FIELDS: tuple[str, ...] = (
+    "bhardlimit", "bsoftlimit", "curspace", "ihardlimit", "isoftlimit", "curinodes", "btime", "itime",
+)
+
+
+def _dqblk_type() -> type:
+    import ctypes
+
+    class _Dqblk(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in _DQBLK_FIELDS] + [("valid", ctypes.c_uint32)]
+
+    return _Dqblk
+
+
+def _user_quota_headroom(path: Path) -> int | None:
+    """Bytes this user may still write under the user quota of *path*'s filesystem,
+    or None when there is no limit or it cannot be read (not 64-bit Linux on
+    x86_64/arm64, no quota on the mount, a kernel without quotactl_fd). Never raises.
+    chas mounts /dev/shm with ``usrquota`` and gives nxtest about 49.45 GiB of a
+    62 GiB tmpfs, which ``shutil.disk_usage`` cannot see (nexus-bmjet)."""
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64"):
+        return None
+    try:
+        import ctypes
+
+        if ctypes.sizeof(ctypes.c_void_p) != 8:  # a 32-bit Python lays the struct out in 68 bytes
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            dq = _dqblk_type()()
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.syscall(_QUOTACTL_FD_NR, fd, _Q_GETQUOTA_USR, os.getuid(), ctypes.byref(dq)) != 0:
+                return None
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 — a probe: no answer, never an error
+        return None
+    return _quota_headroom(dq.bhardlimit, dq.bsoftlimit, dq.curspace, dq.valid)
+
+
+def _quota_headroom(hard_kib: int, soft_kib: int, used_bytes: int, valid: int) -> int | None:
+    """Headroom under the tighter of a quota's block limits (1 KiB blocks; 0 means
+    none), or None when it sets none or did not report them."""
+    if not (valid & _QIF_BLIMITS and valid & _QIF_SPACE):
+        return None
+    limits = [lim for lim in (hard_kib, soft_kib) if lim]
+    if not limits:
+        return None
+    return max(0, min(limits) * 1024 - used_bytes)
+
+
+def _tmpfs_free_bytes(path: Path) -> int:
+    """Free bytes on *path*'s filesystem for this user: the filesystem's free space,
+    or the user's quota headroom when that is smaller."""
+    free = shutil.disk_usage(path).free
+    quota = _user_quota_headroom(path)
+    return free if quota is None else min(free, quota)
+
+
 def _read_mounts() -> str | None:
     """``/proc/mounts``, or None where there is none (macOS, Windows)."""
     try:
@@ -419,12 +486,12 @@ def decide_pg_root(
     if not can_write(shm_dir):
         return None, f"{shm_dir} is not writable by this user"
     try:
-        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(shm_dir)
+        free = (free_bytes or _tmpfs_free_bytes)(shm_dir)
     except OSError as exc:
         return None, f"cannot read free space of {shm_dir} ({exc})"
     if free < _TMPFS_MIN_FREE_BYTES:
         return None, (
-            f"{shm_dir} has {free // 1024**2} MiB free, below the "
+            f"{shm_dir} has {free // 1024**2} MiB free for this user (free space or user quota), below the "
             f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor"
         )
     # The CREDITED figure decides, the same one the mid-run floor uses: a grant
@@ -639,7 +706,7 @@ def _tmpfs_floor_cause(
 ) -> str | None:
     """Why one more cluster does not fit right now, or None when it does."""
     try:
-        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(
+        free = (free_bytes or _tmpfs_free_bytes)(
             root if root.exists() else root.parent
         )
     except OSError:
@@ -648,7 +715,7 @@ def _tmpfs_floor_cause(
         cgroup_headroom or (lambda: _cgroup_headroom(credit_reclaimable=True))
     )()
     if free is not None and free < _TMPFS_HARD_FLOOR_BYTES:
-        return f"{root} has {free // 1024**2} MiB free"
+        return f"{root} has {free // 1024**2} MiB free for this user (free space or user quota)"
     if headroom is not None and headroom < _TMPFS_HARD_FLOOR_BYTES:
         return (
             f"the cgroup has {headroom // 1024**2} MiB of memory headroom left "
@@ -841,8 +908,11 @@ def substrate_pg_roots(
         roots.append(_abs(override))
     if (platform.system() if system is None else system) == "Linux":
         cand = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
-        if cand.is_dir():
-            roots.append(cand)
+        # lstat, as the creation path does: a symlink planted under our name in the
+        # world-writable /dev/shm is not our root, and the sweep must not follow it.
+        with contextlib.suppress(OSError):
+            if stat.S_ISDIR(cand.lstat().st_mode):
+                roots.append(cand)
     roots.append(base)
     unique: list[Path] = []
     seen: set[Path] = set()

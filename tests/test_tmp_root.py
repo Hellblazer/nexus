@@ -704,6 +704,8 @@ _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
         _FROM_SCRATCH,
     "tests/test_native_smoke_scratch_dir_lint.py::test_trap_removes_dir_on_success_and_keeps_it_on_failure": _FROM_SCRATCH,
     "tests/test_tmp_root.py::_plugin": _IN_PROCESS + " (handed to TmpRootPlugin as its env)",
+    "tests/test_tmp_root.py::test_the_controller_does_not_sweep_through_a_symlink_planted_as_the_tmp_root":
+        _IN_PROCESS + " (handed to TmpRootPlugin as its env)",
     "tests/test_tmp_root.py::test_the_keep_dir_is_the_runs_tmpdir_only_while_a_tmpfs_run_is_active":
         _IN_PROCESS + " (TMPDIR is the input _log_keep_dir reads)",
     "tests/test_tmp_root.py::TestPlugin.test_a_worker_imported_after_the_switch_still_keeps_its_boot_slots_on_the_original_tempdir":
@@ -1435,3 +1437,21 @@ def test_a_failing_log_keep_never_leaks_the_cluster(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(sub, "preserve_logs", boom)
     sub._teardown()
     assert not Path(state["pgdata"]).exists() and sub._state is None
+
+
+def test_the_controller_does_not_sweep_through_a_symlink_planted_as_the_tmp_root(tmp_path, monkeypatch) -> None:
+    """nexus-bmjet: the root sits in world-writable /dev/shm under a predictable name."""
+    elsewhere = tmp_path / "elsewhere"
+    stale = elsewhere / "r00000000"
+    stale.mkdir(parents=True)
+    os.utime(stale, (1, 1))
+    link = tmp_path / _ROOT
+    link.symlink_to(elsewhere)
+    swept: list[Path] = []
+    monkeypatch.setattr(tr, "sweep_stale_runs", lambda root, **_k: swept.append(root) or [])
+    plugin = tr.TmpRootPlugin(
+        decide=lambda env: tr.TmpDecision(link, None, expected_tmpfs=True), env={"TMPDIR": str(tmp_path / "orig")},
+    )
+    plugin._begin()
+    assert swept == [] and stale.exists()
+    assert plugin.run is None, "make_run_dir refuses the symlink too, so the run stays on disk"
