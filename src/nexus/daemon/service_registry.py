@@ -2383,6 +2383,14 @@ def parse_procargs2_environment(data: bytes) -> list[bytes] | None:
     strings, each NUL-terminated. A pure function over bytes so every
     platform's tests exercise it.
 
+    nexus-wnbba: the padding rounds the exec path and its NUL up to a multiple
+    of 8 bytes, so argv[0] starts at ``4 + roundup(len(path) + 1, 8)``
+    (measured on Darwin 27 arm64, 2026-10-21: exec paths of 14 to 30 bytes,
+    argv[0] empty and not). Skipping NULs instead swallows an empty argv[0],
+    which is itself one NUL, and reads every later string one place off. When
+    the bytes up to that offset are not all NUL (a block that does not follow
+    the rule), the parse falls back to skipping the NUL run.
+
     Every length is checked before it is used. ``None`` (never ``[]`` and
     never a slice of the wrong region) for: fewer than 4 bytes, a negative
     ``argc``, an exec path with no terminator, fewer than ``argc`` argv
@@ -2401,8 +2409,13 @@ def parse_procargs2_environment(data: bytes) -> list[bytes] | None:
     pos = data.find(b"\x00", 4)
     if pos < 0:
         return None  # no exec-path terminator
-    while pos < len(data) and data[pos] == 0:
-        pos += 1  # the NUL padding after the exec path
+    path_with_nul = pos + 1 - 4
+    argv_start = 4 + -(-path_with_nul // 8) * 8
+    if argv_start <= len(data) and not data[pos:argv_start].strip(b"\x00"):
+        pos = argv_start  # the kernel's padding rule: an empty argv[0] stays an argv string
+    else:
+        while pos < len(data) and data[pos] == 0:
+            pos += 1  # a block off the rule: skip the NUL run after the exec path
     for _ in range(argc):
         end = data.find(b"\x00", pos)
         if end < 0:
