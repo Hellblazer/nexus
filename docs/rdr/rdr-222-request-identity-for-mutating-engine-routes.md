@@ -8,7 +8,7 @@ priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-27
-related_issues: [nexus-ll31n, nexus-wvek6, nexus-mfw6c, nexus-r46u9, nexus-w94eo, nexus-vhyar, nexus-8hdg9]
+related_issues: [nexus-ll31n, nexus-wvek6, nexus-mfw6c, nexus-r46u9, nexus-w94eo, nexus-vhyar, nexus-8hdg9, nexus-1579m]
 related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103, RDR-225, RDR-229]
 ---
 
@@ -51,9 +51,10 @@ nothing about the outcome. Three beads are one problem seen from three places:
    (25 s, which already includes the lock wait, plus pool wait, against about
    30 s), the expire route runs with no statement bound, and none of them
    reports committed, in flight or rolled back. Phase 1 closes this for the
-   bounded quarantine and restore sweeps; expire and `quarantine-restore`
-   stay outside it (Technical Design 2). The
-   three-state question is still unanswerable.
+   bounded quarantine and restore sweeps, and Amendment A1 for the bounded
+   client expiry (Technical Design 7); the unbounded expire and
+   `quarantine-restore` stay outside it (Technical Design 2, nexus-k9kr9). The
+   three-state question is still unanswerable there.
 #### Gap 2: A retried upsert can embed the same chunks twice (nexus-wvek6)
 
 **nexus-wvek6 (duplicate embeds).** A retried `upsert-chunks` page that
@@ -495,9 +496,9 @@ Where the marker goes per route:
   - the unbounded `quarantineOrphans`, `restoreRereferenced` and the
     floor-only `quarantineOrphansFloored` (no `row_limit`): no effective
     statement bound, so no lease can cover them;
-  - `/gc/expire-quarantine`: it has no bounded form to loop on, so a
-    statement bound would roll back every large expiry, and it takes no
-    sweep gate (222-research-14). A bounded expire form is follow-up work;
+  - `/gc/expire-quarantine` without `row_limit`: no statement bound, so no
+    lease can cover it. The bounded form Amendment A1 adds is keyed
+    (Technical Design 7);
   - `/gc/quarantine-restore`: it commits once per quarantine sibling and so
     cannot carry one marker; it keeps its typed 503 busy body with the audit
     ids it wrote.
@@ -640,6 +641,433 @@ carries the check. Also, the combined write (M-e) already is a per-document
 single-transaction commit for the repo path; the streaming PDF path is the one
 that would need moving.
 
+#### 7. Bounded, keyed expire (Amendment A1, nexus-1579m)
+
+**What is there today.** `POST /v1/vectors/gc/expire-quarantine` reads its
+fields with fixed defaults (floor 0.5, minimum 50, no force) and calls the
+unbounded repository form (`VectorHandler.java:1739-1754`). The repository has
+a statement-bound overload, but the route passes 0, which means no bound
+(`PgVectorRepository.java:6148-6174`). The function behind it,
+`nexus.gc_expire_quarantine` as last redefined by vectors-026 (vectors-030 did
+not touch it), reads every client-owned row of the sibling once, judges the
+floor on the whole set, then deletes every past-cutoff row the origin's
+manifest does not name, in one statement, and writes one `gc_audit` row with
+at most 5,000 chashes (`vectors-026-gc-expire-quarantine-skips-engine-rows.xml:47-151`).
+It takes no advisory lock (222-research-14 item 2). A 25 s bound on that one
+statement would roll back any expiry too large to finish in 25 s, every time,
+which is why Phase 1 left it unkeyed. Both client callers send a floor that
+can never fire (`floor_fraction=1.0`, `chunk_quarantine.py:732-748`; used by
+`nx index repo` through `expire_quarantine_across_serverside`,
+`indexer.py:4168-4170`, and by `nx t3 gc`, `commands/t3.py:334-336`).
+
+The amendment adds a bounded form selected by `row_limit` on the same route,
+as `restore-rereferenced` did (nexus-e8h5x, `VectorHandler.java:1677-1714`),
+and keys it through the ledger as Phase 1 keys the bounded restore.
+
+##### 7.1 The bounded function
+
+New function `nexus.gc_expire_quarantine_bounded(dim, p_tenant_id,
+p_quarantine_collection, p_origin_collection, p_cutoff, p_floor_fraction,
+p_floor_min_chunks, p_force, p_row_limit, p_count_refused)` returning
+`TABLE(expired bigint, refused bigint, more boolean, floor_refused boolean)`,
+in a new changeset (next free id at implementation; vectors-034 is the last
+included today, `db.changelog-master.xml:1812`). The unbounded function is not
+touched. "Eligible" below is vectors-026's predicate, unchanged: tagged for
+this origin (or untagged), `reaper_owns_quarantined_row IS NOT TRUE`,
+`quarantined_at <= p_cutoff`, and no manifest row in the origin names the
+chash. Body, in order:
+
+1. Refuse an unsupported `dim`, and refuse `p_row_limit <= 0` with
+   `invalid_parameter_value`, never "unbounded" (the restore's guard,
+   `vectors-030-model-tenant-partition-functions.xml:1774-1783`). Clamp the
+   page at 5,000 distinct chashes, the `gc_audit` chash ceiling, so each
+   page's audit row lists every chash it deleted (the unbounded form
+   truncates above 5,000, vectors-026:139-145).
+2. Take the gate (7.2).
+3. The floor, only when `p_floor_fraction < 1 AND NOT p_force`: one counting
+   scan as vectors-026 does (`v_mine` all client rows, `v_eligible`,
+   `v_protected` past cutoff and referenced), and
+   `v_eligible >= p_floor_min_chunks AND v_eligible / v_mine > p_floor_fraction`
+   returns `(0, v_eligible + v_protected, true, true)` and deletes nothing
+   (`refused` keeps the unbounded form's meaning there, vectors-026:113-115).
+   A fraction of 1 or more can never trip that test, since `v_eligible <=
+   v_mine`, so skipping the scan changes no answer; the client callers send
+   1.0 and never pay for it.
+4. `refused`: `v_protected` if step 3 ran; otherwise, when `p_count_refused`,
+   one count of past-cutoff client rows the origin's manifest names;
+   otherwise NULL.
+5. The victims: `SELECT DISTINCT c.chash` with the eligible predicate,
+   `ORDER BY c.chash LIMIT v_row_limit + 1`. `more` is whether the probe
+   found `v_row_limit + 1`; the victims are the first `v_row_limit`.
+6. `DELETE ... WHERE chash = ANY(victims)` restating every eligible
+   predicate (origin tag, ownership, cutoff, manifest `NOT EXISTS`)
+   `RETURNING chash`. vectors-026's DELETE re-checks only ownership
+   (:122-128). Under READ COMMITTED a row another transaction changed and
+   committed while this DELETE waited on its row lock is re-checked against
+   the new version, so a row re-quarantined with a fresh `quarantined_at`,
+   re-tagged by the reaper or tagged for another origin in between is not
+   deleted. The manifest re-check reads the DELETE's own snapshot, so it
+   narrows the select-to-delete window for a new reference without closing
+   it; 7.2 says why that is safe.
+7. `expired` = rows the DELETE returned, one per model row of a chash, as
+   vectors-026 counts. A page holds at most `v_row_limit` distinct chashes, so
+   it can delete more rows than that when a chash is stored under two models.
+8. One `gc_audit` row per page that deleted anything: operation
+   `gc_expire_quarantine_bounded`, collection = the sibling (the convention
+   the ghost sweep relies on, `CatalogRepository.java:10017-10022`),
+   `chash_count` and `chashes` the distinct deleted chashes (never truncated,
+   by the clamp), details `origin_collection`, `cutoff`, `row_limit` (as
+   clamped), `rows` (rows deleted), `more_after` and `refused` when counted
+   (the bounded restore's shape, vectors-030:1930-1946).
+
+**Audit operation name.** `gc_expire_quarantine_bounded`, following
+`gc_quarantine_orphans_bounded` and `gc_restore_rereferenced_bounded`. No code
+filters on the `gc_expire_quarantine` literal; the cost is that an operator's
+`--operation gc_expire_quarantine` audit read (`listGcAudit`'s exact filter,
+`CatalogRepository.java:11921`) no longer shows client expiries once clients
+run the bounded form. Reading both names, or filtering by the sibling
+collection, shows them all.
+
+**Why pages neither skip nor repeat a row.** There is no cursor. Each page
+selects the lowest eligible chashes from live state and deletes them. An
+eligible row cannot be passed over, because nothing remembers a position past
+it: if a page did not take it, it is still selectable by the next. A row
+repeats only if a page selected it and the DELETE did not take it, which
+happens only when it stopped being eligible, and then no page selects it
+again. Protected and engine-owned rows are excluded by the selection
+predicate, not filtered after the `LIMIT`, so they cannot fill a page and
+stall the loop (Test Plan, 1a). The set can change during a loop: a row
+quarantined during it carries a `quarantined_at` after the client's fixed
+cutoff (7.5) and stays out, while a row whose manifest reference is removed
+becomes eligible and a later page, or the next run, takes it. Nothing here
+depends on the set only shrinking.
+
+**The floor, for a caller that sends one.** Only a hand call sends a real
+floor. Deleting k eligible rows takes k from both sides of the fraction, and
+`(e - k)/(m - k) <= e/m` for `e <= m`, so a loop whose first page passes the
+floor passes it on every later page unless the population moves under it (a
+concurrent restore draining protected rows raises the fraction; a later page
+may then refuse, the safe direction). The first page's judgement equals the
+unbounded form's on the same data. Every page carries the floor fields,
+because an absent field means the route's defaults (0.5 / 50,
+`VectorHandler.java:1747-1748`), not "no floor", so the quarantine loop's
+"floor on the first batch only" convention (`chunk_quarantine.py:509-513`)
+does not carry over.
+
+**Cost per page, and the 25 s bound.** A client page pays the ordered walk of
+step 5 (sibling rows in chash order until `v_row_limit + 1` eligible chashes
+are found) and, on the page that asks for it, the `refused` count; it never
+counts the whole sibling for the floor. The walk re-reads the non-eligible
+rows (protected, not yet past cutoff, engine-owned) below each page's last
+victim, so a drain costs pages times that population, not pages times the
+sibling. The chunks primary key `(tenant_id, collection, chash,
+embedding_model)` (vectors-030:677) serves the order per leaf, merged across
+model partitions; `EXPLAIN` on the largest live sibling is the 1a measurement,
+not assumed. If one page's walk or `refused` count cannot finish inside 25 s,
+a smaller `row_limit` does not help (the cost is the rows walked past, not the
+rows deleted): every page fails 57014 and rolls back, the loop stops loud
+(7.5) and nothing is deleted, which is where an unbounded expiry too large for
+the edge stands today. The fallback is an expression index serving the
+eligible predicate, `(tenant_id, collection, (metadata->>'quarantined_at'))`,
+with victims selected in that order, in a changeset of its own. The 1a
+measurement decides before any code whether it ships with 1a.
+
+##### 7.2 Statement bound and sweep gate
+
+The repository sets `statement_timeout` 25 s and `lock_timeout` 2 s as their
+own statements before the call (`PgSession.setStatementAndLockBounds`,
+`PgSession.java:516-527`), with new constants
+`DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS = 25_000` and
+`DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS = 2_000` beside the restore pair
+(`PgSession.java:508-509`). A bound set inside the function body is inert for
+the statement already running it (`PgSession.java:480-491`), so the body's own
+`set_config` calls only mirror the values. The 25 s includes the gate wait
+(222-research-14 item 7).
+
+The page takes an exclusive advisory gate keyed on the **sibling**:
+`pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' ||
+p_quarantine_collection))`, and on `lock_not_available` re-raises with a
+message carrying the RDR-191 sweep gate marker text
+(`PgSession.SWEEP_GATE_MESSAGE_MARKER`, `PgSession.java:478`), as
+`gc_quarantine_orphans_bounded` does (vectors-030:1398-1411). Why this key and
+not the origin's:
+
+- The origin key `sweepgate:<tenant>/<origin>` is taken shared by every
+  manifest writer (`CatalogRepository.java:4979-4983`,
+  `PgVectorRepository.java:871`, `:6679`) and exclusive by the quarantine,
+  reaper and quarantine-restore functions (vectors-030:1171, :1400, :1999,
+  :2273). Taking it in expire would stall indexing writes on the origin for
+  up to 25 s per page and buys no correctness. The manifest foreign key
+  (catalog-029) points a manifest row at a chunk row in the manifest row's own
+  collection. No documented write path writes a manifest row naming a
+  quarantine collection (catalog-029 header); if one ever existed, its FK
+  (`NO ACTION`, `DEFERRABLE INITIALLY IMMEDIATE`) would fail this DELETE with
+  23503 at statement end rather than leave it dangling. So the narrow window
+  in 7.1 step 6 can delete the quarantine copy of a chash the origin
+  re-referenced a moment earlier; that reference names the origin's own row,
+  so the DELETE removes a copy, never a row a manifest names.
+- No active function takes the sibling key for a quarantine collection. The
+  sweep-gated functions key on whatever collection they are called with (the
+  quarantine move, including its hygiene-002/005/008 redefinitions, on its
+  `p_collection`), so one called on a sibling would only queue behind an
+  expire page. The key serializes expire pages against each other: two loops
+  on one sibling (`nx t3 gc` beside `nx index repo`, or a same-key takeover
+  beside a zombie attempt still deleting). Without it the second page waits
+  on the first's row locks, trips the 2 s `lock_timeout` as a row-lock 55P03
+  and surfaces as an opaque error; with it, the keyed path answers the typed
+  503 `sweep_gate_busy` and the client waits and resends (Technical Design 2
+  and 4 already cover both).
+- `reaper_expire_quarantine` takes no gate and deletes only reaper-owned rows,
+  disjoint from this function's by the shared ownership predicate
+  (vectors-026:17-21), so it does not need the key.
+
+The unkeyed bounded call takes the same gate; an unkeyed gate timeout keeps
+today's error, as on the quarantine route.
+
+##### 7.3 Ledger claim and marker
+
+As the bounded restore:
+
+- Repository: `expireQuarantineBounded(tenant, quarantine, origin, cutoff,
+  fraction, minChunks, force, rowLimit, countRefused, dim,
+  LedgerMarker<ExpireBoundedOutcome> marker)`: one `withTenant`, the bounds,
+  the function call, `runAfterSweepSqlHook()`, then `marker.mark(ctx, outcome)`
+  inside the same transaction (the shape of `PgVectorRepository.java:5553-5569`;
+  the hook is the test seam at `:253-272`). A lost lease throws
+  `LedgerMarkerLost` from the marker and the page's DELETE and audit row roll
+  back with it (`RequestLedger.java:415-432`).
+- Handler: read the key first (`keyedRequest(ex)`, `VectorHandler.java:1521-1528`)
+  and the raw body (`readBodyBytes`), then `resolveRowLimit` (the shared
+  400-on-non-positive rule, `:1616-1632`), clamped to 5,000 by a Java constant
+  equal to the function's clamp, so the response echoes the `row_limit` the
+  function applied. With `row_limit` and a key: resolve the origin's dim
+  through `keyedDim` (so a committed key on a since-removed collection still
+  replays, `:1501-1511`), then `runKeyed(..., EXPIRE_ROUTE, raw,
+  DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true, ...,
+  out -> boundedExpireBody(out, clamped))` (`:1536-1542`). The claim commits
+  in its own short transaction before the page runs (`KeyedSweep.java:109`).
+  Without `row_limit`, a key is 400 `idempotency_key_unsupported`, as on the
+  unbounded restore (`:1708-1710`).
+- `EXPIRE_ROUTE` joins `IdempotencyKeyGuard.KEYED_ROUTES`
+  (`IdempotencyKeyGuard.java:27`); today the guard refuses a key on this route
+  before the handler runs (`:37-38`).
+- Lease: `leaseMs(25 s)` = 25 s + two pool waits + 10 s = 95 s
+  (`RequestLedger.java:208-214`), the same as the other keyed sweeps; the
+  client's 180 s poll budget covers it (`http_vector_client.py:2041`).
+- Stored response: the body below is a few fields, far under the 64 KB cap;
+  `storedResponse` cuts only a `sample`, which this body has none of
+  (`KeyedSweep.java:245-261`).
+- A null `refused` runs end to end. The function returns SQL NULL when
+  `p_count_refused` is false, so `ExpireBoundedOutcome` carries `Long
+  refused` (never a primitive: reading the jOOQ record into a `long` would
+  throw on NULL), `boundedExpireBody` builds a null-tolerant map (`Map.of`
+  rejects nulls), and the stored and replayed response carries JSON `null`.
+  The route and ledger tests include a `count_refused=false` case that
+  stores, replays and polls that body.
+
+##### 7.4 Route and response
+
+Request: today's fields plus optional `row_limit` and `count_refused`
+(boolean, default true, so a single hand call answers `refused` as the
+unbounded form does). Without `row_limit` the route is the unbounded form,
+byte-identical to today (`{"expired", "refused"}`); with it, `row_limit` must
+be a positive integer (400 otherwise). Response of the bounded form:
+
+```json
+{"expired": N, "refused": M, "more": true, "row_limit": L, "floor_refused": false}
+```
+
+`expired` is this page's rows. `refused` describes the sibling as of this page
+and is `null` when not counted. `more` says the page found eligible chashes
+past its own; it is not a count. `row_limit` is the clamped value. A caller
+sums `expired` and takes `refused` from the first page that carries it.
+
+##### 7.5 Client
+
+- `HttpVectorClient.gc_expire_quarantine_bounded(quarantine_collection,
+  origin_collection, cutoff, floor_fraction, floor_min_chunks, force,
+  row_limit, count_refused)` posts through `_keyed_sweep_post(..., gate_busy=True)`
+  (`http_vector_client.py:2189-2300`): one fresh key per page, byte-identical
+  resends, status polling on an ambiguous outcome, `sweep_gate_busy` and
+  `request_claim_contended` resent after `Retry-After`, key refusals raised
+  and never resent, at most 3 resends. The unbounded `gc_expire_quarantine`
+  (`:4794-4819`) stays for hand use and as the capability fallback.
+- `chunk_quarantine.expire_quarantine_bounded_serverside(db, sibling, origin,
+  cutoff, row_limit=GC_EXPIRE_ROW_LIMIT_DEFAULT, *, strict=False)` loops pages
+  in the shape of `restore_rereferenced_bounded_serverside`
+  (`chunk_quarantine.py:372-434`) and `quarantine_orphans_bounded_serverside`
+  (`:456-556`), capped by `_gc_loop_max_iterations` (`:327-347`; 200 pages at
+  the default). `GC_EXPIRE_ROW_LIMIT_DEFAULT = 2000`, the shared GC default
+  (`:368-369`), unless the 1a measurement lowers it. Every page sends the
+  inert floor `expire_quarantine_serverside` sends today (`:732-733`) and the
+  same `cutoff`, computed once by the caller (`indexer.py:4159-4161`,
+  `commands/t3.py:323`); The non-strict loop (the indexer path) sends
+  `count_refused=false` on every page: the indexer discards `refused`, and a
+  sibling-wide count would add a statement that can hit the 25 s bound and
+  stop a drain that has expired nothing yet. The strict loop (`nx t3 gc`)
+  sends `count_refused=true` until a page has answered a non-null `refused`. `expire_quarantine_serverside` (`:736-750`) gains
+  `strict` and tries the bounded loop first, falling back to the unbounded
+  method when the client object lacks it (the in-memory double), the module's
+  capability-sensing rule. Only `nx t3 gc` sets `strict`.
+- Per page outcome. "Raises" means the errors `_keyed_sweep_post` can let out
+  that the loop handles: `VectorServiceError` (including
+  `IdempotencyKeyRefusedError`), `OSError` and `http.client.HTTPException`.
+  Three others propagate in both modes and the loop never swallows them: a
+  `ValueError` or `TypeError` (a malformed response, and `json.JSONDecodeError`,
+  which `_post` raises on an undecodable body, `http_vector_client.py:787`) is
+  a data defect, as the indexer requires for `ValueError`
+  (`indexer.py:4389-4398`); and `ProductionWriteGuardError` (a
+  `RuntimeError`, `service_endpoint.py:737`, raised before the request is sent
+  because `/gc/expire-quarantine` is a guarded T3 write path,
+  `http_vector_client.py:1782`) is a stop-and-verify refusal that "never
+  raises" must not hide.
+
+  | page answer | loop does | non-strict | strict |
+  |---|---|---|---|
+  | 2xx (a replay, or `committed` from a poll) with `more` | add `expired`; keep `refused` if not yet known; stop when `more` is false | exact totals | same |
+  | 2xx without `more` | an engine older than the bounded form ran the unbounded expire: done | that response as the total | same |
+  | 2xx with `expired == 0` and `more` (or `floor_refused`) | stop: no progress | warning, totals so far | `BoundedDrainIncomplete("no progress")` |
+  | `CommittedWithUnknownCounts` (`http_vector_client.py:2114-2117`) | continue | `counts_complete=False` | same; does not raise |
+  | iteration cap with `more` still true | stop | warning, totals so far | `BoundedDrainIncomplete("iteration cap")` |
+  | the first page raises | stop | warning (error and its notes), returns `(0, None, False)` | re-raise unchanged |
+  | a later page raises after the ledger could not settle it (no ledger, polls failed, budget, the resend cap; the error carries `_note_unresolved`'s key note, `:2181-2186`) | stop | warning, totals so far, `counts_complete=False` | `BoundedDrainIncomplete("page failed")` from the error |
+  | a later page raises a definite error (`_keyed_sweep_post` raised it without polling: a 400, a 500, an engine error such as a row-lock 55P03 the gate does not cover; nothing ran) | stop | as the row above | as the row above |
+
+  **Deliberate deviation from Phase 1 on `committed_unknown_counts`.** Both
+  Phase 1 loops stop there: the restore loop returns its total so it never
+  loops on a guessed `remaining` (`chunk_quarantine.py:413-422`), and the
+  strict quarantine loop raises (`:523-533`). This loop continues because no
+  page uses anything an earlier page answered: every page recomputes `more`
+  from live state, so a lost body costs that page's count and nothing else.
+  The drain can still finish provably (a later page answers `more: false`);
+  only `expired` becomes a lower bound, which is what `counts_complete=False`
+  says. That is why strict mode does not raise for it.
+
+  The two later-page error rows report the same way on purpose. The loop
+  does not parse notes to tell them apart, and "at least N expired" is true
+  in both: after a definite error N is exact, after an unsettled one the page
+  may have added to it. The warning carries the error and its notes, so the
+  log says which it was and names the key when there is one.
+
+  **Second deliberate deviation from Phase 1: non-strict never raises a
+  page's outcome, the first page's included.** Phase 1's non-strict loops
+  re-raise a page error (the quarantine loop's `except`,
+  `chunk_quarantine.py:517-521`; the restore loop has no catch). This loop
+  does not, for the reason that follows. So
+  the indexer's per-sibling handling cannot be cut short by this loop: today
+  `expire_quarantine_across_serverside`'s `best_effort` catches only
+  `VectorServiceError` and `OSError` and only after the first sibling
+  (`chunk_quarantine.py:711-718`), and anything it does not catch reaches the
+  indexer's outer `except Exception`, which logs `gc_serverside_prune_failed`
+  and skips that collection's remaining siblings (`indexer.py:4399-4402`). An
+  `http.client.HTTPException` that is not an `OSError` (an `IncompleteRead`)
+  can reach it after an unsettled poll in local mode. With a non-raising loop
+  every sibling's expiry runs and logs its own result; the first sibling's
+  failure, which today skips the rest, becomes a warning too.
+- `BoundedDrainIncomplete` (`chunk_quarantine.py:437-453`) today says "strict
+  bounded quarantine drain" and its message reads "bounded quarantine drain
+  stopped ... moved". It gains `kind` (`"quarantine"`, the default, or
+  `"expire"`); its docstring covers both strict drains, the message names the
+  drain and says "expired" for `kind="expire"`, and `moved` is documented as
+  the rows the drain moved or expired. Reasons for expire: `"no progress"`,
+  `"iteration cap"`, `"page failed"` (the error is `__cause__`, with the key
+  note when the outcome is unknown); `remaining` is `None` for expire.
+- `expire_quarantine_serverside` returns `(expired, refused, counts_complete)`
+  with `refused` an `int` or `None`; its two callers change with it
+  (`chunk_quarantine.py:707-722`, `commands/t3.py:333-358`).
+  `expire_quarantine_across_serverside` today does `refused += result[1]`
+  (`chunk_quarantine.py:722`); a `None` there would raise `TypeError`, which
+  `best_effort` does not catch and the indexer's outer handler turns into a
+  skipped collection, the outcome the non-raising loop exists to prevent. So
+  `across` treats `None` as unknown: it sums the known values, and returns
+  `None` when no sibling reported one. Its docstring ("a failure on the first
+  still raises", `chunk_quarantine.py:700`) is false for the real client once
+  the loop is non-raising and is rewritten; the two existing tests that pin it
+  stay green only because their `_IndexDb` double lacks the bounded method and
+  takes the fallback path, so real-client coverage comes from the new tests. `nx t3 gc`
+  prints "at least N expired" when `counts_complete` is false and "refused
+  unknown" for `None`. Its expiry handler, which catches only
+  `VectorServiceError` today (`commands/t3.py:337`), catches
+  `BoundedDrainIncomplete`, `OSError` and `http.client.HTTPException` too,
+  prints the pages and rows that committed and the error's notes (the request
+  key whose outcome is unknown), then exits 1 after saying the move stands
+  (its existing failure shape, `:337-348`).
+
+##### 7.6 Compatibility
+
+- OLD client + NEW engine: no `row_limit`, no key; the unbounded form answers
+  byte-identically.
+- NEW client + engine before the ledger (v0.1.160 and earlier, outside the
+  release pairing): the key, `row_limit` and `count_refused` are ignored, the
+  unbounded expire runs, the response has no `more` and the loop stops after
+  it; an ambiguous outcome costs one status GET answered 404 and surfaces as
+  today, with the key note. A resent expire deletes nothing twice.
+- NEW client + an engine with the Phase 1 ledger but without this form:
+  `IdempotencyKeyGuard` answers 400 `idempotency_key_unsupported` and the
+  client raises it without resending (`http_vector_client.py:2244-2248`).
+  engine-service-v0.1.161 (tagged 2026-10-19) is such an engine: it carries
+  `RequestLedger`, `KeyedSweep` and `IdempotencyKeyGuard` with `KEYED_ROUTES`
+  holding only the quarantine and restore routes. The window is closed in
+  practice by two things, not by the absence of that engine: A1 rides
+  engine-service-v0.1.162 with the rest of Phase 1, and the client release
+  (nexus-yye8l.17) pins `REQUIRED_ENGINE_VERSION` to v0.1.162 and ships after
+  the engine deploy (choreography (a)). A client that meets v0.1.161 anyway
+  (a hand-pinned engine) refuses loud and deletes nothing: `nx t3 gc` exits 1,
+  the indexer logs a warning per sibling. No keyless resend is added (Sam,
+  2026-10-21): it would break Phase 1's rule that a refused key is never
+  resent, for a pairing the pin keeps out. The same holds for a develop
+  engine between the two landings.
+- The unbounded route stays. Old clients and hand calls use it, and removing
+  it is not additive. The new client calls it only as the capability fallback.
+- `REQUIRED_ENGINE_VERSION` (`engine_version.py:667`, today (0, 1, 160))
+  bumps to the engine tag carrying A1's engine half in the client release
+  that carries its client half (the unconditional project rule). Riding
+  v0.1.162, the bump nexus-yye8l.17 already makes (v0.1.160 to v0.1.162)
+  covers it.
+- `is_non_idempotent_sweep_path` keeps `/gc/expire-quarantine`
+  (`gateway_backoff.py:181-186`): `_request` still never gateway-retries it;
+  the keyed method handles ambiguity above it, as for the other sweeps.
+
+##### 7.7 nexus-k9kr9 (`quarantine-restore`) stays separate
+
+Do not fold it into A1. When it is done, use a single-transaction keyed form,
+not per-sibling ledger rows.
+
+Why separate:
+
+- It is not the same shape. `restoreAcross` runs one transaction per quarantine
+  sibling (`PgVectorRepository.java:5985-6028`, each through `restoreRows`
+  with its own 25 s / 2 s bounds, `:6042-6049`), and its response carries a
+  `rows` list of up to 1,000 entries (`VectorHandler.java:1762`,
+  `:1876-1919`). That list can exceed the 64 KB stored cap, and the stored
+  copy knows only how to cut a `sample` (`KeyedSweep.java:245-268`), so keying
+  it needs a stored-response rule of its own. A1 needs none.
+- Its ambiguity already costs less. A resend is safe and self-describing (a
+  chash already restored reads `present`), and a busy trip on a later sibling
+  returns the earlier siblings' audit ids and chashes in a typed 503
+  (`VectorHandler.java:1819-1824`, `PgVectorRepository.java:5999-6005`). It is
+  an operator verb (`nx t3 quarantine restore`); expire runs on every
+  `nx index repo` pass.
+
+Between the two options, for when it is done:
+
+- One ledger row per sibling commit under a parent key keeps the commit
+  structure, but the parent's state cannot commit together with every child.
+  An engine death between siblings leaves a parent whose lease lapses to
+  `rolled_back` after sibling 1 committed, which breaks what Technical Design 3
+  promises `rolled_back` means. Repairing that needs a new `partial` state, and
+  the Phase 1 client surfaces any state it does not know
+  (`http_vector_client.py:2170-2172`), so it is not additive.
+- A single transaction over all siblings keeps the four states exact with one
+  marker. Its cost is the bound: n sibling statements at 25 s each could run
+  n x 25 s, past the edge. The keyed path would give each sibling statement
+  the remainder of one 25 s budget (set per statement from the elapsed time),
+  so the lease formula stays as it is. Two things to check before choosing it:
+  the per-document `indexrun:` locks the function takes (vectors-030:2361)
+  would be held across siblings, so lock order against `beginIndexRun` needs a
+  look; and only the keyed path should change, leaving the unkeyed route's
+  per-sibling commits as they are.
+
 ### Wire contract and paired release
 
 Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
@@ -650,8 +1078,25 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
   an unknown request header, ignored by `com.sun.net.httpserver`; the status
   route answers 404, which the client maps to "no ledger" and falls back to
   today's behavior (sweeps surface the gateway error, upserts resend on the
-  r46u9 floor). No refusal window in either order, so choreography (a)
-  applies: deploy the engine before the client tag.
+  r46u9 floor). Amendment A1 adds one refusal window, and the pairing closes
+  it: an engine with the ledger but without A1 (engine-service-v0.1.161,
+  tagged 2026-10-19, is one) answers the new client's keyed expire 400
+  `idempotency_key_unsupported` (the key guard refuses a key on a route
+  outside its keyed set), which the client surfaces and never resends. A1
+  rides engine-service-v0.1.162, and the client release pins
+  `REQUIRED_ENGINE_VERSION` to v0.1.162 and ships after the engine deploy, so
+  no pinned pairing meets v0.1.161. Choreography (a) applies: deploy the
+  engine before the client tag.
+- **Bounded expire (Amendment A1).** `POST /v1/vectors/gc/expire-quarantine`
+  gains optional `row_limit` (positive integer; 400 otherwise) and
+  `count_refused`; with `row_limit` the response adds `more`, `row_limit`
+  (as clamped, at most 5,000) and `floor_refused`, `refused` may be `null`,
+  an `Idempotency-Key` is accepted, and the keyed form can answer 503
+  `sweep_gate_busy`. Without `row_limit` the route is byte-identical and a
+  key on it is 400 `idempotency_key_unsupported`. `[additive]` both
+  directions (Technical Design 7.6). The engine entry is in
+  `docs/wire-contract-pending.md` under `## Unshipped`, with the client
+  entry beside it.
 - **Run fence.** OLD client + NEW engine: no `doc_id`/`run_id`, no check, today's
   merge. NEW client + OLD engine: the fields are ignored by the schemaless body
   map; `stale_run` is absent and the client treats absence as "not stale".
@@ -779,8 +1224,14 @@ is never refused.
   one for a failure marker); a keyed write route (Phase 2) gains a claim
   INSERT and a marker UPDATE in existing transactions (Phase 2's throughput
   A/B measures it).
-- Negative: expire and `quarantine-restore` stay unkeyed in Phase 1
-  (Technical Design 2).
+- Negative: `quarantine-restore` stays unkeyed (Technical Design 2,
+  nexus-k9kr9), and the unbounded expire stays unkeyed for old clients and
+  hand calls.
+- Negative: a bounded expire drain re-walks the sibling's non-eligible rows
+  on every page, so it costs pages times that population where the
+  unbounded form paid one scan, and a page whose walk cannot finish in 25 s
+  fails every time until an index serves the predicate (Technical Design
+  7.1). Measured before 1a ships (Phase 1a).
 - Negative: unkeyed callers, sole abandoned attempts and multi-request
   operations stay outside the guarantee (What this does NOT close).
 
@@ -884,6 +1335,51 @@ is never refused.
   `Idempotency-Replayed` response headers (222-research-13).
 - Engine cut, deploy, then the client release (choreography (a)).
 
+### Phase 1a: bounded, keyed expire (Amendment A1, nexus-1579m)
+
+- Measure first, on a PITR fork, never production: read-only
+  `EXPLAIN (ANALYZE)` of one page's victim walk at `row_limit` 2,000 and of
+  the `refused` count against the largest live client sibling. Under 5 s
+  together (a fifth of the bound): proceed with the PK order and keep the
+  2,000 default. Over it: add the `quarantined_at` expression index changeset
+  and select in that order (Technical Design 7.1); a lower `row_limit` is not
+  the remedy.
+- Changeset: `nexus.gc_expire_quarantine_bounded` (Technical Design 7.1-7.2),
+  `GRANT EXECUTE ... TO nexus_svc` in the changeset as catalog-042 does for
+  the bounded restore (`catalog-042-gc-restore-rereferenced-bounded.xml:300`);
+  rollback drops it. DDL only, no row DML, so not in the rehearsal seed set;
+  it does enter the PITR-fork Liquibase walk.
+- jOOQ: regenerate; the RETURNS TABLE adds a Record type, so
+  `JooqRecordReflectionFeatureTest.EXPECTED_RECORD_TYPES` moves from 114
+  (`JooqRecordReflectionFeatureTest.java:273`). `PlpgsqlCheckGateTest` checks
+  the new body (an `Allowed` entry like the restore twin's, line 87, or a
+  clean body).
+- Engine: `PgSession` constants; `PgVectorRepository.expireQuarantineBounded`
+  (unkeyed and marker overloads, plus an explicit-bound overload for tests);
+  `VectorHandler` routing, the 5,000 clamp, `EXPIRE_ROUTE`,
+  `boundedExpireBody`; `IdempotencyKeyGuard.KEYED_ROUTES`. Every `*GateTest`
+  runs (any `service/src` edit).
+- Client: `gc_expire_quarantine_bounded`; `expire_quarantine_bounded_serverside`
+  with `strict` and the outcome table of 7.5; `GC_EXPIRE_ROW_LIMIT_DEFAULT`;
+  the three-field return; `BoundedDrainIncomplete(kind=...)`; `nx t3 gc`
+  passing `strict=True` and its widened handler; the indexer path left
+  non-strict. Local-service gate (the keyed path end to end).
+- Wire-contract entries: the Wire contract bullet above, and an `## Unshipped`
+  entry per half in `docs/wire-contract-pending.md` (bead nexus-1579m, engine
+  tag engine-service-v0.1.162, `[additive]` with old-client and new-engine
+  direction prose, as `tests/test_wire_contract_pairing_lint.py` requires).
+- Housekeeping found in the confirmation pass: the
+  `afterSweepSqlHookForTests` javadoc in `PgVectorRepository` (`:253-259`) lists three
+  methods and gains `expireQuarantineBounded`; the `expire_quarantine_across_serverside`
+  docstring is rewritten (Technical Design 7.5).
+- Engine cut and deploy (Sam tags), then the client release (choreography
+  (a)), riding engine-service-v0.1.162 with Phase 1 (Sam, 2026-10-21).
+- Exit: the 1a minimum viable validation below passes on a real substrate.
+
+Beads: nexus-1579m carries the work; its engine half and client half land in
+separate worktrees. Review gate: "Ship when the 1a MVV passes and every
+red-first test below was seen red".
+
 ### Phase 2 (DEFERRED, Sam 2026-09-28): content-addressed writes (closes wvek6)
 
 - Keyed handling on `upsert-chunks`, then `store-put` and `write_many` with
@@ -953,6 +1449,115 @@ Python (client):
 
 Minimum viable validation for Phase 1: the ll31n replay scenario on a real
 substrate, plus the `RequestLedgerTest` post-commit-exception case.
+
+### Phase 1a (Amendment A1)
+
+Each test below is written and run red before its code exists; the red it
+shows is named.
+
+Java, SQL function (`GcExpireQuarantineBoundedTest`, real Postgres):
+
+- Drain without skip or repeat: seed a sibling with 2.5 x `row_limit` eligible
+  chashes plus protected (manifest-referenced), engine-owned and not-yet-cutoff
+  rows; loop the function until `more` is false. Assert the union of the
+  pages' audit chash lists equals the eligible set exactly, the lists are
+  pairwise disjoint, each page's chashes are ascending and above the previous
+  page's, and every non-eligible row survives. Red: the function does not
+  exist.
+- No stall behind protected rows: protected chashes sort first (`00..` prefix)
+  and outnumber `row_limit`. Every page deletes eligible rows. Red against a
+  variant that applies `LIMIT` before the manifest filter (the page deletes 0
+  and `more` stays true), kept in the test as the stated hazard.
+- `more`: exactly `row_limit` eligible chashes drain in one page answering
+  `more: false`; `row_limit + 1` answer `true`, then `false`.
+- Concurrent re-quarantine: a second session updates one victim's
+  `quarantined_at` to now and holds the row lock; the page runs on a thread
+  and is released by that session's commit once `pg_stat_activity` shows the
+  page waiting on a lock (inside the 2 s `lock_timeout`). The row survives
+  and is absent from the audit row. Red: a DELETE without the cutoff
+  predicate (vectors-026's) deletes it. The after-SQL hook cannot reach this
+  window, since it runs after the function returns.
+- `row_limit <= 0` raises `invalid_parameter_value`; 6,000 is clamped to
+  5,000 and the audit row lists every chash it deleted.
+- A chash stored under two models: `expired` counts both rows, the audit row
+  lists the chash once, `details.rows` is 2.
+- `count_refused` false answers `refused` NULL; true answers the protected
+  count; a fraction of 1.0 or `force` gives the same `expired` and `refused`
+  as the unbounded function on the same data.
+- Floor (fraction below 1): a first page over the floor returns
+  `floor_refused = true`, `expired = 0`, deletes nothing, writes no audit row;
+  with `force` it pages. A loop that passes page 1 is never refused later
+  with no concurrent change.
+- Gate: a test session holding `sweepgate:<tenant>/<sibling>` makes the page
+  raise 55P03 whose message contains the sweep gate marker, inside about 2 s;
+  holding the origin's key does not block it (the key choice, 7.2).
+- Statement bound: the explicit-bound overload with a bound shorter than the
+  walk raises 57014 and deletes nothing.
+- The unbounded `gc_expire_quarantine` tests (`PgVectorRepositoryGcQuarantineTest`)
+  stay green unchanged.
+
+Java, route and ledger (`VectorHandlerRowLimitRoutingTest`, `KeyedSweepRouteTest`,
+`KeyedRoutesCensusTest`):
+
+- A `count_refused=false` page answers `"refused": null`, stores that body in
+  the ledger and replays it unchanged (status poll and `Idempotency-Replayed`).
+- `row_limit` absent answers exactly `{"expired","refused"}`; 0, negative or a
+  string is 400; 6,000 answers `row_limit: 5000`; a key without `row_limit`
+  is 400 `idempotency_key_unsupported`.
+- `KeyedRoutesCensusTest` fails until `EXPIRE_ROUTE` is in `KEYED_ROUTES`
+  (the handler calls `keyedRequest`).
+- Two concurrent same-key pages (the after-SQL hook holding the first): one
+  200, one 409 `request_in_flight`; a status read during the hold says
+  `in_flight`, after commit `committed` with the true `expired`; a replay
+  returns the same body with `Idempotency-Replayed: true` and the function's
+  invocation count stays flat.
+- A page whose lease expires during the hook cannot commit: the rows it
+  deleted are present again and the status reads `rolled_back`.
+- Gate held by another session: 503 `sweep_gate_busy`, the ledger row
+  `failed`, a same-key resend after release commits once.
+
+Python (client):
+
+- `tests/db/test_http_vector_client_keyed_sweeps.py`: `gc_expire_quarantine_bounded`
+  sends one key across every resend of a page and a new key per page; a
+  socket timeout polls and returns the stored body on `committed`;
+  `sweep_gate_busy` resends. Red: the method does not exist.
+- `tests/test_chunk_quarantine_serverside.py`, one test per row of the 7.5
+  table in each mode: sums `expired`, keeps the first non-null `refused` and
+  stops sending `count_refused` after it, stops at `more: false`; no progress
+  warns (non-strict) or raises `"no progress"` (strict); an absent `more` is
+  an old engine's complete answer; `CommittedWithUnknownCounts` continues in
+  both modes with `counts_complete=False` and no raise; the iteration cap;
+  a first-page error returns `(0, None, False)` non-strict and re-raises
+  unchanged strict; a later page's unsettled error (with the key note) and a
+  later page's definite 400 each return partial totals with
+  `counts_complete=False` non-strict and raise `"page failed"` with the error
+  as cause strict; a `ValueError`, a `json.JSONDecodeError` and a `ProductionWriteGuardError`
+  propagate in both; the non-strict loop sends `count_refused=false` on every
+  page and the strict loop sends it until a page answers non-null. Red: each against the
+  current single-call `expire_quarantine_serverside`.
+- `expire_quarantine_across_serverside` treats a `None` refused as unknown
+  (known values summed, `None` when no sibling reported one); a first-page
+  failure on one sibling does not raise `TypeError` on the sum.
+- `expire_quarantine_across_serverside(best_effort=True)` over three
+  siblings, the first failing on page 2 with `http.client.IncompleteRead` and
+  the second with a 500: the third sibling's expiry still runs and the call
+  returns. Red: today the `IncompleteRead` escapes to the indexer's outer
+  handler and the later siblings never run.
+- `BoundedDrainIncomplete(kind="expire")`'s message says "expire" and
+  "expired"; the quarantine message is unchanged.
+- `nx t3 gc` prints "at least" for an incomplete count, prints the request
+  key of an unknown page, and exits 1 on `BoundedDrainIncomplete` and on a
+  bare `OSError` with the move-stands message.
+
+Scenario on the engine substrate, the ll31n replay for expire (the
+`tests/test_yye8l13_ll31n_replay_substrate.py` pattern): a keyed bounded
+expire page held past the client's socket timeout reports committed with the
+true `expired` count, and the drain finishes with every eligible row gone
+exactly once.
+
+Minimum viable validation for 1a: that scenario, plus the drain-without-skip,
+no-stall and concurrent re-quarantine function tests.
 
 ### Phase 0 (shipped)
 
@@ -1028,6 +1633,20 @@ Record: T2 `nexus/decision-rdr222-open-questions-2026-10-17`.
 
 Record: T2 `nexus/decision-rdr222-q6-2026-10-18`. (This draft earlier said
 open question 6 was answered on 2026-09-27; that record answers 3 and 4 only.)
+
+## Decision on Amendment A1 (Sam, 2026-10-21)
+
+Amendment A1 (nexus-1579m, Technical Design 7, Phase 1a) is recorded under
+this RDR's existing acceptance. It was not re-gated; the RDR stays
+`accepted`. Its draft went through two critique rounds (T2
+`nexus/critique-rdr222-a1-1579m-draft`, `nexus/critique-rdr222-a1-1579m-confirm`),
+and the confirmation round's follow-ups are folded in.
+
+1. **A1 rides engine-service-v0.1.162 with Phase 1.** No keyless resend is
+   added for an engine that has the ledger without the bounded expire.
+2. **The sibling-keyed advisory gate (Technical Design 7.2) is accepted**,
+   a new advisory key carrying the RDR-191 marker text.
+3. **Recorded as an amendment under the existing acceptance**, not re-gated.
 
 ## Open Questions (for Sam)
 
@@ -1136,6 +1755,8 @@ of record; nothing is trimmed. The record is larger than Phase 1 needs
 because it keeps that design.
 
 ## Revision History
+
+- 2026-10-21: Amendment A1 (nexus-1579m): bounded, keyed expire-quarantine (Technical Design 7, Phase 1a, Test Plan 1a, wire bullets); nexus-k9kr9 kept separate with a recommended direction. Recorded under the existing acceptance by Sam's decision (no re-gate); the RDR stays `accepted`. Sources in 222-research-15.
 
 - 2026-10-18: accept residual dispositions: residual 1 [BLOCKS-PLANNING] carried by bead nexus-zxgld (Sam's choice); residual 2 [DISCOVER-AT-IMPLEMENTATION] carried by bead nexus-zxgld (Phase 1). Round 2 Significants: bead nexus-icdmw.
 
