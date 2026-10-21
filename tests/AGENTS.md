@@ -21,13 +21,14 @@ when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
 out. Diagnose with `ipcs -m` before suspecting the code.
 
 **`-n` is also capped to the run's memory grant** (nexus-vo9qn,
-`tests/_xdist_cap.py`): workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 2.5
-GiB. The 2.5 GiB is the measured per-worker peak (engine JVM + Postgres cluster
-+ the cluster's tmpfs pages, charged to the grant): lab-l, 48 GB, 16 workers
-peaked 39.4 GB; lab-m, 16 GB, `-n 8` peaked 14.5 GB. So `-n auto` keeps 16 on
-lab-l and runs 6 on lab-m; the clamp prints its reason. Nothing applies without a
+`tests/_xdist_cap.py`): workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 3264
+MiB (about 3.2 GiB). That is the measured per-worker peak of a FULL Python suite
+(engine JVM + Postgres cluster + the cluster's tmpfs pages, charged to the
+grant): lab-l, 48 GiB, 16 workers peaked 47.8 GB, 1.4 GB from exit 137
+(2026-10-21). So `-n auto` runs 15 on lab-l and 5 on lab-m; the clamp prints its
+reason. Nothing applies without a
 visible limit (a laptop). `NX_XDIST_NO_CAP=1` opts out of both caps. The cost on
-lab-m is real: `-n auto` goes from 8 workers to 6 (25% less parallelism, a longer
+lab-m is real: `-n auto` goes from 8 workers to 5 (37% less parallelism, a longer
 wall clock), because 8 at 14.5 of 16 GB left no room for the run to stay on tmpfs.
 Both caps rewrite xdist's `option.tx` as well as `numprocesses`
 (`set_worker_count`): xdist builds `tx` before conftest loads, so setting the
@@ -133,7 +134,7 @@ not a code failure: do not rerun hoping it passes.
   events (info level, so rerun with `--log-level=INFO`) give each start's root and
   the headroom the decision saw.
 - Remedies, in order: (1) fewer workers or a larger `lab-run` class: `-n` =
-  headroom / 2.5 GiB (a 16 GB grant carries 6), which is also what the memory cap
+  headroom / 3.2 GiB (a 16 GB grant carries 5), which is also what the memory cap
   computes unless `NX_XDIST_NO_CAP=1` overrode it; (2) `NX_TEST_PG_ROOT=<dir>`
   puts every cluster under a directory you choose (a disk you accept writing to);
   (3) `NX_TEST_PG_ROOT=default` puts every cluster back on the tempdir, which is

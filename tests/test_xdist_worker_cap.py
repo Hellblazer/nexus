@@ -239,23 +239,32 @@ class TestMemoryCap:
         assert BYTES_PER_WORKER >= 39.4e9 / 16
         # lab-m, 16 GB, -n 8 peaked 14.5 GB: the budget must not exceed what fits
         assert BYTES_PER_WORKER >= 14.5e9 / 8
+        # The FULL Python suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f): lab-l at -n auto =
+        # 16 workers peaked 47.8 GB of the 48 GiB grant, about 3.0 GB per worker, 1.4 GB from exit 137.
+        assert BYTES_PER_WORKER >= 47.8e9 / 16
+
+    def test_a_full_suite_in_lab_l_keeps_two_gib_of_its_grant_free(self) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        grant = 48 * self.GIB
+        assert cap_from_memory(grant_bytes=grant) * (47.8e9 / 16) <= grant - 2 * self.GIB
 
     @pytest.mark.parametrize(
         "cls,grant_gib,workers",
-        [("lab-s", 4, 1), ("lab-m", 16, 6), ("lab-6c18g", 18, 7), ("lab-l", 48, 19), ("lab-xl", 96, 38)],
+        [("lab-s", 4, 1), ("lab-m", 16, 5), ("lab-6c18g", 18, 5), ("lab-l", 48, 15), ("lab-xl", 96, 30)],
     )
     def test_cap_per_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
         from tests._xdist_cap import cap_from_memory
 
         assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
 
-    def test_lab_l_keeps_its_sixteen_workers_and_lab_m_loses_two(self) -> None:
+    def test_lab_l_runs_fifteen_workers_and_lab_m_five(self) -> None:
         from tests._xdist_cap import cap_from_memory
 
-        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[1] is None
-        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 6
+        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[0] == 15
+        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 5
 
-    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 4)])
+    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 3)])
     def test_cap_per_mac_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
         from tests._xdist_cap import cap_from_memory
 
@@ -304,7 +313,7 @@ class TestMemoryCap:
 
         monkeypatch.setenv("LAB_MEM_MB", str(16 * 1024))
         monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
-        assert mod.effective_memory_cap() == 6
+        assert mod.effective_memory_cap() == 5
         monkeypatch.setenv(mod.NO_CAP_ENV, "1")
         assert mod.effective_memory_cap() is None
 
@@ -446,10 +455,10 @@ class TestClampsReallyReduceWorkers:
     xdist run can. Each asserts the worker count xdist actually created."""
 
     def test_the_memory_cap_creates_fewer_workers(self, tmp_path) -> None:
-        # 5200 MiB grant / 2560 MiB per worker = 2 workers (a tighter cgroup can
+        # 6600 MiB grant / 3264 MiB per worker = 2 workers (a tighter cgroup can
         # only lower it).
         created, total, out = _run_real_xdist(
-            tmp_path, setup="", env_extra={"LAB_MEM_MB": "5200"}, n=4,
+            tmp_path, setup="", env_extra={"LAB_MEM_MB": "6600"}, n=4,
         )
         assert "clamped 4 ->" in out
         assert 1 <= created <= 2 and created == total

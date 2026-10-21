@@ -233,16 +233,18 @@ def effective_cap() -> int | None:
 #: cgroup). nexus-vo9qn, measured on chas with the labrun sampler (nexus_911
 #: proofs, 2026-10-19, tests/db + ddl): lab-l (16 cores, 48 GB) at ``-n auto`` =
 #: 16 workers peaked 39.4 GB anon including shmem = 2.46 GB per worker; lab-m
-#: (8 cores, 16 GB) at ``-n 8`` peaked 14.5 GB = 1.81 GB per worker. The budget is
-#: the larger figure rounded up to 2.5 GiB, so lab-l keeps its 16 workers (40 of
-#: 48 GiB) and lab-m runs 6 (15 of 16 GiB) instead of 8 (14.5 of 16 GB, no room).
-#: Without this a grant fills as workers grow, the run used to fall back to disk
-#: for later clusters (3.9 GB written in 4 minutes); the session now never does,
-#: so the worker count has to keep the grant from filling. Per class, from the
-#: grant alone: lab-s (4 GiB) 1, lab-m (16) 6, lab-6c18g (18) 7, lab-l (48) 19
-#: (its 16 cores bind first), lab-xl (96) 38; on hellmini lab-mac-s (4) 1 and
-#: lab-mac-m (10) 4 (nexus-pnyfq).
-BYTES_PER_WORKER = 2560 * 1024**2
+#: (8 cores, 16 GB) at ``-n 8`` peaked 14.5 GB = 1.81 GB per worker. Those were
+#: subsets. The FULL suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f) at
+#: ``-n auto`` = 16 workers on lab-l peaked 47.8 GB of the 48 GiB grant, about
+#: 3.0 GB per worker, 1.4 GB from an OOM kill (exit 137). The budget is 3264 MiB
+#: (about 3.2 GiB), so lab-l runs 15 workers (about 45 GB at that peak, 3 GB free)
+#: and lab-m 5. Without this a grant fills as workers grow, the run used to fall
+#: back to disk for later clusters (3.9 GB written in 4 minutes); the session now
+#: never does, so the worker count has to keep the grant from filling. Per class,
+#: from the grant alone: lab-s (4 GiB) 1, lab-m (16) 5, lab-6c18g (18) 5 (CI's
+#: shards run -n 4), lab-l (48) 15, lab-xl (96) 30; on hellmini lab-mac-s (4) 1
+#: and lab-mac-m (10) 3 (nexus-pnyfq).
+BYTES_PER_WORKER = 3264 * 1024**2
 
 
 def _lab_mem_bytes(env: Mapping[str, str]) -> int | None:

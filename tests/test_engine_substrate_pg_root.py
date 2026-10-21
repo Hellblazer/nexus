@@ -1113,7 +1113,7 @@ class TestFloorPollsBeforeRaising:
         msg = str(ei.value)
         order = [msg.index(k) for k in ("fewer workers", "NX_TEST_PG_ROOT=<dir>", "NX_TEST_PG_ROOT=default")]
         assert order == sorted(order)
-        assert "headroom / 2.5 GiB" in msg and "NVMe writes" in msg
+        assert "headroom / 3.2 GiB" in msg and "NVMe writes" in msg
         assert "cluster_root" in msg and "summary line" in msg
 
 

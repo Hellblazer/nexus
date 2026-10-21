@@ -769,7 +769,7 @@ def _check_tmpfs_has_room(
         f"in the summary line ('clusters on tmpfs N, on disk M') and the "
         f"nexus_t2_substrate.cluster_root / root_decision_headroom log events "
         f"(info level: re-run with --log-level=INFO). "
-        f"In order: run fewer workers (-n N, with N = headroom / 2.5 GiB) or a "
+        f"In order: run fewer workers (-n N, with N = headroom / 3.2 GiB) or a "
         f"larger lab-run class; set {_PG_ROOT_ENV}=<dir> to put clusters on a "
         f"disk you choose; {_PG_ROOT_ENV}=default puts every cluster back on the "
         f"tempdir (disk) and brings the NVMe writes this check exists to prevent."
