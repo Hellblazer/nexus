@@ -6,15 +6,17 @@ and a per-page request key. These tests pin its outcome table (Technical Design 
 client object, one test per row of the table in each mode; ``tests/db/test_http_vector_client_keyed_sweeps.py``
 drives the same loop over the real transport.
 
-* Non-strict (the indexer's prune) never raises a page outcome, the first page's included.
+* Non-strict (the indexer's prune) never raises a page outcome, the first page's included, with two
+  carve-outs below.
 * Strict (``nx t3 gc``) re-raises the first page's error unchanged and relabels a later page's as
   :class:`BoundedDrainIncomplete`.
-* A data defect (a malformed response, the production-write guard) propagates in both modes.
+* A response-shape defect (a parsed body with wrong fields) and the production-write guard's refusal
+  propagate in both modes. A 200 whose body is not JSON is NOT one: the client polls the ledger for it
+  (``test_a_200_whose_body_does_not_parse_*`` in the keyed-sweeps tests).
 """
 from __future__ import annotations
 
 import http.client
-import json
 
 import pytest
 from structlog.testing import capture_logs
@@ -128,6 +130,20 @@ def test_an_answer_with_no_more_key_is_an_older_engines_complete_unbounded_answe
     assert len(db.calls) == 1
 
 
+@BOTH_MODES
+@pytest.mark.parametrize("body", [
+    {"expired": 5, "refused": None, "row_limit": 100},
+    {"expired": 5, "refused": None, "more": None, "row_limit": 100, "floor_refused": False},
+], ids=["row_limit-no-more", "row_limit-null-more"])
+def test_a_body_with_row_limit_but_no_more_is_a_shape_defect_not_an_old_engines_answer(strict, body):
+    """A bounded engine always answers `row_limit`; an answer that carries it and lost `more` is not the
+    unbounded older engine's complete total. Reading it as one would report a partial drain as done."""
+    db = Pages(body)
+    with pytest.raises(ValueError, match="more"):
+        drain(db, strict=strict)
+    assert len(db.calls) == 1
+
+
 def test_no_progress_warns_with_the_totals_so_far_non_strict_and_raises_strict():
     db = Pages(page(100, more=True), page(0, more=True))
     with capture_logs() as cap:
@@ -144,8 +160,10 @@ def test_no_progress_warns_with_the_totals_so_far_non_strict_and_raises_strict()
 
 
 @BOTH_MODES
-def test_a_floor_refusal_is_no_progress_too(strict):
-    db = Pages(page(0, more=True, refused=900, floor_refused=True))
+@pytest.mark.parametrize("more", [True, False], ids=["more", "no-more"])
+def test_a_floor_refusal_is_no_progress_too(strict, more):
+    """`more=False, floor_refused=True` reaches the no-progress exit only through the floor_refused clause."""
+    db = Pages(page(0, more=more, refused=900, floor_refused=True))
     if strict:
         with pytest.raises(BoundedDrainIncomplete) as exc:
             drain(db, strict=True)
@@ -153,7 +171,8 @@ def test_a_floor_refusal_is_no_progress_too(strict):
     else:
         with capture_logs() as cap:
             assert drain(db) == (0, 900, True)
-        assert events(cap, "gc_expire_bounded_no_progress")
+        (warning,) = events(cap, "gc_expire_bounded_no_progress")
+        assert warning["floor_refused"] is True
     assert len(db.calls) == 1
 
 
@@ -164,6 +183,39 @@ def test_a_page_committed_with_unknown_counts_continues_and_marks_the_total_a_lo
         assert drain(db, strict=strict) == (107, None, False)
     assert len(db.calls) == 3
     assert events(cap, "gc_expire_batch_committed_counts_unknown")
+
+
+LOST = CommittedWithUnknownCounts(committed_unknown_counts=True)
+
+
+def test_a_lost_count_page_then_no_progress_keeps_the_total_a_lower_bound():
+    db = Pages(page(100, more=True), LOST, page(0, more=True))
+    with capture_logs():
+        assert drain(db) == (100, None, False)
+    db = Pages(page(100, more=True), LOST, page(0, more=True))
+    with pytest.raises(BoundedDrainIncomplete) as exc:
+        drain(db, strict=True)
+    assert exc.value.reason == "no progress" and exc.value.moved == 100
+
+
+def test_a_lost_count_page_then_the_iteration_cap_keeps_the_total_a_lower_bound():
+    row_limit = 1_000_000
+    cap_pages = _gc_loop_max_iterations(row_limit)
+    # page 1 is lost, the rest (the last entry repeats) always have more: the cap ends the drain.
+    db = Pages(LOST, page(5, more=True))
+    with capture_logs() as cap:
+        assert drain(db, row_limit=row_limit) == (5 * (cap_pages - 1), None, False)
+    assert events(cap, "gc_expire_bounded_loop_iteration_cap_reached")
+    db = Pages(LOST, page(5, more=True))
+    with pytest.raises(BoundedDrainIncomplete) as exc:
+        drain(db, strict=True, row_limit=row_limit)
+    assert exc.value.reason == "iteration cap"
+
+
+@BOTH_MODES
+def test_a_lost_count_page_then_an_older_engines_no_more_answer_keeps_the_total_a_lower_bound(strict):
+    db = Pages(LOST, {"expired": 9, "refused": 1})
+    assert drain(db, strict=strict) == (9, 1, False)
 
 
 def test_the_iteration_cap_warns_non_strict_and_raises_strict():
@@ -249,7 +301,6 @@ def test_a_later_page_error_is_a_bounded_drain_incomplete_with_the_error_as_caus
 
 DEFECTS = [
     ProductionWriteGuardError("refused: no opt-in"),
-    json.JSONDecodeError("Expecting value", "{", 0),
     ValueError("malformed"),
     TypeError("malformed"),
 ]

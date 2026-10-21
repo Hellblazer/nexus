@@ -715,7 +715,9 @@ def expire_quarantine_across_serverside(
 
     The bounded loop (:func:`expire_quarantine_bounded_serverside`, non-strict) never raises a page
     outcome, the first page's included, so with it every sibling's expiry runs and logs its own
-    result. Only a client object with no bounded method falls back to the unbounded call, and
+    result. Two carve-outs propagate and end the pass: a response-shape defect (``ValueError`` /
+    ``TypeError`` from a parsed body with the wrong fields) and ``ProductionWriteGuardError`` (a
+    stop-and-verify refusal). Only a client object with no bounded method falls back to the unbounded call, and
     there ``best_effort`` keeps its meaning: a :class:`VectorServiceError` or ``OSError`` (a
     local-mode transport failure) on any sibling after the first is logged
     (``quarantine_sibling_expire_failed``, naming the sibling) and skipped, and a failure on the
@@ -775,8 +777,9 @@ def expire_quarantine_bounded_serverside(
 
     Outcome per page (Technical Design 7.5), non-strict / ``strict`` (``nx t3 gc``):
 
-    * ``more`` false: done. No ``more`` key at all: an engine that predates the bounded form ran the
-      unbounded expire and its answer is the total.
+    * ``more`` false: done. Neither ``more`` nor ``row_limit`` in the answer: an engine that predates the
+      bounded form ran the unbounded expire and its answer is the total. ``row_limit`` without ``more`` is a
+      response-shape defect (:class:`ValueError`).
     * No progress (``more`` with nothing expired, or ``floor_refused``): a warning / :class:`BoundedDrainIncomplete`.
     * A page committed with unknown counts: the drain continues in both modes.
     * The iteration cap with ``more`` still true: a warning / :class:`BoundedDrainIncomplete`.
@@ -787,9 +790,11 @@ def expire_quarantine_bounded_serverside(
       could not settle carries a note naming its request key; the page may have committed).
 
     Non-strict (the indexer's prune) never raises a page outcome, so one sibling's expiry cannot cut
-    short the siblings after it. Anything outside that error set propagates in both modes: a malformed
-    response (``ValueError``, ``TypeError``) is a data defect, and the production-write guard's refusal
-    is a stop-and-verify.
+    short the siblings after it, with two carve-outs. Anything outside that error set propagates in both
+    modes: a response-shape defect (a parsed body with the wrong fields: ``ValueError``, ``TypeError``) is a
+    data defect, and :class:`~nexus.db.service_endpoint.ProductionWriteGuardError` is a stop-and-verify
+    refusal. A 200 whose body does not parse is not a defect but an ambiguous outcome: the client polls the
+    ledger for it (``_keyed_sweep_post``), and an unsettled one arrives here as a ``VectorServiceError``.
 
     ``count_refused`` is sent only for a strict drain, until a page has answered it: the indexer discards
     ``refused``, and counting it costs the engine a sibling-wide scan inside the 25 s bound.
@@ -841,7 +846,13 @@ def expire_quarantine_bounded_serverside(
             refused = int(result["refused"])
         more = result.get("more")
         if more is None:
-            # Older engine: ignored row_limit, already did the whole thing.
+            if result.get("row_limit") is not None:
+                # A bounded engine always answers row_limit. A body that carries it but lost `more` is not
+                # an older engine's complete answer; reading it as one would report a partial drain as done.
+                raise ValueError(
+                    f"expire-quarantine answer for {quarantine_name} has row_limit but no 'more': {result!r}"
+                )
+            # Older engine (neither key): ignored row_limit, already did the whole thing.
             return expired, refused, counts_complete
         if result.get("floor_refused") or (more and page_expired <= 0):
             if strict:

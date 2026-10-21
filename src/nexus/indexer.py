@@ -4167,7 +4167,9 @@ def _prune_collection_serverside(
     # carries NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
     # RDR-222 Amendment A1 (nexus-1579m): the expiry is a bounded, keyed drain run NON-strict, which never
     # raises a page outcome (a failed or unsettled page is a warning naming its request key), so every
-    # sibling's expiry runs; `nx t3 gc` runs the same drain strict. A ValueError still propagates (below).
+    # sibling's expiry runs; `nx t3 gc` runs the same drain strict. Two carve-outs still propagate and end
+    # the pass: a response-shape defect (ValueError, below) and ProductionWriteGuardError (a stop-and-verify
+    # refusal). A 200 whose body does not parse is not one: the client polls the ledger for it.
     expired = expire_quarantine_across_serverside(
         db, siblings, collection_name, cutoff, best_effort=True,
     )

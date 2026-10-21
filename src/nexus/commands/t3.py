@@ -330,7 +330,10 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
 
     cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if getattr(t3_db, "gc_expire_quarantine", None) is None:
+    if (
+        getattr(t3_db, "gc_expire_quarantine_bounded", None) is None
+        and getattr(t3_db, "gc_expire_quarantine", None) is None
+    ):
         click.echo(
             f"  Client expiry of {qname} did NOT run: this T3 handle carries no gc_expire_quarantine route.",
             err=True,

@@ -2203,7 +2203,9 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
       Waits ``Retry-After`` (5 s and 1 s when absent) and resends under the same key.
     * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``, at
       most :data:`_RETRY_AFTER_BEFORE_POLL_MAX_S`: the managed edge answers its own 503 for a request
-      that never reached the engine), a socket timeout, a malformed response, or a connection failure
+      that never reached the engine), a socket timeout, a malformed response (a non-HTTP status line, or a
+      200 whose body is not JSON, which is raised as a :class:`VectorServiceError` with no code and the
+      decode error as its cause), or a connection failure
       that does not prove the engine never ran the request, is ambiguous:
       :func:`_poll_request_status` answers it, at the resend cap too (the 4th POST's timeout must not
       surface as a failure when the ledger says committed). Never a re-POST on a 409, and a 409 after a
@@ -2227,8 +2229,16 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
     while True:
         _pop_idempotency_response_headers()  # a socket timeout leaves no response to overwrite a stale one
         try:
-            with _request_key(key):
-                result = _post(path, body, tenant=tenant, timeout=_SWEEP_POST_TIMEOUT_S)
+            try:
+                with _request_key(key):
+                    result = _post(path, body, tenant=tenant, timeout=_SWEEP_POST_TIMEOUT_S)
+            except json.JSONDecodeError as bad:
+                # A 200 whose body does not parse (edge HTML, a truncation that is not an IncompleteRead):
+                # the page may have committed. Reframed as a transport-level failure (code None, cause the
+                # decode error) so it is polled like the other ambiguous outcomes, and so an unsettled one
+                # surfaces as a VectorServiceError a non-strict caller can skip. A parsed body that is
+                # missing fields is a different thing (a shape defect, raised by the caller as ValueError).
+                raise VectorServiceError(f"{path}: response body is not JSON ({bad})") from bad
             if _pop_idempotency_response_headers().get("Idempotency-Replayed") == "true":
                 _log.info("keyed_sweep_replayed", path=path, request_id=key)
             return result

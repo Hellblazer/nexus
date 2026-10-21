@@ -398,6 +398,7 @@ def test_route_unavailable_prunes_nothing_and_crosses_no_wire(t2_service_env) ->
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced", None), \
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced_bounded", None), \
          patch.object(hvc.HttpVectorClient, "gc_expire_quarantine", None), \
+         patch.object(hvc.HttpVectorClient, "gc_expire_quarantine_bounded", None), \
          patch("nexus.db.http_vector_client._post", side_effect=_spy_post):
         _prune_deleted_files(coll_name, "docs__gcq-fallback-unused", db, catalog=cat)
 

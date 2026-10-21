@@ -818,9 +818,49 @@ def test_a_refused_key_on_the_first_page_is_raised_unchanged_when_strict_and_nev
         assert len(_posts(srv, _EXPIRE)) == 1, "a refused key is never resent"
 
 
-def test_a_malformed_page_body_propagates_in_both_modes(srv, client, clock):
-    """A 200 that is not JSON is a data defect, not an ambiguity the ledger settles: it propagates."""
-    srv.script(f"POST {_EXPIRE}", sv.Reply(200, b"{not json"))
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_a_200_whose_body_does_not_parse_is_ambiguous_and_polled(srv, client, clock, form):
+    """The page may have committed before its body was cut or mangled (edge HTML, a truncation that is not
+    an IncompleteRead): the ledger is asked, never a blind resend and never a bare JSONDecodeError."""
+    path, call, _ = _FORMS[form]
+    srv.script(f"POST {path}", sv.Reply(200, b"{not json"))
+    srv.script(f"GET {_STATUS}", _committed(form))
+    assert call(client) == _stored(form)
+    assert len(_posts(srv, path)) == 1, "committed: never resent"
+    assert len(_polls(srv)) == 1
+
+
+def test_a_200_whose_body_does_not_parse_and_the_ledger_cannot_settle_is_a_service_error_in_both_modes(
+    srv, client, clock,
+):
+    """Unsettled, it surfaces like any other ambiguous outcome (a VectorServiceError naming the key), so
+    a non-strict drain skips the sibling instead of aborting the whole prune with a ValueError."""
+    srv.script(f"POST {_EXPIRE}", sv.Reply(200, b"{not json"))  # no ledger script: the poll finds none
+    assert _drain(client) == (0, None, False), "non-strict: a warning, never a raise"
+    srv.requests.clear()
+    with pytest.raises(hv.VectorServiceError) as exc:
+        _drain(client, strict=True)
+    assert isinstance(exc.value.__cause__, ValueError)
+    _assert_unresolved_note(exc.value, "this engine keeps no request ledger")
+
+
+def test_a_later_page_whose_200_body_does_not_parse_is_settled_by_the_ledger(srv, client, clock):
     for strict in (False, True):
-        with pytest.raises(ValueError):
+        srv.requests.clear()
+        srv.script(
+            f"POST {_EXPIRE}", sv.ok(_expire_page(100, more=True)), sv.Reply(200, b"{not json"),
+        )
+        srv.script(f"GET {_STATUS}", _status("committed", response_status=200, response=_expire_page(5, more=False)))
+        assert _drain(client, strict=strict) == (105, None, True)
+        assert len(_posts(srv, _EXPIRE)) == 2 and len(_polls(srv)) == 1
+
+
+@pytest.mark.parametrize("body", [{"expired": None, "more": False}, {"expired": "x", "more": False}])
+def test_a_parsed_body_with_a_bad_shape_still_propagates_in_both_modes(srv, client, clock, body):
+    """A parsed body whose fields are wrong is a response-SHAPE defect, not an ambiguous outcome: no poll."""
+    for strict in (False, True):
+        srv.requests.clear()
+        srv.script(f"POST {_EXPIRE}", sv.ok(body))
+        with pytest.raises((TypeError, ValueError)):
             _drain(client, strict=strict)
+        assert not _polls(srv)

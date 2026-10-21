@@ -1009,6 +1009,7 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     db.gc_restore_rereferenced_bounded = None
     db.gc_quarantine_orphans_bounded = None
     db.gc_expire_quarantine = None
+    db.gc_expire_quarantine_bounded = None  # RDR-222 A1 (nexus-1579m): the loop is tried first
     return db, cols
 
 
@@ -1152,6 +1153,31 @@ def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quara
         c.args and c.args[0] == "gc_pruned_orphan_chunks_serverside"
         for c in log.info.call_args_list
     )
+
+
+def test_prune_collection_serverside_warns_when_the_expiry_has_no_route_after_the_quarantine_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-222 A1 (nexus-1579m): a client object with neither expiry method answers `None` to the expiry
+    (not 'nothing to expire'); the pass still succeeds, because the move did, and says so in a warning."""
+    import nexus.catalog.chunk_quarantine as cq
+    from nexus.indexer import _prune_collection_serverside
+
+    monkeypatch.setattr(cq, "restore_rereferenced_across_serverside", lambda *a, **k: 0)
+    monkeypatch.setattr(cq, "quarantine_orphans_bounded_serverside", lambda *a, **k: (4, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: None)
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    with patch("nexus.indexer._log") as log:
+        result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    (event,) = [
+        c for c in log.warning.call_args_list
+        if c.args and c.args[0] == "gc_expire_quarantine_route_missing_after_quarantine_succeeded"
+    ]
+    assert event.kwargs["collection"] == origin
 
 
 def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(

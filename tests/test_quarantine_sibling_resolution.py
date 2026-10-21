@@ -807,6 +807,30 @@ def _run_t3_expiry(db, capsys, *, moved: int = 0):
     return 0, capsys.readouterr()
 
 
+def test_nx_t3_gc_runs_on_a_handle_that_has_only_the_bounded_expiry_method(rewritten_row, capsys) -> None:
+    """The capability gate considers the bounded method too: a handle with no unbounded
+    `gc_expire_quarantine` must not be told its expiry "did NOT run"."""
+
+    class BoundedOnly:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def gc_quarantine_restore(self, origin, **kwargs):
+            return {"quarantine_collections": []}
+
+        def gc_expire_quarantine_bounded(
+            self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+        ):
+            self.calls.append(quarantine)
+            return _page(3, more=False, refused=0)
+
+    db = BoundedOnly()
+    code, cap = _run_t3_expiry(db, capsys)
+    assert code == 0 and db.calls, "the expiry ran"
+    assert "did NOT run" not in cap.err
+    assert "3 expired, 0 refused" in cap.out
+
+
 def test_nx_t3_gc_expires_strictly_and_asks_for_the_refused_count(rewritten_row, capsys) -> None:
     db = _BoundedGcDb([REAPER_NAME], {
         ROW_NAME: [_page(100, more=True, refused=2), _page(4, more=False, refused=2)],
