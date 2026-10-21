@@ -278,12 +278,10 @@ def _dqblk_type() -> type:
     return _Dqblk
 
 
-def _user_quota_headroom(path: Path) -> int | None:
-    """Bytes this user may still write under the user quota of *path*'s filesystem,
-    or None when there is no limit or it cannot be read (not 64-bit Linux on
-    x86_64/arm64, no quota on the mount, a kernel without quotactl_fd). Never raises.
-    chas mounts /dev/shm with ``usrquota`` and gives nxtest about 49.45 GiB of a
-    62 GiB tmpfs, which ``shutil.disk_usage`` cannot see (nexus-bmjet)."""
+def _read_user_quota(path: Path) -> tuple[int, int, int, int] | None:
+    """``(hard KiB, soft KiB, used bytes, valid bits)`` of this user's quota on *path*'s
+    filesystem, or None when it cannot be read (not 64-bit Linux on x86_64/arm64, no
+    quota on the mount, a kernel without quotactl_fd). Never raises."""
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64"):
         return None
     try:
@@ -291,17 +289,28 @@ def _user_quota_headroom(path: Path) -> int | None:
 
         if ctypes.sizeof(ctypes.c_void_p) != 8:  # a 32-bit Python lays the struct out in 68 bytes
             return None
+        uid = int(_current_uid())
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             dq = _dqblk_type()()
             libc = ctypes.CDLL(None, use_errno=True)
-            if libc.syscall(_QUOTACTL_FD_NR, fd, _Q_GETQUOTA_USR, os.getuid(), ctypes.byref(dq)) != 0:
+            if libc.syscall(_QUOTACTL_FD_NR, fd, _Q_GETQUOTA_USR, uid, ctypes.byref(dq)) != 0:
                 return None
         finally:
             os.close(fd)
     except Exception:  # noqa: BLE001 — a probe: no answer, never an error
         return None
-    return _quota_headroom(dq.bhardlimit, dq.bsoftlimit, dq.curspace, dq.valid)
+    return dq.bhardlimit, dq.bsoftlimit, dq.curspace, dq.valid
+
+
+def _user_quota_headroom(path: Path) -> int | None:
+    """Bytes this user may still write under the user quota of *path*'s filesystem,
+    or None when there is no limit or it cannot be read. chas mounts /dev/shm with
+    ``usrquota`` and gives nxtest about 49.45 GiB of a 62 GiB tmpfs, which
+    ``shutil.disk_usage`` cannot see (nexus-bmjet); a user given no limit there
+    (the CI runner's) reads None."""
+    quota = _read_user_quota(path)
+    return None if quota is None else _quota_headroom(*quota)
 
 
 def _quota_headroom(hard_kib: int, soft_kib: int, used_bytes: int, valid: int) -> int | None:

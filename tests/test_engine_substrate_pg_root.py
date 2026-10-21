@@ -1275,7 +1275,7 @@ class TestTmpfsHardening:
         assert sub._tmpfs_free_bytes(tmp_path) == fs_free
 
     def test_a_small_quota_trips_the_mid_run_floor(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        setattr_in(monkeypatch, sub, "shutil.disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
         monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
         cause = sub._tmpfs_floor_cause(tmp_path, None, lambda: None)
         assert cause is not None and "64 MiB free for this user" in cause, cause
@@ -1283,7 +1283,7 @@ class TestTmpfsHardening:
     def test_a_small_quota_sends_the_tmp_root_to_disk(self, monkeypatch) -> None:
         from tests import _tmp_root
 
-        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        setattr_in(monkeypatch, sub, "shutil.disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
         monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
         d = _tmp_root.decide_tmp_root(
             env={"LAB_CPUS": "8"}, system="Linux", mounts_text=_TMPFS_MOUNTS, writable=_writable,
@@ -1300,7 +1300,7 @@ class TestTmpfsHardening:
 
     def test_a_small_quota_sends_the_cluster_root_to_disk(self, monkeypatch) -> None:
         # A roomy filesystem but a 64 MiB quota: the real default probe (no free_bytes injected) must refuse.
-        monkeypatch.setattr(sub.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
+        setattr_in(monkeypatch, sub, "shutil.disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
         monkeypatch.setattr(sub, "_user_quota_headroom", lambda _p: 64 * 1024**2)
         root, refusal = sub.decide_pg_root(
             env={}, system="Linux", mounts_text=_TMPFS_MOUNTS, writable=_writable, uid=1000,
@@ -1310,18 +1310,21 @@ class TestTmpfsHardening:
 
     def test_a_probe_that_breaks_answers_none(self, monkeypatch) -> None:
         monkeypatch.setattr(sub, "_dqblk_type", lambda: (_ for _ in ()).throw(AttributeError("no syscall")))
-        monkeypatch.setattr(sub.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(sub.platform, "machine", lambda: "x86_64")
+        setattr_in(monkeypatch, sub, "platform.system", lambda: "Linux")
+        setattr_in(monkeypatch, sub, "platform.machine", lambda: "x86_64")
         assert sub._user_quota_headroom(Path(sys.prefix)) is None
 
     @pytest.mark.skipif(sys.platform != "linux", reason="quotactl_fd is Linux-only")
-    def test_the_live_quota_probe_reads_a_real_figure_where_there_is_a_quota(self) -> None:
-        got = sub._user_quota_headroom(Path("/dev/shm"))
-        if got is None:
-            # A host that mounts /dev/shm with usrquota (chas) must answer: None there is a broken probe.
-            assert not any(
-                f[1] == "/dev/shm" and "usrquota" in f[3].split(",")
-                for f in (line.split() for line in Path("/proc/mounts").read_text().splitlines()) if len(f) > 3
-            ), "/dev/shm has usrquota but the quota probe answered None"
-            pytest.skip("no user quota on /dev/shm here")
-        assert 0 <= got <= shutil.disk_usage("/dev/shm").total
+    def test_the_live_quota_probe_answers_on_a_usrquota_mount(self) -> None:
+        on = any(
+            f[1] == "/dev/shm" and "usrquota" in f[3].split(",")
+            for f in (line.split() for line in Path("/proc/mounts").read_text().splitlines()) if len(f) > 3
+        )
+        if not on:
+            pytest.skip("/dev/shm has no usrquota here")
+        # The syscall must answer on such a mount. A user given no limit there (the CI runner, uid 1002 on
+        # 7fd83e5a3) has zero limits, so its headroom is None and that is not a broken probe.
+        quota = sub._read_user_quota(Path("/dev/shm"))
+        assert quota is not None, "/dev/shm has usrquota but quotactl_fd did not answer"
+        headroom = sub._quota_headroom(*quota)
+        assert headroom is None or 0 <= headroom <= shutil.disk_usage("/dev/shm").total
