@@ -265,7 +265,9 @@ hold_lock() {
   # held is set only once the owner is written: release_lock removes a lock only when its owner
   # names us, so a lock we made and could not write into is removed here, not left owner-less.
   if ! touch -- "$lockdir/heartbeat" 2>/dev/null || ! printf '%s\n' "$me" > "$lockdir/owner" 2>/dev/null; then
-    remove_tree "$lockdir"
+    # Only what we wrote, then rmdir, which fails on a lock another job has made its own meanwhile.
+    rm -f -- "$lockdir/heartbeat" "$lockdir/owner" 2>/dev/null || true
+    rmdir -- "$lockdir" 2>/dev/null || true
     warn_fallback "cannot write into the build lock $lockdir"
   fi
   held=1
@@ -300,7 +302,10 @@ take_over_lock() {
   if [ "$age" -le "$dead_after" ]; then
     # We caught a lock that was refreshed or re-taken between our look and the move: put it back.
     # If a fresh lock took its place meanwhile, the one we hold is no one's any more: drop it.
-    if [ -e "$lockdir" ] || ! mv -- "$gone" "$lockdir" 2>/dev/null; then remove_tree "$gone"; fi
+    # os.rename, not mv: mv onto a directory created after the check would nest ours inside it.
+    if [ -e "$lockdir" ] || ! "$py" -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$gone" "$lockdir" 2>/dev/null; then
+      remove_tree "$gone"
+    fi
     return 0
   fi
   echo "::notice::build lock for $key is dead (no heartbeat for ${age}s, owner $owner); taking it over"
