@@ -205,8 +205,8 @@ class SchemaRollbackRoundTripIntegrationTest {
 
     private static final String MASTER_CHANGELOG_RELATIVE = "db/changelog/db.changelog-master.xml";
 
-    private static final String ADMIN_ROLE = "nexus_admin_rollback";
-    private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
+    private static final String ADMIN_ROLE = "nexus_admin_schemarollback";
+    private static final String ADMIN_PASS = "nexus_admin_schemarollback_pass";
 
     /**
      * The TWELVE {@code runAlways} changesets, in master order. Formerly eleven

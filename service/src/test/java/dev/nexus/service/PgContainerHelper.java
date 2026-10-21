@@ -483,6 +483,11 @@ public final class PgContainerHelper {
      * </ul>
      * Classes that create a cluster-global role under a name the migration fixes ({@code nexus_diag}, say)
      * no longer need a container: they declare it exclusive in {@link #startEmptyDatabase}.
+     *
+     * <p>{@code TestRoleUniquenessScanTest} pins this roster (nexus-dscbd): the callers of this method must be the
+     * classes listed above, plus the two tests of the container factory and its log ({@code PgServerLogTest},
+     * {@code DdlCountSwitchTest}), no more and no fewer. Add a class here, with its reason, in the same change that
+     * adds its call.
      */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDedicated() {

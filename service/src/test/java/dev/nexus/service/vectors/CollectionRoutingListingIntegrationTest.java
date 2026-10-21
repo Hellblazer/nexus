@@ -54,8 +54,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionRoutingListingIntegrationTest {
 
-    static final String SVC_ROLE = "svc_clr";
-    static final String SVC_PASS = "svc_clr_pass";
+    static final String SVC_ROLE = "svc_crl";
+    static final String SVC_PASS = "svc_crl_pass";
     static final String TOKEN = "tok-clr-routing-0123456789abcdef0000";
     static final String T1 = "clr-tenant-1";
     static final String T2 = "clr-tenant-2";
