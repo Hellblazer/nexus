@@ -298,8 +298,15 @@ class PgContainerTmpfsGateTest {
                     PostgreSQLContainer<?> reference = PgContainerHelper.newContainer();
                     assertThat(c.getDockerImageName()).isEqualTo(reference.getDockerImageName());
                     assertThat(c.getTmpFsMapping()).isEqualTo(reference.getTmpFsMapping());
-                    assertThat(reference.getCommandParts()).as("the helper's server flags include every one the runner sets")
-                        .containsAll(List.of(c.getCommandParts()));
+                    // Equality, not containment (nexus-lywcf review): the runner's command must be exactly the helper's
+                    // base command, the part before the DDL counter's extras (present only when DdlCounts is on), so a
+                    // flag dropped or added on either side fails here, not only the ones the live SHOW checks read.
+                    // tests/test_service_jooq_codegen_skip_lint.py pins the same recipe as text.
+                    List<String> helperParts = List.of(reference.getCommandParts());
+                    int counterStart = helperParts.indexOf("log_statement=ddl");
+                    List<String> helperBase = counterStart < 0 ? helperParts : helperParts.subList(0, counterStart - 1);
+                    assertThat(List.of(c.getCommandParts())).as("the runner's server command equals the helper's base command")
+                        .isEqualTo(helperBase);
                     c.start();
                     assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, memory);
                 }
