@@ -210,6 +210,23 @@ _RECIPE_SPELLINGS = (
 )
 
 
+#: A Java string literal, char literal, line comment or block comment, in one pass (so a "//" inside a string is no comment).
+_JAVA_TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'|//[^\n]*|/\*.*?\*/', re.DOTALL)
+
+
+def _java_code(src: str) -> str:
+    """``src`` with its comments removed and its string and char literals kept."""
+    return _JAVA_TOKENS.sub(lambda m: m.group() if m.group()[0] in "\"'" else " ", src)
+
+
+def test_java_code_drops_comments_and_keeps_literals() -> None:
+    assert "newContainer" not in _java_code("// PgContainerRecipe.newContainer(x);\nint a;")
+    assert "newContainer" not in _java_code("/* PgContainerRecipe.newContainer(x); */ int a;")
+    assert "newContainer" in _java_code('String s = "//"; PgContainerRecipe.newContainer(x); // tail')
+    assert "tail" not in _java_code('String s = "//"; PgContainerRecipe.newContainer(x); // tail')
+    assert "newContainer" in _java_code("char q = '\"'; PgContainerRecipe.newContainer(x); char r = '\"';")
+
+
 def test_the_runner_and_the_helper_build_their_container_from_one_recipe() -> None:
     """nexus-llba1: the runner cannot call PgContainerHelper (it runs before the test classes compile), so both call
     ``dev.nexus.build.PgContainerRecipe``. This keeps a second copy from growing back in either."""
@@ -226,20 +243,28 @@ def test_the_runner_and_the_helper_build_their_container_from_one_recipe() -> No
     for spelling in _RECIPE_SPELLINGS:
         assert spelling in recipe, f"{spelling} is not in the recipe: the recipe moved, move this pin with it"
     # the runner builds its container through it and spells none of it
-    assert re.search(r"^import dev\.nexus\.build\.PgContainerRecipe;$", runner, re.MULTILINE)
-    assert "PgContainerRecipe.newContainer(" in runner, "the runner does not build its container from the recipe"
+    # (the import and the call are read with the runner's comments removed: a commented-out call is no call)
+    runner_code = _java_code(runner)
+    assert re.search(r"^import dev\.nexus\.build\.PgContainerRecipe;$", runner_code, re.MULTILINE)
+    assert re.search(r"\bPgContainerRecipe\s*\.\s*newContainer\s*\(", runner_code), (
+        "the runner does not build its container from the recipe")
     assert not [x for x in _RECIPE_SPELLINGS if x in runner], "the runner spells the container recipe itself"
     assert not re.search(r"\b(IMAGE|TMPFS_SIZE|MEMORY_LIMIT_BYTES|PGDATA) =", runner), "the runner holds recipe constants"
     # the helper configures its container through it and spells none of it
-    assert "PgContainerRecipe.configure(" in helper, "PgContainerHelper does not configure its container from the recipe"
+    assert re.search(r"\bPgContainerRecipe\s*\.\s*configure\s*\(", _java_code(helper)), (
+        "PgContainerHelper does not configure its container from the recipe")
     assert not [x for x in _RECIPE_SPELLINGS if x in helper and x != "new PostgreSQLContainer"], (
         "PgContainerHelper spells the container recipe itself")
 
 
 def test_the_recipe_is_a_test_source_root_and_the_runner_is_not_compiled_into_the_tests() -> None:
-    """The test tree (PgContainerHelper) needs the recipe, so ``src/build/java`` is a test source root; the files
-    beside it in the unnamed package (the runner, which main() exits the JVM and needs the jOOQ generator, and every
-    other source program there) must stay out of the test compile (testExcludes)."""
+    """The test tree (PgContainerHelper) needs the recipe, so ``src/build/java`` is a test source root; everything else
+    there (the runner, whose main() exits the JVM and needs the jOOQ generator, and every other source program) must
+    stay out of the test compile. Default-deny (nexus-llba1 review): the compiler plugin's ``testIncludes`` name the
+    packages that may be test code, and this computes which files of each root those patterns admit. A new program
+    anywhere under ``src/build/java`` (top level or a subdirectory, no package) is then out unless someone broadens
+    the includes, and broadening them fails here; a ``testExcludes`` list, which admits whatever it does not name, is
+    refused outright."""
     root = _pom()
     helper_plugin = next(
         p for p in root.findall("m:build/m:plugins/m:plugin", _NS)
@@ -254,12 +279,73 @@ def test_the_recipe_is_a_test_source_root_and_the_runner_is_not_compiled_into_th
     compiler = next(
         p for p in root.findall("m:build/m:plugins/m:plugin", _NS)
         if p.findtext("m:artifactId", namespaces=_NS) == "maven-compiler-plugin")
-    excluded = {t.text.strip() for t in compiler.findall("m:configuration/m:testExcludes/m:testExclude", _NS)}
-    programs = {f.name for f in (_SERVICE / "src/build/java").glob("*.java")}
-    assert "JooqCodegen.java" in programs, "the non-vacuity of this pin: the runner is where it was"
-    assert excluded == programs, (
-        f"every unnamed-package source program under src/build/java must be a testExclude (and nothing else): "
-        f"programs {sorted(programs)}, excluded {sorted(excluded)}")
+    assert compiler.find("m:configuration/m:testExcludes", _NS) is None, (
+        "testExcludes admits every file it does not name; list the admitted packages in testIncludes instead")
+    includes = [t.text.strip() for t in compiler.findall("m:configuration/m:testIncludes/m:testInclude", _NS)]
+    assert includes, "no testIncludes: the test compile admits every file in src/build/java by default"
+    patterns = [_ant_regex(i) for i in includes]
+
+    def admitted(root_dir: Path) -> list[str]:
+        return sorted(
+            rel for f in root_dir.rglob("*.java")
+            if any(p.fullmatch(rel := f.relative_to(root_dir).as_posix()) for p in patterns))
+
+    build_root, test_root = _SERVICE / "src/build/java", _SERVICE / "src/test/java"
+    on_disk = sorted(f.relative_to(build_root).as_posix() for f in build_root.rglob("*.java"))
+    assert "JooqCodegen.java" in on_disk and "dev/nexus/build/PgContainerRecipe.java" in on_disk, (
+        "the non-vacuity of this pin: the runner and the recipe are where they were")
+    # the recipe, and only the recipe's package, reaches the test compile from src/build/java
+    in_build = admitted(build_root)
+    assert "dev/nexus/build/PgContainerRecipe.java" in in_build, "the recipe is not test-compiled: PgContainerHelper cannot import it"
+    stray = [rel for rel in in_build if not rel.startswith("dev/nexus/build/")]
+    assert not stray, f"testIncludes {includes} admit source programs from src/build/java into the test compile: {stray}"
+    for rel in in_build:
+        text = _java_code((build_root / rel).read_text(encoding="utf-8"))
+        assert re.search(r"^package dev\.nexus\.build;$", text, re.MULTILINE), f"{rel} is admitted but is not in package dev.nexus.build"
+    # and the includes do not silently drop test code
+    tests_on_disk = sorted(f.relative_to(test_root).as_posix() for f in test_root.rglob("*.java"))
+    assert len(tests_on_disk) > 300, "the non-vacuity of this pin: the test tree is where it was"
+    assert admitted(test_root) == tests_on_disk, "testIncludes drop test sources from src/test/java"
+
+
+def _ant_regex(pattern: str) -> re.Pattern[str]:
+    """An Ant path pattern (``**`` crosses directories, ``*`` and ``?`` do not) as a regex over a root-relative path."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out)
+
+
+def test_the_ant_pattern_matcher_matches_ant_semantics() -> None:
+    assert _ant_regex("dev/nexus/build/**/*.java").fullmatch("dev/nexus/build/A.java")
+    assert _ant_regex("dev/nexus/build/**/*.java").fullmatch("dev/nexus/build/x/y/A.java")
+    assert not _ant_regex("dev/nexus/build/**/*.java").fullmatch("JooqCodegen.java")
+    assert not _ant_regex("dev/nexus/build/**/*.java").fullmatch("tools/dev/nexus/build/A.java")
+    assert _ant_regex("**/*.java").fullmatch("JooqCodegen.java") and _ant_regex("**/*.java").fullmatch("tools/Tool.java")
+    assert not _ant_regex("*.java").fullmatch("tools/Tool.java")
+
+
+def test_the_recipe_imports_only_the_jdk_and_testcontainers() -> None:
+    """The recipe compiles in the runner's launch (classpath = the test classpath) and in the tests; nothing else may
+    creep in (nexus-llba1 review S2). Its javadoc says so; this is the check."""
+    code = _java_code((_SERVICE / _RECIPE).read_text(encoding="utf-8"))
+    imports = re.findall(r"^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;", code, re.MULTILINE)
+    assert imports, "the non-vacuity of this pin: the recipe has imports"
+    stray = [i for i in imports if not (i.startswith("java.") or i.startswith("org.testcontainers."))]
+    assert not stray, f"{_RECIPE} imports outside java.* and org.testcontainers.*: {stray}"
+    # a fully-qualified use is an import by another spelling
+    qualified = set(re.findall(r"\b((?:[a-z][a-z0-9_]*\.){2,}[A-Z]\w*)", code)) - set(imports)
+    assert not [q for q in qualified if not (q.startswith("java.") or q.startswith("org.testcontainers."))], (
+        f"{_RECIPE} names a class outside java.* and org.testcontainers.* by its qualified name")
 
 
 _JOOQ_NS = {"j": "http://www.jooq.org/xsd/jooq-codegen-3.20.0.xsd"}

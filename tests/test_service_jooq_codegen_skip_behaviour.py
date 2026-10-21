@@ -47,6 +47,7 @@ _POM = Path(__file__).resolve().parents[1] / "service" / "pom.xml"
 
 #: nexus-aca0q.3: the generation inputs beside the changelogs (service/src/build/...), per kind.
 _RUNNER = "src/build/java/JooqCodegen.java"
+_RECIPE = "src/build/java/dev/nexus/build/PgContainerRecipe.java"
 _GENERATOR = {"main": "src/build/jooq/jooq-main.xml", "test": "src/build/jooq/jooq-test.xml"}
 
 _ANT_VERSION = "1.10.12"  # what maven-antrun-plugin 3.1.0 declares
@@ -286,6 +287,7 @@ def _make_project(parent: Path, ant_cp: str, cache: str | None = "off") -> Proje
     p.put("src/main/resources/db/changelog/other.xml", "<main-other>A</main-other>")
     p.put("src/test/resources/db/changelog-test/test-master.xml", "<test>A</test>")
     p.put(_RUNNER, "class JooqCodegen {} // A")
+    p.put(_RECIPE, "package dev.nexus.build; class PgContainerRecipe {} // A")
     p.put(_GENERATOR["main"], "<configuration>main A</configuration>")
     p.put(_GENERATOR["test"], "<configuration>test A</configuration>")
     # an unrelated file under resources/ that the hash must NOT cover
@@ -354,6 +356,17 @@ def test_a_runner_edit_regenerates_both(proj: Project) -> None:
     proj.put(_RUNNER, "class JooqCodegen {} // B")
     assert proj.build().skip == {"main": False, "test": False}
     assert proj.generations == ["main", "test"]
+
+
+def test_a_container_recipe_edit_regenerates_both(proj: Project) -> None:
+    """nexus-llba1: the runner compiles PgContainerRecipe with itself (image, tmpfs, flags), so an edit to it is a changed input."""
+    proj.build()
+    proj.generations.clear()
+    proj.put(_RECIPE, "package dev.nexus.build; class PgContainerRecipe {} // B")
+    d = proj.build()
+    assert d.skip == {"main": False, "test": False}
+    assert proj.generations == ["main", "test"]
+    assert proj.build().skip == {"main": True, "test": True}
 
 
 def test_a_generator_file_edit_regenerates_only_its_own_tree(proj: Project) -> None:

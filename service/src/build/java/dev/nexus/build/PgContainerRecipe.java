@@ -27,8 +27,8 @@ import java.util.Map;
  * the unnamed-package source programs excluded), so the test tree can call it. A class in the unnamed package
  * cannot be imported from {@code dev.nexus.service}.
  *
- * <p>It compiles against Testcontainers only. Keep it that way: the runner's classpath is the test classpath and
- * nothing else.
+ * <p>It compiles against the JDK and Testcontainers only. Keep it that way: the runner's classpath is the test
+ * classpath and nothing else. tests/test_service_jooq_codegen_skip_lint.py checks its imports.
  */
 public final class PgContainerRecipe {
 

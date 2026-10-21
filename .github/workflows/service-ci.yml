@@ -285,7 +285,8 @@ jobs:
           persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       # nexus-km7ma (Sam 2026-10-20): on the pool, generated jOOQ trees persist in a host cache
-      # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the codegen runner and generator files,
+      # under NX_LAB_CACHE_ROOT, keyed by pom.xml, db/**, the codegen runner, the container recipe
+      # it compiles with (src/build/java/dev/nexus/build) and the generator files,
       # the jOOQ/JDBC/Liquibase/Testcontainers versions
       # and the producer (service/pom.xml, jooq-inputs). A hit skips the codegen container and
       # its changelog replay for inputs a fresh replay already generated on this host. The suite

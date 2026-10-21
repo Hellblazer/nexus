@@ -343,12 +343,16 @@
                     <!-- nexus-llba1: src/build/java is a test source root (build-helper, add-test-source-build-recipe) for the
                          container recipe dev/nexus/build/PgContainerRecipe.java. The unnamed-package source programs beside
                          it are run by `java <file>` and are not test code: JooqCodegen needs the jOOQ generator's main() and
-                         exits the JVM; NativeTrustStore is a native-image build tool. Every file directly in the root is
-                         listed; tests/test_service_jooq_codegen_skip_lint.py checks the list against the directory. -->
-                    <testExcludes>
-                        <testExclude>JooqCodegen.java</testExclude>
-                        <testExclude>NativeTrustStore.java</testExclude>
-                    </testExcludes>
+                         exits the JVM; NativeTrustStore is a native-image build tool. Default-deny: the patterns below name
+                         the only packages that are test code (they apply to every test root, src/test/java and the generated
+                         jOOQ test sources included), so a new program anywhere under src/build/java stays out of the test
+                         compile without being listed. tests/test_service_jooq_codegen_skip_lint.py computes what the patterns
+                         admit from each root and fails if src/build/java admits anything but dev/nexus/build or src/test/java
+                         loses a file. -->
+                    <testIncludes>
+                        <testInclude>dev/nexus/service/**/*.java</testInclude>
+                        <testInclude>dev/nexus/build/**/*.java</testInclude>
+                    </testIncludes>
                 </configuration>
             </plugin>
 
@@ -658,10 +662,12 @@
                          nexus-aca0q.3 that was testcontainers-jooq-codegen-maven-plugin 0.0.4, which
                          exposed no tmpfs, memory or command setting, so PGDATA sat on Docker's overlay
                          (the host disk); the runner that replaced it (service/src/build/java/JooqCodegen.java)
-                         mirrors PgContainerHelper.newContainer(): PGDATA on a tmpfs, a memory limit.
+                         builds its container with the same recipe class as PgContainerHelper.newContainer(),
+                         dev.nexus.build.PgContainerRecipe: PGDATA on a tmpfs, a memory limit.
 
                          This step hashes what the generation reads (this pom, which holds the
-                         executions' arguments; the runner source and the generator XML each execution
+                         executions' arguments; the runner source, the container recipe it compiles
+                         with (src/build/java/dev/nexus/build) and the generator XML each execution
                          runs; the changelog tree each execution applies; the jOOQ, PostgreSQL,
                          Liquibase and Testcontainers versions, which a -D can change without touching
                          the pom) and compares it with the stamp the jooq-stamp-* steps write. A match

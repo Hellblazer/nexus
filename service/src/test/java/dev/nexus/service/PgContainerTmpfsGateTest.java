@@ -54,6 +54,12 @@ class PgContainerTmpfsGateTest {
         PKG.resolve("FailFastPostgreSQLContainer.java"), PKG.resolve("SharedDatabaseHandle.java"),
         PKG.resolve("PgServerLogTest.java"));
 
+    /**
+     * nexus-llba1 review: the recipe is public and on the test classpath; calling it directly gives a container without
+     * the DDL counter's flags and wait, the FailFast wait or the server-log wiring. Only the factory may.
+     */
+    private static final Pattern RECIPE_CALL = Pattern.compile("\\bPgContainerRecipe\\s*\\.\\s*(newContainer|configure)\\b");
+
     /** Ways to get a Postgres container without the factory. */
     private static final List<Pattern> BYPASSES = List.of(
         // new PostgreSQLContainer<>(...), qualified or not, and any subclass named *PostgreSQLContainer
@@ -61,7 +67,8 @@ class PgContainerTmpfsGateTest {
         Pattern.compile("PostgreSQLContainer\\s*::\\s*new"),
         // a GenericContainer or ImageFromDockerfile on a Postgres image, or a jdbc:tc: URL
         Pattern.compile("\"(pgvector/pgvector[^\"]*|postgres:(?!//)[^\"]+)\""),
-        Pattern.compile("jdbc:tc:"));
+        Pattern.compile("jdbc:tc:"),
+        RECIPE_CALL);
 
     // \w* so a subclass of FailFastPostgreSQLContainer (the factory's own type) is caught as well.
     private static final Pattern SUBCLASSING = Pattern.compile(
@@ -154,6 +161,8 @@ class PgContainerTmpfsGateTest {
         String factory = stripComments(Files.readString(FACTORY));
         assertThat(BYPASSES.stream().filter(b -> b.matcher(factory).find()).count())
             .as("the factory's own construction (its image literal moved to the recipe)").isGreaterThanOrEqualTo(1);
+        assertThat(RECIPE_CALL.matcher(factory).find())
+            .as("the factory calls the recipe, so the recipe-call pattern is alive").isTrue();
         String recipe = stripComments(Files.readString(RECIPE));
         assertThat(BYPASSES.stream().filter(b -> b.matcher(recipe).find()).count())
             .as("the recipe's own construction and image literal").isGreaterThanOrEqualTo(2);
@@ -194,7 +203,11 @@ class PgContainerTmpfsGateTest {
             "Function<DockerImageName, ?> f = PostgreSQLContainer :: new;",
             "new GenericContainer<>(\"pgvector/pgvector:pg17\")",
             "new GenericContainer<>(\"postgres:17\")",
-            "String url = \"jdbc:tc:postgresql:17:///db\";");
+            "String url = \"jdbc:tc:postgresql:17:///db\";",
+            "var c = PgContainerRecipe.newContainer(\"x\");",
+            "dev.nexus.build.PgContainerRecipe.newContainer(\"x\");",
+            "PgContainerRecipe\n    .configure(c, \"2g\", 1L, List.of(), \"x\");",
+            "PgContainerRecipe . configure(c, s, m, a, n);");
         for (String d : dodges) {
             assertThat(BYPASSES.stream().anyMatch(b -> b.matcher(stripComments(d)).find()))
                 .as("caught: %s", d).isTrue();
@@ -210,7 +223,10 @@ class PgContainerTmpfsGateTest {
             "String u = \"postgres://u@h/db\";",
             ".withDatabaseName(\"postgres\")",
             "// new PostgreSQLContainer<>(img) in a comment",
-            "/* \"pgvector/pgvector:pg17\" in a block comment */");
+            "/* \"pgvector/pgvector:pg17\" in a block comment */",
+            "// PgContainerRecipe.newContainer(\"x\") in a comment",
+            "String i = PgContainerRecipe.IMAGE;",
+            "long m = PgContainerRecipe.gibibytes(\"2g\");");
         for (String c : clean) {
             assertThat(BYPASSES.stream().noneMatch(b -> b.matcher(stripComments(c)).find()))
                 .as("not a bypass: %s", c).isTrue();
@@ -279,6 +295,12 @@ class PgContainerTmpfsGateTest {
      * and the same live assertions once started. If either side stops going through the recipe (an override, a flag
      * added in one place) the equality fails here. A JRE-only JVM (no compiler) or a missing source file fails; it
      * does not skip.
+     *
+     * <p>Launcher resolution: the test classpath already holds the compiled recipe (src/build/java is a test source
+     * root), so a plain {@code -sourcepath} would compile with or without the sibling lookup. {@code -Xprefer:source}
+     * makes javac take the source over the class it finds on the classpath, and the test asserts that the recipe
+     * class was produced into the output directory, i.e. compiled from {@code RUNNER_SOURCE_ROOT/dev/nexus/build/}.
+     * Drop the sourcepath, move the recipe out of the runner's directory or change its package, and it fails.
      */
     @Test
     void the_codegen_runners_started_container_runs_on_tmpfs_with_the_settings_and_the_limit() throws Exception {
@@ -297,9 +319,13 @@ class PgContainerTmpfsGateTest {
             java.io.StringWriter diagnostics = new java.io.StringWriter();
             Boolean compiled = compiler.getTask(diagnostics, null, null,
                 List.of("-proc:none", "-nowarn", "-d", out.toString(), "-classpath", classpath,
-                    "-sourcepath", RUNNER_SOURCE_ROOT.toString()),
+                    "-sourcepath", RUNNER_SOURCE_ROOT.toString(), "-Xprefer:source"),
                 null, List.of(new SourceFile(RUNNER))).call();
             assertThat(compiled).as("the runner compiles on the test classpath: %s", diagnostics).isTrue();
+            assertThat(out.resolve("dev/nexus/build/PgContainerRecipe.class"))
+                .as("the runner's sibling recipe was compiled from source, found by package under the runner's directory"
+                    + " (the way the source launcher finds it), not taken from the test classpath")
+                .isRegularFile();
             try (java.net.URLClassLoader loader = new java.net.URLClassLoader(
                     new java.net.URL[] {out.toUri().toURL()}, PgContainerTmpfsGateTest.class.getClassLoader())) {
                 Class<?> runner = loader.loadClass("JooqCodegen");
