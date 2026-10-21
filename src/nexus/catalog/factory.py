@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
 
@@ -326,14 +327,14 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
 
 
 def make_catalog_writer(
-    *, config_dir: Optional[Path] = None, priority: Optional[str] = None,
+    *, config_dir: Optional[Path] = None,
 ) -> Any:
     """Return a write-only catalog proxy backed by the service.
 
     Returns a :class:`_ServiceCatalogWriter` that enforces the
     :data:`CATALOG_WRITE_OPS` whitelist and forwards writes to the Java
-    Postgres service via HTTP. *priority* is ignored (the service enforces
-    its own fairness); the parameter survives for call-site compatibility.
+    Postgres service via HTTP. The service enforces its own fairness, so
+    there is no priority argument (nexus-nhym2 removed the ignored one).
     The resolver call is validation only — see :func:`make_catalog_reader`.
     """
     from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle
@@ -511,7 +512,7 @@ def make_catalog_client_for_migration(
     """
     from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    _log.debug("catalog_client_for_migration", base_url=base_url)
+    _log.debug("catalog_client_for_migration", endpoint=log_endpoint(base_url) if base_url else None)
     if base_url:
         # code-review WORTH-TRACKING (nexus-wrwb7 fix pass, nexus-ssqk9
         # relay): deliberately stays fully pinned, unlike the no-base_url

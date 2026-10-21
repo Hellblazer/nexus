@@ -66,6 +66,7 @@ def _wire(monkeypatch, t3, target, *, service=True):
 
 
 class TestSearchMetadataScopedTool:
+    @pytest.mark.t2_tenant
     def test_structured_doc_level_ids_are_tumblers(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1"},
@@ -92,6 +93,7 @@ class TestSearchMetadataScopedTool:
         assert t3.meta_calls == [
             ("q", ["c1"], "paper", "alice", 2024, None, "1.2", {"lang": "java"}, 5)]
 
+    @pytest.mark.t2_tenant
     def test_empty_filters_become_none(self, monkeypatch):
         t3 = _FakeServiceT3(meta_rows=[])
         _wire(monkeypatch, t3, ["c1"])
@@ -99,6 +101,7 @@ class TestSearchMetadataScopedTool:
         assert t3.meta_calls == [
             ("q", ["c1"], None, None, None, None, None, None, 10)]
 
+    @pytest.mark.t2_tenant
     def test_where_multi_pair_parsed(self, monkeypatch):
         t3 = _FakeServiceT3(meta_rows=[])
         _wire(monkeypatch, t3, ["c1"])
@@ -114,6 +117,7 @@ class TestSearchMetadataScopedTool:
         assert isinstance(out, str) and out.startswith("Error:") and "equality-only" in out
         assert t3.meta_calls == []  # rejected before dispatch
 
+    @pytest.mark.t2_tenant
     def test_where_numeric_equality_typed(self, monkeypatch):
         # parse_where_str coerces known numeric fields → JSONB number, not string.
         t3 = _FakeServiceT3(meta_rows=[])
@@ -128,6 +132,7 @@ class TestSearchMetadataScopedTool:
         assert isinstance(out, str) and out.startswith("Error:")
         assert t3.meta_calls == []
 
+    @pytest.mark.t2_tenant
     def test_multichunk_doc_deduped_keeps_best_distance(self, monkeypatch):
         # The SQL function returns one row per matching chunk (distance-asc), so a
         # 2-chunk document repeats its tumbler. The tool collapses to one row per
@@ -187,6 +192,7 @@ class TestSearchGraphHopTool:
         assert "equality-only" in out
         assert not t3.graph_calls, "the combined-query call must NOT be made"
 
+    @pytest.mark.t2_tenant
     def test_where_string_parsed_and_passed(self, monkeypatch):
         # nexus-7ndh3: the KEY=VALUE where string reaches the client as a dict.
         t3 = _FakeServiceT3(graph_rows=[])
@@ -197,6 +203,7 @@ class TestSearchGraphHopTool:
         assert t3.graph_calls, "graph-hop must be called"
         assert t3.graph_calls[0][-2] == {"lang": "python"}
 
+    @pytest.mark.t2_tenant
     def test_structured_doc_level_with_chashes(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1",
@@ -221,6 +228,7 @@ class TestSearchGraphHopTool:
         }
         assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], "cites", 2, "out", None, 5)]
 
+    @pytest.mark.t2_tenant
     def test_single_string_seed_accepted(self, monkeypatch):
         t3 = _FakeServiceT3(graph_rows=[])
         _wire(monkeypatch, t3, ["c1"])
@@ -234,6 +242,7 @@ class TestSearchGraphHopTool:
         assert isinstance(out, str) and "No seeds" in out
         assert t3.graph_calls == []
 
+    @pytest.mark.t2_tenant
     def test_multichunk_doc_deduped_keeps_best_distance(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "near", "distance": 0.1, "collection": "c1",
@@ -261,6 +270,7 @@ class TestSearchGraphHopTool:
 class TestSearchAspectScopedTool:
     """RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape."""
 
+    @pytest.mark.t2_tenant
     def test_structured_doc_level_ids_are_tumblers(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1",
@@ -286,6 +296,7 @@ class TestSearchAspectScopedTool:
         assert t3.aspect_calls == [
             ("q", ["c1"], "proposed_method", "gradient", 0.5, {"lang": "java"}, 5)]
 
+    @pytest.mark.t2_tenant
     def test_empty_filters_become_none(self, monkeypatch):
         t3 = _FakeServiceT3(aspect_rows=[])
         _wire(monkeypatch, t3, ["c1"])
@@ -312,6 +323,7 @@ class TestSearchAspectScopedTool:
             assert isinstance(out, str) and out.startswith("Error:")
         assert t3.aspect_calls == []
 
+    @pytest.mark.t2_tenant
     def test_multichunk_doc_deduped_keeps_best_distance(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "near", "distance": 0.1, "collection": "c1",
@@ -348,6 +360,7 @@ class TestReferenceOnlyRowContentCoercion:
     None-content row renders as ``""`` in both output modes, for all four tools.
     """
 
+    @pytest.mark.t2_tenant
     def test_metadata_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
         rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
                  "chash": "a" * 32}]
@@ -373,6 +386,7 @@ class TestReferenceOnlyRowContentCoercion:
                                         structured=False)
         assert "None" not in text
 
+    @pytest.mark.t2_tenant
     def test_graph_hop_null_content_coerces_to_empty_string(self, monkeypatch):
         rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
                  "chash": "a" * 32}]
@@ -386,6 +400,7 @@ class TestReferenceOnlyRowContentCoercion:
         text = core.search_graph_hop("q", ["1.2.0"], corpus="knowledge", structured=False)
         assert "None" not in text
 
+    @pytest.mark.t2_tenant
     def test_aspect_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
         rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
                  "chash": "a" * 32}]
@@ -448,6 +463,7 @@ class _EngineModelUnavailableT3:
 _VPLY6_VOYAGE_COLLECTION = "knowledge__seam-b-test__voyage-context-3__v1"
 
 
+@pytest.mark.t2_tenant
 class TestScopedToolsClassifyEmbeddingProfileMismatch:
     """nexus-vply6 fix round 2, point 3: search_metadata_scoped /
     search_topic_scoped / search_graph_hop / search_aspect_scoped and

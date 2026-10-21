@@ -15,9 +15,24 @@ BUILDER=lp2qo-lin-build
 cleanup() {
   docker rm -f "$PG" "$BUILDER" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  build_lease_release service 2>/dev/null || true
 }
 trap cleanup EXIT
 cleanup
+
+# nexus-8qdpe: the ./mvnw below runs INSIDE the container, but $REPO is bind-mounted,
+# so service/target is the same single-writer resource every host build writes. Take
+# the host-side build lease around the docker build, as tests/e2e/gc-ab/run-ab.sh does.
+# shellcheck source=../scripts/lib/build-lease.sh
+. "$REPO/scripts/lib/build-lease.sh"
+build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" linux-native-verify || exit 1
+
+# nexus-k6zxp: service/target's jar may be a hard link into the gate-jar cache. This
+# build runs as root in the container, ignores the read-only bit and rewrites the jar
+# in place, which would rewrite the cache entry too: unlink it first.
+# shellcheck source=../scripts/lib/gate-jar-cache.sh
+. "$REPO/scripts/lib/gate-jar-cache.sh"
+gate_jar_cache_unshare "$REPO/service/target/nexus-service-1.0-SNAPSHOT.jar"
 
 docker network create "$NET" >/dev/null
 docker run -d --name "$PG" --network "$NET" \
@@ -28,7 +43,8 @@ until docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
 sleep 2; echo "pg ready"
 
 # Build + smoke inside the linux/arm64 GraalVM container. Docker socket + host
-# override let the testcontainers jOOQ codegen reach the host daemon; the smoke
+# override let the jOOQ codegen runner (service/src/build/java/JooqCodegen.java)
+# reach the host daemon; the smoke
 # pgvector is reached by container name on $NET. ONNX model mounted from host cache.
 docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
   -v "$REPO:$REPO" -w "$REPO/service" \

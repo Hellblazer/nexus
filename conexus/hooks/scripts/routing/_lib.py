@@ -46,6 +46,8 @@ Decision envelope shape (PreToolUse):
             "permissionDecision": "ask",
             "permissionDecisionReason": "<what the USER reads in the prompt>"
         }}
+    With NO human to answer the prompt (``claude -p``) an ask is a DENY, never
+    a hang and never an approval; measured per mode in :func:`ask_envelope`.
 
     deny (see ``deny_envelope`` — the reason rides in two audience-specific
     fields, with ``reason`` kept for legacy compatibility):
@@ -199,9 +201,53 @@ def ask_envelope(reason: str, context: str = "") -> str:
     in charge, which in auto mode means a silent approval.
 
     *reason* rides in ``permissionDecisionReason``, which the prompt shows
-    the user; the model does not read it. Text the MODEL needs goes in
-    *context* (``additionalContext``). A blank *reason* is replaced rather
-    than emitted, since a prompt that says nothing is worse than none.
+    the user. In an attended session the model does not read it; in a
+    headless one it does (see below), so write it for both readers. Text only
+    the MODEL needs goes in *context* (``additionalContext``). A blank
+    *reason* is replaced rather than emitted, since a prompt that says nothing
+    is worse than none.
+
+    MEASURED BEHAVIOUR WITH NO HUMAN PRESENT (nexus-mcfaj, Claude Code
+    2.1.302, haiku, real ``claude -p`` sessions in a container on chas;
+    harness ``tests/cc-validation/hook-ask-headless/``, recorded runs in its
+    ``evidence/cc-2.1.302/``; one run per row). Each direct-mode ask row is
+    paired with a control that differs only by the hook emitting no decision,
+    and the control ran the command (an allow rule pre-approves it; the
+    auto-mode no-rule pair leaves only the classifier to approve it). The
+    background-subagent row has no control of its own; its denial is
+    attributed to the ask by the hook-sourced ``permission_denied`` event:
+
+    ========================================  =========================
+    session                                   an ask ...
+    ========================================  =========================
+    ``-p``, default permission mode           DENIES the call
+    ``-p --permission-mode dontAsk``          DENIES the call
+    ``-p --permission-mode auto``             DENIES the call
+    auto, no allow rule (classifier only)     DENIES the call
+    background subagent inside a ``-p`` run   DENIES the subagent's call
+    ========================================  =========================
+
+    * Nothing hung: every recorded run exited 0 in under 10 s. Nothing was approved:
+      the auto-mode classifier does NOT approve past a hook ask, with or
+      without an allow rule behind it (the documented v2.1.211 behaviour,
+      confirmed live at 2.1.302). An ask also beats an allow rule.
+    * The denial carries *reason* back: the tool result is an error whose
+      text is the reason, and the ``result`` event lists the call under
+      ``permission_denials``. The model reads it and can act on it. In the
+      background-subagent run the subagent got the denial and the parent
+      session stayed alive to receive the task notification, then exited 0.
+    * So where no one can answer, an ask is a fail-closed DENY. A gate that
+      returns ask on a capability gap ("cannot verify") therefore blocks the
+      unattended caller (release scripts, harnesses, ``claude -p`` CI) and
+      its *reason* must be phrased so a model can act on it, not only a user.
+    * The real envelope (this function, through ``ask``) was run, not just a
+      hand-written copy: same DENY, same reason text.
+    * Not measured: the Agent SDK with a ``canUseTool`` callback (a host
+      that CAN answer), a foreground subagent, ``--permission-prompt-tool``.
+
+    No live gate emits an ask today: the bd-close review gate that did was
+    deleted at cleanup step A2 (nexus-0r1uz). This helper stays for the next
+    rule that cannot tell whether a command is safe.
     """
     reason = reason.strip() or "(no reason provided)"
     payload: dict[str, Any] = {
@@ -456,6 +502,10 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
     if not url:
         url = yaml_creds.get("service_url", "").strip().rstrip("/")
     if url:
+        if _ep.has_userinfo(url):
+            # The CLI refuses a service_url carrying user:password@ (nexus-ujbf8);
+            # a routing hook neither sends to it nor echoes it.
+            return None, None
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token

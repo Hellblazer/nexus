@@ -23,6 +23,8 @@ from nexus.commands.catalog_cmds.integrity import _never_chunked_breakdown
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.test_catalog_doctor_new_checks import isolated_nexus, runner  # noqa: F401 — fixtures by name
 
+pytestmark = pytest.mark.t2_tenant
+
 COLLECTION = "knowledge__seeded__bge-base-en-v15-768__v1"
 
 

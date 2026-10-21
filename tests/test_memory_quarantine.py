@@ -64,6 +64,7 @@ def _quarantined_ids(db: T2Database) -> set[int]:
 # ── list --quarantined ───────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_list_quarantined_is_the_one_listing_that_sees_quarantined_rows(
     runner: CliRunner, db: T2Database,
 ) -> None:
@@ -92,6 +93,7 @@ def test_list_quarantined_is_the_one_listing_that_sees_quarantined_rows(
 # ── restore ──────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_restore_brings_a_quarantined_row_back_as_permanent(
     runner: CliRunner, db: T2Database,
 ) -> None:
@@ -114,6 +116,7 @@ def test_restore_brings_a_quarantined_row_back_as_permanent(
 # ── reap ─────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_reap_deletes_only_marked_rows_and_their_topic_assignments(
     runner: CliRunner, db: T2Database,
 ) -> None:
@@ -141,6 +144,7 @@ def test_reap_deletes_only_marked_rows_and_their_topic_assignments(
     )
 
 
+@pytest.mark.t2_tenant
 def test_reap_with_nothing_marked_touches_nothing(runner: CliRunner, db: T2Database) -> None:
     q_id = _quarantine(db, "proj", "old.md")
     out = _nx(runner, db, "reap", "--yes")
@@ -152,6 +156,7 @@ def test_reap_with_nothing_marked_touches_nothing(runner: CliRunner, db: T2Datab
 # ── summaries ────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_summaries_lists_and_shows_by_id(runner: CliRunner, db: T2Database) -> None:
     empty = _nx(runner, db, "summaries")
     assert empty.exit_code == 0 and "No summaries found." in empty.output
@@ -178,6 +183,7 @@ def test_summaries_lists_and_shows_by_id(runner: CliRunner, db: T2Database) -> N
 # ── delete reaches a quarantined row ────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_delete_by_id_removes_an_unmarked_quarantined_row_and_its_topic_assignments(
     runner: CliRunner, db: T2Database,
 ) -> None:
@@ -197,6 +203,7 @@ def test_delete_by_id_removes_an_unmarked_quarantined_row_and_its_topic_assignme
     assert db.taxonomy.get_all_topic_doc_ids(topic_id) == [], "and its topic assignment"
 
 
+@pytest.mark.t2_tenant
 def test_delete_by_project_and_title_reaches_a_quarantined_row(
     runner: CliRunner, db: T2Database,
 ) -> None:
@@ -206,6 +213,7 @@ def test_delete_by_project_and_title_reaches_a_quarantined_row(
     assert q_id not in _quarantined_ids(db)
 
 
+@pytest.mark.t2_tenant
 def test_facade_delete_by_id_cascades_for_a_quarantined_row(db: T2Database) -> None:
     title = canonical_chunk_id("facade-quarantined")
     q_id = _quarantine(db, "proj", title)
@@ -369,6 +377,7 @@ def test_expire_cmd_against_a_deleting_engine_says_deleted(runner: CliRunner) ->
     assert "Quarantined" not in out.output
 
 
+@pytest.mark.t2_tenant
 def test_session_end_against_a_deleting_engine_says_deleted(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     result = MemoryExpireResult(deleted_ids=[1, 2, 3])
@@ -378,6 +387,7 @@ def test_session_end_against_a_deleting_engine_says_deleted(tmp_path, monkeypatc
     assert "Quarantined" not in message
 
 
+@pytest.mark.t2_tenant
 def test_doctor_row_against_the_engine(db: T2Database) -> None:
     """The real route, through the row's own self-resolving store: empty reads
     ``none`` (what a virgin box with an engine shows), then one quarantined row

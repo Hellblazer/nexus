@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Seed ``nexus.chunks`` rows with substrate SQL, never the write routes.
 
-RDR-223 Phase 3 makes ``/v1/vectors/upsert-chunks``, ``/store-put`` and
-``/upsert-reference-only`` refuse a write whose chashes have no live manifest
-row in the collection. A test that needs a chunk before its owner exists (the
-manifest FK ``fk_catalog_chunks_chunk`` demands the chunk first) or that needs
-an ORPHAN on purpose (the RDR-192 census, reaper and gc tests) can therefore no
-longer go through those routes. This module is the one place they build that
+RDR-223 Phase 3 makes ``/v1/vectors/upsert-chunks`` refuse a write whose chashes
+have no live manifest row in the collection (``/store-put`` and
+``/upsert-reference-only`` are retired and answer 410 Gone). A test that needs a
+chunk before its owner exists (the manifest FK ``fk_catalog_chunks_chunk`` demands
+the chunk first) or that needs an ORPHAN on purpose (the RDR-192 census, reaper
+and gc tests) can therefore no longer go through the write routes. This module is the one place they build that
 state instead: an ``INSERT INTO nexus.chunks`` run as ``nexus_svc``
 (NOSUPERUSER NOBYPASSRLS) with the tenant GUC set, so FORCE RLS applies.
 

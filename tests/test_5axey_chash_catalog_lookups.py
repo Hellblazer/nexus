@@ -29,6 +29,8 @@ from tests._catalog_fixture_ops import (
     seed_manifest_chunks,
 )
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):

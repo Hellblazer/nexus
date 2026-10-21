@@ -617,6 +617,12 @@ def _page(box: Box, timeout: float = 30) -> tuple[Path, str]:
     return opener, match.group(0)
 
 
+def _wait_for_the_waiting_status(box: Box) -> None:
+    """The run asks for the page to be opened before its next status write records "waiting for credentials",
+    so a test that acts as soon as the page is asked for can, on a loaded box, act before that write (nexus-ys8a4)."""
+    _wait_for(lambda: _credentials(box) == _SIX[0], 20, "the run to record that it waits for credentials")
+
+
 def _age_lock(setup: Path) -> None:
     """Make a dead run's lock stale: its heartbeat has not been written for two minutes."""
     heartbeat = setup / "lock" / "heartbeat"
@@ -694,6 +700,7 @@ def cloud_run(tmp_path_factory: pytest.TempPathFactory) -> Iterator[CloudRun]:
         out = box.start("cloud")
         assert out["started"] is True, out
         opener, address = _page(box)
+        _wait_for_the_waiting_status(box)
         text = _retry(lambda: opener.read_text(encoding="utf-8"))
         try:
             assert_owner_only(opener)
@@ -1751,13 +1758,14 @@ def test_the_status_of_a_run_killed_before_acceptance_is_unchanged(tmp_path: Pat
     box.behave([box.uv_builds_nx(sleep=8.0)])
     assert box.start("cloud")["started"] is True
     _page(box)
+    _wait_for_the_waiting_status(box)
     pid = box.status()["pid"]
     _terminate(pid)
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
     view = box.status()
-    assert view["state"] == "interrupted" and view.get("credentials") == _SIX[0]
+    assert view["state"] == "interrupted" and view.get("credentials") == _SIX[0], view
     assert "lost" not in (view.get("message", "") + view["next"]).lower()
 
 

@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,6 +21,37 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * same split as Bge768EmbedderMathTest / Bge768ParityTest, RDR-160 P1 S1).
  */
 class CrossEncoderRerankerTest {
+
+    // ── Live availability (nexus-yuh4a) ─────────────────────────────────────
+
+    @Test
+    void availableTracksTheFilesOnDiskLive_andReportsPresenceNotLoadability(@TempDir Path dir) throws Exception {
+        Path model = dir.resolve("onnx/model.onnx");
+        Path tokenizer = dir.resolve("onnx/tokenizer.json");
+        var reranker = new CrossEncoderReranker(model.toString(), tokenizer.toString());
+
+        assertThat(reranker.available()).as("neither file").isFalse();
+
+        Files.createDirectories(model.getParent());
+        Files.writeString(model, "m");
+        assertThat(reranker.available()).as("model only: a half install is not available").isFalse();
+
+        Files.writeString(tokenizer, "t");
+        assertThat(reranker.available()).as("both files appeared after construction: read live from the files")
+                .isTrue();
+
+        Files.delete(model);
+        assertThat(reranker.available()).as("a file removed again: flips back").isFalse();
+    }
+
+    @Test
+    void availableIsTrueWhenNoRerankerDeclaresOtherwise_theInterfaceDefault() {
+        Reranker voyageLike = new Reranker() {
+            @Override public String modelToken() { return "rerank-2.5"; }
+            @Override public List<Scored> rerank(String q, List<String> d, Integer k) { return List.of(); }
+        };
+        assertThat(voyageLike.available()).isTrue();
+    }
 
     // ── Scoring/order seam (static, model-free) ──────────────────────────────
 

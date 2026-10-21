@@ -3,19 +3,21 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_TEXT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -69,13 +71,10 @@ class ManifestFunctionsTest {
     // unreachable by construction. See this file's class javadoc for the full
     // scope-down (this file's remaining coverage is nexus.document_text only).
 
-    /**
-     * Ordered manifest⋈chunk_text reconstruction for a document.
-     * {@code nexus.document_text(doc_id text) RETURNS TABLE(position int, chunk_text text)}.
-     * SECURITY INVOKER; tenant-scoped via nexus.tenant GUC.
-     * Tombstone-aware: tombstoned doc returns empty set (never stale text).
-     */
-    private static final String FN_DOC_TEXT  = "nexus.document_text";
+    // nexus.document_text(doc_id text) RETURNS TABLE(position int, chunk_text text):
+    // ordered manifest-chunk_text reconstruction for a document. SECURITY INVOKER; tenant-scoped
+    // via nexus.tenant GUC; tombstone-aware (a tombstoned doc returns the empty set). Called through
+    // the generated DOCUMENT_TEXT table function.
 
     // ── Test collections (must be registered in catalog_collections per fk-002) ─
     // Collection names follow the conformant shape: <type>__<owner>__<model>__<version>
@@ -160,33 +159,33 @@ class ManifestFunctionsTest {
         // Call document_text via svc role with GUC set — RED trigger: function absent
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
-                "ORDER BY position");
+            var dt = DOCUMENT_TEXT.call(docId);
+            var rows = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(dt.POSITION, dt.CHUNK_TEXT).from(dt).orderBy(dt.POSITION).fetch();
 
             // Position 0
-            assertThat(rs.next()).as("row 0 must exist").isTrue();
-            assertThat(rs.getInt("position")).as("position 0 must be 0").isEqualTo(0);
-            assertThat(rs.getString("chunk_text"))
+            assertThat(rows).as("row 0 must exist").hasSizeGreaterThanOrEqualTo(1);
+            assertThat(rows.get(0).get(dt.POSITION)).as("position 0 must be 0").isEqualTo(0);
+            assertThat(rows.get(0).get(dt.CHUNK_TEXT))
                 .as("position 0 chunk_text must be '" + text0 + "'")
                 .isEqualTo(text0);
 
             // Position 1
-            assertThat(rs.next()).as("row 1 must exist").isTrue();
-            assertThat(rs.getInt("position")).as("position 1 must be 1").isEqualTo(1);
-            assertThat(rs.getString("chunk_text"))
+            assertThat(rows).as("row 1 must exist").hasSizeGreaterThanOrEqualTo(2);
+            assertThat(rows.get(1).get(dt.POSITION)).as("position 1 must be 1").isEqualTo(1);
+            assertThat(rows.get(1).get(dt.CHUNK_TEXT))
                 .as("position 1 chunk_text must be '" + text1 + "'")
                 .isEqualTo(text1);
 
             // Position 2
-            assertThat(rs.next()).as("row 2 must exist").isTrue();
-            assertThat(rs.getInt("position")).as("position 2 must be 2").isEqualTo(2);
-            assertThat(rs.getString("chunk_text"))
+            assertThat(rows).as("row 2 must exist").hasSizeGreaterThanOrEqualTo(3);
+            assertThat(rows.get(2).get(dt.POSITION)).as("position 2 must be 2").isEqualTo(2);
+            assertThat(rows.get(2).get(dt.CHUNK_TEXT))
                 .as("position 2 chunk_text must be '" + text2 + "'")
                 .isEqualTo(text2);
 
             // No more rows
-            assertThat(rs.next()).as("document_text must return exactly 3 rows (3 manifest positions)").isFalse();
+            assertThat(rows).as("document_text must return exactly 3 rows (3 manifest positions)").hasSize(3);
         }
     }
 
@@ -219,18 +218,16 @@ class ManifestFunctionsTest {
         // Tombstone the document
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .execute();
         }
 
         // document_text must return EMPTY SET for the tombstoned doc
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docId + "')");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(svc, SQLDialect.POSTGRES).fetchCount(DOCUMENT_TEXT.call(docId)))
                 .as("document_text must return empty set for a tombstoned doc " +
                     "(tombstone-aware contract: never stale text from retired documents)")
                 .isEqualTo(0L);
@@ -279,20 +276,20 @@ class ManifestFunctionsTest {
         // document_text must return exactly 1 row (position 0; position 1 gap is skipped)
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
-                "ORDER BY position");
+            var dt = DOCUMENT_TEXT.call(docId);
+            var rows = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(dt.POSITION, dt.CHUNK_TEXT).from(dt).orderBy(dt.POSITION).fetch();
 
-            assertThat(rs.next()).as("first row must exist (position 0)").isTrue();
-            assertThat(rs.getInt("position")).as("first row must be position 0").isEqualTo(0);
-            assertThat(rs.getString("chunk_text"))
+            assertThat(rows).as("first row must exist (position 0)").isNotEmpty();
+            assertThat(rows.get(0).get(dt.POSITION)).as("first row must be position 0").isEqualTo(0);
+            assertThat(rows.get(0).get(dt.CHUNK_TEXT))
                 .as("position 0 chunk_text must match")
                 .isEqualTo(text0);
 
-            assertThat(rs.next())
+            assertThat(rows)
                 .as("document_text must return exactly 1 row when position 1 chunk is missing " +
                     "(contract: manifest gap is silently skipped — use manifest_orphans for integrity checks)")
-                .isFalse();
+                .hasSize(1);
         }
     }
 
@@ -341,10 +338,8 @@ class ManifestFunctionsTest {
         // RED until catalog-004 grants EXECUTE to nexus_svc.
         try (Connection su = pg.createConnection("")) {
             for (String fn : List.of("document_text(text)")) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT has_function_privilege('nexus_svc', 'nexus." + fn + "', 'EXECUTE')");
-                rs.next();
-                assertThat(rs.getBoolean(1))
+                assertThat(PgCatalogProbes.canExecuteFunction(DSL.using(su, SQLDialect.POSTGRES),
+                        "nexus_svc", "nexus." + fn))
                     .as("nexus_svc must have EXECUTE on nexus." + fn + " (catalog-004 grants)")
                     .isTrue();
             }
@@ -380,10 +375,7 @@ class ManifestFunctionsTest {
         // Call document_text for tenant B's doc via GUC=A — must return empty set (RLS filters)
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docB + "')");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(svc, SQLDialect.POSTGRES).fetchCount(DOCUMENT_TEXT.call(docB)))
                 .as("document_text called with GUC=A must return 0 rows for tenant B's doc " +
                     "(RLS isolation: SECURITY INVOKER under FORCE RLS filters by tenant)")
                 .isEqualTo(0L);
@@ -416,10 +408,7 @@ class ManifestFunctionsTest {
             // Confirm GUC is NOT set (reset to default)
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
 
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + anyDocId + "')");
-            rs.next();
-            long count = rs.getLong(1);
+            long count = DSL.using(su, SQLDialect.POSTGRES).fetchCount(DOCUMENT_TEXT.call(anyDocId));
             assertThat(count)
                 .as("document_text with no nexus.tenant GUC must return 0 rows " +
                     "(reader contract: no GUC = no tenant = no rows; missing_ok=true returns NULL, " +
@@ -438,11 +427,13 @@ class ManifestFunctionsTest {
      */
     private static void insertCatalogDocument(Connection su, String tenantId, String tumbler,
                                                String physicalCollection) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, physical_collection) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "', '" + physicalCollection + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     /**
@@ -473,21 +464,22 @@ class ManifestFunctionsTest {
         // bead's scope). Bypass locally: drop the constraint, insert, then re-add
         // it NOT VALID (catalog-029-0's exact shape) so it is live again
         // (unvalidated) for every subsequent statement in this container.
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "', '"
-            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        PgContainerHelper.dropCatalogChunksFk(su);
+        // The 32-character chash is the bytea's ASCII bytes, exactly as the raw chunk seed's text
+        // literal is read into the bytea column (catalog-002-hygiene CHECK).
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenantId, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
         // RDR-225: the foreign key is four columns (the chunk's model is part of its identity).
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks " +
-            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
-            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) " +
-            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) " +
-            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        PgContainerHelper.readdCatalogChunksFkNotValid(su);
     }
 
     /**
@@ -498,12 +490,17 @@ class ManifestFunctionsTest {
      */
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', '"
-            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "', " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        // The 32 ASCII characters are 32 raw bytes: the same value the bytea escape-format text literal produced.
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, chash.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, chunkText)
+            .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /**
@@ -511,11 +508,8 @@ class ManifestFunctionsTest {
      */
     private static int countManifest(Connection conn, String tenantId, String docId)
             throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId + "'");
-        rs.next();
-        return rs.getInt(1);
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
     }
 
     /**
@@ -523,22 +517,9 @@ class ManifestFunctionsTest {
      */
     private static int countChunks384(Connection conn, String tenantId, String collection)
             throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
-            " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
-        rs.next();
-        return rs.getInt(1);
-    }
-
-    /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::nexus.vector} cast.
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(tenantId), CHUNKS.COLLECTION.eq(collection),
+            CHUNKS.EMBEDDING_384.isNotNull());
     }
 
     /**

@@ -51,7 +51,7 @@ class Hygiene006SequenceCatchupTest {
 
     @Test
     void advancesLaggingSequencesPastImportedIds_leavesAheadSequencesAlone() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene006_test";
             final String pass = "nexus_admin_hygiene006_test_pass";

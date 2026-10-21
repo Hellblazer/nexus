@@ -22,6 +22,8 @@ from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
 
+pytestmark = pytest.mark.t2_tenant
+
 _local_ef = DefaultEmbeddingFunction()
 
 

@@ -66,6 +66,7 @@ import structlog
 # the other. tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
 # additionally pins this module's and http_vector_client's values equal
 # against a future local-redefinition drift.
+from nexus._log_safe_url import log_endpoint
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
@@ -946,7 +947,7 @@ class RefreshableHttpStoreMixin:
         _log.info(
             "refreshable_http_store.reresolved",
             store=type(self).__name__,
-            base_url=self._base_url,
+            endpoint=log_endpoint(self._base_url),
         )
 
     # ── Public transport (subclasses call these, never self._client directly) ──

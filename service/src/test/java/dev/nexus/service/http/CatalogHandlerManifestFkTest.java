@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.VectorSeeds;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
@@ -26,6 +27,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -313,18 +315,16 @@ class CatalogHandlerManifestFkTest {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             // RDR-225: "knowledge__fk__v1" is not a conformant name, so insertCollection registers it
             // under the bge-base-en-v15-768 fallback; the chunk carries that model and a 768-wide vector.
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                    + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setString(3, chashHex);
-                ps.setString(4, PgContainerHelper.collectionModel(
-                    DSL.using(su, SQLDialect.POSTGRES), TENANT, collection));
-                ps.setString(5, "[" + "0.1,".repeat(767) + "0.1]");
-                ps.execute();
-            }
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 

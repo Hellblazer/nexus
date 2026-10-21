@@ -15,7 +15,7 @@ import java.util.List;
  * <p><b>Process-wide, not per-instance (review finding 1).</b> This class
  * owns no {@link java.util.concurrent.Semaphore} of its own — every wrapper
  * in a process takes the SAME {@link LocalOnnxAdmission} (constructed once,
- * in {@code Main.java}'s local-mode branch, and shared with {@link
+ * in {@code Main.java}'s local-model setup, and shared with {@link
  * AdmissionControlledReranker} too — finding 4: reranks compete for the
  * SAME budget as embeds, not a separate one). {@code EmbedderRouter} no
  * longer wraps its local embedder internally; the caller wraps BEFORE
@@ -68,7 +68,7 @@ public final class AdmissionControlledEmbedder implements Embedder {
     private final boolean           interactive;
 
     /**
-     * @param delegate    the local embedder to gate (bge, or the ONNX fallback)
+     * @param delegate    the local embedder to gate (bge in production)
      * @param admission   the SHARED admission gate — pass the SAME instance to
      *                    every wrapper in the process so the bound is process-wide
      * @param interactive {@code true} for query-path callers (bounded-timeout

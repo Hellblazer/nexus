@@ -40,6 +40,7 @@ from enum import Enum
 import structlog
 
 from nexus.upgrade_ladder.completion import derive_ladder_position
+from nexus.upgrade_ladder.deadline import Deadline, bound
 from nexus.upgrade_ladder.protocol import CompletionLedger, ProgressReporter, Rung, RungStatus
 from nexus.upgrade_ladder.registry import LadderRegistry
 
@@ -193,6 +194,7 @@ class LadderRunner:
         reporter: ProgressReporter | None = None,
         package_version_fn: Callable[[], str] | None = None,
         max_steps_per_rung: int = DEFAULT_MAX_STEPS_PER_RUNG,
+        deadline: Deadline | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -201,6 +203,7 @@ class LadderRunner:
             package_version_fn if package_version_fn is not None else _installed_package_version
         )
         self._max_steps_per_rung = max_steps_per_rung
+        self._deadline = deadline
 
     # ── read-only surface (nx doctor, P0.4) ─────────────────────────────────
 
@@ -212,11 +215,30 @@ class LadderRunner:
 
     def run(self) -> LadderRunReport:
         """Walk the ladder: converge every pending rung in order, recording
-        each ONLY after its verify passes. Stops at the first failure."""
+        each ONLY after its verify passes. Stops at the first failure.
+
+        With a ``deadline`` (the detached ``--auto`` child only, nexus-dcbof)
+        the walk stops STARTING work at safe points. Here, before each rung:
+        once the deadline has passed, a rung that has nothing to do
+        (not applicable, or converged and recorded) still reports its own
+        outcome, and the first rung that WOULD do work is reported DEFERRED
+        (non-fatal, the class that retries on a later run) with the rest
+        NOT_ATTEMPTED. The deadline is also bound for the running rung, so a
+        rung can stop at its own safe points (see
+        :mod:`nexus.upgrade_ladder.deadline`); nothing is killed mid-call and
+        the next run resumes from the first rung not yet verified."""
         runs: list[RungRun] = []
         rungs = iter(self._registry)
         for rung in rungs:
-            run = self._run_rung(rung)
+            if (
+                self._deadline is not None
+                and self._deadline.expired()
+                and self._would_do_work(rung)
+            ):
+                runs.extend(self._stop_at_deadline(self._deadline, rung, rungs))
+                break
+            with bound(self._deadline):
+                run = self._run_rung(rung)
             runs.append(run)
             # A failed OR deferred rung stops the walk: the hard edges make
             # later rungs depend on earlier ones. Deferred differs only in
@@ -234,6 +256,45 @@ class LadderRunner:
                 self._store.verified_rungs(), [r.name for r in self._registry]
             ),
         )
+
+    def _would_do_work(self, rung: Rung) -> bool:
+        """Read-only: would walking *rung* now converge or verify something?
+        False for a rung that is not applicable or already converged AND
+        recorded. A detect that raises is not work to defer: it returns False so
+        the walk does not stop at the deadline, and :meth:`_run_rung` calls
+        detect again and reports the failure as FAILED instead of hiding it
+        behind a deferral."""
+        try:
+            status = rung.detect()
+        except Exception:  # noqa: BLE001 — surfaced by _run_rung, which reports the detect failure
+            return False
+        if not status.applicable:
+            return False
+        return not (status.converged and rung.name in self._store.verified_rungs())
+
+    def _stop_at_deadline(
+        self, deadline: Deadline, next_rung: Rung, remaining: Iterator[Rung]
+    ) -> list[RungRun]:
+        rest = list(remaining)
+        later = self._not_attempted(iter(rest), reason="auto deadline reached")
+        skipped = [next_rung.name, *(r.name for r in rest if self._would_do_work(r))]
+        elapsed = deadline.elapsed()
+        _log.warning(
+            "upgrade_auto_deadline_reached",
+            elapsed_s=round(elapsed, 1),
+            deadline_s=deadline.seconds,
+            next_rung=next_rung.name,
+            skipped=skipped,
+        )
+        deferred = RungRun(
+            next_rung.name,
+            RungOutcome.DEFERRED,
+            detail=(
+                f"auto deadline of {deadline.seconds:g}s reached after "
+                f"{elapsed:.1f}s; resumes on the next run"
+            ),
+        )
+        return [deferred, *later]
 
     def _run_rung(self, rung: Rung) -> RungRun:
         try:
@@ -326,8 +387,10 @@ class LadderRunner:
         )
 
     @staticmethod
-    def _not_attempted(remaining: Iterator[Rung]) -> list[RungRun]:
+    def _not_attempted(
+        remaining: Iterator[Rung], *, reason: str = "walk stopped at earlier failure"
+    ) -> list[RungRun]:
         return [
-            RungRun(rung.name, RungOutcome.NOT_ATTEMPTED, detail="walk stopped at earlier failure")
+            RungRun(rung.name, RungOutcome.NOT_ATTEMPTED, detail=reason)
             for rung in remaining
         ]

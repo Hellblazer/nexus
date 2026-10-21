@@ -437,8 +437,14 @@ def run_status() -> str:
         )
     if view.get("live") and view.get("state") == "running":
         return render(view)
-    if view.get("state") == "done" and local_service_provisioned():
+    rows = view.get("doctor_failing")
+    unnamed_doctor_failure = view.get("state") == "doctor-failed" and not (isinstance(rows, list) and rows)
+    if (view.get("state") == "done" or unnamed_doctor_failure) and local_service_provisioned():
         # The last run finished, so its "done ... reconnect" is history: what is missing
-        # now is a running service (nexus-sv2wx.24, row 2), and setup starts one.
+        # now is a running service (nexus-sv2wx.24, row 2), and setup starts one. A doctor-failed
+        # record that names no failing row is the same (nexus-36qyh): a 7.82.0 run on a box with no
+        # git recorded none, and the verify step's failure cannot be told from that one tool alone,
+        # so it does not send the user to a terminal while the installed service is down. A record
+        # that names any row keeps its state below.
         return SERVICE_DOWN + (f"\nLog: {view['log']}" if view.get("log") else "")
     return "No usable Nexus service was found on this machine.\n" + _checked(view)

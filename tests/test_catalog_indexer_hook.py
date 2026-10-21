@@ -45,6 +45,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
 
 
 class TestCatalogHookSkipped:
+    @pytest.mark.t2_tenant
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
 
@@ -59,6 +60,7 @@ class TestCatalogHookSkipped:
         )
 
 
+@pytest.mark.t2_tenant
 class TestCatalogHookOwner:
     def test_owner_auto_created(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
@@ -94,6 +96,7 @@ class TestCatalogHookOwner:
         assert rows[0] == 1
 
 
+@pytest.mark.t2_tenant
 class TestCatalogHookDocuments:
     def test_document_registered_on_first_index(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
@@ -166,6 +169,7 @@ class TestCatalogHookDocuments:
         assert len(entries) == 2
 
 
+@pytest.mark.t2_tenant
 class TestFixturePathAutoStamp:
     """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
     ``nx index repo`` auto-stamps ``non_evidentiary`` in ``Document.meta``
@@ -220,6 +224,7 @@ class TestFixturePathAutoStamp:
         assert not entry.meta.get("non_evidentiary")
 
 
+@pytest.mark.t2_tenant
 class TestNeedsFenceOutParam:
     """nexus-hg2dw: ``needs_fence`` names exactly the documents this run's
     registration determined need real indexing work — new registrations,
@@ -393,6 +398,7 @@ def _update_calls(spy: "_SpyProxy") -> int:
     return spy.calls.get("update", 0) + spy.calls.get("update_many", 0)
 
 
+@pytest.mark.t2_tenant
 class TestCatalogHookBatchedLookups:
     """nexus-dst5h: the pre-index sweep must not do per-file catalog
     round-trips — one owner-scoped list + local join, and no writes for
@@ -543,6 +549,7 @@ class TestCatalogHookOwnerListFailure:
     """nexus-dst5h review Critical: a failing owner-list fetch must not
     silently no-op the whole hook — it falls back to per-file lookups."""
 
+    @pytest.mark.t2_tenant
     def test_by_owner_failure_falls_back_per_file(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
 
@@ -603,6 +610,7 @@ class TestFrecencyDocIdMapBatched:
     """nexus-dst5h: _build_frecency_doc_id_map's second per-file
     by_file_path pass must also become one by_owner + local join."""
 
+    @pytest.mark.t2_tenant
     def test_single_by_owner_no_per_file_lookups(self, tmp_path, monkeypatch):
         from nexus.indexer import _build_frecency_doc_id_map, _catalog_hook
         from nexus.repo_identity import _repo_identity
@@ -641,8 +649,6 @@ class TestCatalogHookBatchedServiceMode:
 
     class _StubWriter:
         """Write-side stub with the surface _catalog_hook touches."""
-
-        priority = "interactive"
 
         def __init__(self, *, update_many_raises: bool = False, reconcile_tumbler: str = "1.10.41"):
             self.register_calls: list[dict] = []
@@ -888,6 +894,7 @@ class TestCatalogHookBatchedServiceMode:
 
 
 class TestCatalogHookErrorSafe:
+    @pytest.mark.t2_tenant
     def test_hook_does_not_propagate_errors(self, tmp_path, monkeypatch):
         from nexus.indexer import _catalog_hook
 
@@ -906,6 +913,7 @@ class TestCatalogHookErrorSafe:
         # Should not raise — errors are caught internally
 
 
+@pytest.mark.t2_tenant
 class TestRunHousekeeping:
     """Tests for _run_housekeeping() — orphan detection with miss_count tracking."""
 
@@ -1136,6 +1144,7 @@ class TestCatalogHookForeignCwd:
     persisted ``source_uri`` is anchored on the indexed repo.
     """
 
+    @pytest.mark.t2_tenant
     def test_hook_writes_correctly_attributed_uris_from_foreign_cwd(
         self, tmp_path, monkeypatch,
     ):
@@ -1172,6 +1181,7 @@ class TestCatalogHookForeignCwd:
         assert str(foreign_cwd) not in entry.source_uri
 
 
+@pytest.mark.t2_tenant
 class TestCatalogHookEphemeralPathGuard:
     """nexus-u8n4r: ``_catalog_hook``'s per-file loop refuses registration
     when the REGISTERED identity (owner's main-repo root + rel_path)

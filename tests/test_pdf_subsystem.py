@@ -7,6 +7,8 @@ pipeline stitches together correctly without requiring API keys or network acces
 AC-S1 through AC-S6 from RDR-011.
 AC-S7 through AC-S8 from RDR-012 (pdfplumber tier).
 """
+import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -207,6 +209,7 @@ class TestPdfChunksMetadata:
 
 # ── AC-S3 / AC-S4 — index_pdf pipeline ───────────────────────────────────────
 
+@pytest.mark.t2_tenant
 class TestIndexPdfPipeline:
     """AC-S3 / AC-S4: index_pdf with real extraction, mocked embed + T3."""
 
@@ -307,6 +310,7 @@ def pdf_git_repo(tmp_path_factory: pytest.TempPathFactory, simple_pdf: Path) -> 
     return repo
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfFileForceReEmbedDecoupled:
     """nexus-4jj40 sibling (shakedown 2026-09-15): the PDF per-file fallback
     passed ``force`` as ``force_re_embed``, so a plain --force paid for a full
@@ -352,6 +356,7 @@ class TestIndexPdfFileForceReEmbedDecoupled:
         assert flags and set(flags) == {True}
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfFileGitMetadata:
     """AC-S5 / AC-S6: _index_pdf_file augments chunks with git metadata."""
 
@@ -555,6 +560,86 @@ class TestFFLigatureHelper:
 
 # ── nexus-2fyb: real-fixture formula-preservation regression guard ──────────
 
+def _give_mineru_its_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hand a real MinerU run the operator's model locations explicitly (nexus-ld3aa).
+
+    The suite's HOME fence is empty, so MinerU finds neither ``~/mineru.json``
+    (its ``models-dir``) nor ``~/.cache/huggingface`` and would download 2-3 GB
+    of weights on every run, then time out. Mirroring either into the fence is
+    what the fence no longer does: ``mineru.json`` also carries an
+    ``llm-aided-config`` block that can hold a provider key. So the test builds a
+    config of its own holding only the model locations, and points the HF hub
+    cache (``HF_HUB_CACHE``, never ``HF_HOME``, whose ``token`` file is a
+    credential) at the real one. The fence already pins ``HF_HUB_CACHE``; it is
+    set again here so a run under ``NX_NO_HOME_FENCE`` gets the same. The run can
+    still add model files and cache locks to the real hub cache; it writes no
+    config and no token.
+
+    An ambient ``MINERU_TOOLS_CONFIG_JSON`` (CI's prime-mineru step) is left
+    alone. With neither it nor a real ``~/mineru.json`` the test SKIPS with the
+    reason, rather than falling through to the download.
+    """
+    real_home = Path(os.environ.get("NX_REAL_HOME") or Path.home())
+    if not os.environ.get("MINERU_TOOLS_CONFIG_JSON"):
+        real_cfg = real_home / "mineru.json"
+        if not real_cfg.is_file():
+            pytest.skip(
+                f"no {real_cfg} and no MINERU_TOOLS_CONFIG_JSON: MinerU would download "
+                "2-3 GB of models into the fenced home"
+            )
+        real = json.loads(real_cfg.read_text())
+        cfg = tmp_path / "mineru.json"
+        cfg.write_text(json.dumps({
+            key: real[key] for key in ("config_version", "model-source", "models-dir") if key in real
+        }))
+        monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", str(cfg))
+    hub = real_home / ".cache" / "huggingface" / "hub"
+    if hub.is_dir() and not os.environ.get("HF_HUB_CACHE"):
+        monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+
+
+class TestGiveMineruItsModels:
+    """The fixture hands MinerU model locations, never a credential (nexus-ld3aa review)."""
+
+    def test_it_copies_only_the_model_locations_and_never_sets_hf_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        real = tmp_path / "real"
+        (real / ".cache" / "huggingface" / "hub").mkdir(parents=True)
+        (real / "mineru.json").write_text(json.dumps({
+            "config_version": "1.3.1", "models-dir": {"pipeline": "/m"},
+            "llm-aided-config": {"api_key": "sk-secret"},
+        }))
+        monkeypatch.setenv("NX_REAL_HOME", str(real))
+        monkeypatch.delenv("MINERU_TOOLS_CONFIG_JSON", raising=False)
+        monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+        monkeypatch.delenv("HF_HOME", raising=False)
+
+        _give_mineru_its_models(monkeypatch, tmp_path)
+
+        cfg = json.loads(Path(os.environ["MINERU_TOOLS_CONFIG_JSON"]).read_text())
+        assert cfg == {"config_version": "1.3.1", "models-dir": {"pipeline": "/m"}}
+        assert "sk-secret" not in json.dumps(cfg)
+        assert os.environ["HF_HUB_CACHE"] == str(real / ".cache" / "huggingface" / "hub")
+        assert "HF_HOME" not in os.environ
+
+    def test_it_skips_rather_than_downloading_when_there_is_no_real_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("NX_REAL_HOME", str(tmp_path / "bare"))
+        monkeypatch.delenv("MINERU_TOOLS_CONFIG_JSON", raising=False)
+        with pytest.raises(pytest.skip.Exception, match="2-3 GB"):
+            _give_mineru_its_models(monkeypatch, tmp_path)
+
+    def test_an_ambient_config_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("NX_REAL_HOME", str(tmp_path / "bare"))
+        monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", "/ci/mineru.json")
+        _give_mineru_its_models(monkeypatch, tmp_path)
+        assert os.environ["MINERU_TOOLS_CONFIG_JSON"] == "/ci/mineru.json"
+
+
 class TestFormulaPreservationOnRealPdf:
     """End-to-end formula extraction on a real math paper.
 
@@ -679,7 +764,9 @@ class TestFormulaPreservationOnRealPdf:
         assert "--extractor docling" in msg
 
     @pytest.mark.slow
-    def test_mineru_path_preserves_formulas(self) -> None:
+    def test_mineru_path_preserves_formulas(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
         """End-to-end formula extraction on a real math paper. All assertions
         are EXACT against locked empirical values.
 
@@ -728,6 +815,7 @@ class TestFormulaPreservationOnRealPdf:
         be present, not something the shakedown or CI currently wires.
         """
         mineru_importorskip()
+        _give_mineru_its_models(monkeypatch, tmp_path)
         from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
 
         result = PDFExtractor().extract(self._FIXTURE, extractor="auto")

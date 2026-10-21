@@ -1,0 +1,9 @@
+{
+  "permissions": { "allow": ["Bash(touch HOOKASK_PROBE*)"] },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "bash /harness/hooks/probe_hook.sh ask /out/hook.log", "timeout": 20 }] }
+    ]
+  }
+}

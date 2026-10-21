@@ -159,6 +159,7 @@ def test_since_head_no_delta_short_circuits(git_repo, monkeypatch):
     assert any("nothing changed" in p for p in phases)
 
 
+@pytest.mark.t2_tenant
 def test_since_head_without_base_logs_fallback(git_repo, monkeypatch):
     """No stored head_hash: the delta path must announce the full-index
     fallback (and then proceed as a normal full run)."""
@@ -185,6 +186,7 @@ def test_since_head_without_base_logs_fallback(git_repo, monkeypatch):
     assert any("no usable base — full index" in p for p in phases)
 
 
+@pytest.mark.t2_tenant
 def test_since_head_ignored_with_force(git_repo, monkeypatch):
     """--force + --since-head: full pass by definition; the delta block must
     not even consult the base."""

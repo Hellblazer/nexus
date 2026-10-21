@@ -78,6 +78,7 @@ def repo(tmp_path: Path) -> Path:
     r.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=r, check=True)
     return r
+@pytest.mark.t2_tenant
 class TestCriticalThreeModelVersionV1:
     """CRITICAL-3, against the ACTIVE catalog (nexus-i711w terminal
     deletion ported the harness off the local Catalog; the adapter's
@@ -200,6 +201,7 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
             except (json.JSONDecodeError, ValueError):
                 # Or raise — also acceptable.
                 pass
+@pytest.mark.t2_tenant
 class TestCriticalFiveTOCTOUOwnerRace:
     """CRITICAL-5, now against the ACTIVE (engine) catalog.
 

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-225 Phase 3 Step 3 (bead nexus-3wh8d.22): drop nexus.chunks_retired_225 and
+    nexus.taxonomy_centroids_retired_225, the pre-walk tables vectors-030-1 kept after it swapped the partitioned
+    replacements in. Each is dropped with its _retired_225 indexes, constraints and policies; a DROP TABLE
+    takes them along, so none has a statement of its own.
+
+    WHY. The walk kept the old tables for one reason: a data-recovery source while the partitioned tables
+    proved themselves. Nothing in the engine reads them (git grep retired_225 over service/src/main and src/
+    finds only vectors-030 itself), and until they go they hold a full copy of every chunk and centroid on
+    disk, with a second set of HNSW indexes.
+
+    THE WINDOW. The tables are kept until a changeset that drops them runs.
+      - Cloud: kept 14 days after the 2026-10-07 deploy of the walk. This changeset ships in an engine
+        tag cut after that date (RDR-225 Implementation Plan, Phase 3 Step 3).
+      - Local install: the engine runs Liquibase on its first boot after an upgrade, so the window is the
+        time between the engine release that carries vectors-030-1 and the one that carries this
+        changeset. A local install that skips straight across both releases runs the two changesets in one
+        boot, and its window is zero: the walk commits and this changeset drops the retired tables in the
+        same Liquibase run, so no recovery copy is ever visible to the operator. Recovery for such an
+        install is the backup taken before the upgrade.
+
+    WHAT IT DOES. For each retired table that exists, logs its row count with RAISE NOTICE (a NOTICE reaches
+    the client as a SQLWarning, which Liquibase logs into the engine's log; vectors-030 explains why not
+    RAISE LOG), then DROP TABLE IF EXISTS. No CASCADE: a view or foreign key that still depends on a retired
+    table makes the DROP fail, and the transaction rolls back with both tables in place. Vectors-030-1
+    recreated the three views over the new tables and dropped the inbound foreign keys, so nothing is
+    expected to depend on them; if something does, the failure names it, which is the point.
+
+    The count runs under FORCE ROW LEVEL SECURITY, and the migrating role has no BYPASSRLS, so FORCE is
+    switched off on the table first (as migration-002-1 does for its count). The DROP that follows removes
+    the table; if the DROP fails, the transaction rolls the switch back.
+
+    A table that is absent is skipped: a store whose retired tables were already dropped by hand, or by this
+    changeset's rollback and a forward re-apply, runs this changeset as a no-op.
+
+    DATA EFFECT. Irreversible. Every row of both retired tables is deleted with them. The rollback recreates
+    the two tables EMPTY, in the exact shape vectors-030-1 leaves them: it restores shape, not rows (the
+    migration-002-1 discipline). The rollback exists to keep the rollback test chain executable:
+    vectors-030-1's rollback needs both retired tables present, and raises when nexus.chunks is partitioned
+    and they are not (SchemaRollbackRoundTripIntegrationTest rolls the whole chain back to zero). It is not a
+    recovery path; recovery from a drop is a backup or PITR restore taken before it ran.
+
+    The recreated tables carry no ACL. The runAlways grant blocks below issue DML grants on every table of
+    the schema on each boot, so a recreated table gets its grants on the next run; the shape test compares
+    ACLs on a chain where those blocks have not run.
+
+    GRANTS SWEEP (checked, nothing to change). grants-nexus-svc.xml and grants-nexus-diag.xml grant through
+    loops over the relations that exist; neither names a retired table. Dropping them removes them from the
+    next loop's iteration.
+
+    Placed after vectors-035 and before the runAlways grants blocks. Enters the PITR-fork changelog walk;
+    it carries no row DML on a surviving table, so it needs no rehearsal seed of its own.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-036-1" author="nexus-3wh8d.22">
+        <comment>RDR-225 P3.3: drop nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 (the pre-walk tables vectors-030-1 kept), with their _retired_225 indexes and constraints. Logs each table's row count first (RAISE NOTICE); no CASCADE; lock_timeout 120s; an absent table is skipped. DATA EFFECT: irreversible, every row of nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 is deleted with the tables; the rollback recreates both EMPTY in the shape vectors-030-1 leaves. Cloud window: 14 days after the 2026-10-07 walk deploy. Local window: the time between the engine release carrying vectors-030-1 and the one carrying this changeset; zero when an install crosses both in one boot.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+-- A session holding a lock on a retired table (an operator's idle transaction on the recovery source) fails the
+-- boot with a lock_not_available error after 120 s instead of hanging it; a role-level statement_timeout must not
+-- kill the row count. Both revert at the end of the transaction (the vectors-030-1 settings).
+SET LOCAL lock_timeout = '120s';
+SET LOCAL statement_timeout = 0;
+
+DO $drop$
+DECLARE
+    t text;
+    n bigint;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['chunks_retired_225', 'taxonomy_centroids_retired_225'] LOOP
+        IF pg_catalog.to_regclass(pg_catalog.format('nexus.%I', t)) IS NOT NULL THEN
+            EXECUTE pg_catalog.format('ALTER TABLE nexus.%I NO FORCE ROW LEVEL SECURITY', t);
+            EXECUTE pg_catalog.format('SELECT pg_catalog.count(*) FROM nexus.%I', t) INTO n;
+            RAISE NOTICE 'vectors-036-1: dropping nexus.% (% row(s))', t, n;
+        END IF;
+    END LOOP;
+END
+$drop$;
+
+DROP TABLE IF EXISTS nexus.chunks_retired_225;
+DROP TABLE IF EXISTS nexus.taxonomy_centroids_retired_225;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+-- ROLLBACK: both retired tables, EMPTY, as vectors-030-1 leaves them (see the file header). A retired table that
+-- already exists makes this fail, which is right: the state is not the one the rollback is for.
+CREATE TABLE nexus.chunks_retired_225 (
+    tenant_id       text NOT NULL,
+    collection      text NOT NULL,
+    chash           bytea NOT NULL,
+    chunk_text      text,
+    embedding_384   nexus.vector(384),
+    embedding_768   nexus.vector(768),
+    embedding_1024  nexus.vector(1024),
+    chunk_tsv       tsvector GENERATED ALWAYS AS (pg_catalog.to_tsvector('english'::pg_catalog.regconfig, chunk_text)) STORED,
+    metadata        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at      timestamptz NOT NULL DEFAULT pg_catalog.now(),
+    retention       text NOT NULL DEFAULT 'full',
+    last_written_at timestamptz NOT NULL DEFAULT pg_catalog.now(),
+    CONSTRAINT chunks_pk_retired_225 PRIMARY KEY (tenant_id, collection, chash),
+    CONSTRAINT chunks_content_retention_consistent CHECK ((chunk_text IS NULL) = (retention = 'reference-only')),
+    CONSTRAINT chunks_retention_chk CHECK (retention IN ('reference-only', 'full')),
+    CONSTRAINT exactly_one_embedding CHECK (pg_catalog.num_nonnulls(embedding_384, embedding_768, embedding_1024) = 1)
+);
+-- CREATE TABLE ignores NOT VALID (it validates against zero rows), so the unvalidated octet check is added after.
+ALTER TABLE nexus.chunks_retired_225
+    ADD CONSTRAINT chunks_chash_octet_check CHECK (pg_catalog.octet_length(chash) = 32) NOT VALID;
+CREATE INDEX idx_chunks_embedding_1024_retired_225 ON nexus.chunks_retired_225
+    USING hnsw (embedding_1024 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_embedding_384_retired_225 ON nexus.chunks_retired_225
+    USING hnsw (embedding_384 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_embedding_768_retired_225 ON nexus.chunks_retired_225
+    USING hnsw (embedding_768 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_tenant_chash_retired_225 ON nexus.chunks_retired_225 USING btree (tenant_id, chash);
+CREATE INDEX idx_chunks_trgm_retired_225 ON nexus.chunks_retired_225 USING gin (chunk_text nexus.gin_trgm_ops);
+CREATE INDEX idx_chunks_tsv_retired_225 ON nexus.chunks_retired_225 USING gin (chunk_tsv);
+
+CREATE TABLE nexus.taxonomy_centroids_retired_225 (
+    tenant_id       text NOT NULL,
+    collection      text NOT NULL,
+    topic_id        bigint NOT NULL,
+    embedding_384   nexus.vector(384),
+    embedding_768   nexus.vector(768),
+    embedding_1024  nexus.vector(1024),
+    label           text NOT NULL,
+    doc_count       integer,
+    created_at      timestamptz NOT NULL DEFAULT pg_catalog.now(),
+    CONSTRAINT taxonomy_centroids_pk_retired_225 PRIMARY KEY (tenant_id, collection, topic_id),
+    CONSTRAINT taxonomy_centroids_exactly_one_embedding CHECK (pg_catalog.num_nonnulls(embedding_384, embedding_768, embedding_1024) = 1)
+);
+CREATE INDEX idx_taxonomy_centroids_embedding_1024_retired_225 ON nexus.taxonomy_centroids_retired_225
+    USING hnsw (embedding_1024 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_embedding_384_retired_225 ON nexus.taxonomy_centroids_retired_225
+    USING hnsw (embedding_384 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_embedding_768_retired_225 ON nexus.taxonomy_centroids_retired_225
+    USING hnsw (embedding_768 nexus.vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+-- Row-level security: enabled and FORCEd, with the policies the pre-walk tables carried. vectors-030-1's
+-- rollback does NO FORCE on the table it renames back, so FORCE must be on here.
+ALTER TABLE nexus.chunks_retired_225 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_retired_225 FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_retired_225 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_retired_225 FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON nexus.chunks_retired_225;
+CREATE POLICY tenant_isolation ON nexus.chunks_retired_225
+    USING (tenant_id = pg_catalog.current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = pg_catalog.current_setting('nexus.tenant', true));
+DROP POLICY IF EXISTS chunks_gate_probe_owner_read ON nexus.chunks_retired_225;
+CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks_retired_225 FOR SELECT TO CURRENT_USER USING (true);
+DROP POLICY IF EXISTS tenant_isolation ON nexus.taxonomy_centroids_retired_225;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_retired_225
+    USING (tenant_id = pg_catalog.current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = pg_catalog.current_setting('nexus.tenant', true));
+]]></sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

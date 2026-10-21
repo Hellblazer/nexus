@@ -851,6 +851,84 @@ class TestServiceLocalEmbedder:
         assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
         assert calls == ["fetch"]
 
+    def test_service_local_keeps_an_existing_voyage_embed_model(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-ddmfg: a local-Voyage user re-running `nx init --service` (or the
+        ladder's provision leg, which goes through the same step) keeps their
+        voyage-* posture; reverting it strands their voyage collections."""
+        calls = self._patch_common(monkeypatch)
+        (cfg_dir / "config.yml").write_text(
+            "local:\n  embed_model: voyage-3\n", encoding="utf-8"
+        )
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert _read_config(cfg_dir)["local"]["embed_model"] == "voyage-3"
+        assert "Kept" in result.output
+        assert f"nx config set local.embed_model {_TIER1_MODEL}" in result.output
+        assert f"Saved: local.embed_model = {_TIER1_MODEL}" not in result.output
+        assert "until you switch back or re-index them" in result.output
+        assert "RDR-210" not in result.output  # a draft RDR is not promised to users
+        # the bge ONNX is still fetched (a later keyless restart needs it)
+        assert calls == ["fetch"]
+
+    def test_kept_voyage_line_adds_the_missing_key_sentence_only_without_a_key(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A kept voyage-* model with no resolvable voyage_api_key fails a write
+        that needs a new collection (LocalVoyageCredentialMissingError; existing
+        bge collections still take writes); init must say so. With a key
+        the Kept line stands alone. Real tmp-path config; the key value is never
+        printed."""
+        from nexus.config import CREDENTIALS
+
+        env_var = CREDENTIALS.get("voyage_api_key", "VOYAGE_API_KEY")
+        for var in {env_var, "VOYAGE_API_KEY", "NX_VOYAGE_API_KEY"}:
+            monkeypatch.delenv(var, raising=False)
+        self._patch_common(monkeypatch)
+        cfg = cfg_dir / "config.yml"
+        cfg.write_text("local:\n  embed_model: voyage-3\n", encoding="utf-8")
+
+        keyless = CliRunner().invoke(init_cmd, ["--service"])
+        assert keyless.exit_code == 0, keyless.output
+        assert "Kept" in keyless.output
+        assert "No Voyage API key is configured" in keyless.output
+        assert "nx config set voyage_api_key" in keyless.output
+
+        secret = "pa-test-secret-value-1234"
+        cfg.write_text(
+            "local:\n  embed_model: voyage-3\n"
+            f"credentials:\n  voyage_api_key: {secret}\n",
+            encoding="utf-8",
+        )
+        keyed = CliRunner().invoke(init_cmd, ["--service"])
+        assert keyed.exit_code == 0, keyed.output
+        assert "Kept" in keyed.output
+        assert "No Voyage API key" not in keyed.output
+        assert secret not in keyed.output
+
+    @pytest.mark.parametrize(
+        "seed",
+        [
+            "",  # no config file at all
+            "local:\n  embed_model: bge-768\n",
+            "local:\n  embed_model: minilm-384\n",
+        ],
+        ids=["absent", "bge", "minilm"],
+    )
+    def test_service_local_stamps_bge_unless_voyage(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, seed: str
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        if seed:
+            (cfg_dir / "config.yml").write_text(seed, encoding="utf-8")
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert f"Saved: local.embed_model = {_TIER1_MODEL}" in result.output
+        assert "Kept" not in result.output
+        assert calls == ["fetch"]
+
     def test_service_local_fetch_offline_is_loud_and_fatal(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1357,6 +1435,7 @@ class TestManagedOnboardingP12:
         assert provisioned == []
         assert "reachable" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_probe_failure_exits_nonzero_with_actionable_message(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

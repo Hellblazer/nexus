@@ -578,8 +578,8 @@ def autostart_unit_config_dir(dest: Path) -> Path:
     systemd ``ExecStart``, the launchd ``ProgramArguments`` or the Windows
     task's ``<Arguments>``. A unit with no flag (one installed before the flag
     was baked, nexus-cd1k0.19) means the DEFAULT dir: the units set no
-    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``,
-    the same literal ``storage_service_stack_matcher`` uses. The path is
+    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``
+    (what ``nexus_config_dir()`` falls back to). The path is
     returned as written, unresolved.
 
     Raises ``ValueError`` naming the problem when the file cannot be read or
@@ -1539,6 +1539,23 @@ def _user_model_root_outside(cache: Path) -> Path | None:
     return None
 
 
+def _user_ort_native_root_outside(cache: Path) -> Path | None:
+    """The ``NX_ORT_NATIVE_DIR`` root when it lies outside ``cache``, else None (nexus-8ool4).
+
+    Like the model root, a directory the user chose; uninstall never removes it.
+    """
+    from nexus.db import onnx_model_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not os.environ.get(onnx_model_root.ENV_ORT_NATIVE_DIR, "").strip():
+        return None
+    root = onnx_model_root.ort_native_root()
+    try:
+        root.resolve().relative_to(cache.resolve())
+    except ValueError:
+        return root
+    return None
+
+
 #: The extraction directory onnxruntime-java makes on every start. The engine's
 #: own boot sweep (``OrtTempSweep.java``, nexus-f9bgu.8/.11) removes the old
 #: ones, so the LAST run's directory is the one a Windows uninstall finds. The
@@ -1665,15 +1682,48 @@ def sweep_ort_temp_dirs(
     return removed, notes
 
 
-def _force_remove(func, path, _exc) -> None:  # type: ignore[no-untyped-def]
-    """``rmtree`` onexc: Windows refuses to delete a read-only file, so clear
-    the flag and retry once. A second failure propagates to the caller.
+def _force_remove(func, path, exc, *, _retried: set[str] | None = None, _root: str | None = None) -> None:  # type: ignore[no-untyped-def]
+    """``rmtree`` onexc: Windows refuses to delete a read-only file, and POSIX
+    refuses to enter a directory without r-x, so restore owner access and retry
+    once. A second failure on the same path propagates to the caller.
+
+    The retry never re-calls *func*: the POSIX fd walk passes ``os.open`` (and
+    ``os.scandir``, ``os.lstat``, ``os.path.islink``), which need more than a path,
+    so ``func(path)`` raised TypeError past the caller's ``except OSError``
+    (5588beead, the same handler shape in tests/_tmp_root.py). A directory that
+    could not be entered is removed by one nested rmtree; a failed ``rmdir`` is
+    retried as ``rmdir``; anything else is unlinked.
 
     Not a credential write: the mode only makes the entry deletable (Windows
     reads the write bit alone; S_IRWXU keeps a directory traversable on POSIX).
     """
-    os.chmod(path, stat.S_IRWXU)
-    func(path)
+    if isinstance(exc, FileNotFoundError):
+        return
+    retried = set() if _retried is None else _retried
+    if path in retried:
+        raise exc
+    retried.add(path)
+    parent = os.path.dirname(path)
+    inside = _root is not None and os.path.normpath(path) != os.path.normpath(_root)
+    if parent and inside and func in (os.unlink, os.rmdir):
+        # POSIX: an unlink or rmdir is refused by the PARENT's mode, not the
+        # entry's. Only below the root being removed: the root's own parent (the
+        # user's cache dir) must keep its mode.
+        try:
+            os.chmod(parent, stat.S_IRWXU)
+        except OSError:
+            pass
+    is_link = os.path.islink(path)
+    if not is_link:
+        # chmod follows symlinks: a link inside the cache may point anywhere,
+        # and its target is not ours to change.
+        os.chmod(path, stat.S_IRWXU)
+    if func is os.rmdir:
+        os.rmdir(path)
+    elif os.path.isdir(path) and not is_link:
+        shutil.rmtree(path, onexc=lambda f, p, e: _force_remove(f, p, e, _retried=retried, _root=_root))
+    else:
+        os.unlink(path)
 
 
 def _remove_model_cache(cache: Path) -> str | None:
@@ -1686,7 +1736,7 @@ def _remove_model_cache(cache: Path) -> str | None:
         if cache.is_symlink():
             cache.unlink()
         elif cache.is_dir():
-            shutil.rmtree(cache, onexc=_force_remove)
+            shutil.rmtree(cache, onexc=lambda f, p, e: _force_remove(f, p, e, _root=str(cache)))
     except OSError as exc:
         return f"could not remove model cache {cache}: {exc}"
     return None
@@ -1868,6 +1918,7 @@ def uninstall_daemon(
     marker = _first_run_marker_path()
     cache_dir = nexus_cache_root()
     user_model_root = _user_model_root_outside(cache_dir)
+    user_ort_native_root = _user_ort_native_root_outside(cache_dir)
     legacy_djl = legacy_djl_tokenizer_cache()
 
     on_windows = _is_windows()
@@ -1898,6 +1949,10 @@ def uninstall_daemon(
             if user_model_root is not None:
                 parts.append(
                     f"(the NX_ONNX_MODEL_DIR model root at {user_model_root} is kept)"
+                )
+            if user_ort_native_root is not None:
+                parts.append(
+                    f"(the NX_ORT_NATIVE_DIR native-library root at {user_ort_native_root} is kept)"
                 )
             if on_windows:
                 parts.append(
@@ -2034,6 +2089,11 @@ def uninstall_daemon(
         if user_model_root is not None:
             warnings.append(
                 f"kept the NX_ONNX_MODEL_DIR model root {user_model_root}: "
+                "it is a directory you chose; remove it yourself if you no longer need it"
+            )
+        if user_ort_native_root is not None:
+            warnings.append(
+                f"kept the NX_ORT_NATIVE_DIR native-library root {user_ort_native_root}: "
                 "it is a directory you chose; remove it yourself if you no longer need it"
             )
         if cache_dir.exists() or cache_dir.is_symlink():

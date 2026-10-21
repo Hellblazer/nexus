@@ -23,9 +23,9 @@ Edge-case contracts:
     manifest is created by whichever path first CREATES the doc, not backfill.
   - Chunk lookup key: matched by EITHER metadata ``doc_id`` (indexer-origin
     chunks: ``indexer.py`` stamps the tumbler under ``doc_id``) OR metadata
-    ``catalog_doc_id`` (store_put-origin chunks: ``http_vector_client.py``
-    stamps the tumbler under ``catalog_doc_id`` and reserves ``doc_id`` for
-    the chash) (nexus-b91tv). The engine's ``where`` grammar has no ``$or``
+    ``catalog_doc_id`` (store_put-origin chunks, as written by the since-retired
+    ``HttpVectorClient.put``: it stamped the tumbler under ``catalog_doc_id``
+    and reserved ``doc_id`` for the chash) (nexus-b91tv). The engine's ``where`` grammar has no ``$or``
     (``PgVectorRepository.appendWherePredicate`` fails loud on a
     ``$``-prefixed key), so both keys are queried separately and merged,
     deduped by chash.

@@ -39,6 +39,7 @@ def test_the_default_endpoint_is_a_black_hole_under_pytest(_no_pinned_endpoint: 
     assert base == "http://127.0.0.1:9", base
 
 
+@pytest.mark.t2_tenant
 def test_an_unpatched_probe_fails_fast_and_names_the_black_hole(_no_pinned_endpoint: None) -> None:
     """The exact class nexus-d5aye names: a probe nobody patched, with no
     pinned endpoint to catch it. It must raise the unreachable error within

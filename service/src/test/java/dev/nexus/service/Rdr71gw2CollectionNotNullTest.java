@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
@@ -17,23 +18,20 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
+import java.util.HexFormat;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -60,12 +58,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * below needs a corpus that GENUINELY STARTS with NULL/dangling rows, so
  * each test temporarily {@code DROP}s the NOT NULL constraint, seeds its own
  * fixture, then re-executes the changeset's own {@code <sql>} block VERBATIM
- * (read from the changelog file at test time via {@link #changesetSql()},
+ * (read from the changelog at test time by {@link PgContainerHelper#replayChangeset},
  * never a hand-copied duplicate — the two can never drift apart) — proving
  * the ACTUAL production SQL converges on the fixture, not a stand-in for it.
- * The PostgreSQL JDBC simple-query protocol executes a semicolon-separated
- * multi-statement string as one implicit transaction when none is already
- * open, matching Liquibase's own per-changeset transaction shape.
+ * {@code runChangeset} wraps the replay in one explicit transaction, matching
+ * Liquibase's own per-changeset transaction ({@code LOCK TABLE} needs one).
  *
  * <p>Every scenario is seeded with a DISTINCT tenant so the changeset's
  * fleet-wide (no GUC) scan cannot cross-contaminate between tests even
@@ -74,8 +71,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr71gw2CollectionNotNullTest {
 
-    private static final Path CHANGESET_PATH = Path.of(
-        "src", "main", "resources", "db", "changelog", "catalog-025-collection-not-null.xml");
+    private static final String CHANGELOG = "db/changelog/catalog-025-collection-not-null.xml";
 
     PostgreSQLContainer<?> pg;
 
@@ -87,12 +83,12 @@ class Rdr71gw2CollectionNotNullTest {
         // vectors-004-1 is never in ITS unrun list (migrateUpTo fails with
         // idx=-1) and the per-dim tables are already gone. Partial-migrate
         // harnesses need their own container by construction.
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             // Step G (RDR-191 repoint batch cluster A): stop BEFORE
             // vectors-004-1 (now real head, Step B registration) rather than
             // migrating to true head. catalog-025-0's own raw SQL (replayed
-            // verbatim below by runChangeset/changesetSql) reads
+            // verbatim below by runChangeset) reads
             // nexus.chunks_384/768/1024 DIRECTLY -- it ran historically
             // BEFORE the RDR-191 unify in changelog order (still true post-
             // Step B: catalog-025's <include> precedes vectors-004's in
@@ -104,6 +100,12 @@ class Rdr71gw2CollectionNotNullTest {
             // ran in production; catalog-025-0 itself is still fully applied
             // by this call (its <include> is well before vectors-004-1's).
             migrateUpTo(su, "vectors-004-1");
+        }
+        // nexus_test.lock_table for the lock-window test (an empty database has no
+        // test objects of its own; nexus-cbo4a batch 6). A fresh connection, since
+        // migrateUpTo's Liquibase closes the one it ran on.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.installTestObjects(su);
         }
     }
 
@@ -154,10 +156,9 @@ class Rdr71gw2CollectionNotNullTest {
     @AfterEach
     void restoreNotNullInvariant() {
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_document_chunks WHERE collection IS NULL");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection SET NOT NULL");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()).execute();
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).setNotNull().execute();
         } catch (Exception ignored) {
             // best-effort; do not mask the test's own failure
         }
@@ -167,26 +168,14 @@ class Rdr71gw2CollectionNotNullTest {
     // Changeset replay plumbing
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Reads {@code catalog-025-collection-not-null.xml} and returns the raw
-     *  SQL body of changeset {@code catalog-025-0}, XML-unescaped — the same
-     *  text Liquibase itself executes, never a hand-copied duplicate. */
-    private static String changesetSql() throws Exception {
-        String xml = Files.readString(CHANGESET_PATH);
-        Matcher m = Pattern.compile("<sql[^>]*>(.*?)</sql>", Pattern.DOTALL).matcher(xml);
-        assertThat(m.find()).as("catalog-025-0's <sql> block must be present in the changelog file").isTrue();
-        return m.group(1)
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&");
-    }
 
     /** Undo just the NOT NULL constraint (not the whole changeset) so a test
      *  can seed a genuinely-NULL corpus, mirroring this changeset's own
      *  rollback. Idempotent: DROP NOT NULL on an already-nullable column is a
      *  no-op, so tests may run in any order. */
     private static void dropNotNullForTest(Connection su) throws Exception {
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection DROP NOT NULL");
+        DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+            .alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).dropNotNull().execute();
     }
 
     /** Runs the changeset's SQL as ONE explicit transaction (autoCommit off
@@ -198,8 +187,8 @@ class Rdr71gw2CollectionNotNullTest {
     private static void runChangeset(Connection su) throws Exception {
         boolean priorAutoCommit = su.getAutoCommit();
         su.setAutoCommit(false);
-        try (Statement st = su.createStatement()) {
-            st.execute(changesetSql());
+        try {
+            PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-025-0");
             su.commit();
         } catch (Exception e) {
             su.rollback();
@@ -237,31 +226,38 @@ class Rdr71gw2CollectionNotNullTest {
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-            + "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') "
-            + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertManifestRowNull(Connection su, String tenantId, String docId,
                                                int position, String chashHex) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks "
-            + "  (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", "
-            + "decode('" + chashHex + "', 'hex')) "
-            + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void insertManifestRowStamped(Connection su, String tenantId, String docId,
                                                   int position, String chashHex, String collection)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks "
-            + "  (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", "
-            + "decode('" + chashHex + "', 'hex'), '" + collection + "') "
-            + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     /** Step G correction (RDR-191 repoint batch cluster A): seeds the
@@ -277,18 +273,37 @@ class Rdr71gw2CollectionNotNullTest {
     private static void insertChunk(Connection su, int dim, String tenantId,
                                      String collection, String chashHex, int vecLen) throws Exception {
         insertCollection(su, tenantId, collection);
-        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this class's
+        // The embedding binds as a real[] (VectorSeeds.LEGACY_EMBEDDING), deliberately NOT through the
+        // generated Vector binding, which renders ::nexus.vector: this class's
         // startAll() stops the migration walk BEFORE vectors-004-1, permanently --
         // it never resumes to a full migrate() call, so search-path-001 (placed even
         // later in the changelog) never runs and the extension is never relocated
         // out of `public` for the lifetime of this test class (nexus-cbo4a batch 9
         // item 0 discovery, same class as SchemaMigratorIntegrationTest's
-        // lateUpgradingDeployment... test).
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
-            + "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-            + "'chunk text', ('[1" + ",0".repeat(vecLen - 1) + "]')::vector) "
-            + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        // lateUpgradingDeployment... test). pgvector's real[] -> vector ASSIGNMENT cast is
+        // looked up by type oid, so it resolves with the extension in `public`.
+        Float[] embedding = VectorSeeds.legacyEmbedding(vecLen, 0f);
+        embedding[0] = 1f;
+        var chunks = DSL.table(DSL.name("nexus", "chunks_" + dim));
+        var tenantCol = DSL.field(DSL.name("tenant_id"), String.class);
+        var collectionCol = DSL.field(DSL.name("collection"), String.class);
+        var chashCol = DSL.field(DSL.name("chash"), byte[].class);
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        byte[] chash = HexFormat.of().parseHex(chashHex);
+        ctx.insertInto(chunks)
+            .set(tenantCol, tenantId)
+            .set(collectionCol, collection)
+            .set(chashCol, chash)
+            .set(DSL.field(DSL.name("chunk_text"), String.class), "chunk text")
+            .set(VectorSeeds.LEGACY_EMBEDDING, embedding)
+            .onConflict(tenantCol, collectionCol, chashCol).doNothing()
+            .execute();
+        // Positive control: ON CONFLICT DO NOTHING would hide a non-insert, and the collection backfill
+        // assertions that read this chunk are vacuous if it is absent.
+        assertThat(ctx.fetchCount(chunks, tenantCol.eq(tenantId).and(collectionCol.eq(collection))
+                .and(chashCol.eq(chash))))
+            .as("legacy chunks_%d seed %s/%s/%s must be present", dim, tenantId, collection, chashHex)
+            .isEqualTo(1);
     }
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,
@@ -298,34 +313,28 @@ class Rdr71gw2CollectionNotNullTest {
 
     private static String collectionOf(Connection su, String tenantId, String docId, int position)
             throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT collection FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId
-                 + "' AND position = " + position)) {
-            return rs.next() ? rs.getString(1) : null;
-        }
+        var rows = DSL.using(su, SQLDialect.POSTGRES)
+            .select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId),
+                   CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position))
+            .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private static boolean rowExists(Connection su, String tenantId, String docId, int position)
             throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT 1 FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId
-                 + "' AND position = " + position)) {
-            return rs.next();
-        }
+        return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId),
+            CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position));
     }
 
     private static int chunkCountOf(Connection su, String tenantId, String docId) throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT chunk_count FROM nexus.catalog_documents "
-                 + "WHERE tenant_id = '" + tenantId + "' AND tumbler = '" + docId + "'")) {
-            assertThat(rs.next()).isTrue();
-            return rs.getInt(1);
-        }
+        var rows = DSL.using(su, SQLDialect.POSTGRES)
+            .select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenantId), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .fetch(CATALOG_DOCUMENTS.CHUNK_COUNT);
+        assertThat(rows).isNotEmpty();
+        return rows.get(0);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -342,9 +351,10 @@ class Rdr71gw2CollectionNotNullTest {
             dropNotNullForTest(su);
             insertDoc(su, tenant, doc);
             insertManifestRowNull(su, tenant, doc, 0, ch);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             assertThat(collectionOf(su, tenant, doc, 0)).isNull();
 
@@ -380,9 +390,10 @@ class Rdr71gw2CollectionNotNullTest {
             // manifest row is stamped `wrongColl`, which does NOT contain it.
             insertChunk1024(su, tenant, rightColl, ch);
             insertManifestRowStamped(su, tenant, doc, 0, ch, wrongColl);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -414,9 +425,10 @@ class Rdr71gw2CollectionNotNullTest {
             insertDoc(su, tenant, doc);
             insertChunk1024(su, tenant, coll, ch);
             insertManifestRowStamped(su, tenant, doc, 0, ch, coll);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 1 "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -443,9 +455,11 @@ class Rdr71gw2CollectionNotNullTest {
             dropNotNullForTest(su);
             insertDoc(su, tenant, doc);
             insertManifestRowNull(su, tenant, doc, 0, ch);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET chunk_count = 9, deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 9)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant), CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
 
             runChangeset(su);
 
@@ -502,12 +516,8 @@ class Rdr71gw2CollectionNotNullTest {
             assertThat(rowExists(su, tenant, "m.1", 0)).isFalse();
             assertThat(rowExists(su, tenant, "m.2", 0)).isFalse();
             assertThat(collectionOf(su, tenant, "m.3", 0)).isEqualTo(coll);
-            try (Statement st = su.createStatement();
-                 ResultSet rs = st.executeQuery(
-                     "SELECT count(*) FROM nexus.catalog_document_chunks WHERE collection IS NULL")) {
-                rs.next();
-                assertThat(rs.getLong(1)).isEqualTo(0L);
-            }
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull())).isEqualTo(0);
         }
     }
 
@@ -527,13 +537,15 @@ class Rdr71gw2CollectionNotNullTest {
                 .isTrue();
             insertDoc(su, tenant, doc);
 
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + tenant + "', '" + doc + "', 0, "
-                    + "decode('" + chash("71gw2-throws") + "', 'hex'), NULL)"));
-            assertThat(ex.getSQLState())
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash("71gw2-throws")))
+                    .setNull(CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .execute());
+            assertThat(ex.sqlState())
                 .as("the state is unrepresentable -- assert the not-null-violation SQLSTATE "
                     + "directly, not merely a row count of 0")
                 .isEqualTo("23502");
@@ -574,18 +586,18 @@ class Rdr71gw2CollectionNotNullTest {
         try (Connection holder = DriverManager.getConnection(
                 pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
             holder.setAutoCommit(false);
-            try (Statement st = holder.createStatement()) {
-                // The exact first statement catalog-025-0 opens with.
-                st.execute("LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE");
-            }
+            // The exact first statement catalog-025-0 opens with.
+            PgContainerHelper.lockTable(holder, CATALOG_DOCUMENT_CHUNKS,
+                PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
 
             Future<?> writer = executor.submit(() -> {
                 try (Connection su2 = pg.createConnection("")) {
-                    su2.createStatement().execute(
-                        "INSERT INTO nexus.catalog_document_chunks "
-                        + "(tenant_id, doc_id, position, chash) "
-                        + "VALUES ('" + tenant + "', '" + doc + "', 0, "
-                        + "decode('" + ch + "', 'hex'))");
+                    DSL.using(su2, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                        .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                        .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                        .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                        .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(ch))
+                        .execute();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -610,11 +622,10 @@ class Rdr71gw2CollectionNotNullTest {
                 .isTrue();
             // Cleanup: restore the invariant so no NULL row from this test
             // leaks into any other test's fleet-wide resolution scan.
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant + "'");
-            assertThatCode(() ->
-                su.createStatement().execute(
-                    "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection SET NOT NULL"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute();
+            assertThatCode(() -> ctx.alterTable(CATALOG_DOCUMENT_CHUNKS)
+                .alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).setNotNull().execute())
                 .doesNotThrowAnyException();
         }
     }

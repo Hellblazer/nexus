@@ -5,7 +5,6 @@
 Bead nexus-7zuzz — since RDR-155 P4a.2, nexus.mcp_infra.get_t3() always
 returns HttpVectorClient. Signature drift from T3Database silently broke:
   - git-hook indexing (upsert_chunks_with_embeddings collection_name kwarg)
-  - MCP store_put (put() lacked T3Database.put()'s public contract)
   - get_embeddings / delete_by_source / search param names
 
 These tests are the standing tripwire.  Every exclusion must carry a written
@@ -13,9 +12,7 @@ reason in EXCLUSIONS.
 """
 from __future__ import annotations
 
-import hashlib
 import inspect
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -28,7 +25,7 @@ from nexus.db.t3 import T3Database
 def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
     """RDR-204 Phase 1 (nexus-f5wwx): see the identical fixture in
     tests/db/test_http_vector_client.py for the full rationale — this
-    file's put()/upsert_chunks() tests are pure HTTP-shape tests using
+    file's upsert_chunks() tests are pure HTTP-shape tests using
     arbitrary collection name strings, so the registration step is
     stubbed to a bare passthrough here too.
     """
@@ -51,7 +48,6 @@ DROP_IN_METHODS = [
     "upsert_chunks_with_embeddings",
     "delete_by_source",
     "get_embeddings",
-    "put",
     "search",
     "upsert_chunks",
     # Already-verified parity-OK methods — pinned as free tripwires
@@ -137,6 +133,13 @@ EXCLUSIONS: dict[str, str] = {
         "critic): no caller outside T3Database itself. Same disposition as "
         "ids_for_doc_id above."
     ),
+    "put": (
+        "RETIRED from HttpVectorClient (nexus-nt76j): the engine's POST "
+        "/v1/vectors/store-put route is gone and every note writer rides the "
+        "combined chunk-plus-owner write (RDR-223), so the single-chunk put has "
+        "no caller. T3Database.put stays for injected in-memory clients. Not in "
+        "DROP_IN_METHODS; a deliberate deviation, not drift."
+    ),
     "rename_collection": (
         "NOT ported to HttpVectorClient — not live in service mode: "
         "collection_rename.py short-circuits to catalog.rename_collection_"
@@ -219,582 +222,10 @@ class TestSignatureParity:
         )
 
 
-# ── Behavior: put() must match T3Database.put() public contract ───────────────
-
-
-def _reference_metadata(
-    collection: str,
-    content: str,
-    *,
-    title: str = "",
-    tags: str = "",
-    category: str = "",
-    ttl_days: int = 0,
-    session_id: str = "",
-    source_agent: str = "",
-    now_iso: str | None = None,
-) -> dict:
-    """Build the reference metadata dict using the SAME factory T3Database.put uses.
-
-    This is the authoritative oracle for what metadata HttpVectorClient.put()
-    must produce — parity by construction, not by enumeration.
-    """
-    from nexus.corpus import (
-        embedding_model_for_collection_name,
-        index_model_for_collection,
-    )
-    from nexus.metadata_schema import make_chunk_metadata
-
-    if now_iso is None:
-        now_iso = datetime.now(UTC).isoformat()
-
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
-    prefix_to_ct = {
-        "code__": "code",
-        "docs__": "prose",
-        "rdr__": "markdown",
-        "knowledge__": "prose",
-    }
-    content_type = "prose"
-    for prefix, ct in prefix_to_ct.items():
-        if collection.startswith(prefix):
-            content_type = ct
-            break
-
-    return make_chunk_metadata(
-        content_type=content_type,
-        chunk_text_hash=content_hash,
-        content_hash=content_hash,
-        chunk_start_char=0,
-        chunk_end_char=len(content),
-        indexed_at=now_iso,
-        embedding_model=(
-            embedding_model_for_collection_name(collection)
-            or index_model_for_collection(collection)
-        ),
-        title=title,
-        tags=tags,
-        category=category,
-        ttl_days=ttl_days,
-        source_agent=source_agent,
-        session_id=session_id,
-    )
-
-
-class TestPutBehavior:
-    """HttpVectorClient.put() must match T3Database.put()'s public contract.
-
-    T3Database.put() signature:
-        put(collection, content, title='', tags='', category='',
-            session_id='', source_agent='', store_type='knowledge',
-            ttl_days=None, catalog_doc_id='') -> str
-
-    nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): ttl_days=None is
-    permanent (was 0); an explicit ttl_days<=0 now raises ValueError on
-    BOTH T3Database.put and HttpVectorClient.put, before any HTTP call.
-
-    The HTTP wire call is /v1/vectors/store-put. The request body must carry:
-      - doc_id: full sha256(content) hexdigest (RDR-180)
-      - content: the raw content
-      - metadata: every key make_chunk_metadata() produces (the same factory
-        T3Database.put uses — parity by construction, not by duplication)
-
-    T3Database.put is single-chunk: fail_on_oversized=True. HttpVectorClient.put
-    must NOT multi-chunk. The doc_id is full sha256(content) hexdigest (RDR-180).
-    """
-
-    @staticmethod
-    def _fake_post_capture(calls: list) -> Any:
-        def fake(path: str, body: dict, *, tenant: str = "default", timeout: int = 120):
-            calls.append({"path": path, "body": body, "tenant": tenant})
-            return {"id": body.get("doc_id", "fake-id")}
-        return fake
-
-    def test_put_returns_chash_doc_id(self, monkeypatch):
-        """put() must return full sha256(content) hexdigest (RDR-180)."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        content = "Hello MCP store_put content"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
-
-        returned = client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content=content,
-            title="test-title",
-            tags="rdr-test",
-            category="test",
-            catalog_doc_id="",
-        )
-        assert returned == expected_doc_id, (
-            f"put() must return full sha256(content) hexdigest (RDR-180); got {returned!r}"
-        )
-
-    def test_put_sends_chash_as_doc_id_in_body(self, monkeypatch):
-        """The HTTP body must carry doc_id = full sha256(content) hexdigest (RDR-180)."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        content = "content for doc_id derivation test"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content=content,
-        )
-        assert calls, "no HTTP call was made"
-        body = calls[0]["body"]
-        assert body["doc_id"] == expected_doc_id, (
-            f"expected doc_id={expected_doc_id!r} in body, got {body.get('doc_id')!r}"
-        )
-
-    def test_put_kwarg_shape_from_mcp_core(self, monkeypatch):
-        """Verify the exact kwarg shape mcp/core.py:1373 uses (the live-broken call).
-
-        mcp/core.py calls:
-            t3.put(
-                collection=col_name,
-                content=content,
-                title=title,
-                tags=tags,
-                category=category,
-                ttl_days=ttl_days,
-                catalog_doc_id=catalog_doc_id,
-            )
-        This must not raise TypeError on HttpVectorClient.put().
-        """
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        result = client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="MCP store_put content body",
-            title="mcp-test-title",
-            tags="tag1,tag2",
-            category="prose",
-            ttl_days=30,
-            catalog_doc_id="1.2.3",
-        )
-        assert result  # returns doc_id string
-        assert calls, "no HTTP call made"
-        body = calls[0]["body"]
-        meta = body.get("metadata", {})
-        assert "title" in meta, f"'title' missing from metadata: {meta}"
-        assert meta["title"] == "mcp-test-title"
-        assert "tags" in meta, f"'tags' missing from metadata: {meta}"
-        assert "category" in meta, f"'category' missing from metadata: {meta}"
-        assert meta["category"] == "prose"
-
-    def test_put_metadata_matches_make_chunk_metadata_factory(self, monkeypatch):
-        """The metadata dict must contain EVERY key make_chunk_metadata() produces.
-
-        Parity by construction: HttpVectorClient.put() calls the same
-        make_chunk_metadata factory as T3Database.put(). This test compares
-        the produced metadata against a reference dict from the same factory,
-        so future factory changes are automatically caught — no manual enumeration.
-        """
-        collection = "knowledge__nexus__minilm-l6-v2-384__v1"
-        content = "Metadata factory parity test content"
-        title = "parity-title"
-        tags = "test,parity"
-        category = "prose"
-        ttl_days = 7
-        session_id = "sess-abc"
-        source_agent = "test-agent"
-
-        calls: list = []
-
-        def fake_post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120):
-            calls.append(body)
-            return {"id": body.get("doc_id", "fake")}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-
-        client = HttpVectorClient()
-        client.put(
-            collection=collection,
-            content=content,
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            session_id=session_id,
-            source_agent=source_agent,
-        )
-        assert calls, "no HTTP call"
-        actual_meta = calls[0]["metadata"]
-
-        # Read the timestamp the implementation produced so the reference uses
-        # the same value (avoids false mismatch from two datetime.now() calls).
-        actual_indexed_at = actual_meta.get("indexed_at")
-        assert actual_indexed_at, "put() must stamp indexed_at in metadata"
-
-        # Build the reference using the same factory with the captured timestamp
-        reference = _reference_metadata(
-            collection,
-            content,
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            session_id=session_id,
-            source_agent=source_agent,
-            now_iso=actual_indexed_at,
-        )
-
-        # Every key the factory produces must be present in the actual metadata
-        missing_keys = [k for k in reference if k not in actual_meta]
-        assert not missing_keys, (
-            f"put() metadata is missing factory keys: {missing_keys}\n"
-            f"Reference (from make_chunk_metadata): {sorted(reference.keys())}\n"
-            f"Actual:                                {sorted(actual_meta.keys())}"
-        )
-
-        # Values for factory-produced keys must match
-        mismatched = {
-            k: (actual_meta[k], reference[k])
-            for k in reference
-            if k in actual_meta and actual_meta[k] != reference[k]
-        }
-        assert not mismatched, (
-            "put() metadata values diverge from factory reference:\n"
-            + "\n".join(f"  {k}: got={v[0]!r}, expected={v[1]!r}" for k, v in mismatched.items())
-        )
-
-        # Key fields downstream consumers require — double-check explicitly
-        assert "embedding_model" in actual_meta, (
-            "embedding_model is missing — search_engine.py routing depends on it"
-        )
-        assert "content_type" in actual_meta, (
-            "content_type is missing — search_engine.py and exporter depend on it"
-        )
-        assert actual_meta["ttl_days"] == ttl_days, (
-            f"ttl_days mismatch: got {actual_meta['ttl_days']!r}"
-        )
-
-    def test_put_metadata_carries_catalog_doc_id(self, monkeypatch):
-        """catalog_doc_id flows through to metadata (HTTP-path superset).
-
-        NOTE: This is a documented HTTP-path SUPERSET, not T3 parity.
-        T3Database.put() accepts catalog_doc_id but normalize() strips it
-        (not in ALLOWED_TOP_LEVEL); on the T3 path catalog association goes
-        via the hook chain, not chunk metadata. HttpVectorClient stamps it
-        into the service request body so the Java layer can persist the
-        tumbler cross-reference. See docstring in http_vector_client.py.
-        """
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="catalog doc id test content",
-            catalog_doc_id="1.5.17",
-        )
-        meta = calls[0]["body"].get("metadata", {})
-        assert meta.get("catalog_doc_id") == "1.5.17", (
-            f"catalog_doc_id not stamped into metadata body: {meta}"
-        )
-
-    def test_put_catalog_doc_id_absent_when_empty(self, monkeypatch):
-        """When catalog_doc_id='' (legacy path), the key must be absent from metadata."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="no catalog path",
-            catalog_doc_id="",
-        )
-        meta = calls[0]["body"].get("metadata", {})
-        assert "catalog_doc_id" not in meta, (
-            f"catalog_doc_id must be absent for legacy/no-catalog path: {meta}"
-        )
-
-    def test_put_posts_to_store_put_endpoint(self, monkeypatch):
-        """put() must POST to /v1/vectors/store-put."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="content here",
-        )
-        path = calls[0]["path"]
-        assert "/store-put" in path, (
-            f"put() must POST to a store-put endpoint; got {path!r}"
-        )
-
-    def test_put_is_single_chunk_not_multi_chunk(self, monkeypatch):
-        """T3Database.put() is single-chunk (fail_on_oversized=True). HttpVectorClient.put()
-        must also be single-chunk — one HTTP call per put() call regardless of content size.
-        Long content that exceeds SAFE_CHUNK_BYTES is ALLOWED to fail loud (matching T3's
-        fail_on_oversized=True contract), or truncate at oversized detection, but must NOT
-        silently split into multiple /v1/vectors/store-put calls.
-        """
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        content = "A" * 10000  # under SAFE_CHUNK_BYTES (12288 bytes)
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content=content,
-        )
-        store_put_calls = [c for c in calls if "/store-put" in c["path"]]
-        assert len(store_put_calls) == 1, (
-            f"put() must be single-chunk (1 HTTP call); got {len(store_put_calls)}"
-        )
-
-    def test_put_raises_on_oversized_content(self, monkeypatch):
-        """nexus-xzyr3: HttpVectorClient.put() must match T3Database.put()'s
-        fail_on_oversized=True contract exactly — raise PutOversizedError
-        BEFORE any HTTP call, never rely on the server to reject an oversized
-        document. T3Database.put()'s own test is
-        test_put_raises_on_oversized_content in tests/test_t3.py; this is its
-        parity twin.
-
-        This was the live admitting path for nexus-xzyr3: HttpVectorClient
-        is the ONLY production T3 handle (RDR-155 P4a.2 — Chroma serving
-        paths are retired), but put() posted straight to
-        /v1/vectors/store-put with no client-side size check, and the
-        engine's handleStorePut has no server-side check either. Nine
-        knowledge__knowledge chunks up to 32,735 bytes were admitted this
-        way between 2026-07-10 and 2026-09-04 (T2 nexus/xzyr3-oversize-rows
-        -2026-09-05).
-        """
-        from nexus.db.limits import QUOTAS
-        from nexus.errors import PutOversizedError
-
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
-
-        with pytest.raises(PutOversizedError) as exc_info:
-            client.put(
-                collection="knowledge__nexus__minilm-l6-v2-384__v1",
-                content=oversized,
-                title="big.md",
-            )
-
-        assert exc_info.value.doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES
-        assert exc_info.value.max_bytes == QUOTAS.MAX_DOCUMENT_BYTES
-        assert exc_info.value.collection == "knowledge__nexus__minilm-l6-v2-384__v1"
-        # No HTTP call must have been made: the refusal is client-side,
-        # before the POST, never a round trip the server has to reject.
-        assert calls == [], (
-            f"put() must refuse oversized content before any HTTP call; got {calls}"
-        )
-
-    def test_put_under_cap_still_succeeds_http(self, monkeypatch):
-        """Regression guard mirroring test_t3.py's own: content under the
-        cap must still write normally through the HTTP path."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        doc_id = client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="small body",
-            title="ok.md",
-        )
-        assert isinstance(doc_id, str) and len(doc_id) == 64
-        assert len(calls) == 1
-
-    def test_put_exactly_at_cap_succeeds(self, monkeypatch):
-        """critique-nexus-xzyr3-26edb6662 [24589]: exact-boundary case.
-        Content of EXACTLY QUOTAS.MAX_DOCUMENT_BYTES bytes is the allowed
-        edge (the check is strict '>', matching T3Database._write_batch's
-        own '<=' valid predicate) and must NOT raise."""
-        from nexus.db.limits import QUOTAS
-
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        at_cap = "x" * QUOTAS.MAX_DOCUMENT_BYTES
-        assert len(at_cap.encode()) == QUOTAS.MAX_DOCUMENT_BYTES
-
-        doc_id = client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content=at_cap,
-            title="exactly-at-cap.md",
-        )
-        assert isinstance(doc_id, str) and len(doc_id) == 64
-        assert len(calls) == 1, "content at exactly the cap must still write"
-
-    def test_put_one_byte_over_cap_refused(self, monkeypatch):
-        """critique-nexus-xzyr3-26edb6662 [24589]: the other half of the
-        exact-boundary pair — cap+1 is the first refused value."""
-        from nexus.db.limits import QUOTAS
-        from nexus.errors import PutOversizedError
-
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        one_over = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
-        with pytest.raises(PutOversizedError) as exc_info:
-            client.put(
-                collection="knowledge__nexus__minilm-l6-v2-384__v1",
-                content=one_over,
-                title="one-byte-over.md",
-            )
-        assert exc_info.value.doc_bytes == QUOTAS.MAX_DOCUMENT_BYTES + 1
-        assert calls == []
-
-    def test_put_measures_utf8_bytes_not_characters(self, monkeypatch):
-        """critique-nexus-xzyr3-26edb6662 [24589]: 'UTF-8 measured' —
-        construct content whose CHARACTER count is under the cap but whose
-        UTF-8 BYTE count is over it (multi-byte characters), proving the
-        check measures encoded bytes, matching T3Database._doc_bytes'
-        ``len(d.encode())`` exactly, not ``len(d)``."""
-        from nexus.db.limits import QUOTAS
-        from nexus.errors import PutOversizedError
-
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        # "é" (e-acute) is 1 char / 2 UTF-8 bytes. Half the cap in
-        # character count still exceeds the cap in byte count.
-        multibyte = "é" * (QUOTAS.MAX_DOCUMENT_BYTES // 2 + 10)
-        assert len(multibyte) < QUOTAS.MAX_DOCUMENT_BYTES, (
-            "fixture must be under the cap in CHARACTER count"
-        )
-        assert len(multibyte.encode()) > QUOTAS.MAX_DOCUMENT_BYTES, (
-            "fixture must be over the cap in UTF-8 BYTE count"
-        )
-
-        with pytest.raises(PutOversizedError) as exc_info:
-            client.put(
-                collection="knowledge__nexus__minilm-l6-v2-384__v1",
-                content=multibyte,
-                title="multibyte.md",
-            )
-        assert exc_info.value.doc_bytes == len(multibyte.encode())
-        assert calls == []
-
-    def test_put_accepts_all_t3_kwargs_without_typeerror(self, monkeypatch):
-        """All T3Database.put() parameters must be accepted without TypeError."""
-        client = HttpVectorClient()
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            self._fake_post_capture([]),
-        )
-        # Full T3Database.put() call signature — must not raise TypeError
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="full signature test",
-            title="full-sig",
-            tags="a,b",
-            category="prose",
-            session_id="session-abc",
-            source_agent="developer",
-            store_type="knowledge",
-            ttl_days=14,
-            catalog_doc_id="1.2",
-        )
-
-    def test_put_store_type_silently_ignored(self, monkeypatch):
-        """store_type is accepted but not forwarded — symmetric with T3Database.put().
-
-        T3Database also ignores store_type (RDR-101 Phase 5c dropped it from
-        ALLOWED_TOP_LEVEL; content_type derives from the collection prefix).
-        This test pins the intentional-ignore so callers don't expect it to matter.
-        """
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="store type test",
-            store_type="rdr",
-        )
-        meta = calls[0]["body"].get("metadata", {})
-        # store_type must NOT appear in the metadata (it's dropped by design)
-        assert "store_type" not in meta, (
-            f"store_type must not be forwarded to the service (intentional drop): {meta}"
-        )
-        # content_type DOES appear — derived from collection prefix, not store_type
-        assert "content_type" in meta, "content_type (from prefix) must be in metadata"
-
-    # ── nexus-24rof (RDR-194 D5 ship-blocker, tk070.p6b fix-pass): ttl_days
-    #    write-path rejection, byte-identical to T3Database.put's own ──────
-
-    def test_put_ttl_days_zero_raises_before_any_http_call(self, monkeypatch):
-        """An explicit ttl_days=0 must be REJECTED loudly, never silently
-        reinterpreted as permanent — and must never even reach the HTTP
-        call (validated first, matching T3Database.put's ordering)."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        with pytest.raises(ValueError) as exc_info:
-            client.put(
-                collection="knowledge__nexus__minilm-l6-v2-384__v1",
-                content="rejected content",
-                ttl_days=0,
-            )
-        msg = str(exc_info.value)
-        assert "ttl_days=0" in msg
-        assert "permanent" in msg
-        assert "None" in msg
-        assert not calls, "put() must validate BEFORE making any HTTP call"
-
-    def test_put_ttl_days_negative_raises(self, monkeypatch):
-        client = HttpVectorClient()
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post", self._fake_post_capture([]),
-        )
-        with pytest.raises(ValueError, match="ttl_days=-3"):
-            client.put(
-                collection="knowledge__nexus__minilm-l6-v2-384__v1",
-                content="rejected content",
-                ttl_days=-3,
-            )
-
-    def test_put_ttl_days_omitted_is_permanent(self, monkeypatch):
-        """Omitting ttl_days must default to None (permanent) — the new
-        default, not the retired 0."""
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="permanent by omission",
-        )
-        meta = calls[0]["body"].get("metadata", {})
-        assert meta.get("ttl_days") is None, (
-            f"omitted ttl_days must land as None (permanent), got {meta.get('ttl_days')!r}"
-        )
-
-    def test_put_ttl_days_none_explicit_is_permanent(self, monkeypatch):
-        client = HttpVectorClient()
-        calls: list = []
-        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
-
-        client.put(
-            collection="knowledge__nexus__minilm-l6-v2-384__v1",
-            content="permanent explicit none",
-            ttl_days=None,
-        )
-        meta = calls[0]["body"].get("metadata", {})
-        assert meta.get("ttl_days") is None
-
-
 # ── Behavior: upsert_chunks_with_embeddings collection_name kwarg ─────────────
 
 
+@pytest.mark.t2_tenant
 class TestUpsertChunksWithEmbeddingsKwarg:
     """The collection_name= kwarg form used by code_indexer, prose_indexer, exporter."""
 
@@ -849,6 +280,7 @@ class TestUpsertChunksWithEmbeddingsKwarg:
         assert calls[0]["collection"] == "code__nexus__minilm-l6-v2-384__v1"
 
 
+@pytest.mark.t2_tenant
 class TestUpsertChunksOversizedDropAndWarn:
     """nexus-xzyr3 fold-in round 2 (dev-suite-reds-2026-09-05-wave-fold):
     a document over ``QUOTAS.MAX_DOCUMENT_BYTES`` (16384) must NOT be
@@ -864,10 +296,8 @@ class TestUpsertChunksOversizedDropAndWarn:
     method anyway, which emptied every batch in TestUpsertChunksPaging
     (18,000-300,000-byte synthetic chunks, all legitimately shippable) —
     reverted. These tests now pin the CORRECTED contract: no drop, ever,
-    regardless of document size. ``put()``'s own
-    ``fail_on_oversized=True`` check (the single-chunk, non-paginated
-    sibling — the path the original 9-row evidence pointed at) is
-    untouched and out of scope here.
+    regardless of document size. (``put()``, the single-chunk sibling the
+    original 9-row evidence pointed at, is retired, nexus-nt76j.)
     """
 
     @staticmethod
@@ -1186,6 +616,7 @@ class TestExpire:
         )
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
+    @pytest.mark.t2_tenant
     def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):
         """Neutral model token on purpose (RDR-109 mode lint): the code__
         collection below is included only to prove it is EXCLUDED from
@@ -1232,6 +663,7 @@ class TestExpire:
         deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
         assert deletes == [{"collection": self._KNOWLEDGE, "ids": ["expired1"]}]
 
+    @pytest.mark.t2_tenant
     def test_expire_paginates_and_accumulates_before_deleting(self, monkeypatch):
         posted = []
 
@@ -1432,6 +864,36 @@ class TestCollectionMetadata:
         monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 0)
         with pytest.raises(KeyError):
             HttpVectorClient().collection_metadata(self._CONFORMANT)
+
+    @pytest.mark.parametrize("reason, message", [
+        ("unregistered_collection", "collection 'gone__x__y__v1' is not registered in this tenant"),
+        (None, "collection 'gone__x__y__v1' is not registered in this tenant"),  # an engine that predates reason
+    ])
+    def test_an_unregistered_collection_422_raises_keyerror(self, monkeypatch, reason, message):
+        """The engine answers /count for a name with no catalog row with a typed 422, not a 404. It is
+        the same "absent" as a 404, so the KeyError contract holds for it too (the RDR hook's t3-exists
+        probe logged it as a resolution failure every few seconds for a never-indexed repo)."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError(message, code=422, reason=reason)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata("gone__x__y__v1")
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_info("gone__x__y__v1")
+
+    def test_a_422_with_another_reason_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("collection is not registered (worded alike)", code=422,
+                                     reason="model_unavailable")
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_info(self._CONFORMANT)
 
     def test_non_404_error_reraises(self, monkeypatch):
         from nexus.db.http_vector_client import VectorServiceError

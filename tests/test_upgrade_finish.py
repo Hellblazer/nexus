@@ -335,14 +335,17 @@ class TestRestartStale:
                 patch_time("nexus.upgrade_finish", "sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
-                patch("nexus.upgrade_finish.run_bounded", return_value=probe):
+                patch("nexus.upgrade_finish.run_bounded", return_value=probe), \
+                patch("nexus.daemon.aspect_worker_daemon.ensure_aspect_worker_daemon",
+                      side_effect=RuntimeError("respawn stubbed out")):
             actions = restart_stale(self._report())
         assert calls[0] == (200, signal.SIGTERM)
         # Wording changed when the branch started actually restarting the
         # worker instead of only draining it (see
-        # TestAspectWorkerIsRestartedNotJustStopped). This fixture does not
-        # stub ensure_aspect_worker_daemon, so the respawn raises and the
-        # branch must say so rather than claim a restart -- which is the
+        # TestAspectWorkerIsRestartedNotJustStopped). This fixture stubs
+        # ensure_aspect_worker_daemon to raise (the real one reaches a storage
+        # client, which the storage-touch guard fails without a tenant,
+        # nexus-0ite2), so the branch must say so rather than claim a restart -- which is the
         # behaviour that matters here: never report success it did not
         # observe.
         assert any(
@@ -436,6 +439,7 @@ class TestVersionTransition:
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
+    @pytest.mark.t2_tenant
     def test_transition_reports_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         self._tool = patch(
@@ -679,6 +683,7 @@ class TestCheckVersionTransitionBackfillsInstallMode:
         assert line is None
         backfill.assert_called_once_with()
 
+    @pytest.mark.t2_tenant
     def test_preview_never_calls_the_backfill(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -950,9 +955,9 @@ class TestFailLoud:
         """nexus-cd1k0.19 review round 2, finding 4: the two bare
         subprocess.run(["nx", "daemon", "service", "stop"/"start"]) calls
         used to inherit environment and never pass --config-dir at all --
-        closing the false-positive surface storage_service_stack_matcher's
-        flagless-matches-default rule otherwise has against a live,
-        env-scoped invocation on the same box. Both calls must now carry
+        closing the false-positive surface a bare start otherwise has against
+        storage_service_stack_matcher's environment check (a live,
+        env-scoped invocation on the same box). Both calls must now carry
         an explicit --config-dir with the RESOLVED absolute path."""
         from nexus import upgrade_finish as uf
 
@@ -2217,6 +2222,7 @@ class TestCheckVersionTransitionEngineConvergence:
     """check_version_transition's automatic post-upgrade pass also runs
     engine convergence (nexus-cfgo9) alongside stale-process restart."""
 
+    @pytest.mark.t2_tenant
     def test_transition_includes_convergence_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -2360,6 +2366,7 @@ class TestCheckVersionTransitionDiagViewHeal:
     """check_version_transition's finish pass also runs the diag-view heal
     (nexus-cfgo9), independently try/excepted from engine convergence."""
 
+    @pytest.mark.t2_tenant
     def test_transition_includes_heal_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
@@ -2400,6 +2407,7 @@ class TestCheckVersionTransitionDiagViewHeal:
             line = check_version_transition(tmp_path)
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
 
+    @pytest.mark.t2_tenant
     def test_engine_convergence_failure_does_not_block_heal_actions(self, tmp_path):
         """The two new legs (converge_engine, heal_diag_view) are
         independently try/excepted -- one failing must not swallow the

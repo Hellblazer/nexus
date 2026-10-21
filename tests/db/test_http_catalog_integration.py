@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
+from tests._child_process import integration_pg_conf, java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     create_tenant_token,
@@ -368,6 +368,7 @@ def pg_instance():
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
+            f.write(integration_pg_conf(pgdata))
         pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),

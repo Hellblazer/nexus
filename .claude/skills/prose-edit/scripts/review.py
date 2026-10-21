@@ -21,6 +21,11 @@ except the document itself and the temp file described under `apply`.
 because WORK does. Its format (Step 1.1):
 
   - a header line naming the file and the genre, then one line on how to answer
+  - an index of links right after that line, one per proposal (`[E1](#e1)`, `[P1](#p1)`, `[Q1](#q1)`) with a
+    one-line gist, because Typora's rendered view shows no line numbers; each proposal site holds the matching
+    `<a id="e1" name="e1"></a>` (an edit's at the start of its mark, a note's at the end of its first line,
+    an unplaced proposal's in its listing). A copy with no proposal has no index; a dropped edit has no link.
+    There is no changes-only copy.
   - the editor's note as a blockquote, then the voice card as a blockquote
   - each sentence edit inline as <del>old</del><ins>new</ins><sup>N</sup> (a cut has no ins)
   - paragraph proposals as `> **[P1] action.** advice` before their paragraph, queries as
@@ -512,10 +517,56 @@ def change_note(old: str, new: str) -> str:
     return f" ({kind}: {_show(a)} → {_show(b)})"
 
 
+def _anchor(kind: str, n: object) -> str:
+    """An explicit HTML anchor for the index links: `id` for a browser, `name` for older HTML readers. Both
+    render as nothing. Typora's bundled Markdown Reference documents only heading targets for internal links,
+    but a hand check in Typora's rendered view (nexus-ger02.29, 2026-10-18) jumped to this anchor for an edit,
+    an edit inside Markdown link text, an unplaced proposal, a paragraph note and a query."""
+    key = f"{kind.lower()}{n}"
+    return f'<a id="{key}" name="{key}"></a>'
+
+
+def _anchored(body: str, kind: str, n: object) -> str:
+    """`body` with the anchor at the end of its first line, so the quoted text a reader and a test match is
+    unbroken and a jump still lands on the note."""
+    first, nl, rest = body.partition("\n")
+    return first + _anchor(kind, n) + nl + rest
+
+
+INDEX_GIST = 90
+
+
+def _gist(text: object, fallback: str) -> str:
+    """One line: whitespace collapsed, cut at INDEX_GIST characters; `fallback` when nothing is left. Markdown
+    and HTML specials are escaped after the cut, so a reason with `<del>`, a backtick or a bracket is shown as
+    text and cannot open a construct the cut leaves unclosed."""
+    one = " ".join(str(text).split()) or fallback
+    if len(one) > INDEX_GIST:
+        one = one[:INDEX_GIST - 1].rstrip() + "…"
+    return "".join(_GIST_ESCAPES.get(c, c) for c in one)
+
+
+_GIST_ESCAPES: dict[str, str] = {"<": "&lt;", "&": "&amp;", "`": "\\`", "[": "\\[", "]": "\\]", "*": "\\*", "_": "\\_"}
+
+
+def _index(edits: list[Obj], paragraphs: list[Obj], queries: list[Obj]) -> list[str]:
+    """The copy's index: one link per proposal in the copy (a dropped one is not a proposal here) with a
+    one-line gist. A Typora reader has no line numbers, so the links are the way around a long copy."""
+    rows = [f"- [E{e['n']}](#e{e['n']}) {_gist(e.get('reason') or '', 'edit')}"
+            for e in sorted(edits, key=lambda x: int(x["n"]))]
+    rows += [f"- [P{p['n']}](#p{p['n']}) "
+             f"{_gist(': '.join(x for x in (str(p.get('action', '')).strip(), str(p.get('advice', '')).strip()) if x), 'paragraph')}"
+             for p in sorted(paragraphs, key=lambda x: int(x["n"]))]
+    rows += [f"- [Q{q['n']}](#q{q['n']}) {_gist(q.get('text') or '', 'query')}"
+             for q in sorted(queries, key=lambda x: int(x["n"]))]
+    return ["## Index", "", *rows] if rows else []
+
+
 def _unplaced_note(p: Obj) -> str:
     tail = (" Accepted together they are both skipped; accepted alone it is applied."
             if p["cause"] == "overlap" else " It is skipped if accepted.")
-    return _quote(f"**[E{p['n']}]** Cannot be placed: {p['detail']}.{tail}\n\"{p['old']}\" -> \"{p['new']}\"")
+    return _quote(_anchored(
+        f"**[E{p['n']}]** Cannot be placed: {p['detail']}.{tail}\n\"{p['old']}\" -> \"{p['new']}\"", "E", p["n"]))
 
 
 def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None, html: bool, stdin: bool) -> str:
@@ -541,7 +592,7 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
             start, end = cast(Span, p["span"])
             head, gone, put, tail = change_core(str(p["old"]), str(p["new"]))
             mark = (f"<del>{gone}</del>" if gone else "") + (f"<ins>{put}</ins>" if put else "")
-            edit_marks.append((start, end, f"{head}{mark}{tail}<sup>{p['n']}</sup>"))
+            edit_marks.append((start, end, f"{_anchor('E', p['n'])}{head}{mark}{tail}<sup>{p['n']}</sup>"))
     unplaced = [_unplaced_note(p) for p in plans if p["span"] is None]
     p_notes: list[tuple[int, str]] = []
     for pr in sorted(paragraphs, key=lambda x: int(x["n"])):
@@ -549,13 +600,13 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
                  if (s := _first(text, ph, window)) is not None]
         head = f"**[P{pr['n']}] {pr.get('action', '')}.**"
         if spots:
-            p_notes.append((min(spots), _quote(f"{head} {pr.get('advice', '')}")))
+            p_notes.append((min(spots), _quote(_anchored(f"{head} {pr.get('advice', '')}", "P", pr["n"]))))
         else:
-            unplaced.append(_quote(f"{head} {pr.get('paragraphs', '')}: {pr.get('advice', '')}"))
+            unplaced.append(_quote(_anchored(f"{head} {pr.get('paragraphs', '')}: {pr.get('advice', '')}", "P", pr["n"])))
     q_notes: list[tuple[int, str]] = []
     for q in sorted(queries, key=lambda x: int(x["n"])):
         at = _first(text, str(q["anchor"]), window)
-        body = _quote(f"**[Q{q['n']}]** \"{q['anchor']}\": {q.get('text', '')}")
+        body = _quote(_anchored(f"**[Q{q['n']}]** \"{q['anchor']}\": {q.get('text', '')}", "Q", q["n"]))
         if at is None:
             unplaced.append(body)
         else:
@@ -595,6 +646,9 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
                           "To store a rejection for this document say `reject 2` or `reject the rest`, and give a "
                           "reason if you like (`reject 2 because it changes my meaning`). An edit listed below as "
                           "cannot be placed is left alone by `reject the rest`; name it to reject it.")
+    index = _index(edits, paragraphs, queries)
+    if index:
+        head_lines += ["", *index]
     for w in cast("list[str]", prop.get("warnings") or []):
         head_lines += ["", f"Warning: {w}"]
     for key, title in (("note", "Editor's note"), ("voice_card", "Voice card")):

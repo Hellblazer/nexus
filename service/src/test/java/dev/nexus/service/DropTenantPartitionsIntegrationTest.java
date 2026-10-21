@@ -4,7 +4,6 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -52,8 +51,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DropTenantPartitionsIntegrationTest {
 
-    private static final String ADMIN_ROLE = "nexus_admin_p225drop";
-    private static final String ADMIN_PASS = "nexus_admin_p225drop_pass";
+    private static final String ADMIN_ROLE = PgContainerHelper.TEMPLATE_OWNER;
+    private static final String ADMIN_PASS = PgContainerHelper.TEMPLATE_OWNER_PASSWORD;
 
     /** The bystander whose every row and leaf must survive every drop; each test seeds the tenant it drops. */
     private static final String TB = "p225-drop-b";
@@ -63,17 +62,13 @@ class DropTenantPartitionsIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startDedicated();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
-        }
+        pg = PgContainerHelper.startMigratedByOwner();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(ADMIN_ROLE);
         cfg.setPassword(ADMIN_PASS);
         cfg.setMaximumPoolSize(2);
         adminDs = new HikariDataSource(cfg);
-        SchemaMigrator.migrate(adminDs);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);

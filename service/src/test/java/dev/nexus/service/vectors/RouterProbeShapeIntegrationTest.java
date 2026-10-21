@@ -97,7 +97,7 @@ class RouterProbeShapeIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             // nexus_svc has MAINTAIN on the table in production (grants-005-chunks-unify-maintain); the test's
             // per-class role gets the same grant.
-            PgContainerHelper.runSuperuserDdl(su, "GRANT MAINTAIN ON nexus.chunks TO " + SVC_ROLE);
+            PgContainerHelper.grantMaintainOnChunks(su, SVC_ROLE);
             // ... and a leaf carries its own copy of the parent's privileges, which the engine's
             // partition-sync function copies.
             @SuppressWarnings("deprecation")

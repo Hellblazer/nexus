@@ -8254,6 +8254,13 @@ public final class CatalogRepository {
      * per-table deleted-row count map (preserves the {@code CascadeCounts} / CLI-render
      * + telemetry contract); no {@code failures} list — the operation is all-or-nothing.
      *
+     * <p><b>Retired predecessors (nexus-s80u9).</b> A rename leaves the old name as a tombstone naming its successor;
+     * deleting the successor also removes the empty tombstones that name it ({@link #deleteRetiredPredecessorsOf}),
+     * so {@code nx collection rename A B} then {@code nx collection delete B} leaves no row for A. The removal is not
+     * in the returned counts, whose key set is a wire contract. It is skipped when {@code keepQuarantine} is set:
+     * that caller ({@code nx collection reindex}) re-registers the same name at once, so the tombstones still
+     * name a live successor.
+     *
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
      *
@@ -8274,7 +8281,7 @@ public final class CatalogRepository {
      *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact. The rows removed are reported under
      *       both {@code chunks} and {@code quarantine_chunks}.</li>
      * </ul>
-     * Not closed here: store-put and update-metadata on a {@code quarantine-*} name are not guarded, and the
+     * Not closed here: update-metadata on a {@code quarantine-*} name is not guarded, and the
      * RDR-162 cross-model COPY keeps the source's quarantine rows with the source.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
@@ -8288,6 +8295,8 @@ public final class CatalogRepository {
      *                       no audit row, no sibling unregistered), for a caller that re-registers the SAME name
      *                       straight away ({@code nx collection reindex}) and so keeps the rows restorable.
      *                       Ignored for a {@code quarantine-*} name: deleting that collection removes its own rows.
+     *                       Also keeps the retired predecessors that name {@code name} as successor
+     *                       ({@link #deleteRetiredPredecessorsOf}), for the same reason: the name comes back.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
         DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine);
@@ -8295,6 +8304,10 @@ public final class CatalogRepository {
         // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
         for (String sibling : outcome.unregisteredSiblings()) {
             CollectionRegistry.evict(tenant, sibling);
+        }
+        // Retired predecessors of the deleted name (nexus-s80u9): their rows are gone too.
+        for (String retired : outcome.retiredRemoved()) {
+            CollectionRegistry.evict(tenant, retired);
         }
         // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
         // CollectionRegistry entry would make later writers silently skip
@@ -8336,7 +8349,8 @@ public final class CatalogRepository {
     }
 
     /** What {@link #deleteCollectionTxn} committed: the per-table counts, and the quarantine siblings it unregistered. */
-    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings) {}
+    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings,
+                                 List<String> retiredRemoved) {}
 
     private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
@@ -8465,8 +8479,49 @@ public final class CatalogRepository {
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
-            return new DeleteOutcome(counts, unregisteredSiblings);
+            // 8. nexus-s80u9 (7.77.0 shakeout N5): a rename retires the old name as a tombstone that names its
+            //    successor (renameCollectionTxn step 3). With the successor deleted the tombstone names nothing
+            //    and, having been emptied by the re-home, holds nothing: debris the ghost sweep and `nx doctor`
+            //    then count. Remove it here, in the same transaction. Deliberately NOT in `counts`: the response's
+            //    key set is a wire contract and this is cleanup of the rename's own residue, not data the caller
+            //    asked to delete.
+            //    Skipped under keepQuarantine: that flag means the caller re-registers the SAME name straight away
+            //    (nx collection reindex), so the tombstones naming it still name a live successor and are the
+            //    redirect that `nx collection info A` and the client's superseded-write refusal read.
+            List<String> retiredRemoved = keepQuarantine
+                ? List.of() : deleteRetiredPredecessorsOf(ctx, tenant, name);
+            return new DeleteOutcome(counts, unregisteredSiblings, retiredRemoved);
         });
+    }
+
+    /**
+     * Delete the retired registry rows that name {@code successor} as {@code superseded_by} and hold nothing,
+     * then the ones that named those, until none is left (a chain of renames A to B to C is debris from the end
+     * once C goes). The predicate is the ghost sweep's own, {@link #collectionHoldsContent} plus the quarantine
+     * hold: a retired row that still holds content (a plain supersede moves nothing, so the old name keeps its
+     * chunks) or whose rows sit in quarantine is the data's only home and stays, and so does everything that names
+     * it. Each pass deletes at least one row or ends, so the loop terminates, a cycle included.
+     */
+    private List<String> deleteRetiredPredecessorsOf(DSLContext ctx, String tenant, String successor) {
+        List<String> all = new ArrayList<>();
+        List<String> frontier = List.of(successor);
+        while (!frontier.isEmpty()) {
+            List<String> removed = new ArrayList<>();
+            for (String retired : ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(frontier))
+                    .fetch(CATALOG_COLLECTIONS.NAME)) {
+                if (collectionHoldsContent(ctx, retired) || QuarantineOrigin.holdsRowsOf(ctx, tenant, retired)) {
+                    continue;
+                }
+                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(retired)).execute();
+                removed.add(retired);
+            }
+            all.addAll(removed);
+            frontier = removed;
+        }
+        return all;
     }
 
     /**
@@ -9832,6 +9887,23 @@ public final class CatalogRepository {
     }
 
     /**
+     * Forget that {@code tenant}'s ghost sweep ran in this process (bead nexus-0bl77, the test-only tenant reset
+     * route). The durable {@code catalog_meta} marker is a row the reset deletes with the tenant's other rows, so
+     * after this the tenant's next request re-sweeps exactly as a brand-new tenant's first request does.
+     *
+     * @return 1 when the tenant was marked checked, 0 otherwise
+     */
+    public int evictGhostSweepTenant(String tenant) {
+        return ghostSweepCheckedTenants.remove(tenant) ? 1 : 0;
+    }
+
+    /** Whether {@code tenant}'s ghost sweep has been checked in this process: operational visibility, and the
+     *  assertion point of the reset route's tests. */
+    public boolean ghostSweepChecked(String tenant) {
+        return ghostSweepCheckedTenants.contains(tenant);
+    }
+
+    /**
      * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
      * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
      *
@@ -9863,6 +9935,10 @@ public final class CatalogRepository {
      *       quarantine has no content of its own, and deleting its row would leave those rows with no live
      *       origin. Checked first. Once those rows expire or are restored, the next sweep treats it as the
      *       ghost it then is;</li>
+     *   <li>leaves it UNCHANGED when {@link #collectionHoldsContent} is false but it is a retired row
+     *       ({@code superseded_by} set) whose successor is registered in the same tenant (nexus-s80u9): a rename's
+     *       tombstone is a live redirect, the source of {@code nx collection info}'s "renamed to" and of the
+     *       client's superseded-write refusal. Checked after the quarantine hold and before the ghost delete;</li>
      *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
      *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
      *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
@@ -9978,13 +10054,19 @@ public final class CatalogRepository {
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
-            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                    CATALOG_COLLECTIONS.SUPERSEDED_BY)
                 .from(CATALOG_COLLECTIONS)
                 .fetch();
+            java.util.Set<String> registered = new java.util.HashSet<>();
+            for (var r : nameAndState) {
+                registered.add(r.value1());
+            }
             List<SweptRow> out = new ArrayList<>(nameAndState.size());
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
+                String supersededBy = r.value3();
                 boolean holdsContent = collectionHoldsContent(ctx, name);
                 if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
                     // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
@@ -9994,6 +10076,14 @@ public final class CatalogRepository {
                     // quarantine collection still holds a row that is its own (tagged for it, or untagged and
                     // attributable to it alone). The sweep after those rows expire or are restored reclaims it.
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINED_ORIGIN));
+                } else if (!holdsContent && supersededBy != null && !supersededBy.isEmpty() && !supersededBy.equals(name)
+                        && registered.contains(supersededBy)) {
+                    // nexus-s80u9: a retired row (a rename's tombstone) whose successor is registered in this
+                    // tenant is a live redirect, not a ghost: `nx collection info A` reads "renamed to B" from it
+                    // and the client refuses a write to A because of it. Reported as unchanged, so the response
+                    // shape is the same. A tombstone whose successor is gone names nothing and stays a ghost;
+                    // a chain A to B to C keeps both rows while C exists (each names a registered row).
+                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
                 } else if (!holdsContent) {
                     // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
                     // a drained quarantine sibling included. Checked BEFORE the quarantine

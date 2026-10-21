@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests._hook_wiring import NX_SETUP_NOTICE, command_verb, launcher_script_args, runs_cli_program
+import pytest
 
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────
@@ -37,6 +38,7 @@ class TestSC5McpVersionCheck:
 # ── SC-6: Domain stores usable post-upgrade ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestSC6Delegation:
     """RDR-076 SC-6 originally asserted the SQLite MemoryStore / PlanLibrary
     delegated schema work to migrations.py's module-level functions. Those

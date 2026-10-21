@@ -63,6 +63,9 @@ _SERVICE_JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.j
 _SERVICE_SRC_DIRS = (
     _REPO_ROOT / "service" / "src" / "main" / "java",
     _REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog",
+    # nexus-aca0q.3: the jOOQ codegen runner and its generator config; an edit there regenerates the jar's
+    # generated classes.
+    _REPO_ROOT / "service" / "src" / "build",
 )
 
 
@@ -249,8 +252,16 @@ def last_provision_failure() -> str | None:
 
 
 def substrate_cache_root() -> Path:
-    """Root of the per-tag test-substrate caches: ``$XDG_CACHE_HOME`` when set
-    and non-blank, else ``~/.cache``, then ``nexus-test-substrate``.
+    """Root of the per-tag test-substrate caches: ``$NX_TEST_SUBSTRATE_CACHE``
+    when set and non-blank, else ``$XDG_CACHE_HOME``/``~/.cache`` plus
+    ``nexus-test-substrate``.
+
+    ``NX_TEST_SUBSTRATE_CACHE`` (nexus-ld3aa review) is how the suite's HOME
+    fence shares the real cache: the fenced home is empty, so the HOME rung would
+    resolve to a cold directory and re-fetch and sigstore-verify the PG bundle
+    every session. ``XDG_CACHE_HOME`` would also work but re-exposes all of
+    ``.cache``, so the fence pins this one key (tests/_fence_home.py
+    ``fence_cache_env``).
 
     nexus-wvyvn: this was ``~/.cache`` unconditionally, so a host that moves
     its caches with ``XDG_CACHE_HOME`` still grew a second cache under HOME.
@@ -263,6 +274,9 @@ def substrate_cache_root() -> Path:
     so a test that redirects HOME would otherwise still land in the real
     profile's cache.
     """
+    pinned = os.environ.get("NX_TEST_SUBSTRATE_CACHE", "").strip()
+    if pinned:
+        return Path(pinned)
     xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
     if xdg:
         return Path(xdg) / "nexus-test-substrate"
@@ -435,8 +449,10 @@ def _group_alive(pgid: int) -> bool:
     return group_alive(pgid)
 
 
-def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
-    """Return a reason if a service BUILD IS RUNNING, else ``None``.
+def build_in_progress_reason(
+    lease_root: Path | None = None, *, repo_root: Path | None = None,
+) -> str | None:
+    """Return a reason if a service BUILD IS RUNNING in this checkout, else ``None``.
 
     nexus-06fu4. Writers of the shaded jar take a lease
     (scripts/lib/build-lease.sh, resource "service"); readers never did.
@@ -466,6 +482,18 @@ def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
 
     Never raises: a malformed or half-written lease returns ``None`` rather
     than blocking the suite on the lease reader's own bug.
+
+    SCOPED TO THIS CHECKOUT (nexus-qt6q7). The lease is shared by every
+    worktree of the repo so that builds serialize box-wide (nexus-g6xpa), but
+    a build rewrites only the ``service/target`` of the checkout whose
+    scripts took the lease. A jar shared between worktrees is a read-only
+    gate-jar-cache link, which build-gate-jar.sh and mvnw-leased.sh unlink
+    before a package goal (and which a writer that does not would fail on,
+    not write through), and the cache publishes by rename. So a lease whose ``worktree`` file names another
+    checkout than *repo_root* (default: this one) is not a reason; before
+    this, a scoped mvnw-leased run in one worktree turned a full suite in
+    another into 197 setup errors. A lease without that file (an older
+    lib, or one still being populated) still counts: when unsure, refuse.
     """
     # Resolved per call, not at import: NX_BUILD_LEASE_ROOT set by a test
     # (or a box) after this module loaded must still win (nexus-pv93h —
@@ -487,9 +515,15 @@ def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
                 return None
         elif not _pid_alive(pid):
             return None  # holder is gone; the lease lib will reclaim it
-        holder = (lease / "label").read_text().strip() or "unknown"
-        command = (lease / "command").read_text().strip() or "unknown command"
-        since = (lease / "ts").read_text().strip() or "unknown time"
+        builder = (lease / "worktree").read_text().strip() if (lease / "worktree").exists() else ""
+        if builder and _is_another_checkout(builder, repo_root or _REPO_ROOT):
+            return None  # another worktree's build: it never rewrites this jar
+        # The holder is live: a missing descriptive file is the populate
+        # window (scripts/lib/build-lease.sh writes worktree, ts, label,
+        # command after the pid), not a reason to proceed (nexus-qt6q7).
+        holder = _lease_field(lease / "label", "unknown")
+        command = _lease_field(lease / "command", "unknown command")
+        since = _lease_field(lease / "ts", "unknown time")
     except (OSError, ValueError):
         return None
     return (
@@ -498,6 +532,29 @@ def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
         "rewritten, so launching the engine now would read a partial or "
         "half-replaced artifact. Wait for that build to finish and rerun."
     )
+
+
+def _lease_field(path: Path, default: str) -> str:
+    try:
+        return path.read_text().strip() or default
+    except OSError:
+        return default
+
+
+def _is_another_checkout(builder: str, here: Path) -> bool:
+    """True only when *builder* is provably a different directory from *here*.
+
+    Identity by inode (``os.path.samefile``), not by spelling: a bind mount, an
+    alias or an MSYS ``/c/...`` path names the same checkout under another
+    string, and treating that as foreign would ignore this checkout's own build
+    (the 2026-09-02 rewritten-jar case). A builder path that cannot be read
+    from here (absent, unmountable, a symlink loop) is not proof of anything,
+    so it counts as this checkout and the reader refuses.
+    """
+    try:
+        return not os.path.samefile(builder, here)
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 #: Seconds between lease polls while waiting (matches build_lease_acquire_wait).
@@ -554,6 +611,34 @@ def wait_for_build_lease(
         waited += _BUILD_LEASE_POLL_S
 
 
+#: Written beside the jar by scripts/lib/gate-jar-cache.sh on every gate-jar
+#: cache install and store (nexus-k6zxp). Its content is the cache key.
+_GATE_JAR_MARKER = ".gate-jar-key"
+
+
+def _jar_freshness_mtime(jar: Path) -> float:
+    """The time to hold against the sources: ``max(jar mtime, marker mtime)``.
+
+    nexus-k6zxp: a gate-jar cache hit hard-links the cached jar into
+    ``service/target``, so every worktree on that key shares one inode and
+    therefore ONE mtime, which is the time the jar was built, not the time THIS
+    worktree last verified it. The install never touches that inode (another
+    worktree's hit would otherwise make this worktree's stale jar look newer than
+    its edited sources). The per-worktree signal is the private marker
+    ``.gate-jar-key`` the install writes beside the jar: "at this time the jar
+    was verified to be the one for this tree's build inputs". A source edited
+    after it reads STALE however many other worktrees hit the same entry since.
+    The jar's own mtime still wins when something rewrote the jar after the
+    marker (a bare ``mvnw package``), and with no marker (a plain build, the CI
+    stamp step) this is the jar mtime alone, as before.
+    """
+    jar_mtime = jar.stat().st_mtime
+    try:
+        return max(jar_mtime, (jar.parent / _GATE_JAR_MARKER).stat().st_mtime)
+    except OSError:
+        return jar_mtime
+
+
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     """Return a skip reason if the shaded service jar is missing, INCOMPLETE
     or STALE, else ``None`` (jar is current and safe to launch).
@@ -578,7 +663,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
             f"service jar not built: {_rel(jar)} "
             "(run: scripts/build-gate-jar.sh)"
         )
-    jar_mtime = jar.stat().st_mtime
+    jar_mtime = _jar_freshness_mtime(jar)
     newest_src = 0.0
     newest_src_path: Path | None = None
     found_any_src = False
@@ -750,14 +835,32 @@ HikariPool fail-fast. Such a fixture pops every key here
 tests in ``test_xnz0o_commands_integration.py``)."""
 
 
+#: The environment names ``tests/_tmp_root.py`` (nexus-kyujr) sets when it moves ``TMPDIR``
+#: onto a per-run tmpfs directory. They are spelled out here because that module imports
+#: ``tests/_engine_substrate.py``, which imports this one; ``tests/test_tmp_root.py`` pins
+#: that the spellings match.
+TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
+TMP_SESSION_ENV = "NX_TEST_TMP_SESSION"
+
+
+def original_tempdir() -> Path:
+    """The tempdir the run started with: ``TMPDIR`` is the per-run tmpfs directory
+    inside a lab-run grant and that directory is deleted when the run ends, so
+    anything meant to outlive it (a crash report, a cluster on disk) goes here."""
+    return Path(os.environ.get(TMP_ORIG_ENV) or tempfile.gettempdir())
+
+
 def jvm_error_file_arg() -> str:
-    """``-XX:ErrorFile=<run temp dir>/hs_err_%p.log``: where a crashing engine JVM
+    """``-XX:ErrorFile=<original tempdir>/hs_err_%p.log``: where a crashing engine JVM
     writes its hs_err report (nexus-o5xyx.2).
 
     Without it the JVM drops ``hs_err_pid<N>.log`` into its cwd, which for a test
     launched from the repo is the repo. ``%p`` is expanded by the JVM to its own
-    pid, so concurrent engines do not overwrite each other. ``tempfile.gettempdir()``
-    honours ``TMPDIR``, the same root every other test artifact uses.
+    pid, so concurrent engines do not overwrite each other. The ORIGINAL tempdir
+    (:func:`original_tempdir`), not ``tempfile.gettempdir()``: a report is evidence
+    of a crash, and the run's tmpfs ``TMPDIR`` is deleted at the end of the run
+    (nexus-kyujr). The JVM writes the file only when it crashes, so a green run
+    leaves nothing there.
 
     JVM launches ONLY. A GraalVM native image is not a JVM and has no hs_err
     machinery, so this flag does not apply to it and is deliberately not passed to
@@ -765,7 +868,7 @@ def jvm_error_file_arg() -> str:
     an hs_err). ``tests/test_jvm_jar_launch_error_file_lint.py`` fails any
     ``-jar`` launch in tests/ or src/ that omits it.
     """
-    return f"-XX:ErrorFile={Path(tempfile.gettempdir()) / 'hs_err_%p.log'}"
+    return f"-XX:ErrorFile={original_tempdir() / 'hs_err_%p.log'}"
 
 
 def jar_argv(java: str | Path, jar: str | Path) -> list[str]:
@@ -783,6 +886,49 @@ def with_error_file(cmd: list[str]) -> list[str]:
         return list(cmd)
     i = cmd.index("-jar")
     return [*cmd[:i], jvm_error_file_arg(), *cmd[i:]]
+
+
+#: Heap and CPU budget for every test-launched engine JVM (nexus-0yym1). Without
+#: them a JVM sizes its heap to a quarter of the memory it can see and its thread
+#: pools to the CPUs it can see; inside a lab-run grant that is the grant's (a
+#: lab-l grant: 48 GiB, 16 CPUs), so each engine could claim ~12 GiB. Passed on
+#: the command line, never via JAVA_TOOL_OPTIONS, whose "Picked up" stderr line
+#: would reach tests that read engine stderr.
+SUBSTRATE_ENGINE_HEAP: str = "2g"
+SUBSTRATE_ENGINE_CPUS: int = 2
+
+
+def run_tmpdir_arg() -> str | None:
+    """``-Djava.io.tmpdir=<TMPDIR>`` while ``tests/_tmp_root.py`` has put ``TMPDIR`` on
+    the run's tmpfs directory (nexus-kyujr), else None. The JDK ignores ``TMPDIR`` on
+    Linux and uses ``/tmp``, where netty and JNA extract native libraries on every engine
+    boot: on the disk this run was moved off. Safe for the two things that care. The
+    engine's uid probe (``OrtNativeDir.processUid``) reads ``/proc/self/status`` first
+    and only on a platform without it creates one file in that directory, which is ours
+    and 0700. The hs_err report has its own explicit ``-XX:ErrorFile=`` on the original
+    tempdir."""
+    if not os.environ.get(TMP_SESSION_ENV, "").startswith(("tmpfs=", "forced=")):
+        return None
+    return f"-Djava.io.tmpdir={tempfile.gettempdir()}"
+
+
+def with_substrate_sizing(cmd: list[str]) -> list[str]:
+    """Insert ``-Xmx`` and ``-XX:ActiveProcessorCount`` (and, while the run's ``TMPDIR``
+    is on tmpfs, ``-Djava.io.tmpdir``; :func:`run_tmpdir_arg`) just before ``-jar`` when
+    *cmd* is a JVM launch that does not set them. A caller's own value wins; a
+    command without ``-jar`` (a native binary) comes back unchanged."""
+    if "-jar" not in cmd:
+        return list(cmd)
+    flags = []
+    if not any(str(a).startswith("-Xmx") for a in cmd):
+        flags.append(f"-Xmx{SUBSTRATE_ENGINE_HEAP}")
+    if not any(str(a).startswith("-XX:ActiveProcessorCount=") for a in cmd):
+        flags.append(f"-XX:ActiveProcessorCount={SUBSTRATE_ENGINE_CPUS}")
+    tmp_arg = run_tmpdir_arg()
+    if tmp_arg is not None and not any(str(a).startswith("-Djava.io.tmpdir=") for a in cmd):
+        flags.append(tmp_arg)
+    i = cmd.index("-jar")
+    return [*cmd[:i], *flags, *cmd[i:]]
 
 
 def spawn_service(
@@ -814,9 +960,10 @@ def spawn_service(
     the PIPE form threw away.
 
     A JVM launch (``-jar`` in *cmd*) gets ``-XX:ErrorFile=`` injected by
-    :func:`with_error_file`, so no caller can drop hs_err into the cwd.
+    :func:`with_error_file`, so no caller can drop hs_err into the cwd, and its
+    heap and CPU budget by :func:`with_substrate_sizing`.
     """
-    cmd = with_error_file(cmd)
+    cmd = with_substrate_sizing(with_error_file(cmd))
     d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
     d.mkdir(parents=True, exist_ok=True)
     log_path = d / "engine.log"
@@ -830,6 +977,7 @@ def spawn_service(
         stdout=fh,
         stderr=subprocess.STDOUT,
     )
+    # popen_in_group recorded the engine for the crash sweep (nexus-942h9, nexus-qsqc6).
     return proc, log_path
 
 

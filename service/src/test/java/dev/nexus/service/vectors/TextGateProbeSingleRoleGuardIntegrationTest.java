@@ -62,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * through the probe, and nothing of another tenant). The two-role posture, where the policy must exist and
  * name the owner alone, is {@link Rdr192LiveCExplainEvidenceIntegrationTest}.
  *
- * <p>The membership shapes (second review round) each get a dedicated container migrated as
+ * <p>The membership shapes (second review round) each get an empty database (exclusive roles) migrated as
  * {@code nexus_admin}: {@code nexus_svc} a member WITH INHERIT TRUE (the changeset must be skipped) and WITH
  * INHERIT FALSE (it must run, since the role does not have the owner's privileges), another login role that
  * inherits (skipped), a BYPASSRLS one (not skipped: the policy gives it nothing), a post-condition forced by
@@ -219,8 +219,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------------------------------
-    // Two-role posture, membership shapes (nexus-wbfpw.48, second review round). Each test owns a dedicated
-    // container migrated as nexus_admin, because role membership and schema ownership are global state.
+    // Two-role posture, membership shapes (nexus-wbfpw.48, second review round). Each test owns an empty database
+    // migrated as nexus_admin. Role membership is cluster-global, so every role a scenario creates is declared
+    // exclusive (SCENARIO_ROLES): dropped at stop, which takes the memberships it gave nexus_svc with it.
+    // The single-role posture above makes nexus_svc itself the owner, so it keeps a container of its own.
     // ---------------------------------------------------------------------------------------------------
 
     private static final String ADMIN = "nexus_admin";
@@ -243,9 +245,15 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         return new HikariDataSource(cfg);
     }
 
-    /** A dedicated container: owner bootstrapped, {@code pre} run, walked AS nexus_admin, both tenants seeded. */
+    /** Every cluster-global role a scenario below creates, plus the migrator: declared exclusive, so the holder
+     *  drops them (and with them any membership they gave nexus_svc) when it stops, and finds none at acquire. */
+    private static final String[] SCENARIO_ROLES =
+        {ADMIN, EXTRA, "guard_other_owner", "nexus_super_nobypass", "nexus_bypass_login"};
+
+    /** An empty database on the shared cluster (nexus-7xfh7): owner bootstrapped, {@code pre} run, walked AS
+     *  nexus_admin, both tenants seeded. */
     private PostgreSQLContainer<?> migratedAsAdmin(PreMigrate pre) throws Exception {
-        PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c = PgContainerHelper.startEmptyDatabase(SCENARIO_ROLES);
         try {
             try (Connection su = c.createConnection("")) {
                 PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);
@@ -263,7 +271,12 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             }
             return c;
         } catch (Throwable t) {
-            c.stop();
+            // nexus-ap7sm: a stop() that fails too is attached to t, never thrown in its place.
+            try {
+                c.stop();
+            } catch (RuntimeException stopFailure) {
+                t.addSuppressed(stopFailure);
+            }
             throw t;
         }
     }
@@ -318,7 +331,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     void nexusSvcInheritingTheMigratingRole_theChangesetIsSkipped_andNothingIsExposed() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su ->
             PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, true, false));
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             assertThat(hasRole(DSL.using(su, SQLDialect.POSTGRES), SVC, ADMIN))
                 .as("non-vacuity: nexus_svc really has nexus_admin's privileges here").isTrue();
             assertChangesetSkipped(su, "nexus_svc is a member of the migrator WITH INHERIT TRUE");
@@ -326,8 +339,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-check", 1)) {
                 assertThat(ChunksIsolationCheck.violations(svc)).as("boot check on the service pool").isEmpty();
             }
-        } finally {
-            c.stop();
         }
     }
 
@@ -336,7 +347,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     void nexusSvcMemberWithInheritFalse_theChangesetRuns_andTheServiceStillSeesOnlyItsTenant() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su ->
             PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, false, false));
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(hasRole(ctx, SVC, ADMIN))
                 .as("non-vacuity: a member that does not inherit has no USAGE of the role").isFalse();
@@ -350,8 +361,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-check", 1)) {
                 assertThat(ChunksIsolationCheck.violations(svc)).as("boot check on the service pool").isEmpty();
             }
-        } finally {
-            c.stop();
         }
     }
 
@@ -360,12 +369,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     void anotherLoginRoleInheritingTheMigratingRole_theChangesetIsSkipped() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su ->
             PgContainerHelper.grantRoleMembership(su, ADMIN, EXTRA, true, false));
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             assertThat(hasRole(DSL.using(su, SQLDialect.POSTGRES), SVC, ADMIN))
                 .as("nexus_svc is not involved in this case").isFalse();
             assertChangesetSkipped(su, EXTRA + " is a login role with nexus_admin's privileges");
-        } finally {
-            c.stop();
         }
     }
 
@@ -374,12 +381,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     void aBypassRlsMemberOfTheMigratingRole_doesNotSkipTheChangeset() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su ->
             PgContainerHelper.grantRoleMembership(su, ADMIN, EXTRA, true, true));
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             assertThat(hasRole(DSL.using(su, SQLDialect.POSTGRES), EXTRA, ADMIN)).as("non-vacuity").isTrue();
             assertThat(execTypes(su)).as("RLS does not bind a BYPASSRLS role, nothing to guard")
                 .containsExactly("EXECUTED");
-        } finally {
-            c.stop();
         }
     }
 
@@ -394,7 +399,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             @org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su ->
             PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, true, false));
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             assertChangesetSkipped(su, "baseline: the real changeset was skipped");
             String xml;
             try (InputStream in = getClass().getClassLoader()
@@ -429,8 +434,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                 .as("the policy the failed changeset created was rolled back").isFalse();
             assertThat(definerProbes(ctx)).as("the definer bodies were rolled back with it").isEmpty();
             assertServiceSeesOnlyItsOwnTenant(c);
-        } finally {
-            c.stop();
         }
     }
 
@@ -485,13 +488,13 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void vectors0312_withTheOwnerPolicyNamingAnotherRole_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(definerProbes(ctx)).as("non-vacuity: a normal walk leaves 3 definer probes").hasSize(3);
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE guard_other_owner NOLOGIN");
-            PgContainerHelper.runSuperuserDdl(su, "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks");
-            PgContainerHelper.runSuperuserDdl(su,
-                "CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks FOR SELECT TO guard_other_owner USING (true)");
+            PgContainerHelper.createNologinRole(su, "guard_other_owner");
+            PgContainerHelper.dropPolicy(su, CHUNKS, "chunks_gate_probe_owner_read");
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "chunks_gate_probe_owner_read",
+                PgContainerHelper.PolicyKind.PERMISSIVE, "SELECT", "guard_other_owner");
             assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunks").stream()
                     .map(PgCatalogProbes.PolicyRoles::toString).toList())
                 .as("non-vacuity: the owner policy no longer names the migrating role")
@@ -502,8 +505,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             assertThat(definerProbes(ctx))
                 .as("no definer probe beside an owner policy that does not name the migrating role").isEmpty();
             assertServiceSeesOnlyItsOwnTenant(c);
-        } finally {
-            c.stop();
         }
     }
 
@@ -515,7 +516,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void vectors0312_withNexusSvcInheritingTheMigrator_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(definerProbes(ctx)).as("non-vacuity: 3 definer probes after the normal walk").hasSize(3);
             PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, true, false);
@@ -525,8 +526,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
             assertThat(definerProbes(ctx)).as("no definer probe while nexus_svc has the migrator's privileges")
                 .isEmpty();
-        } finally {
-            c.stop();
         }
     }
 
@@ -534,12 +533,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void vectors0312_afterANormalWalk_keepsTheDefinerProbes(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try (Connection su = c.createConnection("")) {
+        try (c; Connection su = c.createConnection("")) {
             rerunVectors0312(c, tmp);
             assertThat(definerProbes(DSL.using(su, SQLDialect.POSTGRES))).hasSize(3);
             assertServiceSeesOnlyItsOwnTenant(c);
-        } finally {
-            c.stop();
         }
     }
 
@@ -552,7 +549,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void aMembershipGrantedAfterTheWalk_isCaughtByTheBootCheck_andMainRefusesToStart() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try {
+        try (c) {
             try (Connection su = c.createConnection("")) {
                 assertThat(execTypes(su)).containsExactly("EXECUTED");
                 // The clean state first, so the contrast below is the grant and nothing else.
@@ -595,8 +592,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                     .as("NexusService wires the field").contains("\"chunks_tenant_isolation_intact\":false");
             }
             assertMainRefusesToStart(c);
-        } finally {
-            c.stop();
         }
     }
 
@@ -648,10 +643,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     // fail, and the status field's structural half.
     // ---------------------------------------------------------------------------------------------------
 
-    private static void exec(Connection su, String ddl) throws Exception {
-        PgContainerHelper.runSuperuserDdl(su, ddl);
-    }
-
     /**
      * I1: a role RLS does not bind is never a violation, even though pg_has_role answers true for a superuser
      * for every role and the owner policy exists. Three shapes: a SUPERUSER without the BYPASSRLS attribute
@@ -663,11 +654,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         String superLogin = "nexus_super_nobypass";
         String bypassLogin = "nexus_bypass_login";
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try {
+        try (c) {
             try (Connection su = c.createConnection("")) {
                 assertThat(execTypes(su)).as("the owner policy exists in this container").containsExactly("EXECUTED");
-                exec(su, "CREATE ROLE " + superLogin + " LOGIN PASSWORD '" + PgContainerHelper.MEMBER_PASSWORD
-                    + "' SUPERUSER NOBYPASSRLS");
+                PgContainerHelper.createSuperuserLoginRole(su, superLogin, PgContainerHelper.MEMBER_PASSWORD);
                 PgContainerHelper.grantRoleMembership(su, ADMIN, bypassLogin, true, true);
                 PgContainerHelper.grantRoleMembership(su, ADMIN, EXTRA, true, false);
                 var ctx = DSL.using(su, SQLDialect.POSTGRES);
@@ -686,8 +676,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                 assertThat(ChunksIsolationCheck.violations(p)).as("control: the same policy applies to an ordinary role")
                     .hasSize(1);
             }
-        } finally {
-            c.stop();
         }
     }
 
@@ -698,16 +686,18 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void aRestrictivePublicPolicyIsIgnored_aPermissivePublicPolicyIsOneViolationNamingPublic() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try {
+        try (c) {
             try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-public", 1)) {
                 assertThat(ChunksIsolationCheck.violations(svc)).as("clean two-role posture").isEmpty();
                 try (Connection su = c.createConnection("")) {
-                    exec(su, "CREATE POLICY only_narrows ON nexus.chunks AS RESTRICTIVE FOR ALL TO PUBLIC USING (true)");
+                    PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "only_narrows",
+                        PgContainerHelper.PolicyKind.RESTRICTIVE, "ALL", "PUBLIC");
                 }
                 assertThat(ChunksIsolationCheck.violations(svc)).as("RESTRICTIVE policies only narrow").isEmpty();
                 ChunksIsolationCheck.verifyAtStartup(svc);
                 try (Connection su = c.createConnection("")) {
-                    exec(su, "CREATE POLICY opens_to_all ON nexus.chunks AS PERMISSIVE FOR ALL TO PUBLIC USING (true)");
+                    PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "opens_to_all",
+                        PgContainerHelper.PolicyKind.PERMISSIVE, "ALL", "PUBLIC");
                 }
                 assertThat(ChunksIsolationCheck.violations(svc).stream().map(Object::toString).toList())
                     .as("a PERMISSIVE policy for PUBLIC reaches every role")
@@ -717,8 +707,6 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                     .hasMessageContaining("opens_to_all").hasMessageContaining("through PUBLIC")
                     .hasMessageContaining("read or write every tenant's chunks");
             }
-        } finally {
-            c.stop();
         }
     }
 
@@ -732,35 +720,33 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     @Test
     void theStatusFieldIsFalseAndBootRefuses_whenRlsIsNotWiredOnChunks() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
-        try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-rls", 2);
+        try (c; HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-rls", 2);
              Connection su = c.createConnection("")) {
             assertThat(awaitAnswer(svc)).as("baseline: intact").isTrue();
 
-            exec(su, "ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.NO_FORCE);
             assertThat(awaitAnswer(svc)).as("row security not forced").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
                 .hasMessageContaining("nexus.chunks").hasMessageContaining("FORCE");
-            exec(su, "ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.FORCE);
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
             ChunksIsolationCheck.verifyAtStartup(svc);
 
-            exec(su, "ALTER TABLE nexus.chunks DISABLE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.DISABLE);
             assertThat(awaitAnswer(svc)).as("row security disabled").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
                 .hasMessageContaining("nexus.chunks").hasMessageContaining("not enabled");
-            exec(su, "ALTER TABLE nexus.chunks ENABLE ROW LEVEL SECURITY");
+            PgContainerHelper.setRowSecurity(su, CHUNKS, PgContainerHelper.RowSecurityMode.ENABLE);
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
             ChunksIsolationCheck.verifyAtStartup(svc);
 
-            exec(su, "DROP POLICY tenant_isolation ON nexus.chunks");
+            PgContainerHelper.dropPolicy(su, CHUNKS, "tenant_isolation");
             assertThat(awaitAnswer(svc)).as("tenant policy missing").isFalse();
             assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
                 .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
                 .hasMessageContaining("tenant_isolation");
-        } finally {
-            c.stop();
         }
     }
 

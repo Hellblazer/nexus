@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Properties;
+import java.util.function.Supplier;
 
 /**
  * GET /version — app + schema version handshake (bead nexus-pebfx.4).
@@ -124,11 +125,23 @@ public final class VersionHandler implements HttpHandler {
         this(dataSource, null);
     }
 
+    private volatile Supplier<EmbedPosture> embedPosture;   // nullable — keys omitted
+
+    /**
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: bind the boot posture ({@link EmbedPosture}:
+     * {@code embedding_profile}, {@code reranker}, {@code embedding_degraded}). Unbound, or a supplier that
+     * returns null, omits the three keys. A setter because the handler is built before the posture exists.
+     */
+    public VersionHandler embedPosture(Supplier<EmbedPosture> embedPosture) {
+        this.embedPosture = embedPosture;
+        return this;
+    }
+
     /**
      * @param embedderRouter the doc-side router; supplies the
      *        nexus-pebfx.5 embedding-mode handshake fields
      *        ({@code embedding_mode}, {@code embedding_models}) so
-     *        {@code nx daemon service status} can show voyage|onnx-local
+     *        {@code nx daemon service status} can show voyage|onnx-local|dual
      *        without parsing DEVNULLed JAR logs. Null → "unknown".
      */
     public VersionHandler(DataSource dataSource, EmbedderRouter embedderRouter) {
@@ -487,6 +500,12 @@ public final class VersionHandler implements HttpHandler {
             body.append(']');
         } else {
             body.append(",\"embedding_mode\":\"unknown\"");
+        }
+        // RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: profile, reranker, degraded-boot description.
+        Supplier<EmbedPosture> postureSource = embedPosture;
+        EmbedPosture posture = postureSource != null ? postureSource.get() : null;
+        if (posture != null) {
+            posture.appendFields(body);
         }
         if (schemaError == null) {
             body.append(",\"schema_latest_id\":")

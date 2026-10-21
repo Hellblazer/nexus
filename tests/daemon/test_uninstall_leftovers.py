@@ -332,6 +332,34 @@ class TestRemoveDataRemovesTheModelCache:
         assert str(mine) in preview.message and "kept" in preview.message, preview.message
         assert any(str(mine) in w for w in report.warnings), report.warnings
 
+    def test_a_user_chosen_ort_native_root_is_named_and_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-8ool4: like NX_ONNX_MODEL_DIR, an NX_ORT_NATIVE_DIR outside the nexus
+        cache is the user's: the preview and the report name it and it survives."""
+        cache = _cache_layout(monkeypatch, tmp_path, "linux")
+        mine = tmp_path / "my-ort"
+        (mine / "1.20.0-linux-x64").mkdir(parents=True)
+        monkeypatch.setenv(omr.ENV_ORT_NATIVE_DIR, str(mine))
+
+        preview = installer.uninstall_daemon(confirm=False, remove_data=True)
+        report = installer.uninstall_daemon(confirm=True, remove_data=True)
+
+        assert (mine / "1.20.0-linux-x64").is_dir(), "an NX_ORT_NATIVE_DIR root is the user's"
+        assert not cache.exists(), "the default nexus cache still goes"
+        assert str(mine) in preview.message and "NX_ORT_NATIVE_DIR" in preview.message, preview.message
+        assert any(str(mine) in w and "NX_ORT_NATIVE_DIR" in w for w in report.warnings), report.warnings
+
+    def test_an_ort_native_root_inside_the_cache_is_not_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _cache_layout(monkeypatch, tmp_path, "linux")
+        monkeypatch.setenv(omr.ENV_ORT_NATIVE_DIR, str(cache / "ort_native"))
+
+        preview = installer.uninstall_daemon(confirm=False, remove_data=True)
+
+        assert "NX_ORT_NATIVE_DIR" not in preview.message, preview.message
+
     def test_a_symlinked_cache_dir_loses_only_the_link(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -412,3 +440,154 @@ class TestOneCacheRoot:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
 
         assert omr.nexus_cache_root() == profile / ".cache" / "nexus"
+
+
+# ── an unreadable entry in the model cache is removed, never a TypeError ──────
+#
+# 5588beead: rmtree's POSIX fd walk hands its onexc handler ``os.open`` for a
+# directory it cannot enter, and ``_force_remove`` re-called ``func(path)``,
+# which raised TypeError past ``_remove_model_cache``'s ``except OSError``.
+
+
+def _unreadable_cache(cache: Path) -> None:
+    (cache / "zero" / "inner").mkdir(parents=True)
+    (cache / "zero" / "inner" / "f").write_text("x", encoding="utf-8")
+    (cache / "zero" / "inner").chmod(0)
+    (cache / "zero").chmod(0)
+    (cache / "wonly").mkdir()
+    (cache / "wonly" / "f").write_text("x", encoding="utf-8")
+    (cache / "wonly").chmod(0o200)
+    (cache / "ro").mkdir()
+    (cache / "ro" / "g").write_text("x", encoding="utf-8")
+    (cache / "ro" / "g").chmod(0)
+    (cache / "ro").chmod(0o500)
+
+
+class TestForceRemoveOnEveryPlatform:
+    """Shapes Windows hands the handler, driven directly so they run on every host.
+
+    Windows rmtree has no fd walk: a directory it cannot list arrives as
+    ``os.scandir`` and is removed by one nested rmtree, a read-only file arrives
+    as ``os.unlink``. The read-only bit is the one mode Windows enforces; the 0o555
+    parents make the same cases need the handler on POSIX too.
+
+    Pins, not red-first: the handler was fixed in 3a5098842 and these pass on that
+    source. They hold its Windows shapes on every host (nexus-yqzpw).
+    """
+
+    def test_a_directory_that_could_not_be_listed_goes_by_a_nested_rmtree(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "d").mkdir(parents=True)
+        (cache / "d" / "f").write_text("x", encoding="utf-8")
+        (cache / "d" / "f").chmod(0o444)
+        (cache / "d").chmod(0)
+        try:
+            installer._force_remove(os.scandir, str(cache / "d"), PermissionError(13, "denied"), _root=str(cache))
+            assert not (cache / "d").exists()
+            assert cache.is_dir(), "only the entry goes, not the root it sits in"
+        finally:
+            if (cache / "d").exists():
+                (cache / "d").chmod(0o700)
+
+    def test_a_read_only_file_is_unlinked_after_one_chmod(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "ro").mkdir(parents=True)
+        (cache / "ro" / "f").write_text("x", encoding="utf-8")
+        (cache / "ro" / "f").chmod(0o444)
+        (cache / "ro").chmod(0o555)
+        try:
+            installer._force_remove(
+                os.unlink, str(cache / "ro" / "f"), PermissionError(13, "denied"), _root=str(cache)
+            )
+            assert not (cache / "ro" / "f").exists()
+        finally:
+            (cache / "ro").chmod(0o700)
+
+    def test_a_vanished_entry_is_not_an_error(self, tmp_path: Path) -> None:
+        installer._force_remove(os.unlink, str(tmp_path / "gone"), FileNotFoundError(2, "gone"))
+
+    def test_a_second_failure_on_the_same_path_propagates(self, tmp_path: Path) -> None:
+        refused = PermissionError(13, "denied")
+        with pytest.raises(PermissionError) as raised:
+            installer._force_remove(os.unlink, str(tmp_path / "f"), refused, _retried={str(tmp_path / "f")})
+        assert raised.value is refused
+
+    def test_a_read_only_tree_is_removed_by_remove_model_cache(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "m" / "onnx").mkdir(parents=True)
+        for name in ("model.onnx", "tokenizer.json"):
+            (cache / "m" / "onnx" / name).write_text("x", encoding="utf-8")
+            (cache / "m" / "onnx" / name).chmod(0o444)
+        (cache / "m" / "onnx").chmod(0o555)
+        (cache / "m").chmod(0o555)
+        try:
+            assert installer._remove_model_cache(cache) is None
+            assert not cache.exists()
+        finally:
+            if (cache / "m").exists():
+                (cache / "m").chmod(0o700)
+                if (cache / "m" / "onnx").exists():
+                    (cache / "m" / "onnx").chmod(0o700)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+class TestAnUnreadableCacheEntryIsRemoved:
+    def test_the_whole_cache_goes_and_its_parent_keeps_its_mode(self, tmp_path: Path) -> None:
+        parent = tmp_path / "dotcache"
+        parent.mkdir()
+        parent.chmod(0o755)
+        probe = parent / "probe"
+        _unreadable_cache(probe)
+        seen: list[object] = []
+        shutil.rmtree(probe, onexc=lambda func, _p, _e: seen.append(func))
+        if not seen:
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert any(f not in (os.unlink, os.rmdir) for f in seen), seen
+        assert installer._remove_model_cache(probe) is None
+
+        cache = parent / "nexus"
+        _unreadable_cache(cache)
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+        assert (parent.stat().st_mode & 0o777) == 0o755, "the user's cache dir keeps its mode"
+
+    def test_a_symlink_in_the_cache_never_changes_its_targets_mode(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside.chmod(0o755)
+        cache = tmp_path / "nexus"
+        cache.mkdir()
+        (cache / "lnk").symlink_to(outside)
+        cache.chmod(0o500)
+        if os.access(cache, os.W_OK):
+            cache.chmod(0o700)
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+        assert outside.is_dir()
+        assert (outside.stat().st_mode & 0o777) == 0o755, "chmod must not follow the link to its target"
+
+    def test_a_read_only_dir_holding_an_empty_dir_is_removed(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "ro" / "empty").mkdir(parents=True)
+        (cache / "ro").chmod(0o500)
+        if os.access(cache / "ro", os.W_OK):
+            (cache / "ro").chmod(0o700)
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+
+    def test_an_entry_that_stays_unremovable_is_a_warning_not_a_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = tmp_path / "nexus"
+        _unreadable_cache(cache)
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        setattr_in(monkeypatch, installer, "os.chmod", refuse)
+        warning = installer._remove_model_cache(cache)
+        monkeypatch.undo()
+        assert warning is not None and str(cache) in warning, warning
+        assert installer._remove_model_cache(cache) is None and not cache.exists()

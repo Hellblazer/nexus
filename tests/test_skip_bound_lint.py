@@ -139,6 +139,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import functools
 import pathlib
 
 import pytest
@@ -572,14 +573,16 @@ def _has_local_bound(tree: ast.AST) -> bool:
 
 
 def scan_tests_dir(
-    tests_root: pathlib.Path = TESTS_ROOT,
+    tests_root: pathlib.Path | None = TESTS_ROOT,
     repo_root: pathlib.Path = REPO_ROOT,
     extra_files: list[pathlib.Path] | None = None,
 ) -> ScanResult:
     """Filesystem AST scan of every ``.py`` file under *tests_root* (plus any
     *extra_files*, for synthetic-fixture tests), producing one ``SkipSite``
-    per environment-keyed skip found. Never touches ``session.items``."""
-    files = sorted(tests_root.rglob("*.py"))
+    per environment-keyed skip found. Never touches ``session.items``.
+    ``tests_root=None`` scans only *extra_files*: the planted-fixture tests ask
+    what the detector says about their own file, which needs no tree walk."""
+    files = sorted(tests_root.rglob("*.py")) if tests_root is not None else []
     if extra_files:
         files = list(files) + list(extra_files)
 
@@ -635,6 +638,14 @@ def _unbounded_gate_like_violations(result: ScanResult) -> list[SkipSite]:
     return violations
 
 
+@functools.cache
+def _live_scan() -> ScanResult:
+    """One scan of the real tests/ tree per worker, shared by the tests that read
+    it (nexus-0h5a7: each walk parses ~2k files, 25-50 s apiece on a CI lint group)."""
+    return scan_tests_dir()
+
+
+@functools.cache
 def _parse_for_bound_check(rel_or_abs: str) -> ast.AST | None:
     p = pathlib.Path(rel_or_abs)
     candidate = p if p.is_absolute() else (REPO_ROOT / rel_or_abs)
@@ -654,7 +665,7 @@ def test_scan_partitions_and_prints_counts():
     """The live check: prints files scanned, sites found, gate-like vs
     substrate-dependent counts, allowlisted count -- and asserts zero
     unbounded gate-like violations."""
-    result = scan_tests_dir()
+    result = _live_scan()
     violations = _unbounded_gate_like_violations(result)
     allowlisted_count = sum(GATE_LIKE_SKIP_ALLOWLIST.values())
 
@@ -682,7 +693,7 @@ def test_non_vacuity_scan_examines_something():
     check is a failure, not a pass. The census this lint models found 100
     files with skip sites across the whole tree; a scan that examines a
     near-zero file count or finds zero sites at all is broken, not clean."""
-    result = scan_tests_dir()
+    result = _live_scan()
     assert result.files_scanned > 500, (
         f"only {result.files_scanned} files examined -- scan_tests_dir is "
         "not walking the real tests/ tree"
@@ -706,7 +717,7 @@ def test_planted_unguarded_gate_like_skip_fails(tmp_path):
         "    if not os.environ.get('SOME_CANARY_TOKEN'):\n"
         "        pytest.skip('no token')\n"
     )
-    result = scan_tests_dir(extra_files=[canary])
+    result = scan_tests_dir(tests_root=None, extra_files=[canary])
     matched = [s for s in result.sites if s.file.endswith("test_release_canary_unguarded.py")]
     assert len(matched) == 1
     assert matched[0].bucket == "gate-like", "filename carries 'release' -- must classify gate-like"
@@ -731,7 +742,7 @@ def test_planted_bounded_gate_like_skip_passes(tmp_path):
         "    if not os.environ.get('SOME_CANARY_TOKEN'):\n"
         "        pytest.skip('no token')\n"
     )
-    result = scan_tests_dir(extra_files=[canary])
+    result = scan_tests_dir(tests_root=None, extra_files=[canary])
     violations = _unbounded_gate_like_violations(result)
     canary_violations = [v for v in violations if v.file.endswith("test_gate_canary_bounded.py")]
     assert canary_violations == [], "a module carrying a bound token must not violate"
@@ -750,7 +761,7 @@ def test_substrate_dependent_skip_is_never_enforced(tmp_path):
         "def test_thing():\n"
         "    pass\n"
     )
-    result = scan_tests_dir(extra_files=[canary])
+    result = scan_tests_dir(tests_root=None, extra_files=[canary])
     matched = [s for s in result.sites if s.file.endswith("test_needs_docker_thing.py")]
     assert len(matched) == 1
     assert matched[0].bucket == "substrate-dependent"
@@ -773,7 +784,7 @@ def test_skipif_shutil_which_and_importorskip_detected(tmp_path):
         "def test_b():\n"
         "    pytest.importorskip('some_optional_module')\n"
     )
-    result = scan_tests_dir(extra_files=[target])
+    result = scan_tests_dir(tests_root=None, extra_files=[target])
     matched = [s for s in result.sites if s.file.endswith("test_gate_detector_shapes.py")]
     kinds = sorted((s.kind, s.shutil_which) for s in matched)
     assert kinds == [("importorskip", False), ("skipif", True)]
@@ -789,7 +800,7 @@ def test_unconditional_skip_is_not_a_site(tmp_path):
         "def test_todo():\n"
         "    pytest.skip('not yet implemented')\n"
     )
-    result = scan_tests_dir(extra_files=[target])
+    result = scan_tests_dir(tests_root=None, extra_files=[target])
     matched = [s for s in result.sites if s.file.endswith("test_gate_unconditional_skip.py")]
     assert matched == []
 
@@ -808,7 +819,7 @@ def test_allowlist_is_shrink_only():
         "with its own reason, never a silent grow."
     )
 
-    result = scan_tests_dir()
+    result = _live_scan()
     by_file: dict[str, int] = {}
     for site in result.gate_like_sites:
         by_file[site.file] = by_file.get(site.file, 0) + 1
@@ -840,7 +851,7 @@ def test_known_detector_gaps_are_still_real():
     gate-like, still calls a pytest skip, and still yields zero detected
     sites. When the detector learns the shape, or the skip goes, this fails
     and the entry is deleted, so the list cannot become a standing excuse."""
-    result = scan_tests_dir()
+    result = _live_scan()
     detected = {site.file for site in result.sites}
     untrue: list[str] = []
     for file in _KNOWN_UNDETECTED_GATE_SKIPS:

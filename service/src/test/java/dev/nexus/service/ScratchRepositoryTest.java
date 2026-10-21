@@ -66,13 +66,11 @@ class ScratchRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // t1 is a separate schema bootstrapServiceRole never touches (it covers
-            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // nexus and nexus_test only); grantT1ScratchTo grants it (nexus-cbo4a).
             // No session search_path is set (Sam's directive, nexus-zrcj7): the
             // production ScratchRepository queries t1.scratch via the generated,
             // schema-qualified jOOQ SCRATCH table.
-            su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            PgContainerHelper.grantT1ScratchTo(su, SVC_ROLE);
         }
 
         svcDs = buildSvcDs();

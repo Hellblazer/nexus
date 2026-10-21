@@ -57,6 +57,23 @@ _SCAN_PROBE = (
     "sys.stdout.write(out)\n"
 )
 
+#: The same probe with ``HttpMemoryStore._get`` (the request layer BELOW ``get``)
+#: wrapped so each ``/v1/memory/get`` request reports the ``timeout`` and
+#: ``retry_read_timeout`` it was handed. Recording below ``get`` makes a ``get`` that
+#: drops or rewrites the timeout visible. The clamp is a property of those
+#: arguments, not of how long a loaded host takes to run the scan around them.
+_SCAN_PROBE_RECORDING_GET = (
+    "import sys\n"
+    "from nexus.db.t2.http_memory_store import HttpMemoryStore\n"
+    "_real_get = HttpMemoryStore._get\n"
+    "def _get(self, path, params=None, **kw):\n"
+    "    if path == '/v1/memory/get':\n"
+    "        sys.stderr.write('\\nGET_CALL timeout=%r retry=%r\\n' % (\n"
+    "            kw.get('timeout'), kw.get('retry_read_timeout', True)))\n"
+    "    return _real_get(self, path, params, **kw)\n"
+    "HttpMemoryStore._get = _get\n"
+) + _SCAN_PROBE
+
 
 # ── Mock engine ──────────────────────────────────────────────────────────────
 
@@ -223,6 +240,7 @@ def _run(
     *,
     config_dir: Path,
     env: dict[str, str] | None = None,
+    probe: str = _SCAN_PROBE,
 ) -> str:
     """Run ``scan(project_name)`` in a child interpreter and return what it
     returned. Isolated from any ambient ``NX_SERVICE_*`` env (the suite's
@@ -233,7 +251,7 @@ def _run(
     full_env["HOME"] = str(config_dir)
     full_env.update(env or {})
     result = subprocess.run(
-        [sys.executable, "-c", _SCAN_PROBE, project_name],
+        [sys.executable, "-c", probe, project_name],
         capture_output=True,
         text=True, encoding=PYTHON_CHILD_ENCODING,
         env=full_env,
@@ -244,11 +262,22 @@ def _run(
         f"scan exit {result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
     _last_scan_seconds[0] = float(re.findall(r"SCAN_SECONDS=([0-9.]+)", result.stderr)[-1])
+    # Raw tokens, not floats: a None or non-numeric timeout must reach the
+    # test as itself and fail it, not drop out of a numeric-only regex.
+    _last_get_calls[:] = re.findall(r"GET_CALL timeout=(\S+) retry=(\S+)", result.stderr)
+    _last_get_call_markers[0] = result.stderr.count("GET_CALL")
     return result.stdout
 
 
 #: How long the last ``_run``'s ``scan()`` took inside the child.
 _last_scan_seconds: list[float] = [0.0]
+
+#: (timeout, retry_read_timeout) as the raw repr tokens the probe wrote, one per
+#: /v1/memory/get request in the last _run that used _SCAN_PROBE_RECORDING_GET, plus
+#: the count of GET_CALL markers on stderr (so a line the regex cannot parse is a
+#: count mismatch, not a silent omission).
+_last_get_calls: list[tuple[str, str]] = []
+_last_get_call_markers: list[int] = [0]
 
 
 def _engine_env(engine: _MockMemoryEngine, **extra: str) -> dict[str, str]:
@@ -320,6 +349,7 @@ def test_empty_t2_is_not_confused_with_unreachable(tmp_path: Path, mock_engine) 
     )
 
 
+@pytest.mark.t2_tenant
 def test_unreachable_arm_warns_when_no_endpoint_resolvable(tmp_path: Path) -> None:
     """Arm 1: no env, a config dir that does not exist yet, no lease (fresh
     install / no supervisor running) -> a VISIBLE warning line, never the
@@ -463,11 +493,13 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
     and the existing per-entry deadline gate then renders the remaining
     entries title-only rather than issuing further calls.
 
-    Measured on this box: fixed code passes comfortably under the 2.2s
-    bound below; the pre-fix code (unclamped timeout, default
-    ``retry_read_timeout=True``) measures ~6.9s for this same scenario
-    -- the mixin's own once-retry-on-ReadTimeout doubles even the
-    UNCLAMPED 3.0s ceiling, not just a clamped one.
+    The test asserts on the ``timeout`` and ``retry_read_timeout`` the
+    ``get`` call RECEIVED, recorded by the probe, not on how long the scan
+    took (nexus-ys8a4 / nexus-frfeh): a wall-clock bound just above the 1.5s
+    budget measured 2.295s on a loaded chas run and 2.313s on Windows, while
+    the clamp itself was working. The unclamped code hands ``get`` the full
+    3.0s ceiling, and the default retry would double the wait; neither
+    depends on host speed.
     """
     now = _now()
     engine = mock_engine(
@@ -489,15 +521,31 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
             NX_T2_SCAN_BUDGET_S="1.5",
             NX_T2_SCAN_TIMEOUT_S="3.0",
         ),
+        probe=_SCAN_PROBE_RECORDING_GET,
     )
     assert time.monotonic() - t0 < 30  # the child as a whole: a hang guard only
-    elapsed = _last_scan_seconds[0]
     assert "entry-0" in out  # the freshest entry's title still renders
-    assert elapsed < 2.2, (
-        f"scan took {elapsed:.2f}s — the get() call was not clamped to "
-        "the remaining scan budget (~1.5s) and instead waited out closer "
-        "to the full 3.0s configured ceiling"
+    # Exactly one request: the 5.0s sleep always outlasts the 1.5s clamp, so the
+    # first snippet attempt spends the whole budget and the per-entry deadline gate
+    # renders the other two entries title-only. A second request means the gate is gone.
+    assert _last_get_call_markers[0] == len(_last_get_calls), (
+        f"{_last_get_call_markers[0]} GET_CALL lines on stderr but {len(_last_get_calls)} "
+        "parsed; a timeout or retry token the probe wrote is malformed"
     )
+    assert len(_last_get_calls) == 1, (
+        f"expected exactly 1 /v1/memory/get request, saw {_last_get_calls}; the scan "
+        "budget is spent after the first attempt, so later entries must render title-only"
+    )
+    ((raw_timeout, raw_retry),) = _last_get_calls
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        pytest.fail(f"the get request carried timeout={raw_timeout}: the clamp was dropped")
+    assert timeout <= 1.5, (
+        f"the get request was handed timeout={timeout}s, not clamped to the remaining "
+        "scan budget (<= 1.5s) but closer to the 3.0s configured ceiling"
+    )
+    assert raw_retry == "False", "a clamped timeout must not be retried (it would double the wait)"
 
 
 # ── Scoped to what is rendered (nexus-fow78) ─────────────────────────────────

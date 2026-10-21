@@ -5,7 +5,11 @@
 # same time (see scripts/lib/build-lease.sh for the mechanism and the
 # incident that motivated it).
 #
-# usage: scripts/mvnw-leased.sh [mvnw args...]
+# usage: scripts/mvnw-leased.sh [--lab-run <class>] [mvnw args...]
+#
+# On a lab pool host (chas, qwent) pass --lab-run <class> rather than
+# wrapping this script in lab-run: the lease is then taken before the pool
+# grant, so a build waiting its turn holds no cores (nexus-iqmih).
 #
 # A live holder is WAITED FOR (nexus-g6xpa): the lease is shared by every
 # worktree of this repo (see scripts/lib/build-lease.sh § LEASE LOCATION),
@@ -13,7 +17,9 @@
 # instead of running beside it. NX_BUILD_LEASE_WAIT=<seconds> bounds the
 # wait (default 3600); 0 restores the old refuse-immediately behaviour.
 # Exits 75 (EX_TEMPFAIL) without running mvnw at all only once that bound
-# is exhausted — the refusal message names the holder.
+# is exhausted — the refusal message names the holder. Inside a lab-run grant
+# (LAB_CPUS set, not GitHub Actions) a held lease refuses at once with 75,
+# whatever NX_BUILD_LEASE_WAIT says (nexus-dfg0q).
 #
 # SIGNAL HANDLING (review finding round 3, nexus-c00dw). A plain
 # `trap '...release...' EXIT` is UNSAFE here. Under `set -m` the
@@ -36,6 +42,11 @@
 #      wait (bounded, 30s) for it to actually exit, escalate to KILL if it
 #      does not, and only then exit — so the now-safe EXIT trap releases
 #      cleanly instead of abandoning a still-running build.
+# Both now live in scripts/lib/leased-build.sh, shared with build-gate-jar.sh
+# (nexus-t6t9f). Behaviour change there: HUP and QUIT are trapped and forwarded
+# like INT and TERM (a closed terminal used to kill the wrapper with the build
+# alive and the lease left held), and the wrapper exits 130 on any of the four
+# (TERM used to end it with 143).
 
 set -euo pipefail
 set -m
@@ -49,65 +60,67 @@ set -m
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=./lib/build-lease.sh disable=SC1091
 source "$repo_root/scripts/lib/build-lease.sh"
+# shellcheck source=./lib/leased-build.sh disable=SC1091
+source "$repo_root/scripts/lib/leased-build.sh"
 
-build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
+# --lab-run <class> (nexus-iqmih): run the build as `lab-run -c <class> --
+# ./mvnw ...` AFTER taking the lease. The other order, `lab-run -- this
+# script`, waits for the lease inside the pool grant: on chas two lab-m
+# grants sat idle behind one lease holder while other requests queued
+# behind them. Waiting here, outside any grant, holds no cores or memory.
+lab_class=""
+if [[ "${1:-}" == "--lab-run" ]]; then
+    leased_build_check_lab_run mvnw-leased.sh "${2:-}"
+    lab_class="$2"
+    shift 2
+fi
 
-# Initialized before any trap is installed, so a trap can always reference
-# it safely under `set -u` even if a signal lands in the brief window
-# before the real build is launched below.
-child_pgid=""
-child_pid=""
-
-# _release_if_safe — the EXIT trap. Never releases while the tracked build
-# is still alive (round-3 fix); an unconditional release here is exactly
-# what let a SIGTERM'd wrapper free the lease out from under a
-# still-running child.
-_release_if_safe() {
-    if [[ -n "$child_pgid" ]] && _build_lease_group_alive "$child_pgid" 2>/dev/null; then
-        echo "mvnw-leased.sh: WARNING — exiting WITHOUT releasing the build lease 'service': the tracked build (process group $child_pgid) is still alive. A future acquire will reclaim it as stale once that process actually exits; it is not being silently held forever, but it is also not released early." >&2
-        return 0
-    fi
-    build_lease_release service
+# Inside a lab-run grant a hand run refuses at once instead of waiting
+# (build_lease_caller_wait, nexus-dfg0q).
+build_lease_acquire_wait service "$(build_lease_caller_wait)" ./mvnw "$@" || {
+    rc=$?
+    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint mvnw-leased.sh "take the lease before the grant: scripts/mvnw-leased.sh --lab-run <class> ... outside lab-run"
+    exit "$rc"
 }
-trap _release_if_safe EXIT
 
-# _forward_signal <sig> — INT/TERM handler: forward to the child's own
-# process group (the wrapper's default signal delivery never reaches it —
-# see header), wait up to 30s for a graceful exit, escalate to KILL, reap
-# it, then exit so the EXIT trap above (now safe — the group is actually
-# dead) releases the lease instead of abandoning it.
-_forward_signal() {
-    local sig="$1"
-    if [[ -z "$child_pgid" ]]; then
-        # No child launched yet — nothing to forward to.
-        exit 130
-    fi
-    echo "mvnw-leased.sh: received $sig — forwarding to the build (process group $child_pgid)..." >&2
-    kill -s "$sig" -- "-$child_pgid" 2>/dev/null || true
-    local waited=0
-    while _build_lease_group_alive "$child_pgid" 2>/dev/null && (( waited < 30 )); do
-        sleep 1
-        waited=$((waited + 1))
+# Test Postgres containers are labelled dev.nexus.test.run=$NX_TEST_RUN_ID
+# (nexus-xynce) so a host can count one build's containers; name this build
+# unless the caller already did.
+export NX_TEST_RUN_ID="${NX_TEST_RUN_ID:-mvnw-$(id -un 2>/dev/null || echo u)-$$-$(date +%s)}"
+
+# Releases only once the build is gone, and forwards INT/TERM to its process
+# group (scripts/lib/leased-build.sh).
+leased_build_init mvnw-leased.sh service
+
+# A gate-jar cache hit or store leaves service/target's jar hard-linked to the
+# cache entry (nexus-k6zxp), and maven-jar-plugin rewrites an existing jar IN
+# PLACE: through the link that would corrupt the entry (and on the read-only
+# entry it fails the build). A goal that reaches the package phase therefore
+# unlinks a shared jar first; a goal that stops short of it (compile, test)
+# leaves the jar, and the cache link, alone. A plugin goal that writes the jar
+# directly counts too (jar:jar, shade:shade, org.apache.maven.plugins:
+# maven-jar-plugin:3.4.1:jar, ...), as does any phase that runs after package.
+# Each argument is split on whitespace first: one quoted argument such as
+# "clean package" reaches mvnw as one word but names the package phase
+# (nexus-8qdpe). `${_words[@]+...}` keeps an empty argument safe under set -u on
+# bash 3.2.
+_unshare_needed=0
+for _arg in "$@"; do
+    read -r -a _words <<< "$_arg"
+    for _word in ${_words[@]+"${_words[@]}"}; do
+        case "$_word" in
+            package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test|\
+            *:jar|*:shade|*jar-plugin*|*shade-plugin*)
+                _unshare_needed=1 ;;
+        esac
     done
-    if _build_lease_group_alive "$child_pgid" 2>/dev/null; then
-        echo "mvnw-leased.sh: build did not exit ${waited}s after $sig — escalating to KILL" >&2
-        kill -9 -- "-$child_pgid" 2>/dev/null || true
-    fi
-    wait "$child_pid" 2>/dev/null || true
-    exit 130
-}
-trap '_forward_signal INT' INT
-trap '_forward_signal TERM' TERM
+done
+if [[ $_unshare_needed -eq 1 ]]; then
+    # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
+    source "$repo_root/scripts/lib/gate-jar-cache.sh"
+    gate_jar_cache_unshare "$repo_root/service/target/nexus-service-1.0-SNAPSHOT.jar"
+fi
 
 cd "$repo_root/service"
-./mvnw "$@" &
-child_pid=$!
-child_pgid="$child_pid"
-build_lease_track_pid service "$child_pgid"
-# `wait` on a specific pid returns that process's own exit status; under
-# `set -e` a nonzero result here still exits this script with the same
-# code (same propagation as the direct foreground call this replaces). By
-# the time `wait` returns NORMALLY (not interrupted by a trap), the child
-# has already exited on its own, so the EXIT trap's liveness check above
-# is safe to release immediately.
-wait "$child_pid"
+# A non-zero exit here exits this script with the same code (set -e).
+leased_build_run "$lab_class" ./mvnw "$@"

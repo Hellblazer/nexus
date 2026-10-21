@@ -22,15 +22,29 @@ conexus already requires uv and Python 3.12+, so the server runs on those.
 Transport: MCP stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. It writes
 nothing to stderr: Claude Code records every stderr line of a stdio server as an
 ``error`` entry in its MCP log, so the upstream startup banner and per-thought
-echo would read as faults there. Like the upstream server, it keeps the thought
-history in process memory for the session's life.
+echo would read as faults there, and so would a traceback: input that is not
+UTF-8, too deeply nested, or too long to parse gets a JSON-RPC error, and a
+client that stops reading ends the server quietly. Like the upstream server, it
+keeps the thought history in process memory for the session's life.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
+
+# The stdio loop is shared with the setup stand-in (conexus/launch/nx_standin.py) and
+# lives beside it, in conexus/launch/: both are started from the plugin directory, so
+# this finds it from this file's own location and not from the working directory or
+# sys.path[0] (an interpreter run with -I or PYTHONSAFEPATH has neither). No .pyc is
+# written into the plugin directory.
+sys.dont_write_bytecode = True
+_LAUNCH_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "launch")
+if _LAUNCH_DIR not in sys.path:
+    sys.path.insert(0, _LAUNCH_DIR)
+import _stdio_loop  # noqa: E402 -- must follow the sys.path insert
 
 SERVER_NAME: str = "sequential-thinking-server"
 SERVER_VERSION: str = "1.0.0"
@@ -170,7 +184,7 @@ def _as_positive_int(name: str, value: Any) -> int:
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}")
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: an int too big for a float
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}") from None
     if not number.is_integer() or number < 1:
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}")
@@ -225,30 +239,22 @@ class SequentialThinking:
         }
 
 
-def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
-
 def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
     """Answer one JSON-RPC message; None for a notification or a response."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-        return _error(None, -32600, "Invalid Request")
+        return _stdio_loop.error(None, -32600, "Invalid Request")
     method = message.get("method")
     if "id" not in message or message.get("id") is None:
         return None  # a notification (initialized, cancelled, ...) or a stray response
     request_id = message["id"]
     if not isinstance(method, str):
-        return None if ("result" in message or "error" in message) else _error(request_id, -32600, "Invalid Request")
+        return None if ("result" in message or "error" in message) else _stdio_loop.error(request_id, -32600, "Invalid Request")
     params = message.get("params") or {}
     match method:
         case "initialize":
             asked = params.get("protocolVersion") if isinstance(params, dict) else None
             version = asked if asked in SUPPORTED_PROTOCOL_VERSIONS else SUPPORTED_PROTOCOL_VERSIONS[0]
-            return _result(
+            return _stdio_loop.result(
                 request_id,
                 {
                     "protocolVersion": version,
@@ -257,19 +263,19 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
                 },
             )
         case "ping":
-            return _result(request_id, {})
+            return _stdio_loop.result(request_id, {})
         case "tools/list":
-            return _result(request_id, {"tools": [TOOL]})
+            return _stdio_loop.result(request_id, {"tools": [TOOL]})
         case "tools/call":
             if not isinstance(params, dict) or params.get("name") != TOOL_NAME:
                 name = params.get("name") if isinstance(params, dict) else None
-                return _error(request_id, -32602, f"Unknown tool: {name!r}")
+                return _stdio_loop.error(request_id, -32602, f"Unknown tool: {name!r}")
             try:
                 payload = state.process(params.get("arguments") or {})
             except InvalidArguments as exc:
                 text = json.dumps({"error": str(exc), "status": "failed"}, indent=2)
-                return _result(request_id, {"content": [{"type": "text", "text": text}], "isError": True})
-            return _result(
+                return _stdio_loop.result(request_id, {"content": [{"type": "text", "text": text}], "isError": True})
+            return _stdio_loop.result(
                 request_id,
                 {
                     "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
@@ -277,35 +283,13 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
                 },
             )
         case _:
-            return _error(request_id, -32601, f"Method not found: {method}")
-
-
-def serve(stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF."""
-    stdin = stdin if stdin is not None else sys.stdin
-    stdout = stdout if stdout is not None else sys.stdout
-    state = SequentialThinking()
-    for line in stdin:
-        if not line.strip():
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            reply: dict[str, Any] | None = _error(None, -32700, "Parse error")
-        else:
-            reply = handle(state, message)
-        if reply is not None:
-            stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
-            stdout.flush()
-    return 0
+            return _stdio_loop.error(request_id, -32601, f"Method not found: {method}")
 
 
 def main() -> int:
-    # Text-mode stdio on Windows would translate "\n" to "\r\n" and decode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines.
-    sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    return serve()
+    state = SequentialThinking()
+    # ``handle`` is looked up at each message, so a test can replace it.
+    return _stdio_loop.serve_stdio(lambda message: handle(state, message))
 
 
 if __name__ == "__main__":

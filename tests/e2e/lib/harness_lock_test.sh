@@ -125,12 +125,9 @@ for name in migration-rehearsal gc-ab sandbox; do
     fi
 
     # ── (3) blocked invocation: real harness, lock held ──────────────────
-    t0=$(date +%s%N)
     # shellcheck disable=SC2086 # $args is a single trusted literal per harness, intentionally unquoted for the (possibly-empty) split
     out="$(cd "$REPO_ROOT" && bash "$script" $args 2>&1)"
     rc=$?
-    t1=$(date +%s%N)
-    elapsed_ms=$(( (t1 - t0) / 1000000 ))
 
     if [[ $rc -ne 0 ]]; then
         ok "$name: blocked invocation exited nonzero ($rc)"
@@ -142,11 +139,11 @@ for name in migration-rehearsal gc-ab sandbox; do
     else
         bad "$name: no lock-failure message in output: $out"
     fi
-    if ((elapsed_ms < 1000)); then
-        ok "$name: blocked invocation resolved in ${elapsed_ms}ms (<1000ms — never ran the harness body)"
-    else
-        bad "$name: blocked invocation took ${elapsed_ms}ms (>=1000ms — looks like real work ran before failing)"
-    fi
+    # No wall-clock bound here (nexus-boz84): "the harness body never ran" is proven by
+    # the nonzero exit above and the output check below ('lock acquired' absent). A
+    # timing bound only adds load sensitivity (1205 ms under 32-way load, well under
+    # 1000 ms alone): any bound either flakes under a concurrent suite or is too loose
+    # to tell anything.
     if [[ "$out" == *"lock acquired"* ]]; then
         bad "$name: 'lock acquired' appeared while the lock was HELD — got past a lock it should not have"
     else

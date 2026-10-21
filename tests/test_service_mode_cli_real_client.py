@@ -57,6 +57,7 @@ def real_client():
 # ── nx store expire (expire, nexus-h8rf6.5) ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_store_expire_service_mode_real_client(runner, real_client, monkeypatch):
     """End-to-end through the real client: one expired chunk found in the
     knowledge collection, deleted, count reported."""
@@ -111,6 +112,7 @@ class TestFixPathsRealClient:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
+    @pytest.mark.t2_tenant
     def test_fix_paths_service_mode_repairs_the_catalog_without_touching_t3(
         self, tmp_path, runner, real_client, monkeypatch,
     ):
@@ -364,6 +366,7 @@ def test_collection_reembed_cross_model_rejected_service_mode(
     assert not any("upsert" in p for p in posted)
 
 
+@pytest.mark.t2_tenant
 def test_collection_reembed_same_model_requests_server_side_re_embed(
     runner, real_client, monkeypatch,
 ):

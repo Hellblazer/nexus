@@ -8,6 +8,7 @@ import org.testcontainers.utility.DockerImageName;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
@@ -52,9 +53,13 @@ import java.util.concurrent.TimeUnit;
  * <p><b>LOAD-BEARING INVARIANT</b> (nexus-soqa8 substantive-critic critique, T2
  * {@code nexus/nexus-soqa8-critique-2026-08-06} [21531]): failing fast on the FIRST
  * classified attempt is safe only because {@link PostgreSQLContainer#waitUntilContainerStarted()}
- * OVERRIDES {@code JdbcDatabaseContainer}'s connect-loop wait entirely, gating on a
- * {@code LogMessageWaitStrategy} ("database system is ready to accept connections",
- * required twice) instead. Postgres's {@code initdb} finalizes the superuser role and
+ * OVERRIDES {@code JdbcDatabaseContainer}'s connect-loop wait entirely, gating on the wait
+ * strategy {@link PgContainerHelper#newContainer} sets instead. With the DDL counter on (the default;
+ * nexus-sz651) that is a {@code pg_isready} probe on TCP, which the init's unix-socket-only temp server
+ * never passes: the server log is a file then and no longer carries the "ready to accept connections"
+ * line on Docker's log, where the earlier {@code LogMessageWaitStrategy} read it. With the counter off
+ * ({@code -Dnexus.ddl.count=false}, nexus-3cwsw) there is no collector, the ready line is on Docker's log
+ * again, and the library's default {@code LogMessageWaitStrategy} stays. Postgres's {@code initdb} finalizes the superuser role and
  * credentials synchronously, before either ready line — so by the time {@code start()}
  * returns and ANY application code makes its first {@code createConnection} call, the
  * server side of the auth handshake is already fixed; a classified failure at attempt 1
@@ -79,7 +84,7 @@ import java.util.concurrent.TimeUnit;
  * to confirm the retry shape (condition, sleep interval, final wrapped exception) has not
  * changed underneath this override.
  */
-final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQLContainer> {
+class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPostgreSQLContainer> {
 
     /** SQLSTATE 28000 — invalid_authorization_specification (e.g. "role ... does not exist"). */
     static final String SQLSTATE_INVALID_AUTHORIZATION_SPECIFICATION = "28000";
@@ -89,6 +94,138 @@ final class FailFastPostgreSQLContainer extends PostgreSQLContainer<FailFastPost
 
     FailFastPostgreSQLContainer(DockerImageName dockerImageName) {
         super(dockerImageName);
+    }
+
+    // nexus-sz651: DDL-per-run counting. The log is read once, at stop() or JVM exit.
+    private volatile boolean ddlShared;
+    private volatile String ddlOwner = "unknown";
+    // False when the counter was switched off (-Dnexus.ddl.count=false) as this container was built:
+    // it then carries none of the counter's settings, so its server log is Docker's log (PgContainerHelper.serverLog).
+    // Whether it is registered is DdlCounts.register's own check of the switch.
+    private volatile boolean ddlCounted = true;
+
+    /** Whether this container was built with the counter's settings (see {@link DdlCounts#enabled()}). */
+    FailFastPostgreSQLContainer ddlCounted(boolean counted) {
+        this.ddlCounted = counted;
+        return this;
+    }
+
+    boolean ddlCounted() {
+        return ddlCounted;
+    }
+
+    /** The wait strategy this container will start with (a test reads it; the field is protected). */
+    org.testcontainers.containers.wait.strategy.WaitStrategy ddlWaitStrategy() {
+        return getWaitStrategy();
+    }
+
+    /** This container is the per-fork shared cluster (its logs split at the template's ready mark). */
+    FailFastPostgreSQLContainer ddlSharedCluster() {
+        this.ddlShared = true;
+        return this;
+    }
+
+    FailFastPostgreSQLContainer ddlOwner(String owner) {
+        this.ddlOwner = owner;
+        return this;
+    }
+
+    boolean ddlShared() {
+        return ddlShared;
+    }
+
+    String ddlOwner() {
+        return ddlOwner;
+    }
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(FailFastPostgreSQLContainer.class);
+
+    private volatile String startFailureLogTail;
+
+    /** The server log's tail captured when the last start's wait failed, or null when none failed (a test reads it). */
+    String startFailureLogTail() {
+        return startFailureLogTail;
+    }
+
+    /** One try, as long as the server log tail's read: a wedged daemon must not hang the failure report (nexus-ccg9y). */
+    static final Duration INSPECT_TIMEOUT = Duration.ofSeconds(15);
+
+    /** Test seam, per thread: a shorter wait for {@link #containerStateForLog}'s inspect. */
+    static final ThreadLocal<Duration> INSPECT_TIMEOUT_OVERRIDE = new ThreadLocal<>();
+
+    /** What the daemon says about a container that failed its wait (nexus-ccg9y). */
+    record ContainerExit(String status, Long exitCode, Boolean oomKilled) { }
+
+    /**
+     * A FRESH inspect, not {@code getContainerInfo()}: that is the response cached when the container was created,
+     * so it still says "running" after the postmaster died and the container exited. A seam for the stub test.
+     */
+    ContainerExit inspectExit() {
+        var state = getDockerClient().inspectContainerCmd(getContainerId()).exec().getState();
+        return state == null ? null : new ContainerExit(state.getStatus(), state.getExitCodeLong(), state.getOOMKilled());
+    }
+
+    /**
+     * The container's state and exit code for the failure line, or why they could not be read. When the postmaster
+     * dies the container exits and the tmpfs server log goes with it, so this is then the only diagnosis the line
+     * carries (nexus-ccg9y). Never throws and waits at most {@link #INSPECT_TIMEOUT}: a daemon that cannot be asked, or
+     * answers too slowly, must not mask or delay the original wait failure.
+     */
+    String containerStateForLog() {
+        try {
+            Duration timeout = INSPECT_TIMEOUT_OVERRIDE.get() != null ? INSPECT_TIMEOUT_OVERRIDE.get() : INSPECT_TIMEOUT;
+            ContainerExit exit = PgContainerHelper.boundedOnce(this::inspectExit, timeout, "docker inspect");
+            if (exit == null) {
+                return "container_state=unknown (inspect returned no state)";
+            }
+            return "container_state=" + exit.status() + " exit_code=" + exit.exitCode() + " oom_killed=" + exit.oomKilled();
+        } catch (RuntimeException e) {
+            return "container_state=unreadable (" + e + ")";
+        }
+    }
+
+    /**
+     * nexus-t4y7b: when the wait fails, print the end of the server log FILE. Testcontainers' failed-start
+     * dump is Docker's log, which with the counter on no longer carries the server's lines after the
+     * collector started. The library retries the start (and calls this again) up to the startup attempts.
+     */
+    @Override
+    protected void waitUntilContainerStarted() {
+        try {
+            super.waitUntilContainerStarted();
+        } catch (RuntimeException e) {
+            reportStartWaitFailure(e);
+            throw e;
+        }
+    }
+
+    /** Logs {@code event=start_wait_failed} with the container state and the server log tail; never throws. */
+    void reportStartWaitFailure(RuntimeException e) {
+        if (!ddlCounted) {
+            return;
+        }
+        String state = containerStateForLog();
+        String tail = PgContainerHelper.serverLogTail(this, PgContainerHelper.START_FAILURE_TAIL_LINES);
+        startFailureLogTail = tail;
+        LOG.error("event=start_wait_failed owner={} error={} {} server_log_tail=\n{}", ddlOwner, e.toString(), state, tail);
+    }
+
+    @Override
+    public void start() {
+        super.start();
+        DdlCounts.register(this);
+    }
+
+    @Override
+    public void stop() {
+        try {
+            DdlCounts.record(this);
+        } catch (RuntimeException e) {
+            // Counting is a diagnostic: whatever it hits, the container still has to stop.
+            System.err.println("nexus-sz651: recording a container's DDL failed: " + e);
+        } finally {
+            super.stop();
+        }
     }
 
     /**

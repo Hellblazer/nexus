@@ -794,19 +794,17 @@ class PgVectorCardinalityRouterIntegrationTest {
     private void createPciIndex(String tenant, String collection) throws Exception {
         String model = registeredModel(tenant, collection);
         assertThat(model).isEqualTo(MODEL_384);
-        String ddl = "CREATE INDEX " + PciCatalog.indexName(model, tenant, collection) + " ON nexus."
-            + leafName(model, tenant) + " USING hnsw (embedding_384 nexus.vector_cosine_ops) WHERE collection = '"
-            + collection + "'";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, ddl);
+            PgContainerHelper.createLeafHnswIndex(su, "nexus", leafName(model, tenant),
+                PciCatalog.indexName(model, tenant, collection), "embedding_384", collection);
         }
     }
 
     private void dropPciIndex(String tenant, String collection) throws Exception {
         String model = registeredModel(tenant, collection);
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su,
-                "DROP INDEX IF EXISTS nexus." + PciCatalog.indexName(model, tenant, collection));
+            PgContainerHelper.dropIndexIfExists(su,
+                DSL.name("nexus", PciCatalog.indexName(model, tenant, collection)));
         }
     }
 

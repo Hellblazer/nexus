@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -84,13 +85,11 @@ class ScratchHandlerTest {
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), OTHER_TOKEN, OTHER_TENANT, "test-bound-other");
             // t1 is a separate schema bootstrapServiceRole never touches (it covers
-            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // nexus and nexus_test only); grantT1ScratchTo grants it (nexus-cbo4a).
             // No session search_path is set (Sam's directive, nexus-zrcj7): the
             // production ScratchRepository queries t1.scratch via the generated,
             // schema-qualified jOOQ SCRATCH table.
-            su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            PgContainerHelper.grantT1ScratchTo(su, SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -446,14 +445,13 @@ class ScratchHandlerTest {
     private void seedMintedSession(String rawSessionToken, String sessionId) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-                + "VALUES (?, ?, ?, now() + interval '1 hour') ON CONFLICT (session_token_hash) DO NOTHING")) {
-                ps.setString(1, dev.nexus.service.db.TokenHashing.sha256Hex(rawSessionToken));
-                ps.setString(2, TENANT);
-                ps.setString(3, sessionId);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(SESSION_TOKENS)
+                .set(SESSION_TOKENS.SESSION_TOKEN_HASH, dev.nexus.service.db.TokenHashing.sha256Hex(rawSessionToken))
+                .set(SESSION_TOKENS.TENANT_ID, TENANT)
+                .set(SESSION_TOKENS.SESSION_ID, sessionId)
+                .set(SESSION_TOKENS.EXPIRES_AT, java.time.OffsetDateTime.now().plusHours(1))
+                .onConflict(SESSION_TOKENS.SESSION_TOKEN_HASH).doNothing()
+                .execute();
         }
     }
 

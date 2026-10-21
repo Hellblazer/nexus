@@ -74,24 +74,29 @@ public final class PciIndexSweep implements PciIndexSet {
      * @param everRead            whether any read has succeeded since boot
      * @param valid               parsed indexes with {@code indisvalid} true
      * @param invalid             parsed indexes with {@code indisvalid} false
-     * @param unparsed            {@code pci_} indexes that failed any part of the parsed rule
+     * @param unparsed            {@code pci_} indexes that failed any part of the parsed rule, EXCLUDING
+     *                            {@code reindexLeftover} (an index is counted once)
+     * @param reindexLeftover     invalid REINDEX CONCURRENTLY leftovers the reconciler drops (nexus-rn1yd)
      * @param lastReadAt          when the last successful read finished, or {@code null}
      * @param lastFailureAt       when the last failed read finished, or {@code null}
      * @param consecutiveFailures failed reads since the last successful one; 0 after a success
      * @param expired             true when the set is older than {@code 3 * period + readBound} and so is answering
      *                            as empty; the counts above are still the last read's
      */
-    public record Status(boolean everRead, int valid, int invalid, int unparsed, Instant lastReadAt,
-                         Instant lastFailureAt, int consecutiveFailures, boolean expired) {
-        static final Status NEVER = new Status(false, 0, 0, 0, null, null, 0, false);
+    public record Status(boolean everRead, int valid, int invalid, int unparsed,
+                         int reindexLeftover, Instant lastReadAt, Instant lastFailureAt, int consecutiveFailures,
+                         boolean expired) {
+        static final Status NEVER = new Status(false, 0, 0, 0, 0, null, null, 0, false);
 
         Status failedAt(Instant when) {
-            return new Status(everRead, valid, invalid, unparsed, lastReadAt, when, consecutiveFailures + 1, expired);
+            return new Status(everRead, valid, invalid, unparsed, reindexLeftover, lastReadAt, when,
+                consecutiveFailures + 1, expired);
         }
 
         Status withExpired(boolean now) {
             return now == expired ? this
-                : new Status(everRead, valid, invalid, unparsed, lastReadAt, lastFailureAt, consecutiveFailures, now);
+                : new Status(everRead, valid, invalid, unparsed, reindexLeftover, lastReadAt, lastFailureAt,
+                    consecutiveFailures, now);
         }
     }
 
@@ -280,7 +285,8 @@ public final class PciIndexSweep implements PciIndexSet {
             State previous = state.get();
             Instant now = clock.instant();
             Status status = new Status(true, snapshot.validCount(), snapshot.invalidCount(),
-                snapshot.unparsedCount(), now, previous.status().lastFailureAt(), 0, false);
+                snapshot.unparsedCount(), snapshot.reindexLeftoverCount(), now, previous.status().lastFailureAt(), 0,
+                false);
             // A key listed by the read before this one, which had not expired, keeps its date; any other is new now.
             boolean continuous = !expired(previous);
             Map<PciCatalog.Key, Instant> since = new HashMap<>();
@@ -294,15 +300,16 @@ public final class PciIndexSweep implements PciIndexSet {
             if (status.unparsed() > 0 && status.valid() == 0) {
                 // Indexes named pci_ exist and none parsed: a deparse change after a PostgreSQL upgrade looks
                 // exactly like this, and routes every collection as if it had no index.
-                log.warn("event=pci_sweep valid={} invalid={} unparsed={} warning=unparsed_indexes_and_no_valid_one",
-                    status.valid(), status.invalid(), status.unparsed());
+                log.warn("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={} "
+                    + "warning=unparsed_indexes_and_no_valid_one",
+                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
             } else {
-                log.info("event=pci_sweep valid={} invalid={} unparsed={}",
-                    status.valid(), status.invalid(), status.unparsed());
+                log.info("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={}",
+                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
             }
             if (previous.expiryLogged().get()) {
-                log.info("event=pci_sweep_set_recovered valid={} invalid={} unparsed={}",
-                    status.valid(), status.invalid(), status.unparsed());
+                log.info("event=pci_sweep_set_recovered valid={} invalid={} unparsed={} reindex_leftover={}",
+                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
             }
             return true;
         } finally {

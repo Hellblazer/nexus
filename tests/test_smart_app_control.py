@@ -18,6 +18,7 @@ import pytest
 from nexus import _smart_app_control as sac
 from nexus import health
 from nexus.db import pg_provision
+from tests._module_seam import setattr_in
 from nexus.db.pg_provision import (
     PgSmartAppControlError,
     provision,
@@ -63,9 +64,65 @@ def test_the_remedy_names_the_install_guide_section() -> None:
 # ── The provisioning guard ────────────────────────────────────────────────────
 
 
-def test_refuse_raises_when_smart_app_control_is_on() -> None:
+def test_refuse_raises_when_smart_app_control_is_on_and_blocks() -> None:
     with pytest.raises(PgSmartAppControlError):
-        refuse_smart_app_control(read_state=lambda: sac.ON)
+        refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: True)
+
+
+def test_refuse_raises_when_on_and_the_probe_is_inconclusive() -> None:
+    # The registry says on; a probe that could not run proves nothing against it.
+    with pytest.raises(PgSmartAppControlError):
+        refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: None)
+
+
+def test_refuse_is_silent_when_on_but_an_unsigned_binary_runs() -> None:
+    # nexus-vv068: the registry said on while Windows blocked nothing (restored
+    # guests, T2 nexus_rdr/224-sac-on-baseline-control-2026-10-17).
+    refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: False)
+
+
+def test_probe_is_not_run_for_any_other_state() -> None:
+    def _must_not_probe() -> bool:
+        raise _Tripwire
+
+    for state in (sac.OFF, sac.EVALUATION, sac.UNKNOWN, sac.ABSENT, sac.NOT_WINDOWS):
+        refuse_smart_app_control(read_state=lambda s=state: s, probe=_must_not_probe)
+
+
+# ── The enforcement probe ─────────────────────────────────────────────────────
+
+
+def test_probe_is_not_windows_off_windows_and_never_launches() -> None:
+    def _must_not_launch() -> None:
+        raise _Tripwire
+
+    assert sac.execution_blocked(platform="darwin", launch=_must_not_launch) is None
+
+
+def _os_error_with_winerror(code: int) -> OSError:
+    # OSError ignores its winerror argument off Windows; set the attribute so
+    # the Windows branch runs on any host.
+    exc = OSError(0, "blocked")
+    exc.winerror = code  # type: ignore[attr-defined]
+    return exc
+
+
+def test_probe_reports_blocked_on_winerror_4551() -> None:
+    def _launch() -> None:
+        raise _os_error_with_winerror(4551)
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is True
+
+
+def test_probe_reports_not_blocked_when_the_binary_runs() -> None:
+    assert sac.execution_blocked(platform="win32", launch=lambda: None) is False
+
+
+def test_probe_is_inconclusive_on_any_other_failure() -> None:
+    def _launch() -> None:
+        raise _os_error_with_winerror(5)
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is None
 
 
 @pytest.mark.parametrize(
@@ -80,6 +137,7 @@ def test_provision_refuses_before_touching_the_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(pg_provision, "smart_app_control_state", lambda: sac.ON)
+    monkeypatch.setattr(pg_provision, "_sac_execution_blocked", lambda: True)
     monkeypatch.setattr(
         pg_provision, "bootstrap_superuser", lambda: (_ for _ in ()).throw(_Tripwire())
     )
@@ -96,6 +154,7 @@ def test_init_refuses_before_the_bundle_download(
     from nexus.commands import init as init_cmd
 
     monkeypatch.setattr(pg_provision, "smart_app_control_state", lambda: sac.ON)
+    monkeypatch.setattr(pg_provision, "_sac_execution_blocked", lambda: True)
     monkeypatch.setattr(
         init_cmd, "_select_bundled_pg", lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire())
     )
@@ -139,3 +198,104 @@ def test_doctor_row_warns_for_evaluation_and_unknown(state: str) -> None:
 def test_doctor_row_passes_when_off() -> None:
     (row,) = health._check_smart_app_control(state=sac.OFF, local=True)
     assert row.ok
+
+
+def test_default_launcher_copies_runs_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The real launcher body, on any host: a stub "interpreter" is copied,
+    # appended to, spawned, and its temp directory is gone afterwards.
+    import tempfile
+
+    stub = tmp_path / "python-stub"
+    stub.write_bytes(b"MZ-stub")
+    seen: list[tuple[str, bytes]] = []
+
+    def _fake_run(argv: list[str], **_kw: object) -> None:
+        seen.append((argv[0], Path(argv[0]).read_bytes()))
+
+    setattr_in(monkeypatch, sac, "sys.executable", str(stub))
+    monkeypatch.setattr(sac, "run_bounded", _fake_run)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert sac.execution_blocked(platform="win32") is False
+    ((path, data),) = seen
+    assert data.startswith(b"MZ-stub") and len(data) == len(b"MZ-stub") + 8
+    assert not Path(path).exists()
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), TimeoutError("30s")])
+def test_probe_is_inconclusive_on_a_crash_or_timeout(exc: Exception) -> None:
+    # The dangerous direction: a crash must never count as "the binary ran".
+    def _launch() -> None:
+        raise exc
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is None
+
+
+# ── The backstop: a blocked spawn carries the remedy (nexus-cntvz) ────────────
+
+
+def test_a_blocked_pg_spawn_raises_the_remedy_not_a_raw_winerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The probe can say "ran" while Windows blocks the real bundle (signed
+    # interpreter, unobserved True branch). The first bundle binary then fails
+    # with WinError 4551 after the download; that must name the cause.
+    def _blocked(*_a: object, **_k: object) -> None:
+        raise _os_error_with_winerror(4551)
+
+    monkeypatch.setattr(pg_provision, "run_bounded", _blocked)
+    monkeypatch.setattr(pg_provision, "refuse_root", lambda: None)
+    with pytest.raises(PgSmartAppControlError) as exc:
+        pg_provision._run(["initdb.exe", "--version"], timeout=5)
+    assert "Smart App Control" in str(exc.value)
+
+
+def test_another_spawn_failure_is_not_taken_for_smart_app_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(*_a: object, **_k: object) -> None:
+        raise _os_error_with_winerror(2)
+
+    monkeypatch.setattr(pg_provision, "run_bounded", _missing)
+    monkeypatch.setattr(pg_provision, "refuse_root", lambda: None)
+    with pytest.raises(OSError) as exc:
+        pg_provision._run(["initdb.exe", "--version"], timeout=5)
+    assert not isinstance(exc.value, PgSmartAppControlError)
+
+
+# ── The doctor row probes the real bundle binary (nexus-gdqca) ────────────────
+
+
+def test_bundle_binary_probe_reports_blocked_ran_and_inconclusive() -> None:
+    def _blocked() -> None:
+        raise _os_error_with_winerror(4551)
+
+    def _other() -> None:
+        raise _os_error_with_winerror(5)
+
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=_blocked) is True
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=lambda: None) is False
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=_other) is None
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="darwin", launch=_blocked) is None
+
+
+def test_doctor_row_is_a_warning_when_on_but_nothing_is_blocked() -> None:
+    (row,) = health._check_smart_app_control(state=sac.ON, local=True, blocked=False)
+    assert (row.ok, row.warn, row.fatal) == (False, True, False)
+    assert "blocks" not in row.detail.split(":")[0]
+    assert "nothing" in row.detail
+
+
+@pytest.mark.parametrize("blocked", [True, None])
+def test_doctor_row_stays_fatal_when_blocked_or_unprobed(blocked: bool | None) -> None:
+    (row,) = health._check_smart_app_control(state=sac.ON, local=True, blocked=blocked)
+    assert (row.ok, row.warn, row.fatal) == (False, False, True)
+
+
+def test_doctor_does_not_probe_unless_on_and_local() -> None:
+    def _must_not_probe() -> bool:
+        raise _Tripwire
+
+    for state, local in [(sac.OFF, True), (sac.EVALUATION, True), (sac.ON, False)]:
+        health._check_smart_app_control(state=state, local=local, probe=_must_not_probe)

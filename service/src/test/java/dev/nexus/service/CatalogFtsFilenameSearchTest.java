@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -241,8 +242,8 @@ class CatalogFtsFilenameSearchTest {
             // under-estimates the bulk-loaded table to rows=1 (default-selectivity
             // guesswork, no ANALYZE ever run).
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
-            su.createStatement().execute("SET enable_seqscan = off");
-            su.createStatement().execute("SET enable_indexscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
+            PgContainerHelper.setPlannerGuc(su, "enable_indexscan", "off", false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Same idiom CatalogRepository#searchDocuments uses: fts_vector's
             // tsvector type has no jOOQ-recognized mapping, so codegen types the
@@ -253,12 +254,11 @@ class CatalogFtsFilenameSearchTest {
                 Routines.catalogFtsMatch(
                     CATALOG_DOCUMENTS.field("fts_vector").coerce(Object.class),
                     DSL.val(RARE_TERM), DSL.val(false)));
-            return ctx.explain(ctx.select(CATALOG_DOCUMENTS.TUMBLER)
-                    .from(CATALOG_DOCUMENTS)
-                    .where(ftsMatch)
-                    .orderBy(CATALOG_DOCUMENTS.TUMBLER)
-                    .limit(50))
-                .plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.select(CATALOG_DOCUMENTS.TUMBLER)
+                .from(CATALOG_DOCUMENTS)
+                .where(ftsMatch)
+                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                .limit(50));
         }
     }
 
@@ -322,13 +322,17 @@ class CatalogFtsFilenameSearchTest {
             // (tenant_id, name) — stub-register the collection first, mirroring
             // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024) VALUES ("
-                + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COLLECTION + "'), 'stub', "
-                + "('[" + "0.1,".repeat(1023) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

@@ -290,6 +290,7 @@ def mcp_wired(monkeypatch):
     mcp_infra.reset_search_telemetry_sink()
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("tool", ["search", "query"])
 def test_mcp_tool_writes_telemetry_through_the_sink(mcp_wired, tool) -> None:
     if tool == "search":
@@ -305,6 +306,7 @@ def test_mcp_tool_writes_telemetry_through_the_sink(mcp_wired, tool) -> None:
     assert mcp_wired.writer_threads == ["nexus-search-telemetry"]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("tool", ["search", "query"])
 def test_mcp_tool_honours_the_search_telemetry_opt_out(mcp_wired, tool) -> None:
     mcp_wired.cfg["telemetry"]["search_enabled"] = False

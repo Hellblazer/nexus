@@ -108,6 +108,7 @@ import pytest
 from nexus.daemon.service_registry import service_identity
 
 from nexus.daemon.service_registry import ServiceRegistry
+from tests._epipe_server import skip_on_windows
 from tests._module_seam import module_time
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
@@ -1027,7 +1028,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
     with an inline ``chunks=`` field) was the HEADLINE failure mode of the
     duplicate-re-embed production incident -- 77 of 101 edge timeouts -- so
     it gets the SAME 504 floor as ``http_vector_client._request``'s
-    ``/v1/vectors/upsert-chunks``/``/store-put`` routes, via the shared
+    ``/v1/vectors/upsert-chunks`` route, via the shared
     :mod:`nexus.db.gateway_backoff`. Mirrors
     ``tests/db/test_http_vector_client.py::TestEmbedWrite504BackoffFloor``.
 
@@ -1397,6 +1398,7 @@ class TestLeaseGapReresolveRetry:
         # error propagate — reaching this point proves it was never called.
 
 
+@pytest.mark.t2_tenant
 class TestConstructionTimeEvidenceGate:
     """nexus-7dsgp (critic round 1 CRITICAL): T2Database is built FRESH per
     call (``mcp_infra.t2_ctx()``) — a construction landing in the
@@ -3040,3 +3042,41 @@ class TestRemintSingleFlightCrossSurface:
         finally:
             _ALWAYS_401 = False
             self._reset_manager()
+
+
+class TestBrokenPipeNeverLeavesHttpx:
+    """nexus-40fjk: a write after the restarting service's RST fails with EPIPE. httpx never lets it
+    out as a ``BrokenPipeError``: httpcore wraps the failed write as ``WriteError``, swallows that
+    one while writing request headers (a server may answer before it has read the request), then
+    reads, and the reset connection surfaces as ``RemoteProtocolError`` or ``ReadError``. All of
+    those are already in the T2/catalog client's retry set, so ``_request`` needs no
+    ``BrokenPipeError`` entry. Over a real socket, with the EPIPE ordered by
+    ``tests/_epipe_server.py``."""
+
+    @skip_on_windows
+    def test_an_epipe_reaches_the_client_as_a_retryable_httpx_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import httpcore._backends.sync as sync_backend
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+        from tests._epipe_server import order_rst_before_the_first_write_httpx, resetting_server
+
+        writes: list[type[BaseException]] = []
+        real_write = sync_backend.SyncStream.write
+
+        def spy(self: object, buffer: bytes, timeout: float | None = None) -> None:
+            try:
+                real_write(self, buffer, timeout)  # type: ignore[arg-type]
+            except Exception as exc:
+                writes.append(type(exc.__cause__ or exc))
+                raise
+
+        monkeypatch.setattr(sync_backend.SyncStream, "write", spy)
+        with resetting_server() as server:
+            order_rst_before_the_first_write_httpx(monkeypatch, server)
+            with httpx.Client() as client, pytest.raises(httpx.TransportError) as caught:
+                client.get(f"{server.base_url}/v1/x")
+        # Non-vacuity: the write really failed with EPIPE, and still no bare OSError came out.
+        assert writes == [BrokenPipeError], writes
+        assert not isinstance(caught.value, OSError)
+        assert isinstance(caught.value, (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError)), caught.value
+        assert _is_retryable_endpoint_error(caught.value)

@@ -26,6 +26,8 @@ import pytest
 from nexus.catalog import orphan_backfill as ob
 from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _hx(label: str) -> str:
     """Deterministic full-64-hex chash for a test label."""

@@ -39,8 +39,31 @@ passed 3/3 and showed the answers, so no grader defect was found. One
 caveat on that run: inside docker, Claude Code's Bash sandbox could start
 bubblewrap but not apply its seccomp filter, so every shell command
 failed and the model worked by reading files. Read the run as a
-shell-less baseline; a run on a host with a working sandbox (or a
-container allowed to apply seccomp) is still owed.
+shell-less baseline. A second run on 2026-10-17 in a `--privileged`
+container scored 14/16 (0.953) and was shell-less too: its kept traces
+show every Bash call failing with `apply-seccomp: write
+/proc/self/setgroups (nested userns is capability-restricted; caller
+must provide CAP_SYS_ADMIN)`. Claude Code's seccomp step creates a user
+namespace inside bubblewrap's, and chas (Ubuntu 26.04) sets
+`kernel.apparmor_restrict_unprivileged_userns = 1`, which refuses the
+nested namespace to every process in the container, root included
+(probe: `bwrap --unshare-user ... bwrap --unshare-user ... /bin/true`
+fails, a single level succeeds). No container flag fixes that; a run
+with a shell needs that sysctl relaxed on the host, or a host whose
+sandbox is not bubblewrap (macOS).
+
+On macOS (hellmini, 2026-10-17, `tests/e2e/prefix-capture/ab/skillroute/pe_mac.sh`,
+nexus-fi1qg) the shell works: two full runs scored 15/16 (0.990) and
+14/16 (0.976), with 92 and 105 Bash calls succeeding and no sandbox
+errors. git does not: inside Claude Code's macOS sandbox a bare `git`
+resolves to the `/usr/bin/git` shim even with Homebrew first on `PATH`
+(a probe printed `command -v git` = `/usr/bin/git`), and the shim fails
+there ("Failed to locate 'git'"; `xcrun -f git` cannot find it;
+`DEVELOPER_DIR` does not reach the sandbox). Calling
+`/Library/Developer/CommandLineTools/usr/bin/git` or
+`/opt/homebrew/bin/git` by full path works, and the models that needed
+history fell back to that or to reading files. Read these as runs with a
+shell but without git; accepted as the baseline (Sam, 2026-10-17).
 
 ## Layout
 
@@ -75,7 +98,7 @@ conexus/evals/
 | p13-continuation-handoff | `continuation` loads before a `/clear` | tool_used |
 | p14-phase-review-gate | `phase-review-gate` loads at a phase boundary | tool_used |
 | a01-review-gate-dispatch | the quality gate dispatches `code-review-expert` and `substantive-critic`, with "Ship when" in the brief | tool_used ×3 |
-| o01-voyage-retry-wrapper | `src/embed.py` gains a bounded retry on HTTP errors; only transient failures retried | regex ×2 (file), llm (file) |
+| o01-voyage-retry-wrapper | the Voyage call gains a bounded retry on HTTP errors, in `src/embed.py` or a helper module; only transient failures retried | regex ×2 (trace, anchored to a Write/Edit input to a non-test file), llm (file) |
 | o02-review-branch-before-pr | the review names the three planted defects: logged API key, `os.system` injection, world-writable cache | regex ×3, llm |
 | o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
@@ -84,6 +107,21 @@ conexus/evals/
 | n02-query-absorption-single-fact | `nx_answer` not called for a one-symbol lookup | tool_used `0..0` |
 | n04-test-authoring-absorption-figurative-test | test-validator agent silent | tool_used `0..0` |
 | n05-debugging-absorption-detective-novels | debugger agent silent | tool_used `0..0` |
+
+o01's regexes read the trace, so a retry counts in whichever non-test file the
+model writes it to (nexus-pztjj). Its judge reads only the final `src/embed.py`:
+`focus: trace` gives the judge the first and last messages of a run, and the live
+run's middle, retry edit included, was elided. A retry body in a helper module
+is therefore token-checked, never judged for the transient-only rule. That is
+an accepted limit (nexus-ejdlu, closed on Sam's call): a probe on chas with
+Claude Code 2.1.300 showed no grader source reaches a new file's contents.
+The judge's `focus: files` receives only the new paths, `{source: file}`
+takes one exact path and refuses a glob, and `focus: trace` keeps the first
+and last 12 messages. In the 6 live o01 runs the model never wrote a helper.
+The regexes grade what the model attempted, not the file it ended with: a
+Write or Edit that failed, or a retry a later edit removed, still counts, and
+a write made through Bash is not seen. `files` targets carry paths only, so
+the trace is the only grader source that spans several files.
 
 ### The grading rule (nexus-dg7i6.7, 2026-10-17)
 
@@ -191,6 +229,12 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   --max-cost-usd 100 --json report.json <path-to-conexus-plugin>
 ```
 
+- **Opt the run out of the install ping.** `claude plugin eval` hands a
+  plugin MCP server only the env its `.mcp.json` names, and every run gets
+  a fresh HOME, so each run of an installed `nx` counts as a new install.
+  Add `"env": {"NX_NO_TELEMETRY": "1"}` to each server in the copy you
+  evaluate, as `pe_in_container.sh` does (nexus-ca5rw); exporting the
+  variable in your shell does not reach the server.
 - **Tool grants are part of the measurement.** Without `--allow-tools`
   the runner removes Bash, Write and Edit, so o01 cannot edit its file
   and o02/o04 cannot read git or run the tests. Without `--mocks off` the
@@ -202,7 +246,10 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   needs `--security-opt seccomp=unconfined --security-opt
   apparmor=unconfined --security-opt systempaths=unconfined`:
   `tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh` runs it that way
-  on chas.
+  on chas. Those flags let the sandbox start but not run commands on a
+  host that restricts unprivileged user namespaces (see the run notes
+  above); check a trace for `apply-seccomp` errors before reading a
+  score as a run with a shell.
 - **`--no-publish`** keeps the HTML report local; the default publishes
   it to claude.ai.
 - **Case filters match the `name:` field**, not the directory

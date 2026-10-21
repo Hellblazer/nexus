@@ -234,6 +234,7 @@ class TestNonIdempotent401Remint:
 
 
 class TestConstructionEvidenceGate:
+    @pytest.mark.t2_tenant
     def test_cold_process_fails_fast_no_wait(self, monkeypatch) -> None:
         calls: list = []
 
@@ -247,6 +248,7 @@ class TestConstructionEvidenceGate:
             se.resolve_service_endpoint_with_evidence_gate()
         assert calls == [{}], "cold process must fail fast — exactly one no-budget attempt"
 
+    @pytest.mark.t2_tenant
     def test_prior_evidence_retries_with_budget(self, monkeypatch) -> None:
         calls: list = []
 

@@ -45,9 +45,14 @@ and A3, nexus-0r1uz):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 2 (`subagent_git_write`, `credential_print_guard`) | 0 | 2 |
+| nx | 3 (`subagent_git_write`, `credential_print_guard`, `subagent_git_integrity_check`) | 0 | 3 |
 | sn | 0 | 0 | 0 |
-| **Aggregate** | | | **2** |
+| **Aggregate** | | | **3** |
+
+`subagent_git_integrity_check` (nexus-i93tz) is registered for three events on
+the Bash matcher (PreToolUse, PostToolUse, PostToolUseFailure). A Bash call
+fires PostToolUse or PostToolUseFailure, never both, so the per-call count the
+registration-surface lint holds to the cap is 2 + 1 + 1 = 4: at the cap.
 
 The cap is 4. Adding a fifth routing rule in any plugin requires either
 consolidation or a budget revision in a successor RDR. The

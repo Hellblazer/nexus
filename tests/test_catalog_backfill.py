@@ -98,6 +98,7 @@ def _mock_t3(collections: list[dict] | None = None) -> MagicMock:
     return mock
 
 
+@pytest.mark.t2_tenant
 class TestBackfillRepos:
     def test_backfill_creates_owner_and_docs(self, catalog_env, tmp_path):
         from nexus.commands.catalog import _backfill_repos
@@ -137,6 +138,7 @@ class TestBackfillRepos:
         assert rows[0] == 1
 
 
+@pytest.mark.t2_tenant
 class TestBackfillKnowledge:
     def test_backfill_knowledge(self, catalog_env):
         from nexus.commands.catalog import _backfill_knowledge
@@ -194,6 +196,7 @@ class TestBackfillCommand:
         assert result.exit_code == 0
         assert "dry-run" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     @patch("nexus.commands.catalog._make_t3")
     @patch("nexus.commands.catalog._make_registry")
     def test_backfill_cli(self, mock_reg_fn, mock_t3_fn, catalog_env, tmp_path):
@@ -277,6 +280,7 @@ class TestBackfillFromT3:
         mock_t3.get_collection.return_value = mock_col
         return mock_t3
 
+    @pytest.mark.t2_tenant
     def test_per_file_recovery_registers_unique_source_paths(
         self, catalog_env, tmp_path,
     ):
@@ -316,6 +320,7 @@ class TestBackfillFromT3:
         assert "src/b.py" in paths
         assert "src/c.py" in paths
 
+    @pytest.mark.t2_tenant
     def test_per_file_recovery_idempotent(self, catalog_env, tmp_path):
         """Re-running per-file recovery does not duplicate rows
         (cat.register is idempotent on file_path within owner)."""
@@ -344,6 +349,7 @@ class TestBackfillFromT3:
         assert first == 2
         assert second == 0  # already registered
 
+    @pytest.mark.t2_tenant
     def test_per_file_recovery_dry_run_writes_nothing(
         self, catalog_env, tmp_path,
     ):
@@ -374,6 +380,7 @@ class TestBackfillFromT3:
         ]
         assert written == []
 
+    @pytest.mark.t2_tenant
     def test_per_file_recovery_rejects_non_repo_collection(
         self, catalog_env,
     ):
@@ -431,6 +438,7 @@ class TestBackfillFromT3CLI:
         out = result.output.lower()
         assert "--collection" in out or "--all-repo-collections" in out
 
+    @pytest.mark.t2_tenant
     @patch("nexus.commands.catalog._make_t3")
     @patch("nexus.commands.catalog._make_registry")
     def test_from_t3_with_collection_runs_recovery(
@@ -524,6 +532,7 @@ class TestBackfillFromT3CLI:
         assert called_with == ["code__myrepo-cafebabe", "docs__myrepo-deadbeef"]
 
 
+@pytest.mark.t2_tenant
 class TestBackfillRdrsRepoOwner:
     """nexus-3e4s critique-followup S1.
 
@@ -748,6 +757,7 @@ class TestBackfillRdrsRepoOwner:
         )
 
 
+@pytest.mark.t2_tenant
 class TestLocalRegisterManyParity:
     """nexus-9dvqy: local Catalog.register_many is a faithful loop over
     register() — same tumblers, same idempotency, aligned 1:1 with docs."""

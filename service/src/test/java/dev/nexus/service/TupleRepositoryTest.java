@@ -1974,7 +1974,8 @@ class TupleRepositoryTest {
         repo.out(TENANT_A, subspace, Map.of("owner", "o", "kind", "open"), Map.of(), null, null, null);
 
         TupleRepository.setTestOnlySubspaceListPreQueryHook(
-                ctx -> ctx.resultQuery("SELECT pg_sleep(2)").fetch());
+                ctx -> ctx.select(org.jooq.impl.DSL.function("pg_sleep", Object.class,
+                        org.jooq.impl.DSL.val(2))).fetch());
         try {
             assertThatThrownBy(() -> shortTimeoutRepo.subspaceListPage(TENANT_A, subspace, null, null))
                     .isInstanceOf(CensusTimeoutException.class)
@@ -2223,14 +2224,9 @@ class TupleRepositoryTest {
         String poisonHex = java.util.HexFormat.of().formatHex(poisonId);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                    "CREATE OR REPLACE FUNCTION nexus_test_poison_tuple_row() RETURNS trigger AS $$ "
-                    + "BEGIN IF OLD.id = decode('" + poisonHex + "', 'hex') THEN "
-                    + "RAISE EXCEPTION 'nexus_test_poison_row: forced failure for row %', OLD.id; "
-                    + "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql");
-            su.createStatement().execute(
-                    "CREATE TRIGGER nexus_test_poison_tuple_row_trigger BEFORE UPDATE ON nexus.tuples "
-                    + "FOR EACH ROW EXECUTE FUNCTION nexus_test_poison_tuple_row()");
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                    "db/changelog-test/db.changelog-test-poison-tuple-row-install.xml",
+                    "databasechangelog_test_poison_tuple_row_install", Map.of("poisonHex", poisonHex));
         }
 
         try {
@@ -2257,7 +2253,9 @@ class TupleRepositoryTest {
             // (attempts never advanced above).
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("DROP TRIGGER nexus_test_poison_tuple_row_trigger ON nexus.tuples");
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                        "db/changelog-test/db.changelog-test-poison-tuple-row-drop-trigger.xml",
+                        "databasechangelog_test_poison_tuple_row_drop_trigger", Map.of());
             }
             var secondResult = repo.releaseLapsedClaimsBatch(tenant, 300, null);
             assertThat(secondResult.scanned()).isEqualTo(1);
@@ -2266,9 +2264,12 @@ class TupleRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                        "DROP TRIGGER IF EXISTS nexus_test_poison_tuple_row_trigger ON nexus.tuples");
-                su.createStatement().execute("DROP FUNCTION IF EXISTS nexus_test_poison_tuple_row()");
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                        "db/changelog-test/db.changelog-test-poison-tuple-row-drop-trigger.xml",
+                        "databasechangelog_test_poison_tuple_row_drop_trigger", Map.of());
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                        "db/changelog-test/db.changelog-test-poison-tuple-row-drop-function.xml",
+                        "databasechangelog_test_poison_tuple_row_drop_function", Map.of());
             }
         }
     }

@@ -632,3 +632,59 @@ def test_a_deferred_trailing_sweep_chain_parks_the_document_after_its_last_sweep
     assert res.landed == ["1.1.1"] and res.finished == []
     assert w.complete_documents(res.landed).finished == ["1.1.1"]
     assert cat.calls[-1][1]["complete"] == {"1.1.1": (_H, 2)}
+
+
+# ── nexus-8hhbk: the completion stamp carries each document's own content hash ──
+
+
+def test_the_completion_stamp_carries_each_documents_own_hash_and_defaults_to_the_files():
+    """An imported bundle's documents were all stamped the bundle's sha256, so the same-as linker
+    (keyed on index_content_hash) joined every pdf of one bundle. A document registered with its own
+    hash is stamped with it on every completion path; one registered without keeps the file's."""
+    cat = FakeCat()
+    w = _writer(cat)
+    w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="own-1")
+    w.register_document("1.1.2", total_rows=2, max_position=1, completion_hash="own-2")
+    _doc(w, "1.1.3", 1)
+    a, b1, b2, c = _c(1), _c(2), _c(3), _c(4)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, a)), "1.1.2": _rows(w, "1.1.2", (0, b1)),
+                  "1.1.3": _rows(w, "1.1.3", (0, c))}, {a: _chunk(a), b1: _chunk(b1), c: _chunk(c)})
+    w.write_page({"1.1.2": _rows(w, "1.1.2", (1, b2))}, {b2: _chunk(b2)})
+    stamps: dict[str, str] = {}
+    for op, call in cat.calls:
+        for d, v in (call.get("complete") or {}).items():
+            stamps[d] = v if isinstance(v, str) else v[0]
+    assert stamps == {"1.1.1": "own-1", "1.1.2": "own-2", "1.1.3": _H}
+
+
+def test_a_deferred_completion_stamps_each_documents_own_hash():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="own-1")
+    _doc(w, "1.1.2", 1)
+    a, b = _c(1), _c(2)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, a)), "1.1.2": _rows(w, "1.1.2", (0, b))},
+                 {a: _chunk(a), b: _chunk(b)})
+    w.complete_documents(["1.1.1", "1.1.2"])
+    final = [c for op, c in cat.calls if op == "append_many" and c["complete"]][-1]["complete"]
+    assert {d: h for d, (h, _n) in final.items()} == {"1.1.1": "own-1", "1.1.2": _H}
+
+
+def test_the_stamp_that_rides_the_last_trailing_sweep_carries_the_documents_own_hash():
+    """The sweep-rest path (a drop list over the cap) stamps on its last trailing sweep."""
+    dropped = [_c(1000 + i) for i in range(650)]
+    cat = FakeCat(prior={"1.1.1": dropped})
+    w = _writer(cat)
+    w.register_document("1.1.1", total_rows=2, max_position=1, completion_hash="own-1")
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2)))}, {_c(2): _chunk(_c(2))})
+    appends = [c for op, c in cat.calls if op == "append_many"]
+    assert [a["complete"] for a in appends] == [None, None, {"1.1.1": ("own-1", 2)}]
+
+
+def test_registering_again_with_another_completion_hash_is_refused():
+    w = _writer(FakeCat())
+    w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="own-1")
+    w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="own-1")
+    with pytest.raises(ValueError, match="completion_hash"):
+        w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="other")

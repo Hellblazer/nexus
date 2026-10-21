@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -174,13 +175,12 @@ class AspectHandlerEnqueueErrorTest {
 
         // Non-vacuity: no row must have landed at all -- the whole write is
         // refused, not partially applied.
-        try (Connection su = pg.createConnection("");
-             var st = su.createStatement();
-             var rs = st.executeQuery(
-                 "SELECT 1 FROM nexus.aspect_extraction_queue "
-                 + "WHERE tenant_id='" + TENANT + "' AND collection='coll-enq-ok' "
-                 + "AND source_path='ok-src.pdf'")) {
-            assertThat(rs.next()).as("a rejected enqueue must not land a row").isFalse();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchExists(ASPECT_EXTRACTION_QUEUE,
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT)
+                        .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq("coll-enq-ok"))
+                        .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("ok-src.pdf"))))
+                .as("a rejected enqueue must not land a row").isFalse();
         }
     }
 

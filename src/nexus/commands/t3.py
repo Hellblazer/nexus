@@ -305,6 +305,12 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     repo index sweeps (every ``knowledge__*``) still expires its own quarantine; without it nothing
     would ever expire what this verb moved. A failure is exit 1 after saying the move stands.
 
+    The expiry is the bounded, keyed drain (RDR-222 Amendment A1, nexus-1579m), run strict: a drain that
+    stops short (no progress, the iteration cap, a page that fails after earlier ones committed) and an
+    error on the first page are each an exit 1, naming the pages and rows that did commit and, for a page
+    whose outcome the request ledger could not settle, its request key. Rows are reported as "at least N"
+    when a page committed with its count lost.
+
     *qname* is the sibling the verb moves into (the origin's catalog-row-derived name), not the only one
     it expires from (nexus-wbfpw.58): rows a client moved under an earlier name of the same origin, one
     the catalog row no longer derives (catalog-044-3 rewrote ``owner_id``), carry no ``quarantined_by`` tag
@@ -313,7 +319,10 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     two derived names only, because the probe is an unindexed scan engine-side; nexus-wbfpw.64 moves the
     resolution into the engine and retires the probe). Each sibling is expired and reported on its own
     line, so one sibling's kept chunks and another's expiry are each stated as what they are, never summed."""
+    import http.client  # noqa: PLC0415 — command-local import (http.client)
+
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+        BoundedDrainIncomplete,
         expire_quarantine_serverside,
         quarantine_days,
         resolve_quarantine_siblings,
@@ -321,7 +330,10 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
 
     cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if getattr(t3_db, "gc_expire_quarantine", None) is None:
+    if (
+        getattr(t3_db, "gc_expire_quarantine_bounded", None) is None
+        and getattr(t3_db, "gc_expire_quarantine", None) is None
+    ):
         click.echo(
             f"  Client expiry of {qname} did NOT run: this T3 handle carries no gc_expire_quarantine route.",
             err=True,
@@ -331,17 +343,19 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     done: list[tuple[str, int]] = []  # (sibling, expired) for every sibling whose expiry completed
     for sibling in siblings:
         try:
+            # strict: this verb reports each sibling's own outcome, so a drain that stops short is an error here
+            # (the indexer's prune runs the same loop non-strict and only warns). RDR-222 Amendment A1.
             expiry = expire_quarantine_serverside(
-                t3_db, sibling, collection, cutoff,
+                t3_db, sibling, collection, cutoff, strict=True,
             )
-        except VectorServiceError as exc:
+        except (VectorServiceError, BoundedDrainIncomplete, OSError, http.client.HTTPException) as exc:
             earlier = (
                 " Already expired before it: " + ", ".join(f"{n} from {s}" for s, n in done) + "."
                 if done else ""
             )
             click.echo(
                 f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
-                f" the client expiry of {sibling} FAILED: {exc}. Siblings are expired in this order: "
+                f" the client expiry of {sibling} FAILED: {_expiry_failure_detail(exc)}. Siblings are expired in this order: "
                 f"{', '.join(siblings)}; that one and any after it were not.{earlier} Re-run this verb to retry it.",
                 err=True,
             )
@@ -349,15 +363,37 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
         if expiry is None:  # cannot happen past the route check above; never read as "nothing to expire"
             click.echo(f"  Client expiry of {sibling} did NOT run: the T3 handle lost its expire route.", err=True)
             continue
-        expired, refused = expiry
+        expired, refused, counts_complete = expiry
         done.append((sibling, expired))
         # The engine's `refused` is the chunks the origin collection's manifest references again, kept
         # always. The client sends no floor (nexus-wbfpw.74), so a refusal on this path is never the floor.
         why = " (kept: the manifest references them again)" if refused else ""
+        expired_text = str(expired) if counts_complete else f"at least {expired}"
+        refused_text = "refused unknown" if refused is None else f"{refused} refused"
         click.echo(
             f"  Client expiry of {sibling} (older than {quarantine_days()} day(s), rows the engine's "
-            f"reaper tagged excluded): {expired} expired, {refused} refused{why}."
+            f"reaper tagged excluded): {expired_text} expired, {refused_text}{why}."
         )
+
+
+def _expiry_failure_detail(exc: BaseException) -> str:
+    """What the verb says about a failed client expiry (RDR-222 Amendment A1). Each engine page commits on its
+    own, so a drain that stopped after earlier pages says how many rows those expired and that they stay
+    expired. A page whose outcome the ledger could not settle carries a note naming its request key (PEP 678,
+    on the error or on the drain's ``__cause__``): that page may have committed, and the key is how to find
+    out (``GET /v1/requests/<key>``)."""
+    from nexus.catalog.chunk_quarantine import BoundedDrainIncomplete  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+
+    cause = exc.__cause__ if isinstance(exc, BoundedDrainIncomplete) else None
+    notes = " ".join(getattr(cause if cause is not None else exc, "__notes__", []))
+    if isinstance(exc, BoundedDrainIncomplete):
+        text = (
+            f"the expiry STOPPED ({exc.reason}{f': {cause}' if cause is not None else ''}) after {exc.batches} "
+            f"page(s), {exc.moved} row(s) expired in them; each page committed on its own and stays expired"
+        )
+    else:
+        text = str(exc)
+    return f"{text} {notes}".rstrip()
 
 
 @t3.command("gc")

@@ -29,6 +29,8 @@ from nexus.cli import main
 from nexus.corpus import _write_intent_embedding_model
 from tests._catalog_fixture_ops import ActiveCatalog
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
 # embedding profile per (tenant, content_type) on first write — the backfill
 # verb parses the model straight from a conformant T3 name, so a hardcoded

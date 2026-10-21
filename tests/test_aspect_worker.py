@@ -101,6 +101,7 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestWorkerDrain:
+    @pytest.mark.t2_tenant
     def test_worker_drains_pending_queue(self, _isolate_t2: Path) -> None:
         """A row enqueued before the worker starts is drained: the row
         is deleted from the queue and a document_aspects row exists."""
@@ -135,7 +136,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -176,6 +177,7 @@ class TestWorkerDrain:
         assert restored.retry_count == 2
         assert restored.doc_id == "1.2.3"
 
+    @pytest.mark.t2_tenant
     def test_worker_unsupported_collection_drops_silently(
         self,
         _isolate_t2: Path,
@@ -199,7 +201,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -208,6 +210,7 @@ class TestWorkerDrain:
             rec = db.document_aspects.get("code__nexus", "/p1.py")
         assert rec is None
 
+    @pytest.mark.t2_tenant
     def test_worker_null_confidence_record_dropped_without_retry(
         self,
         _isolate_t2: Path,
@@ -259,7 +262,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -275,6 +278,7 @@ class TestWorkerDrain:
             "consumers); reverting the floor check fails this assert"
         )
 
+    @pytest.mark.t2_tenant
     def test_mcp_path_content_survives_the_queue(
         self,
         _isolate_t2: Path,
@@ -334,7 +338,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -358,6 +362,7 @@ class TestWorkerDrain:
         assert rec is not None
         assert rec.problem_formulation == "P"
 
+    @pytest.mark.t2_tenant
     def test_worker_uncaught_exception_marks_failed(
         self,
         _isolate_t2: Path,
@@ -382,7 +387,7 @@ class TestWorkerDrain:
             try:
                 _wait_until(
                     lambda: _row_status(_isolate_t2, "/p1.pdf") == "failed",
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -400,6 +405,7 @@ class TestWorkerDrain:
 # ── Worker lifecycle ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestWorkerLifecycle:
     def test_worker_stop_is_clean(self, _isolate_t2: Path) -> None:
         """``stop()`` signals the worker and joins quickly; no zombie
@@ -453,6 +459,7 @@ class TestWorkerLifecycle:
 # ── Enqueue hook ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestEnqueueHook:
     def test_hook_enqueues_supported_collection(
         self,
@@ -513,6 +520,7 @@ class TestEnqueueHook:
         assert get_worker() is None  # no lazy start either
 
 
+@pytest.mark.t2_tenant
 class TestEnqueueHookWakeSignal:
     """nexus-59611 stage 2: the hook's enqueue path is the choke point
     every producer shares (MCP store_put / CLI ingest). A successful
@@ -571,6 +579,7 @@ class TestEnqueueHookWakeSignal:
         assert calls == []
 
 
+@pytest.mark.t2_tenant
 class TestGap2SourcePathNormalization:
     """RDR-145 Phase 1 (P1.2, nexus-syga3): forward-only ``source_path``
     canonicalization in ``aspect_extraction_enqueue_hook``.
@@ -821,6 +830,7 @@ class TestGap2SourcePathNormalization:
         assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
 
 
+@pytest.mark.t2_tenant
 class TestEnqueueFailureTripwire:
     """RDR-172 P2.1 (nexus-hlkvj): loudness tripwire on enqueue failure.
 
@@ -966,7 +976,13 @@ class TestEnqueueFailureTripwire:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _wait_until(predicate, timeout: float = 5.0, poll: float = 0.05) -> None:
+#: How long a worker-loop assertion waits. It returns as soon as the predicate holds, so this bounds only a
+#: genuine failure; 5 s was too tight for a worker making T2 HTTP round trips on a loaded 4-worker CI shard
+#: (test_worker_uncaught_exception_marks_failed timed out on develop 5d6eb342d, shard 3).
+_WAIT_S: float = 30.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_S, poll: float = 0.05) -> None:
     """Poll ``predicate`` until True or raise."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1003,6 +1019,7 @@ def _row_status(db_path: Path, source_path: str) -> str | None:
 # ── Batch path (RDR-089 Phase D) ────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestBatchPath:
     """Worker drains in batches when queue depth allows it."""
 
@@ -1065,7 +1082,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1141,7 +1158,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1221,7 +1238,7 @@ class TestBatchPath:
             try:
                 _wait_until(
                     lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=5.0,
+                    timeout=_WAIT_S,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1368,6 +1385,7 @@ class TestRetryLadderRouting:
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestEnqueueHookDocIdWiring:
     """nexus-w8lg1 (6.3.0 live shakeout finding #1): the enqueue hook must
     persist the catalog tumbler it was handed as the row's ``doc_id`` —
@@ -1808,6 +1826,7 @@ class TestDefaultPollInterval:
         assert AspectExtractionWorker(poll_interval=0.05)._poll_interval == 0.05
 
 
+@pytest.mark.t2_tenant
 class TestBestEffortQueueDepthSharedClient:
     """nexus-m20mf P3 fold-in (round-2 critique finding 2):
     ``_best_effort_queue_depth`` shares the ACTIVE index run's client

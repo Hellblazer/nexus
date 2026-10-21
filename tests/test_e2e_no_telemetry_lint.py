@@ -28,8 +28,11 @@ check -- see the sweep's own record in T2 project ``nexus``, title
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -176,6 +179,43 @@ def test_cc_validation_harness_exports_the_opt_out(name: str) -> None:
     )
 
 
+def test_every_cc_validation_container_forwards_the_opt_out() -> None:
+    """The same rule as the e2e sweep above, over tests/cc-validation (nexus-ueztp
+    review, 2026-10-17: container/run.sh launched a fresh-HOME Claude Code
+    container and sat outside both sweeps' domain). No exemptions, for the
+    reason the e2e test gives. The Dockerfile's image carries a nexus-capable
+    plugin tree only by bind mount, but the flag is free and the judgement is
+    not."""
+    scripts = sorted(CC_VALIDATION.rglob("*.sh"))
+    runs = 0
+    offenders: list[str] = []
+    for sh in scripts:
+        whole = sh.read_text(errors="replace")
+        for line in _DOCKER_RUN.findall(_spliced(whole)):
+            runs += 1
+            if not _forwards_the_flag(line, whole):
+                offenders.append(f"  {sh.relative_to(CC_VALIDATION)}: {line.strip()[:90]}")
+    assert runs >= 1, (
+        "no `docker run` found under tests/cc-validation (expected container/run.sh): "
+        "the sweep is not examining the launcher it exists for"
+    )
+    assert not offenders, (
+        "docker run invocations under tests/cc-validation that do not forward "
+        "NX_NO_TELEMETRY=1:\n" + "\n".join(offenders)
+        + "\n\nPass `-e NX_NO_TELEMETRY=1`; an exported host var does not cross the container boundary."
+    )
+
+
+def test_cc_validation_container_sweep_sees_the_launcher_and_catches_a_missing_flag() -> None:
+    """Non-vacuity of the sweep above: it finds container/run.sh's docker run,
+    and the same matcher flags a launcher that forgot the flag."""
+    run_sh = CC_VALIDATION / "container" / "run.sh"
+    assert _DOCKER_RUN.findall(_spliced(run_sh.read_text()))
+    bare = _spliced("docker run --rm \\\n    -e CLAUDE_CODE_OAUTH_TOKEN \\\n    img\n")
+    (line,) = _DOCKER_RUN.findall(bare)
+    assert not _forwards_the_flag(line, bare)
+
+
 def test_harness_entry_point_sweep_is_non_vacuous() -> None:
     """nexus-cf3p2's whole point was that the sweep must not stop at the
     first harness found. Each swept ROOT gets its OWN floor (review
@@ -224,3 +264,68 @@ def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None
     )
     with pytest.raises(AssertionError, match="CC_VALIDATION_EXPORTING_HARNESSES is empty"):
         test_harness_entry_point_sweep_is_non_vacuous()
+
+
+# ---- nexus-ca5rw: the two harnesses the 10-13..10-17 burst came from ---------
+#
+# conexus counted 251 one-ping installs from Sam's home egress between 10-13
+# and 10-17, 190 of them linux 7.79.0 (the skill-routing image's nx) and the
+# rest mostly win32; these two harnesses fit both shapes, attributed by
+# platform and version, not by per-run timestamps. Probed on chas 2026-10-17:
+# `claude -p` (with --mcp-config or --plugin-dir) hands a stdio MCP server the
+# container's NX_NO_TELEMETRY=1; `claude plugin eval` does not (the server saw
+# None) unless the plugin's .mcp.json names it in `env`.
+
+WINDOWS_GUEST = E2E / "windows-guest"
+WINDOWS_DRIVER = WINDOWS_GUEST / "driver"
+SESSION_SCRIPTS = ("restore.ps1", "stduser.ps1", "cache.ps1", "guest-run.ps1")
+_GUEST_OPT_OUT = "[Environment]::SetEnvironmentVariable('NX_NO_TELEMETRY', '1', 'Machine'); $env:NX_NO_TELEMETRY = '1'"
+
+
+@pytest.mark.parametrize("name", SESSION_SCRIPTS)
+def test_every_windows_guest_session_opts_the_guest_out(name: str) -> None:
+    text = (WINDOWS_DRIVER / name).read_text()
+    start = text.index("function Open-GuestSession")
+    body = text[start : text.index("\n}\n", start)]
+    assert _GUEST_OPT_OUT in body, f"{name}: Open-GuestSession must set NX_NO_TELEMETRY=1 Machine-wide"
+
+
+def test_every_script_that_opens_a_guest_session_is_listed() -> None:
+    openers = sorted(p.name for p in WINDOWS_DRIVER.glob("*.ps1") if "New-PSSession" in p.read_text())
+    assert openers == sorted(SESSION_SCRIPTS)
+
+
+def test_every_guest_task_that_runs_powershell_opts_out() -> None:
+    """An Interactive scheduled task joins the signed-in session, whose environment predates the
+    Machine-wide value, so each PowerShell payload a task starts sets the opt-out itself. host-recv's
+    task starts claude through a ProcessStartInfo, whose environment it names the same way."""
+    payloads = {
+        "driver/as-user.ps1": "\n$env:NX_NO_TELEMETRY = '1'\n",
+        "driver/setup-run.ps1": "\n$env:NX_NO_TELEMETRY = '1'\n",
+        "host-recv.ps1": "$psi.EnvironmentVariables['NX_NO_TELEMETRY'] = '1'",
+    }
+    tasks = sorted(p.relative_to(WINDOWS_GUEST).as_posix() for p in WINDOWS_GUEST.rglob("*.ps1")
+                   if re.search(r"New-ScheduledTaskAction -Execute 'powershell\.exe'", p.read_text()))
+    assert tasks == sorted(payloads), "a new scheduled task runs PowerShell in the guest: add its opt-out here"
+    for rel, needle in payloads.items():
+        assert needle in (WINDOWS_GUEST / rel).read_text(), f"{rel} must set NX_NO_TELEMETRY=1 for its task"
+
+
+def test_every_plugin_eval_run_names_the_opt_out_for_every_server(tmp_path: pathlib.Path) -> None:
+    script = (E2E / "prefix-capture" / "ab" / "skillroute" / "pe_in_container.sh").read_text()
+    m = re.search(r"python3 - \"\$PLUGIN/\.mcp\.json\" <<'PY' \|\| \{[^\n]*exit 1; \}\n(.*?)\nPY\n", script, re.S)
+    assert m, "pe_in_container.sh no longer rewrites the copied tree's .mcp.json, or no longer stops when it fails"
+    assert script.index(m.group(0)) < script.index('claude plugin eval "${ARGS[@]}"'), "the rewrite must come before the eval"
+    mcp = tmp_path / ".mcp.json"
+    mcp.write_text((REPO / "conexus" / ".mcp.json").read_text())
+    subprocess.run([sys.executable, "-c", m.group(1), str(mcp)], check=True)
+    servers = json.loads(mcp.read_text())
+    assert len(servers) >= 3, "the shipped .mcp.json lost its servers; the check would pass on nothing"
+    assert {n: s.get("env", {}).get("NX_NO_TELEMETRY") for n, s in servers.items()} == dict.fromkeys(servers, "1")
+
+
+def test_the_prefix_capture_image_opts_out_whoever_starts_it() -> None:
+    """A hand-typed docker run of the A/B image (nxab-seed on 10-15) names no -e flag; the image
+    itself carries the opt-out (nexus-ca5rw)."""
+    dockerfile = (E2E / "prefix-capture" / "Dockerfile").read_text()
+    assert re.search(r"^ENV\b.*\bNX_NO_TELEMETRY=1\b", dockerfile, re.M), "the image must set ENV NX_NO_TELEMETRY=1"

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): ALTER TABLE ${table} SET (${options}).
+    Storage parameters on a leaf (autovacuum_*, fillfactor); jOOQ's alterTable has no SET (storage_parameter).
+    Run through PgContainerHelper#setTableStorageParams, which renders ${table} from a jOOQ Table and builds
+    ${options} only from an allowlist of parameter names and plain numeric or boolean values; runAlways,
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="table-storage-set" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER TABLE ${table} SET (${options})</sql>
+    </changeSet>
+</databaseChangeLog>

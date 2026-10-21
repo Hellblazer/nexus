@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: GRANT USAGE ON SCHEMA t1 TO ${role}, in Liquibase XML instead of a Java SQL string (Sam's
+    rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's grant(..).on(..) resolves its target
+    to a Table internally, so it can never name a schema.
+
+    t1 is a separate schema PgContainerHelper#bootstrapServiceRole never touches (it covers nexus and
+    nexus_test only); the scratch tests give their service role the schema USAGE here and the t1.scratch table
+    privileges through jOOQ. Run through PgContainerHelper#grantT1ScratchTo; runAlways, bookkeeping in its
+    own table. ${role} is a fixed test literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="t1-schema-usage" author="nexus-cbo4a" runAlways="true">
+        <sql>GRANT USAGE ON SCHEMA t1 TO ${role}</sql>
+    </changeSet>
+</databaseChangeLog>

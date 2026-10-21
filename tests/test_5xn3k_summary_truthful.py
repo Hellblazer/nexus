@@ -133,6 +133,7 @@ class TestDtIndexSummaryTruthful:
         assert "NOT fully indexed" in result.output
         assert "nx catalog show" in result.output
 
+    @pytest.mark.t2_tenant
     def test_mixed_refusal_batch_footer_is_arithmetically_honest(self, runner, monkeypatch):
         """nexus-l6tr7: a batch mixing (a) a record refused on the
         non-propagating flush-grain path (chunks returned normally, counted
@@ -199,6 +200,7 @@ class TestDtIndexSummaryTruthful:
         assert result.exit_code == 0, result.output
         assert "REFUSED" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_manifest_write_failure_alone_exits_nonzero(self, runner, monkeypatch):
         """nexus-tp8yk D2b: a manifest WRITE failure (distinct from a
         refusal) must ALSO fail the run — this collector was checked by
@@ -240,6 +242,7 @@ class TestDtIndexSummaryTruthful:
         assert "WITHOUT a catalog document identity" in result.output
 
 
+@pytest.mark.t2_tenant
 class TestDtIndexRefusalPropagation:
     """substantive-critic CRITICAL (nexus-qo84l, 2026-08-02): the ORIGINAL
     bug is that dt.py's per-record catch — ``except (RuntimeError,
@@ -361,6 +364,7 @@ def _make_fake_index_repository(files):
     return fake_index
 
 
+@pytest.mark.t2_tenant
 class TestIndexRepoSummaryTruthful:
     def _invoke(self, runner, args, mock_reg, files):
         with patch("nexus.commands.index._registry", return_value=mock_reg):
@@ -608,6 +612,7 @@ class TestFenceCompleteRefusalRecording:
         assert get_complete_refusals() == []
 
 
+@pytest.mark.t2_tenant
 class TestSingleFileRefusalRendering:
     def test_pdf_refusal_renders_clean_message_and_exits_nonzero(self, runner, fake_pdf):
         def _raise(*a, **kw):
@@ -673,6 +678,7 @@ class TestSingleFileRefusalRendering:
 # ── nx index rdr ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestIndexRdrSummaryTruthful:
     def _rdr_dir(self, home: Path, count: int) -> Path:
         repo = home / "myrepo"

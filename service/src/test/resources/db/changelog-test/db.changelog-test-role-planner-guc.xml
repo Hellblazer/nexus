@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 9: ALTER ROLE ${role} SET ${guc} = ${value}, in Liquibase XML instead of a Java SQL string
+    (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no ALTER ROLE.
+
+    A role-level PLANNER setting (enable_indexscan, enable_bitmapscan, ...) for a plan-shape test's second role, so
+    its real-call queries take the exact Seq Scan + Sort path while another role keeps the planner's own choice. Run
+    through PgContainerHelper#setRolePlannerGuc, which checks ${role} (plain identifier), ${guc} (planner allowlist,
+    never search_path) and ${value} (on, off or digits) before they reach this text. runAlways, bookkeeping in its
+    own table. Takes effect for connections opened after the call.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-planner-guc" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER ROLE ${role} SET ${guc} = ${value}</sql>
+    </changeSet>
+</databaseChangeLog>

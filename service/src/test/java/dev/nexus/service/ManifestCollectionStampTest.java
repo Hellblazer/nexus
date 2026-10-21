@@ -2,8 +2,9 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
+import java.util.HexFormat;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -12,11 +13,12 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -82,14 +84,18 @@ class ManifestCollectionStampTest {
         docTumbler = repo.registerDocument(TENANT, "9.1", Map.of(
             "title", "stamp doc", "content_type", "knowledge",
             "physical_collection", COLL));
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COLL + "'), 'alpha text', "
-                + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector)");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            dsl.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLL)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(CH_A))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, COLL))
+                .set(CHUNKS.CHUNK_TEXT, "alpha text")
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .execute();
         }
     }
 
@@ -106,7 +112,7 @@ class ManifestCollectionStampTest {
      * chash's content actually lives when stamping the manifest).
      */
     private void seedChunkContent(String coll, String chash, String text) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             // RDR-225: the stub vector is 1024-wide, so the collection is registered under a 1024-d model.
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -116,12 +122,15 @@ class ManifestCollectionStampTest {
                 // No chunk can exist under a model of another width, so the model is still free to change.
                 PgContainerHelper.insertCollection(dsl, TENANT, coll, "voyage-code-3");
             }
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + coll + "'), '"
-                + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
-                + "ON CONFLICT DO NOTHING");
+            dsl.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, coll)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, coll))
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .onConflictDoNothing()
+                .execute();
         }
     }
 
@@ -185,23 +194,25 @@ class ManifestCollectionStampTest {
     }
 
     private String collectionOf(String chash) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT collection FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + TENANT + "' AND chash = decode('" + chash + "', 'hex')")) {
-            return rs.next() ? rs.getString(1) : null;
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                       CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash)))
+                .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     private int combinedQueryHits() throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
-                 + "ARRAY['" + COLL + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
-            rs.next();
-            return rs.getInt(1);
+        return combinedQueryHits(COLL);
+    }
+
+    private int combinedQueryHits(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(SEARCH_METADATA_SCOPED_1024.call(
+                VectorSeeds.vec(1024, 0.1f), new String[] {collection},
+                null, null, null, null, null, null, 10, "voyage-context-3", TENANT));
         }
     }
 
@@ -575,16 +586,8 @@ class ManifestCollectionStampTest {
                 + "CASCADE now (F10a) -- the explicit per-table UPDATE that used to "
                 + "do this work finds nothing left to touch")
             .isEqualTo(0);
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
-                 + "ARRAY['" + renamed + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
-            rs.next();
-            assertThat(rs.getInt(1))
-                .as("combined query follows the rename end-to-end").isEqualTo(1);
-        }
+        assertThat(combinedQueryHits(renamed))
+            .as("combined query follows the rename end-to-end").isEqualTo(1);
         // restore for sibling tests (PER_CLASS lifecycle, shared fixture)
         repo.renameCollection(TENANT, renamed, COLL);
     }
@@ -605,20 +608,24 @@ class ManifestCollectionStampTest {
         // constraint is independent of the RLS mechanism this changeset used
         // to rely on to reach the row at all.
         String chNull = "d".repeat(64);
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, false);
             try {
                 var ex = org.junit.jupiter.api.Assertions.assertThrows(
-                    java.sql.SQLException.class, () ->
-                        st.execute("INSERT INTO nexus.catalog_document_chunks "
-                            + "(tenant_id, doc_id, position, chash, collection, embedding_model) "
-                            + "VALUES ('" + TENANT + "', '" + docTumbler + "', 99, decode('"
-                            + chNull + "', 'hex'), NULL, 'voyage-context-3')"));
-                assertThat(ex.getSQLState())
+                    DataAccessException.class, () ->
+                        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+                            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docTumbler)
+                            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 99)
+                            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chNull))
+                            .setNull(CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+                            .execute());
+                assertThat(ex.sqlState())
                     .as("NOT NULL is a column constraint -- FORCE RLS being off must not exempt it")
                     .isEqualTo("23502");
             } finally {
-                st.execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
+                PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, true);
             }
         }
     }

@@ -538,7 +538,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=None; T2
         # ttl=N -> T3 ttl_days=N. nexus-tk070.p6b fix-pass (nexus-24rof,
         # RDR-194 D5): the permanent branch used to coerce to 0 — T3Database
-        # .put/HttpVectorClient.put now REJECT an explicit 0 loudly, so
+        # .put (and the since-retired HttpVectorClient.put) REJECT an explicit 0 loudly, so
         # every permanent promote would have raised ValueError had this
         # coercion survived. None is the correct translation, matching T2's
         # own permanent sentinel one-to-one.
@@ -550,7 +550,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # ``indexed_at + ttl_days`` and accept NO ``expires_at`` kwarg
         # (nexus-40t: "no separate expires_at field") — the old
         # ``expires_at=`` pass-through was a TypeError against BOTH
-        # ``T3Database.put`` and ``HttpVectorClient.put``, mock-shielded
+        # ``T3Database.put`` and the since-retired ``HttpVectorClient.put``, mock-shielded
         # until the nexus-v4paa fold's integration tests. The remaining
         # window is expressed by shrinking ttl_days instead. Guarded on
         # ``is not None`` first (short-circuit) — ``None > 0`` raises
@@ -572,8 +572,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # writer MCP ``store_put`` uses), so its chunk and its manifest row
         # land together or not at all. A chunk can no longer be written
         # without its owner, a failed request leaves the document's previous
-        # manifest exactly as it was, and this command makes no /store-put or
-        # /upsert-chunks call. put_note owns the caller protocol: register the
+        # manifest exactly as it was, and this command makes no /store-put (a
+        # retired route) or /upsert-chunks call. put_note owns the caller protocol: register the
         # catalog document, begin the index-run fence, write, then settle the
         # outcome (fail the fence; remove the row this call minted, or put back
         # the identity stamp it changed). This command words the result and

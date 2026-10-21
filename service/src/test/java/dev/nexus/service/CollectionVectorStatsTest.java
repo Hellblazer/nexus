@@ -2,20 +2,22 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import java.time.OffsetDateTime;
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -84,13 +86,6 @@ class CollectionVectorStatsTest {
     private static final String SVC_ROLE = "svc_cvs_test";
     private static final String SVC_PASS = "svc_cvs_test_pass";
 
-    /**
-     * Per-collection vector statistics view.
-     * {@code nexus.collection_vector_stats(tenant_id, collection, dim, chunk_count, last_write)}.
-     * SECURITY INVOKER; tombstone-filtered via live_chunks semantics.
-     */
-    private static final String VIEW_STATS = "nexus.collection_vector_stats";
-
     // ── Test collections (registered in catalog_collections per fk-002) ──────
     // Conformant shape <type>__<owner>__<model>__<version>; model token routes dim.
     private static final String COLL_A_384   = "knowledge__cvs-owner-a__minilm-l6-v2-384__v1";
@@ -100,11 +95,11 @@ class CollectionVectorStatsTest {
     private static final String COLL_B_384   = "knowledge__cvs-owner-b__minilm-l6-v2-384__v1";
 
     // ── Deterministic write timestamps (fixed clock — no now() in fixtures) ──
-    private static final String T1 = "2026-01-01T00:00:01+00";
-    private static final String T2 = "2026-01-01T00:00:02+00";
-    private static final String T3 = "2026-01-01T00:00:03+00";
-    private static final String T4 = "2026-02-01T00:00:04+00";
-    private static final String T5 = "2026-02-01T00:00:05+00";
+    private static final OffsetDateTime T1 = OffsetDateTime.parse("2026-01-01T00:00:01Z");
+    private static final OffsetDateTime T2 = OffsetDateTime.parse("2026-01-01T00:00:02Z");
+    private static final OffsetDateTime T3 = OffsetDateTime.parse("2026-01-01T00:00:03Z");
+    private static final OffsetDateTime T4 = OffsetDateTime.parse("2026-02-01T00:00:04Z");
+    private static final OffsetDateTime T5 = OffsetDateTime.parse("2026-02-01T00:00:05Z");
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -186,46 +181,52 @@ class CollectionVectorStatsTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT dim, chunk_count, last_write FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_384 + "'");
-            assertThat(rs.next())
-                .as("stats row for COLL_A_384 must exist").isTrue();
-            assertThat(rs.getInt("dim"))
+            var stats = DSL.using(su, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.DIM, COLLECTION_VECTOR_STATS.CHUNK_COUNT,
+                        COLLECTION_VECTOR_STATS.LAST_WRITE)
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_384))
+                .fetch();
+            assertThat(stats).as("stats row for COLL_A_384 must exist").isNotEmpty();
+            var row = stats.get(0);
+            assertThat(row.get(COLLECTION_VECTOR_STATS.DIM))
                 .as("COLL_A_384 dim must be exactly 384").isEqualTo(384);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(row.get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_A_384 chunk_count must be exactly 3").isEqualTo(3L);
-            assertThat(rs.getObject("last_write", java.time.OffsetDateTime.class).toInstant())
+            assertThat(row.get(COLLECTION_VECTOR_STATS.LAST_WRITE).toInstant())
                 .as("COLL_A_384 last_write must be exactly max(created_at) = T3")
                 .isEqualTo(java.time.OffsetDateTime.parse("2026-01-01T00:00:03+00:00").toInstant());
-            assertThat(rs.next())
-                .as("exactly ONE stats row per (tenant, collection, dim)").isFalse();
+            assertThat(stats)
+                .as("exactly ONE stats row per (tenant, collection, dim)").hasSize(1);
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT dim, chunk_count, last_write FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_1024 + "'");
-            assertThat(rs.next())
-                .as("stats row for COLL_A_1024 must exist").isTrue();
-            assertThat(rs.getInt("dim"))
+            var stats = DSL.using(su, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.DIM, COLLECTION_VECTOR_STATS.CHUNK_COUNT,
+                        COLLECTION_VECTOR_STATS.LAST_WRITE)
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_1024))
+                .fetch();
+            assertThat(stats).as("stats row for COLL_A_1024 must exist").isNotEmpty();
+            var row = stats.get(0);
+            assertThat(row.get(COLLECTION_VECTOR_STATS.DIM))
                 .as("COLL_A_1024 dim must be exactly 1024").isEqualTo(1024);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(row.get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_A_1024 chunk_count must be exactly 2").isEqualTo(2L);
-            assertThat(rs.getObject("last_write", java.time.OffsetDateTime.class).toInstant())
+            assertThat(row.get(COLLECTION_VECTOR_STATS.LAST_WRITE).toInstant())
                 .as("COLL_A_1024 last_write must be exactly max(created_at) = T5")
                 .isEqualTo(java.time.OffsetDateTime.parse("2026-02-01T00:00:05+00:00").toInstant());
-            assertThat(rs.next())
-                .as("exactly ONE stats row per (tenant, collection, dim)").isFalse();
+            assertThat(stats)
+                .as("exactly ONE stats row per (tenant, collection, dim)").hasSize(1);
         }
 
         // Zero-chunk registered collection must be ABSENT
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_EMPTY + "'");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                    COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_EMPTY)))
                 .as("registered-but-empty collection must NOT appear in stats " +
                     "(chunk-driven view, matching DISTINCT-based listCollections)")
                 .isEqualTo(0L);
@@ -326,9 +327,7 @@ class CollectionVectorStatsTest {
 
         // Direction 2: tombstone the doc — the owned chunk is excluded too
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, true);
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
             .as("doc tombstoned → chunk_count must drop to exactly 0 " +
@@ -337,9 +336,7 @@ class CollectionVectorStatsTest {
 
         // Direction 3: restore — count returns
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, false);
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
             .as("doc restored → chunk_count must return to exactly 1")
@@ -372,11 +369,11 @@ class CollectionVectorStatsTest {
 
         // CONTROL: superuser (bypasses RLS) sees both tenants underneath the view
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(DISTINCT tenant_id) FROM " + VIEW_STATS +
-                " WHERE tenant_id IN ('" + TENANT_A + "', '" + TENANT_B + "')");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.countDistinct(COLLECTION_VECTOR_STATS.TENANT_ID))
+                    .from(COLLECTION_VECTOR_STATS)
+                    .where(COLLECTION_VECTOR_STATS.TENANT_ID.in(TENANT_A, TENANT_B))
+                    .fetchSingle(0, Long.class))
                 .as("CONTROL: superuser must see BOTH tenants' stats rows " +
                     "(proves foreign rows exist; the RLS assertions below are non-vacuous)")
                 .isEqualTo(2L);
@@ -385,18 +382,14 @@ class CollectionVectorStatsTest {
         // svc + GUC=A: zero tenant-B rows, but tenant-A rows visible
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rsB = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_B + "'");
-            rsB.next();
-            assertThat(rsB.getLong(1))
+            DSLContext svcCtx = DSL.using(svc, SQLDialect.POSTGRES);
+            assertThat(svcCtx.fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_B)))
                 .as("GUC=A must see ZERO tenant-B stats rows (caller RLS via security_invoker)")
                 .isEqualTo(0L);
-            ResultSet rsA = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLL_A_384 + "'");
-            rsA.next();
-            assertThat(rsA.getLong(1))
+            assertThat(svcCtx.fetchCount(COLLECTION_VECTOR_STATS,
+                    COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A),
+                    COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL_A_384)))
                 .as("GUC=A must see its OWN tenant-A stats row for COLL_A_384")
                 .isEqualTo(1L);
         }
@@ -404,26 +397,25 @@ class CollectionVectorStatsTest {
         // svc + GUC=B: exactly the one tenant-B collection row, exact count
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT collection, chunk_count FROM " + VIEW_STATS);
-            assertThat(rs.next())
-                .as("GUC=B must see exactly one stats row").isTrue();
-            assertThat(rs.getString("collection"))
+            var stats = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.CHUNK_COUNT)
+                .from(COLLECTION_VECTOR_STATS)
+                .fetch();
+            assertThat(stats)
+                .as("GUC=B must see exactly one stats row").isNotEmpty();
+            assertThat(stats.get(0).get(COLLECTION_VECTOR_STATS.COLLECTION))
                 .as("GUC=B's single visible collection must be COLL_B_384")
                 .isEqualTo(COLL_B_384);
-            assertThat(rs.getLong("chunk_count"))
+            assertThat(stats.get(0).get(COLLECTION_VECTOR_STATS.CHUNK_COUNT))
                 .as("COLL_B_384 chunk_count must be exactly 2").isEqualTo(2L);
-            assertThat(rs.next())
-                .as("GUC=B must see NO further rows").isFalse();
+            assertThat(stats)
+                .as("GUC=B must see NO further rows").hasSize(1);
         }
 
         // svc + no GUC: zero rows
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT count(*) FROM " + VIEW_STATS);
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(svc, SQLDialect.POSTGRES).fetchCount(COLLECTION_VECTOR_STATS))
                 .as("svc with NO nexus.tenant GUC must see 0 stats rows " +
                     "(tenant_isolation matches nothing on NULL)")
                 .isEqualTo(0L);
@@ -459,9 +451,7 @@ class CollectionVectorStatsTest {
         // tombstoned and the manifest-less chunk is never live).
         String docId = "cvs-tomb-doc-1";
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() " +
-                " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+            setTombstone(su, docId, true);
             long raw = rawChunkCount(su, 384, TENANT_A, COLL_A_TOMB);
             assertThat(raw)
                 .as("CONTROL: raw count still sees both chunks (chunks tables have no tombstone)")
@@ -473,9 +463,7 @@ class CollectionVectorStatsTest {
         } finally {
             // restore for any later-ordered assertions
             try (Connection su = pg.createConnection("")) {
-                su.createStatement().execute(
-                    "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
-                    " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
+                setTombstone(su, docId, false);
             }
         }
     }
@@ -528,11 +516,12 @@ class CollectionVectorStatsTest {
     /** chunk_count for (tenant, collection) via the stats view, superuser connection. */
     private long statsCount(String tenantId, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT coalesce(sum(chunk_count), 0) FROM " + VIEW_STATS +
-                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.coalesce(DSL.sum(COLLECTION_VECTOR_STATS.CHUNK_COUNT), java.math.BigDecimal.ZERO))
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(tenantId),
+                       COLLECTION_VECTOR_STATS.COLLECTION.eq(collection))
+                .fetchSingle(0, Long.class);
         }
     }
 
@@ -543,12 +532,9 @@ class CollectionVectorStatsTest {
      */
     private static long rawChunkCount(Connection conn, int dim, String tenantId,
                                       String collection) throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME +
-            " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
-            " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL");
-        rs.next();
-        return rs.getLong(1);
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(tenantId), CHUNKS.COLLECTION.eq(collection),
+            VectorSeeds.chunkEmbedding(dim).isNotNull());
     }
 
     /**
@@ -567,12 +553,24 @@ class CollectionVectorStatsTest {
      */
     private static void insertCatalogDocument(Connection su, String tenantId, String tumbler,
                                                String physicalCollection) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, physical_collection) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "', '" +
-            physicalCollection + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
+    }
+
+    /**
+     * Tombstone ({@code tombstoned}) or restore the {@link #TENANT_A} catalog document {@code tumbler}
+     * by setting or clearing {@code deleted_at}, on {@code su}'s own autoCommit.
+     */
+    private static void setTombstone(Connection su, String tumbler, boolean tombstoned) {
+        DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? DSL.currentOffsetDateTime() : DSL.inline((OffsetDateTime) null))
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .execute();
     }
 
     /**
@@ -597,13 +595,19 @@ class CollectionVectorStatsTest {
     private static void insertManifestRow(Connection su, String tenantId, String docId,
                                           int position, String chash, String collection)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" +
-            collection + "', (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" +
-            tenantId + "' AND name = '" + collection + "')) " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        // The 32-character chash is the bytea's ASCII bytes, exactly as the raw chunk seed's text
+        // literal is read into the bytea column (catalog-002-hygiene CHECK).
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenantId, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     /**
@@ -613,26 +617,21 @@ class CollectionVectorStatsTest {
      * insert bypasses FORCE RLS.
      */
     private static void insertChunk(Connection su, int dim, String tenantId, String collection,
-                                    String chash, String chunkText, String createdAt)
+                                    String chash, String chunkText, OffsetDateTime createdAt)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId +
-            "' AND name = '" + collection + "'), " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::nexus.vector, " +
-            "'" + createdAt + "'::timestamptz) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-    }
-
-    /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        // The 32-character chash is the bytea's ASCII bytes, exactly as the raw text literal was read into the
+        // bytea column.
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, chunkText)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+            .set(CHUNKS.CREATED_AT, createdAt)
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /**

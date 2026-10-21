@@ -1144,16 +1144,14 @@ def read_source(
     ``file``, ``chroma``, ``nx-scratch``, ``https``, ``x-devonthink-item``,
     ``obsidian``.
 
-    **RDR-169 G3 reachability split:** the Java service also has handlers for
-    ``chroma://`` and ``https://`` in its ``UriSchemeResolverRegistry``
-    (``dev.nexus.service.resolver``).  The SPLIT means: at /v1 serving time a
-    server-reachable scheme (``chroma``, ``https``) MAY be resolved inline by
-    the Java handler; a local scheme (``file``, ``obsidian``,
-    ``x-devonthink-item``, ``nx-scratch``) is resolved client-side by calling
-    this function.  The Python-side ``chroma`` and ``https`` readers exist for
-    the Python bridge's own aspect-enrichment path (``commands/enrich.py``),
-    which runs in the MCP process on the tenant's local machine where both local
-    and network sources are reachable.
+    **Where the readers run:** every scheme is read client-side, in this
+    process.  The engine had a ``POST /v1/vectors/resolve`` route and a Java
+    resolver registry for ``chroma://`` and ``https://``; both were removed
+    (nexus-3t0jv), so there is no server-side read of any scheme.  The
+    ``chroma`` and ``https`` readers serve the Python bridge's own
+    aspect-enrichment path (``commands/enrich.py``), which runs in the MCP
+    process on the tenant's local machine where both local and network sources
+    are reachable.
 
     **Security contract for ``obsidian://`` (and any future local-scheme that
     uses ``tenant``):** ``tenant["vault_root"]`` MUST be server-provisioned
@@ -1235,14 +1233,10 @@ def read_source(
 #                          stripped from both sides before comparing, so
 #                          W/"x" and "x" read equal (RFC 7232 SS2.3).  With
 #                          no recorded ETag to compare against this remains
-#                          reason='error' ('unknown').  KNOWN LIMITATION: a
-#                          server that mints a genuinely fresh ETag on
-#                          every response (no stable validator at all) will
-#                          read 'stale' on every check regardless of
-#                          whether the content changed — stripping W/
-#                          narrows the weak/strong false-stale case, it
-#                          does not paper over a server with nothing
-#                          stable to compare.  Writers record the ETag via
+#                          reason='error' ('unknown').  A server that mints
+#                          a fresh ETag on every response (no stable
+#                          validator) is caught by one confirming HEAD and
+#                          reads 'unknown' (nexus-ltrjf).  Writers record the ETag via
 #                          :func:`capture_https_etag` / :func:`record_https_etag`
 #                          at register/refresh time, bounded to
 #                          HTTPS_ETAG_CAPTURE_TIMEOUT_S (read ~3s plus a separate ~2s connect
@@ -1256,10 +1250,9 @@ def read_source(
 #                          stat_source/staleness_signal over them
 #                          (``nexus.doctor_references``).  See
 #                          _stat_https_uri.
-#   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
-#     UriSchemeHandler interface has a comment-only seam; no stat/head
-#     capability is implemented yet, so POST /v1/vectors/resolve cannot
-#     surface a staleness field to callers.
+#   Java-side: gone.  The engine's URI resolver (``POST /v1/vectors/resolve``)
+#     was removed (nexus-3t0jv), so there is no server-side stat seam to
+#     build; leg 2 (nexus-oqenh) has nothing left to attach to.
 
 
 @dataclass(frozen=True)
@@ -1533,14 +1526,15 @@ HTTPS_STAT_MAX_ATTEMPTS: int = 3
 #: Worst case per call, for whoever wires this onto a caller:
 #: ``httpx.Timeout(10.0)`` applies to connect, read, write and pool
 #: separately, so one attempt can take about 20 s (a slow connect then a
-#: slow read); three attempts plus 1.5 s of backoff is about 61.5 s. That
+#: slow read); three attempts plus 1.5 s of backoff, plus the one confirming
+#: HEAD after an ETag mismatch (nexus-ltrjf), is about 81.5 s. That
 #: is fine for a maintenance sweep and wrong per result on a search path.
 HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
 #: Write-path ETag capture budget (nexus-0ne1m critique, 9727a80cc Critical):
 #: :func:`capture_https_etag` runs SYNCHRONOUSLY inside `nx catalog register`/
 #: `update` and the `register` MCP tool — a caller waiting on a register call
-#: must never be exposed to HTTPS_STAT_TIMEOUT_S's ~61.5s read-time worst
+#: must never be exposed to HTTPS_STAT_TIMEOUT_S's ~81.5s read-time worst
 #: case. ``httpx.Timeout(HTTPS_ETAG_CAPTURE_TIMEOUT_S,
 #: connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)`` applies the default to
 #: read/write/pool and the (tighter) connect value only to the connect
@@ -1548,7 +1542,7 @@ HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 #: minor #3): connect and read/write/pool are INDEPENDENT phase budgets, not
 #: one shared bound, so the pathological worst case is their SUM (~2s slow
 #: connect + ~3s slow read ≈ 5s), not ``HTTPS_ETAG_CAPTURE_TIMEOUT_S`` alone.
-#: Still a vast improvement over HTTPS_STAT_TIMEOUT_S's ~61.5s read-time
+#: Still a vast improvement over HTTPS_STAT_TIMEOUT_S's ~81.5s read-time
 #: worst case; the ~5s figure is the one to cite, not ~3s.
 HTTPS_ETAG_CAPTURE_TIMEOUT_S: float = 3.0
 HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S: float = 2.0
@@ -1579,13 +1573,10 @@ def _strip_weak_etag_prefix(etag: str) -> str:
     """Strip a leading ``W/`` weak-validator prefix (RFC 7232 §2.3), so a
     weak and a strong ETag naming the same value compare equal.
 
-    Limitation named here rather than re-derived at each call site: a
-    server that mints a FRESH ETag on every response (no stable validator
-    at all — some dynamically-rendered pages do this) makes this
-    comparison read 'stale' on every check regardless of whether the
-    underlying content actually changed. Stripping ``W/`` narrows false
-    stale reports from the weak/strong distinction; it cannot fix a
-    server with no stable validator to compare in the first place.
+    Stripping ``W/`` narrows false stale reports from the weak/strong
+    distinction only. A server that mints a FRESH ETag on every response
+    (no stable validator at all) is caught by :func:`_stat_https_uri`'s
+    confirming HEAD instead (nexus-ltrjf).
     """
     return etag.removeprefix("W/") if etag else etag
 
@@ -1656,6 +1647,14 @@ def _stat_https_uri(
     * ``StatOk(current_mtime=None, etag_stale=<bool>)`` — no usable
       Last-Modified, but a current ETag and a non-empty *recorded_etag* both
       exist (nexus-0ne1m); ``staleness_signal`` reads ``etag_stale`` directly.
+      A mismatch is confirmed by one more HEAD (nexus-ltrjf): a second ETag
+      equal to *recorded_etag* is fresh, one equal to the first stays stale.
+    * ``StatFail(reason='error', detail='... unstable validator ...')`` — the
+      confirming HEAD's ETag differs from the first, with no Last-Modified and
+      an equal Content-Length (both absent counts as equal): the host mints a
+      fresh ETag per response, so a mismatch shows nothing ('unknown'). A real
+      change can also land here (a same-length rewrite behind per-node ETags,
+      a page edited between the two HEADs); 'unknown' never fails a check.
     * ``StatFail(reason='absent', ...)`` — HTTP 404: the resource is
       confirmed gone at this URL, mirroring the ``file://`` handler's
       ``FileNotFoundError`` → ``'absent'`` semantics.  ``staleness_signal``
@@ -1733,9 +1732,37 @@ def _stat_https_uri(
         # strips a leading W/ weak-validator prefix from BOTH sides first,
         # so W/"x" and "x" compare equal — the raw header value is still
         # what record_https_etag stores; only the COMPARISON normalises.
-        # See _strip_weak_etag_prefix's docstring for the residual
-        # limitation (a server minting a fresh ETag every response).
         is_stale = _strip_weak_etag_prefix(recorded_etag) != _strip_weak_etag_prefix(etag)
+        if is_stale:
+            # nexus-ltrjf: a host that mints a fresh ETag per response reads
+            # stale on every run. One confirming HEAD tells it apart: an ETag
+            # that changes again while Content-Length holds is no validator.
+            again = _confirm_head(uri, None if own_client else http_client)
+            again_etag = again.headers.get("etag") if again is not None else None
+            if (
+                again is not None
+                and again_etag
+                and not again.headers.get("last-modified")
+            ):
+                if _strip_weak_etag_prefix(again_etag) == _strip_weak_etag_prefix(recorded_etag):
+                    return StatOk(current_mtime=None, etag_stale=False)
+                length = response.headers.get("content-length")
+                if (
+                    _strip_weak_etag_prefix(again_etag) != _strip_weak_etag_prefix(etag)
+                    and again.headers.get("content-length") == length
+                ):
+                    same_length = (
+                        f"the same Content-Length ({length})" if length is not None
+                        else "no Content-Length on either"
+                    )
+                    return StatFail(
+                        reason="error",
+                        detail=(
+                            f"HTTP {status} from {uri!r}: unstable validator, the ETag changed "
+                            f"between two consecutive HEADs ({etag!r}, {again_etag!r}) with "
+                            f"{same_length} and no Last-Modified, so it cannot show a change"
+                        ),
+                    )
         return StatOk(current_mtime=None, etag_stale=is_stale)
     return StatFail(
         reason="error",
@@ -1751,6 +1778,23 @@ def _stat_https_uri(
             )
         ),
     )
+
+
+def _confirm_head(uri: str, http_client: Any) -> Any:
+    """One more HEAD of *uri*, no retry: the 2xx/3xx response, else ``None``.
+    *http_client* ``None`` builds a short-lived client with the stat timeout."""
+    own_client = http_client is None
+    if own_client:
+        import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+    try:
+        response = http_client.head(uri)
+    except Exception:  # noqa: BLE001 — no confirmation; the caller keeps its first verdict
+        return None
+    finally:
+        if own_client:
+            http_client.close()
+    return response if response.status_code < 400 else None
 
 
 # ── https:// ETag capture at register/refresh time (nexus-0ne1m) ────────────

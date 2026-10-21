@@ -88,10 +88,10 @@ This file documents common error handling patterns for agents.
 
 ### T3 Store Errors
 
-**TTL model (T3 has no `expires_at` column)**: both `T3Database.put` and `HttpVectorClient.put`
-compute expiry as `indexed_at + ttl_days`, so there is no stored expiry timestamp to guard in
-SQL. `ttl_days=0` is rejected outright by both (RDR-194 D5, nexus-tk070.p6b) — never coerced to
-permanent. `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
+**TTL model (T3 has no `expires_at` column)**: `T3Database.put` computes expiry as
+`indexed_at + ttl_days`, so there is no stored expiry timestamp to guard in SQL. `ttl_days=0` is
+rejected outright (RDR-194 D5, nexus-tk070.p6b) — never coerced to permanent. (`HttpVectorClient.put`
+did the same until it was retired, nexus-nt76j.) `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
 integer-or-None shape `memory_put`/`plan_save` use.
 
 **ChromaDB connectivity failure**:

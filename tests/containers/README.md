@@ -82,7 +82,9 @@ tarball (chroma re-downloads on archive-hash miss).
   64 MB default is tight once a shard's engine substrate is up.
 - Engine JAR needs Java 25 (`service/pom.xml` `maven.compiler.release=25`);
   base image is `eclipse-temurin:25-jre-noble`.
-- `NX_TEST_T2_SUBSTRATE=engine` boots ONE PG + JAR per container (session-
+- `NX_TEST_T2_SUBSTRATE=engine` (today's spelling is `per-test`; both mean the
+  same, and the default substrate now mints a tenant only for tests that ask for
+  one, nexus-j23ni) boots ONE PG + JAR per container (session-
   scoped, memoized) and mints a tenant per test — per-shard isolation is the
   container, per-test isolation is the tenant token. Budget ~15-25 s of
   substrate boot per container before the first test runs.

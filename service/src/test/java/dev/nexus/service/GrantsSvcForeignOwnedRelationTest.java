@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,54 +39,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GrantsSvcForeignOwnedRelationTest {
 
-    // nexus-cbo4a batch 13 group F: kept raw verbatim (byte-for-byte identical to the
-    // same-named method in every other grants/ladder test file, batch 7/12 precedent) --
-    // CREATE EXTENSION / ALTER EXTENSION SET SCHEMA and a SECURITY DEFINER plpgsql
-    // function body have no typed jOOQ DSL form, and this exact copy is reused
-    // tree-wide for diff parity.
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        exec(su, "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        exec(su,
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-        exec(su,
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-            + "  END IF; "
-            + "END; "
-            + "$unrelofunc$");
-        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
-
     private static final String ADMIN_ROLE = "nexus_admin_svcgrant_replay";
     private static final String ADMIN_PASS = "nexus_admin_svcgrant_replay_pw";
     private static final String SVC_ROLE = "nexus_svc";
-    private static final String SVC_PASS = "nexus_svc_pass";
 
     @Test
     void changelogReplaysCleanly_withForeignOwnedDiagView() throws Exception {
-        try (var pg = PgContainerHelper.startDedicated();
+        try (var pg = PgContainerHelper.startEmptyDatabase();
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
@@ -98,35 +56,13 @@ class GrantsSvcForeignOwnedRelationTest {
             // creates; extensions are superuser-installed up front (CREATE
             // EXTENSION requires superuser; neither vector nor pg_trgm is
             // trusted).
-            // CREATE ROLE has no typed jOOQ DSL (DSLContext exposes no createRole); raw.
-            exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            exec(su, "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // GRANT ... ON DATABASE / ON SCHEMA has no typed jOOQ form: GrantOnStep#on
-            // resolves to a relation (regclass) internally even through its Name/String
-            // overloads -- only TABLE-level GRANT is typed (batch 13 group A finding,
-            // confirmed via javap against org.jooq.impl.GrantImpl); raw.
-            exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
-            exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-            // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-            // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-            // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
-            // and PostgreSQL refuses that GRANT unless the migration role already holds
-            // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-            // the falsification proof of this exact prerequisite.
-            // GRANT <role> TO <role> is role-MEMBERSHIP grant, a different statement
-            // from GrantOnStep's object-privilege grant; no typed jOOQ form; raw.
-            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-            // javadoc for the full derivation -- creates the extensions directly as
-            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-            // 001's guard to call mid-walk, since this walk resumes through both
-            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-            // as a NOSUPERUSER role.
-            bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
+            // The admin and nexus_svc roles, the CREATE grants, pg_monitor WITH ADMIN OPTION
+            // (nexus-hzhgl: grants-004 passes it on to nexus_svc and PostgreSQL refuses unless
+            // the migrating role holds it; GrantsPgMonitorTest is the falsification proof), the
+            // extensions and the SECURITY DEFINER relocation helpers search-path-001 calls
+            // mid-walk all come from db.changelog-test-nonsuper-owner.xml, run here as the
+            // superuser through PgContainerHelper#bootstrapNonSuperuserOwner.
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
 
             // 1. Full changelog AS THE NON-SUPERUSER ADMIN ROLE, from
             //    scratch. nexus_admin owns every relation it creates here —
@@ -203,11 +139,5 @@ class GrantsSvcForeignOwnedRelationTest {
         var hasPriv = DSL.function("has_table_privilege", SQLDataType.BOOLEAN,
             DSL.val(role), DSL.val(rel), DSL.val(priv));
         return DSL.using(c, SQLDialect.POSTGRES).select(hasPriv).fetchOne(hasPriv);
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
     }
 }

@@ -11,7 +11,9 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -21,14 +23,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Types;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -103,15 +104,15 @@ class Taxonomy014TenantFkRepointTest {
     @Test
     void crossTenantParentReference_acceptedPreRepoint_rejectedPostRepoint() throws Exception {
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(), not start(): this test asserts on the migration PROCESS
+        // startEmptyDatabase(), not start(): this test asserts on the migration PROCESS
         // itself (a specific fresh single-pass apply history distinguishing pre- vs
         // post-repoint schema state) -- PgContainerHelper.start()'s default shared-
         // cluster handle (nexus-yhmav) hands back an ALREADY-fully-migrated database
         // (built from the real classpath master, taxonomy-014 included), which would
         // make every assertion below vacuous regardless of preRepointRoot's content.
-        // See PgContainerHelper.startDedicated()'s own javadoc roster of tests with
-        // this identical requirement.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // An empty database on the same cluster (nexus-7xfh7) is virgin without a
+        // container boot.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -142,8 +143,9 @@ class Taxonomy014TenantFkRepointTest {
             // so nothing trips taxonomy-014-2's fail-loud anti-join.
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.topics WHERE tenant_id IN ('tenant-a', 'tenant-b')");
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(TOPICS)
+                    .where(TOPICS.TENANT_ID.in("tenant-a", "tenant-b"))
+                    .execute();
             }
 
             try (Connection su = pg.createConnection("")) {
@@ -167,8 +169,8 @@ class Taxonomy014TenantFkRepointTest {
             }).as("post-repoint schema: a cross-tenant parent_id reference must be REJECTED "
                 + "-- fk_topics_parent_tenant is tenant-scoped (tenant_id, parent_id) -> "
                 + "(tenant_id, id)")
-                .isInstanceOf(SQLException.class)
-                .satisfies(t -> assertThat(((SQLException) t).getSQLState()).isEqualTo("23503"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(t -> assertThat(((DataAccessException) t).sqlState()).isEqualTo("23503"));
         } finally {
             pg.stop();
             deleteRecursively(preRepointRoot);
@@ -178,8 +180,8 @@ class Taxonomy014TenantFkRepointTest {
     @Test
     void crossTenantParentReference_presentBeforeRepoint_failsLoudNotSilently() throws Exception {
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(): see the sibling test's identical rationale above.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // startEmptyDatabase(): see the sibling test's identical rationale above.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -215,16 +217,14 @@ class Taxonomy014TenantFkRepointTest {
             // still be exactly where it was (fail-loud leaves quarantine + re-run as
             // the human-directed remedy, never a half-migrated schema).
             try (Connection su = pg.createConnection("")) {
-                assertThat(count(su,
-                    "SELECT count(*) FROM pg_constraint WHERE conname = 'fk_topics_parent_tenant'"))
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, "fk_topics_parent_tenant"))
                     .as("the failed changeset must leave no half-created composite FK behind")
                     .isEqualTo(0);
-                assertThat(count(su,
-                    "SELECT count(*) FROM pg_constraint WHERE conname = 'topics_parent_fk'"))
+                assertThat(PgCatalogProbes.constraintCount(ctx, "topics_parent_fk"))
                     .as("the OLD tenant-blind FK must survive the failed changeset unchanged")
                     .isEqualTo(1);
-                assertThat(count(su,
-                    "SELECT count(*) FROM nexus.topics WHERE tenant_id IN ('tenant-a', 'tenant-b')"))
+                assertThat(ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.in("tenant-a", "tenant-b")))
                     .as("fail-loud must not have deleted the offending rows either -- they stay "
                         + "in place for the human-directed quarantine, not silently reaped")
                     .isEqualTo(2);
@@ -254,8 +254,8 @@ class Taxonomy014TenantFkRepointTest {
         // are all tenant-blind), so the trigger's own predicate is what is being
         // proven, not the FK.
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(): see the sibling tests' identical rationale above.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // startEmptyDatabase(): see the sibling tests' identical rationale above.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -286,13 +286,14 @@ class Taxonomy014TenantFkRepointTest {
             // reference doc_count at all, and pre-repoint there is no FK
             // blocking the cross-tenant reference in the first place.
             try (Connection su = pg.createConnection("")) {
-                assertThat(count(su, "SELECT doc_count FROM nexus.topics WHERE id = " + topicB))
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(ctx.select(TOPICS.DOC_COUNT).from(TOPICS).where(TOPICS.ID.eq(topicB))
+                        .fetchSingle(TOPICS.DOC_COUNT))
                     .as("nexus.topics_doc_count_recount_ins's own t.tenant_id = a.tenant_id "
                         + "predicate must keep a cross-tenant assignment from mutating the "
                         + "referenced topic's doc_count, independently of any FK")
                     .isEqualTo(7);
-                assertThat(count(su,
-                    "SELECT count(*) FROM nexus.topics WHERE tenant_id = 'tenant-a' AND id = " + topicB))
+                assertThat(ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq("tenant-a"), TOPICS.ID.eq(topicB)))
                     .as("tenant-a must not have gained a topic row under tenant-b's id either")
                     .isEqualTo(0);
             }
@@ -407,28 +408,14 @@ class Taxonomy014TenantFkRepointTest {
         // requires (the bare two-column raw INSERT this used to run 23502s on
         // lifecycle_state NOT NULL).
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, "coll");
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topics (tenant_id, label, parent_id, collection, created_at) "
-                + "VALUES (?, ?, ?, 'coll', now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tenant + "-topic");
-            if (parentId == null) {
-                ps.setNull(3, Types.BIGINT);
-            } else {
-                ps.setLong(3, parentId);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, tenant + "-topic")
+            .set(TOPICS.PARENT_ID, parentId)
+            .set(TOPICS.COLLECTION, "coll")
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     /** Genuine 64-lowercase-hex sha256 chash for the doc_count-trigger test's
@@ -456,18 +443,14 @@ class Taxonomy014TenantFkRepointTest {
             Connection c, String tenant, String collection, int docCount) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at) "
-                + "VALUES (?, ?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tenant + "-doc-count-topic");
-            ps.setString(3, collection);
-            ps.setInt(4, docCount);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, tenant + "-doc-count-topic")
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.DOC_COUNT, docCount)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     /**
@@ -483,34 +466,32 @@ class Taxonomy014TenantFkRepointTest {
         // fallback model, and the vector's width must be that model's dimension.
         int dim = 768;
         // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
-        try (Statement st = c.createStatement()) {
-            st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
-                + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + collection + "'), "
-                + "'doc-count-trigger-test chunk', ('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        PgContainerHelper.insertCollection(ctx, tenant, collection);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "doc-count-trigger-test chunk")
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     /** A {@code nexus.topic_assignments} row -- {@code doc_id} is bytea (RDR-194
      *  P3c), {@code source_collection} is NOT NULL (RDR-194 P3b). */
     private static void insertTopicAssignment(
             Connection c, String tenant, String docIdHex, long topicId, String sourceCollection) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
-                + "VALUES (?, decode(?, 'hex'), ?, 'manual', ?, "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docIdHex);
-            ps.setLong(3, topicId);
-            ps.setString(4, sourceCollection);
-            ps.setString(5, tenant);
-            ps.setString(6, sourceCollection);
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        ctx.insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TOPIC_ASSIGNMENTS.DOC_ID, java.util.HexFormat.of().parseHex(docIdHex))
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                PgContainerHelper.collectionModel(ctx, tenant, sourceCollection))
+            .execute();
     }
 }

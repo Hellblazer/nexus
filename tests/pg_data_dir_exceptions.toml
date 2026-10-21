@@ -1,0 +1,26 @@
+# Test files whose Postgres data directory does NOT come from tests._child_process.pg_data_tempdir
+# (nexus-szyun). tests/_ddl_cluster_sites.py::provenance_problems and tests/test_ddl_uncounted_clusters_lint.py
+# enforce this file against the tree in both directions. A cluster made under tmp_path, tmp_path_factory or
+# mkdtemp writes its data and WAL to the CI host's disk instead of the run's tmpfs root; every file with an
+# initdb / pg_ctl_start site is either proven to use the helper, or listed here with the reason it cannot.
+# The tables may only shrink: tests/_ddl_cluster_sites.py::NOT_A_CLUSTER_CEILING and DISK_REQUIRED_CEILING
+# pin today's counts (9 and 0). Every disk_required reason names the bead that drains it.
+
+# The file names initdb, pg_ctl_start, _init_cluster or provision() but never runs a postmaster: no data dir exists to place.
+[not_a_cluster]
+"tests/db/test_no_host_pg_fallback.py" = "builds a stub bundle of empty files in tmp_path to test binary discovery; initdb is looked up, never run"
+"tests/db/test_pg_provision_binary_discovery.py" = "binary-discovery unit tests over empty stub files; initdb is looked up, never run"
+"tests/test_init_pg_bundle_acquire.py" = "install_pg_bundle is faked and the bundle is stub files; initdb is looked up, never run"
+"tests/db/test_pg_auth_unit.py" = "pg_provision._run is faked and the bin dir is stub files; _init_cluster is called with tmp_path paths but no initdb or postmaster runs"
+"tests/db/test_pg_windows_start.py" = "pg_provision._run is faked and the bin dir is stub files; _init_cluster is called with a tmp_path path but no initdb or postmaster runs"
+"tests/test_pg_ctl_start.py" = "drives tests._pg_ctl.pg_ctl_start against a fake pg_ctl shell script in tmp_path; no postmaster starts"
+"tests/daemon/test_service_status_clarity.py" = "calls pg_provision.provision(tmp_path / 'cfg') with discover_pg_binaries, check_pgvector_available and _init_cluster patched; the pre-flight raises before any cluster work"
+"tests/db/test_pg_provision_root_guard.py" = "provision(config_dir=tmp_path) is stopped by a faked root-user guard or a tripwire before bootstrap_superuser; no initdb or postmaster runs"
+"tests/test_smart_app_control.py" = "provision(config_dir=tmp_path) is refused by a faked Smart App Control probe before the bundle is touched; no initdb or postmaster runs"
+
+# Real clusters that stay on disk. Empty since nexus-0ajjm: the five provision()-driven files (test_pg_provision,
+# test_pg_provision_ca3_bundle, test_pg_bundle_relocation, test_pg_scram_auth and the storage-service pg_monitor
+# backfill test) take their config_dir from pg_data_tempdir(), because the owner-record sweep now reads the nested
+# <dir>/postgres/postmaster.pid. DISK_REQUIRED_CEILING in tests/_ddl_cluster_sites.py is 0: an entry here is a
+# decision to put a cluster on the CI host's disk, made on purpose, in a diff a reviewer reads.
+[disk_required]

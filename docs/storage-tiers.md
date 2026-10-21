@@ -101,6 +101,29 @@ through to the flat file; only a **bare** invocation (neither env var set)
 uses the flat-file fallback. Concurrent independent Claude Code windows
 stay isolated because each has its own session-id.
 
+An MCP server that Claude Code did not start (`nx-mcp` under Cursor, Codex
+CLI, Gemini CLI, or a Claude Desktop chat) never takes its T1 scope from
+the flat file (nexus-xs7fp): the file names whichever Claude session wrote
+it last, which that host has no claim on and which may already have ended.
+"Started by Claude Code" means the process environment carries `CLAUDECODE`
+or `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets on every subprocess,
+MCP servers included. Such a server has no session id, so its `scratch`
+tools report that T1 is unavailable for the process and every other tool is
+unaffected. Set `NX_SESSION_ID` in the server's environment to give it a
+scratch scope. A bare `nx` in a terminal and the hooks still use the file.
+No host-local id is minted in its place: nexus-4lkmz decision 2 is "never a
+shared identity, never a silent private store".
+
+T2 attribution (the `session` label on `memory_put` rows) resolves through
+`resolve_active_session_id` and so inherits this gate: a gated server's rows
+carry NULL (nexus-d8yul). Only operator dispatch keeps a raw file read, as
+its last tier, because without it a `claude -p` child's SessionStart hook
+overwrites `current_session`. A bare CLI in a terminal still labels with
+the file's last writer. One case the gate cannot close: a host launched
+from inside a Claude Code shell inherits that shell's
+`CLAUDE_CODE_SESSION_ID`, which the resolver answers (tier 3) before the
+gate is consulted, so that host keeps the launching session's scope.
+
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process
 `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired
@@ -206,7 +229,7 @@ limit):
 
 A collection embedded under the posture NOT running at the moment is refused
 with a 422 (RDR-204's "reads never refused" is the design intent, not today's
-behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and re-running `nx init` or the upgrade ladder's provision leg reverts a Voyage opt-in back to bge-768 (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
+behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and nothing checks what the switch strands first ([RDR-210](rdr/rdr-210-dual-mode-local-engine.md) tracks the dual-mode engine that serves both). Re-running `nx init` or the upgrade ladder's provision leg keeps a Voyage opt-in (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
 
 Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder has no live production consumer since its salience caller was also retired at nexus-0hqez, 2026-09-23). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
 
@@ -328,7 +351,7 @@ T3 has no separate `expires_at` field: expiry is computed client-side as `indexe
 | NULL (permanent) | `None` |
 | N days | The *remaining* window, not a reset N: computed from the entry's original timestamp so a promote does not silently extend its life |
 
-`ttl_days=0` is rejected outright by both `T3Database.put` and `HttpVectorClient.put` (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
+`ttl_days=0` is rejected outright by `T3Database.put` and, until nexus-nt76j retired it, `HttpVectorClient.put` (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
 
 ## When to Use Each Tier
 

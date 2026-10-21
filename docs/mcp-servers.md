@@ -1,6 +1,6 @@
 # MCP Servers
 
-Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) is `mcpb/src/bootstrap.py`, a resolve-with-retry wrapper (nexus-r433b) that execs `mcpb/src/server.py`, which in turn runs `nexus.mcp.core:main` — with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
+Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) is `mcpb/src/bootstrap.py`, a resolve-with-retry wrapper (nexus-r433b) that execs `mcpb/src/server.py`, which in turn runs `nexus.mcp.core:main` — with no `nexus-catalog` process. For setup in Cursor, Codex CLI, Gemini CLI, VS Code and other stdio hosts, see [MCP Hosts](mcp-hosts.md). This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
 
 For **when to use which retrieval interface**, see [Querying Guide](querying-guide.md). For conceptual background, see [Document Catalog](catalog.md) and [Storage Tiers](storage-tiers.md).
 

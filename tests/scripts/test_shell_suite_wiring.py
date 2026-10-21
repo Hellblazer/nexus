@@ -109,6 +109,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._sigterm_guard import run_suite
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _SUMMARY_RE_TEMPLATE = r"{name}: (\d+) passed, (\d+) failed"
@@ -150,7 +152,9 @@ def _bin_bash_is_pre_4() -> bool:
 # used to, loose enough that adding a new assertion to one of these suites
 # never requires touching this file.
 SUITES = [
-    _Suite("scripts/build-gate-jar_test.sh", 24),
+    # 130, not 24 (nexus-t6t9f): 139 pass in the foreground launch this file uses; a launch that ignores
+    # HUP/QUIT at entry skips their cases (121), so the floor sits between and catches a silent skip.
+    _Suite("scripts/build-gate-jar_test.sh", 130),
     _Suite("scripts/lib/bare_mvnw_lint_test.sh", 2),
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
@@ -159,7 +163,9 @@ SUITES = [
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).
     _Suite("tests/e2e/lib/lock_test.sh", 30),
-    _Suite("tests/e2e/lib/harness_lock_test.sh", 35),
+    # 32: 35 until nexus-boz84 dropped the per-harness wall-clock assertion (3 harnesses,
+    # one assertion each); the output checks still prove no harness body ran.
+    _Suite("tests/e2e/lib/harness_lock_test.sh", 32),
     # 16, not the 19 this suite reports on macOS: its Test F only runs its
     # 3 assertions under the stock macOS /bin/bash 3.2 (the guard's actual
     # target); on any host whose /bin/bash is already 4+ -- every Linux CI
@@ -171,13 +177,18 @@ SUITES = [
         "tests/e2e/lib/commit_scope_audit_test.sh",
         19 if _bin_bash_is_pre_4() else 16,
     ),
-    # 40 as an ordinary user, 39 as root: Test 10 (the pgid-liveness pin) takes
+    # 71 as an ordinary user, 70 as root: Test 10 (the pgid-liveness pin) takes
     # one `ok` instead of two when the process is root (measured in
-    # python:3.12-slim, which runs as root: "39 passed, 0 failed"; round-3 review
-    # L1). Same precedent as the /bin/bash floor above: the floor follows the
-    # host, here the effective uid. Nothing known in CI runs as root; a root hand
-    # run or container does. Deleting Test 10 still turns either floor red.
-    _Suite("scripts/lib/build-lease_test.sh", 39 if os.geteuid() == 0 else 40),
+    # python:3.12-slim, which runs as root: "39 passed, 0 failed" before Test 13;
+    # round-3 review L1). Same precedent as the /bin/bash floor above: the floor
+    # follows the host, here the effective uid. Nothing known in CI runs as root; a
+    # root hand run or container does. Deleting Test 10 still turns either floor red.
+    # Was 40/39; nexus-jqk5c added Test 13 (the lease-events log) and the floor is
+    # lifted to what the suite now reports (66 at the first commit, 71 after its fix
+    # round: the suite lease name, the lost mv race, the 0664 file mode, and the
+    # set -e check now run against both unwritable-log shapes), so deleting Test 13
+    # turns it red too.
+    _Suite("scripts/lib/build-lease_test.sh", 70 if os.geteuid() == 0 else 71),
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
@@ -187,7 +198,12 @@ SUITES = [
     # audit negatives over mutated copies of the gate, 75 in all. nexus-tu8wp.3: leg L (the per-collection
     # search route through the edge): 20 verdict cases over _route_probe_verdict, 7 wiring checks, the
     # widened audit and 11 negatives over mutated copies of the gate, 115 in all.
-    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 150),
+    # nexus-0bl77: leg N (the test-only tenant-reset route is absent, fails closed): 19 verdict cases over the two
+    # judges (8 N1, 11 N2), 4 wiring checks and 7 negatives over mutated copies of the gate, 180 in all (the first
+    # cut's prose said 17 and 9; the counts were 19 and 7). nexus-69be4: the probe judge calls a 403, 400 or 503
+    # REGISTERED only on the engine's own body text and INCONCLUSIVE on an edge-shaped body, and the 404 ok line
+    # prints the body head: 24 N2 cases (13 more), so 32 verdict cases, 4 wiring checks and 7 negatives, 193 in all.
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 193),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),
@@ -228,14 +244,7 @@ class TestSuitesAreGreen:
     @pytest.mark.parametrize("suite", SUITES, ids=lambda s: s.id)
     def test_suite_runs_clean(self, suite: _Suite) -> None:
         start = time.monotonic()
-        result = subprocess.run(
-            ["bash", str(suite.path)],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=_env_without_lease_vars(),
-        )
+        result = run_suite(suite.path, cwd=REPO_ROOT, env=_env_without_lease_vars())
         elapsed = time.monotonic() - start
 
         summary_re = re.compile(_SUMMARY_RE_TEMPLATE.format(name=re.escape(suite.id)))
@@ -297,9 +306,7 @@ class TestSuitesIgnoreAnInheritedLeaseRoot:
         env["NX_BUILD_LEASE_ROOT"] = str(shared)
         env["NX_SUITE_LEASE_WAIT"] = "1"
         path = REPO_ROOT / relpath
-        result = subprocess.run(
-            ["bash", str(path)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=env
-        )
+        result = run_suite(path, cwd=REPO_ROOT, env=env)
         assert result.returncode == 0, (
             f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"

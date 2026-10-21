@@ -872,6 +872,7 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
 # ── GH #371 + #436: oversize file guard ─────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_indexer_oversize_guard_skips_huge_files(tmp_path, monkeypatch) -> None:
     """GH #371 + #436: a file larger than ``indexing.max_file_bytes``
     must be skipped BEFORE classification + read_text. Pre-fix, a

@@ -2,7 +2,7 @@
 
 Runs :func:`nexus.tables.check.check_table` over every ``*.toml`` file
 under BOTH ``src/nexus/tables/`` (the packaged tables) and
-``docs/tables/`` (repo-only tables; none today), asserting zero BLOCKING
+``docs/tables/`` (repo-only tables; today cc-version-answers.toml), asserting zero BLOCKING
 findings per table. This is the "-m lint" leg (see ``tests/AGENTS.md``):
 O(repo) meta-tests, excluded from default ``addopts``, run in the dedicated
 CI lint job.

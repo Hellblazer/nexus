@@ -1,0 +1,51 @@
+# How many tests of a whole run may mint a tenant (nexus-zv8i7, epic nexus-aca0q).
+#
+# Since the opt-in flip (nexus-j23ni) a test mints a tenant only when it asks for one. Marks only
+# get added and nothing flags a mark that is no longer needed, so the saving erodes one module mark
+# at a time. The fan-in (tests/_storage_touch_fan_in.py, stdlib only) sums `provisioned` over the
+# nx-storage-touch-report.json of every shard of one run and fails when the total is above
+# `provisioned_tests` + `tolerance_tests`:
+#
+#   python -m tests._storage_touch_fan_in <dir holding the reports> --suite python_unit --shards 6
+#
+# The metric is a COUNT, summed across shards. A per-shard share against a worst-shard ceiling
+# (the first design) flaps when a file moves to another shard and lets every lighter shard regress
+# freely (nexus-2rhif recorded the same refutation for the DDL ratchet); the total does not depend
+# on how the run was split. Each shard's own share stays in the fan-in output as advice.
+#
+# `tolerance_tests` is an absolute number of tests, an integer from 0 to 50. The count is
+# deterministic for a given selection; the slack only covers tests that count here and skip on
+# another host. Ceilings are reduce-only: the fan-in prints when one can be lowered, lower it in
+# the commit that lowers the count; raising one needs a reviewed reason in that commit's message.
+#
+# "measure" means no full-run measurement exists: the fan-in then fails and prints the number to
+# commit (a ceiling nobody set must not pass a run).
+#
+# Measured 2026-10-20 on chas (nexus-abcqb), each from ONE run with NX_STORAGE_TOUCH_SWEEP=1 and
+# NX_STORAGE_TOUCH_GUARD_MODE=report:
+#   python_unit  4916 of 30679, `uv run pytest -n 8` at 9383142eb (lab-l); the fail-mode full run at
+#                c3ed01320 counted the same 4916 of 30718;
+#   docs_readers 581 of 1561, the docs-readers leg's own selection, serial, at d9d1a2891 (lab-m),
+#                the same 581 as the 55c082c63 measurement.
+#
+# pytest-gate runs the python_unit fan-in over the six shards' reports (they ride the DDL report
+# artifact). THE PYTHON_UNIT GATE IS ARMED (2026-10-21, nexus-ylpac): `measured_on` names the CI runs
+# whose fan-in total is the ceiling, and the step is enforced
+# (tests/scripts/test_storage_touch_fan_in_wiring.py holds the step's continue-on-error to that key).
+# CI's selection skips no tenant test chas runs (CI 39452192135 at 28fc79b4e counted 4916, the chas
+# number); the ceiling is 4925, not 4916, because the tests added between the chas measurement and
+# the arming runs mint 9 more (CI 39509863155 at badd4a5cf already counted 4919).
+# A CI shard turns the whole-run checks on by itself (pytest-split is splitting it), so its report says
+# sweep=true and the fan-in accepts it. The docs-readers leg is neither split nor above SWEEP_AUTO_FLOOR,
+# so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
+
+[python_unit]
+provisioned_tests = 4925
+tolerance_tests = 0
+measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff)"
+
+# The docs-readers CI leg runs a different selection (lint-marked docs files under the default
+# substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
+[docs_readers]
+provisioned_tests = 581
+tolerance_tests = 0

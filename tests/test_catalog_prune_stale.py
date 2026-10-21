@@ -122,6 +122,7 @@ def test_rdr_prefix_of_returns_empty_for_non_rdr() -> None:
 # ── remediate-paths --rdr-prefix-mode ──────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRemediateRdrPrefixMode:
     def test_renamed_rdr_resolved_via_prefix(
         self, initialized_catalog: Catalog, catalog_env: Path, rdr_dir: Path,
@@ -225,6 +226,7 @@ class TestRemediateRdrPrefixMode:
 # ── prune-stale ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCatalogPruneStale:
     def test_dry_run_default_no_writes(
         self, initialized_catalog: Catalog, catalog_env: Path, tmp_path: Path,

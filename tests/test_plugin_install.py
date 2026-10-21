@@ -21,6 +21,111 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 
 
+def _is_shallow(repo: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"git rev-parse failed in {repo}:\n{result.stderr}"
+    return result.stdout.strip() == "true"
+
+
+def _clone_for_install(src: Path, dest: Path) -> str:
+    """Clone ``src`` into ``dest`` without copying its object store; return the mode used.
+
+    No explicit --local (nexus-jz9n3): git hard-links objects for a local path and
+    falls back to copying when the link fails, but an EXPLICIT --local turns that
+    failure fatal. With TMPDIR on another volume than the checkout (the shared
+    /Volumes/SanHell TMPDIR on Sam's Mac) every link is cross-device, so --local
+    failed all 24 cases at setup.
+
+    A full source clones ``--shared`` (nexus-kyujr): inside a lab-run grant
+    tmp_path_factory lives on tmpfs, where hard links to the source are impossible
+    and a plain copy of the object store was 1.3 GB per xdist worker on the primary,
+    charged to the grant's memory. The tests read only the working tree, so the copy
+    borrows the objects through alternates instead.
+
+    A shallow source (CI's actions/checkout) cannot be borrowed: git ignores
+    --local/--shared for a shallow source and falls back to the transport, leaving
+    no alternates. That clone is bounded by the source's own depth; ``--depth 1``
+    over file:// pins the bound at one commit's tree whatever depth CI fetched.
+    """
+    if _is_shallow(src):
+        mode = "shallow"
+        cmd = ["git", "clone", "--depth", "1", src.resolve().as_uri(), str(dest)]
+    else:
+        mode = "shared"
+        cmd = ["git", "clone", "--shared", str(src), str(dest)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"git clone ({mode}) failed:\n{result.stderr}"
+    if mode == "shared":
+        # The pin for --shared: a plain local clone also succeeds, and silently copies
+        # (or hard-links) the whole object store. Alternates are what --shared leaves.
+        alternates = dest / ".git" / "objects" / "info" / "alternates"
+        assert alternates.is_file(), (
+            f"{alternates} is missing: the clone did not borrow the source's objects, so "
+            "each xdist worker would copy the whole object store into its (tmpfs) tmp_path"
+        )
+    else:
+        # The pin for the shallow path: the clone holds one commit, not the history.
+        count = subprocess.run(
+            ["git", "-C", str(dest), "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        assert (dest / ".git" / "shallow").is_file() and count.stdout.strip() == "1", (
+            f"the clone of shallow {src} is not a one-commit shallow clone "
+            f"(rev-list --count HEAD = {count.stdout.strip()!r}); it copied history "
+            "into the (tmpfs) tmp_path"
+        )
+    return mode
+
+
+def _make_repo_with_history(root: Path) -> Path:
+    src = root / "src"
+    subprocess.run(["git", "init", "-q", str(src)], check=True)
+    for i in range(3):
+        (src / f"f{i}.txt").write_text(f"{i}\n")
+        subprocess.run(["git", "-C", str(src), "add", f"f{i}.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", f"c{i}"],
+            check=True,
+        )
+    return src
+
+
+def test_clone_for_install_borrows_objects_from_a_full_source(tmp_path: Path) -> None:
+    src = _make_repo_with_history(tmp_path)
+    assert not _is_shallow(src)
+    dest = tmp_path / "dest"
+    assert _clone_for_install(src, dest) == "shared"
+    assert (dest / ".git" / "objects" / "info" / "alternates").is_file()
+    assert (dest / "f2.txt").read_text() == "2\n"
+
+
+def test_clone_for_install_takes_one_commit_from_a_shallow_source(tmp_path: Path) -> None:
+    """CI's actions/checkout is shallow: --shared leaves no alternates there
+    (git falls back to the transport), which failed every case at setup on
+    5588beead. The shallow path must clone, and copy no history."""
+    full = _make_repo_with_history(tmp_path)
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "2", full.resolve().as_uri(), str(shallow)],
+        check=True,
+    )
+    assert _is_shallow(shallow)
+    # The failure this replaces: --shared from a shallow source leaves no alternates.
+    probe = tmp_path / "probe"
+    subprocess.run(["git", "clone", "-q", "--shared", str(shallow), str(probe)], check=True)
+    assert not (probe / ".git" / "objects" / "info" / "alternates").exists()
+
+    dest = tmp_path / "dest"
+    assert _clone_for_install(shallow, dest) == "shallow"
+    assert (dest / "f2.txt").read_text() == "2\n"
+
+
 @pytest.fixture(scope="module")
 def installed_plugin(tmp_path_factory) -> Path:
     """
@@ -35,17 +140,9 @@ def installed_plugin(tmp_path_factory) -> Path:
     """
     clone_root = tmp_path_factory.mktemp("plugin-install")
     # A clone simulates a real install: only committed, tracked files arrive.
-    # No explicit --local (nexus-jz9n3): git hard-links objects for a local
-    # path and falls back to copying when the link fails, but an EXPLICIT
-    # --local turns that failure fatal. With TMPDIR on another volume than
-    # the checkout (the shared /Volumes/SanHell TMPDIR on Sam's Mac) every
-    # link is cross-device, so --local failed all 24 cases at setup.
-    result = subprocess.run(
-        ["git", "clone", str(REPO_ROOT), str(clone_root)],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"git clone failed:\n{result.stderr}"
+    # How it avoids copying the object store, on a full or a shallow source:
+    # _clone_for_install.
+    _clone_for_install(REPO_ROOT, clone_root)
 
     # Read source dir from marketplace.json (same as Claude Code does).
     # nexus-mkj6u: source is now the git-subdir object form with tag

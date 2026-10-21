@@ -213,7 +213,7 @@ def seed(db: hvc.HttpVectorClient, corpus: list[dict]) -> float:
         _say(f"[seed] {done}/{len(corpus)} chunks  {elapsed:6.1f}s  "
              f"{done / max(elapsed, 0.001):6.1f} chunks/s")
 
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("rdr217-baseline", "repo")
     by_file: dict[str, list[str]] = {}
     for r in corpus:

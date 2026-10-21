@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -410,24 +411,19 @@ class GcRestoreRereferencedBoundedTest {
     private void insertManifestRowBypassingFk(String docId, String chashHex, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             insertManifestRow(su, TENANT, docId, chashHex, collection);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 
     private String metadataField(String collection, String chashHex, String key) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT metadata->>'" + key + "' FROM nexus.chunks WHERE collection = '" + collection
-                + "' AND chash = decode('" + chashHex + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key))
+                .from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(Chash.fromHex(chashHex).toBytes()))
+                .fetchOne(0, String.class);
         }
     }
 

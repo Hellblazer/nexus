@@ -214,6 +214,7 @@ def _make_graph_rows(*items):
 # SERVICE MODE: metadata-scoped path (author / content_type / subtree)
 # ═════════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.t2_tenant
 class TestQueryRepointMetadataScoped:
     """Service mode + catalog params → search_metadata_scoped is called."""
 
@@ -429,6 +430,7 @@ class TestQueryRepointMetadataScoped:
 class TestQueryRepointGraphHop:
     """Service mode + follow_links → seeds resolved app-side, then search_graph_hop."""
 
+    @pytest.mark.t2_tenant
     def test_follow_links_calls_search_graph_hop(self, monkeypatch):
         """follow_links in service mode resolves seeds then calls t3.search_graph_hop."""
         rows = _make_graph_rows(("1.2.3", "a" * 32))
@@ -445,6 +447,7 @@ class TestQueryRepointGraphHop:
         assert "c1" in call[2]  # broad target
         assert call[3] == "cites"  # link_type
 
+    @pytest.mark.t2_tenant
     def test_follow_links_with_author_resolves_author_seeds(self, monkeypatch):
         """follow_links + author: seeds come from cat.find(author, ...) filtered by author."""
         rows = _make_graph_rows(("1.2.3", "a" * 32))
@@ -460,6 +463,7 @@ class TestQueryRepointGraphHop:
         seeds_arg = t3.graph_calls[0][1]
         assert "1.1.1" in seeds_arg
 
+    @pytest.mark.t2_tenant
     def test_follow_links_structured_chunk_text_hash_from_chash(self, monkeypatch):
         """HIGH-1: follow_links structured path also uses row['chash'] for chunk_text_hash."""
         chash = "f" * 32
@@ -473,6 +477,7 @@ class TestQueryRepointGraphHop:
 
         assert result["chunk_text_hash"] == [chash]
 
+    @pytest.mark.t2_tenant
     def test_follow_links_no_seeds_falls_through_to_metadata_scoped(self, monkeypatch):
         """SIGNIFICANT: follow_links-only with no seeds → broad search via search_metadata_scoped.
 
@@ -493,6 +498,7 @@ class TestQueryRepointGraphHop:
         assert isinstance(result, dict)
         assert result["ids"] == ["1.2.3"]
 
+    @pytest.mark.t2_tenant
     def test_follow_links_no_seeds_empty_fallback_returns_no_docs_message(self, monkeypatch):
         """When no seeds AND metadata_scoped fallback also returns empty → no-docs message."""
         t3 = _FakeServiceT3(graph_rows=[], meta_rows=[])
@@ -505,6 +511,7 @@ class TestQueryRepointGraphHop:
         assert t3.graph_calls == []
         assert t3.meta_calls  # metadata_scoped still called
 
+    @pytest.mark.t2_tenant
     def test_follow_links_where_routes_through_graph_hop(self, monkeypatch):
         """H2 RESOLVED (nexus-7ndh3): follow_links + where stays on the service branch.
 
@@ -564,6 +571,7 @@ class TestQueryRepointGraphHop:
         assert not t3.graph_calls, "search_graph_hop must NOT receive an operator where"
         assert not t3.meta_calls, "search_metadata_scoped must NOT receive an operator where"
 
+    @pytest.mark.t2_tenant
     def test_follow_links_subtree_service_mode(self, monkeypatch):
         """L1: follow_links + subtree in service mode: seeds come from cat.descendants()."""
         rows = _make_graph_rows(("1.2.3", "a" * 32))
@@ -610,6 +618,7 @@ class TestQueryGuards:
 
         assert "catalog not initialized" in result
 
+    @pytest.mark.t2_tenant
     def test_catalog_filters_match_nothing_returns_no_docs_message(self, monkeypatch):
         """MEDIUM-3: filters resolve to empty set → 'No documents found matching catalog filters'."""
         t3 = _FakeServiceT3()
@@ -779,6 +788,7 @@ class TestQueryRepointClassifiesEmbeddingProfileMismatch:
     already raises for the plain (no-catalog-params) path — "every read
     path names it identically"."""
 
+    @pytest.mark.t2_tenant
     def test_author_filter_names_the_mismatch(self, monkeypatch):
         from nexus.db.http_vector_client import VectorServiceError
         from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE

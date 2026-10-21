@@ -7,20 +7,19 @@ follow-up to Phase 1A's ``tier_writes`` telemetry table at nexus-kren).
 
 Reads the ``tier_writes`` T2 table populated by ``_record_tier_write``
 in ``src/nexus/mcp/core.py``. By default reports the current session
-(via ``NX_SESSION_ID`` env or ``read_claude_session_id()``); other
+(via ``resolve_active_session_id()``); other
 modes select by id, last-N, or time window.
 """
 from __future__ import annotations
 
 import json as _json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 import structlog
 
-from nexus.session import read_claude_session_id
+from nexus.session import resolve_active_session_id
 
 _log = structlog.get_logger(__name__)
 
@@ -41,10 +40,9 @@ def _resolve_session(session_arg: str | None) -> str | None:
     """Return the session_id to query, or None for 'no specific session'."""
     if session_arg:
         return session_arg
-    env_sid = os.environ.get("NX_SESSION_ID", "").strip()
-    if env_sid:
-        return env_sid
-    return read_claude_session_id()
+    # The same order T1 and T2 attribution use: NX_SESSION_ID, then
+    # CLAUDE_CODE_SESSION_ID, then the machine-wide file (nexus-d8yul).
+    return resolve_active_session_id()
 
 
 def _resolve_target_session_or_exit(
@@ -70,7 +68,8 @@ def _resolve_target_session_or_exit(
         else:
             click.echo(
                 "No current session resolvable "
-                "(NX_SESSION_ID env unset, no claude session file). "
+                "(NX_SESSION_ID and CLAUDE_CODE_SESSION_ID env unset, "
+                "no claude session file). "
                 "Use --session, --last, or --since.",
                 err=True,
             )
@@ -93,7 +92,10 @@ def _summarize(rows: list[tuple]) -> dict[str, int]:
 @click.command("tier-status")
 @click.option(
     "--session", "session_arg", default=None,
-    help="Specific session_id (default: current session via NX_SESSION_ID).",
+    help=(
+        "Specific session_id (default: current session via NX_SESSION_ID, "
+        "then CLAUDE_CODE_SESSION_ID, then the claude session file)."
+    ),
 )
 @click.option(
     "--last", "last_n", type=int, default=None,

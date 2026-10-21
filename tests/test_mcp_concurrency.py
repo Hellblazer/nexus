@@ -119,6 +119,7 @@ def test_t1_isolation_across_sessions():
 
 # ── T2 concurrent writes ─────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_t2_concurrent_writes():
     """N processes writing to same SQLite file via WAL — all entries persisted.
 
@@ -170,6 +171,7 @@ def test_t2_concurrent_writes():
     assert total == n_processes * entries_per_process
 
 
+@pytest.mark.t2_tenant
 def test_t2_concurrent_reads_during_writes():
     """Reader processes don't block or crash during concurrent writes."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

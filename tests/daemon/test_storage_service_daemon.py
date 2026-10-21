@@ -2051,6 +2051,47 @@ class TestSpawnServiceOnnxModelRoot:
         home = Path(os.environ.get("HOME") or Path.home())
         assert env["DJL_CACHE_DIR"] == str(home / ".cache" / "nexus" / "djl")
 
+    def test_ort_native_root_is_passed_under_the_nexus_cache(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-8ool4: the engine extracts ONNX Runtime's native libraries once into
+        HOME/.cache/nexus/ort_native; the supervisor passes that root explicitly,
+        as it does the model root and the DJL cache, so a HOME override cannot split them."""
+        monkeypatch.delenv("NX_ORT_NATIVE_DIR", raising=False)
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        home = Path(os.environ.get("HOME") or Path.home())
+        assert env["NX_ORT_NATIVE_DIR"] == str(home / ".cache" / "nexus" / "ort_native")
+
+    def test_an_explicit_ort_native_root_passes_through(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_ORT_NATIVE_DIR", "/their/ort")
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        # Verbatim, not str(Path(...)): apply_ort_native_env returns early on a
+        # non-blank value, so the operator's spelling reaches the engine as
+        # written; str(Path("/their/ort")) is "\\their\\ort" on Windows.
+        assert env["NX_ORT_NATIVE_DIR"] == "/their/ort"
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_ort_native_root_is_unset_not_a_choice(
+        self,
+        blank: str,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_ORT_NATIVE_DIR", blank)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        home = Path(os.environ.get("HOME") or Path.home())
+        assert env["NX_ORT_NATIVE_DIR"] == str(home / ".cache" / "nexus" / "ort_native")
+
     @pytest.mark.parametrize("name", ["DJL_CACHE_DIR", "ENGINE_CACHE_DIR"])
     def test_an_operators_own_djl_directory_is_left_alone(
         self,
@@ -2655,6 +2696,58 @@ class TestExitReasonReaders:
         assert ssd.last_engine_error_line(log, log.stat().st_size) is None
         assert ssd.last_supervisor_error_line(tmp_path / "absent.log", 0) is None
 
+    def test_a_signal_death_with_only_info_lines_has_no_reason(self, tmp_path: Path) -> None:
+        """nexus-pmq9y: an engine killed by a signal during start logs no ERROR,
+        and its last line is a logback INFO line (pci_builders_terminated in the
+        7.77.1 shakeout). That line is not why it died: no reason, so the caller
+        says neither process left one. Output outside logback still counts."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            "2026-10-11 02:10:03,000 WARN  [main] d.n.service.Main - slow start\n"
+            "2026-10-11 02:10:04,000 INFO  [pci] d.n.service.Pci - event=pci_builders_terminated\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_error_line(log, 0) is None
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write("Unrecognized option: --bogus\n")
+        assert ssd.last_engine_error_line(log, 0) == "Unrecognized option: --bogus"
+
+    _INFO ="2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
+
+    def test_boot_failure_reason_reports_only_a_final_error(self, tmp_path: Path) -> None:
+        """nexus-pbway: ``nx doctor`` finds the engine down some time later. The log's end must be the error
+        (with its trace), not an old ERROR followed by a clean stop."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == self._ERR
+        log.write_text(self._ERR + "\n" + self._INFO + "\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "an old ERROR before a clean stop"
+        log.write_text(self._ERR + "\n" + self._INFO + "\nShutting down...\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "a plain-text tail is no reason"
+        log.write_text(self._INFO + "\n" + self._ERR + "\nCaused by: java.io.IOException: disk\n", encoding="utf-8")
+        reason = ssd.engine_boot_failure_reason(log)
+        assert reason is not None and reason.startswith(self._ERR) and "java.io.IOException: disk" in reason
+
+    def test_boot_failure_reason_reads_a_fatal_line_outside_the_logback_format(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._INFO + '\nException in thread "main" java.lang.IllegalStateException: no pg\n'
+            "\tat dev.nexus.service.Main.main(Main.java:9)\n",
+            encoding="utf-8",
+        )
+        assert ssd.engine_boot_failure_reason(log) == 'Exception in thread "main" java.lang.IllegalStateException: no pg'
+        log.write_text('Exception in thread "main" java.lang.Error: x\nShutting down...\n', encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == 'Exception in thread "main" java.lang.Error: x'
+        log.write_text("Shutting down...\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None
+        assert ssd.engine_boot_failure_reason(tmp_path / "absent.log") is None
+
     def test_engine_exit_reason_picks_the_log_that_grew(self, tmp_path: Path) -> None:
         """A jar launch writes storage_service_jar.log; a native log left by an
         earlier install did not change and is not the source."""
@@ -3256,8 +3349,8 @@ class TestEnsureStorageSupervisor:
         spawned supervisor's argv must carry an EXPLICIT, RESOLVED-ABSOLUTE
         --config-dir -- never rely on the spawned process re-deriving its
         own config dir from an inherited environment. storage_service_stack_
-        matcher's flagless-matches-default rule exists only for units
-        installed BEFORE this fix; a freshly spawned supervisor must never
+        matcher's bare-start branch (decided by the environment check) exists
+        only for units installed BEFORE this fix; a freshly spawned supervisor must never
         be flagless."""
         from nexus.commands import daemon as daemon_mod
         from nexus import config as _config

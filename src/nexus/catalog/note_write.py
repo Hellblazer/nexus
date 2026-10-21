@@ -3,7 +3,7 @@
 
 A note (MCP ``store_put``; next ``nx store put``, ``nx memory promote`` and the recovery-bundle
 import) is one catalog document of a few pieces. It used to be written as one ``/store-put``
-request per piece, then a separate manifest request, then compensation when a later step failed.
+(a route since retired, nexus-nt76j) request per piece, then a separate manifest request, then compensation when a later step failed.
 Between the chunk requests and the manifest request a chunk existed with no owner row, and a client
 that died there left it behind. :func:`write_note` sends the pieces as the ``chunks`` array of a
 single ``write_manifest_many`` request for the one document, with ``sweep`` on (the completion stamp
@@ -250,7 +250,7 @@ def _chunk_payload(
 ) -> list[dict]:
     """The ``chunks`` array: one ``{chash, text, metadata}`` per DISTINCT piece.
 
-    The metadata is what ``HttpVectorClient.put`` stamped on the single piece it wrote (the same
+    The metadata is what the retired ``HttpVectorClient.put`` stamped on the single piece it wrote (the same
     ``make_chunk_metadata`` factory, ``catalog_doc_id`` included), so a note reads back exactly as
     one written the old way. Identical pieces collapse to one chunk, as identical text always did.
     """
@@ -366,7 +366,7 @@ def write_note(
     if owns_cat:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
 
-        cat = make_catalog_writer(priority="interactive")
+        cat = make_catalog_writer()
     recorder = _AttemptRecorder(cat)
     try:
         try:
@@ -834,7 +834,7 @@ def stamp_note(outcome: PutNoteOutcome, *, cat: Any = None) -> PutNoteOutcome:
         if owns_cat:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
 
-            cat = make_catalog_writer(priority="interactive")
+            cat = make_catalog_writer()
         complete_document(cat, doc_id=doc, content_hash=outcome.content_hash, manifest_rows=rows)
     except IndexRunVerifyRefused as exc:
         refused = _stamp_refused(doc, outcome.collection, exc)

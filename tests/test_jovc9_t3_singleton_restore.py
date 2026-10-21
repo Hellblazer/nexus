@@ -183,3 +183,19 @@ def test_guard_tolerates_a_test_that_reset_the_singleton(guard) -> None:
         _drive(gen, leak=None)
     assert mcp_infra._t3_instance is prior
     mcp_infra.inject_t3(None)
+
+
+def test_guard_restores_the_t1_singleton_a_test_left_behind(guard) -> None:
+    """nexus-kt6kj: ``get_t1()`` memoises a scratch store bound to the endpoint and
+    session its first caller saw; a later test in the worker must not inherit it."""
+    prior, leaked = _NotAMock(), _NotAMock()
+    mcp_infra.inject_t1(prior)
+    try:
+        gen = guard(_fake_request())
+        next(gen)
+        mcp_infra.inject_t1(leaked, isolated=True)
+        with pytest.raises(StopIteration):
+            next(gen)
+        assert mcp_infra._t1_instance is prior and mcp_infra._t1_isolated is False
+    finally:
+        mcp_infra.inject_t1(None)

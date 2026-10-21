@@ -3,26 +3,24 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
-import liquibase.Contexts;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.Liquibase;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.util.HexFormat;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -108,11 +106,7 @@ class ManifestVerifyTest {
         // changeset fails to apply cleanly, @BeforeAll fails and every test below
         // reports it — the migration-conformance check for this bead.
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         svcDs = buildSvcDataSource();
@@ -142,10 +136,8 @@ class ManifestVerifyTest {
     @Test
     void catalog020Changesets_recordedInDatabaseChangeLog() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM databasechangelog WHERE id LIKE 'catalog-020-%'");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("public", "databasechangelog")),
+                    DSL.field(DSL.name("id"), String.class).like("catalog-020-%")))
                 .as("all 5 catalog-020 changesets (columns, index, manifest_verify, " +
                     "manifest_verify_all, grants) must be recorded as applied")
                 .isEqualTo(5L);
@@ -174,11 +166,12 @@ class ManifestVerifyTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertDoc(su, TENANT, docId);
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT index_state FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("index_state"))
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.INDEX_STATE).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .fetch();
+            assertThat(rows).isNotEmpty();
+            assertThat(rows.get(0).get(CATALOG_DOCUMENTS.INDEX_STATE))
                 .as("index_state must default to NULL (unknown) — no backfill asserts a fact " +
                     "nobody measured")
                 .isNull();
@@ -286,9 +279,10 @@ class ManifestVerifyTest {
             // A manifest row with NO chunk — would read as 1 missing if the
             // document were live. It must not, once tombstoned.
             insertManifestRow(su, TENANT, docId, 0, chashMissing, COLLECTION);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .execute();
         }
 
         long[] r = verify(docId);
@@ -331,9 +325,9 @@ class ManifestVerifyTest {
             insertManifestRow(su, TENANT, docId, 0, chashBackfilled, COLLECTION);
             insertChunk1024(su, TENANT, COLLECTION, chashBackfilled);
 
-            PSQLException ex = org.junit.jupiter.api.Assertions.assertThrows(PSQLException.class, () ->
+            DataAccessException ex = org.junit.jupiter.api.Assertions.assertThrows(DataAccessException.class, () ->
                 insertManifestRowNullCollection(su, TENANT, docId, 1, chashPending));
-            assertThat(ex.getSQLState())
+            assertThat(ex.sqlState())
                 .as("the state is unrepresentable -- assert the not-null-violation SQLSTATE "
                     + "directly, not merely a row count of 0")
                 .isEqualTo("23502");
@@ -477,18 +471,19 @@ class ManifestVerifyTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT referenced, present, missing FROM nexus.manifest_verify('" + docId + "')");
-            assertThat(rs.next())
+            var mv = MANIFEST_VERIFY.call(docId);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(mv.REFERENCED, mv.PRESENT, mv.MISSING)
+                .from(mv).fetch();
+            assertThat(rows)
                 .as("manifest_verify always returns exactly one aggregate row, even with " +
                     "no tenant GUC set")
-                .isTrue();
-            assertThat(rs.getLong("referenced"))
+                .isNotEmpty();
+            assertThat(rows.get(0).get(mv.REFERENCED))
                 .as("no GUC = no tenant = no rows matched -> referenced = 0 " +
                     "(reader contract: never RAISE, unlike purge_trash)")
                 .isEqualTo(0L);
-            assertThat(rs.getLong("present")).isEqualTo(0L);
-            assertThat(rs.getLong("missing")).isEqualTo(0L);
+            assertThat(rows.get(0).get(mv.PRESENT)).isEqualTo(0L);
+            assertThat(rows.get(0).get(mv.MISSING)).isEqualTo(0L);
         }
     }
 
@@ -545,10 +540,8 @@ class ManifestVerifyTest {
         // RDR-191 Phase 6 (nexus-o8dil.33): narrowed from
         // nexusSvc_hasExecuteGrantOnBothFunctions — manifest_verify_all() is dropped.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT has_function_privilege('nexus_svc', 'nexus.manifest_verify(text)', 'EXECUTE')");
-            rs.next();
-            assertThat(rs.getBoolean(1))
+            assertThat(PgCatalogProbes.canExecuteFunction(DSL.using(su, SQLDialect.POSTGRES),
+                    "nexus_svc", "nexus.manifest_verify(text)"))
                 .as("nexus_svc must have EXECUTE on nexus.manifest_verify(text) (catalog-020-5 grants)")
                 .isTrue();
         }
@@ -561,13 +554,10 @@ class ManifestVerifyTest {
     /** Call manifest_verify(docId) under the TENANT GUC. Returns [referenced, present, missing]. */
     private long[] verify(String docId) {
         return tenantScope.withTenant(TENANT, ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT referenced, present, missing FROM nexus.manifest_verify(?)", docId);
+            var mv = MANIFEST_VERIFY.call(docId);
+            var row = ctx.select(mv.REFERENCED, mv.PRESENT, mv.MISSING).from(mv).fetchOne();
             assertThat(row).as("manifest_verify must return exactly one row").isNotNull();
-            return new long[]{
-                row.get("referenced", Long.class),
-                row.get("present", Long.class),
-                row.get("missing", Long.class)};
+            return new long[]{row.get(mv.REFERENCED), row.get(mv.PRESENT), row.get(mv.MISSING)};
         });
     }
 
@@ -581,10 +571,12 @@ class ManifestVerifyTest {
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertManifestRow(Connection su, String tenantId, String docId,
@@ -604,10 +596,10 @@ class ManifestVerifyTest {
                                            int position, String chashHex, String collection,
                                            String embeddingModel)
             throws Exception {
-        final String modelExpr = embeddingModel != null
-            ? "'" + embeddingModel + "'"
-            : "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
-                + "' AND name = '" + collection + "')";
+        final DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        final String model = embeddingModel != null
+            ? embeddingModel
+            : PgContainerHelper.collectionModel(seed, tenantId, collection);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every catalog_document_chunks insert. This
         // file's whole purpose is manifest_verify's detection of a chash with NO
@@ -619,41 +611,45 @@ class ManifestVerifyTest {
         // insert, then re-add it NOT VALID (catalog-029-0's exact shape) so it is
         // live again (unvalidated) for every subsequent statement in this
         // container, including any other test's real inserts.
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex'), '" + collection + "', " + modelExpr + ") " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks " +
-            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
-            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) " +
-            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) " +
-            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        PgContainerHelper.dropCatalogChunksFk(su);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
+        PgContainerHelper.readdCatalogChunksFkNotValid(su);
     }
 
     private static void insertManifestRowNullCollection(Connection su, String tenantId,
                                                          String docId, int position, String chashHex)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex'), 'voyage-context-3') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,
                                          String chashHex) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
-            + "' AND name = '" + collection + "'), " +
-            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenantId)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk text")
+            .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vecXY(1024, 1f, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 }

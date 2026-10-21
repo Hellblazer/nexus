@@ -49,10 +49,14 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.link_generator import (
     _FILE_PATH_RE,
     _PROSE_PATH_RE,
+    DryRunLinkWriter,
     generate_citation_links,
     generate_pdf_corpus_links,
     generate_prose_filepath_links,
     generate_rdr_filepath_links,
+    load_existing_link_keys,
+    prune_stale_same_as_links,
+    relink_changed_pdfs,
 )
 from nexus.catalog.tumbler import Tumbler
 
@@ -219,6 +223,13 @@ class FakeLinkGenHandler(BaseHTTPRequestHandler):
                 params.get("to_tumbler", ""),
                 params.get("link_type", ""),
             )
+            created_by = params.get("created_by", "")
+            if created_by:
+                matches = [m for m in matches if m.get("created_by") == created_by]
+            # Mirrors queryLinks: id order (insertion order here), limit/offset.
+            offset = int(params.get("offset", 0))
+            limit = int(params.get("limit", 0)) or len(matches) or 1
+            matches = matches[offset:offset + limit]
             self._send_json({"links": matches, "count": len(matches)})
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
@@ -252,6 +263,22 @@ class FakeLinkGenHandler(BaseHTTPRequestHandler):
                     "to_span": body.get("to_span", ""),
                 })
                 self._send_json({"ok": True, "created": True})
+        elif op == "/resolve_many":
+            # Mirrors CatalogHandler.handleResolveMany: unknown ids are absent.
+            entries = {
+                d: _State.documents[d] for d in body.get("doc_ids", []) if d in _State.documents
+            }
+            self._send_json({"entries": entries})
+        elif op == "/unlink":
+            # Mirrors CatalogHandler.handleUnlink: deletes the exact
+            # (from, to, link_type) row and returns the rowcount.
+            gone = _State.links_matching(
+                body.get("from_tumbler", ""),
+                body.get("to_tumbler", ""),
+                body.get("link_type", ""),
+            )
+            _State.links = [lnk for lnk in _State.links if lnk not in gone]
+            self._send_json({"deleted": len(gone)})
         else:
             self._send_json({"ok": True})
 
@@ -496,14 +523,36 @@ class TestProseFilepathLinksServiceMode:
 
 
 class TestPdfCorpusLinksServiceMode:
+    def test_pdfs_sharing_a_commit_but_not_content_are_not_linked(self, reader, writer) -> None:
+        """nexus-utkop: head_hash is the git commit for a repo-indexed file,
+        so seven distinct PDFs indexed at one commit were joined as same-as."""
+        for t, h in (("1.1.1", "3e397d9c"), ("1.1.2", "4fe9dd09"), ("1.1.3", "a2723ab6")):
+            _State.add_document(
+                t, title=t, content_type="pdf", head_hash="aee32ea0commit",
+                index_content_hash=h, physical_collection="docs__1-1",
+            )
+        assert generate_pdf_corpus_links(reader, writer=writer) == 0
+        assert _State.links == []
+
+    def test_legacy_meta_content_hash_is_the_fallback_key(self, reader, writer) -> None:
+        _State.add_document(
+            "1.1.1", title="P1", content_type="paper", head_hash="c1",
+            metadata={"content_hash": "same-bytes"}, physical_collection="knowledge__a",
+        )
+        _State.add_document(
+            "1.1.2", title="P2", content_type="pdf", head_hash="c2",
+            index_content_hash="same-bytes", physical_collection="knowledge__b",
+        )
+        assert generate_pdf_corpus_links(reader, writer=writer) == 1
+
     def test_two_pdfs_with_same_hash_get_linked(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="Paper1", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__delos",
+            index_content_hash="abc123", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="Paper2", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__art-papers",
+            index_content_hash="abc123", physical_collection="knowledge__art-papers",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 1
@@ -517,7 +566,7 @@ class TestPdfCorpusLinksServiceMode:
     def test_no_link_when_hash_unique(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="Unique", content_type="paper",
-            head_hash="unique-hash", physical_collection="knowledge__delos",
+            index_content_hash="unique-hash", physical_collection="knowledge__delos",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 0
@@ -525,11 +574,11 @@ class TestPdfCorpusLinksServiceMode:
     def test_idempotent(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__delos",
+            index_content_hash="h1", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__art-papers",
+            index_content_hash="h1", physical_collection="knowledge__art-papers",
         )
         first = generate_pdf_corpus_links(reader, writer=writer)
         second = generate_pdf_corpus_links(reader, writer=writer)
@@ -537,17 +586,244 @@ class TestPdfCorpusLinksServiceMode:
         assert second == 0
         assert len(_State.links) == 1
 
-    def test_pdfs_without_head_hash_skipped(self, reader, writer) -> None:
+    def test_pdfs_without_content_hash_skipped(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="NoHash1", content_type="paper",
-            head_hash="", physical_collection="knowledge__delos",
+            index_content_hash="", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="NoHash2", content_type="paper",
-            head_hash="", physical_collection="knowledge__art-papers",
+            index_content_hash="", physical_collection="knowledge__art-papers",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 0
+
+
+class TestPdfCorpusSameAsPruneServiceMode:
+    """nexus-h0uy7: a PDF re-indexed with new bytes must lose the same-as
+    link it no longer earns. Pruning is per link, never a bulk delete by
+    created_by, and touches only content_hash_dedup links."""
+
+    @staticmethod
+    def _doc(t: str, h: str, *, content_type: str = "pdf", **fields: Any) -> None:
+        _State.add_document(
+            t, title=t, content_type=content_type,
+            index_content_hash=h, physical_collection="knowledge__a", **fields,
+        )
+
+    @staticmethod
+    def _dedup_link(src: str, dst: str, **meta: Any) -> None:
+        _State.links.append({
+            "from_tumbler": src, "to_tumbler": dst, "link_type": "same-as",
+            "created_by": "content_hash_dedup", "from_span": "", "to_span": "",
+            "metadata": meta,
+        })
+
+    def test_link_is_retracted_when_member_content_changes(self, reader, writer) -> None:
+        self._doc("1.1.1", "same")
+        self._doc("1.1.2", "same")
+        assert generate_pdf_corpus_links(reader, writer=writer) == 1
+        _State.documents["1.1.2"]["index_content_hash"] = "new-bytes"
+        assert prune_stale_same_as_links(reader, writer=writer) == [("1.1.2", "1.1.1")]
+        assert _State.links == []
+
+    def test_still_matching_link_is_kept(self, reader, writer) -> None:
+        self._doc("1.1.1", "same")
+        self._doc("1.1.2", "same")
+        generate_pdf_corpus_links(reader, writer=writer)
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+        assert len(_State.links) == 1
+
+    def test_legacy_meta_content_hash_pair_is_kept(self, reader, writer) -> None:
+        self._doc("1.1.1", "", metadata={"content_hash": "same-bytes"})
+        self._doc("1.1.2", "same-bytes")
+        assert generate_pdf_corpus_links(reader, writer=writer) == 1
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+
+    def test_legacy_meta_content_hash_pair_that_differs_is_retracted(self, reader, writer) -> None:
+        self._doc("1.1.1", "", metadata={"content_hash": "old-bytes"})
+        self._doc("1.1.2", "", metadata={"content_hash": "other-bytes"})
+        self._dedup_link("1.1.2", "1.1.1")
+        assert prune_stale_same_as_links(reader, writer=writer) == [("1.1.2", "1.1.1")]
+
+    def test_unsettled_key_is_left_alone(self, reader, writer) -> None:
+        """Registration moved meta.content_hash but begin_index_run never
+        landed, so index_content_hash still names the old bytes."""
+        self._doc("1.1.1", "new-bytes", metadata={"content_hash": "new-bytes"})
+        self._doc("1.1.2", "old-bytes", metadata={"content_hash": "new-bytes"})
+        self._dedup_link("1.1.2", "1.1.1")
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+
+    def test_relink_on_a_code_only_change_fetches_no_documents(self, reader, writer) -> None:
+        self._doc("1.1.1", "same")
+        self._doc("1.1.2", "same")
+        generate_pdf_corpus_links(reader, writer=writer)
+        _State.add_document("1.1.7", title="code", content_type="code")
+        _State.list_requests.clear()
+        assert relink_changed_pdfs(reader, writer=writer, changed={"1.1.7"}) == (0, 0)
+        assert _State.list_requests == []
+        assert len(_State.links) == 1
+
+    def test_endpoint_with_no_key_is_left_alone(self, reader, writer) -> None:
+        """An unknown key is not a changed one."""
+        self._doc("1.1.1", "h1")
+        self._doc("1.1.2", "")
+        self._dedup_link("1.1.2", "1.1.1")
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+
+    def test_scope_covers_either_endpoint_and_nothing_else(self, reader, writer) -> None:
+        for t, h in (("1.1.1", "a"), ("1.1.2", "b"), ("1.1.3", "c"), ("1.1.4", "d")):
+            self._doc(t, h)
+        self._dedup_link("1.1.2", "1.1.1")  # scoped by its from side
+        self._dedup_link("1.1.4", "1.1.3")  # scoped by its to side
+        self._dedup_link("1.1.4", "1.1.1")  # neither side in scope
+        retracted = prune_stale_same_as_links(reader, writer=writer, scope={"1.1.2", "1.1.3"})
+        assert sorted(retracted) == [("1.1.2", "1.1.1"), ("1.1.4", "1.1.3")]
+        assert [(lnk["from_tumbler"], lnk["to_tumbler"]) for lnk in _State.links] == [
+            ("1.1.4", "1.1.1"),
+        ]
+
+    def test_other_creators_and_co_asserted_links_are_never_pruned(self, reader, writer) -> None:
+        self._doc("1.1.1", "h1")
+        self._doc("1.1.2", "h2")
+        self._doc("1.1.3", "h3")
+        _State.links.append({
+            "from_tumbler": "1.1.2", "to_tumbler": "1.1.1", "link_type": "same-as",
+            "created_by": "user", "from_span": "", "to_span": "",
+        })
+        self._dedup_link("1.1.3", "1.1.1", co_discovered_by=["user"])
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+        assert len(_State.links) == 2
+
+    def test_link_to_a_document_no_longer_a_pdf_is_retracted(self, reader, writer) -> None:
+        self._doc("1.1.1", "same")
+        self._doc("1.1.2", "same")
+        generate_pdf_corpus_links(reader, writer=writer)
+        _State.documents["1.1.1"]["content_type"] = "prose"
+        assert prune_stale_same_as_links(reader, writer=writer) == [("1.1.2", "1.1.1")]
+
+    def test_empty_pdf_fetch_refuses_instead_of_retracting_everything(self, reader, writer) -> None:
+        self._dedup_link("1.1.2", "1.1.1")
+        assert prune_stale_same_as_links(reader, writer=writer) == []
+        assert len(_State.links) == 1
+
+    def test_pages_past_the_first_page(self, reader, writer) -> None:
+        self._doc("1.1.1", "anchor")
+        for i in range(2, 7):
+            self._doc(f"1.1.{i}", f"changed-{i}")
+            self._dedup_link(f"1.1.{i}", "1.1.1")
+        assert len(prune_stale_same_as_links(reader, writer=writer, page=2)) == 5
+        assert _State.links == []
+
+    def test_relink_rejoins_members_when_the_anchor_changes(self, reader, writer) -> None:
+        """The anchor re-indexed with new bytes: its members still share a
+        key, so they re-join the next anchor in the same pass."""
+        for t in ("1.1.1", "1.1.2", "1.1.3"):
+            self._doc(t, "same")
+        assert generate_pdf_corpus_links(reader, writer=writer) == 2
+        _State.documents["1.1.1"]["index_content_hash"] = "new-bytes"
+        assert relink_changed_pdfs(reader, writer=writer, changed={"1.1.1"}) == (2, 1)
+        assert [(lnk["from_tumbler"], lnk["to_tumbler"]) for lnk in _State.links] == [
+            ("1.1.3", "1.1.2"),
+        ]
+
+    def test_relink_joins_a_changed_pdf_to_its_new_group(self, reader, writer) -> None:
+        self._doc("1.1.1", "old")
+        self._doc("1.1.2", "old")
+        self._doc("1.1.3", "new-bytes")
+        generate_pdf_corpus_links(reader, writer=writer)
+        _State.documents["1.1.2"]["index_content_hash"] = "new-bytes"
+        assert relink_changed_pdfs(reader, writer=writer, changed={"1.1.2"}) == (1, 1)
+        assert [(lnk["from_tumbler"], lnk["to_tumbler"]) for lnk in _State.links] == [
+            ("1.1.3", "1.1.2"),
+        ]
+
+    def test_a_new_anchor_gets_every_member_of_its_group(self, reader, writer) -> None:
+        self._doc("1.1.5", "same")
+        self._doc("1.1.6", "same")
+        generate_pdf_corpus_links(reader, writer=writer)
+        self._doc("1.1.3", "same")
+        assert generate_pdf_corpus_links(
+            reader, writer=writer, new_tumblers=[Tumbler.parse("1.1.3")],
+        ) == 2
+        assert {lnk["to_tumbler"] for lnk in _State.links} == {"1.1.3", "1.1.5"}
+
+    def test_index_time_hook_prunes_the_runs_changed_pdfs(
+        self, reader, fake_server: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-h0uy7: the post-run pass in indexer.py, scoped by needs_fence."""
+        from nexus import indexer  # noqa: PLC0415 — keeps this module's import cost unchanged
+        from nexus.catalog import factory  # noqa: PLC0415 — patch target
+
+        self._doc("1.1.1", "old")
+        self._doc("1.1.2", "new-bytes")
+        self._dedup_link("1.1.2", "1.1.1")
+        monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
+        monkeypatch.setattr(
+            factory, "make_catalog_writer",
+            lambda: _ServiceCatalogWriter(HttpCatalogClient(
+                base_url=fake_server, tenant="tenant_abc", _token="test_tok",
+            )),
+        )
+        indexer._relink_changed_pdfs({"needs_fence": {"1.1.2": ("new-bytes", "knowledge__a")}})
+        assert _State.links == []
+
+    def test_index_time_hook_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus import indexer  # noqa: PLC0415 — keeps this module's import cost unchanged
+        from nexus.catalog import factory  # noqa: PLC0415 — patch target
+
+        def _boom() -> None:
+            raise RuntimeError("catalog down")
+
+        monkeypatch.setattr(factory, "make_catalog_reader", _boom)
+        indexer._relink_changed_pdfs({"needs_fence": {"1.1.2": ("h", "c")}})
+
+    @staticmethod
+    def _cli(reader, writer, monkeypatch: pytest.MonkeyPatch, *args: str) -> str:
+        from click.testing import CliRunner  # noqa: PLC0415 — CLI tests only
+
+        from nexus.commands import catalog as cat_cmd  # noqa: PLC0415 — patch target
+        from nexus.commands.catalog_cmds.links import generate_links_cmd  # noqa: PLC0415 — CLI tests only
+
+        monkeypatch.setattr(cat_cmd, "_get_catalog", lambda: reader)
+        monkeypatch.setattr(cat_cmd, "_get_catalog_writer", lambda: writer)
+        result = CliRunner().invoke(
+            generate_links_cmd,
+            ["--no-citations", "--no-filepath", "--no-prose", "--no-rdr-dependency", *args],
+        )
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    def test_cli_write_pass_retracts_then_relinks(self, reader, writer, monkeypatch) -> None:
+        self._doc("1.1.1", "a")
+        self._doc("1.1.2", "b")
+        self._doc("1.1.3", "b")
+        self._dedup_link("1.1.2", "1.1.1")
+        out = self._cli(reader, writer, monkeypatch)
+        assert "stale same-as links retracted: 1" in out
+        assert [(lnk["from_tumbler"], lnk["to_tumbler"]) for lnk in _State.links] == [
+            ("1.1.3", "1.1.2"),
+        ]
+
+    def test_cli_dry_run_projects_the_count_once(self, reader, writer, monkeypatch) -> None:
+        self._doc("1.1.1", "a")
+        self._doc("1.1.2", "b")
+        self._dedup_link("1.1.2", "1.1.1")
+        out = self._cli(reader, writer, monkeypatch, "--dry-run")
+        assert "would retract 1 stale same-as link(s)" in out
+        assert "Catalog link count would go 1 -> 0" in out
+        assert len(_State.links) == 1
+
+    def test_dry_run_records_the_retraction_and_writes_nothing(self, reader) -> None:
+        self._doc("1.1.1", "h1")
+        self._doc("1.1.2", "h2")
+        self._dedup_link("1.1.2", "1.1.1")
+        recorder = DryRunLinkWriter(existing=load_existing_link_keys(reader))
+        prune_stale_same_as_links(reader, writer=recorder)
+        assert [(r.from_tumbler, r.to_tumbler, r.link_type) for r in recorder.retracted] == [
+            ("1.1.2", "1.1.1", "same-as"),
+        ]
+        assert len(_State.links) == 1
 
 
 # ── T0.2 (nx/chroma-residue-plan-2026-08-10): fetch-scope narrowing ─────────
@@ -651,18 +927,25 @@ def _old_generate_prose_filepath_links(cat, *, writer=None, new_tumblers=None):
     return count
 
 
+def _content_key(e) -> str:
+    return e.index_content_hash or (e.meta or {}).get("content_hash") or ""
+
+
 def _old_generate_pdf_corpus_links(cat, *, writer=None, new_tumblers=None):
-    """Reference copy of the PRE-T0.2 ``generate_pdf_corpus_links`` body."""
+    """Reference copy of the PRE-T0.2 ``generate_pdf_corpus_links`` body,
+    with the grouping key moved from head_hash to the content hash
+    (nexus-utkop) so the fetch-scope equivalence still compares like with
+    like."""
     if new_tumblers is not None and len(new_tumblers) == 0:
         return 0
     entries = cat.all_documents()
     pdf_entries = [
         e for e in entries
-        if e.content_type in ("pdf", "paper") and e.head_hash
+        if e.content_type in ("pdf", "paper") and _content_key(e)
     ]
     by_hash: dict[str, list] = {}
     for e in pdf_entries:
-        by_hash.setdefault(e.head_hash, []).append(e)
+        by_hash.setdefault(_content_key(e), []).append(e)
     new_set = {str(t) for t in new_tumblers} if new_tumblers is not None else None
     count = 0
     for group in by_hash.values():
@@ -739,11 +1022,11 @@ class TestLinkGeneratorFetchScope:
     def test_pdf_linker_fetches_only_its_content_types(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__a",
+            index_content_hash="h1", physical_collection="knowledge__a",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__b",
+            index_content_hash="h1", physical_collection="knowledge__b",
         )
 
         generate_pdf_corpus_links(reader, writer=writer)
@@ -827,12 +1110,12 @@ class TestLinkGeneratorFetchScopeEquivalence:
         assert new_snap == old_snap
 
     def test_pdf_linker_equivalent(self, reader, writer) -> None:
-        _State.add_document("1.1.1", title="P1", content_type="pdf", head_hash="h1", physical_collection="knowledge__a")
-        _State.add_document("1.1.2", title="P2", content_type="paper", head_hash="h1", physical_collection="knowledge__b")
-        _State.add_document("1.1.3", title="P3", content_type="paper", head_hash="h1", physical_collection="knowledge__c")
-        _State.add_document("1.1.4", title="Unique", content_type="pdf", head_hash="h2", physical_collection="knowledge__d")
-        # Noise: same head_hash, wrong content_type — must not join the group.
-        _State.add_document("2.2.1", title="noise", content_type="knowledge", head_hash="h1")
+        _State.add_document("1.1.1", title="P1", content_type="pdf", index_content_hash="h1", physical_collection="knowledge__a")
+        _State.add_document("1.1.2", title="P2", content_type="paper", index_content_hash="h1", physical_collection="knowledge__b")
+        _State.add_document("1.1.3", title="P3", content_type="paper", index_content_hash="h1", physical_collection="knowledge__c")
+        _State.add_document("1.1.4", title="Unique", content_type="pdf", index_content_hash="h2", physical_collection="knowledge__d")
+        # Noise: same content hash, wrong content_type — must not join the group.
+        _State.add_document("2.2.1", title="noise", content_type="knowledge", index_content_hash="h1")
 
         old_snap = self._run(_old_generate_pdf_corpus_links, reader, writer)
         new_snap = self._run(generate_pdf_corpus_links, reader, writer)
@@ -990,11 +1273,11 @@ class TestLinkGeneratorSeedSkip:
     def test_pdf_linker_still_fetches_and_links_when_pdf_seed_present(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__a",
+            index_content_hash="h1", physical_collection="knowledge__a",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__b",
+            index_content_hash="h1", physical_collection="knowledge__b",
         )
         member_t = Tumbler.parse("1.1.2")
 

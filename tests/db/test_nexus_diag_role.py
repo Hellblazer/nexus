@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import integration_pg_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
 
 
@@ -72,7 +73,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture(scope="module")
-def diag_cluster(tmp_path_factory):
+def diag_cluster(request):
     """Scratch cluster + provisioned roles + a FORCE-RLS tenant table."""
     from nexus.db.pg_provision import (
         PgBinaries,
@@ -85,13 +86,19 @@ def diag_cluster(tmp_path_factory):
     )
 
     bins = PgBinaries.from_dir(pg_bin_dir())
-    pgdata = tmp_path_factory.mktemp("diag-pg") / "data"
+    # The cluster dir itself, not a child of one: the substrate's crash sweep reads
+    # postmaster.pid at its top level (nexus-942h9). pytest's tmp_path_factory would
+    # put the cluster on disk; this lands on the run's tmpfs root on Linux (nexus-szyun).
+    pgdata = Path(pg_data_tempdir("nexus_diag_pg_"))
+    request.addfinalizer(lambda: stop_and_remove_cluster(bins.pg_ctl, pgdata))
     port = _free_port()
     os_user = getpass.getuser()
 
     su_pw = "su-pw"  # nexus-ja4pq: the cluster demands a superuser password
     _init_cluster(bins, pgdata, os_user, superuser_password=su_pw)
     _configure_cluster(pgdata, port)
+    with open(pgdata / "postgresql.conf", "a", encoding="utf-8") as conf:
+        conf.write(integration_pg_conf(str(pgdata)))
     _start_cluster(bins, pgdata, port)
     with superuser_auth(su_pw):
         _create_db(bins, port, os_user)
@@ -145,11 +152,6 @@ def diag_cluster(tmp_path_factory):
         )
 
     yield {"su": su, "diag": diag}
-
-    subprocess.run(
-        [str(bins.pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
-        capture_output=True, text=True, timeout=30,
-    )
 
 
 class TestRoleAttributes:

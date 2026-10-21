@@ -4,13 +4,15 @@ package dev.nexus.service.vectors;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import org.jooq.Record;
-import org.jooq.Result;
+import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -18,8 +20,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -165,28 +165,20 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
     private void seedNoiseAndTargets() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Statement st = su.createStatement();
-            st.execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                + "SELECT '" + TENANT + "', 'wbfpw4-idx-planshape-noise-' || i, "
-                + "       'noise note ' || i, 'prose', 'knowledge', '" + COLLECTION + "', "
-                + "       jsonb_build_object('doc_id', md5('noise-a-' || i) || md5('noise-b-' || i)) "
-                + "FROM generate_series(1, " + NOISE_NOTE_ROWS + ") i");
-            st.execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                + "SELECT '" + TENANT + "', 'wbfpw4-idx-planshape-other-' || i, "
-                + "       'other collection doc ' || i, 'prose', 'knowledge', '" + OTHER_COLLECTION + "', "
-                + "       jsonb_build_object('doc_id', md5('other-a-' || i) || md5('other-b-' || i)) "
-                + "FROM generate_series(1, " + OTHER_COLLECTION_ROWS + ") i");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertBulkNotes(seed, NOISE_NOTE_ROWS, "wbfpw4-idx-planshape-noise-", "noise note ", COLLECTION, "noise");
+            insertBulkNotes(seed, OTHER_COLLECTION_ROWS, "wbfpw4-idx-planshape-other-", "other collection doc ",
+                OTHER_COLLECTION, "other");
             for (int i = 0; i < NUM_TARGETS; i++) {
-                st.execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                    + "VALUES ('" + TENANT + "', '" + TARGET_NOTE_DOCS.get(i) + "', 'target note', 'prose', "
-                    + "        'knowledge', '" + COLLECTION + "', "
-                    + "        jsonb_build_object('doc_id', '" + TARGET_CHASHES.get(i) + "'))");
+                seed.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, TARGET_NOTE_DOCS.get(i))
+                    .set(CATALOG_DOCUMENTS.TITLE, "target note")
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
+                    .set(CATALOG_DOCUMENTS.CORPUS, "knowledge")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                    .set(CATALOG_DOCUMENTS.METADATA, DSL.jsonbObject(DSL.key("doc_id").value(TARGET_CHASHES.get(i))))
+                    .execute();
             }
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
@@ -194,6 +186,29 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
         vecRepo.upsertChunks(TENANT, COLLECTION, TARGET_CHASHES,
             TARGET_CHASHES.stream().map(c -> "reverse-lookup plan-shape text " + c).toList(),
             IntStream.range(0, NUM_TARGETS).mapToObj(i -> Map.<String, Object>of()).toList());
+    }
+
+    /**
+     * {@code rows} note-shaped documents {@code <tumblerPrefix>N} in {@code collection}, each with a
+     * distinct {@code metadata.doc_id} = {@code md5(<tag>-a-N) || md5(<tag>-b-N)}.
+     */
+    private static void insertBulkNotes(DSLContext seed, int rows, String tumblerPrefix, String titlePrefix,
+                                        String collection, String tag) {
+        var series = DSL.generateSeries(1, rows).as("s", "i");
+        Field<String> i = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
+        seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS,
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.METADATA)
+            .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENTS.TENANT_ID),
+                    DSL.concat(DSL.val(tumblerPrefix, CATALOG_DOCUMENTS.TUMBLER), i),
+                    DSL.concat(DSL.val(titlePrefix, CATALOG_DOCUMENTS.TITLE), i), DSL.inline("prose"),
+                    DSL.inline("knowledge"),
+                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
+                    DSL.jsonbObject(DSL.key("doc_id").value(DSL.concat(
+                        DSL.md5(DSL.concat(DSL.val(tag + "-a-", CATALOG_DOCUMENTS.TITLE), i)),
+                        DSL.md5(DSL.concat(DSL.val(tag + "-b-", CATALOG_DOCUMENTS.TITLE), i))))))
+                .from(series))
+            .execute();
     }
 
     // Matches each CTE's own MATERIALIZATION node -- "CTE <name>" followed by its
@@ -206,17 +221,17 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
     private static final Pattern REV_CANDIDATES_MATERIALIZATION_LOOPS =
         Pattern.compile("CTE rev_candidates\\s*\\n\\s*->.*?loops=(\\d+)", Pattern.DOTALL);
 
+    /**
+     * {@code EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)} of the product statement, run as the RLS-subject role under the
+     * tenant GUC. ANALYZE for the {@code loops=} counts and VERBOSE for the {@code Output:} lines the assertions read,
+     * which {@code ctx.explain} (a plain EXPLAIN) cannot give. The query is the product's own constant with the same
+     * six binds the route passes; the explain function renders them inline, so this is the custom plan for these
+     * literals, the plan the first execution of the route's statement gets.
+     */
     private String explainFullStatement() {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            Result<Record> rows = ctx.fetch(
-                "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) " + PgVectorRepository.MANIFEST_LESS_CENSUS_SQL,
-                TENANT, COLLECTION, TENANT, COLLECTION, 300, 0);
-            List<String> lines = new ArrayList<>();
-            for (var rec : rows) {
-                lines.add(rec.get(0, String.class));
-            }
-            return String.join("\n", lines);
-        });
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
+            ctx.resultQuery(PgVectorRepository.MANIFEST_LESS_CENSUS_SQL, TENANT, COLLECTION, TENANT, COLLECTION, 300, 0),
+            PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
     }
 
     /**
@@ -293,15 +308,10 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
      */
     @Test
     void leakproofFlags_explainWhichQualsCanReachAnIndexUnderRls() {
-        Map<String, Boolean> flags = tenantScope.withTenant(TENANT, ctx -> {
-            Map<String, Boolean> out = new java.util.HashMap<>();
-            ctx.fetch("SELECT p.proname, p.proleakproof FROM pg_operator o "
-                    + "JOIN pg_proc p ON p.oid = o.oprcode "
-                    + "WHERE (o.oprname = '=' AND o.oprleft = 'text'::regtype AND o.oprright = 'text'::regtype) "
-                    + "   OR (o.oprname = '->>' AND o.oprleft = 'jsonb'::regtype AND o.oprright = 'text'::regtype)")
-               .forEach(r -> out.put(r.get(0, String.class), r.get(1, Boolean.class)));
-            return out;
-        });
+        Map<String, Boolean> flags = tenantScope.withTenant(TENANT, ctx ->
+            PgCatalogProbes.operatorFunctionLeakproof(ctx, List.of(
+                new PgCatalogProbes.OperatorSignature("=", "text", "text"),
+                new PgCatalogProbes.OperatorSignature("->>", "jsonb", "text"))));
         assertThat(flags)
             .containsEntry("texteq", true)
             .containsEntry("jsonb_object_field_text", false);

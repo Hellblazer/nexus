@@ -159,12 +159,14 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
 
 # ── Healthy / basic output ──────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_all_healthy(runner, mock_reg):
     result = _invoke(runner, mock_reg)
     assert result.exit_code == 0
     assert "\u2713" in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("expected", [
     "git hooks", "index log", "\u2713 index log", "Python", "3.12",
 ])
@@ -174,6 +176,7 @@ def test_doctor_healthy_output_contains(runner, mock_reg, expected):
     assert expected in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("absent", ["nx serve start", "Nexus server"])
 def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
     result = _invoke(runner, mock_reg)
@@ -184,6 +187,7 @@ def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
 # ── opt-in --check-* subset) ─────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestSupplementaryChecks:
     """The default `nx doctor` sweep additionally runs the promoted subset
     of --check-* diagnostics (resources / plan-library / taxonomy /
@@ -282,6 +286,7 @@ class TestSupplementaryChecks:
 # HttpVectorClient.list_collections() returns.
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_lists_excluded_collection(runner, mock_reg):
     mock_t3 = MagicMock()
     mock_t3.list_collections.return_value = [
@@ -300,6 +305,7 @@ def test_fanout_floor_census_lists_excluded_collection(runner, mock_reg):
     )[1]
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_clean_when_nothing_excluded(runner, mock_reg):
     """A lone collection under its prefix is never excluded (nexus-rbhci
     sibling-relative rule) -- the census must say so plainly, not just
@@ -316,6 +322,7 @@ def test_fanout_floor_census_clean_when_nothing_excluded(runner, mock_reg):
     assert "no collections currently excluded" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_ignores_negative_count_sentinel(runner, mock_reg):
     """A -1 (HttpVectorClient's failed-per-collection-count sentinel) must
     read as unknown here too, never as a genuinely thin collection --
@@ -334,6 +341,7 @@ def test_fanout_floor_census_ignores_negative_count_sentinel(runner, mock_reg):
     assert "code__mystery" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_groups_legacy_bare_name_under_itself(runner, mock_reg):
     """nexus-ft04v.23: the grouping key funnelled ``name.split("__",
     1)[0]`` (bare split, always non-empty) to
@@ -358,6 +366,7 @@ def test_fanout_floor_census_groups_legacy_bare_name_under_itself(runner, mock_r
     assert "no collections currently excluded" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_unavailable_on_t3_failure(runner, mock_reg):
     result = _invoke(
         runner, mock_reg,
@@ -371,6 +380,7 @@ def test_fanout_floor_census_unavailable_on_t3_failure(runner, mock_reg):
 
 # ── Missing credentials ─────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_credentials_informational(runner, mock_reg):
     """nexus-nmw3i/c7aj3 → RDR-155 P4b: the CHROMA_* credential rows died
     with the migration machinery; the Voyage row survives and stays
@@ -385,6 +395,7 @@ def test_doctor_missing_credentials_informational(runner, mock_reg):
     assert "nx config set chroma_api_key" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_partial_credentials_informational(runner, mock_reg):
     """The Voyage row reads 'set' when present; no CHROMA rows remain
     (RDR-155 P4b) — no fatal line either way (nexus-nmw3i/c7aj3)."""
@@ -400,6 +411,7 @@ def test_doctor_partial_credentials_informational(runner, mock_reg):
 # ── Missing tools ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
     """nexus-njmg: git Fix-line must include winget."""
     def which_side(name):
@@ -408,6 +420,7 @@ def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
     assert "winget install --id Git.Git -e --source winget" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_git_hint_leads_windows_with_no_admin_portablegit(runner, mock_reg):
     """nexus-f9bgu: Git for Windows' installer raises UAC through winget,
     with ``--scope user`` and an ``/CURRENTUSER`` override alike (measured
@@ -428,6 +441,7 @@ def test_doctor_missing_git_hint_leads_windows_with_no_admin_portablegit(runner,
     assert "docs/windows-install.md#2-install-git" in out
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_bd_includes_release_zip_hint(runner, mock_reg):
     """nexus-njmg: bd has no winget package; the Fix-line must point
     at the GitHub releases page so Windows users can find the right
@@ -439,6 +453,7 @@ def test_doctor_missing_bd_includes_release_zip_hint(runner, mock_reg):
     assert "github.com/BeadsProject/beads/releases" in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("tool,exit_code", [("bd", 0), ("uv", 0)])
 def test_doctor_missing_optional_tool(runner, mock_reg, tool, exit_code):
     def which_side(name):
@@ -447,6 +462,7 @@ def test_doctor_missing_optional_tool(runner, mock_reg, tool, exit_code):
     assert result.exit_code == exit_code
 
 
+@pytest.mark.t2_tenant
 def test_doctor_missing_bd_output(runner, mock_reg):
     def which_side(name):
         return None if name == "bd" else f"/usr/bin/{name}"
@@ -456,6 +472,7 @@ def test_doctor_missing_bd_output(runner, mock_reg):
     assert "BeadsProject/beads" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_has_no_npx_row(runner, mock_reg):
     """nexus-f9bgu: no plugin MCP server needs Node.js any more, so doctor
     must not tell a user without npx that plugin servers will fail."""
@@ -469,6 +486,7 @@ def test_doctor_has_no_npx_row(runner, mock_reg):
 
 # ── Python version ──────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_python_version_too_old_fails(runner, mock_reg):
     result = _invoke(runner, mock_reg, extra_patches=[
         patch("nexus.health._python_ok", return_value=(False, "3.11.0")),
@@ -484,6 +502,7 @@ def test_doctor_python_version_too_old_fails(runner, mock_reg):
 
 # ── Hooks ───────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_hooks_no_repos_registered(runner, mock_reg):
     result = _invoke(runner, mock_reg)
     assert result.exit_code == 0
@@ -492,6 +511,7 @@ def test_doctor_hooks_no_repos_registered(runner, mock_reg):
     assert "\u2713 git hooks" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_hooks_installed(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
@@ -513,6 +533,7 @@ def test_doctor_hooks_installed(runner):
     assert "post-commit" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_reports_a_malformed_stanza_as_malformed_not_drift(runner):
     """Begin sentinel, no end sentinel: previously green by accident, then
     called "stale" with an ``nx hooks update`` remedy that cannot repair it
@@ -534,6 +555,7 @@ def test_doctor_reports_a_malformed_stanza_as_malformed_not_drift(runner):
     assert "nx hooks update" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_hooks_not_installed(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
@@ -549,6 +571,7 @@ def test_doctor_hooks_not_installed(runner):
     assert "\u2717 git hooks" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_hooks_exception_does_not_propagate(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
@@ -560,6 +583,7 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     assert "git hooks" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_git_hooks_scope_excludes_out_of_scope_repo(runner, tmp_path):
     """nexus-jds59: ``--git-hooks-scope`` wires through to the CLI. A
     registered repo outside the given root (the ambient dev-checkout
@@ -583,6 +607,7 @@ def test_doctor_git_hooks_scope_excludes_out_of_scope_repo(runner, tmp_path):
 
 # ── Index log ───────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_index_log_not_created_yet(runner, mock_reg):
     """nexus-ay18d fix-round finding: this assertion previously passed via
     an UNRELATED check's "not created yet" wording — the now-retired
@@ -603,6 +628,7 @@ def test_doctor_index_log_not_created_yet(runner, mock_reg):
 
 # ── Single-database check ───────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_probes_vector_service(runner, mock_reg):
     # RDR-155 P4a.2: the probe hits the service's /v1/vectors/collections.
     result = _invoke(runner, mock_reg,
@@ -611,6 +637,7 @@ def test_doctor_probes_vector_service(runner, mock_reg):
     assert "not reachable" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_single_db_unreachable_fails(runner, mock_reg):
     result = _invoke(runner, mock_reg, cloud_client={
         "side_effect": RuntimeError("connection refused"),
@@ -621,6 +648,7 @@ def test_doctor_single_db_unreachable_fails(runner, mock_reg):
     assert "NX_SERVICE_URL" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_single_db_no_secret_leak(runner, mock_reg):
     result = _invoke(runner, mock_reg, cloud_client={
         "side_effect": RuntimeError("HTTP 401: invalid api_key SUPERSECRET"),
@@ -629,6 +657,7 @@ def test_doctor_single_db_no_secret_leak(runner, mock_reg):
     assert "not reachable" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_census_redacts_credentials(runner, mock_reg):
     """nexus-x75kg: the census renders whatever the T3 handle raised. The
     engine echoes the rejected credential in its 401 body, so the
@@ -662,6 +691,7 @@ def test_check_helper_detail():
 
 # ── Local mode ──────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     # RDR-137 followup IMP-22 (nexus-43qgm.22): the legacy
     # nexus.registry.RepoRegistry patch is dead code post-RDR-137
@@ -693,6 +723,7 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     assert "VOYAGE_API_KEY" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     """RDR-155 P4a.2 (nexus-1k8s1): the collection census routes through the
     pgvector service handle (``make_t3()``); the on-disk chroma directory is
@@ -749,6 +780,7 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
 # ── doctor --fix-paths ─────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestFixPaths:
     """doctor --fix-paths migration tests."""
 
@@ -1567,6 +1599,7 @@ class TestCheckEngineActivity:
         assert result.exit_code == 0, result.output
         assert "UNKNOWN" in result.output
 
+    @pytest.mark.t2_tenant
     def test_promoted_into_the_default_sweep(self, runner: CliRunner, monkeypatch) -> None:
         calls = {"n": 0}
 
@@ -1589,6 +1622,7 @@ class TestCheckEngineActivity:
 # least name/ok/status/detail) plus summary counts.
 
 
+@pytest.mark.t2_tenant
 class TestJsonMainSweep:
     def test_emits_a_single_parseable_json_object(self, runner, mock_reg):
         import json as _json
@@ -1607,6 +1641,9 @@ class TestJsonMainSweep:
         import json as _json
 
         result = _invoke(runner, mock_reg, extra_args=["--json"])
+        # An empty stdout means the sweep raised before printing: name the exception
+        # (a bare JSONDecodeError on '' hid it in a CI shard, 2026-10-19).
+        assert result.exit_code == 0, (result.output, repr(result.exception))
         _json.loads(result.stdout)  # raises if anything but pure JSON
         assert "Nexus health check:" not in result.stdout
         assert "✓" not in result.stdout
@@ -1975,6 +2012,7 @@ class TestCheckCollectionShape:
 # ── RDR-204 Day 2 (nexus-ft04v.31): the profile row renders through doctor ──
 
 
+@pytest.mark.t2_tenant
 def test_doctor_renders_the_embedding_profile_row(runner, mock_reg):
     """Non-vacuous: the row itself must be present on a run with no
     findings, and the rendered detail carries no credential."""

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: installs a BEFORE UPDATE trigger on nexus.tuples that raises for exactly one row, id
+    decode('${poisonHex}', 'hex'), in Liquibase XML instead of Java SQL strings (Sam's rule, nexus-zrcj7: no
+    SQL strings in Java, tests included). jOOQ OSS has no CREATE FUNCTION and no CREATE TRIGGER.
+
+    TupleRepositoryTest uses it for a real server-side per-row failure inside releaseLapsedClaimsBatch: a
+    REVOKE cannot tell one row from another in the same table and column, and a Java exception is not a SQL
+    error. The body holds dollar quotes, hence splitStatements="false". ${poisonHex} is the lower-case hex of
+    a tuple id the test just created, never input. Removed by db.changelog-test-poison-tuple-row-drop-trigger.xml
+    and db.changelog-test-poison-tuple-row-drop-function.xml; run by that test directly.
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="poison-tuple-row-install" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test_poison_tuple_row() RETURNS trigger AS $$
+BEGIN IF OLD.id = decode('${poisonHex}', 'hex') THEN
+RAISE EXCEPTION 'nexus_test_poison_row: forced failure for row %', OLD.id;
+END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER nexus_test_poison_tuple_row_trigger BEFORE UPDATE ON nexus.tuples
+FOR EACH ROW EXECUTE FUNCTION nexus_test_poison_tuple_row();
+        </sql>
+    </changeSet>
+</databaseChangeLog>

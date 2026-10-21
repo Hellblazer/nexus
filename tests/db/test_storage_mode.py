@@ -323,6 +323,7 @@ def test_t2_facade_stores_matches_t2database_ast_construction() -> None:
     )
 
 
+@pytest.mark.t2_tenant
 def test_valid_store_names_covers_t2database_attributes(
     tmp_path: pytest.TempPathFactory,
 ) -> None:

@@ -11,6 +11,9 @@ htmlcov/
 *.log
 # Real engine log excerpts used as test fixtures (RDR-224, nexus-f9bgu.29).
 !tests/fixtures/windows_engine/*.log
+# The hook-ask measurement's recorded runs: summarize.py reads hook.log to know
+# whether the probe hook fired (nexus-mcfaj).
+!tests/cc-validation/hook-ask-headless/evidence/**/hook.log
 .pm/
 .pm-archives/
 .DS_Store

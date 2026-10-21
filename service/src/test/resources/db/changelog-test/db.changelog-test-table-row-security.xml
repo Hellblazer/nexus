@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): ALTER TABLE ${table} ${mode} ROW LEVEL SECURITY.
+    jOOQ has no row-level-security clause. Not nexus_test.set_row_security / set_force_rls: this one runs in
+    databases the product changelog alone walked, which carry no nexus_test schema. Run through
+    PgContainerHelper#setRowSecurity, which renders ${table} from a jOOQ Table and takes ${mode} from the closed
+    list ENABLE, DISABLE, FORCE, NO FORCE; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="table-row-security" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER TABLE ${table} ${mode} ROW LEVEL SECURITY</sql>
+    </changeSet>
+</databaseChangeLog>

@@ -102,11 +102,13 @@ class TestHttpDocumentAspectsStore:
         store._client = httpx.Client(transport=transport)
         return store
 
+    @pytest.mark.t2_tenant
     def test_upsert_written(self):
         store = self._store({"/v1/aspects/upsert": {"written": True}})
         record = _make_aspect()
         assert store.upsert(record) is True
 
+    @pytest.mark.t2_tenant
     def test_upsert_rejected_low_confidence(self):
         # Service returns written=False (confidence gate)
         store = self._store({"/v1/aspects/upsert": {"written": False}})
@@ -214,6 +216,7 @@ class TestHttpDocumentAspectsStore:
         with pytest.raises(NotImplementedError, match="nexus-ingey"):
             store.delete_orphans(Path("/some/path.db"))
 
+    @pytest.mark.t2_tenant
     def test_rename_collection(self):
         store = self._store({"/v1/aspects/rename_collection": {"updated": 5}})
         assert store.rename_collection(old="old", new="new") == 5
@@ -379,6 +382,7 @@ class TestHttpAspectQueue:
         store._client = httpx.Client(transport=transport)
         return store
 
+    @pytest.mark.t2_tenant
     def test_enqueue_calls_endpoint(self):
         store = self._queue({"/v1/aspects/queue/enqueue": {"ok": True}})
         store.enqueue("coll", "doc.pdf", content_hash="abc", content="text", doc_id="1.2.3")
@@ -393,6 +397,7 @@ class TestHttpAspectQueue:
         with pytest.raises(ValueError, match="source_path"):
             store.enqueue("coll", "")
 
+    @pytest.mark.t2_tenant
     def test_enqueue_success_signals_local_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """nexus-59611 stage 2: a successful enqueue touches the local wake
         signal so a same-box worker's poll wait returns early instead of
@@ -406,6 +411,7 @@ class TestHttpAspectQueue:
         store.enqueue("coll", "doc.pdf")
         assert len(calls) == 1
 
+    @pytest.mark.t2_tenant
     def test_enqueue_failure_does_not_signal_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failed enqueue must not touch the wake file — there is no new
         row for a same-box worker to claim."""
@@ -577,6 +583,7 @@ class TestHttpAspectQueue:
         result = store.list_pending(limit=5)
         assert len(result) == 5
 
+    @pytest.mark.t2_tenant
     def test_rename_collection(self):
         store = self._queue({"/v1/aspects/queue/rename_collection": {"updated": 4}})
         assert store.rename_collection(old="old", new="new") == 4
@@ -657,6 +664,7 @@ class TestT2DatabaseAspectsSeam:
     # document_highlights died with their stores; the remaining
     # document_aspects SQLite arm retires in sub-stage A3.
 
+    @pytest.mark.t2_tenant
     def test_missing_port_raises(self, tmp_path, monkeypatch):
         """RuntimeError when NX_SERVICE_PORT is absent."""
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
@@ -671,6 +679,7 @@ class TestT2DatabaseAspectsSeam:
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
             T2Database(tmp_path / "memory2.db", run_migrations=False)
 
+    @pytest.mark.t2_tenant
     def test_missing_token_raises(self, tmp_path, monkeypatch):
         """RuntimeError when NX_SERVICE_TOKEN is absent."""
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")

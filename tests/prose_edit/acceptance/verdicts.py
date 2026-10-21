@@ -32,7 +32,7 @@ NOT-MEASURABLE):
              card lists them. PASS means none of the scored devices was touched; the rest of the document is for a
              human to read. The lists were read off the documents; a listed phrase the document no longer holds
              exactly once makes the run NOT-MEASURABLE.
-             xanadu and linda notes also count the semicolon queries (the site-page rule is a query on these essays)
+             xanadu and linda notes also count the semicolon queries (since nexus-ger02.23 the no-semicolons rule does not apply to essays, so it reads 0)
 Every doc-editing kind and the stdin run also need proof that the line-editor subagent read WORK/brief.md: a Read
 of that file by the subagent, before its reply, with a non-error result that carries the file's last line
 (`Brief id: <id>`), and a reply whose brief_sha is that id. The id is in the file and nowhere in the dispatch prompt,

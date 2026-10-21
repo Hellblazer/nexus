@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -28,6 +27,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -45,7 +45,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <pre>
  *   upsert-chunks   {"upserted": N}
  *   search          flat row list (id, content, distance, collection, metadata...)
- *   store-put       {"id": "..."}
  *   get             {"ids": [...], "documents": [...], "metadatas": [...]}
  *   store-get       {"ids": [...], "documents": [...], "metadatas": [...]}
  *   store-list      {"ids": [...], "metadatas": [...]}
@@ -233,8 +232,8 @@ class PgVectorServingContractTest {
     /**
      * Seed {@code ids} as OWNED chunks of {@code COL} for {@code tenant}, with the vectors the
      * fake embedder gives {@code texts}, through substrate SQL (RDR-223 P3.1, nexus-z0o2p.23).
-     * From Phase 3 the engine refuses an ownerless write on upsert-chunks and store-put, so
-     * the tests below that POST to those routes POST a chunk that already has an owner (a
+     * From Phase 3 the engine refuses an ownerless write on upsert-chunks, so
+     * the tests below that POST to that route POST a chunk that already has an owner (a
      * re-upsert: same text, so the existence partition keeps the stored vector and refreshes
      * the metadata) instead of making the route insert it.
      */
@@ -349,16 +348,10 @@ class PgVectorServingContractTest {
         // The rows must be IN PGVECTOR — count them in the unified nexus.chunks table
         // (RDR-191 Phase 4; formerly chunks_1024) as superuser. This is what makes the
         // suite a cutover proof rather than a status-code check.
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?")) {
-            ps.setString(1, COL);
-            try (var rs = ps.executeQuery()) {
-                rs.next();
-                assertThat(rs.getLong(1))
-                    .as("upserted chunks land in nexus.chunks (dim=1024)")
-                    .isEqualTo(3L);
-            }
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(COL)))
+                .as("upserted chunks land in nexus.chunks (dim=1024)")
+                .isEqualTo(3);
         }
     }
 
@@ -408,22 +401,13 @@ class PgVectorServingContractTest {
 
     @Test
     @Order(3)
-    void storePut_singleChunk() throws Exception {
-        // Same text (so the stored vector, which the search tests rank on, is already the
-        // embedder's) but STALE metadata: the existing-chash write path refreshes metadata, so the
-        // POST is asserted to have changed it. store-put has no force_re_embed.
+    void seedsTheSingleChunkTheLaterTestsRead() throws Exception {
+        // The /store-put route is gone (nexus-nt76j); the later tests (store-get, stats, update-metadata)
+        // still read this fifth chunk of COL, so it is seeded owned, through substrate SQL, with the
+        // metadata the retired route's test used to leave on it.
         seedOwned(TENANT_A, List.of(PUT1), List.of("single put chunk about tenant isolation policy"),
-            List.of(Map.of("kind", "stale")));
-        Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
-            "collection", COL,
-            "doc_id",     PUT1,
-            "content",    "single put chunk about tenant isolation policy",
-            "metadata",   Map.of("kind", "put")));
-        assertThat(resp.get("id"))
-            .as("store-put envelope {\"id\": ...} preserved")
-            .isEqualTo(PUT1);
+            List.of(Map.of("kind", "put")));
         assertThat(stored(TENANT_A, PUT1, "kind"))
-            .as("store-put refreshed the stored metadata of the chunk, not just echoed the id")
             .containsExactly("single put chunk about tenant isolation policy", "put");
     }
 
@@ -577,7 +561,7 @@ class PgVectorServingContractTest {
             .as("operator-form $ne must serve 200 (got: %s)", resp.body())
             .isEqualTo(200);
         List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
-        // Mutation-robust (this is an ordered class; an earlier store-put added a
+        // Mutation-robust (this is an ordered class; the seeded PUT1 chunk is a
         // lang-less chunk that $ne correctly keeps): assert only the contract claim —
         // the py chunk is excluded, both java chunks are kept.
         assertThat(rows.stream().map(r -> r.get("id")).toList())
@@ -646,19 +630,16 @@ class PgVectorServingContractTest {
         assertThat(((Number) resp.get("updated")).intValue()).isEqualTo(1);
 
         // chunk_text untouched (no re-embed, no rewrite).
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT chunk_text, metadata->>'frecency_score' FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, COL);
+        try (Connection su = pg.createConnection("")) {
+            var frecency = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "frecency_score");
             // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(C1));
-            try (var rs = ps.executeQuery()) {
-                assertThat(rs.next()).isTrue();
-                assertThat(rs.getString(1))
-                    .isEqualTo("the tenant isolation policy guards every row");
-                assertThat(rs.getString(2)).isEqualTo("0.75");
-            }
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT, frecency).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(COL), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(C1)))
+                .fetch();
+            assertThat(rows).isNotEmpty();
+            assertThat(rows.get(0).get(CHUNKS.CHUNK_TEXT))
+                .isEqualTo("the tenant isolation policy guards every row");
+            assertThat(rows.get(0).get(frecency)).isEqualTo("0.75");
         }
     }
 
@@ -693,7 +674,7 @@ class PgVectorServingContractTest {
         // RDR-156 P3 (nexus-70r3c.12): GET /v1/vectors/stats serves
         // nexus.collection_vector_stats — one round-trip, all collections,
         // tombstone-filtered live counts. State here: 4 chunks in COL
-        // (3 upserted + 1 store-put), each given a live own-collection manifest
+        // (3 upserted + 1 seeded), each given a live own-collection manifest
         // owner (RDR-192 Step 5, nexus-wbfpw.10: collection_vector_stats now
         // requires live(c) too — a manifest-less chunk no longer counts).
         var resp = get("/v1/vectors/stats", TOKEN_A);
@@ -766,16 +747,10 @@ class PgVectorServingContractTest {
             "collection", COL, "ids", List.of(C3, PUT1)));
         assertThat(((Number) owner.get("deleted")).intValue()).isEqualTo(2);
 
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?")) {
-            ps.setString(1, COL);
-            try (var rs = ps.executeQuery()) {
-                rs.next();
-                assertThat(rs.getLong(1))
-                    .as("2 of 4 rows remain after the owner delete")
-                    .isEqualTo(2L);
-            }
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(COL)))
+                .as("2 of 4 rows remain after the owner delete")
+                .isEqualTo(2);
         }
     }
 
@@ -805,25 +780,22 @@ class PgVectorServingContractTest {
             .as("tenant-A has no such row: the write did not leak across the partition")
             .isNull();
 
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT tenant_id, count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? GROUP BY tenant_id ORDER BY tenant_id")) {
-            ps.setString(1, COL);
-            try (var rs = ps.executeQuery()) {
-                assertThat(rs.next()).isTrue();
-                assertThat(rs.getString(1)).isEqualTo(TENANT_A);
-                assertThat(rs.getLong(2))
-                    .as("tenant-a still owns exactly its 2 remaining rows — the "
-                        + "foreign write must not touch them (WITH CHECK)")
-                    .isEqualTo(2L);
-                assertThat(rs.next()).isTrue();
-                assertThat(rs.getString(1)).isEqualTo(TENANT_B);
-                assertThat(rs.getLong(2))
-                    .as("tenant-b's write landed in tenant-b's partition")
-                    .isEqualTo(1L);
-                assertThat(rs.next()).isFalse();
-            }
+        try (Connection su = pg.createConnection("")) {
+            var cnt = DSL.count();
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.TENANT_ID, cnt).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(COL)).groupBy(CHUNKS.TENANT_ID).orderBy(CHUNKS.TENANT_ID).fetch();
+            assertThat(rows).hasSizeGreaterThanOrEqualTo(1);
+            assertThat(rows.get(0).get(CHUNKS.TENANT_ID)).isEqualTo(TENANT_A);
+            assertThat(rows.get(0).get(cnt))
+                .as("tenant-a still owns exactly its 2 remaining rows — the "
+                    + "foreign write must not touch them (WITH CHECK)")
+                .isEqualTo(2);
+            assertThat(rows).hasSizeGreaterThanOrEqualTo(2);
+            assertThat(rows.get(1).get(CHUNKS.TENANT_ID)).isEqualTo(TENANT_B);
+            assertThat(rows.get(1).get(cnt))
+                .as("tenant-b's write landed in tenant-b's partition")
+                .isEqualTo(1);
+            assertThat(rows).hasSize(2);
         }
     }
 

@@ -107,91 +107,6 @@ class SchemaMigratorIntegrationTest {
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
 
-    /**
-     * nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-     * nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-blocker fix, and
-     * again per T2 nexus/critique-nexus-cbo4a-batch-9-gated SIGNIFICANT 1/2).
-     * Creates {@code vector}/{@code pg_trgm} directly as the connection's own
-     * superuser (no throwaway role, no REASSIGN OWNED BY — a superuser can
-     * relocate either extension regardless of ownership, so there is nothing to
-     * transfer), then installs the SECURITY DEFINER function pair —
-     * {@code nexus.ensure_vector_extensions_relocated()} and its rollback-
-     * direction companion {@code nexus.ensure_vector_extensions_unrelocated()},
-     * both owned by that same superuser, both {@code REVOKE EXECUTE ... FROM
-     * PUBLIC} before the explicit {@code GRANT ... TO} the migrating role —
-     * WITHOUT relocating the extensions itself. Mirrors {@code
-     * nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema} exactly
-     * (that Python function no longer takes a {@code direct} parameter — an
-     * earlier revision's eager, every-daemon-start relocation path turned out to
-     * be permanently unreachable on any real cluster and was deleted; the
-     * function's only remaining job, mirrored here, is ensuring the schema and
-     * this function pair exist), for exactly the same reason: every test in this
-     * file resumes through vectors-001-baseline.xml's bare {@code vector(N)}/
-     * {@code vector_cosine_ops} references AND search-path-001/002 in ONE
-     * continuous {@code SchemaMigrator.migrate()} call, so the extensions must
-     * stay resolvable via the migrating role's default (public-only) search_path
-     * through vectors-001, then get relocated MID-WALK — which the migrating
-     * role (NOSUPERUSER) cannot do itself, but CAN trigger by calling this
-     * function, since a SECURITY DEFINER function runs with its OWNER's
-     * privileges. search-path-001's own guard changeset calls it, by qualified
-     * name, at exactly that point. See {@code
-     * relocate_vector_extensions_to_nexus_schema}'s own docstring and
-     * search-path-001-relocate-vector-extensions.xml's header for the full
-     * derivation.
-     *
-     * @param su the superuser connection (e.g. the embedded Postgres's own
-     *           bootstrap connection)
-     * @param migratingRole the NOSUPERUSER role that will run the Liquibase
-     *                      walk and therefore needs EXECUTE on the function
-     */
-    // SANCTIONED RAW (nexus-cbo4a): DBA/superuser provisioning DDL simulating
-    // nexus.db.pg_provision.py's real bootstrap step -- CREATE EXTENSION (no jOOQ
-    // typed form for extension DDL), CREATE SCHEMA ... AUTHORIZATION (no typed
-    // AUTHORIZATION clause in jOOQ's fluent schema DSL), and CREATE OR REPLACE
-    // FUNCTION with a plpgsql SECURITY DEFINER body (no typed DSL for authoring an
-    // arbitrary function body). Same class as this file's own admin/svc role
-    // bootstrap below, kept raw by decision per RawSqlGateTest's own javadoc.
-    static void bootstrapVectorExtensionsForFreshWalk(
-            Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO "
-            + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-            + "  END IF; "
-            + "END; "
-            + "$unrelofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO "
-            + migratingRole);
-    }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -206,7 +121,7 @@ class SchemaMigratorIntegrationTest {
     @BeforeAll
     void bootstrap() throws Exception {
         // Start a completely schema-less embedded Postgres.
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
 
         // ── Phase A: provisioning (done by DBA / Phase-5 nx step, NOT by Liquibase) ──
         // Using the embedded postgres superuser to simulate the DBA bootstrap:
@@ -215,61 +130,16 @@ class SchemaMigratorIntegrationTest {
         //   3. Create the schemas and transfer ownership to nexus_admin_test.
         //      (In real provisioning: CREATE DATABASE nexus; CREATE SCHEMA nexus
         //       AUTHORIZATION nexus_admin; Liquibase then runs as nexus_admin.)
-        // SANCTIONED RAW (this whole Phase A block, all 8 occurrences of this shape in
-        // this file): bespoke admin/svc role bootstrap against a dedicated container
-        // (PgContainerHelper.startDedicated(), never applyProductSchema's
-        // role-001-created nexus_admin) -- CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA
-        // / GRANT pg_monitor WITH ADMIN OPTION are cluster-level DDL with no jOOQ
-        // typed-DSL form. RawSqlGateTest's own javadoc names this file's admin/svc role
-        // bootstrap as kept-raw-by-decision.
+        // All of Phase A (the admin and nexus_svc roles, CREATE on the database and public,
+        // pg_monitor WITH ADMIN OPTION per nexus-hzhgl, both extensions, schema nexus owned by
+        // the admin role, and the SECURITY DEFINER relocation helpers search-path-001 calls
+        // mid-walk) is db.changelog-test-nonsuper-owner.xml, run here as the superuser through
+        // PgContainerHelper#bootstrapNonSuperuserOwner. The extensions stay bare-resolvable in
+        // public through vectors-001-2/-3/-4 and get relocated mid-walk by search-path-001's
+        // own guard calling the helper; see that changeset's header for the derivation, and
+        // GrantsPgMonitorTest for the falsification proof of the ADMIN OPTION prerequisite.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-
-            // nexus_admin_test: NOT superuser, NOT createrole — plain schema owner.
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + ADMIN_ROLE + "') THEN " +
-                "    CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS + "' NOSUPERUSER NOCREATEDB NOCREATEROLE; " +
-                "  END IF; " +
-                "END $$");
-
-            // nexus_svc: NOSUPERUSER NOBYPASSRLS — the production application role.
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-
-            // Grant nexus_admin_test CREATE privilege on the database so it can CREATE SCHEMA
-            // (models production: nexus_admin holds CONNECT + CREATE on the nexus database,
-            // not superuser).  CREATE ON DATABASE is NOT superuser — it is a normal privilege
-            // that schema-owner roles must hold.
-            su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
-
-            // Allow nexus_admin_test to write Liquibase's DATABASECHANGELOG to public.
-            su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-
-            // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-            // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-            // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
-            // PostgreSQL refuses that GRANT unless the migration role already holds
-            // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-            // the falsification proof of this exact prerequisite.
-            su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-            // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-            // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-            // nexus_schema (no direct-relocation parameter any more -- see that
-            // function's own docstring) -- this walk resumes through vectors-001
-            // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-            // below, so the extension must stay bare-resolvable in public through
-            // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-            // own guard calling this function -- see that changeset's header for the
-            // full derivation.
-            bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
         }
 
         // ── Phase B: build connection pools ─────────────────────────────────────
@@ -299,9 +169,9 @@ class SchemaMigratorIntegrationTest {
     void stopAll() {
         if (adminDs != null) adminDs.close();
         if (svcDs   != null) svcDs.close();
-        try {
-            if (pg != null) pg.stop();
-        } catch (Exception ignored) { }
+        // nexus-ap7sm: not swallowed, so a leaked exclusive role fails this class's own teardown
+        // rather than the next class's acquire.
+        if (pg != null) pg.stop();
     }
 
     // ── Test 1: non-superuser owner migrates + all tables present + idempotent ─
@@ -554,8 +424,8 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(5)
     void agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_aged_test";
             final String pass = "nexus_admin_aged_test_pass";
 
@@ -565,36 +435,7 @@ class SchemaMigratorIntegrationTest {
             // role-001-1's "IF NOT EXISTS" CREATE ROLE branch is skipped — otherwise
             // the migration role would need CREATEROLE just to no-op past it.
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
-                // and PostgreSQL refuses that GRANT unless the migration role already holds
-                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-                // the falsification proof of this exact prerequisite.
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -739,8 +580,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -764,43 +603,14 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(6)
     void agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_aged_ci_test";
             final String pass = "nexus_admin_aged_ci_test_pass";
 
             // Phase A: same minimal DBA-equivalent bootstrap as test 5.
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
-                // and PostgreSQL refuses that GRANT unless the migration role already holds
-                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-                // the falsification proof of this exact prerequisite.
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -921,8 +731,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1000,43 +808,14 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(8)
     void agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_aged_fk002_test";
             final String pass = "nexus_admin_aged_fk002_test_pass";
 
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6.
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
-                // and PostgreSQL refuses that GRANT unless the migration role already holds
-                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-                // the falsification proof of this exact prerequisite.
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1157,8 +936,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1240,43 +1017,14 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(10)
     void presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_aged_viol_test";
             final String pass = "nexus_admin_aged_viol_test_pass";
 
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8.
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
-                // and PostgreSQL refuses that GRANT unless the migration role already holds
-                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-                // the falsification proof of this exact prerequisite.
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1424,8 +1172,6 @@ class SchemaMigratorIntegrationTest {
                         .isNull();
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1541,37 +1287,14 @@ class SchemaMigratorIntegrationTest {
     @Order(13)
     void lateUpgradingDeployment_withPreExistingDanglingManifestPopulation_bootsSuccessfully_andRemediates()
             throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_o8dil29_test";
             final String pass = "nexus_admin_o8dil29_test_pass";
 
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8/10.
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1629,25 +1352,24 @@ class SchemaMigratorIntegrationTest {
                             CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                         .values(tenant, "o8dil29-doc", "late upgrade doc", collection)
                         .execute();
-                    // SANCTIONED RAW: bare (unqualified) ::vector, deliberately NOT ::nexus.vector.
-                    // This INSERT runs at Phase C, mid-walk, BEFORE catalog-029-0 and therefore
-                    // well before search-path-001 (placed near the end of the changelog)
-                    // has relocated the extension -- it is still in `public` at this exact
-                    // point, resolvable only via the connecting role's default search_path
-                    // (which always includes public). Phase D's full SchemaMigrator.migrate()
-                    // resumes through search-path-001/002 and beyond, so every OTHER
-                    // reference in this file that runs AFTER a full migrate() call is
-                    // correctly qualified as nexus.vector; this one site is the sole
-                    // exception, and is exempt from that qualification for exactly this
-                    // reason (nexus-cbo4a batch 9 item 0 discovery). This is why it cannot
-                    // convert onto the generated CHUNKS.EMBEDDING_384 field: VectorBinding
+                    // The embedding binds as a real[] (VectorSeeds.legacyEmbedding), deliberately NOT
+                    // through the generated CHUNKS.EMBEDDING_1024 field: VectorBinding
                     // (dev.nexus.service.jooq.binding.VectorBinding#sql) ALWAYS renders the
-                    // schema-qualified ::nexus.vector cast, which would silently change what
-                    // this exact statement proves (that a bare cast still resolves here).
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) VALUES "
-                        + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
-                        + "('[" + "0.1,".repeat(1023) + "0.1]')::vector)");   // RDR-225: voyage-context-3 is 1024-wide
+                    // schema-qualified ::nexus.vector cast, and this INSERT runs at Phase C, mid-walk,
+                    // BEFORE catalog-029-0 and therefore well before search-path-001 (placed near the
+                    // end of the changelog) has relocated the extension -- it is still in `public` at
+                    // this exact point (nexus-cbo4a batch 9 item 0 discovery). pgvector's
+                    // real[] -> vector ASSIGNMENT cast is looked up by type oid, so it resolves with the
+                    // extension in `public`. Phase D's full SchemaMigrator.migrate() resumes through
+                    // search-path-001/002 and beyond. RDR-225: voyage-context-3 is 1024-wide.
+                    dsl(su).insertInto(CHUNKS)
+                        .set(CHUNKS.TENANT_ID, tenant)
+                        .set(CHUNKS.COLLECTION, collection)
+                        .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(goodChash))
+                        .set(CHUNKS.CHUNK_TEXT, "good text")
+                        .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("embedding_1024"),
+                            org.jooq.impl.SQLDataType.REAL.array()), VectorSeeds.legacyEmbedding(1024, 0.1f))
+                        .execute();
                     dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -1714,8 +1436,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo(1);
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1735,36 +1455,13 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(14)
     void bareValidateWithoutRemediation_againstDanglingPopulation_throws() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_o8dil29_neg_test";
             final String pass = "nexus_admin_o8dil29_neg_test_pass";
 
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1834,9 +1531,7 @@ class SchemaMigratorIntegrationTest {
                     // SAME bypass idiom used elsewhere in this suite: drop, insert,
                     // re-add NOT VALID -- reproducing exactly what a genuinely aged
                     // box looks like immediately before its own first VALIDATE.
-                    dsl(su).alterTable(CATALOG_DOCUMENT_CHUNKS)
-                        .dropConstraintIfExists("fk_catalog_chunks_chunk")
-                        .execute();
+                    PgContainerHelper.dropCatalogChunksFk(su);
                     dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -1844,9 +1539,7 @@ class SchemaMigratorIntegrationTest {
                         .values(tenant, "o8dil29-neg-doc", 0, java.util.HexFormat.of().parseHex(danglingChash),
                             collection)
                         .execute();
-                    PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS,
-                        "fk_catalog_chunks_chunk", "collection", "chash", CHUNKS, "collection", "chash",
-                        "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+                    PgContainerHelper.readdCatalogChunksFkNotValid(su);
                 }
 
                 // The naive two-step shape: VALIDATE alone, skipping remediation.
@@ -1867,8 +1560,6 @@ class SchemaMigratorIntegrationTest {
                         .hasMessageContaining("fk_catalog_chunks_chunk");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1917,36 +1608,13 @@ class SchemaMigratorIntegrationTest {
     @Order(16)
     void chunksCollectionFk_bareValidateWithoutReconcile_againstUnregisteredCollection_throws()
             throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_o8dil49_neg_test";
             final String pass = "nexus_admin_o8dil49_neg_test_pass";
 
             try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
-                // role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
-                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
-                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema (no direct-relocation parameter any more -- see that
-                // function's own docstring) -- this walk resumes through vectors-001
-                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
-                // below, so the extension must stay bare-resolvable in public through
-                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
-                // own guard calling this function -- see that changeset's header for the
-                // full derivation.
-                bootstrapVectorExtensionsForFreshWalk(su, role);
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -2013,8 +1681,6 @@ class SchemaMigratorIntegrationTest {
                         .hasMessageContaining("chunks_collection_fk");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -2073,7 +1739,7 @@ class SchemaMigratorIntegrationTest {
      * changelog creates. The second walk must not throw, must land nothing new,
      * and the only DATABASECHANGELOG must be public's.
      *
-     * <p>Two shapes, one invariant. {@code bootstrapVectorExtensionsForFreshWalk}
+     * <p>Two shapes, one invariant. {@code PgContainerHelper#bootstrapNonSuperuserOwner}
      * pre-creates schema {@code nexus} (the relocation function lives there), so
      * for roles {@code t1} and {@code staging} the natural failure sequence
      * reproduces exactly (boot 1 history in public, boot 2 in the role's own
@@ -2089,8 +1755,8 @@ class SchemaMigratorIntegrationTest {
             throws Exception {
         final String pass = role + "_q81g7_pass";
 
-        PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startEmptyDatabase(role);
+        try (roleNamedPg) {
             // Phase A: the minimal DBA-equivalent bootstrap, for a role whose NAME is
             // the variable under test.
             bootstrapRole(roleNamedPg, role, pass);
@@ -2140,8 +1806,6 @@ class SchemaMigratorIntegrationTest {
                     }
                 }
             }
-        } finally {
-            try { roleNamedPg.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2157,36 +1821,30 @@ class SchemaMigratorIntegrationTest {
 
     /**
      * The minimal DBA-equivalent bootstrap (migrating role + nexus_svc + the
-     * vector/pg_trgm relocation helper) for a dedicated container, as ONE
-     * simple-protocol multi-statement call: the same statements the aged-box tests
-     * each spell out, kept as a single raw site so this file's raw-SQL ceiling
-     * (RawSqlGateTest) moves down, not up. The role name is quoted because it is
-     * the variable under test (nexus, t1, staging).
+     * vector/pg_trgm relocation helper) for a dedicated container, through
+     * {@link PgContainerHelper#bootstrapNonSuperuserOwner}. The role name is the
+     * variable under test (nexus, t1, staging); all three are plain lower-case
+     * identifiers, so the changelog's unquoted use of it resolves to the same role
+     * the old quoted form named.
      */
     private static void bootstrapRole(PostgreSQLContainer<?> c, String role, String pass)
             throws Exception {
         try (Connection su = c.createConnection("")) {
-            su.setAutoCommit(true);
-            // SANCTIONED RAW: see bootstrap()'s own comment above -- the same
-            // admin/svc role bootstrap class, no jOOQ typed-DSL form.
-            su.createStatement().execute(
-                "CREATE ROLE \"" + role + "\" LOGIN PASSWORD '" + pass
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE; "
-                    + "GRANT CREATE ON DATABASE postgres TO \"" + role + "\"; "
-                    + "GRANT CREATE ON SCHEMA public TO \"" + role + "\"; "
-                    + "GRANT pg_monitor TO \"" + role + "\" WITH ADMIN OPTION; "
-                    + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            bootstrapVectorExtensionsForFreshWalk(su, role);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
         }
     }
 
     private PostgreSQLContainer<?> startRoleContainer(String role, String pass) throws Exception {
-        PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c = PgContainerHelper.startEmptyDatabase(role);
         try {
             bootstrapRole(c, role, pass);
         } catch (Exception e) {
-            c.stop();
+            // nexus-ap7sm: a stop() that fails too is attached to e, never thrown in its place.
+            try {
+                c.stop();
+            } catch (RuntimeException stopFailure) {
+                e.addSuppressed(stopFailure);
+            }
             throw e;
         }
         return c;
@@ -2215,7 +1873,7 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_sp";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try (var ds = roleDataSource(c, role, pass, 1)) {
+        try (c; var ds = roleDataSource(c, role, pass, 1)) {
             SchemaMigrator.migrate(ds);
             try (Connection conn = ds.getConnection()) {
                 String sp = DSL.using(conn, SQLDialect.POSTGRES)
@@ -2224,8 +1882,6 @@ class SchemaMigratorIntegrationTest {
                     .fetchOne(0, String.class);
                 assertThat(sp).as("session search_path after the walk").isEqualTo("public");
             }
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2242,15 +1898,15 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_split";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try {
+        try (c) {
             try (var ds = roleDataSource(c, role, pass, 2)) {
                 SchemaMigrator.migrate(ds);
                 try (Connection conn = ds.getConnection()) {
-                    // SANCTIONED RAW: reproduces the split a role named for a
-                    // schema produced in the field; a one-off relocation of
-                    // Liquibase's own table has no typed jOOQ form.
-                    conn.createStatement().execute(
-                        "ALTER TABLE public.databasechangelog SET SCHEMA nexus");
+                    // Reproduces the split a role named for a schema produced in the field.
+                    // ALTER TABLE ... SET SCHEMA has no typed jOOQ form:
+                    // db.changelog-test-table-schema.xml, run as the table's owner (this role).
+                    PgContainerHelper.setTableSchema(conn,
+                        DSL.table(DSL.name("public", "databasechangelog")), "nexus");
                 }
             }
             try (var ds = roleDataSource(c, role, pass, 2)) {
@@ -2263,8 +1919,6 @@ class SchemaMigratorIntegrationTest {
                         .doesNotContain("databasechangelog");
                 }
             }
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2279,7 +1933,7 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_stray";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try (var ds = roleDataSource(c, role, pass, 2)) {
+        try (c; var ds = roleDataSource(c, role, pass, 2)) {
             SchemaMigrator.migrate(ds);
             try (Connection conn = ds.getConnection()) {
                 // The stray a failed boot 2 leaves: an empty table of that name in the
@@ -2291,8 +1945,6 @@ class SchemaMigratorIntegrationTest {
             }
             SchemaMigrator.MigrationOutcome again = SchemaMigrator.migrate(ds);
             assertThat(again.newChangesets()).isZero();
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2309,8 +1961,8 @@ class SchemaMigratorIntegrationTest {
     // Liquibase's RERAN path (MarkChangeSetRanGenerator) issues one
     // UPDATE ... WHERE id=? AND author=? AND filename=? per changeset, with no
     // row-count limit, so it re-stamps every matching physical row while
-    // Liquibase itself believes it processed one changeset: 12 genuine
-    // runAlways identities + 13 duplicate extra rows = 25. The origin of the
+    // Liquibase itself believes it processed one changeset: 13 genuine
+    // runAlways identities (12 at v0.1.118, 25 rows then) + 13 duplicate extra rows = 26. The origin of the
     // duplicates is not recoverable -- every RERAN overwrites each copy's own
     // dateexecuted/deployment_id alike -- and conexus will not delete them
     // without Sam's decision, so SchemaMigrator must count correctly with them
@@ -2344,11 +1996,11 @@ class SchemaMigratorIntegrationTest {
      * IDENTITIES, not rows). A RETIRED dateexecuted-clock-window
      * reconstruction, and independently a non-distinct
      * {@code COUNT(*) WHERE deployment_id=?} over this walk's own deployment
-     * id, must BOTH reproduce the v0.1.118 anomaly verbatim (25) against this
+     * id, must BOTH reproduce the v0.1.118 anomaly verbatim (26 with today's 13 runAlways identities; 25 with the 12 of v0.1.118) against this
      * hermetic duplicate shape — proving the bug is real and that scoping by
      * deployment_id alone does not fix it. {@code reexecutedChangesets} on the
      * FIXED {@code MigrationOutcome} must equal EXACTLY the runAlways set's
-     * size (12) — the identity-based counting a duplicate row cannot inflate.
+     * size (13) — the identity-based counting a duplicate row cannot inflate.
      */
     @Test
     @Order(18)
@@ -2358,8 +2010,8 @@ class SchemaMigratorIntegrationTest {
         final int diag2ExtraCopies = 7;
         final int duplicatedIdentities = 2;
 
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
-        try {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
+        try (agedPg) {
             final String role = "nexus_admin_jl08t_test";
             final String pass = "nexus_admin_jl08t_test_pass";
 
@@ -2409,9 +2061,10 @@ class SchemaMigratorIntegrationTest {
                 }
                 assertThat(runAlwaysIds)
                     .as("nexus-jl08t: the runAlways set parsed straight from the "
-                        + "changelog XML at HEAD (12: 5 grants-nexus-svc-*, 5 "
-                        + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8)")
-                    .hasSize(12);
+                        + "changelog XML at HEAD (13: 5 grants-nexus-svc-*, 5 "
+                        + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8, "
+                        + "vectors-034-2)")
+                    .hasSize(13);
                 assertThat(runAlwaysIds)
                     .as("nexus-jl08t: production's two duplicated identities must "
                         + "both be in the parsed runAlways set, or this seeding "
@@ -2498,14 +2151,14 @@ class SchemaMigratorIntegrationTest {
                         + "unaffected by duplicate rows elsewhere")
                     .isEqualTo(5L);
 
-                // ── Assert: pending_at_start = new (5) + runAlways (12),
+                // ── Assert: pending_at_start = new (5) + runAlways (13),
                 // unaffected by row duplication (listUnrunChangeSets() counts
                 // identities, never rows).
                 assertThat(outcome.pendingAtStart())
                     .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
                         + "the 5 genuinely-pending changesets PLUS the full "
                         + "runAlways set (always considered unrun regardless of "
-                        + "prior execution) -- 5 + 12 = 17 on the v0.1.118 walk")
+                        + "prior execution) -- 5 + 13 = 18 on today's changelog (17 on the v0.1.118 walk)")
                     .isEqualTo(5L + runAlwaysIds.size());
 
                 // ── Assert: every runAlways row's dateexecuted actually moved
@@ -2528,8 +2181,8 @@ class SchemaMigratorIntegrationTest {
                 // ── Assert: the RETIRED dateexecuted-clock-window algorithm,
                 // reconstructed independently here against this exact
                 // production duplicate shape, reproduces the v0.1.118 anomaly
-                // verbatim -- 12 genuine runAlways identities + 13 duplicate
-                // extra rows = 25, not 12. This is the "old code" wrong value:
+                // verbatim -- 13 genuine runAlways identities + 13 duplicate
+                // extra rows = 26, not 13. This is the "old code" wrong value:
                 // a test that could not produce it would prove nothing.
                 long oldStyleTouched;
                 try (Connection conn = agedDs.getConnection()) {
@@ -2590,7 +2243,7 @@ class SchemaMigratorIntegrationTest {
                 // assertion nexus-jl08t exists to pin.
                 assertThat(outcome.reexecutedChangesets())
                     .as("nexus-jl08t: reexecuted_changesets must count exactly "
-                        + "the runAlways set touched by this walk (12), "
+                        + "the runAlways set touched by this walk (13), "
                         + "de-duplicated by identity -- immune to the 13 extra "
                         + "physical rows seeded for grants-nexus-diag-1/-2")
                     .isEqualTo((long) runAlwaysIds.size());
@@ -2625,8 +2278,6 @@ class SchemaMigratorIntegrationTest {
                         + "database's owner, not something a migration performs")
                     .isEqualTo(rowsAfterSecondWalk);
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -2656,7 +2307,7 @@ class SchemaMigratorIntegrationTest {
     // role/schema bootstrap (CREATE ROLE / GRANT ON DATABASE|SCHEMA / GRANT
     // pg_monitor -- the same class tests 5/6/18 each already pay once, with
     // no jOOQ typed-DSL form), which this design avoids entirely. `pg` is
-    // itself a real Testcontainers Postgres (PgContainerHelper.startDedicated(),
+    // itself a real Testcontainers Postgres (PgContainerHelper.startEmptyDatabase(),
     // same helper the dedicated-container tests use), so "against the real
     // Testcontainers Postgres" still holds.
 

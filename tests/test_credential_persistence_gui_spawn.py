@@ -114,6 +114,7 @@ def test_check_credential_persistence_partial_warns(monkeypatch, tmp_path):
 # ── service-token error message (GUI-spawn self-explanation) ─────────────────
 
 
+@pytest.mark.t2_tenant
 def test_service_token_error_self_explains(monkeypatch):
     """RDR-155 P4a.2 (nexus-1k8s1): the daemon-vs-cloud fork — and the
     T3DaemonError enrichment that explained it — retired with the Chroma

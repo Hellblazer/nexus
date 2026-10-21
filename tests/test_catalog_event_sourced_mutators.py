@@ -25,6 +25,8 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture()
 def active_catalog() -> ActiveCatalog:

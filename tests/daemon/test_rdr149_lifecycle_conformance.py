@@ -1801,6 +1801,8 @@ class TestGracefulStopChannel:
         try:
             result = sweep_matching_processes(
                 lambda cmd: cmd == command, exclude_pid=os.getpid(), grace_s=0.3,
+                # the matcher above is this test's own; the subject is the console path
+                member_check=lambda _pid, _command: "member",
             )
             assert result.pids == (proc.pid,)
             assert result.stubborn == (proc.pid,)

@@ -706,6 +706,209 @@ def test_doctor_failing_rows_are_recorded_in_a_terminal_status(box: Box) -> None
     assert not (box.setup / "lock").exists()
 
 
+def test_the_main_sweeps_failing_rows_are_recorded(box: Box) -> None:
+    """``nx doctor``'s main sweep prints ``  ✗ label: detail`` with no brackets; only the supplementary
+    checks print ``[✗]``. A filter on ``[✗]`` alone recorded no rows for a real failure (nexus-36qyh)."""
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 1,
+        "out": "Nexus health check:\n\n  ✓ T2: ok\n  ✗ T3: vector store unreachable\n    Fix: nx init\n  ⚠ soft: x\n",
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ T3: vector store unreachable"]
+
+
+_GIT_FAILED_OUT = "  ✗ git: not found on PATH\n    Fix: brew install git\n"
+_LOCAL_FOOTER = "\nSome checks failed. Run 'nx doctor' again after fixing the issues above.\n"
+_CLOUD_FOOTER = (
+    "\nRun 'nx config init' to configure managed-service credentials, "
+    "or 'nx init --service' to provision a local service stack.\n"
+)
+
+
+def test_a_missing_vcs_tool_does_not_fail_the_verify_step(box: Box) -> None:
+    """nexus-36qyh. A Claude Desktop-only Windows user has no git. A doctor that exits 0 with git
+    a warning ends ``done`` with ``doctor`` pass; a doctor from before that change exits 1 (up to
+    v7.20.0) or 2 (from v7.21.0; git is a fatal row there) with git as its only failing row and its
+    summary footer, and the plugin must still call the run done, because the plugin updates
+    independently of the CLI it finds."""
+    box.layout()
+    box.provision()
+    for out, code in (
+        ("  ⚠ git: not found on PATH — needed only for indexing repositories and Claude Code's plugin marketplace\n", 0),
+        (_GIT_FAILED_OUT + _LOCAL_FOOTER, 2),
+        (_GIT_FAILED_OUT + _CLOUD_FOOTER, 2),
+        (_GIT_FAILED_OUT + _LOCAL_FOOTER + "[✓] supplementary: fine\r\n", 2),
+        (_GIT_FAILED_OUT + _LOCAL_FOOTER, 1),  # a CLI up to v7.20.0 exits 1 after the same footer
+        (_GIT_FAILED_OUT + _CLOUD_FOOTER, 1),
+    ):
+        box.behave([{"prog": "nx", "match": ["doctor"], "exit": code, "out": out}])
+        box.start("local")
+        done = box.wait_terminal()
+        assert done["state"] == "done", (out, done)
+        assert done["doctor"] == "pass" and done["doctor_failing"] == []
+
+
+@pytest.mark.parametrize(
+    ("out", "code"),
+    [
+        (_GIT_FAILED_OUT, 1),
+        (_GIT_FAILED_OUT, 2),
+        (_GIT_FAILED_OUT + _LOCAL_FOOTER, 3),
+        (_GIT_FAILED_OUT + "Traceback (most recent call last):\n  File \"x\", line 1\nRuntimeError: boom\n", 1),
+        (_GIT_FAILED_OUT + "Some checks failed", 2),
+    ],
+    ids=[
+        "died-after-the-row-exit-1", "exit-2-without-the-footer", "footer-with-exit-3",
+        "traceback", "footer-cut-short",
+    ],
+)
+def test_a_doctor_that_failed_git_and_did_not_finish_the_sweep_fails_the_verify_step(
+    box: Box, out: str, code: int
+) -> None:
+    """nexus-0ky29. The git-only path needs a fatal exit code (1 or 2) AND the footer printed after the rows (exit 1
+    with the footer is a finished git-only sweep, covered above; exit 1 without it is here). An old CLI
+    that prints the git row and then dies without another row is not a missing git alone. The record names an
+    added row, so neither this script's status view nor ``nx doctor``'s setup row reads it as ``done`` later."""
+    box.layout()
+    box.provision()
+    box.behave([{"prog": "nx", "match": ["doctor"], "exit": code, "out": out}])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed", (out, code, done)
+    assert done["doctor"] == "fail"
+    assert done["doctor_failing"][0] == "✗ git: not found on PATH"
+    assert "did not finish" in done["doctor_failing"][-1] and f"exit code {code}" in done["doctor_failing"][-1]
+
+
+def test_a_doctor_that_times_out_after_the_git_row_is_recorded_as_unfinished(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0ky29. Drives ``_execute`` itself: ``nx doctor`` times out (``cmd`` returns ``None``) after printing only
+    the git row (and, being cut short, no footer). The run ends ``doctor-failed`` and its record carries the added
+    row, so ``status_view`` reads the record back as ``doctor-failed`` rather than the git-only ``done``."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+    run = mod._Run(box.setup, "local", False, mod._Heartbeat(box.setup / "lock", token))
+    nx = str(box.root / "nx")
+
+    def cmd(argv: list[str], **kw: Any) -> tuple[int | None, str]:
+        assert argv == [nx, "doctor"], argv  # nothing else runs: the build and the service step are stubbed out
+        return None, _GIT_FAILED_OUT
+
+    monkeypatch.setattr(mod, "_locate_nexus_cli", lambda r: (nx, False))
+    monkeypatch.setattr(mod, "_service", lambda r, n, c: None)
+    monkeypatch.setattr(run, "cmd", cmd)
+    assert mod._execute(run) == 1
+    record = json.loads((box.setup / "status.json").read_text(encoding="utf-8"))
+    assert record["state"] == "doctor-failed" and record["doctor"] == "fail"
+    assert record["message"] == "nx doctor timed out."
+    assert record["doctor_failing"][0] == "✗ git: not found on PATH"
+    extra = record["doctor_failing"][-1]
+    assert "did not finish a sweep that failed only on git (timed out)" in extra, extra
+    assert len(record["doctor_failing"]) == 2
+    assert mod.only_git_failed(record["doctor_failing"]) is False
+    view = mod.status_view(box.setup)
+    assert view["state"] == "doctor-failed", view
+
+
+def test_a_sweep_that_timed_out_is_never_a_git_only_sweep(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0ky29. No exit code is not a fatal one, whatever was printed."""
+    mod = _in_process(box, monkeypatch)
+    rows = ["✗ git: not found on PATH"]
+    assert mod.git_only_sweep(None, _GIT_FAILED_OUT + _LOCAL_FOOTER, rows) is False
+
+
+def test_the_git_only_sweep_matches_the_real_doctor_footer_and_exit_code(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0ky29. The script's footers and exit code are checked against the CLI module's own output, so a
+    reworded footer or a changed exit code breaks this test, not a user's setup. A fatal failed row is rendered in
+    both modes by ``format_health_for_cli`` and the exit code is ``health_exit_code``'s."""
+    from nexus.health import HealthResult, format_health_for_cli, health_exit_code
+
+    mod = _in_process(box, monkeypatch)
+    fatal = [HealthResult(label="git", ok=False, detail="not found on PATH", fatal=True)]
+    assert health_exit_code(fatal) == mod._DOCTOR_EXIT_FATAL == 2
+    printed = ""
+    for local_mode in (True, False):
+        output, failed = format_health_for_cli(fatal, local_mode=local_mode)
+        printed += output
+        assert failed is True
+        assert any(footer in output for footer in mod._DOCTOR_FATAL_FOOTERS), (local_mode, output)
+        rows = mod._doctor_rows(output)
+        assert rows and mod.git_only_sweep(2, output, rows), (local_mode, output, rows)
+        assert mod.git_only_sweep(1, output, rows)  # a CLI up to v7.20.0 exits 1 after the same footer
+        assert not mod.git_only_sweep(3, output, rows)
+        assert not mod.git_only_sweep(None, output, rows)
+        assert not mod.git_only_sweep(2, output.split("\n\n")[0], rows)  # the same output, cut before its footer
+    # every footer the script accepts is printed by one of the two modes (none is stale)
+    assert all(footer in printed for footer in mod._DOCTOR_FATAL_FOOTERS)
+
+
+def test_a_missing_vcs_tool_with_another_failing_row_still_fails_the_verify_step(box: Box) -> None:
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 2,
+        "out": "  ✗ git: not found on PATH\n  ✗ Service: not running\n" + _LOCAL_FOOTER,
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ git: not found on PATH", "✗ Service: not running"]
+
+
+def test_a_failing_git_hooks_row_still_fails_the_verify_step(box: Box) -> None:
+    """The row labelled ``git hooks (stanza drift)`` is a real failure of ``nx doctor``, not the missing tool."""
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 1,
+        "out": "  ✗ git hooks (stanza drift): /r/.git/hooks/post-commit\n",
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ git hooks (stanza drift): /r/.git/hooks/post-commit"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (["✗ git: not found on PATH"], "done"),
+        (["[✗] git: not found on PATH"], "done"),
+        (["✗ git: not found on PATH", "[✗] git: x"], "done"),
+        (["✗ git: not found on PATH", "✗ Service: not running"], "doctor-failed"),
+        (["✗ gitea: unreachable"], "doctor-failed"),
+        (["✗ git hooks (stanza drift): x"], "doctor-failed"),
+        (["[✗] git hooks (malformed stanza): y"], "doctor-failed"),
+        (["✗ git hooks (stanza drift): x", "✗ git: not found on PATH"], "doctor-failed"),
+        ([], "doctor-failed"),
+    ],
+    ids=[
+        "only-the-tool", "bracketed", "twice", "plus-another", "a-different-prefix",
+        "git-hooks-drift", "git-hooks-malformed", "git-hooks-beside-the-tool", "no-rows-recorded",
+    ],
+)
+def test_a_recorded_doctor_failure_over_one_optional_tool_reads_done(
+    box: Box, monkeypatch: pytest.MonkeyPatch, rows: list[str], expected: str
+) -> None:
+    """nexus-36qyh, the status ranking. A record written before the fix (a 7.82.0 run on a box with no git)
+    must not outrank "the installed service is not running": it reads ``done``. A record naming any other
+    failing row, or no row at all, keeps its state."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    record = {"state": "doctor-failed", "stage": "verify", "mode": "local", "doctor": "fail", "doctor_failing": rows}
+    (box.setup / "status.json").write_text(json.dumps(record), encoding="utf-8")
+    view = mod.status_view(box.setup)
+    assert view["state"] == expected
+    if expected == "done":
+        assert view["terminal"] is True and view["doctor_failing"] == [] and view["doctor"] == "pass"
+        assert "Nexus is installed" in view["message"]
+
+
 # -- the lock and the status lifecycle ------------------------------------------------------
 
 

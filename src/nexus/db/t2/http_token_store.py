@@ -25,6 +25,8 @@ from typing import Any
 import httpx
 import structlog
 
+from nexus._log_safe_url import log_endpoint
+
 _log = structlog.get_logger(__name__)
 
 #: Default tenant header value (matches TenantConstants.DEFAULT_TENANT in the service).
@@ -146,7 +148,7 @@ class HttpTokenStore:
         self._auth_token = _token or ""
         self._apply_data_token_preference()
         self._client = self._build_client()
-        _log.debug("http_token_store.init", base_url=self._base_url)
+        _log.debug("http_token_store.init", endpoint=log_endpoint(self._base_url))
 
     def _apply_data_token_preference(self) -> None:
         """Replace the static token with the manager's DATA token when
@@ -211,7 +213,7 @@ class HttpTokenStore:
         if recovered is None:
             return False
         new_url, new_token = recovered
-        _log.warning("http_token_store.rebind", old=self._base_url, new=new_url)
+        _log.warning("http_token_store.rebind", old=log_endpoint(self._base_url), new=log_endpoint(new_url))
         self._base_url = new_url
         if new_token:
             self._auth_token = new_token
@@ -310,7 +312,7 @@ class HttpTokenStore:
                     f"(sha256 {_token_fingerprint(token)})")
         lines = [
             f"{status} {'Unauthorized' if status == 401 else 'Forbidden'} "
-            f"from {self._base_url}{path}",
+            f"from {log_endpoint(self._base_url)}{path}",
             f"  sent: {sent}",
         ]
         if reason := _endpoint_reason(resp, token):

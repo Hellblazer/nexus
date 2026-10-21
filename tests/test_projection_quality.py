@@ -216,6 +216,7 @@ def _build_two_clusters_in_chroma(
 class TestAssignSingleReturnsNamedTuple:
     """SC-2 case 4: AssignResult shape + distance→similarity inversion."""
 
+    @pytest.mark.t2_tenant
     def test_assign_single_returns_namedtuple(
         self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
@@ -250,6 +251,7 @@ class TestAssignSingleReturnsNamedTuple:
 class TestProjectAgainst3Tuple:
     """``project_against`` emits 3-tuples with raw cosine similarity."""
 
+    @pytest.mark.t2_tenant
     def test_chunk_assignments_carry_similarity(
         self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
@@ -324,6 +326,7 @@ def _seed_projection_rows(
     db.taxonomy.clear_icf_cache()
 
 
+@pytest.mark.t2_tenant
 class TestICF:
     """RDR-077 Phase 3 — ``compute_icf_map`` SC-3 + SC-8."""
 
@@ -501,6 +504,7 @@ def fixture_icf_ranking(
     return db
 
 
+@pytest.mark.t2_tenant
 class TestIcfRankingFixture:
     """S-3: ≥10-collection fixture exercises the SC-3 calibration spread."""
 
@@ -554,6 +558,7 @@ class TestIcfRankingFixture:
         assert kept_any_nonzero_icf
 
 
+@pytest.mark.t2_tenant
 class TestProjectAgainstIcf:
     """``project_against(icf_map=...)`` — weighting at filter time only."""
 
@@ -773,6 +778,7 @@ def fixture_hub_synthetic(db: T2Database, t2_service_env: str) -> tuple[T2Databa
 
 
 class TestHubs:
+    @pytest.mark.t2_tenant
     def test_hubs_detects_stopword_topic(
         self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
@@ -784,6 +790,7 @@ class TestHubs:
         assert hubs[0].topic_id == B + 1  # sorted by score desc
         assert "assert" in hubs[0].matched_stopwords
 
+    @pytest.mark.t2_tenant
     def test_hubs_excludes_single_collection_domain_topics(
         self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
@@ -795,6 +802,7 @@ class TestHubs:
         for domain_topic in (B + 2, B + 3, B + 4, B + 5, B + 6):
             assert domain_topic not in topic_ids
 
+    @pytest.mark.t2_tenant
     def test_hubs_max_icf_threshold(
         self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
@@ -812,6 +820,7 @@ class TestHubs:
         )
         assert [h.topic_id for h in hubs_none] == [B + 1]
 
+    @pytest.mark.t2_tenant
     def test_hubs_min_collections_threshold(
         self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
@@ -821,6 +830,7 @@ class TestHubs:
         assert hubs == []
 
 
+    @pytest.mark.t2_tenant
     def test_hubs_warn_stale_without_flag_leaves_fields_default(
         self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
@@ -904,6 +914,7 @@ class TestAudit:
         db.taxonomy.clear_icf_cache()
         return db, B
 
+    @pytest.mark.t2_tenant
     def test_audit_quantiles(self, audit_db: tuple[T2Database, int]) -> None:
         db, _B = audit_db
         report = db.taxonomy.audit_collection("code__auditC0")
@@ -913,6 +924,7 @@ class TestAudit:
         assert report.p50 == pytest.approx(0.60)
         assert report.p90 == pytest.approx(0.95)
 
+    @pytest.mark.t2_tenant
     def test_audit_below_threshold_count(self, audit_db: tuple[T2Database, int]) -> None:
         db, _B = audit_db
         report = db.taxonomy.audit_collection(
@@ -922,6 +934,7 @@ class TestAudit:
         # Rows below 0.50: 0.10 / 0.20 / 0.30 / 0.40 = 4.
         assert report.below_threshold_count == 4
 
+    @pytest.mark.t2_tenant
     def test_audit_uses_per_corpus_default_threshold(
         self, audit_db: tuple[T2Database, int],
     ) -> None:
@@ -931,6 +944,7 @@ class TestAudit:
         assert report.threshold == 0.70
         assert report.below_threshold_count == 6
 
+    @pytest.mark.t2_tenant
     def test_audit_top_receiving_hubs(self, audit_db: tuple[T2Database, int]) -> None:
         db, B = audit_db
         report = db.taxonomy.audit_collection(
@@ -939,6 +953,7 @@ class TestAudit:
         ids = [h.topic_id for h in report.top_receiving_hubs]
         assert ids == [B + 1, B + 2, B + 3]
 
+    @pytest.mark.t2_tenant
     def test_audit_pattern_pollution_flags(self, audit_db: tuple[T2Database, int]) -> None:
         db, B = audit_db
         report = db.taxonomy.audit_collection("code__auditC0")
@@ -947,12 +962,14 @@ class TestAudit:
         assert B + 2 not in polluted_ids
         assert B + 3 not in polluted_ids
 
+    @pytest.mark.t2_tenant
     def test_audit_excludes_hdbscan_rows(self, audit_db: tuple[T2Database, int]) -> None:
         db, _B = audit_db
         report = db.taxonomy.audit_collection("code__auditC0")
         # 11 projection rows only — the hdbscan row is ignored.
         assert report.total_assignments == 11
 
+    @pytest.mark.t2_tenant
     def test_audit_handles_empty_projection(self, db: T2Database) -> None:
         report = db.taxonomy.audit_collection("code__none")
         assert report.total_assignments == 0

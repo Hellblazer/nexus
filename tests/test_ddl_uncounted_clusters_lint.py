@@ -1,0 +1,748 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""nexus-sz651: every Postgres cluster start site the scan finds in the test tree is either read by
+the DDL/bytes counter or listed in ``tests/ddl_uncounted_clusters.toml``.
+
+A counter that sees one kind of cluster and says nothing about the others reports a smaller
+number than the run caused. The allowlist makes the omission a committed figure, and this lint
+keeps it equal to the tree in both directions (a new site, and a site that went away).
+
+nexus-szyun adds the second half: where a test cluster's DATA DIRECTORY comes from (``pg_data_tempdir``, which
+lands on the run's tmpfs root, or a listed exception), and that a ``docker run`` of Postgres mounts its data dir
+as tmpfs.
+
+WHAT THIS LINT DOES NOT SCAN, so a green run is not read as "every cluster the suite starts":
+
+* ``scripts/**`` (the Windows smoke tools are standalone programs run on a Windows host, and cannot import the
+  helper), for the data-dir half; the census half does scan ``scripts/*.py``;
+* shell scripts outside ``tests/e2e/``, among them files that DO start clusters: ``scripts/liquibase_bundle_smoke.sh``,
+  ``service/native-smoke.sh``, ``tests/containers/fanout.sh``, ``tests/cc-validation/*`` (see
+  ``_ddl_cluster_sites.UNSCANNED_SHELL``); and a cluster an e2e script starts through anything but a literal
+  ``nx init`` (``nx start``, ``nx upgrade``, a wrapper script): the census reads ``pg_ctl ... start``, a
+  command-position ``initdb``, ``docker run`` of a postgres / pgvector image and, as a SEPARATE figure (product
+  provisioning, not a cluster a test started), a command-position ``nx init``;
+* what the figure counts: call sites, so one Python cluster usually counts twice (its ``<module>::initdb`` and its
+  ``pg_instance::pg_ctl_start``);
+* a ``docker run`` whose argv is not a literal list in a ``.py`` file (a shell string, a variable argv) and an e2e
+  ``docker run`` whose image is a variable (``$PG_IMAGE``); the tmpfs half covers literal lists under ``tests/`` only;
+* a cluster started by product code under ``src/`` that a test merely drives (the five ``provision()`` files
+  are listed, but a new caller reached through a helper in another module is only seen if that helper's own
+  file has a ``provision``, ``_init_cluster``, ``pg_ctl_start`` or initdb argv call);
+* the Java suites (``PgContainerTmpfsGateTest`` covers them) and the jOOQ code generator's container;
+* what a listed file does: an entry excuses its whole file, bounded by the ceilings on the table, not per use;
+* anything that starts a cluster without NAMING it: the argv head must name ``initdb`` / ``pg_ctl`` / ``postgres``
+  (``exe = bins / "initdb"; run([str(exe), "-D", tmp])`` passes in a file whose census is met by other uses),
+  ``os.system(f"initdb -D ...")``, ``getattr(mod, "pg_ctl_start")(...)`` and ``functools.partial(provision, tmp_path)``;
+* a ``provision(x)`` rooted at a parameter that names a same-file fixture returning a helper-made dir, in a file that
+  also makes a dir through the helper: the fixture's value is checked, not what a test later does to it (a method on
+  the fixture's object that swaps the dir, or a fixture overridden in a conftest).
+
+The figure "N of M data-dir uses come from the helper" counts call sites the scan understands, not clusters
+and not bytes. Since nexus-0ajjm the five ``provision()`` files are among them (one ``provision(h())`` is one
+traced use) and ``disk_required`` is empty with a ceiling of 0.
+"""
+from __future__ import annotations
+
+import tomllib
+from collections import Counter
+from pathlib import Path
+
+import pytest
+
+from tests import _ddl_cluster_sites as sites
+from tests import _ddl_counter as ddl
+
+pytestmark = pytest.mark.lint
+
+PROVISION_DRIVEN = sites.PROVISION_DRIVEN  # one definition, shared with tests/test_integration_pg_cluster.py
+
+
+def _tables() -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """``(counted, [uncounted] start sites, [provisioning] commands)`` from the committed file."""
+    data = tomllib.loads(sites.ALLOWLIST.read_text())
+    return (
+        list(data["counted"]["sites"]),
+        {k: int(v) for k, v in data["uncounted"].items()},
+        {k: int(v) for k, v in data["provisioning"].items()},
+    )
+
+
+def _allowlist() -> tuple[list[str], dict[str, int]]:
+    """``(counted, every listed site)``: the two tables together, which is what the scan is compared with."""
+    counted, uncounted, provisioning = _tables()
+    return counted, {**uncounted, **provisioning}
+
+
+def test_the_product_provisioning_commands_are_a_separate_figure() -> None:
+    """``nx init`` provisions the PRODUCT's cluster; it is not a cluster a test started. It is listed in its own table
+    so the start-site figure never absorbs it, and the figure the report prints is the [uncounted] sum alone."""
+    _, uncounted, provisioning = _tables()
+    assert provisioning and all(k.endswith("::" + sites.PROVISIONING_KIND) for k in provisioning)
+    assert not any(k.endswith("::" + sites.PROVISIONING_KIND) for k in uncounted)
+    assert ddl.uncounted_cluster_count() == sum(uncounted.values())
+    assert ddl.provisioning_command_count() == sum(provisioning.values())
+
+
+def test_the_rendered_file_puts_each_kind_in_its_own_table() -> None:
+    text = sites.render(Counter({
+        "tests/a.py::f::initdb": 2, "tests/e2e/x.sh::sh_nx_init": 3, "tests/e2e/x.sh::sh_docker_run": 1,
+    }))
+    data = tomllib.loads(text)
+    assert data["uncounted"] == {"tests/a.py::f::initdb": 2, "tests/e2e/x.sh::sh_docker_run": 1}
+    assert data["provisioning"] == {"tests/e2e/x.sh::sh_nx_init": 3}
+
+
+def test_the_allowlist_equals_the_tree() -> None:
+    found = sites.scan()
+    counted, uncounted = _allowlist()
+    assert counted == list(sites.COUNTED)
+    new, gone = sites.allowlist_drift(found, uncounted)
+    assert not new and not gone, (
+        "cluster start sites changed. A NEW site is a cluster the counter cannot see: read it through "
+        "tests/_ddl_counter.py or list it on purpose (uv run python -m tests._ddl_cluster_sites --write, "
+        f"then review the diff). new/changed: {new}; gone: {gone}"
+    )
+
+
+def test_the_counted_site_is_really_in_the_tree() -> None:
+    """A counted entry the scan no longer finds would let the lint pass over a substrate that moved."""
+    found = sites.scan()
+    for site in sites.COUNTED:
+        assert found[site] >= 1, site
+
+
+def test_the_scan_is_not_vacuous() -> None:
+    """The census must examine a real tree: the committed figure is dozens of sites, not zero."""
+    found = sites.scan()
+    assert sum(found.values()) >= 30, dict(found)
+    assert any(k.startswith("tests/db/") for k in found)
+    assert sites.CODEGEN_SITE in found
+
+
+def test_the_report_figure_is_the_uncounted_sum() -> None:
+    _, uncounted, _ = _tables()
+    assert ddl.uncounted_cluster_count() == sum(uncounted.values()) > 0
+
+
+def test_the_scan_finds_a_site_in_a_fixture_tree(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text(
+        'from tests._pg_ctl import pg_ctl_start\n_INITDB = exe_name("initdb")\n'
+        "def fixture():\n    pg_ctl_start('x')\n    helpers.pg_ctl_start('y')\n"
+        "async def other():\n    def inner():\n        pg_ctl_start('z')\n"
+    )
+    (tmp_path / "tests" / "test_bad.py").write_text("def broken(:\n")
+    assert sites.scan(tmp_path) == Counter({
+        "tests/test_a.py::<module>::initdb": 1,
+        "tests/test_a.py::fixture::pg_ctl_start": 2,
+        "tests/test_a.py::other::pg_ctl_start": 1,
+    })
+
+
+# ── Where a test cluster's data directory comes from (nexus-szyun) ───────────
+
+
+def test_every_test_cluster_data_dir_comes_from_the_substrate_helper() -> None:
+    """A cluster under tmp_path / tmp_path_factory / mkdtemp writes its data and WAL to the CI host's disk and
+    never reaches the run's tmpfs root or the "clusters on tmpfs N, on disk M" summary. Every initdb / postgres
+    argv, ``_init_cluster`` and ``pg_ctl_start`` data dir must be ``pg_data_tempdir(...)`` itself (not nested, no
+    ``parent_dir=``), every ``provision(<dir>)`` dir must be a listed non-helper dir, and a file that starts a
+    cluster through an argv the scan cannot read must be listed, all with a reason in
+    ``tests/pg_data_dir_exceptions.toml``. The exceptions table may only shrink."""
+    assert sites.provenance_problems() == []
+
+
+def test_the_provenance_scan_is_not_vacuous() -> None:
+    """Floors are on what the scan SEES (helper-made uses, every kind of use), never on the exceptions table:
+    nexus-0ajjm drains ``disk_required`` to empty and must not have to edit a floor to do it."""
+    uses = sites.data_dir_uses()
+    helper = [u for u in uses if u.from_helper]
+    assert len(helper) >= 40, f"the scan traced only {len(helper)} helper-made data dirs"
+    assert {u.kind for u in helper} >= {"initdb", "pg_ctl_start", "init_cluster", "provision"}
+    assert {u.kind for u in uses} >= {"initdb", "pg_ctl_start", "init_cluster", "provision"}, (
+        "the scan saw no provision() call or no argv/call of one kind it exists to follow"
+    )
+    # The two fixtures that used to call tmp_path_factory.mktemp (nexus-szyun) are among them.
+    for converted in ("tests/db/test_nexus_diag_role.py", "tests/db/test_svc_monitor_role_live.py"):
+        assert any(u.file == converted and u.kind == "init_cluster" and u.from_helper for u in uses), converted
+    # nexus-0ajjm: the five provision()-driven files take their config_dir from the helper, and none is excused.
+    for moved in PROVISION_DRIVEN:
+        assert any(u.file == moved and u.kind == "provision" and u.from_helper for u in uses), moved
+    not_cluster, disk = sites.exceptions()
+    assert not set(disk) & {u.file for u in helper}, "a file proven to use the helper is still listed as disk-required"
+    # The ceilings are the committed counts and the tree is at or under them: the tables shrink, never grow.
+    assert len(not_cluster) <= sites.NOT_A_CLUSTER_CEILING and len(disk) <= sites.DISK_REQUIRED_CEILING
+    runs = sites.docker_pg_runs()
+    assert {f for f, _, _ in runs} >= {
+        "tests/db/test_write_seam_gate_integration.py", "tests/db/test_http_combined_query_integration.py",
+    }, runs
+
+
+def _fixture_repo(tmp_path: Path, files: dict[str, str], toml: str = "") -> Path:
+    (tmp_path / "scripts").mkdir(parents=True)
+    for rel, body in files.items():
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+    (tmp_path / "tests" / sites.EXCEPTIONS.name).write_text(toml or "[not_a_cluster]\n[disk_required]\n")
+    return tmp_path
+
+
+_GOOD = (
+    "from tests._child_process import pg_data_tempdir\n"
+    "def fx():\n"
+    "    d = pg_data_tempdir('x_')\n"
+    "    pgdata = d\n"
+    "    subprocess.run([str(_INITDB), '-D', pgdata, '-U', 'u'])\n"
+    "    pg_ctl_start(_PG_CTL, str(pgdata), log, '-p 1')\n"
+    "    _init_cluster(bins, Path(pgdata), 'u', superuser_password='p')\n"
+)
+
+#: Fixture repos list a file under disk_required to exercise the rules; the committed ceiling of 0 is not theirs.
+_ROOMY = (sites.NOT_A_CLUSTER_CEILING, 9)
+
+_WHY = "provision() nests pgdata under the dir the test supplies, which the sweep cannot reap (drained by nexus-0ajjm)"
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        "pgdata = tmp_path_factory.mktemp('pg') / 'data'",
+        "pgdata = tempfile.mkdtemp(prefix='pg_')",
+        "pgdata = pg_data_tempdir('x_', parent_dir=str(tmp_path))",
+        "pgdata = Path(pg_data_tempdir('x_')) / 'data'",
+        "pgdata = f'{pg_data_tempdir(\"x_\")}/data'",
+        "pgdata = os.path.join(pg_data_tempdir('x_'), 'data')",
+    ],
+)
+def test_the_provenance_scan_flags_a_data_dir_not_made_by_the_helper(tmp_path: Path, bad_line: str) -> None:
+    body = f"def fx(tmp_path_factory, tmp_path):\n    {bad_line}\n    subprocess.run([str(_INITDB), '-D', str(pgdata)])\n"
+    repo = _fixture_repo(tmp_path, {"tests/test_a.py": body})
+    problems = sites.provenance_problems(repo)
+    assert len(problems) == 1 and "test_a.py" in problems[0] and "initdb" in problems[0], problems
+
+
+def test_the_provenance_scan_accepts_the_helper_through_aliases_and_wrappers(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {"tests/test_a.py": _GOOD})
+    assert sites.provenance_problems(repo) == []
+    assert [(u.kind, u.from_helper) for u in sites.data_dir_uses(repo)] == [
+        ("initdb", True), ("pg_ctl_start", True), ("init_cluster", True),
+    ]
+
+
+def test_the_provenance_scan_flags_a_parameter_a_missing_arg_and_mixed_bindings(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {
+        "tests/test_param.py": "def fx(pgdata):\n    subprocess.run([str(_INITDB), '-D', pgdata])\n",
+        "tests/test_missing.py": "def fx():\n    pg_ctl_start(_PG_CTL)\n",
+        "tests/test_mixed.py": (
+            "def fx(flag, tmp_path):\n"
+            "    pgdata = pg_data_tempdir('x_')\n"
+            "    if flag:\n        pgdata = str(tmp_path)\n"
+            "    subprocess.run([str(_INITDB), '-D', pgdata])\n"
+        ),
+    })
+    problems = sites.provenance_problems(repo)
+    # test_missing.py is named twice: its use has no data dir, and its pg_ctl_start site traces to no helper use.
+    assert sorted({p.split(":")[0] for p in problems}) == [
+        "tests/test_missing.py", "tests/test_mixed.py", "tests/test_param.py",
+    ], problems
+
+
+# A file with one helper-made cluster is "proven" only if every other way it can start one is traced too: each of
+# these appends a SECOND cluster, in a form the first cut of the scan could not see, to a clean file.
+_CLEAN_BASE = (
+    "from tests._child_process import pg_data_tempdir\n"
+    "def good():\n"
+    "    d = pg_data_tempdir('x_')\n"
+    "    subprocess.run([str(_INITDB), '-D', d])\n"
+    "    pg_ctl_start(_PG_CTL, d, log, '-p 1')\n"
+)
+
+
+def test_the_clean_base_for_the_untraced_forms_is_clean(tmp_path: Path) -> None:
+    """Positive control: the base the next test appends to is itself accepted, with its argv read through a name."""
+    resolved = _CLEAN_BASE + (
+        "def named():\n"
+        "    d = pg_data_tempdir('y_')\n"
+        "    cmd = [str(_INITDB), '-D', d]\n"
+        "    subprocess.run(cmd)\n"
+    )
+    assert sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_a.py": resolved})) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "def bad(cmd):\n    subprocess.run(cmd)\n",
+        "def bad(tmp_path):\n    subprocess.run(build_cmd(tmp_path))\n",
+        "def bad(tmp_path):\n    subprocess.run([str(_INITDB), *['-D', str(tmp_path)]])\n",
+        "def bad(tmp_path):\n    subprocess.run([str(_INITDB), f'-D{tmp_path}'])\n",
+        "def bad(tmp_path):\n    subprocess.run([str(_INITDB), '--pgdata=' + str(tmp_path)])\n",
+        "def bad(tmp_path):\n    subprocess.run([str(_INITDB), '--pgdata', str(tmp_path)])\n",
+        "def bad(tmp_path):\n    subprocess.run(f'initdb -D {tmp_path}', shell=True)\n",
+        "def bad(tmp_path):\n    subprocess.Popen([str(_POSTGRES), '-D', str(tmp_path)])\n",
+        "def bad(tmp_path):\n    cmd = [str(_INITDB), '-D', str(tmp_path)]\n    subprocess.run(cmd)\n",
+        "def bad(tmp_path):\n    cmd = [str(_INITDB)]\n    cmd += ['-D', str(tmp_path)]\n    subprocess.run(cmd)\n",
+        "def bad():\n    d = pg_data_tempdir('x_')\n    d += '/data'\n    subprocess.run([str(_INITDB), '-D', d])\n",
+        "from tests._pg_ctl import pg_ctl_start as _start\ndef bad(tmp_path):\n    _start(_PG_CTL, str(tmp_path), log)\n",
+    ],
+    ids=[
+        "variable-argv-param", "argv-built-by-a-call", "splat", "f-string-D", "pgdata-equals", "pgdata-flag",
+        "shell-string", "direct-postgres", "named-list-tmp-path", "named-list-augmented", "augassign-nesting",
+        "import-alias",
+    ],
+)
+def test_a_second_cluster_in_a_form_the_first_cut_missed_is_flagged(tmp_path: Path, bad: str) -> None:
+    repo = _fixture_repo(tmp_path, {"tests/test_a.py": _CLEAN_BASE + bad})
+    problems = sites.provenance_problems(repo)
+    assert problems and all("tests/test_a.py" in p for p in problems), problems
+    # ... and a listing with a reason excuses it (the table, not silence, is where an exception lives).
+    toml = f'[not_a_cluster]\n"tests/test_a.py" = "{_WHY}"\n[disk_required]\n'
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "listed", {"tests/test_a.py": _CLEAN_BASE + bad}, toml)) == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        "['initdb.exe', '--version']",
+        "[str(_PG_CTL), 'stop', '-D', str(tmp_path)]",
+        "[('bin/initdb.exe', 'initdb.exe'), ('bin/pg_ctl.exe', 'pg_ctl.exe')]",
+        "['psql', '-c', 'select 1']",
+    ],
+)
+def test_an_argv_that_starts_no_cluster_is_not_flagged(tmp_path: Path, argv: str) -> None:
+    body = _CLEAN_BASE + f"def other(tmp_path):\n    subprocess.run({argv})\n"
+    assert sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_a.py": body})) == []
+
+
+def test_traced_uses_are_counted_against_census_sites_not_one_proof_per_file(tmp_path: Path) -> None:
+    """One helper-made use does not prove a file with two census sites (an initdb lookup and a pg_ctl_start the
+    scan could not trace the dir of)."""
+    body = (
+        "_INITDB = bin_dir / exe_name('initdb')\n"
+        "def fx():\n"
+        "    subprocess.run([str(_INITDB), '-D', pg_data_tempdir('x_')])\n"
+        "    other_start(_PG_CTL)\n"
+        "    pg_ctl_start(_PG_CTL, pg_data_tempdir('y_'), log)\n"
+        "    pg_ctl_start(_PG_CTL, pg_data_tempdir('z_'), log)\n"
+        "_SECOND = exe_name('initdb')\n"
+        "_THIRD = exe_name('initdb')\n"
+        "_FOURTH = exe_name('initdb')\n"
+    )
+    problems = sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_a.py": body}))
+    assert len(problems) == 1 and "census site" in problems[0] and "3 data-dir use" in problems[0], problems
+
+
+# ── provision(): the nested-pgdata hazard ─────────────────────────────────────
+
+
+def test_provision_on_a_non_helper_dir_must_be_listed(tmp_path: Path) -> None:
+    """The five tmp_path provisioning files were caught only because each happened to name ``exe_name("initdb")``;
+    a new ``provision(tmp_path)`` test must be caught on its own account."""
+    body = "def test_x(tmp_path):\n    pp.provision(tmp_path / 'cfg')\n    provision(config_dir=tmp_path)\n"
+    problems = sites.provenance_problems(_fixture_repo(tmp_path / "bad", {"tests/test_p.py": body}))
+    assert len(problems) == 2 and all("provision(" in p and "test_p.py" in p for p in problems), problems
+    listed = f'[not_a_cluster]\n[disk_required]\n"tests/test_p.py" = "{_WHY}"\n'
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "ok", {"tests/test_p.py": body}, listed), ceilings=_ROOMY) == []
+
+
+def test_a_method_named_provision_with_no_dir_is_not_the_product_call(tmp_path: Path) -> None:
+    body = "def test_x(box):\n    box.provision()\n"
+    assert sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_p.py": body})) == []
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        "provision(pg_data_tempdir('x_'))",
+        "d = pg_data_tempdir('x_')\n    provision(d, force_new_port=True)",
+        "provision(config_dir=str(pg_data_tempdir('x_')))",
+        "d = Path(pg_data_tempdir('x_'))\n    provision(config_dir=d)",
+    ],
+)
+def test_provision_on_a_helper_dir_is_a_traced_use_and_needs_no_listing(tmp_path: Path, setup: str) -> None:
+    """provision() puts the cluster at <dir>/postgres and the sweep reads that nested postmaster.pid (nexus-0ajjm), so
+    the helper's own result is exactly the dir to hand it: clean, and counted like an initdb data dir."""
+    body = f"def test_x():\n    {setup}\n"
+    repo = _fixture_repo(tmp_path, {"tests/test_p.py": body})
+    assert sites.provenance_problems(repo) == []
+    assert [(u.kind, u.from_helper, u.handed_in) for u in sites.data_dir_uses(repo)] == [("provision", True, False)]
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        "provision(Path(pg_data_tempdir('x_')) / 'cfg')",
+        "provision(os.path.join(pg_data_tempdir('x_'), 'cfg'))",
+        "provision(f'{pg_data_tempdir(\"x_\")}/cfg')",
+        "d = pg_data_tempdir('x_')\n    provision(Path(d) / 'cfg')",
+    ],
+)
+def test_provision_nested_under_a_helper_dir_is_a_problem_even_when_listed(tmp_path: Path, setup: str) -> None:
+    """A join under the helper's dir puts the cluster at <dir>/cfg/postgres, two levels below the recorded path:
+    the sweep reads <dir> and <dir>/postgres only. Listing does not excuse it."""
+    body = f"def test_x():\n    {setup}\n"
+    listed = f'[not_a_cluster]\n[disk_required]\n"tests/test_p.py" = "{_WHY}"\n'
+    for toml in ("", listed):
+        problems = sites.provenance_problems(_fixture_repo(tmp_path / f"t{len(toml)}", {"tests/test_p.py": body}, toml))
+        assert any("nests the cluster" in p and "pass the helper's result itself" in p for p in problems), problems
+
+
+_HELPER_FIXTURE = (
+    "@pytest.fixture\n"
+    "def cluster():\n"
+    "    config_dir = Path(pg_data_tempdir('x_'))\n"
+    "    provision(config_dir, force_new_port=True)\n"
+    "    yield result, config_dir\n"
+)
+
+
+_BOX_FIXTURE = (
+    "@pytest.fixture\n"
+    "def box():\n"
+    "    config_dir = Path(pg_data_tempdir('x_'))\n"
+    "    provision(config_dir, force_new_port=True)\n"
+    "    yield Box(config_dir, bins)\n"
+)
+_DIR_FIXTURE = (
+    "@pytest.fixture\n"
+    "def config_dir():\n"
+    "    d = Path(pg_data_tempdir('x_'))\n"
+    "    provision(d)\n"
+    "    return d\n"
+)
+_DEPENDENT_FIXTURE = (
+    "@pytest.fixture\n"
+    "def view(cluster):\n"
+    "    result, config_dir = cluster\n"
+    "    yield result, config_dir, 'u'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _HELPER_FIXTURE + "def test_a(cluster):\n    result, config_dir = cluster\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "def test_a(cluster):\n    provision(cluster[1])\n",
+        _BOX_FIXTURE + "def test_a(box):\n    provision(box.config_dir)\n",
+        _DIR_FIXTURE + "def test_a(config_dir):\n    provision(Path(config_dir))\n",
+        _DIR_FIXTURE + "def test_a(config_dir):\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "def test_a(cluster):\n    result, config_dir = cluster\n    dir_ = config_dir\n    provision(dir_)\n",
+        _HELPER_FIXTURE + _DEPENDENT_FIXTURE + "def test_a(view):\n    result, config_dir, user = view\n    provision(config_dir)\n",
+        _HELPER_FIXTURE + "class TestA:\n    def test_a(self, cluster):\n        _, config_dir = cluster\n        provision(config_dir)\n",
+    ],
+    ids=[
+        "unpacked-from-a-fixture", "subscript-of-a-fixture", "attribute-of-a-fixture", "parameter-through-path",
+        "bare-fixture-parameter", "alias-of-unpacked", "fixture-from-a-fixture", "method-of-a-class",
+    ],
+)
+def test_re_provisioning_a_dir_handed_in_is_accepted_beside_a_helper_made_one(tmp_path: Path, body: str) -> None:
+    """The five provision() files re-run provision(config_dir) on the dir their fixture made (idempotency, repair
+    legs): a new call, not a new cluster, so it is neither a problem nor a traced use. The dir must come from a fixture of
+    the same file whose value is helper-made."""
+    repo = _fixture_repo(tmp_path, {"tests/test_p.py": body})
+    assert sites.provenance_problems(repo) == []
+    kinds = [(u.from_helper, u.handed_in) for u in sites.data_dir_uses(repo) if u.kind == "provision"]
+    assert kinds[-1] == (False, True) and all(k == (True, False) for k in kinds[:-1]), kinds
+
+
+@pytest.mark.parametrize(
+    "reuse",
+    [
+        "def test_a(tmp_path):\n    provision(tmp_path)\n",
+        "def test_a(tmp_path_factory):\n    provision(tmp_path_factory.mktemp('x'))\n",
+        "def test_a(tmp_path):\n    provision(tmp_path / 'cfg')\n",
+        "def test_a(config_dir):\n    provision(config_dir / 'again')\n",
+        "def test_a():\n    with tempfile.TemporaryDirectory() as d:\n        provision(Path(d))\n",
+        "def test_a(cluster):\n    for d in cluster.dirs:\n        provision(d)\n",
+        "def test_a(config_dir):\n    config_dir = Path(config_dir) / 'x'\n    provision(config_dir)\n",
+        # nexus-0ajjm review: a parameter is no proof. Each of these used to pass in a file with one helper-made provision.
+        "@pytest.fixture\ndef cfg(tmp_path):\n    return tmp_path\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path_factory):\n    return tmp_path_factory.mktemp('x')\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield tmp_path / 'x'\ndef test_a(cfg):\n    provision(cfg)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield Box(tmp_path)\ndef test_a(cfg):\n    provision(cfg.dir)\n",
+        "@pytest.fixture\ndef cfg(tmp_path):\n    yield tmp_path, 1\ndef test_a(cfg):\n    d, _ = cfg\n    provision(d)\n",
+        "@pytest.fixture\ndef cfg(request):\n    return request.param\ndef test_a(cfg):\n    provision(cfg)\n",
+        "def test_a(d=Path('/tmp/zz')):\n    provision(d)\n",
+        "def test_a(cluster, d=Path('/tmp/zz')):\n    provision(d)\n",
+        "class T:\n    def test_a(self):\n        provision(self.cfg)\n",
+        "def _go(d):\n    provision(d)\ndef test_a(tmp_path):\n    _go(tmp_path)\n",
+        "def test_a(request):\n    provision(request.config.cache.dir)\n",
+        "def test_a(workdir):\n    provision(workdir)\n",
+        "def test_a(workdir):\n    provision(workdir.parent)\n",
+        "def test_a(tmp_path):\n    base = tmp_path\n    provision(base)\n",
+        "def test_a(tmp_path):\n    provision(tmp_path.parent)\n",
+        "def test_a(tmpdir):\n    provision(str(tmpdir))\n",
+        "@pytest.fixture\ndef cfg(other):\n    return other\ndef test_a(cfg):\n    provision(cfg)\n",
+        "def test_a(cluster):\n    provision(cluster[0])\n",
+    ],
+    ids=[
+        "tmp_path", "tmp_path_factory", "tmp-path-join", "param-join", "with-target", "for-target", "reassigned-join",
+        "fixture-returns-tmp_path", "fixture-returns-mktemp", "fixture-yields-tmp_path-join",
+        "fixture-object-built-from-tmp_path", "fixture-tuple-element-from-tmp_path", "fixture-returns-request-param",
+        "param-default", "unrelated-param-default", "self-attr", "helper-fn-called-with-tmp_path",
+        "request-chain", "unresolved-param", "unresolved-param-chain", "tmp_path-alias", "tmp_path-attr", "tmpdir-str",
+        "fixture-of-an-unresolved-fixture", "wrong-tuple-element",
+    ],
+)
+def test_a_provision_the_scan_cannot_prove_handed_in_is_still_flagged(tmp_path: Path, reuse: str) -> None:
+    repo = _fixture_repo(tmp_path, {"tests/test_p.py": _HELPER_FIXTURE + reuse})
+    problems = sites.provenance_problems(repo)
+    assert len(problems) == 1 and "test_p.py" in problems[0] and "provision(" in problems[0], problems
+
+
+def test_a_handed_in_provision_needs_a_helper_made_one_in_the_same_file(tmp_path: Path) -> None:
+    """A fixture can carry a helper-made dir without ever calling provision() on it (a Box wrapping the dir): the
+    handed-in call is then the file's only provision(), and the file must list itself or make one through the helper."""
+    body = (
+        "@pytest.fixture\ndef box():\n    yield Box(Path(pg_data_tempdir('x_')))\n"
+        "def test_a(box):\n    provision(box.config_dir)\n"
+    )
+    problems = sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_p.py": body}))
+    assert len(problems) == 1 and "no provision() in this file takes its dir from pg_data_tempdir" in problems[0], problems
+
+
+def test_a_provision_on_the_helper_is_counted_against_the_census(tmp_path: Path) -> None:
+    """A file that looks initdb up (``exe_name`` skip gate) and provisions on a helper dir is proven: the provision is
+    its traced use. Two lookups and one provision are not (one traced use per census site)."""
+    one = "_INITDB = bin_dir / exe_name('initdb')\n" + _HELPER_FIXTURE
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "one", {"tests/test_p.py": one})) == []
+    two = one + "_AGAIN = bin_dir / exe_name('initdb')\n"
+    problems = sites.provenance_problems(_fixture_repo(tmp_path / "two", {"tests/test_p.py": two}))
+    assert len(problems) == 1 and "2 initdb/pg_ctl_start census site(s) but only 1" in problems[0], problems
+
+
+# ── The exceptions table ──────────────────────────────────────────────────────
+
+
+def test_a_listed_file_is_excused_and_a_stale_or_unreasoned_listing_is_not(tmp_path: Path) -> None:
+    bad = "_INITDB = exe_name('initdb')\ndef fx(tmp_path):\n    subprocess.run([str(_INITDB), '-D', str(tmp_path)])\n"
+    listed = f'[not_a_cluster]\n[disk_required]\n"tests/test_a.py" = "{_WHY}"\n'
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "ok", {"tests/test_a.py": bad}, listed), ceilings=_ROOMY) == []
+    gone = sites.provenance_problems(_fixture_repo(tmp_path / "gone", {"tests/test_b.py": "x = 1\n"}, listed))
+    assert any("tests/test_a.py no longer exists" in p for p in gone), gone
+    blank = '[not_a_cluster]\n[disk_required]\n"tests/test_a.py" = "ok"\n'
+    assert any("no real reason" in p for p in sites.provenance_problems(
+        _fixture_repo(tmp_path / "blank", {"tests/test_a.py": bad}, blank)))
+    filler = '[not_a_cluster]\n[disk_required]\n"tests/test_a.py" = "x_x_x_x_x_x_x_x_x_x_x_x"\n'
+    assert any("no real reason" in p for p in sites.provenance_problems(
+        _fixture_repo(tmp_path / "filler", {"tests/test_a.py": bad}, filler)))
+    nothing = sites.provenance_problems(_fixture_repo(tmp_path / "nothing", {"tests/test_a.py": "x = 1\n"}, listed))
+    assert any("left to except" in p for p in nothing), nothing
+
+
+def test_a_disk_required_reason_names_the_bead_that_drains_it(tmp_path: Path) -> None:
+    body = "def test_x(tmp_path):\n    provision(tmp_path)\n"
+    no_bead = '[not_a_cluster]\n[disk_required]\n"tests/test_p.py" = "provision nests the pgdata so the sweep cannot reap it"\n'
+    problems = sites.provenance_problems(_fixture_repo(tmp_path / "no", {"tests/test_p.py": body}, no_bead))
+    assert any("names no bead" in p for p in problems), problems
+    with_bead = no_bead.replace("reap it", "reap it (nexus-0ajjm)")
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "yes", {"tests/test_p.py": body}, with_bead), ceilings=_ROOMY) == []
+    # not_a_cluster needs no bead: nothing drains it, it is simply not a cluster.
+    nc = '[not_a_cluster]\n"tests/test_p.py" = "provision is stopped by a faked guard before any cluster starts"\n[disk_required]\n'
+    assert sites.provenance_problems(_fixture_repo(tmp_path / "nc", {"tests/test_p.py": body}, nc)) == []
+
+
+def test_a_word_in_a_docstring_or_comment_keeps_no_listing_alive(tmp_path: Path) -> None:
+    """The staleness check reads the AST: ``provision(`` inside a docstring, a comment or a string is not a call."""
+    body = (
+        '"""Drives provision() against a bundle; _init_cluster() builds it."""\n'
+        "# provision(tmp_path) is described here, never called\n"
+        "NOTE = 'provision(tmp_path)'\n"
+        "def test_x():\n    assert True\n"
+    )
+    listed = f'[not_a_cluster]\n[disk_required]\n"tests/test_p.py" = "{_WHY}"\n'
+    problems = sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_p.py": body}, listed))
+    assert any("left to except" in p for p in problems), problems
+
+
+def test_the_exceptions_tables_may_only_shrink(tmp_path: Path) -> None:
+    body = "def test_x(tmp_path):\n    provision(tmp_path)\n"
+    toml = f'[not_a_cluster]\n[disk_required]\n"tests/test_p.py" = "{_WHY}"\n'
+    repo = _fixture_repo(tmp_path, {"tests/test_p.py": body}, toml)
+    assert sites.provenance_problems(repo, ceilings=(0, 1)) == []
+    problems = sites.provenance_problems(repo, ceilings=(0, 0))
+    assert len(problems) == 1 and "exceed the ceiling 0" in problems[0], problems
+    # The committed tables sit at or under the committed ceilings, and disk_required is drained to empty (nexus-0ajjm):
+    # its ceiling is 0, so one new unreviewed entry fails here instead of fitting in the slack.
+    not_cluster, disk = sites.exceptions()
+    assert len(not_cluster) <= sites.NOT_A_CLUSTER_CEILING
+    assert sites.DISK_REQUIRED_CEILING == 0 and disk == {}, disk
+
+
+def test_a_census_file_with_no_traceable_data_dir_must_be_listed(tmp_path: Path) -> None:
+    """A provisioning test that only looks initdb up (``exe_name``) and runs the product's ``provision()`` never
+    names a data dir: without a listed reason it would pass the scan by being invisible to it."""
+    body = "_INITDB = bin_dir / exe_name('initdb')\ndef test_x(tmp_path):\n    provision(tmp_path)\n"
+    problems = sites.provenance_problems(_fixture_repo(tmp_path, {"tests/test_p.py": body}))
+    assert any("census site" in p for p in problems) and any("provision(" in p for p in problems), problems
+
+
+# ── Docker-run Postgres ───────────────────────────────────────────────────────
+
+
+def test_every_docker_run_postgres_mounts_its_data_dir_as_tmpfs() -> None:
+    """``docker run pgvector/pgvector:pg17`` without ``--tmpfs`` writes the cluster to the docker data-root of
+    whatever host runs the test; the Java suites mount PGDATA as tmpfs (PgContainerHelper.PGDATA). Needs both
+    python modules that start one to be seen (test_the_provenance_scan_is_not_vacuous)."""
+    assert sites.docker_pg_problems() == []
+
+
+def test_a_docker_run_postgres_without_tmpfs_is_flagged(tmp_path: Path) -> None:
+    run = "subprocess.run(['docker', 'run', '-d', '--name', 'n', {extra}'pgvector/pgvector:pg17'])\n"
+    bad = _fixture_repo(tmp_path / "bad", {"tests/test_d.py": run.format(extra="")})
+    assert len(sites.docker_pg_problems(bad)) == 1
+    wrong_path = _fixture_repo(tmp_path / "wrong", {"tests/test_d.py": run.format(extra="'--tmpfs', '/tmp', ")})
+    assert len(sites.docker_pg_problems(wrong_path)) == 1
+    good = _fixture_repo(
+        tmp_path / "good", {"tests/test_d.py": run.format(extra="'--tmpfs', '/var/lib/postgresql/data:rw,size=2g', ")}
+    )
+    assert sites.docker_pg_problems(good) == []
+    other = _fixture_repo(tmp_path / "other", {"tests/test_d.py": "subprocess.run(['docker', 'run', 'alpine'])\n"})
+    assert sites.docker_pg_runs(other) == []
+
+
+# ── Docker-run and e2e shell sites (nexus-d84zv) ──────────────────────────────
+
+_DOCKER_PY = (
+    "def fx():\n"
+    "    subprocess.run(['docker', 'run', '-d', '--name', 'n', 'pgvector/pgvector:pg17'])\n"
+    "def wrapped():\n"
+    "    subprocess.run(['lab-run', '--', 'docker', 'run', 'postgres:17'])\n"
+    "def unrelated():\n"
+    "    subprocess.run(['docker', 'run', 'alpine'])\n"
+    "    subprocess.run(['docker', 'exec', 'n', 'pg_isready'])\n"
+)
+
+_E2E_SH = """#!/bin/bash
+# pg_ctl -D x start      <- a comment is no site
+helper() {
+  "$bin/pg_ctl" -D "$d" -l log start
+  pg_ctl -D "$d" stop -m fast
+  echo "see $cfg/postgres/pg_ctl.out"
+  "$bin/initdb" -D "$d"
+  command -v initdb >/dev/null
+  [ -x "$bin/initdb" ] && echo have
+  docker run -d --name n \\
+    -e POSTGRES_DB=n \\
+    pgvector/pgvector:pg17 >/dev/null
+  docker run --rm alpine
+  docker run --rm -v "$cfg/postgres:/x" -e NX_DB_URL=jdbc:postgresql://h/n nexus-image
+}
+other() { pg_ctl -D d start; }
+pg_ctl -D "$top" start
+NEXUS_CONFIG_DIR="$S" uv run nx init --service --no-autostart </dev/null
+if _nx init -y; then echo ok; fi
+echo "run nx init first"
+die "Provision with 'nx init --service' or set X"
+"""
+
+
+def test_the_scan_finds_docker_run_postgres_sites_in_python(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {"tests/test_d.py": _DOCKER_PY, "scripts/s.py": "def go():\n    run(['docker','run','postgres'])\n"})
+    assert sites.scan(repo) == Counter({
+        "tests/test_d.py::fx::docker_run": 1,
+        "tests/test_d.py::wrapped::docker_run": 1,
+        "scripts/s.py::go::docker_run": 1,
+    })
+
+
+def test_the_scan_finds_the_e2e_shell_sites(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path, {
+        "tests/e2e/x.sh": _E2E_SH,
+        "tests/e2e/lib/h.sh": "start() {\n  pg_ctl -D d -w start\n}\n",
+        "tests/other/y.sh": "pg_ctl -D d start\n",
+    })
+    # Keyed by file and kind only: a shell site is "a start exists in this file", so moving it between functions,
+    # renaming a function or reflowing the script changes no key. The count per file is kept.
+    assert sites.scan(repo) == Counter({
+        "tests/e2e/x.sh::sh_pg_ctl_start": 3,
+        "tests/e2e/x.sh::sh_initdb": 1,
+        "tests/e2e/x.sh::sh_docker_run": 1,
+        "tests/e2e/x.sh::sh_nx_init": 2,
+        "tests/e2e/lib/h.sh::sh_pg_ctl_start": 1,
+    })
+
+
+def test_a_shell_site_is_keyed_by_file_whatever_function_holds_it(tmp_path: Path) -> None:
+    flat = "pg_ctl -D d start\ndocker run postgres:17\n"
+    wrapped = "outer() {\n    nested() {\n        pg_ctl -D d start\n    }\n    docker run postgres:17\n}\n"
+    a = sites.scan(_fixture_repo(tmp_path / "a", {"tests/e2e/x.sh": flat}))
+    b = sites.scan(_fixture_repo(tmp_path / "b", {"tests/e2e/x.sh": wrapped}))
+    assert a == b == Counter({"tests/e2e/x.sh::sh_pg_ctl_start": 1, "tests/e2e/x.sh::sh_docker_run": 1})
+
+
+@pytest.mark.parametrize(
+    ("files", "kind"),
+    [
+        ({"tests/test_d.py": _DOCKER_PY}, "docker_run"),
+        ({"tests/e2e/x.sh": "pg_ctl -D d start\n"}, "sh_pg_ctl_start"),
+        ({"tests/e2e/x.sh": "\"$b/initdb\" -D d\n"}, "sh_initdb"),
+        ({"tests/e2e/x.sh": "docker run -d pgvector/pgvector:pg17\n"}, "sh_docker_run"),
+        ({"tests/e2e/x.sh": "nx init --service --yes\n"}, "sh_nx_init"),
+    ],
+)
+def test_a_new_site_of_each_new_kind_fails_the_allowlist_until_it_is_listed(
+    tmp_path: Path, files: dict[str, str], kind: str,
+) -> None:
+    repo = _fixture_repo(tmp_path, files)
+    found = sites.scan(repo)
+    assert found and all(k.endswith("::" + kind) for k in found), dict(found)
+    new, gone = sites.allowlist_drift(found, {})
+    assert new == dict(found) and not gone
+    listed = dict(found)
+    assert sites.allowlist_drift(found, listed) == ({}, {})
+    new, gone = sites.allowlist_drift(Counter(), listed)  # the site went away, the entry did not
+    assert not new and gone == listed
+
+
+def test_a_docker_or_shell_site_is_not_a_data_dir_use_to_trace(tmp_path: Path) -> None:
+    """The provenance half follows Python initdb / pg_ctl_start data dirs; a docker-run site has its own tmpfs
+    rule (docker_pg_problems) and a shell site has no Python data dir, so neither may demand a traced use."""
+    repo = _fixture_repo(tmp_path, {
+        "tests/test_d.py": _DOCKER_PY.replace("'pgvector/pgvector:pg17'", "'--tmpfs', '/var/lib/postgresql/data', 'pgvector/pgvector:pg17'"),
+        "tests/e2e/x.sh": "pg_ctl -D d start\n",
+    })
+    assert sites.provenance_problems(repo) == []
+
+
+def test_the_new_scans_are_not_vacuous() -> None:
+    """The committed tree: both docker-run modules, and the e2e shell cluster starts the literal spellings reach."""
+    found = sites.scan()
+    for module in ("test_http_combined_query_integration", "test_write_seam_gate_integration"):
+        assert found[f"tests/db/{module}.py::pg_instance::docker_run"] == 1, module
+    shell = {k for k in found if "::sh_" in k}
+    assert "tests/e2e/gc-ab/run-ab.sh::sh_docker_run" in shell, shell
+    assert all(k.startswith("tests/e2e/") for k in shell)
+    # The gates that start their cluster by running the product (`nx init`) are sites too.
+    for gate in ("local-service-gate", "fresh-install-mvv"):
+        assert f"tests/e2e/{gate}.sh::sh_nx_init" in shell, gate
+    # Every e2e script is read, not a subset: the same walk the scan uses.
+    assert len(list((sites.REPO / "tests" / "e2e").rglob("*.sh"))) >= 20
+
+
+# ── The converted fixtures' teardown ──────────────────────────────────────────
+
+
+def test_the_converted_fixtures_tear_down_through_the_shared_helper() -> None:
+    """These modules take their dir from pg_data_tempdir, which is not pytest-managed, so each must remove it itself;
+    ``stop_and_remove_cluster`` does that in a ``finally`` (tests/test_integration_pg_cluster.py). A module-local
+    teardown that stops, then removes, lets a pg_ctl timeout skip the removal. The five provision() files stop
+    ``<config_dir>/postgres`` and remove ``config_dir``, so each of their calls passes ``remove_dir=`` (nexus-0ajjm)."""
+    import ast
+
+    for rel in ("tests/db/test_nexus_diag_role.py", "tests/db/test_svc_monitor_role_live.py", *PROVISION_DRIVEN):
+        tree = ast.parse((sites.REPO / rel).read_text(encoding="utf-8"))
+        calls = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        attrs = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        assert "stop_and_remove_cluster" in calls | attrs, rel
+        assert "rmtree" not in attrs, f"{rel}: a module-local rmtree is the teardown the helper replaced"
+        assert "mktemp" not in attrs, f"{rel}: a pytest-managed dir, not the run's tmpfs root"
+        if rel in PROVISION_DRIVEN:
+            stops = [
+                n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "stop_and_remove_cluster"
+            ]
+            assert stops and all(any(k.arg == "remove_dir" for k in n.keywords) for n in stops), (
+                f"{rel}: a provision() cluster is stopped at <config_dir>/postgres but config_dir (its credentials) must go too"
+            )

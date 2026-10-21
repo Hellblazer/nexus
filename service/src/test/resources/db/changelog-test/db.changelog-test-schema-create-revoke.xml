@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): REVOKE CREATE ON SCHEMA ${schema} FROM ${role}.
+    The undo of db.changelog-test-schema-create-grant.xml. Run through PgContainerHelper#revokeSchemaCreate, which
+    validates both names; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="schema-create-revoke" author="nexus-cbo4a" runAlways="true">
+        <sql>REVOKE CREATE ON SCHEMA ${schema} FROM ${role}</sql>
+    </changeSet>
+</databaseChangeLog>

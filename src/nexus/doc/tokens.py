@@ -11,10 +11,12 @@ Grammar::
     field     : [^|}]+            (resolver-specific dotted path)
     filter    : <name>=<value>    (resolver-specific, multiple allowed)
 
-Tokens inside fenced markdown code (```` ``` ```` / ``~~~``) are
-ignored so tutorial snippets that *demonstrate* the syntax don't get
-resolved. Callers that need the literal fence behaviour (e.g. rendered
-HTML passthrough) should use a different escape.
+Tokens inside fenced markdown code (```` ``` ```` / ``~~~``) and inside
+inline code spans (`` `...` ``, nexus-9bl2f) are ignored so docs that
+*demonstrate* the syntax don't get resolved, the same treatment the
+citation and catalog-link scanners give. Callers that need the literal
+fence behaviour (e.g. rendered HTML passthrough) should use a different
+escape.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from nexus.doc._common import FENCE_RE
+from nexus.doc._common import FENCE_RE, mask_inline_code_spans
 
 __all__ = ["Token", "parse_tokens"]
 
@@ -63,7 +65,7 @@ class Token:
 
 
 def parse_tokens(text: str) -> list[Token]:
-    """Scan *text* for tokens outside fenced code blocks.
+    """Scan *text* for tokens outside fenced code blocks and inline code spans.
 
     Returns tokens in source order. Malformed ``{{…}}`` sequences that
     do not match the grammar are silently skipped — render-time
@@ -95,7 +97,13 @@ def parse_tokens(text: str) -> list[Token]:
             offset += len(line)
             continue
 
-        for tm in _TOKEN_RE.finditer(stripped):
+        # Masking is length-preserving, so spans/columns computed on the
+        # masked line index the original text unchanged. A match that
+        # touches a masked run straddles a code span and is not a token.
+        masked = mask_inline_code_spans(stripped)
+        for tm in _TOKEN_RE.finditer(masked):
+            if "\x00" in tm.group(0):
+                continue
             filters = _parse_filters(tm.group("filters") or "")
             col = tm.start() + 1
             start = offset + tm.start()

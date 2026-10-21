@@ -138,6 +138,9 @@ class MainPciWiringTest {
             Path.of("src/main/java/dev/nexus/service/vectors/PciReconciler.java")));
         assertThat(reconciler).as("an in-flight CREATE INDEX CONCURRENTLY ignores the interrupt; the builder reaper"
             + " ends it, so the hook must not wait for the pass").doesNotContain("awaitTermination");
+        String leafBloat = code(Files.readString(Path.of("src/main/java/dev/nexus/service/vectors/LeafBloatSweep.java")));
+        assertThat(leafBloat).as("the same holds for the leaf bloat read: it may sit on a silent socket")
+            .doesNotContain("awaitTermination");
     }
 
     /**
@@ -189,6 +192,60 @@ class MainPciWiringTest {
             .containsPattern("StatusHandler\\.PerCollectionIndexes\\.of\\(\\s*pciSweep\\.status\\(\\),\\s*"
                 + "pciReconciler\\.status\\(\\)\\)");
         assertThat(src.indexOf("service.perCollectionIndexes(", bind + 1)).as("bound once").isNegative();
+    }
+
+    /**
+     * nexus-dxsjc: the leaf bloat sweep behind {@code chunks_leaf_bloat} on {@code /v1/status}. Without the start call
+     * the cache never fills and the doctor row reads the object as "reads failing" forever; without the bind the route
+     * omits the key and every client reads "cannot tell"; without the stop the daemon thread outlives the pool. None
+     * of those fails any other test, so the text is pinned: built from the pool and the validated settings, started
+     * once after the service, bound once from the SAME sweep's own status before the service is declared ready, and
+     * stopped once in the hook after the reaper and before the pool closes. All plain statements, none guarded.
+     */
+    @Test
+    void theLeafBloatSweepIsStartedAfterTheService_boundToTheStatusRoute_andStoppedBeforeThePoolCloses()
+            throws Exception {
+        String src = code(main());
+        int serviceStart = src.indexOf("service.start();");
+        int create = src.indexOf("var leafBloatSweep = dev.nexus.service.vectors.LeafBloatSweep.create("
+            + "ds, dev.nexus.service.db.PgSession.startupPciSettings());");
+        int start = src.indexOf("leafBloatSweep.start();");
+        int bind = src.indexOf("service.chunksLeafBloat(");
+        int ready = src.indexOf("event=service_ready");
+        int hook = shutdownSteps(src);
+        int listenerStop = src.indexOf("service.stop();", hook);
+        int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
+        int stop = src.indexOf("leafBloatSweep.stop();", hook);
+        int poolClose = src.indexOf("ds.close();", hook);
+
+        assertThat(serviceStart).isPositive();
+        assertThat(create).as("built from the pool and the validated settings").isGreaterThan(serviceStart);
+        assertThat(start).as("started after it is built").isGreaterThan(create);
+        assertThat(bind).as("bound after the sweep is started").isGreaterThan(start);
+        assertThat(ready).as("and before the service is declared ready").isGreaterThan(bind);
+        assertThat(src).as("served from the running sweep's own status and period, nothing re-read")
+            .containsPattern("service\\.chunksLeafBloat\\(\\(\\) -> dev\\.nexus\\.service\\.http\\."
+                + "StatusHandler\\.ChunksLeafBloat\\.of\\(\\s*leafBloatSweep\\.status\\(\\),\\s*"
+                + "leafBloatSweep\\.periodSeconds\\(\\)\\)\\);");
+        assertThat(hook).isGreaterThan(start);
+        assertThat(reaper).isGreaterThan(listenerStop);
+        assertThat(stop).as("stopped after the reaper, so a read that ignores the interrupt cannot delay it")
+            .isGreaterThan(reaper);
+        assertThat(poolClose).as("before the hook closes the pool, which aborts a stuck read").isGreaterThan(stop);
+        assertThat(src.indexOf("var leafBloatSweep =", create + 1)).as("built once").isNegative();
+        assertThat(src.indexOf("leafBloatSweep.start();", start + 1)).as("started once").isNegative();
+        assertThat(src.indexOf("service.chunksLeafBloat(", bind + 1)).as("bound once").isNegative();
+        assertThat(src.indexOf("leafBloatSweep.stop();", stop + 1)).as("stopped once").isNegative();
+
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("leafBloatSweep.start() is at main's top level, not in a block")
+            .isEqualTo(mainDepth);
+        assertThat(precedingToken(src, start)).as("it follows a statement, not an if/else/loop head")
+            .isIn(";", "}");
+        assertThat(depthAt(src, bind)).as("the bind is at main's top level").isEqualTo(mainDepth);
+        assertThat(depthAt(src, stop)).as("leafBloatSweep.stop() is at the hook's top level, beside service.stop()")
+            .isEqualTo(depthAt(src, listenerStop));
+        assertThat(precedingToken(src, stop)).as("it follows a statement, not an if/else/loop head").isIn(";", "}");
     }
 
     /**

@@ -19,11 +19,15 @@ forbidden — there is deliberately no autostart/launchd install for this tier.
 """
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 import nexus.aspect_worker as aw
@@ -142,6 +146,7 @@ def test_ensure_aspect_worker_service_mode_uses_daemon(monkeypatch) -> None:
     assert inproc_calls == []              # NO in-process thread in service mode
 
 
+@pytest.mark.t2_tenant
 def test_ensure_aspect_worker_spawn_failure_is_swallowed(monkeypatch) -> None:
     """The row is already enqueued; a daemon-spawn failure must not fail the store."""
     def _boom(**_k):
@@ -175,6 +180,7 @@ def test_intra_process_dedup_suppresses_repeat_spawn(tmp_path: Path) -> None:
     assert len(_FakePopen.calls) == 1   # 50 calls, ONE spawn (window suppresses)
 
 
+@pytest.mark.t2_tenant
 def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -> None:
     """END-TO-END: aspect_extraction_enqueue_hook with AUTOSTART on + SERVICE mode
     must actually reach ensure_aspect_worker_daemon (not just _ensure_aspect_worker
@@ -222,17 +228,49 @@ def test_no_spawn_without_claude(tmp_path: Path, monkeypatch) -> None:
     assert _FakePopen.calls == []
 
 
+@contextlib.contextmanager
+def _log_level(level: int) -> Iterator[None]:
+    """Run with structlog's filtering level at ``level`` (the CLI default is
+    WARNING, ``--verbose`` / ``NEXUS_LOG_LEVEL=DEBUG`` lowers it)."""
+    prior = structlog.get_config()["wrapper_class"]
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(level))
+    try:
+        yield
+    finally:
+        structlog.configure(wrapper_class=prior)
+
+
+def test_the_absence_prints_nothing_at_the_cli_default_level(tmp_path: Path, monkeypatch) -> None:
+    """N3 (nexus-s80u9): every CLI invocation is a fresh process, so a warning
+    "once per process" printed on every `nx store put` and `nx index repo` on
+    a box without `claude`. At the CLI's default level (WARNING) the spawner
+    now stays silent; `nx doctor` carries the durable warning."""
+    monkeypatch.setattr(awd, "_claude_available", lambda: False)
+    _FakePopen.reset()
+
+    with _log_level(logging.WARNING), capture_logs() as logs:
+        for _ in range(3):
+            ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+
+    assert logs == [], "nothing at WARNING or above reaches a default-level stderr"
+    assert _FakePopen.calls == []
+
+
 def test_the_absence_is_logged_once_per_process(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(awd, "_claude_available", lambda: False)
     _FakePopen.reset()
 
-    with capture_logs() as logs:
+    with _log_level(logging.DEBUG), capture_logs() as logs:
         for _ in range(5):
             ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
 
     skipped = [e for e in logs if e["event"] == "aspect_worker_daemon.spawn_skipped_claude_absent"]
     assert len(skipped) == 1, logs
-    assert skipped[0]["log_level"] == "warning"
+    # N3 (nexus-s80u9): every CLI invocation is a fresh process, so "once per
+    # process" printed this on every `nx store put` / `nx index repo`. The
+    # durable signal is `nx doctor`'s "aspect extraction is idle" WARN; this
+    # line is debug so the default stderr stays clean.
+    assert skipped[0]["log_level"] == "debug"
     assert "claude" in skipped[0]["hint"]
     assert _FakePopen.calls == []
 

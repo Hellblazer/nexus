@@ -287,6 +287,7 @@ class TestTupleInAckNack:
         assert "ClaimOwnershipError" in release.output
 
 
+@pytest.mark.t2_tenant
 class TestTupleReleaseUnitPassThrough:
     """Fast, no engine: proves the CLI is a thin pass-through to the
     store's own ``release``, same shape as ``TestTupleRenewUnitPassThrough``."""
@@ -594,6 +595,7 @@ class TestTupleRenewRoundTrip:
         assert "claimant" in res.output.lower()
 
 
+@pytest.mark.t2_tenant
 class TestTupleRenewUnitPassThrough:
     """Fast, no engine: proves the CLI prints exactly what the store returns
     and does not recompute a lease of its own -- the mutation this exists to
@@ -635,6 +637,7 @@ class TestTupleAckReplyUnitPassThrough:
     --reply-* flags but never builds/forwards a ReplySpec, or forwards the
     wrong fields."""
 
+    @pytest.mark.t2_tenant
     def test_full_reply_flag_set_builds_and_forwards_a_replyspec(self, monkeypatch) -> None:
         captured: dict[str, object] = {}
 
@@ -665,6 +668,7 @@ class TestTupleAckReplyUnitPassThrough:
         assert reply.ttl_seconds == 60
         assert "ab" * 32 in res.output
 
+    @pytest.mark.t2_tenant
     def test_no_reply_flags_passes_none_and_confirmation_is_unchanged(self, monkeypatch) -> None:
         captured: dict[str, object] = {}
 
@@ -702,6 +706,7 @@ class TestTupleAckReplyUnitPassThrough:
         assert res.exit_code != 0
         assert called == []
 
+    @pytest.mark.t2_tenant
     def test_reply_not_written_error_prints_a_clear_message_not_a_traceback(
         self, monkeypatch,
     ) -> None:

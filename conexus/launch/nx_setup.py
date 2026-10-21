@@ -148,8 +148,9 @@ file's own history alone:
    daemon service start``. Else ``nx init --yes`` with ``--no-autostart`` unless
    ``autostart``, and always ``--no-beads-prime`` (``nx init`` otherwise installs
    a user-level beads PRIME.md).
-3. verify: ``nx doctor``. Exit 0 is ``done``; anything else is ``doctor-failed``
-   with the ``[✗]`` rows, read from the tail of the log.
+3. verify: ``nx doctor``. Exit 0 is ``done``. The one exception is a missing git: exit 1 or 2 with the fatal
+   summary footer printed after the rows and the ``git`` row the only failing one is also ``done``. Anything else is
+   ``doctor-failed`` with the ``[✗]`` rows, read from the tail of the log.
 
 **Child programs** print straight into ``setup.log`` (an append-mode handle, no
 pipe), so the log shows a long step's output while it runs and a killed step's
@@ -338,6 +339,37 @@ _CHILD = "child"  # in the lock directory: the pid of the child program the run 
 
 _DOCTOR_ROWS_MAX = 20
 _DOCTOR_ROW_CHARS = 300
+
+#: A failing row of ``nx doctor`` for the check labelled exactly ``git``: ``  ✗ git: ...`` (the main sweep) or
+#: ``[✗] git: ...`` (the supplementary checks). ``git hooks (stanza drift)`` and the like are other checks, real
+#: failures, and do not match. Git is needed only to index repositories and by Claude Code's plugin marketplace,
+#: so a Claude Desktop-only user has none, and ``nx doctor`` reports it as a warning (nexus-36qyh). A CLI from
+#: before that change fails the row, and the plugin updates independently of the CLI it finds.
+_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
+
+#: The exit code of ``nx doctor`` when a check marked fatal fails (``nexus.health.EXIT_FATAL``). The git row of a CLI
+#: from before nexus-36qyh is fatal, so it ends the sweep with this code. CLIs up to v7.20.0 exit 1 after the same
+#: footer (code 2 begins at v7.21.0, commit 02e0379c5): :data:`_DOCTOR_EXIT_FATAL_CODES`.
+_DOCTOR_EXIT_FATAL = 2
+
+#: The exit codes a finished sweep with a fatal failed row can carry: 1 up to v7.20.0, 2 from v7.21.0.
+_DOCTOR_EXIT_FATAL_CODES = (1, _DOCTOR_EXIT_FATAL)
+
+#: The summary ``nx doctor`` prints after its main sweep when a fatal check failed: the first is the local-mode
+#: footer, the second the one a service-mode (cloud) sweep prints (``format_health_for_cli`` in ``nexus.health``;
+#: ``tests/hooks/test_nx_setup.py`` pins both to that function's real output). A CLI that fails the git row and then
+#: dies (a traceback, a crash, a cut-off pipe, an encoding error on the glyph on Windows) printed the row but not
+#: this, and exits with another code; such a run is a failure, not a missing git (nexus-0ky29).
+_DOCTOR_FATAL_FOOTERS = (
+    "Some checks failed.",
+    "Run 'nx config init' to configure managed-service credentials",
+)
+
+#: The row added to a record when ``nx doctor`` named only ``git`` but did not finish as a git-only sweep does, so
+#: that neither this script's view nor ``nx doctor``'s setup row (which read the rows alone) reads it as ``done``.
+_DOCTOR_UNFINISHED_ROW = (
+    "nx doctor did not finish a sweep that failed only on git ({how}); its output may be cut short"
+)
 
 #: ``nx --version`` of the Nexus CLI (click's ``version_option(prog_name="nx")``).
 _VERSION_LINE = re.compile(r"nx, version [0-9][0-9A-Za-z.+!_-]*")
@@ -1983,8 +2015,35 @@ class _Run:
 
 
 def _doctor_rows(text: str) -> list[str]:
-    rows = [line.strip()[:_DOCTOR_ROW_CHARS] for line in text.splitlines() if "[✗]" in line]
+    """The failing rows of ``nx doctor``'s output. The main sweep prints ``  ✗ label: detail`` and the
+    supplementary checks print ``[✗] label: detail``; a filter on the brackets alone recorded no row for a
+    failure of the main sweep (nexus-36qyh)."""
+    rows = [
+        line.strip()[:_DOCTOR_ROW_CHARS]
+        for line in text.splitlines()
+        if "[✗]" in line or line.lstrip().startswith("✗ ")
+    ]
     return rows[:_DOCTOR_ROWS_MAX]
+
+
+def only_git_failed(rows: object) -> bool:
+    """Whether *rows* (a record's ``doctor_failing``) name the ``git`` check and nothing else. An empty list,
+    a list at the cap (rows may have been cut) and anything that is not a list of strings are not."""
+    return (
+        isinstance(rows, list) and 0 < len(rows) < _DOCTOR_ROWS_MAX
+        and all(isinstance(row, str) and _GIT_ROW.match(row.strip()) for row in rows)
+    )
+
+
+def git_only_sweep(code: int | None, text: str, rows: object) -> bool:
+    """Whether ``nx doctor`` finished a sweep whose only failing row is ``git``: a fatal exit code (2, or 1 for a CLI
+    up to v7.20.0), the fatal footer printed after the rows, and *rows* naming ``git`` alone. Rows without the footer
+    are a CLI that failed the row and then died (nexus-0ky29): a real failure, whatever the exit code."""
+    return (
+        code in _DOCTOR_EXIT_FATAL_CODES
+        and any(footer in text for footer in _DOCTOR_FATAL_FOOTERS)
+        and only_git_failed(rows)
+    )
 
 
 def _is_nexus_cli(run: _Run, hit: str) -> bool:
@@ -2078,7 +2137,8 @@ def _record_lockstep(run: _Run, nx: str, version: str) -> None:
     returned) reports exactly that version: RDR-143's rule is a marker on confirmed lockstep, not on the intent to
     build it. A ``PATH`` ``nx`` or a leftover generation that is not the one just built reports another version and
     gets no marker, so the hook judges it. Without the marker for a build that did match, the next session's
-    lockstep hook dispatches an upgrade that races nothing useful (found by the setup journey, 2026-10-15). A failed
+    lockstep hook pays an `nx --version` call to learn what the marker would have said (nexus-ehg1y; before that
+    it dispatched an upgrade that raced nothing useful, found by the setup journey, 2026-10-15). A failed
     check or write is logged and changes nothing else."""
     seen = _cli_version(run, nx)
     if seen != version:
@@ -2156,13 +2216,15 @@ def _execute(run: _Run) -> int:
         code, text = run.cmd([nx, "doctor"])
     except OSError as exc:
         return run.fail("verify", f"nx doctor could not start: {exc}")
-    if code == 0:
+    rows = _doctor_rows(text)
+    if code == 0 or git_only_sweep(code, text, rows):
         run.step_done("verify")
         return run.end(
             DONE, "Nexus is installed and nx doctor passes.",
             RECONNECT_NEXT, doctor="pass", doctor_failing=[],
         )
-    rows = _doctor_rows(text)
+    if only_git_failed(rows):
+        rows = [*rows, _DOCTOR_UNFINISHED_ROW.format(how="timed out" if code is None else f"exit code {code}")]
     return run.end(
         DOCTOR_FAILED, "nx doctor reported problems." if code is not None else "nx doctor timed out.",
         f"Run `nx doctor` in a terminal to see the failing rows.{_CLOUD_DOCTOR_NOTE if run.mode == MODE_CLOUD else ''} "
@@ -2551,6 +2613,13 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
                 f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. {_LOST_NEXT} "
                 f"Log: {setup / _LOG}"
             )
+    if state == DOCTOR_FAILED and only_git_failed(data.get("doctor_failing")):
+        # A run from before a missing git became a warning: the only failing row is one that does not matter
+        # to a Claude Desktop-only user, and it must not outrank "the installed service is not running".
+        state = DONE
+        data.update(
+            message="Nexus is installed and nx doctor passes.", next=RECONNECT_NEXT, doctor="pass", doctor_failing=[],
+        )
     data.setdefault("next", _NEXT_NONE)
     data.update(state=state, live=live, terminal=state in TERMINAL_STATES, not_now=(setup / _MARKER).exists())
     if setup.exists():

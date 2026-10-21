@@ -220,6 +220,7 @@ def _register_paper(cat: Catalog, title: str, file_path: str,
     return str(tumbler)
 
 
+@pytest.mark.t2_tenant
 class TestRemediatePathsCLI:
     def test_dry_run_reports_without_writing(
         self, initialized_catalog: Catalog, catalog_env: Path, papers_dir: Path,
@@ -423,6 +424,7 @@ def _register_paper_with_meta(
     return str(tumbler)
 
 
+@pytest.mark.t2_tenant
 class TestRemediateViaDevonthink:
     """When an entry's meta carries ``devonthink_uri``, remediate-paths
     should ask DEVONthink for the current path before falling back to

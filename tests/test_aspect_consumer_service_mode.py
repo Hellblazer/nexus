@@ -121,6 +121,7 @@ class TestAspectPromotionServiceModeGuard:
             f"Got unhandled exception traceback: {combined!r}"
         )
 
+    @pytest.mark.t2_tenant
     def test_cli_history_failure_in_service_mode_is_endpoint_shaped(
         self,
         tmp_path: Path,

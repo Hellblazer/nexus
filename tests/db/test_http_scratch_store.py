@@ -741,6 +741,7 @@ class TestMintTokenResolutionSeam:
         finally:
             self._reset_manager()
 
+    @pytest.mark.t2_tenant
     def test_401_falls_back_to_data_token_remint_after_session_refresh_declines(
         self, mint_fake_server, monkeypatch, tmp_path
     ) -> None:
@@ -766,6 +767,7 @@ class TestMintTokenResolutionSeam:
         finally:
             self._reset_manager()
 
+    @pytest.mark.t2_tenant
     def test_persistent_mint_rejection_fails_loud(
         self, mint_fake_server, monkeypatch, tmp_path
     ) -> None:
@@ -783,6 +785,7 @@ class TestMintTokenResolutionSeam:
         finally:
             self._reset_manager()
 
+    @pytest.mark.t2_tenant
     def test_proactive_refresh_below_twenty_percent_ttl_no_401_involved(
         self, mint_fake_server, monkeypatch, tmp_path
     ) -> None:

@@ -48,6 +48,7 @@ def _run(runner: CliRunner, repo: Path, stats: dict, *, taxonomy_incomplete: boo
     return result, post
 
 
+@pytest.mark.t2_tenant
 def test_all_skip_run_skips_postprocessing(runner: CliRunner, index_home: Path) -> None:
     # 0 files changed AND taxonomy already built (topics exist) → skip.
     repo = index_home / "myrepo"
@@ -61,6 +62,7 @@ def test_all_skip_run_skips_postprocessing(runner: CliRunner, index_home: Path) 
     assert "skipping discovery" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_all_skip_but_taxonomy_incomplete_still_runs(runner: CliRunner, index_home: Path) -> None:
     # Self-heal guard: 0 files changed but a collection has no topics yet
     # (discover never succeeded) → discovery must still run.
@@ -75,6 +77,7 @@ def test_all_skip_but_taxonomy_incomplete_still_runs(runner: CliRunner, index_ho
     assert "skipping discovery" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_changed_run_runs_postprocessing(runner: CliRunner, index_home: Path) -> None:
     repo = index_home / "myrepo"
     repo.mkdir()
@@ -144,6 +147,7 @@ def test_taxonomy_incomplete_false_for_empty_collection_list() -> None:
     assert _taxonomy_incomplete([]) is False
 
 
+@pytest.mark.t2_tenant
 def test_rdr_only_run_still_runs_postprocessing(runner: CliRunner, index_home: Path) -> None:
     # An RDR-only re-index (no code/prose files, but rdr_indexed > 0) is a
     # content change: files_changed folds in rdr_indexed, so discovery runs.
@@ -215,6 +219,7 @@ def test_discover_subset_probe_error_keeps_collection(monkeypatch) -> None:
     assert _discover_subset(cols, {"code": 1, "docs": 0, "rdr": 0}) == cols
 
 
+@pytest.mark.t2_tenant
 def test_gate_passes_discover_subset_to_postprocessing(runner: CliRunner, index_home: Path) -> None:
     # End-to-end through the CLI gate: code changed, docs didn't (topics
     # exist) → postprocessing receives the FULL list plus the narrowed
@@ -363,6 +368,7 @@ def test_discover_subset_precomputed_no_topics_skips_probe(monkeypatch) -> None:
     assert _discover_subset(cols, by_kind, no_topics={"docs__a__m__v1"}) == cols
 
 
+@pytest.mark.t2_tenant
 def test_self_heal_run_narrows_to_zero_topic_collections(runner: CliRunner, index_home: Path) -> None:
     # Critic coverage gap: files_changed==0 + one zero-topic collection →
     # postprocessing runs with discovery narrowed to the self-heal candidate.

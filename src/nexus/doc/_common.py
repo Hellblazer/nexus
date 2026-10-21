@@ -116,7 +116,7 @@ _MASK_CHAR = "\x00"
 _LIST_MARKER_RE = re.compile(r"^([-*+]|\d{1,9}[.)])(\s+|$)")
 
 
-def _mask_inline_code_spans(line: str) -> str:
+def mask_inline_code_spans(line: str) -> str:
     """Return *line* with every inline code span replaced by
     ``\\x00`` repeated to the same length — the delimiters included.
     Length- and column-preserving, so a caller's reported positions
@@ -175,7 +175,7 @@ def iter_plain_lines(
     changes it), so a reported column is always valid against the
     real file too.
     """
-    emit = _mask_inline_code_spans if mask_inline_code else _identity
+    emit = mask_inline_code_spans if mask_inline_code else _identity
     in_fence = False
     fence_marker: str | None = None
     in_indented_code = False

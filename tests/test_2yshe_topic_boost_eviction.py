@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from nexus.scoring import apply_hybrid_scoring, apply_topic_boost
 from nexus.types import SearchResult
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 #: d=0.239 alone in topic 99; nine rows 0.26-0.34 in four paired topics.
 _ROWS = [("best", 0.239, 99)] + [

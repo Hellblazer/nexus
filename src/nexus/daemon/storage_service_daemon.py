@@ -93,7 +93,12 @@ from nexus import _locking
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
 from nexus.daemon import session_end as _session_end
-from nexus.db.onnx_model_root import ENV_MODEL_DIR, apply_djl_cache_env, service_onnx_models_root
+from nexus.db.onnx_model_root import (
+    ENV_MODEL_DIR,
+    apply_djl_cache_env,
+    apply_ort_native_env,
+    service_onnx_models_root,
+)
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util import win_job as _win_job
@@ -1000,9 +1005,12 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
     *start_offset*: its last ERROR-level line, joined with its last line of
     output when that is a later line outside the logback format (a root
     ``Caused by:``, a JVM or native fatal banner), which an earlier ERROR
-    would otherwise hide. With no ERROR line, the last line that is not a
-    stack frame. ``None`` when the engine wrote nothing readable. Credential
-    values are redacted (the line is printed to terminals and CI logs).
+    would otherwise hide. With no ERROR line, the last line outside the
+    logback format that is not a stack frame (a crash before logback is up);
+    a logback line at another level is not a reason (an engine killed by a
+    signal ends on INFO, nexus-pmq9y). ``None`` when the engine wrote nothing
+    readable. Credential values are redacted (the line is printed to
+    terminals and CI logs).
     """
     lines = _log_lines_since(log_path, start_offset)
     last_error: int | None = next(
@@ -1014,7 +1022,14 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
         None,
     )
     if last_error is None:
-        return None if last_output is None else _reason_text(lines[last_output])
+        last_plain: int | None = next(
+            (
+                i for i in range(len(lines) - 1, -1, -1)
+                if not _ENGINE_FRAME_LINE.match(lines[i]) and not _ENGINE_LOGBACK_LINE.match(lines[i])
+            ),
+            None,
+        )
+        return None if last_plain is None else _reason_text(lines[last_plain])
     reason = _reason_text(lines[last_error])
     if (
         last_output is not None
@@ -1028,6 +1043,38 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
         if tail_message not in lines[last_error]:
             reason = f"{reason} | last output: {_reason_text(tail)}"
     return reason
+
+
+#: A line outside the logback format that is the engine dying: a bare JVM exception (the engine
+#: failed before logback was up), a ``Caused by:`` root cause, or a JVM or native fatal banner.
+#: Plain progress text such as ``Shutting down...`` is not.
+_ENGINE_FATAL_LINE = re.compile(
+    r"^(Exception in thread |Caused by: |# A fatal error|Fatal error|FATAL\b|[\w.$]+(Error|Exception)\b)"
+)
+
+
+def engine_boot_failure_reason(log_path: Path, start_offset: int = 0) -> str | None:
+    """Why the engine is down, when its log says so as its FINAL output; else ``None``.
+
+    :func:`last_engine_error_line` answers "what is the last error in this log", which is
+    right for a caller that just watched the engine exit. A caller that finds the engine
+    down some time later (``nx doctor``) needs the other question: is the log's end an
+    exit reason, or an old ERROR followed by a clean stop? The trailing lines outside the
+    logback format (a stack trace, a bare JVM exception) belong to the logback line before
+    them. That line at ERROR makes the log end in an error, and the reason is the engine's
+    last error line. At INFO or WARN, or with no logback line at all, the reason is the
+    last fatal-looking line of the trailing block, if any (:data:`_ENGINE_FATAL_LINE`); a
+    block of plain text (``Shutting down...``) is no reason. Credentials are redacted.
+    """
+    lines = _log_lines_since(log_path, start_offset)
+    anchor: int | None = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _ENGINE_LOGBACK_LINE.match(lines[i])), None
+    )
+    if anchor is not None and _ENGINE_ERROR_LINE.match(lines[anchor]):
+        return last_engine_error_line(log_path, start_offset)
+    block = lines[0 if anchor is None else anchor + 1 :]
+    fatal = next((ln for ln in reversed(block) if _ENGINE_FATAL_LINE.match(ln)), None)
+    return None if fatal is None else _reason_text(fatal)
 
 
 def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
@@ -1096,11 +1143,19 @@ def _default_engine_liveness_scan(
     from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — deferred import, avoids a module-level cross-import cycle
 
     binary_str = str(binary_path)
-    return [
-        (pid, command)
-        for pid, command in service_stack_pids(config_dir)
-        if binary_str in command
-    ]
+    unreadable: list[int] = []
+    rows = service_stack_pids(config_dir, unreadable_out=unreadable)
+    if unreadable:
+        # nexus-qwn3p: a bare `daemon service start` whose environment cannot
+        # be read is a supervisor, not an engine, so it cannot be a live engine
+        # here and does not change the answer. It is still a candidate the scan
+        # could not place, and the lock cleanup that consults this should say so.
+        _log.warning(
+            "engine_liveness_scan_unverified",
+            pids=list(unreadable),
+            config_dir=str(config_dir),
+        )
+    return [(pid, command) for pid, command in rows if binary_str in command]
 
 
 def _admin_dbname(creds: dict[str, str]) -> str:
@@ -1469,6 +1524,11 @@ class StorageServiceSupervisor:
         # ~/.djl.ai by default, a directory nothing of ours removes. Point it
         # under ~/.cache/nexus so `nx uninstall --remove-data` covers it.
         apply_djl_cache_env(env)
+        # nexus-8ool4: ONNX Runtime's native libraries extract once into one
+        # per-version directory instead of ~16 MB into /tmp per start. The
+        # same root the engine would resolve, passed explicitly like the two
+        # above so a HOME override cannot split supervisor and engine.
+        apply_ort_native_env(env)
         # A Python-only per-model override (NX_SERVICE_BGE_DIR /
         # NX_SERVICE_CROSSENCODER_DIR) pointed off the root re-creates the
         # same green-provision-then-crash shape on a second axis — the
@@ -3543,10 +3603,15 @@ class StopOutcome:
     #: hard-kills). ``source`` is ``"refused"`` when nothing else was signalled.
     #: A refused pid is still running, so it is also in ``stubborn``.
     refused: tuple[GracefulStopSend, ...] = ()
+    #: Flagless ``daemon service start`` processes the stop could not place in
+    #: any directory (unreadable or malformed environment, nexus-oacd3). They
+    #: were NOT signalled and may still be running, so ``sweep_verified`` is
+    #: False and the outcome is not "already stopped".
+    unreadable: tuple[int, ...] = ()
 
     @property
     def already_stopped(self) -> bool:
-        return not self.pids and not self.refused
+        return not self.pids and not self.refused and not self.unreadable
 
 
 def stop_storage_service(
@@ -3659,6 +3724,7 @@ def _stop_marked_service(
     """The signalling half of :func:`stop_storage_service`, run with the stop
     marker already on disk (Windows)."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        storage_service_member_check,
         storage_service_stack_matcher,
         sweep_matching_processes,
     )
@@ -3816,6 +3882,9 @@ def _stop_marked_service(
         matcher,
         exclude_pid=os.getpid(),
         grace_s=_GRACEFUL_STOP_TIMEOUT,
+        # nexus-oacd3: a flagless start names no directory; it is stopped
+        # only when its own environment says it serves *config_dir*.
+        member_check=storage_service_member_check(config_dir, platform=platform),
     )
 
     if not sweep.available:
@@ -3842,6 +3911,16 @@ def _stop_marked_service(
             lease_seen=lease_seen,
             sweep_verified=False,
         )
+
+    if sweep.unreadable:
+        # nexus-oacd3: left alone because its directory could not be
+        # established; the stop must not read as "already stopped, verified".
+        _log.warning(
+            "storage_service_stop_flagless_unreadable",
+            pids=list(sweep.unreadable),
+            config_dir=str(config_dir),
+        )
+    sweep_verified = not sweep.unreadable
 
     # Captured BEFORE the sweep extends `signalled`, so the log reason below
     # can distinguish "the lease produced nothing to signal, the sweep is
@@ -3889,8 +3968,9 @@ def _stop_marked_service(
             stubborn=sweep.stubborn,
             source="refused",
             lease_seen=lease_seen,
-            sweep_verified=True,
+            sweep_verified=sweep_verified,
             refused=sweep.refused,
+            unreadable=sweep.unreadable,
         )
 
     if not signalled:
@@ -3906,7 +3986,8 @@ def _stop_marked_service(
             stubborn=(),
             source="none",
             lease_seen=lease_seen,
-            sweep_verified=True,
+            sweep_verified=sweep_verified,
+            unreadable=sweep.unreadable,
         )
 
     return StopOutcome(
@@ -3914,6 +3995,7 @@ def _stop_marked_service(
         stubborn=tuple(dict.fromkeys([*lease_stubborn, *sweep.stubborn])),
         source=source,
         lease_seen=lease_seen,
-        sweep_verified=True,
+        sweep_verified=sweep_verified,
         refused=sweep.refused,
+        unreadable=sweep.unreadable,
     )

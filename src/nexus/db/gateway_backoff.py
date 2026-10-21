@@ -13,7 +13,7 @@ from ``nexus.db``, so neither of the two callers imports the other)
 once the embed-write 504 floor below turned out to be needed in BOTH
 places — a Voyage slowdown produces the identical premature-re-embed
 hazard whether the write reaches the engine via
-``/v1/vectors/upsert-chunks``/``/store-put`` (T3) or via the catalog's
+``/v1/vectors/upsert-chunks`` (T3) or via the catalog's
 combined-write ``/v1/catalog/manifest/write_many`` (T2/catalog).
 ``http_vector_client.py`` keeps thin re-exports of the old
 underscore-prefixed names for the tests that reference them that way;
@@ -29,7 +29,7 @@ from __future__ import annotations
 _GATEWAY_RETRY_SLEEPS: tuple[float, ...] = (2.0, 5.0, 10.0)
 _GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
 
-#: The edge's OWN upstream request-timeout bound for the three embed-write
+#: The edge's OWN upstream request-timeout bound for the embed-write
 #: routes below, as measured at the time this floor was added (conexus,
 #: 2026-09-14). A 504 on one of those routes means the edge cut the
 #: request off at this bound while the engine's SYNCHRONOUS server-side
@@ -82,14 +82,12 @@ _EMBED_WRITE_504_BACKOFF_FLOOR_S = _EDGE_UPSTREAM_BOUND_S
 #: ``http_vector_client._T3_WRITE_PATH_SUFFIXES`` uses) for routes where the
 #: engine performs a SYNCHRONOUS server-side embed as part of the write
 #: itself -- exactly the routes :data:`_EMBED_WRITE_504_BACKOFF_FLOOR_S`
-#: exists for. FIVE such routes (RDR-223 P2.0 added ``/manifest/append`` and
-#: ``/manifest/append_many``, listed after the three below, with the same
+#: exists for. FOUR such routes (RDR-223 P2.0 added ``/manifest/append`` and
+#: ``/manifest/append_many``, listed after the two below, with the same
 #: conditional as write_many), spanning both HTTP clients:
 #:
 #:   * ``/v1/vectors/upsert-chunks``   -- ``http_vector_client.py``,
 #:     ``HttpVectorClient.upsert_chunks``. Always embeds.
-#:   * ``/v1/vectors/store-put``       -- ``http_vector_client.py``,
-#:     ``HttpVectorClient.put``. Always embeds.
 #:   * ``/v1/catalog/manifest/write_many`` -- ``catalog/http_catalog_client.py``,
 #:     ``HttpCatalogClient.write_manifest_many`` (the "combined write",
 #:     RDR-195/nexus-kl2z6/nexus-wxjr6). CONDITIONAL: embeds only when the
@@ -103,7 +101,6 @@ _EMBED_WRITE_504_BACKOFF_FLOOR_S = _EDGE_UPSTREAM_BOUND_S
 #:     is applied.
 _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/upsert-chunks",
-    "/store-put",
     "/manifest/write_many",
     # RDR-223 P2.0 (nexus-z0o2p.10): append and append_many carry the same optional inline
     # ``chunks`` and embed them synchronously in the request, so they share write_many's
@@ -134,7 +131,7 @@ def _is_embed_server_side_write_path(path: str, body: dict | None = None) -> boo
     ``http_vector_client.py``'s ``_request`` never reaches
     ``/manifest/write_many`` at all (that route is catalog-only) and never
     passes *body*, matching the default: the classifier never consults it
-    for ``/upsert-chunks``/``/store-put`` either, since both always embed
+    for ``/upsert-chunks`` either, since it always embeds
     regardless of body content. The T2 client's own ``_post`` always
     populates ``kwargs["json"]`` before this function is ever called for a
     write_many page, so no LIVE caller reaches ``/manifest/write_many``
@@ -152,8 +149,8 @@ def _is_embed_server_side_write_path(path: str, body: dict | None = None) -> boo
 #
 # Route suffixes for mutating, NON-idempotent sweep/maintenance operations
 # -- an anti-join MOVE/DELETE, not a content-addressed upsert. Every OTHER
-# /v1 write this module retries is safe to resend: upsert-chunks/store-put
-# are keyed on chunk content hash, so a duplicate resend just re-writes the
+# /v1 write this module retries is safe to resend: upsert-chunks
+# is keyed on chunk content hash, so a duplicate resend just re-writes the
 # SAME rows to the SAME result. These three instead MUTATE MEMBERSHIP (rows
 # leave/enter a collection via an anti-join over current state), so a
 # retry after the first attempt already committed server-side (only the

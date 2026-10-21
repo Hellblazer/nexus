@@ -340,6 +340,69 @@ def test_status_says_a_provisioned_service_is_down_not_done(
     assert "downloads nothing" in text and "Reconnect" not in text and "Setup is done" not in text, text
 
 
+def test_a_doctor_failed_record_over_one_optional_tool_does_not_mask_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """nexus-36qyh, cascade of the Windows MVV (nexus-sv2wx.24): the doctor-failed record from a box with no
+    git outranked "the service is not running, setup starts it" after a reboot, and sent the user to a
+    terminal. The view is the real ``status_view`` over a recorded status file."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(
+        tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False,
+        doctor="fail", doctor_failing=["✗ git: not found on PATH"],
+    )
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "not running" in text and "mode local" in text and "downloads nothing" in text, text
+    assert "nx doctor" not in text and "terminal" not in text, text
+
+
+def test_a_doctor_failed_record_with_another_failing_row_still_outranks_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(
+        tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False,
+        doctor="fail", doctor_failing=["✗ git: not found on PATH", "✗ Schema: behind"],
+    )
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "nx doctor reported problems" in text and "Schema: behind" in text, text
+
+
+@pytest.mark.parametrize("record", [{"doctor_failing": []}, {}], ids=["empty-rows", "no-rows-key"])
+def test_a_doctor_failed_record_with_no_parsed_rows_does_not_mask_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder, record: dict[str, Any]
+) -> None:
+    """nexus-36qyh. A 7.82.0 record for a box with no git is ``doctor-failed`` with ``doctor_failing: []``:
+    that release's filter never matched the main sweep's failing row. Nothing says which row failed, so
+    the record cannot be read as that one tool alone; it must still not send the user to a terminal while
+    the installed service is down. The user is offered the restart instead."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False, doctor="fail", **record)
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "not running" in text and "mode local" in text and "downloads nothing" in text, text
+    assert "nx doctor" not in text and "terminal" not in text, text
+
+
+def test_a_doctor_failed_record_with_no_rows_and_no_provisioned_service_keeps_its_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """The restart offer is for an installed service; with none provisioned the record is reported as it was."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _service(monkeypatch, False)
+    _recorded(tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False, doctor="fail", doctor_failing=[])
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    assert "nx doctor reported problems" in _call("setup_status")
+
+
 def test_status_keeps_a_failed_run_ahead_of_a_down_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
 ) -> None:
@@ -406,10 +469,12 @@ def _saved(config: Path, **credentials: str) -> None:
     (config / "config.yml").write_text(body, encoding="utf-8")
 
 
+@pytest.mark.t2_tenant
 def test_nothing_set_is_not_usable(endpoint: Path) -> None:
     assert setup_tools.usable_service() is False
 
 
+@pytest.mark.t2_tenant
 def test_a_service_url_with_no_resolvable_token_is_not_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The case the earlier definition got wrong: every tool that needs storage
     raises RuntimeError there, so setup must not say nothing is missing."""
@@ -435,6 +500,7 @@ def test_a_saved_service_url_and_token_are_usable(endpoint: Path) -> None:
     assert setup_tools.usable_service() is True
 
 
+@pytest.mark.t2_tenant
 def test_a_service_url_with_a_lease_token_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
     _lease(monkeypatch)
@@ -449,6 +515,7 @@ def test_a_service_url_with_a_mint_credential_is_usable(endpoint: Path, monkeypa
     assert setup_tools.usable_service() is True
 
 
+@pytest.mark.t2_tenant
 def test_the_host_port_and_token_variables_are_usable_together_and_not_apart(
     endpoint: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1006,18 +1073,21 @@ def real_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config
 
 
+@pytest.mark.t2_tenant
 def test_status_through_the_real_script_in_an_empty_config_directory(real_script: Path) -> None:
     text = _call("setup_status")
     assert "No usable Nexus service" in text
     assert not (real_script / "setup").exists(), "status created the setup directory"
 
 
+@pytest.mark.t2_tenant
 def test_not_now_through_the_real_script_writes_its_marker_and_nothing_else(real_script: Path) -> None:
     text = _call("setup", mode="not-now")
     assert "nothing was installed" in text.lower()
     assert sorted(p.name for p in (real_script / "setup").iterdir()) == ["not-now"]
 
 
+@pytest.mark.t2_tenant
 def test_cloud_through_the_real_script_starts_a_run_that_serves_the_page(
     real_script: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

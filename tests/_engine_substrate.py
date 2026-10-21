@@ -79,17 +79,19 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import random
 import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,13 +101,16 @@ import structlog
 from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
-from tests._child_process import kill_group, popen_in_group, stop_group
+from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
+from tests._ddl_counter import PROBE_SQL, READY_LABEL, START_LABEL, log_conf, mark_sql
+from tests._ddl_counter import enabled as ddl_count_enabled
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
     jvm_error_file_arg,
     pg_bin_dir,
+    with_substrate_sizing,
     build_in_progress_reason,
     build_lease_wait_seconds,
     wait_for_build_lease,
@@ -126,18 +131,1106 @@ _DBNAME = "nexus_t2_substrate"
 
 
 def engine_argv(java: str) -> list[str]:
-    """The substrate engine's argv. One owner, so the hs_err redirect cannot be
-    dropped from the launch without a test noticing."""
-    return [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+    """The substrate engine's argv. One owner, so the hs_err redirect and the
+    heap/CPU budget (nexus-0yym1) cannot be dropped from the launch without a test
+    noticing."""
+    return with_substrate_sizing(
+        [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+    )
 
 
 _lock = threading.Lock()
 _state: dict | None = None
 _boot_error: str | None = None
 
-#: Glob for a substrate pgdata cluster dir, matched under the process
-#: tempdir root (``tempfile.gettempdir()`` — same default ``mkdtemp`` uses).
+#: Glob for a substrate pgdata cluster dir, matched under every root in
+#: :func:`substrate_pg_roots` (the process tempdir and the tmpfs root).
 _STRAY_GLOB = "nexus_t2_substrate_pg_*"
+
+#: Where substrate clusters live (nexus-me3gm). The per-worker Postgres clusters
+#: wrote about 2.1 TB/day to chas's only NVMe: catalog churn from per-test tenants
+#: drives WAL and heap writes, and nothing in a throwaway cluster needs to survive
+#: a reboot. On Linux the clusters therefore go on tmpfs (``/dev/shm``) when it is
+#: tmpfs, writable and has room; everywhere else they stay under the process
+#: tempdir. ``NX_TEST_PG_ROOT=<dir>`` picks a root outright and
+#: ``NX_TEST_PG_ROOT=default`` forces the old tempdir root for new clusters (the
+#: sweep still looks in an existing tmpfs root).
+_PG_ROOT_ENV = "NX_TEST_PG_ROOT"
+
+#: Test seam for the SWEEP only: a directory standing in for ``/dev/shm`` so the
+#: sweep script's tests do not read the box's real tmpfs root (where a peer's live
+#: clusters would show up in their counts). Creation never reads it.
+_SHM_DIR_SEAM_ENV = "NX_TEST_PG_SHM_DIR"
+_SHM_DIR = Path("/dev/shm")
+_TMPFS_DIR_PREFIX = "nexus-test-pg"
+
+#: The tempdir this run started with. ``tests/_tmp_root.py`` (nexus-kyujr) moves
+#: ``TMPDIR`` onto a private tmpfs directory inside a lab-run grant and records the
+#: original here. Two things must keep the ORIGINAL: the boot-slot directory (a
+#: per-run directory would split the cross-run concurrency cap) and the stray-cluster
+#: sweep's disk root (clusters stranded by an earlier run live there, not in the new
+#: run's private directory).
+_TMP_ORIG_ENV = "NX_TEST_TMP_ORIG"
+
+#: A substrate's logs were in its pgdata, outside the run's TMPDIR, and its atexit teardown deletes
+#: pgdata; in an xdist worker that is before the controller copies a failed run's evidence, and a
+#: killed worker never runs atexit at all, so no failed run kept them (nexus-ww33u). Inside a tmpfs
+#: test run (tests/_tmp_root.py) the engine therefore writes its log straight into
+#: ``<run TMPDIR>/nexus-svc-logs-<pid>/engine.log`` (a kill cannot lose it), and pg.log, which the DDL
+#: counter reads from pgdata, has its tail copied there by the teardown and, for a killed worker's
+#: cluster, by the next boot's sweep (``nexus-svc-logs-swept-<cluster>``). The failed-run copy finds
+#: both through its ``nexus-svc-*`` glob; the run directory goes with the run.
+_LOG_KEEP_PREFIX = "nexus-svc-logs-"
+_LOG_KEEP_TAIL_BYTES = 4 * 1024**2
+
+
+def _original_tempdir() -> Path:
+    """The process tempdir as it was before ``tests/_tmp_root.py`` moved it."""
+    return Path(os.environ.get(_TMP_ORIG_ENV) or tempfile.gettempdir())
+
+#: Headroom required before clusters are put on tmpfs: 2 GiB plus a 1 GiB margin,
+#: checked against the SMALLER of the tmpfs's free space and the process's cgroup
+#: memory headroom (tmpfs pages are charged to the cgroup, and on a 64 GB box
+#: /dev/shm "free" never runs out first). A cluster's footprint is its data
+#: directory PLUS its WAL. Measured on chas (nexus-me3gm, two small T2 test
+#: files, serial): 42 MB at boot, 66 MB at 10 s, 108 MB at 24 s with pg_wal at
+#: its 64 MB cap; the data part keeps growing with the test catalog, so size a
+#: suite as ~100 MB plus growth per worker. The threshold is a floor for
+#: starting, not a budget for 32 workers.
+_TMPFS_MIN_FREE_BYTES = 3 * 1024**3
+
+#: A sidecar-less, postmaster-less cluster dir in the tmpfs root older than this
+#: was killed during initdb and is reaped (disk roots keep reporting only).
+_SWEEP_BARE_TMPFS_MIN_AGE_S = 600.0
+
+#: ``sun_path`` is 108 bytes on Linux including the NUL, so a socket path may use
+#: 107. A cluster dir is ``<root>/<prefix><8 random>`` and the socket
+#: ``/.s.PGSQL.<port>`` inside it, so the root may use ``107 - reserve`` bytes. The
+#: reserve is sized for the LONGEST prefix any cluster maker uses (the integration
+#: fixtures reach 26 chars, e.g. ``nexus_recovery_inttest_pg_``; the substrate's own
+#: is 22); :func:`integration_cluster_dir` also checks the actual path, so a new
+#: longer prefix fails loud there instead of overrunning ``sun_path``.
+_SOCKET_PATH_MAX = 107
+_LONGEST_CLUSTER_PREFIX = len("nexus_recovery_inttest_pg_")
+_SOCKET_SUFFIX_RESERVE = 1 + _LONGEST_CLUSTER_PREFIX + 8 + len("/.s.PGSQL.65535")
+
+#: Appended to the substrate's ``postgresql.conf`` (nexus-me3gm). Caps pg_wal at
+#: about 64 MB instead of the 1 GB default. ``wal_level = minimal`` requires
+#: ``max_wal_senders = 0`` and ``archive_mode = off`` (the default). Nothing in
+#: ``tests/`` or ``service/src/test`` uses replication, logical decoding or
+#: ``pg_basebackup`` against this cluster (grepped 2026-10-19).
+WAL_CAP_CONF = (
+    "wal_level = minimal\n"
+    "max_wal_senders = 0\n"
+    "max_wal_size = 64MB\n"
+    "min_wal_size = 32MB\n"
+    "wal_keep_size = 0\n"
+)
+
+#: fsync-free durability for a throwaway cluster: nothing in a test cluster has to
+#: survive an OS crash (a killed postmaster recovers from the page cache). Shared
+#: by the substrate boot, :func:`throwaway_pg_cluster` and the integration
+#: clusters (:func:`integration_cluster_conf`, nexus-942h9).
+THROWAWAY_FSYNC_CONF = (
+    "fsync = off\n"
+    "synchronous_commit = off\n"
+    "full_page_writes = off\n"
+)
+
+
+def _current_uid() -> str:
+    """The service identity (``str(os.getuid())`` on POSIX); every raw ``getuid``
+    in a test-support module is a lint failure (tests/test_service_identity_lint.py)."""
+    from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred: keep this module's import light
+
+    return service_identity()
+
+
+def _abs(path: str) -> Path:
+    """``~`` expanded and made absolute (no symlink resolution), so a relative
+    ``NX_TEST_PG_ROOT`` is length-checked and swept as the path it really is."""
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _tmpfs_candidate(uid: int | str, shm_dir: Path = _SHM_DIR) -> Path:
+    return shm_dir / f"{_TMPFS_DIR_PREFIX}-{uid}"
+
+
+#: quotactl_fd(2), the asm-generic syscall number shared by x86_64 and arm64 (Linux 5.14+).
+_QUOTACTL_FD_NR: int = 443
+#: QCMD(Q_GETQUOTA, USRQUOTA).
+_Q_GETQUOTA_USR: int = 0x800007 << 8
+#: if_dqblk.dqb_valid bits (linux/quota.h): QIF_BLIMITS, QIF_SPACE.
+_QIF_BLIMITS: int = 1
+_QIF_SPACE: int = 2
+#: struct if_dqblk: eight __u64 and a __u32, 72 bytes with the trailing padding.
+_DQBLK_FIELDS: tuple[str, ...] = (
+    "bhardlimit", "bsoftlimit", "curspace", "ihardlimit", "isoftlimit", "curinodes", "btime", "itime",
+)
+
+
+def _dqblk_type() -> type:
+    import ctypes
+
+    class _Dqblk(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in _DQBLK_FIELDS] + [("valid", ctypes.c_uint32)]
+
+    return _Dqblk
+
+
+def _read_user_quota(path: Path) -> tuple[int, int, int, int] | None:
+    """``(hard KiB, soft KiB, used bytes, valid bits)`` of this user's quota on *path*'s
+    filesystem, or None when it cannot be read (not 64-bit Linux on x86_64/arm64, no
+    quota on the mount, a kernel without quotactl_fd). Never raises."""
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "aarch64"):
+        return None
+    try:
+        import ctypes
+
+        if ctypes.sizeof(ctypes.c_void_p) != 8:  # a 32-bit Python lays the struct out in 68 bytes
+            return None
+        uid = int(_current_uid())
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            dq = _dqblk_type()()
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.syscall(_QUOTACTL_FD_NR, fd, _Q_GETQUOTA_USR, uid, ctypes.byref(dq)) != 0:
+                return None
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 — a probe: no answer, never an error
+        return None
+    return dq.bhardlimit, dq.bsoftlimit, dq.curspace, dq.valid
+
+
+def _user_quota_headroom(path: Path) -> int | None:
+    """Bytes this user may still write under the user quota of *path*'s filesystem,
+    or None when there is no limit or it cannot be read. chas mounts /dev/shm with
+    ``usrquota`` and gives nxtest about 49.45 GiB of a 62 GiB tmpfs, which
+    ``shutil.disk_usage`` cannot see (nexus-bmjet); a user given no limit there
+    (the CI runner's) reads None."""
+    quota = _read_user_quota(path)
+    return None if quota is None else _quota_headroom(*quota)
+
+
+def _quota_headroom(hard_kib: int, soft_kib: int, used_bytes: int, valid: int) -> int | None:
+    """Headroom under the tighter of a quota's block limits (1 KiB blocks; 0 means
+    none), or None when it sets none or did not report them."""
+    if not (valid & _QIF_BLIMITS and valid & _QIF_SPACE):
+        return None
+    limits = [lim for lim in (hard_kib, soft_kib) if lim]
+    if not limits:
+        return None
+    return max(0, min(limits) * 1024 - used_bytes)
+
+
+def _tmpfs_free_bytes(path: Path) -> int:
+    """Free bytes on *path*'s filesystem for this user: the filesystem's free space,
+    or the user's quota headroom when that is smaller."""
+    free = shutil.disk_usage(path).free
+    quota = _user_quota_headroom(path)
+    return free if quota is None else min(free, quota)
+
+
+def _read_mounts() -> str | None:
+    """``/proc/mounts``, or None where there is none (macOS, Windows)."""
+    try:
+        return Path("/proc/mounts").read_text()
+    except OSError:
+        return None
+
+
+def _mount_fstype(mounts_text: str, mountpoint: str) -> str | None:
+    """The filesystem type ``/proc/mounts``-style text gives *mountpoint*, last
+    entry winning (a later mount shadows an earlier one)."""
+    found: str | None = None
+    for line in mounts_text.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == mountpoint:
+            found = fields[2]
+    return found
+
+
+def _socket_path_fits(root: Path) -> bool:
+    return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _SOCKET_PATH_MAX
+
+
+def _cgroup_dirs(
+    *, proc_cgroup: str | None, cgroup_root: Path,
+) -> list[Path]:
+    """The cgroup-v2 directories on this process's path, deepest first and the
+    root last; ``[]`` where there is no v2 path (cgroup v1, macOS)."""
+    try:
+        text = Path("/proc/self/cgroup").read_text() if proc_cgroup is None else proc_cgroup
+    except OSError:
+        return []
+    rel = next((ln[3:] for ln in text.splitlines() if ln.startswith("0::")), None)
+    if rel is None:
+        return []
+    parts = [p for p in rel.strip().split("/") if p]
+    return [cgroup_root.joinpath(*parts[:d]) for d in range(len(parts), -1, -1)]
+
+
+def _reclaimable_file_bytes(d: Path) -> int:
+    """Page cache the kernel can drop under pressure: ``active_file`` plus
+    ``inactive_file`` of ``memory.stat`` (tmpfs pages are NOT in these; they are
+    shmem). 0 when the file is unreadable."""
+    try:
+        text = (d / "memory.stat").read_text()
+    except OSError:
+        return 0
+    total = 0
+    for line in text.splitlines():
+        key, _, val = line.partition(" ")
+        if key in ("active_file", "inactive_file"):
+            try:
+                total += int(val)
+            except ValueError:
+                pass
+    return total
+
+
+def _cgroup_headroom(
+    *,
+    proc_cgroup: str | None = None,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    credit_reclaimable: bool = False,
+) -> int | None:
+    """Bytes of memory headroom under the tightest cgroup-v2 limit on this
+    process's cgroup path (its own and every ancestor's), or None when there is no
+    limit or the files are unreadable (cgroup v1, macOS).
+
+    ``credit_reclaimable`` adds the level's droppable page cache to its room. A
+    long run fills ``memory.current`` with file cache up to the limit and the
+    kernel reclaims it on demand, so the raw figure reads near zero on a healthy
+    run; the mid-run exhaustion check and the start decision (nexus-vo9qn) both
+    use the credited one, and the decision logs both."""
+    best: int | None = None
+    for d in _cgroup_dirs(proc_cgroup=proc_cgroup, cgroup_root=cgroup_root):
+        try:
+            mx = (d / "memory.max").read_text().strip()
+            cur = int((d / "memory.current").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if mx == "max":
+            continue
+        try:
+            room = int(mx) - cur
+        except ValueError:
+            continue
+        if credit_reclaimable:
+            room += _reclaimable_file_bytes(d)
+        best = room if best is None else min(best, room)
+    return best
+
+
+def cgroup_memory_limit(
+    *, proc_cgroup: str | None = None, cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int | None:
+    """The tightest ``memory.max`` on this process's cgroup path, in bytes, or
+    None when nothing on the path is limited (or there is no cgroup v2)."""
+    best: int | None = None
+    for d in _cgroup_dirs(proc_cgroup=proc_cgroup, cgroup_root=cgroup_root):
+        try:
+            mx = (d / "memory.max").read_text().strip()
+            limit = int(mx)
+        except (OSError, ValueError):
+            continue
+        best = limit if best is None else min(best, limit)
+    return best
+
+
+def _tmpfs_refused(reason: str) -> None:
+    """A Linux box that could not use tmpfs says so, once per boot: the NVMe wear
+    this bead exists to stop comes back silently otherwise."""
+    _log.warning("nexus_t2_substrate.tmpfs_root_refused", reason=reason, bead="nexus-me3gm")
+    warnings.warn(
+        f"nexus test substrate: not using tmpfs for clusters: {reason}; "
+        f"falling back to the tempdir (set {_PG_ROOT_ENV} to choose a root)",
+        stacklevel=3,
+    )
+
+
+def decide_pg_root(
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    mounts_text: str | None = None,
+    free_bytes: Callable[[Path], int] | None = None,
+    writable: Callable[[Path], bool] | None = None,
+    cgroup_headroom: Callable[[], int | None] | None = None,
+    uid: int | str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> tuple[Path | None, str | None]:
+    """``(root, refusal)``: the directory substrate clusters are created under, or
+    ``None`` for the process tempdir, and, when a Linux box with no override could
+    not use tmpfs, the reason (else ``None``). Pure decision: it creates and warns
+    about nothing. Every input is injectable so the outcomes (override, forced
+    default, tmpfs, no tmpfs, too small) are unit tests, not machine state.
+    """
+    env = os.environ if env is None else env
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    if override == "default":
+        return None, None
+    if override:
+        root = _abs(override)
+        if not _socket_path_fits(root):
+            raise ValueError(
+                f"{_PG_ROOT_ENV}={root} is too long: a substrate cluster's unix "
+                f"socket path under it would pass the {_SOCKET_PATH_MAX}-byte "
+                f"sun_path limit (root may use at most "
+                f"{_SOCKET_PATH_MAX - _SOCKET_SUFFIX_RESERVE} bytes)"
+            )
+        return root, None
+    if (platform.system() if system is None else system) != "Linux":
+        return None, None
+    if mounts_text is None:
+        mounts_text = _read_mounts()
+        if mounts_text is None:
+            return None, "cannot read /proc/mounts"
+    fstype = _mount_fstype(mounts_text, str(shm_dir))
+    if fstype != "tmpfs":
+        return None, f"{shm_dir} is not tmpfs ({fstype or 'no mount entry'})"
+    can_write = writable or (lambda p: os.access(p, os.W_OK | os.X_OK))
+    if not can_write(shm_dir):
+        return None, f"{shm_dir} is not writable by this user"
+    try:
+        free = (free_bytes or _tmpfs_free_bytes)(shm_dir)
+    except OSError as exc:
+        return None, f"cannot read free space of {shm_dir} ({exc})"
+    if free < _TMPFS_MIN_FREE_BYTES:
+        return None, (
+            f"{shm_dir} has {free // 1024**2} MiB free for this user (free space or user quota), below the "
+            f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor"
+        )
+    # The CREDITED figure decides, the same one the mid-run floor uses: a grant
+    # warmed by a build or ``uv sync`` has its memory.current full of reclaimable
+    # page cache, and the raw figure would send the whole run to disk (nexus-vo9qn).
+    raw_headroom: int | None = None
+    if cgroup_headroom is not None:
+        headroom = cgroup_headroom()
+    else:
+        raw_headroom = _cgroup_headroom()
+        headroom = _cgroup_headroom(credit_reclaimable=True)
+    _log.info(
+        "nexus_t2_substrate.root_decision_headroom",
+        raw_headroom_mib=None if raw_headroom is None else raw_headroom // 1024**2,
+        credited_headroom_mib=None if headroom is None else headroom // 1024**2,
+        floor_mib=_TMPFS_MIN_FREE_BYTES // 1024**2,
+        bead="nexus-vo9qn",
+    )
+    if headroom is not None and headroom < _TMPFS_MIN_FREE_BYTES:
+        raw_note = (
+            "" if raw_headroom is None else f", {raw_headroom // 1024**2} MiB before "
+            f"crediting reclaimable page cache"
+        )
+        return None, (
+            f"the cgroup memory headroom is {headroom // 1024**2} MiB{raw_note}, "
+            f"below the {_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor (tmpfs pages "
+            f"are charged to it)"
+        )
+    root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
+    if not _socket_path_fits(root):
+        return None, f"a unix socket path under {root} would pass the sun_path limit"
+    return root, None
+
+
+def choose_pg_root(**kw) -> Path | None:
+    """:func:`decide_pg_root` for its root alone; a Linux fallback with no override
+    is warned about by name (:func:`_tmpfs_refused`). Takes the same injectable
+    inputs. Production code goes through :func:`session_pg_root`, which makes this
+    decision once per run."""
+    root, refusal = decide_pg_root(**kw)
+    if refusal is not None:
+        _tmpfs_refused(refusal)
+    return root
+
+
+# nexus-vo9qn: the tmpfs-vs-disk decision is made ONCE per run. choose_pg_root used
+# to run per worker at every cluster start and refuse tmpfs when the cgroup's
+# headroom was under 3 GiB; tmpfs pages are charged to the grant, so as workers
+# filled memory the later clusters went to ext4 (lab-l, -n auto: 3.9 GB written in
+# 4 min). The first decision is persisted in the process environment, which xdist
+# workers inherit, so every cluster in the run uses it.
+_PG_ROOT_SESSION_ENV = "NX_TEST_PG_ROOT_SESSION"
+#: Run-scoped file (path in the env) each cluster start appends one line to; the
+#: controller's terminal summary counts it. Only the pytest controller creates it.
+_PG_ROOT_LOG_ENV = "NX_TEST_PG_ROOT_LOG"
+
+#: What a mid-run cluster start needs from a session that chose tmpfs. One cluster
+#: measured 108 MB at 24 s (nexus-me3gm); 512 MiB is that with margin. Below it the
+#: start fails loud instead of falling back to disk: that fallback is the NVMe wear
+#: this bead exists to stop.
+_TMPFS_HARD_FLOOR_BYTES = 512 * 1024**2
+
+
+class SubstrateRootExhausted(RuntimeError):
+    """The run chose tmpfs for its clusters and a later cluster cannot fit. Never
+    answered by a silent fall back to disk (nexus-vo9qn)."""
+
+
+def _encode_session_root(root: Path | None, refusal: str | None) -> str:
+    return f"tmpfs={root}" if root is not None else f"disk={refusal or ''}"
+
+
+def _decode_session_root(raw: str | None) -> tuple[bool, Path | None, str | None]:
+    """``(valid, root, refusal)`` for a :data:`_PG_ROOT_SESSION_ENV` value; an
+    absent or unrecognised value is not valid and is decided afresh."""
+    if raw and raw.startswith("tmpfs=") and len(raw) > len("tmpfs="):
+        return True, Path(raw[len("tmpfs="):]), None
+    if raw is not None and raw.startswith("disk="):
+        return True, None, raw[len("disk="):] or None
+    return False, None, None
+
+
+def session_pg_root(
+    *, env: dict[str, str] | None = None, **decide_kw,
+) -> tuple[Path | None, str | None, bool]:
+    """``(root, refusal, explicit)`` for this run's clusters. An explicit
+    ``NX_TEST_PG_ROOT`` is a standing instruction and is read every time; the
+    automatic choice is made on the first call and persisted in *env* (default
+    ``os.environ``) for every later cluster, in this process and in the xdist
+    workers it spawns. Deciding warns about nothing: a refusal is warned about at
+    the first disk cluster start in each process (:func:`pg_cluster_parent`), so
+    an xdist run that starts no cluster says nothing (nexus-t71bk). The process
+    that decided owns the env value and clears it at
+    :func:`end_pg_root_session`."""
+    env = os.environ if env is None else env
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    if override:
+        root, refusal = decide_pg_root(env=env, **decide_kw)
+        return root, refusal, override != "default"
+    valid, root, refusal = _decode_session_root(env.get(_PG_ROOT_SESSION_ENV))
+    if valid:
+        return root, refusal, False
+    root, refusal = decide_pg_root(env=env, **decide_kw)
+    env[_PG_ROOT_SESSION_ENV] = _encode_session_root(root, refusal)
+    if env is os.environ:
+        _OWNED_SESSION[:] = [env[_PG_ROOT_SESSION_ENV]]
+    return root, refusal, False
+
+
+_OWNED_LOGS: set[str] = set()
+#: The session decision this process wrote to ``os.environ`` (at most one value).
+#: :func:`end_pg_root_session` clears it, so a second ``pytest.main`` in a
+#: long-lived process (an IDE test server) decides afresh (nexus-t71bk).
+_OWNED_SESSION: list[str] = []
+#: This process's own cluster starts: the summary source of a serial run, which
+#: needs no cross-process log.
+_LOCAL_ROWS: list[dict] = []
+#: Whether this process has warned that its clusters go to disk (nexus-t71bk).
+_REFUSAL_WARNED: list[bool] = []
+
+#: The run's cluster log is ``<tempdir>/nexus-pg-roots-<controller pid>-*.log``; the
+#: pid lets a later controller remove the log of one that was SIGKILLed.
+_RUN_LOG_PREFIX = "nexus-pg-roots-"
+_RUN_LOG_NAME = re.compile(r"nexus-pg-roots-(\d+)-[^/]*\.log")
+
+
+def _sweep_dead_run_logs(tmpdir: Path | None = None) -> int:
+    """Remove cluster logs left by controllers that died before their summary
+    (SIGKILL, OOM). Only regular files this uid owns whose name carries a pid that
+    is no longer alive; a log without a pid in its name is left alone. Windows has
+    no numeric uid, so the owner check is POSIX only, as in the stale-dir sweeps.
+    A pid is read in this process's pid namespace: two containers sharing one
+    tempdir under one uid would take each other's live controller for dead. A
+    name that cannot be probed (a planted, out-of-range pid) skips that file only.
+    Returns how many were removed (nexus-t71bk)."""
+    d = Path(tempfile.gettempdir()) if tmpdir is None else tmpdir
+    removed = 0
+    try:
+        candidates = list(d.glob(f"{_RUN_LOG_PREFIX}*.log"))
+    except OSError:
+        return 0
+    for p in candidates:
+        m = _RUN_LOG_NAME.fullmatch(p.name)
+        if m is None:
+            continue
+        try:
+            if int(m[1]) == os.getpid() or pid_alive(int(m[1])):
+                continue
+            st = p.lstat()
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if os.name != "nt" and st.st_uid != int(_current_uid()):
+                continue
+            p.unlink()
+        except (OSError, ValueError, OverflowError):
+            continue
+        removed += 1
+    return removed
+
+
+def begin_pg_root_session() -> None:
+    """Called by the pytest xdist controller before it spawns workers: take the
+    session decision now, so no worker decides on its own, and open the run's
+    cluster log for the workers to append to. A nested pytest inherits both and
+    leaves them alone."""
+    try:
+        session_pg_root()
+    except ValueError:
+        raise  # an over-long NX_TEST_PG_ROOT is a loud, pre-run failure
+    except Exception as exc:  # noqa: BLE001 — workers must not decide on their own
+        persist_controller_failure(exc)
+    if not os.environ.get(_PG_ROOT_LOG_ENV):
+        with contextlib.suppress(Exception):
+            _sweep_dead_run_logs()
+        try:
+            fd, path = tempfile.mkstemp(prefix=f"{_RUN_LOG_PREFIX}{os.getpid()}-", suffix=".log")
+        except OSError as exc:  # the summary is lost; the decision above stands
+            _log.warning("nexus_t2_substrate.cluster_log_unavailable", error=str(exc))
+            return
+        os.close(fd)
+        os.environ[_PG_ROOT_LOG_ENV] = path
+        _OWNED_LOGS.add(path)
+
+
+def persist_controller_failure(exc: BaseException) -> None:
+    """The controller could not take the run's root decision. Persist a DISK
+    decision naming why, so every xdist worker inherits one run-wide answer rather
+    than deciding on its own as memory fills (the per-worker flip this bead
+    removes), and say so loudly. Never raises, and leaves a valid decision alone."""
+    with contextlib.suppress(Exception):
+        valid, _root, _why = _decode_session_root(os.environ.get(_PG_ROOT_SESSION_ENV))
+        if valid:
+            return
+        reason = f"the controller could not decide ({type(exc).__name__}: {exc})"
+        os.environ[_PG_ROOT_SESSION_ENV] = _encode_session_root(None, reason)
+        _OWNED_SESSION[:] = [os.environ[_PG_ROOT_SESSION_ENV]]
+        _tmpfs_refused(reason)
+
+
+def _record_cluster_root(kind: str, root: str | None, reason: str | None) -> None:
+    row = {"kind": kind, "root": root, "reason": reason, "pid": os.getpid()}
+    _LOCAL_ROWS.append(row)
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    if path:
+        with contextlib.suppress(OSError):
+            with open(path, "a") as f:  # one short O_APPEND write: atomic across workers
+                f.write(json.dumps(row) + "\n")
+
+
+def pg_root_run_summary(*, finish: bool = False) -> str | None:
+    """The one-line "where did the clusters go" answer for this run, or None when
+    no cluster started. The controller that opened the cluster log reads every
+    worker's rows from it; any other process, a serial run or a nested pytest that
+    inherited an outer run's log, reads its own (nexus-t71bk). So a nested ``-n``
+    run reports nothing of its workers' starts; their rows count in the outer
+    run's line instead. With ``finish`` the
+    controller also removes the log it created."""
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    rows = list(_LOCAL_ROWS)
+    if path and path in _OWNED_LOGS:
+        try:
+            rows = [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
+        except (OSError, ValueError):
+            pass
+        if finish and path in _OWNED_LOGS:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            _OWNED_LOGS.discard(path)
+            os.environ.pop(_PG_ROOT_LOG_ENV, None)
+    if not rows:
+        return None
+    tmpfs = [r for r in rows if r["kind"] == "tmpfs"]
+    disk = [r for r in rows if r["kind"] != "tmpfs"]
+    line = f"nexus test substrate: clusters on tmpfs {len(tmpfs)}, on disk {len(disk)}"
+    why = sorted({r["reason"] for r in disk if r.get("reason")})
+    if why:
+        line += " (disk because: " + "; ".join(why) + ")"
+    roots = sorted({r["root"] for r in rows if r.get("root")})
+    if roots:
+        line += " [root " + ", ".join(roots) + "]"
+    return line
+
+
+def end_pg_root_session() -> None:
+    """At the end of a pytest run in this process: remove the cluster log it opened
+    if the summary did not, clear the session decision it wrote, and forget its
+    cluster starts and warning, so the next ``pytest.main`` in the same process
+    starts clean. An inherited decision or log is left alone (nexus-t71bk)."""
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    if path and path in _OWNED_LOGS:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        os.environ.pop(_PG_ROOT_LOG_ENV, None)
+    _OWNED_LOGS.clear()
+    if _OWNED_SESSION and os.environ.get(_PG_ROOT_SESSION_ENV) == _OWNED_SESSION[0]:
+        os.environ.pop(_PG_ROOT_SESSION_ENV, None)
+    _OWNED_SESSION.clear()
+    _LOCAL_ROWS.clear()
+    _REFUSAL_WARNED.clear()
+
+
+#: A start below the hard floor waits this long for headroom to come back before
+#: it errors: a neighbour's JVM heap spike or page cache not yet reclaimed is a
+#: moment, not a lack of capacity (nexus-vo9qn review S3). Polled every
+#: :data:`_TMPFS_FLOOR_POLL_S`.
+_TMPFS_FLOOR_WAIT_S = 45.0
+_TMPFS_FLOOR_POLL_S = 3.0
+
+#: When the floor last tripped in this process (the injected clock's reading), or
+#: None. A start within :data:`_TMPFS_FLOOR_LATCH_S` of a trip looks once instead of
+#: polling again, since module- and function-scoped fixtures would otherwise each
+#: re-wait the full bound for the same verdict (nexus-gsjzh). After the window a
+#: start polls the full bound again, so a squeeze that outlasts one poll but passes
+#: (the neighbour-JVM spike the poll exists for) is still absorbed. Cleared by a
+#: start that finds room.
+_FLOOR_TRIPPED_AT: float | None = None
+_TMPFS_FLOOR_LATCH_S = 120.0
+
+
+def _tmpfs_floor_cause(
+    root: Path,
+    free_bytes: Callable[[Path], int] | None,
+    cgroup_headroom: Callable[[], int | None] | None,
+) -> str | None:
+    """Why one more cluster does not fit right now, or None when it does."""
+    try:
+        free = (free_bytes or _tmpfs_free_bytes)(
+            root if root.exists() else root.parent
+        )
+    except OSError:
+        free = None
+    headroom = (
+        cgroup_headroom or (lambda: _cgroup_headroom(credit_reclaimable=True))
+    )()
+    if free is not None and free < _TMPFS_HARD_FLOOR_BYTES:
+        return f"{root} has {free // 1024**2} MiB free for this user (free space or user quota)"
+    if headroom is not None and headroom < _TMPFS_HARD_FLOOR_BYTES:
+        return (
+            f"the cgroup has {headroom // 1024**2} MiB of memory headroom left "
+            f"(tmpfs pages are charged to it)"
+        )
+    return None
+
+
+def _check_tmpfs_has_room(
+    root: Path,
+    *,
+    free_bytes: Callable[[Path], int] | None = None,
+    cgroup_headroom: Callable[[], int | None] | None = None,
+    wait_s: float | None = None,
+    poll_s: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Fail loud when a run that chose tmpfs cannot fit one more cluster, after
+    polling for up to *wait_s* (default :data:`_TMPFS_FLOOR_WAIT_S`) for the
+    headroom to recover. Once that has failed in this process, later calls look
+    once and do not wait for :data:`_TMPFS_FLOOR_LATCH_S` after it
+    (:data:`_FLOOR_TRIPPED_AT`). Clock and sleep are injectable."""
+    global _FLOOR_TRIPPED_AT
+    latched = _FLOOR_TRIPPED_AT is not None and clock() - _FLOOR_TRIPPED_AT < _TMPFS_FLOOR_LATCH_S
+    wait = 0.0 if latched else (_TMPFS_FLOOR_WAIT_S if wait_s is None else wait_s)
+    poll = _TMPFS_FLOOR_POLL_S if poll_s is None else poll_s
+    start = clock()
+    while True:
+        cause = _tmpfs_floor_cause(root, free_bytes, cgroup_headroom)
+        if cause is None:
+            _FLOOR_TRIPPED_AT = None
+            return
+        if clock() - start >= wait:
+            break
+        sleep(poll)
+    if not latched:
+        # only a full poll stamps the window, so repeated fast raises cannot slide it
+        _FLOOR_TRIPPED_AT = clock()
+    waited = (
+        f"the floor already tripped in this process within the last {_TMPFS_FLOOR_LATCH_S:g} s, "
+        f"so this start did not wait again"
+        if latched else f"it did not recover in {wait:g} s"
+    )
+    raise SubstrateRootExhausted(
+        f"nexus test substrate: no room for another cluster on tmpfs: {cause}, "
+        f"below the {_TMPFS_HARD_FLOOR_BYTES // 1024**2} MiB floor a cluster start "
+        f"needs, and {waited}. "
+        f"This run chose tmpfs at its start and will not fall back to disk mid-run "
+        f"(that wrote 3.9 GB to the NVMe in 4 minutes, nexus-vo9qn). Read the cause "
+        f"in the summary line ('clusters on tmpfs N, on disk M') and the "
+        f"nexus_t2_substrate.cluster_root / root_decision_headroom log events "
+        f"(info level: re-run with --log-level=INFO). "
+        f"In order: run fewer workers (-n N, with N = headroom / 3.2 GiB) or a "
+        f"larger lab-run class; set {_PG_ROOT_ENV}=<dir> to put clusters on a "
+        f"disk you choose; {_PG_ROOT_ENV}=default puts every cluster back on the "
+        f"tempdir (disk) and brings the NVMe writes this check exists to prevent."
+    )
+
+
+def _on_tmpfs_root(
+    parent: str | None, *, mounts_text: str | None, shm_dir: Path = _SHM_DIR,
+) -> bool:
+    if parent is None:
+        return False
+    if mounts_text is None:
+        mounts_text = _read_mounts()
+        if mounts_text is None:
+            return False
+    return (
+        _mount_fstype(mounts_text, str(shm_dir)) == "tmpfs"
+        and Path(parent).is_relative_to(shm_dir)
+    )
+
+
+def wal_cap_conf(
+    parent: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """:data:`WAL_CAP_CONF` where it helps: a cluster on the tmpfs root, or on an
+    explicit ``NX_TEST_PG_ROOT``. On the tempdir fallback (disk) the 64 MB cap
+    only multiplies checkpoints, and macOS/Windows stay unchanged (nexus-me3gm)."""
+    env = os.environ if env is None else env
+    explicit = (env.get(_PG_ROOT_ENV) or "").strip() not in ("", "default")
+    if parent is not None and (
+        explicit or _on_tmpfs_root(parent, mounts_text=mounts_text, shm_dir=shm_dir)
+    ):
+        return WAL_CAP_CONF
+    return ""
+
+
+def dsm_conf(
+    parent: str | None,
+    *,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """The ``dynamic_shared_memory_type`` line for a cluster under *parent*.
+
+    Postgres's default (posix) puts dynamic shared memory in ``/dev/shm`` as
+    ``PostgreSQL.<n>`` files, and a SIGKILLed postmaster leaves them behind with
+    nothing to reap them: chas held 864 of them (444 MB) after two weeks. On a
+    cluster that already lives on tmpfs, ``mmap`` keeps DSM in
+    ``<pgdata>/pg_dynshmem`` instead, which dies with the cluster dir (the sweep)
+    and which Postgres clears at startup. On a disk root, ``mmap`` would be real
+    writes, so the default stays (nexus-me3gm).
+    """
+    if not _on_tmpfs_root(parent, mounts_text=mounts_text, shm_dir=shm_dir):
+        return ""
+    return "dynamic_shared_memory_type = mmap\n"
+
+
+def pg_cluster_parent() -> str | None:
+    """The session's cluster root (:func:`session_pg_root`) plus creating the
+    directory (0700, owned by us). ``None`` means "use the tempdir". A tmpfs root
+    that cannot be made private falls back to the tempdir with a warning (a
+    permissions fact, the same for every cluster); an explicit ``NX_TEST_PG_ROOT``
+    that cannot be made fails loud, and so does a tmpfs session with no room
+    left. Every start logs where the cluster went and why, and is counted for
+    the run's summary line (nexus-vo9qn)."""
+    root, refusal, explicit = session_pg_root()
+    if root is None:
+        if refusal is not None and not _REFUSAL_WARNED:
+            _REFUSAL_WARNED.append(True)
+            _tmpfs_refused(refusal)
+        _log_cluster_root(None, refusal)
+        return None
+    if not explicit:
+        _check_tmpfs_has_room(root)
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not explicit:
+            # /dev/shm is world-writable: refuse a dir someone else pre-created
+            # under our predictable name.
+            st = root.lstat()
+            if not stat.S_ISDIR(st.st_mode):
+                raise PermissionError(f"{root} is not a real directory")
+            if st.st_uid != int(_current_uid()):
+                raise PermissionError(f"{root} is owned by uid {st.st_uid}")
+            if st.st_mode & 0o077:
+                root.chmod(0o700)
+    except OSError as exc:
+        if explicit:
+            raise
+        if not _REFUSAL_WARNED:  # the same permissions fact at every start: say it once
+            _REFUSAL_WARNED.append(True)
+            warnings.warn(
+                f"nexus test substrate: cannot use {root} for clusters ({exc}); "
+                f"falling back to the tempdir",
+                stacklevel=2,
+            )
+        _log_cluster_root(None, f"cannot use {root} ({exc})")
+        return None
+    _log_cluster_root(root, None)
+    return str(root)
+
+
+def _log_cluster_root(root: Path | None, reason: str | None) -> None:
+    """One structured line per cluster start and one row in the run's cluster
+    log. A disk start with a reason is a warning (visible at the default log
+    level); the rest are info."""
+    kind = "tmpfs" if root is not None and _on_tmpfs_root(str(root), mounts_text=None) else "disk"
+    fields = {"root": str(root) if root else "tempdir", "on": kind, "reason": reason}
+    if reason:
+        _log.warning("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
+    else:
+        _log.info("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
+    _record_cluster_root(kind, str(root) if root else None, reason)
+
+
+def substrate_pg_roots(
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+    uid: int | str | None = None,
+    tempdir: Path | None = None,
+    shm_dir: Path | None = None,
+) -> list[Path]:
+    """Every root the stray-cluster sweep must look in: the tempdir (where the
+    older clusters live), ``NX_TEST_PG_ROOT`` when set, and the tmpfs root
+    whenever its directory EXISTS on Linux. The override never hides the tmpfs
+    root: ``=default`` and ``=<dir>`` change where NEW clusters go, never what the
+    sweep looks at, because a cluster stranded in tmpfs is RAM until reaped.
+    """
+    env = os.environ if env is None else env
+    base = _original_tempdir() if tempdir is None else tempdir
+    if shm_dir is None:
+        shm_dir = Path(env.get(_SHM_DIR_SEAM_ENV) or _SHM_DIR)
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    roots: list[Path] = []
+    if override and override != "default":
+        roots.append(_abs(override))
+    if (platform.system() if system is None else system) == "Linux":
+        cand = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
+        # lstat, as the creation path does: a symlink planted under our name in the
+        # world-writable /dev/shm is not our root, and the sweep must not follow it.
+        with contextlib.suppress(OSError):
+            if stat.S_ISDIR(cand.lstat().st_mode):
+                roots.append(cand)
+    roots.append(base)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for r in roots:
+        key = r.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
+
+def throwaway_cluster_conf(
+    parent: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """The ``postgresql.conf`` tail for a throwaway cluster created under *parent*:
+    :data:`THROWAWAY_FSYNC_CONF` always, the WAL cap and mmap DSM where
+    :func:`wal_cap_conf` and :func:`dsm_conf` give them (nexus-942h9)."""
+    return (
+        THROWAWAY_FSYNC_CONF
+        + wal_cap_conf(parent, env=env, mounts_text=mounts_text, shm_dir=shm_dir)
+        + dsm_conf(parent, mounts_text=mounts_text, shm_dir=shm_dir)
+    )
+
+
+def integration_cluster_conf(pgdata: str, **kw) -> str:
+    """:func:`throwaway_cluster_conf` for a cluster made by
+    :func:`integration_cluster_dir` (the root is the cluster dir's parent). An
+    integration fixture appends it to ``postgresql.conf`` beside its port line.
+    No integration caller needs durability semantics (nexus-942h9: they stop the
+    cluster with ``pg_ctl stop -m immediate`` at teardown and none reads pg_wal,
+    sets ``wal_level`` or replicates); one that ever does passes
+    ``parent_dir=<a disk directory of its own>`` to ``pg_data_tempdir`` and skips this
+    (not ``tempfile.gettempdir()``: inside a lab-run grant that is the run's tmpfs,
+    nexus-kyujr)."""
+    return throwaway_cluster_conf(str(Path(pgdata).parent), **kw)
+
+
+#: The settings :func:`integration_cluster_conf` can give that Postgres reads only at a postmaster start. A cluster
+#: that is already running (``pg_provision.provision`` initdbs and starts in one call) cannot take them by a conf
+#: append and a reload, so :func:`reloadable_cluster_conf` leaves them out (nexus-0ajjm).
+RESTART_ONLY_SETTINGS = frozenset({"wal_level", "max_wal_senders", "dynamic_shared_memory_type"})
+
+
+def reloadable_cluster_conf(pgdata: str, **kw) -> str:
+    """:func:`integration_cluster_conf` minus :data:`RESTART_ONLY_SETTINGS`: ``fsync``, ``synchronous_commit``,
+    ``full_page_writes`` and, where the cluster is on the tmpfs root, ``max_wal_size`` / ``min_wal_size`` /
+    ``wal_keep_size``. A conf append plus ``pg_ctl reload`` applies all of them to a running cluster."""
+    return "".join(
+        line + "\n"
+        for line in integration_cluster_conf(pgdata, **kw).splitlines()
+        if line.split("=", 1)[0].strip() not in RESTART_ONLY_SETTINGS
+    )
+
+
+# ── Integration clusters: owner records (nexus-942h9) ────────────────────────
+#
+# An integration fixture (``tests._child_process.pg_data_tempdir``) makes its
+# cluster dir BEFORE initdb and starts the engine JVM in a different fixture, so
+# the substrate's in-dir sidecar does not fit: initdb refuses a non-empty dir, and
+# the JVM is not known when the dir is made. Instead the process keeps ONE record
+# per chosen root, ``<root>/nexus_integration_owner_<pid>.json``: its identity,
+# every cluster dir it made there, and every engine child it spawned
+# (:func:`record_integration_child`). The sweep reaps a record whose owner is
+# dead, with the same identity checks as the sidecar clusters. Only a cluster in
+# a chosen root (tmpfs or ``NX_TEST_PG_ROOT``) is recorded: on the tempdir it is
+# inert disk debris, as before.
+_OWNER_RECORD_PREFIX = "nexus_integration_owner_"
+_OWNER_RECORD_GLOB = f"{_OWNER_RECORD_PREFIX}*.json"
+_owner_lock = threading.Lock()
+#: root -> this process's record contents (the file is a mirror of this).
+_owner_records: dict[Path, dict] = {}
+_integration_swept = False
+_owner_exit_registered = False
+
+
+def _owner_record_path(root: Path) -> Path:
+    return root / f"{_OWNER_RECORD_PREFIX}{os.getpid()}.json"
+
+
+def _flush_owner_record(root: Path, info: dict) -> None:
+    path = _owner_record_path(root)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(info, indent=2))
+    tmp.replace(path)  # atomic: the sweep never reads a torn record
+
+
+def _load_owner_record(root: Path) -> dict:
+    """This process's record for *root*: fresh, plus whatever an earlier process
+    with the same pid left in the file (its orphans become ours to be reaped)."""
+    from nexus.daemon.service_registry import process_command
+
+    info: dict = {
+        "owner_pytest_pid": os.getpid(),
+        "owner_cmdline": process_command(os.getpid()),
+        "pgdatas": [],
+        "children": [],
+    }
+    try:
+        old = json.loads(_owner_record_path(root).read_text())
+        info["pgdatas"] = [p for p in old.get("pgdatas", []) if isinstance(p, str)]
+        info["children"] = [c for c in old.get("children", []) if isinstance(c, dict)]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return info
+
+
+def register_owned_cluster(root: Path, pgdata: str) -> None:
+    """Record *pgdata* (a cluster dir this process just made under *root*) so the
+    sweep can reap it if this process is killed. Best effort: a record that cannot
+    be written is a warning, never a test failure."""
+    global _owner_exit_registered
+    try:
+        with _owner_lock:
+            info = _owner_records.get(root) or _load_owner_record(root)
+            info["pgdatas"] = [p for p in info["pgdatas"] if Path(p).exists()] + [pgdata]
+            _owner_records[root] = info
+            _flush_owner_record(root, info)
+            if not _owner_exit_registered:
+                _owner_exit_registered = True
+                atexit.register(_drop_finished_owner_records)
+    except OSError as exc:
+        warnings.warn(
+            f"nexus integration clusters: cannot record {pgdata} under {root} ({exc}); "
+            f"a kill of this process will leave it for a manual sweep",
+            stacklevel=3,
+        )
+
+
+def record_integration_child(proc: subprocess.Popen) -> None:
+    """Record an engine child so a later sweep can kill it if this process dies. Every engine-JVM spawn
+    reaches it through ``tests._child_process.popen_in_group``; recording the same pid again is a no-op.
+
+    In a process that recorded integration clusters the child joins their records. In any other (the
+    substrate's own, and fixtures that boot against it) a children-only record is kept under the process's
+    original tempdir, a root every sweep reads, so the JVM is never left to nobody (nexus-qsqc6). A child with
+    no readable command line is not recorded: the sweep identifies a child by it."""
+    global _owner_exit_registered
+    from nexus.daemon.service_registry import pid_alive, process_command
+
+    if not isinstance(getattr(proc, "pid", None), int):
+        return  # a test double standing in for Popen
+    cmdline = process_command(proc.pid)
+    if not cmdline:
+        return
+    with _owner_lock:
+        if not _owner_records:
+            root = _original_tempdir()
+            _owner_records[root] = _load_owner_record(root)
+            if not _owner_exit_registered:
+                _owner_exit_registered = True
+                atexit.register(_drop_finished_owner_records)
+        for root, info in _owner_records.items():
+            if any(c.get("pid") == proc.pid and c.get("cmdline") == cmdline for c in info["children"]):
+                continue
+            info["children"] = [
+                c for c in info["children"] if pid_alive(c.get("pid", 0)) and c.get("pid") != proc.pid
+            ] + [{"pid": proc.pid, "cmdline": cmdline}]
+            try:
+                _flush_owner_record(root, info)
+            except OSError as exc:
+                warnings.warn(
+                    f"nexus integration clusters: cannot record engine pid {proc.pid} "
+                    f"under {root} ({exc})",
+                    stacklevel=2,
+                )
+
+
+def _drop_finished_owner_records() -> None:
+    """At exit: remove each record with no cluster dir left and no live child; a
+    record that still guards something stays for the sweep."""
+    from nexus.daemon.service_registry import pid_alive
+
+    with _owner_lock:
+        for root, info in list(_owner_records.items()):
+            if any(Path(p).exists() for p in info["pgdatas"]):
+                continue
+            if any(pid_alive(c.get("pid", 0)) for c in info["children"]):
+                continue
+            try:
+                _owner_record_path(root).unlink(missing_ok=True)
+            except OSError:
+                continue
+            del _owner_records[root]
+
+
+def _sweep_once_per_process() -> None:
+    """Reap dead owners' integration clusters before this process makes its first:
+    an integration-only run never boots the substrate, whose boot is otherwise the
+    only caller of the sweep. Owner records only -- the substrate's own stray
+    clusters (and their loud legacy warnings) stay the substrate boot's business."""
+    global _integration_swept
+    if _integration_swept:
+        return
+    _integration_swept = True
+    try:
+        sweep_integration_owner_records()
+    except Exception as exc:  # noqa: BLE001 - the sweep must never block a cluster (nexus-lgdy1)
+        warnings.warn(
+            f"nexus integration clusters: session-start sweep failed unexpectedly: {exc}",
+            stacklevel=3,
+        )
+
+
+def integration_cluster_dir(prefix: str) -> str:
+    """A fresh cluster dir for an integration fixture: ``mkdtemp`` under
+    :func:`pg_cluster_parent` (tmpfs on Linux with the substrate's gates and loud
+    fallback, else the tempdir), recorded for the crash sweep when it is in a
+    chosen root."""
+    _sweep_once_per_process()
+    parent = pg_cluster_parent()
+    # parent None = the cluster root decided on disk: the ORIGINAL tempdir, never the run's
+    # tmpfs TMPDIR (nexus-kyujr), or the disk decision would land in RAM and the sweep
+    # (which looks at the original tempdir) would never see a stranded one.
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent if parent is not None else _original_tempdir())
+    if parent is not None:
+        # The reserve is a guess about prefixes; this is the real path. Only a
+        # chosen root: the tempdir fallback keeps the callers' older behaviour.
+        if len(path) + len("/.s.PGSQL.65535") > _SOCKET_PATH_MAX:
+            shutil.rmtree(path, ignore_errors=True)
+            raise ValueError(
+                f"cluster dir {path} is too long: its unix socket path would pass "
+                f"the {_SOCKET_PATH_MAX}-byte sun_path limit; use a shorter "
+                f"{_PG_ROOT_ENV} or cluster prefix"
+            )
+    grant_user_tree_access(path)
+    if parent is not None:
+        register_owned_cluster(Path(parent), path)
+    return path
+
 
 #: Sidecar filename, written INSIDE the pgdata dir so it is glob-scoped by
 #: construction and removed for free whenever the cluster dir is.
@@ -227,7 +1320,7 @@ def _worker_shard_width() -> int:
 #: import-time resolution note).
 _PG_AMBIENT_ENV_KEYS = (
     "NEXUS_PG_BIN", "NEXUS_PG_BUNDLE", "NEXUS_CONFIG_DIR", "HOME", "PATH",
-    "XDG_CACHE_HOME", "NX_ONNX_MODEL_DIR", "NX_SERVICE_BGE_DIR",
+    "XDG_CACHE_HOME", "NX_TEST_SUBSTRATE_CACHE", "NX_ONNX_MODEL_DIR", "NX_SERVICE_BGE_DIR",
     "NX_SERVICE_CROSSENCODER_DIR",
 )
 _PG_AMBIENT_ENV: dict[str, str | None] = {
@@ -644,7 +1737,7 @@ def _boot_semaphore_dir(root: Path, uid: int | str | None = None) -> Path:
     return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{uid}"
 
 
-_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))
+_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(_original_tempdir())
 
 #: Generous: a slow/loaded box waiting out a genuine queue of concurrent
 #: boots is expected, not a hang. Failing loud after this window (rather
@@ -778,7 +1871,11 @@ def _initdb_cluster(
     *username* names the bootstrap superuser (``initdb -U``); None keeps
     initdb's own default, the OS account name.
     """
-    pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    # parent_dir None = the ORIGINAL tempdir, not the run's tmpfs TMPDIR (nexus-kyujr): see
+    # integration_cluster_dir.
+    pgdata = tempfile.mkdtemp(
+        prefix=prefix, dir=parent_dir if parent_dir is not None else _original_tempdir(),
+    )
     # Windows: the user's own SID gets an inheritable ACE, or initdb's
     # restricted token cannot write the directory under an elevated session
     # (tests._child_process.pg_data_tempdir). A no-op on POSIX.
@@ -859,6 +1956,11 @@ def throwaway_pg_cluster(
     hazard is the semaphore plus a fail-loud setup error (nexus-ui654), and
     changing the substrate's boot contract is not this bead's business.
     """
+    # nexus-942h9: the same root and conf as the substrate and the integration
+    # clusters, unless the caller names a parent (the unit tests of this helper do).
+    chosen_root = parent_dir is None
+    if chosen_root:
+        parent_dir = pg_cluster_parent()
     pgdata: Path | None = None
     bin_dir: Path | None = None
     for attempt in range(1, attempts + 1):
@@ -874,8 +1976,11 @@ def throwaway_pg_cluster(
                     _initdb_cluster(bin_dir, prefix=prefix, parent_dir=parent_dir)
                 )
                 try:
+                    if chosen_root and parent_dir is not None:
+                        register_owned_cluster(Path(parent_dir), str(pgdata))
                     with open(pgdata / "postgresql.conf", "a") as f:
                         f.write("listen_addresses = ''\n")
+                        f.write(throwaway_cluster_conf(str(pgdata.parent)))
                     proc = pg_ctl_start(
                         bin_dir / "pg_ctl", pgdata, pgdata / "pg.log",
                         f"-k {pgdata}", check=False,
@@ -958,6 +2063,22 @@ def _jar_ready_reason(jar: Path) -> str | None:
     return jar_freshness_skip_reason(jar)
 
 
+def _psql_command(
+    bin_dir: Path, pg_port: int, pg_user: str, sql: str, *, timeout: float | None = None,
+) -> None:
+    """Run *sql* in the substrate database as the cluster owner; RuntimeError on failure."""
+    try:
+        proc = subprocess.run(
+            [str(bin_dir / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"psql timed out after {timeout}s") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql failed: {proc.stderr.strip()[-300:]}")
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -1036,8 +2157,10 @@ def _boot() -> dict:
         # Cleans the dir up if initdb fails, and carries initdb's stderr out
         # (nexus-rbc7k) -- see _initdb_cluster's docstring for both, and for
         # the 21 empty cluster dirs the previous shape stranded here.
+        cluster_parent = pg_cluster_parent()
         pgdata = _initdb_cluster(
             bin_dir, prefix="nexus_t2_substrate_pg_", username=pg_user,
+            parent_dir=cluster_parent,
         )
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
@@ -1047,7 +2170,13 @@ def _boot() -> dict:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
-            f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
+            f.write(THROWAWAY_FSYNC_CONF)
+            # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster) where
+            # the cluster is in RAM or on an explicit root; mmap DSM on tmpfs only.
+            f.write(wal_cap_conf(cluster_parent))
+            f.write(dsm_conf(cluster_parent))
+            # nexus-sz651: DDL-per-run counting reads this cluster's pg.log (tests/_ddl_counter.py).
+            f.write(log_conf())
         pg_log = os.path.join(pgdata, "pg.log")
         for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
             # A lost race leaves its failure in pg.log; start each attempt on a clean log
@@ -1151,6 +2280,18 @@ def _boot() -> dict:
             raise RuntimeError(
                 f"T2 engine substrate: role bootstrap failed:\n{proc.stderr}"
             )
+        # nexus-sz651: before the engine migrates, so its DDL (and every nested leaf a
+        # tenant mint creates) reaches pg.log through the event trigger.
+        # NX_DDL_COUNT=0 (nexus-3cwsw) skips the probe and both marks, the logging lines above and the plugin.
+        if ddl_count_enabled():
+            _psql_command(bin_dir, pg_port, pg_user, PROBE_SQL)
+            # Everything in pg.log before this mark is boot (the bootstrap and the probe's own
+            # install, never counted); the engine's migration is after it. Best effort: a missing
+            # mark leaves the run unmeasured, which the ratchet refuses, but must not fail the boot.
+            try:
+                _psql_command(bin_dir, pg_port, pg_user, mark_sql(START_LABEL))
+            except RuntimeError as exc:
+                warnings.warn(f"nexus test substrate: DDL start mark failed: {exc}", stacklevel=2)
     except BaseException:
         _kill_pg()
         raise
@@ -1167,6 +2308,22 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    # nexus-fpwj1: the per-worker tenant pool (tests/_tenant_pool.py) needs POST /v1/_test/tenant-reset, which is
+    # loopback-only and root-token-only, and which answers 503 while per-collection index builds (NX_SEARCH_PCI,
+    # default ON when unset; DDL a data reset cannot undo) are on. These are set ONLY while the pool is on (it is on
+    # unless NX_TEST_TENANT_POOL=0, nexus-7zloy): an engine without the pool is exactly the engine develop boots (an
+    # ambient non-loopback NX_SERVICE_BIND would also refuse to boot with the route registered). Under =0 the pool's
+    # own engine-backed tests run in a child pytest with the pool on.
+    from tests import _tenant_pool  # noqa: PLC0415
+
+    if _tenant_pool.enabled():
+        env["NX_TEST_TENANT_RESET_ROUTE"] = "1"
+        env["NX_SEARCH_PCI"] = "0"
+        # The engine's ChunkReaper makes a pass ChunkReaper.INITIAL_DELAY (60 s) after boot and writes nexus.gc_audit
+        # rows per tenant; one landing between a lease's wipe and its census fails the census (nexus-7zloy A/B,
+        # on-2: tenant still has rows: nexus.gc_audit=1). A pooled tenant is wiped constantly, so an async writer
+        # is a race; without the pool a stray row sits in a tenant nobody reuses.
+        env["NX_REAPER_ENABLED"] = "false"
     _pin_ownerless_write_mode(env)
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
@@ -1177,7 +2334,15 @@ def _boot() -> dict:
     # total engine wedge. Evidence: jstack pin in FileOutputStream.writeBytes
     # from TokenStore.issueToken's log.info; draining exactly the pipe's
     # 65,702 buffered bytes instantly unwedged the next mint.
+    log_keep_dir = _log_keep_dir()
     svc_log_path = os.path.join(pgdata, "engine.log")
+    if log_keep_dir is not None:
+        # nexus-ww33u: in a tmpfs run the engine logs into the run's TMPDIR, where a killed worker's
+        # log survives for the failed-run copy (see _LOG_KEEP_PREFIX).
+        engine_log_dir = Path(log_keep_dir) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+        with contextlib.suppress(OSError):
+            engine_log_dir.mkdir(mode=0o700, exist_ok=True)
+            svc_log_path = str(engine_log_dir / "engine.log")
     for engine_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
         svc_port = _free_port()
         spawn_env = {**env, "NX_SERVICE_PORT": str(svc_port)}
@@ -1232,6 +2397,14 @@ def _boot() -> dict:
             _kill_pg()
             raise
 
+    # nexus-sz651: everything in pg.log before this line is boot and migration, everything
+    # after it is the tests' own DDL. Best effort: a failed mark must not fail the boot.
+    if ddl_count_enabled():
+        try:
+            _psql_command(bin_dir, pg_port, pg_user, mark_sql(READY_LABEL))
+        except RuntimeError as exc:
+            warnings.warn(f"nexus test substrate: DDL ready mark failed: {exc}", stacklevel=2)
+
     state = {
         "base_url": f"http://127.0.0.1:{svc_port}",
         "bearer": _BEARER,
@@ -1248,9 +2421,64 @@ def _boot() -> dict:
         # test that spawns its own engine can hand it the same models (nexus-o5xyx.2).
         "onnx_root": str(onnx_root) if onnx_root is not None else None,
         "svc": svc,
+        "log_keep_dir": log_keep_dir,
+        "engine_log": svc_log_path,
     }
     atexit.register(_teardown)
     return state
+
+
+def _log_keep_dir() -> str | None:
+    """The run's TMPDIR when a tmpfs test run is active (tests/_tmp_root.py exported the original
+    tempdir), else None: outside one a kept log would land on disk and never be removed. Read at
+    boot, because the controller's own unconfigure restores TMPDIR before atexit runs."""
+    if not os.environ.get(_TMP_ORIG_ENV):
+        return None
+    tmp = os.environ.get("TMPDIR")
+    return tmp if tmp and os.path.isdir(tmp) else None
+
+
+def _keep_log_tails(sources: Mapping[str, Path], dest: Path) -> bool:
+    """Copy the last :data:`_LOG_KEEP_TAIL_BYTES` of each existing source to ``dest/<name>``; a source
+    already in *dest* is the log itself and is left alone. False on an OSError (logged)."""
+    try:
+        dest.mkdir(mode=0o700, exist_ok=True)
+        for name, src in sources.items():
+            if not src.is_file() or src.parent == dest:
+                continue
+            with open(src, "rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, size - _LOG_KEEP_TAIL_BYTES))
+                (dest / name).write_bytes(fh.read())
+    except OSError as exc:
+        _log.warning("substrate_log_keep_failed", dest=str(dest), error=repr(exc), bead="nexus-ww33u")
+        return False
+    return True
+
+
+def preserve_logs() -> Path | None:
+    """Keep the live substrate's logs in ``<run TMPDIR>/nexus-svc-logs-<pid>``: pg.log's tail is copied
+    (the engine log is already written there in a tmpfs run); returns that directory, or None when no
+    substrate is up, no tmpfs run is active or the copy failed. Never raises (nexus-ww33u)."""
+    state = _state
+    keep = state.get("log_keep_dir") if state is not None else None
+    if not keep or not os.path.isdir(keep):
+        return None
+    dest = Path(keep) / f"{_LOG_KEEP_PREFIX}{os.getpid()}"
+    pgdata = Path(state["pgdata"])
+    sources = {"engine.log": Path(state.get("engine_log") or pgdata / "engine.log"), "pg.log": pgdata / "pg.log"}
+    return dest if _keep_log_tails(sources, dest) else None
+
+
+def _keep_swept_cluster_logs(cluster_dir: Path) -> None:
+    """Before the sweep removes a dead owner's cluster (a killed worker never ran its teardown), keep
+    its pg.log and engine.log tails in this run's TMPDIR when a tmpfs run is active (nexus-ww33u)."""
+    keep = _log_keep_dir()
+    if keep:
+        _keep_log_tails(
+            {"engine.log": cluster_dir / "engine.log", "pg.log": cluster_dir / "pg.log"},
+            Path(keep) / f"{_LOG_KEEP_PREFIX}swept-{cluster_dir.name}",
+        )
 
 
 def _teardown() -> None:
@@ -1263,6 +2491,10 @@ def _teardown() -> None:
          "stop", "-m", "immediate"],
         capture_output=True,
     )
+    try:
+        preserve_logs()  # both processes are down, so each log is complete
+    except Exception as exc:  # noqa: BLE001 — keeping evidence must never leak the cluster
+        _log.warning("substrate_log_keep_failed", error=repr(exc), bead="nexus-ww33u")
     shutil.rmtree(_state["pgdata"], ignore_errors=True)
     _state = None
 
@@ -1361,8 +2593,12 @@ class SweepResult:
     reaped: list[str] = field(default_factory=list)
     live_untouched: list[str] = field(default_factory=list)
     mismatch_refused: list[str] = field(default_factory=list)
+    #: Owner records the sweep would not trust (not ours, or not a plain file).
+    untrusted: list[str] = field(default_factory=list)
     legacy_reported: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: Stale ``<owner record>.json.tmp`` leftovers the sweep removed (nexus-qsqc6).
+    stale_tmp_removed: list[str] = field(default_factory=list)
 
 
 def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResult:
@@ -1373,30 +2609,309 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
     to the next cluster; nothing here may block substrate boot.
     """
     result = SweepResult()
-    root = tmp_root if tmp_root is not None else Path(tempfile.gettempdir())
-    if not root.exists():
-        return result
-    for cluster_dir in sorted(root.glob(_STRAY_GLOB)):
-        if not cluster_dir.is_dir():
+    # No explicit root: every root clusters may live under (the tempdir AND the
+    # tmpfs root, nexus-me3gm), so a crash-orphaned cluster in RAM is reaped
+    # exactly like one on disk.
+    roots = [tmp_root] if tmp_root is not None else substrate_pg_roots()
+    for root in roots:
+        if not root.exists():
             continue
-        try:
-            _sweep_one_cluster(cluster_dir, result)
-        except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
-            result.errors.append(str(cluster_dir))
-            warnings.warn(
-                f"nexus test substrate sweep: error processing "
-                f"{cluster_dir}: {exc}",
-                stacklevel=2,
-            )
+        tmpfs = _is_tmpfs_root(root)
+        for cluster_dir in sorted(root.glob(_STRAY_GLOB)):
+            if not cluster_dir.is_dir():
+                continue
+            try:
+                _sweep_one_cluster(cluster_dir, result, tmpfs=tmpfs)
+            except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
+                result.errors.append(str(cluster_dir))
+                warnings.warn(
+                    f"nexus test substrate sweep: error processing "
+                    f"{cluster_dir}: {exc}",
+                    stacklevel=2,
+                )
+        _sweep_owner_records(root, result)
     return result
 
 
-def _sweep_one_cluster(cluster_dir: Path, result: SweepResult) -> None:
+def sweep_integration_owner_records() -> SweepResult:
+    """:func:`sweep_stale_substrate_clusters` restricted to the integration owner
+    records, under every root the sweep covers."""
+    result = SweepResult()
+    for root in substrate_pg_roots():
+        if root.exists():
+            _sweep_owner_records(root, result)
+    return result
+
+
+#: ``_flush_owner_record`` writes ``<record>.json.tmp`` and replaces it onto the record within microseconds. A
+#: ``.json.tmp`` older than this is a write that never reached its replace (its process was killed between the
+#: two), not one in flight.
+_OWNER_TMP_MIN_AGE_S: float = 600.0
+
+#: The one name :func:`_flush_owner_record` gives its tmp: the record's own name plus ``.tmp``.
+_OWNER_TMP_NAME = re.compile(rf"{re.escape(_OWNER_RECORD_PREFIX)}\d+\.json\.tmp")
+
+
+def _sweep_stale_owner_tmps(root: Path, result: SweepResult, *, now: float | None = None) -> None:
+    """Remove ``<root>/nexus_integration_owner_<pid>.json.tmp`` files older than :data:`_OWNER_TMP_MIN_AGE_S`
+    (nexus-qsqc6). The glob ``*.json`` of the record sweep never matches them. Only a regular file of the
+    service identity, matched by :data:`_OWNER_TMP_NAME` directly under *root*: a symlink, a look-alike name,
+    another uid's file or anything below *root* is left alone."""
+    now = time.time() if now is None else now
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        if not _OWNER_TMP_NAME.fullmatch(p.name):
+            continue
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if os.name != "nt" and st.st_uid != int(_current_uid()):
+            continue
+        if now - st.st_mtime <= _OWNER_TMP_MIN_AGE_S:
+            continue
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            warnings.warn(
+                f"nexus test substrate sweep: cannot remove stale owner-record tmp {p}: {exc}",
+                stacklevel=2,
+            )
+            continue
+        result.stale_tmp_removed.append(str(p))
+
+
+def _sweep_owner_records(root: Path, result: SweepResult, *, now: float | None = None) -> None:
+    """Reap the integration clusters of dead owners recorded under *root*, and drop the stale ``.json.tmp``
+    a killed record write left (nexus-qsqc6)."""
+    _sweep_stale_owner_tmps(root, result, now=now)
+    for rec in sorted(root.glob(_OWNER_RECORD_GLOB)):
+        try:
+            _sweep_owner_record(rec, root, result)
+        except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
+            result.errors.append(str(rec))
+            warnings.warn(
+                f"nexus test substrate sweep: error processing {rec}: {exc}",
+                stacklevel=2,
+            )
+
+
+def _identify_postmaster(pid: int, pgdata: Path) -> str:
+    """Like :func:`_identify_leg`, with no recorded cmdline: a postmaster started
+    by ``pg_ctl -D <pgdata>`` carries that unique path in its own command line."""
+    from nexus.daemon.service_registry import pid_alive, process_command
+
+    if not pid_alive(pid):
+        return "dead"
+    actual = process_command(pid)
+    if not actual:
+        return "dead"
+    return "ok" if str(pgdata) in actual else "mismatch"
+
+
+def _owner_record_untrusted(rec: Path, result: SweepResult) -> bool | None:
+    """Is *rec* a plain file owned by the service identity? ``None``: it vanished
+    (another worker reaped it), which is not an error. Anything else untrusted is
+    recorded in ``result.untrusted`` and left alone. A symlink or special file is
+    warned about; a file of another uid is routine in a shared root and silent."""
+    try:
+        st = rec.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        result.untrusted.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: owner record {rec} is not a regular file "
+            f"(symlink or special) -- ignoring it",
+            stacklevel=3,
+        )
+        return True
+    if os.name != "nt" and st.st_uid != int(_current_uid()):
+        result.untrusted.append(str(rec))
+        return True
+    return False
+
+
+def _owner_pgdata_refusal(d: Path, root: Path) -> str | None:
+    """Why *d* (a path read from a record) must not be removed, or ``None``.
+    ``rmtree`` follows nothing here: the name must be a real child of *root*
+    (resolved on both sides, so ``<root>/..`` and symlinked dirs fail)."""
+    if d.name in ("", ".", "..") or d.parent != root:
+        return f"outside {root}"
+    if d.is_symlink():
+        return "a symlink"
+    if d.exists() and d.resolve().parent != root.resolve():
+        return f"outside {root}"
+    if (d / _NESTED_PGDATA).is_symlink():
+        # postmaster.pid is read through it and the postmaster it names is signalled.
+        return f"holding a symlinked {_NESTED_PGDATA}/"
+    return None
+
+
+#: ``pg_provision.provision(config_dir)`` puts the cluster at ``<config_dir>/postgres``. A test that
+#: provisions on a recorded dir (nexus-0ajjm) leaves its postmaster.pid one level below the dir the
+#: record names.
+_NESTED_PGDATA = "postgres"
+
+#: How long the owner-record sweep waits for a stopped postmaster to stop RUNNING before it counts it as a
+#: survivor and keeps its dir. A signal is asynchronous: on Linux a SIGKILLed pid still reads ``R`` in
+#: ``/proc/<pid>/stat`` for about 100 us after ``kill()`` returns, so a single probe right after the stop
+#: kept dirs whose postmaster was already dying (nexus-0ajjm, seen on chas).
+_SURVIVOR_SETTLE_S: float = 5.0
+
+
+def _owner_pgdata_candidates(d: Path) -> list[Path]:
+    """The directories under a recorded cluster dir that can hold a ``postmaster.pid``: *d* itself (a cluster
+    ``initdb`` made there) and ``<d>/postgres`` (one ``provision(d)`` made)."""
+    nested = d / _NESTED_PGDATA
+    return [d, nested] if nested.is_dir() else [d]
+
+
+def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
+    from nexus.daemon.service_registry import wait_for_exit  # noqa: PLC0415 — deferred: keep this module's import light
+
+    untrusted = _owner_record_untrusted(rec, result)
+    if untrusted is None or untrusted:
+        return
+    try:
+        info = json.loads(rec.read_text())
+        owner_pid = info.get("owner_pytest_pid")
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, AttributeError) as exc:
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: unreadable owner record {rec}: {exc} "
+            f"-- leaving it untouched",
+            stacklevel=2,
+        )
+        return
+    if not isinstance(owner_pid, int):
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: owner record {rec} has no valid "
+            f"owner_pytest_pid -- leaving it untouched",
+            stacklevel=2,
+        )
+        return
+    if _owner_is_live(owner_pid, info.get("owner_cmdline", "") or ""):
+        result.live_untouched.append(str(rec))
+        return
+
+    dirs: list[Path] = []
+    for raw in info.get("pgdatas") or []:
+        d = Path(str(raw))
+        refusal = _owner_pgdata_refusal(d, root)
+        if refusal is not None:
+            # rmtree on a path read from JSON: only ever a real child of the
+            # root the record sits in. Nothing is signalled either.
+            result.errors.append(str(rec))
+            warnings.warn(
+                f"nexus test substrate sweep: owner record {rec} names {d}, "
+                f"{refusal} -- leaving it untouched",
+                stacklevel=2,
+            )
+            return
+        if d.is_dir():
+            dirs.append(d)
+
+    engines: list[tuple[int, str]] = []
+    for child in info.get("children") or []:
+        pid = child.get("pid") if isinstance(child, dict) else None
+        if isinstance(pid, int) and pid > 0:
+            engines.append((pid, child.get("cmdline", "") or ""))
+    postmasters: list[tuple[int, Path]] = []  # (postmaster pid, the pgdata its pid file sits in)
+    pm_dir: dict[Path, Path] = {}  # that pgdata -> the recorded dir that holds it
+    for d in dirs:
+        for pgdata in _owner_pgdata_candidates(d):
+            pm = _read_postmaster_pid(str(pgdata))
+            if pm is not None:
+                postmasters.append((pm, pgdata))
+                pm_dir[pgdata] = d
+
+    # Identify EVERY leg before signalling any (as _reap_cluster does).
+    engine_status = {pid: _identify_leg(pid, cmd) for pid, cmd in engines}
+    pm_status = {pid: _identify_postmaster(pid, d) for pid, d in postmasters}
+    mismatched = [
+        f"pid {pid}" for pid, st in {**engine_status, **pm_status}.items() if st == "mismatch"
+    ]
+    if mismatched:
+        result.mismatch_refused.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: refusing to reap {rec} -- "
+            f"{', '.join(mismatched)} no longer matches what was recorded "
+            f"(PID-reuse guard); NOTHING was signalled",
+            stacklevel=2,
+        )
+        return
+
+    for pid, _cmd in engines:
+        if engine_status[pid] == "ok":
+            _kill_engine_leg(pid)
+    for pid, pgdata in postmasters:
+        if pm_status[pid] == "ok":
+            _kill_postmaster_leg(pid, pgdata)
+    # A postmaster that survived its stop keeps its dir: removing the tree under it is the hazard this sweep
+    # exists to avoid (and it would take a nested <dir>/postgres with it). The record stays for the next sweep.
+    # A stop is confirmed by the exit, never by the signal: wait (zombie-aware) up to the settle bound.
+    still_running = set(wait_for_exit([pid for pid, _ in postmasters], timeout_s=_SURVIVOR_SETTLE_S))
+    survivors = {pm_dir[pgdata]: pid for pid, pgdata in postmasters if pid in still_running}
+    for d in dirs:
+        if d in survivors:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        result.reaped.append(str(d))
+    if survivors:
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: postmaster pid(s) {sorted(set(survivors.values()))} "
+            f"still running after a stop attempt -- leaving {sorted(str(d) for d in survivors)} "
+            f"and {rec} in place",
+            stacklevel=2,
+        )
+        return
+    rec.unlink(missing_ok=True)
+
+
+def _is_tmpfs_root(root: Path) -> bool:
+    """Is *root* a ``<shm>/nexus-test-pg-<id>`` directory (honouring the sweep's
+    ``NX_TEST_PG_SHM_DIR`` seam)?"""
+    shm = Path(os.environ.get(_SHM_DIR_SEAM_ENV) or _SHM_DIR)
+    return root.name.startswith(f"{_TMPFS_DIR_PREFIX}-") and root.parent == shm
+
+
+def _sweep_one_cluster(
+    cluster_dir: Path, result: SweepResult, *, tmpfs: bool = False,
+) -> None:
     sidecar_path = cluster_dir / _SIDECAR_FILENAME
     if sidecar_path.exists():
         _sweep_sidecar_cluster(cluster_dir, sidecar_path, result)
+    elif tmpfs and _abandoned_bare_dir(cluster_dir):
+        # Killed during initdb, before the first sidecar write. On disk that is
+        # inert debris (and stays reported-only below); in tmpfs it pins RAM.
+        shutil.rmtree(cluster_dir, ignore_errors=True)
+        result.reaped.append(str(cluster_dir))
     else:
         _sweep_legacy_cluster(cluster_dir, result)
+
+
+def _abandoned_bare_dir(cluster_dir: Path) -> bool:
+    """No sidecar, no ``postmaster.pid`` (nothing ever started), and untouched for
+    :data:`_SWEEP_BARE_TMPFS_MIN_AGE_S` -- long past initdb's ~1 s."""
+    if (cluster_dir / "postmaster.pid").exists():
+        return False
+    try:
+        age = time.time() - cluster_dir.stat().st_mtime
+    except OSError:
+        return False
+    return age > _SWEEP_BARE_TMPFS_MIN_AGE_S
 
 
 def _owner_is_live(owner_pid: int, expected_cmdline: str) -> bool:
@@ -1462,6 +2977,8 @@ def _sweep_sidecar_cluster(
         result.live_untouched.append(str(cluster_dir))
         return
 
+    with contextlib.suppress(Exception):
+        _keep_swept_cluster_logs(cluster_dir)
     if _reap_cluster(cluster_dir, info, result):
         result.mismatch_refused.append(str(cluster_dir))
     else:

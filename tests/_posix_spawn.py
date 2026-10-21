@@ -75,6 +75,10 @@ import pytest
 
 _STDLIB_DIR = os.path.dirname(subprocess.__file__)
 _THIS_FILE = os.path.abspath(__file__)
+#: The storage-touch guard wraps ``Popen.__init__`` to count the Python children a
+#: test starts; its frame sits between every caller and the stdlib, so a call site
+#: naming it would say nothing (nexus-j23ni).
+_GUARD_FILE = os.path.join(os.path.dirname(_THIS_FILE), "_storage_touch_guard.py")
 _SH = "/bin/sh"
 _CD_THEN_EXEC = 'cd -P -- "$1" || exit 127; shift; exec "$@"'
 _CD_THEN_EVAL = 'cd -P -- "$1" || exit 127; shift; eval "$1"'
@@ -273,7 +277,7 @@ def _adjust(args, executable, close_fds, pass_fds, cwd, env, shell):
 def _call_site() -> str:
     for frame in reversed(traceback.extract_stack(limit=40)[:-2]):
         name = os.path.abspath(frame.filename)
-        if name == _THIS_FILE or name.startswith(_STDLIB_DIR):
+        if name in (_THIS_FILE, _GUARD_FILE) or name.startswith(_STDLIB_DIR):
             continue
         try:
             name = os.path.relpath(name)

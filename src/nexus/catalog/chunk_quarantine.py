@@ -39,6 +39,10 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    rows, on its own ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14),
    whatever ``NX_GC_QUARANTINE_DAYS`` says; it never touches a code, docs or rdr
    sibling, so a longer client value is honoured there and only there.
+   The client expiry is a bounded, keyed drain (RDR-222 Amendment A1, nexus-1579m;
+   :func:`expire_quarantine_bounded_serverside`): pages of ``GC_EXPIRE_ROW_LIMIT_DEFAULT``
+   rows, each its own request key, so one expiry too large for the edge's ~30 s deadline
+   no longer rolls back whole.
 
 First concrete piece of the RDR-156 soft-delete theme (nexus-70r3c).
 """
@@ -367,6 +371,9 @@ def _gc_loop_max_iterations(row_limit: int) -> int:
 #: together (see :func:`_gc_loop_max_iterations`).
 GC_RESTORE_ROW_LIMIT_DEFAULT = 2000
 GC_QUARANTINE_ROW_LIMIT_DEFAULT = 2000
+#: Page size of the bounded client expiry (RDR-222 Amendment A1, nexus-1579m): the shared GC default.
+#: The engine clamps a page at 5,000 distinct chashes, the ``gc_audit`` chash ceiling.
+GC_EXPIRE_ROW_LIMIT_DEFAULT = 2000
 
 
 def restore_rereferenced_bounded_serverside(
@@ -410,6 +417,15 @@ def restore_rereferenced_bounded_serverside(
     remaining = None
     for _ in range(max_iterations):
         result = fn(quarantine_name, origin_name, row_limit)
+        if result.get("committed_unknown_counts"):
+            # RDR-222: the batch committed (the ledger says so) but its response was lost and its
+            # stored body is unavailable, so its count is unknown: stop and say so, never loop on
+            # a guessed ``remaining``.
+            _log.warning(
+                "gc_restore_batch_committed_counts_unknown",
+                quarantine_collection=quarantine_name, collection=origin_name, restored_before=total,
+            )
+            return total
         total += int(result.get("restored", 0))
         remaining = result.get("remaining")
         if remaining is None:
@@ -426,22 +442,33 @@ def restore_rereferenced_bounded_serverside(
 
 
 class BoundedDrainIncomplete(Exception):
-    """A strict bounded quarantine drain stopped before ``remaining`` reached 0.
+    """A strict bounded drain stopped before it finished: the quarantine move or the client expiry.
 
-    Raised only when :func:`quarantine_orphans_bounded_serverside` is called with
-    ``strict=True`` (``nx t3 gc``). Each engine batch commits on its own, so
-    ``moved`` chunks were moved and audited before the stop and stay quarantined;
-    re-running the move is safe. ``reason`` is one of ``"iteration cap"``,
-    ``"no progress"`` or ``"batch failed"`` (the failing call is ``__cause__``);
-    ``remaining`` is the engine's last answer (``None`` for a failed batch).
+    Raised only when :func:`quarantine_orphans_bounded_serverside` (``kind="quarantine"``, the default)
+    or :func:`expire_quarantine_bounded_serverside` (``kind="expire"``) is called with ``strict=True``
+    (``nx t3 gc``). Each engine batch (page) commits on its own, so ``moved`` is the number of rows the
+    drain moved (quarantine) or expired (expire) before the stop; those stay moved or deleted and
+    audited, and re-running the verb is safe. ``reason`` is one of ``"iteration cap"``, ``"no progress"``,
+    ``"batch failed"`` (quarantine) or ``"page failed"`` (expire); a failing call is ``__cause__``, and for
+    an expire page whose outcome the ledger could not settle it carries a note naming the request key.
+    ``remaining`` is the engine's last answer for a quarantine drain (``None`` for a failed batch) and
+    always ``None`` for an expire drain, whose pages answer ``more`` and no count. ``batches`` counts the
+    batches or pages that were sent.
     """
 
-    def __init__(self, reason: str, moved: int, remaining: int | None, batches: int) -> None:
-        self.reason, self.moved, self.remaining, self.batches = reason, moved, remaining, batches
-        super().__init__(
-            f"bounded quarantine drain stopped ({reason}) after {batches} batch(es): "
-            f"{moved} moved, remaining={remaining}"
-        )
+    def __init__(
+        self, reason: str, moved: int, remaining: int | None, batches: int, *, kind: str = "quarantine",
+    ) -> None:
+        self.reason, self.moved, self.remaining, self.batches, self.kind = reason, moved, remaining, batches, kind
+        if kind == "expire":
+            super().__init__(
+                f"bounded expire drain stopped ({reason}) after {batches} page(s): {moved} expired"
+            )
+        else:
+            super().__init__(
+                f"bounded quarantine drain stopped ({reason}) after {batches} batch(es): "
+                f"{moved} moved, remaining={remaining}"
+            )
 
 
 def quarantine_orphans_bounded_serverside(
@@ -511,6 +538,17 @@ def quarantine_orphans_bounded_serverside(
                 raise BoundedDrainIncomplete("batch failed", total_moved, None, batches) from exc
             raise
         batches += 1
+        if result.get("committed_unknown_counts"):
+            # RDR-222: the batch committed (the ledger says so) but its response was lost and its
+            # stored body is unavailable, so its count and ``remaining`` are unknown. A strict drain
+            # cannot claim it finished; the other stops and reports what it counted.
+            _log.warning(
+                "gc_quarantine_batch_committed_counts_unknown",
+                collection=collection_name, quarantine_collection=quarantine_name, moved_before=total_moved,
+            )
+            if strict:
+                raise BoundedDrainIncomplete("batch committed, counts unknown", total_moved, None, batches)
+            return total_moved, sample
         if floor_bearing:
             _read_floor(result, floor, total_moved)
         batch_moved = int(result.get("moved", 0))
@@ -668,21 +706,28 @@ def restore_rereferenced_across_serverside(
 def expire_quarantine_across_serverside(
     db: Any, siblings: list[str], origin_name: str, cutoff: str,
     *, best_effort: bool = False,
-) -> tuple[int, int] | None:
-    """:func:`expire_quarantine_serverside` over every sibling in *siblings*,
-    summed ``(expired, refused)``; ``refused`` is the chunks the origin's
-    manifest still references, kept. ``None`` when the client object has no
-    expiry capability.
+) -> tuple[int, int | None] | None:
+    """:func:`expire_quarantine_serverside` (non-strict) over every sibling in *siblings*, summed
+    ``(expired, refused)``; ``refused`` is the chunks the origin's manifest still references, kept. A
+    sibling whose ``refused`` is unknown (``None``: its drain failed before any page answered it, or
+    the pages were sent without ``count_refused``) adds nothing to the sum, and the sum is ``None``
+    when no sibling's is known. ``None`` altogether when the client object has no expiry capability.
 
-    With ``best_effort`` a :class:`VectorServiceError` or ``OSError`` (a
-    local-mode transport failure) on any sibling after the
-    first is logged (``quarantine_sibling_expire_failed``, naming the sibling)
-    and skipped; a failure on the first still raises. A caller that must report
-    each sibling's own outcome (``nx t3 gc``) loops over
-    :func:`expire_quarantine_serverside` itself."""
+    The bounded loop (:func:`expire_quarantine_bounded_serverside`, non-strict) never raises a page
+    outcome, the first page's included, so with it every sibling's expiry runs and logs its own
+    result. Two carve-outs propagate out of this function: a response-shape defect (``ValueError`` /
+    ``TypeError`` from a parsed body with the wrong fields; the indexer re-raises it and the prune pass
+    ends) and ``ProductionWriteGuardError`` (a stop-and-verify refusal; the indexer's catch-all ends
+    only this collection's siblings). Only a client object with no bounded method falls back to the unbounded call, and
+    there ``best_effort`` keeps its meaning: a :class:`VectorServiceError` or ``OSError`` (a
+    local-mode transport failure) on any sibling after the first is logged
+    (``quarantine_sibling_expire_failed``, naming the sibling) and skipped, and a failure on the
+    first still raises. A caller that must report each sibling's own outcome (``nx t3 gc``) loops
+    over :func:`expire_quarantine_serverside` itself."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
 
-    expired = refused = 0
+    expired = 0
+    refused: int | None = None
     for i, sibling in enumerate(siblings):
         try:
             result = expire_quarantine_serverside(
@@ -699,7 +744,8 @@ def expire_quarantine_across_serverside(
         if result is None:
             return None
         expired += result[0]
-        refused += result[1]
+        if result[1] is not None:
+            refused = (refused or 0) + result[1]
     return expired, refused
 
 
@@ -713,13 +759,138 @@ _NO_EXPIRY_FLOOR_FRACTION = 1.0
 _NO_EXPIRY_FLOOR_MIN_CHUNKS = 100
 
 
-def expire_quarantine_serverside(
+def expire_quarantine_bounded_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str,
-) -> tuple[int, int] | None:
-    """The server-side grace-window expiry, with no fraction floor (see the
-    module docstring, step 3). ``(expired, refused)`` — ``refused`` is the chunks
-    the origin's manifest still references, kept — or ``None`` if the client has
-    no expiry route."""
+    row_limit: int = GC_EXPIRE_ROW_LIMIT_DEFAULT, *, strict: bool = False,
+) -> tuple[int, int | None, bool] | None:
+    """The server-side BOUNDED client expiry (RDR-222 Amendment A1, nexus-1579m), looping pages until the
+    sibling holds no more expirable rows. ``(expired, refused, counts_complete)``, or ``None`` if the
+    client object has no bounded expiry method (caller falls back to the unbounded call, as the other
+    ``*_bounded_serverside`` wrappers do).
+
+    Each page is one keyed engine request (``HttpVectorClient.gc_expire_quarantine_bounded``): its
+    deletes commit on their own, a lost response is resolved through the request ledger, and no page
+    uses anything an earlier one answered (every page recomputes ``more`` from live state). Every page
+    sends the inert floor (:data:`_NO_EXPIRY_FLOOR_FRACTION`) and the same *cutoff*, computed once by the
+    caller. ``expired`` sums the pages. ``refused`` is the first non-null answer: the chunks the origin's
+    manifest still references, kept; ``None`` when no page gave one. ``counts_complete`` is false when a
+    page committed with its count lost, or a later page failed, so ``expired`` is a lower bound.
+
+    Outcome per page (Technical Design 7.5), non-strict / ``strict`` (``nx t3 gc``):
+
+    * ``more`` false: done. Neither ``more`` nor ``row_limit`` in the answer: an engine that predates the
+      bounded form ran the unbounded expire and its answer is the total. ``row_limit`` without ``more`` is a
+      response-shape defect (:class:`ValueError`).
+    * No progress (``more`` with nothing expired, or ``floor_refused``): a warning / :class:`BoundedDrainIncomplete`.
+    * A page committed with unknown counts: the drain continues in both modes.
+    * The iteration cap with ``more`` still true: a warning / :class:`BoundedDrainIncomplete`.
+    * The first page raises (:class:`VectorServiceError` including a refused request key, ``OSError`` or
+      ``http.client.HTTPException``): a warning and ``(0, None, False)`` / the error re-raised unchanged.
+    * A later page raises one of those: a warning and the totals so far with ``counts_complete`` false /
+      :class:`BoundedDrainIncomplete` ``("page failed")`` with the error as ``__cause__`` (a page the ledger
+      could not settle carries a note naming its request key; the page may have committed).
+
+    Non-strict (the indexer's prune) never raises a page outcome, so one sibling's expiry cannot cut
+    short the siblings after it, with two carve-outs. Anything outside that error set propagates in both
+    modes: a response-shape defect (a parsed body with the wrong fields: ``ValueError``, ``TypeError``) is a
+    data defect, and :class:`~nexus.db.service_endpoint.ProductionWriteGuardError` is a stop-and-verify
+    refusal. A 200 whose body does not parse, or is not UTF-8, is not a defect but an ambiguous outcome:
+    the client polls the ledger for it (``_keyed_sweep_post``), and an unsettled one arrives here as a ``VectorServiceError``.
+
+    ``count_refused`` is sent only for a strict drain, until a page has answered it: the indexer discards
+    ``refused``, and counting it costs the engine a sibling-wide scan inside the 25 s bound.
+    """
+    import http.client  # noqa: PLC0415 — deferred: keeps this module import-light
+
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
+
+    fn = getattr(db, "gc_expire_quarantine_bounded", None)
+    if fn is None:
+        return None
+    expired = 0
+    refused: int | None = None
+    counts_complete = True
+    pages = 0
+    max_iterations = _gc_loop_max_iterations(row_limit)
+    for _ in range(max_iterations):
+        try:
+            result = fn(
+                quarantine_name, origin_name, cutoff,
+                _NO_EXPIRY_FLOOR_FRACTION, _NO_EXPIRY_FLOOR_MIN_CHUNKS, False, row_limit,
+                count_refused=strict and refused is None,
+            )
+        except (VectorServiceError, OSError, http.client.HTTPException) as exc:
+            if strict:
+                if not pages:
+                    raise
+                raise BoundedDrainIncomplete("page failed", expired, None, pages, kind="expire") from exc
+            _log.warning(
+                "gc_expire_bounded_page_failed",
+                collection=origin_name, quarantine_collection=quarantine_name, page=pages + 1,
+                expired_before=expired, error=str(exc)[:300], notes=list(getattr(exc, "__notes__", [])),
+            )
+            return expired, refused, False
+        pages += 1
+        if result.get("committed_unknown_counts"):
+            # RDR-222: the page committed (the ledger says so) but its response was lost and its stored body
+            # is unavailable, so its count and ``more`` are unknown. The next page recomputes both from live
+            # state, so the drain goes on; only ``expired`` becomes a lower bound.
+            counts_complete = False
+            _log.warning(
+                "gc_expire_batch_committed_counts_unknown",
+                collection=origin_name, quarantine_collection=quarantine_name, expired_before=expired,
+            )
+            continue
+        page_expired = int(result.get("expired", 0))
+        expired += page_expired
+        if refused is None and result.get("refused") is not None:
+            refused = int(result["refused"])
+        more = result.get("more")
+        if more is None:
+            if result.get("row_limit") is not None:
+                # A bounded engine always answers row_limit. A body that carries it but lost `more` is not
+                # an older engine's complete answer; reading it as one would report a partial drain as done.
+                raise ValueError(
+                    f"expire-quarantine answer for {quarantine_name} has row_limit but no 'more': {result!r}"
+                )
+            # Older engine (neither key): ignored row_limit, already did the whole thing.
+            return expired, refused, counts_complete
+        if result.get("floor_refused") or (more and page_expired <= 0):
+            if strict:
+                raise BoundedDrainIncomplete("no progress", expired, None, pages, kind="expire")
+            _log.warning(
+                "gc_expire_bounded_no_progress",
+                collection=origin_name, quarantine_collection=quarantine_name, page=pages,
+                floor_refused=bool(result.get("floor_refused")), expired=expired,
+            )
+            return expired, refused, counts_complete
+        if not more:
+            return expired, refused, counts_complete
+    if strict:
+        raise BoundedDrainIncomplete("iteration cap", expired, None, pages, kind="expire")
+    _log.warning(
+        "gc_expire_bounded_loop_iteration_cap_reached",
+        collection=origin_name, quarantine_collection=quarantine_name,
+        iterations=max_iterations, row_limit=row_limit, expired=expired,
+    )
+    return expired, refused, counts_complete
+
+
+def expire_quarantine_serverside(
+    db: Any, quarantine_name: str, origin_name: str, cutoff: str, *, strict: bool = False,
+) -> tuple[int, int | None, bool] | None:
+    """The server-side grace-window expiry, with no fraction floor (see the module docstring, step 3).
+    ``(expired, refused, counts_complete)`` — ``refused`` is the chunks the origin's manifest still
+    references, kept (``None`` when unknown), ``counts_complete`` false when ``expired`` is a lower
+    bound — or ``None`` if the client has no expiry route.
+
+    Tries the bounded, keyed loop first (:func:`expire_quarantine_bounded_serverside`; ``strict`` is
+    ``nx t3 gc``'s), and falls back to the unbounded call for a client object that lacks it (the
+    in-memory double): a ``None`` from the loop is about the CLIENT object's capability, never about
+    whether there was anything to expire."""
+    bounded = expire_quarantine_bounded_serverside(db, quarantine_name, origin_name, cutoff, strict=strict)
+    if bounded is not None:
+        return bounded
     fn = getattr(db, "gc_expire_quarantine", None)
     if fn is None:
         return None
@@ -727,7 +898,7 @@ def expire_quarantine_serverside(
         quarantine_name, origin_name, cutoff,
         _NO_EXPIRY_FLOOR_FRACTION, _NO_EXPIRY_FLOOR_MIN_CHUNKS, False,
     )
-    return int(result.get("expired", 0)), int(result.get("refused", 0))
+    return int(result.get("expired", 0)), int(result.get("refused", 0)), True
 
 # _fetch_full, _upsert_full, quarantine_orphans, restore_rereferenced,
 # and expire_quarantine (the client-side fetch-diff-copy-delete quarantine

@@ -3,17 +3,22 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,26 +61,6 @@ class CatalogRepositoryTest {
         return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 
-    /**
-     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
-     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
-     * chash)} to have a matching {@code nexus.chunks} row. This suite exercises the
-     * MANIFEST bookkeeping layer in isolation from real vector content, so every
-     * manifest-write call site below is routed through one of the {@code *Seeded}
-     * wrappers, which stub a minimal {@code nexus.chunks} row (single
-     * {@code embedding_384} vector, arbitrary text) for each row's chash first. A
-     * chash that is null, not valid hex, or not EXACTLY 64 hex chars (32 bytes) is
-     * left unstubbed on purpose — several tests deliberately exercise chash-shaped
-     * CHECK-constraint violations (missing chash, wrong octet length), and
-     * nexus.chunks carries the SAME {@code chunks_chash_octet_check} (octet_length=32)
-     * as catalog_document_chunks (vectors-004-unify-chunks.xml), so a wrong-length
-     * stub would itself violate that check rather than reaching the manifest-side
-     * violation the test is actually after.
-     */
-    private static String stubVector(int dim) {
-        return "[" + "0.1,".repeat(dim - 1) + "0.1]";
-    }
-
     /** The vector width of a registered embedding model (RDR-225: one model, one dimension). */
     private static int modelDimension(String model) {
         if (model.endsWith("-384")) return 384;
@@ -84,6 +69,22 @@ class CatalogRepositoryTest {
         throw new IllegalStateException("no known dimension for embedding model " + model);
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
+     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
+     * chash)} to have a matching {@code nexus.chunks} row. This suite exercises the
+     * MANIFEST bookkeeping layer in isolation from real vector content, so every
+     * manifest-write call site below is routed through one of the {@code *Seeded}
+     * wrappers, which stub a minimal {@code nexus.chunks} row (one vector of the
+     * collection model's width, arbitrary text) for each row's chash first. A
+     * chash that is null, not valid hex, or not EXACTLY 64 hex chars (32 bytes) is
+     * left unstubbed on purpose — several tests deliberately exercise chash-shaped
+     * CHECK-constraint violations (missing chash, wrong octet length), and
+     * nexus.chunks carries the SAME {@code chunks_chash_octet_check} (octet_length=32)
+     * as catalog_document_chunks (vectors-004-unify-chunks.xml), so a wrong-length
+     * stub would itself violate that check rather than reaching the manifest-side
+     * violation the test is actually after.
+     */
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
             return;
@@ -102,20 +103,20 @@ class CatalogRepositoryTest {
             // lifecycle_state NOT NULL).
             PgContainerHelper.insertCollection(ctx, tenant, collection);
             // RDR-225: the row carries its collection's model, and the vector's width must be that
-            // model's dimension. Exactly one of the three embedding columns is non-null (the CASEs
-            // below), picked from the model's dimension.
+            // model's dimension. Exactly one of the three embedding columns is set (the others stay
+            // NULL), picked from the model's dimension.
             String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
             int dim = modelDimension(model);
-            ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, "
-                + "embedding_384, embedding_768, embedding_1024) "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', "
-                + "CASE WHEN ? = 384 THEN ?::nexus.vector END, "
-                + "CASE WHEN ? = 768 THEN ?::nexus.vector END, "
-                + "CASE WHEN ? = 1024 THEN ?::nexus.vector END) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, chashHex, model,
-                dim, stubVector(384), dim, stubVector(768), dim, stubVector(1024));
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
+                .doNothing()
+                .execute();
             return null;
         });
     }
@@ -2279,6 +2280,79 @@ class CatalogRepositoryTest {
             .isNull();
     }
 
+    @Test @Order(60)
+    void collection_upsert_existingRowIsNeverRepointedByAProfileNamingAnotherModel() throws Exception {
+        // RDR-210 P1.4 (nexus-no5rm), Gap 9: the client now skips its own profile
+        // comparison for a write to an EXISTING row of the same model, relying on
+        // the engine never re-pointing an existing row. This pins that engine side.
+        // Dual-engine shape: a bge row exists, then the tenant's profile for the
+        // content type is moved to Voyage (a restart under a Voyage key re-seeds the
+        // profile by upsert). The existing row must keep accepting its own model and
+        // keep its dimension; a NEW name off the profile must still be refused.
+        String tenant = "cat-profile-seam-tenant";
+        String contentType = "docs";
+        String bge = "bge-base-en-v15-768";
+        String voyage = "voyage-context-3";
+        String existing = "docs__cat-seam-owner__" + bge + "__v1";
+        String fresh = "docs__cat-seam-owner-new__" + bge + "__v1";
+        var coll = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+        var profile = dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
+
+        // No profile row yet: the request's own model seeds the row.
+        repo.upsertCollection(tenant, Map.of(
+            "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+            "embedding_model", bge, "model_version", "v1"));
+        Integer dimensionBefore;
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.select(coll.EMBEDDING_MODEL).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing))
+                    .fetchOne(coll.EMBEDDING_MODEL))
+                .as("guard: the row was registered with the bge model").isEqualTo(bge);
+            dimensionBefore = ctx.select(coll.DIMENSION).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing))
+                    .fetchOne(coll.DIMENSION);
+
+            // The profile moves to Voyage for this content type.
+            ctx.insertInto(profile, profile.TENANT_ID, profile.CONTENT_TYPE,
+                           profile.EMBEDDING_MODEL, profile.DIMENSION)
+               .values(tenant, contentType, voyage, 1024)
+               .onConflict(profile.TENANT_ID, profile.CONTENT_TYPE)
+               .doUpdate()
+               .set(profile.EMBEDDING_MODEL, voyage).set(profile.DIMENSION, 1024)
+               .execute();
+        }
+
+        // Existing row, its own (now off-profile) model: accepted, not re-pointed.
+        repo.upsertCollection(tenant, Map.of(
+            "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+            "embedding_model", bge, "model_version", "v1"));
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(coll.EMBEDDING_MODEL, coll.DIMENSION).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing)).fetchOne();
+            assertThat(row.value1()).as("an existing row is never re-pointed by the profile").isEqualTo(bge);
+            assertThat(row.value2()).as("nor its dimension").isEqualTo(dimensionBefore);
+        }
+
+        // Naming the profile's model for the existing row is the change the engine refuses.
+        assertThatThrownBy(() -> repo.upsertCollection(tenant, Map.of(
+                "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+                "embedding_model", voyage, "model_version", "v1")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining("already registered")
+            .hasMessageContaining(bge);
+
+        // A NEW name off the profile is refused, naming the profile's model, and leaves no row.
+        assertThatThrownBy(() -> repo.upsertCollection(tenant, Map.of(
+                "name", fresh, "content_type", contentType, "owner_id", "cat-seam-owner-new",
+                "embedding_model", bge, "model_version", "v1")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining(voyage)
+            .hasMessageContaining(fresh);
+        assertThat(repo.getCollection(tenant, fresh)).isNull();
+    }
+
     @Test @Order(61)
     void collection_list() {
         var colls = repo.listCollections(TENANT_A);
@@ -2885,13 +2959,22 @@ class CatalogRepositoryTest {
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-            var ex = assertThrows(PSQLException.class, () ->
-                conn.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents " +
-                    "(tenant_id, tumbler, title, content_type) " +
-                    "VALUES ('" + TENANT_B + "', 'wc.1', 'WithCheck Test', 'paper')")
+            // The typed insert surfaces the server's refusal wrapped in a DataAccessException; the
+            // RLS WITH CHECK violation is the wrapped PSQLException, asserted on its own message.
+            var wrapped = assertThrows(DataAccessException.class, () ->
+                DSL.using(conn, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_B)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, "wc.1")
+                    .set(CATALOG_DOCUMENTS.TITLE, "WithCheck Test")
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                    .execute()
             );
-            assertThat(ex.getMessage()).containsIgnoringCase("violates row-level security");
+            assertThat(wrapped.getCause()).isInstanceOf(PSQLException.class);
+            assertThat(((PSQLException) wrapped.getCause()).getSQLState())
+                .as("insufficient_privilege, the SQLState of a row-level security WITH CHECK violation")
+                .isEqualTo("42501");
+            assertThat(wrapped.getCause().getMessage()).containsIgnoringCase("violates row-level security")
+                .contains("\"catalog_documents\"");
             conn.rollback();
         }
     }
@@ -2906,10 +2989,7 @@ class CatalogRepositoryTest {
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
             // DO NOT set nexus.tenant
-            var rs = conn.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents");
-            rs.next();
-            int count = rs.getInt(1);
+            int count = DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS);
             // RLS fail-closed: NULL != any tenant_id => 0 rows
             assertThat(count).isEqualTo(0);
             conn.rollback();
@@ -4043,8 +4123,8 @@ class CatalogRepositoryTest {
     private static final String SPAN_DOC_ID     = "span.1";
 
     /**
-     * Seed: register the collection FK target, then insert a chunk row via raw
-     * SQL (no vector column required when using zero-fill embedding).
+     * Seed: register the collection FK target, then insert a chunk row via the
+     * typed jOOQ insert (no real vector content required when using zero-fill embedding).
      *
      * <p>RDR-191 (nexus-o8dil.48): {@code nexus.chunks} (unified; formerly
      * {@code chunks_768}) has a FK to catalog_collections (COLLECTION col);
@@ -4062,8 +4142,8 @@ class CatalogRepositoryTest {
             "model_version",   "v1"
         ));
 
-        // 2. Insert a chunk row with a zero-filled 768-dim embedding via raw SQL.
-        //    The embedding column is vector(768): we cast a text literal.
+        // 2. Insert a chunk row with a zero-filled 768-dim embedding through the generated table.
+        //    The embedding column is vector(768): the generated field binds it as nexus.vector.
         try (var su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, SPAN_TENANT, false);
@@ -4072,25 +4152,20 @@ class CatalogRepositoryTest {
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.ensureTenantPartitions(suCtx, SPAN_TENANT);
             String spanModel = PgContainerHelper.collectionModel(suCtx, SPAN_TENANT, SPAN_COLLECTION);
-            // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
-            String zeroVec = "[" + "0,".repeat(767) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_768 unified into nexus.chunks --
             // embedding_768 replaces the bare embedding column.
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks"
-                + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata)"
-                + " VALUES (?, ?, ?, ?, ?, ?::nexus.vector, ?::jsonb)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING"
-            );
-            ps.setString(1, SPAN_TENANT);
-            ps.setString(2, SPAN_COLLECTION);
-            // chash column is bytea(32) now (RDR-180) — bind the decoded digest, not the hex text.
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(SPAN_CHASH));
-            ps.setString(4, spanModel);
-            ps.setString(5, "hello span text");
-            ps.setString(6, zeroVec);
-            ps.setString(7, "{\"lang\":\"en\"}");
-            ps.executeUpdate();
+            // chash column is bytea(32) now (RDR-180) -- bind the decoded digest, not the hex text.
+            suCtx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, SPAN_TENANT)
+                .set(CHUNKS.COLLECTION, SPAN_COLLECTION)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(SPAN_CHASH))
+                .set(CHUNKS.EMBEDDING_MODEL, spanModel)
+                .set(CHUNKS.CHUNK_TEXT, "hello span text")
+                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0f))
+                .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{\"lang\":\"en\"}"))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
+                .doNothing()
+                .execute();
         }
 
         // 3. resolveSpan — keyed by (collection, chash).
@@ -4273,7 +4348,7 @@ class CatalogRepositoryTest {
         assertThat(bo2.get("name")).isEqualTo("batch-owner-2");
 
         // Seed a higher live seq, then re-import a lower one — GREATEST must not downgrade.
-        // ownerByPrefix() does not expose next_seq — verify via raw SQL (superuser conn).
+        // ownerByPrefix() does not expose next_seq — verify with a typed read (superuser conn).
         repo.importOwnersBatch(tenant, List.of(
             Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1-updated", "owner_type", "repo",
                    "next_seq", 50)));
@@ -4281,11 +4356,14 @@ class CatalogRepositoryTest {
             Map.of("tumbler_prefix", "bo1", "name", "batch-owner-1-updated", "owner_type", "repo",
                    "next_seq", 3)));
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT next_seq FROM nexus.catalog_owners WHERE tenant_id='" + tenant
-                + "' AND tumbler_prefix='bo1'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("next_seq"))
+            Long nextSeq = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_OWNERS.NEXT_SEQ)
+                .from(CATALOG_OWNERS)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(tenant))
+                .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq("bo1"))
+                .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
+            assertThat(nextSeq).as("the bo1 owner row exists").isNotNull();
+            assertThat(nextSeq)
                 .as("GREATEST: next_seq must never downgrade").isEqualTo(50L);
         }
     }

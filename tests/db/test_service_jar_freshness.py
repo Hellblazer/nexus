@@ -20,8 +20,8 @@ def _no_live_build_lease(tmp_path, monkeypatch):
     """Isolate every test here from the BOX's build lease (nexus-pv93h).
 
     ``jar_freshness_skip_reason`` consults the lease before it looks at the
-    jar, and the lease is shared by every worktree of the repo, so while any
-    Maven run held it these tests reported "BUILD IS IN PROGRESS" instead of
+    jar, and the lease is shared by every worktree of the repo, so while a
+    Maven run held it (before nexus-qt6q7, one in any worktree) these tests reported "BUILD IS IN PROGRESS" instead of
     the jar states they exist to pin. Tests that want a lease pass an
     explicit root.
     """
@@ -345,6 +345,84 @@ class TestBuildInProgressIsRefusedLoudly:
         assert build_in_progress_reason(tmp_path / "nope") is None
 
 
+class TestLeaseScopedToThisCheckout:
+    """nexus-qt6q7: the lease is shared by every worktree so builds serialize,
+    but a build rewrites only its own checkout's jar. A lease naming another
+    worktree is no reason to refuse; one naming this checkout, or naming none
+    (an older lib, or mid-populate), still is."""
+
+    @staticmethod
+    def _lease(tmp_path, worktree: str | None):
+        import os
+
+        root = TestBuildInProgressIsRefusedLoudly._lease(tmp_path, os.getpid())
+        if worktree is not None:
+            (root / "service" / "worktree").write_text(worktree + "\n")
+        return root
+
+    def test_another_worktrees_build_is_not_a_reason(self, tmp_path):
+        other = tmp_path / "other-worktree"
+        other.mkdir()
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        assert build_in_progress_reason(self._lease(tmp_path, str(other)), repo_root=here) is None
+
+    def test_this_checkouts_build_is_a_reason(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        reason = build_in_progress_reason(self._lease(tmp_path, str(here)), repo_root=here)
+        assert reason is not None and "BUILD IS IN PROGRESS" in reason
+
+    def test_the_same_checkout_through_a_symlink_is_still_a_reason(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        (tmp_path / "alias").symlink_to(here)
+        assert build_in_progress_reason(self._lease(tmp_path, str(tmp_path / "alias")), repo_root=here) is not None
+
+    def test_a_lease_naming_no_worktree_still_refuses(self, tmp_path):
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        assert build_in_progress_reason(self._lease(tmp_path, None), repo_root=here) is not None
+
+    def test_a_builder_path_that_cannot_be_read_here_still_refuses(self, tmp_path):
+        """Unsure is not foreign: a path this box cannot stat (another mount
+        namespace, an MSYS spelling, a symlink loop) may be this checkout."""
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")
+        for builder in (str(tmp_path / "gone"), str(tmp_path / "loop")):
+            lease = tmp_path / ("lease-" + builder.rsplit("/", 1)[1])
+            lease.mkdir()
+            root = self._lease(lease, builder)
+            assert build_in_progress_reason(root, repo_root=here) is not None, builder
+
+    def test_a_live_holder_mid_populate_still_refuses(self, tmp_path):
+        """The window between the pid claim and the descriptive files: a live
+        pid alone, or with an empty worktree file, is still a build."""
+        import os
+
+        here = tmp_path / "this-worktree"
+        here.mkdir()
+        d = tmp_path / "root" / "service"
+        d.mkdir(parents=True)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        assert build_in_progress_reason(tmp_path / "root", repo_root=here) is not None
+        (d / "worktree").write_text("")
+        assert build_in_progress_reason(tmp_path / "root", repo_root=here) is not None
+
+    def test_the_session_gate_waits_for_nothing_behind_another_worktrees_build(
+        self, tmp_path, monkeypatch,
+    ):
+        """The callers (conftest's session gate, the boot check) go through
+        wait_for_build_lease with the DEFAULT checkout, not an explicit one."""
+        from tests.db._service_fixture import wait_for_build_lease
+
+        other = tmp_path / "other-worktree"
+        other.mkdir()
+        monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(self._lease(tmp_path, str(other))))
+        assert wait_for_build_lease(0, announce=lambda _m: None) is None
+
+
 @posix_only("the build lease names the ./mvnw build's POSIX process group (pgid; os.getpgid/os.killpg)")
 class TestLeaseHolderLiveness:
     """The lease directory in the git common dir never disappears on its own
@@ -493,3 +571,123 @@ class TestBootCheckHonoursTheLeaseWait:
         monkeypatch.setattr(sf, "wait_for_build_lease", _forbidden)
         monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
         assert sf.jar_freshness_skip_reason(tmp_path / "x.jar") == "held"
+
+
+def test_the_freshness_dirs_sit_inside_the_gate_jar_cache_key_paths() -> None:
+    """nexus-fkhd3: the gate-jar cache keys on pom + src/main + mvnw + .mvn only, so a
+    test-only change under service/ is a cache HIT. The mtime freshness check must agree:
+    every directory it watches has to be covered by the key (else an edit there marks the jar
+    stale while the rebuild HITS and hands back the old jar with a fresh mtime), and none of
+    them may be a test tree (else a test-only commit marks the jar stale for nothing)."""
+    import re
+
+    from tests.db._service_fixture import _REPO_ROOT, _SERVICE_SRC_DIRS
+
+    text = (_REPO_ROOT / "scripts" / "lib" / "gate-jar-cache.sh").read_text(encoding="utf-8")
+    m = re.search(r"^GATE_JAR_KEY_PATHS=\(([^)]*)\)", text, re.MULTILINE)
+    assert m, "GATE_JAR_KEY_PATHS is no longer declared in scripts/lib/gate-jar-cache.sh"
+    key_paths = m.group(1).split()
+    assert key_paths and not any("src/test" in k for k in key_paths), key_paths
+    for watched in _SERVICE_SRC_DIRS:
+        rel = watched.relative_to(_REPO_ROOT).as_posix()
+        assert "src/test" not in rel, f"{rel}: a test tree marks the jar stale"
+        assert any(rel == k or rel.startswith(k + "/") for k in key_paths), (
+            f"{rel} is watched for jar staleness but is not part of the gate-jar cache key {key_paths}")
+
+
+# ── nexus-k6zxp: a linked jar shares its mtime across worktrees ───────────────
+
+_GATE_JAR_LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "gate-jar-cache.sh"
+
+
+def _gate_jar_install(key: str, entry: Path, dest: Path) -> str:
+    """Run the REAL ``gate_jar_cache_install`` (what a build-gate-jar.sh hit calls)."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["bash", "-c", 'source "$1" && gate_jar_cache_install "$2" "$3" "$4" && printf %s "$_GATE_JAR_PLACED"',
+         "_", str(_GATE_JAR_LIB), key, str(entry), str(dest)],
+        capture_output=True, text=True, check=True,
+    )
+    return proc.stdout
+
+
+class TestLinkedJarFreshnessIsPerWorktree:
+    """A gate-jar cache hit hard-links one cached jar into every worktree on a key,
+    so those worktrees share ONE inode and ONE mtime. Freshness must read the
+    worktree's own marker, or another worktree's hit makes an edited worktree's
+    stale jar look newer than its sources (a silent stale-jar false pass)."""
+
+    @staticmethod
+    def _worktree(tmp_path: Path, monkeypatch, name: str, src_mtime: float) -> tuple[Path, Path]:
+        repo = tmp_path / name
+        src = repo / "service" / "src" / "main" / "java"
+        _touch(src / "Main.java", src_mtime)
+        return repo, src
+
+    @staticmethod
+    def _watch(monkeypatch, repo: Path, src: Path) -> None:
+        monkeypatch.setattr("tests.db._service_fixture._REPO_ROOT", repo)
+        monkeypatch.setattr("tests.db._service_fixture._SERVICE_SRC_DIRS", (src,))
+
+    @posix_only("drives the bash gate-jar cache and hard links")
+    def test_another_worktrees_hit_cannot_freshen_an_edited_worktree(self, tmp_path: Path, monkeypatch) -> None:
+        import time
+
+        # The entry's jar was built at t=1000; both worktrees were checked out
+        # later (sources at t=1500), so a bare jar-mtime comparison calls a
+        # freshly linked jar STALE.
+        entry = tmp_path / "cache" / "k1"
+        _touch(entry / "built.jar", 1000.0)  # a real zip (the freshness gate opens it)
+        (entry / "built.jar").rename(entry / "jar")
+        os.chmod(entry / "jar", 0o444)
+        repo_a, src_a = self._worktree(tmp_path, monkeypatch, "A", 1500.0)
+        repo_c, src_c = self._worktree(tmp_path, monkeypatch, "C", 1500.0)
+        jar_a = repo_a / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        jar_c = repo_c / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        for jar in (jar_a, jar_c):
+            jar.parent.mkdir(parents=True)
+            assert _gate_jar_install("k1", entry, jar) == "link"
+        assert os.path.samefile(jar_a, jar_c), "test premise: the two worktrees share one inode"
+
+        # 1. C has just hit: its sources predate its install, so it is FRESH
+        #    although the shared jar's own mtime (1000) predates them.
+        self._watch(monkeypatch, repo_c, src_c)
+        assert jar_freshness_skip_reason(jar_c) is None
+
+        # 2. Time passes; C edits a source after its install.
+        marker_c = jar_c.parent / ".gate-jar-key"
+        long_ago = time.time() - 100
+        os.utime(marker_c, (long_ago, long_ago))
+        os.utime(src_c / "Main.java", (long_ago + 50, long_ago + 50))
+
+        # 3. A hits the same entry again now (a repeat build-gate-jar.sh run).
+        assert _gate_jar_install("k1", entry, jar_a) == "kept"
+
+        # C's jar is still the one built before its edit: STALE, whatever A did.
+        reason = jar_freshness_skip_reason(jar_c)
+        assert reason is not None and "STALE" in reason and "Main.java" in reason
+
+        # A, untouched since its own install, stays fresh.
+        self._watch(monkeypatch, repo_a, src_a)
+        assert jar_freshness_skip_reason(jar_a) is None
+
+    def test_a_jar_rewritten_after_the_marker_is_judged_by_its_own_mtime(self, tmp_path: Path, monkeypatch) -> None:
+        """A bare ``mvnw package`` after a hit leaves an old marker beside a NEW jar:
+        the jar's own mtime is the reference, so a build of the current sources is fresh."""
+        repo, src = self._worktree(tmp_path, monkeypatch, "R", 3000.0)
+        jar = repo / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        _touch(jar, 4000.0)
+        marker = jar.parent / ".gate-jar-key"
+        marker.write_text("oldkey\n")
+        os.utime(marker, (2000.0, 2000.0))
+        self._watch(monkeypatch, repo, src)
+        assert jar_freshness_skip_reason(jar) is None
+
+    def test_no_marker_means_the_jar_mtime_alone(self, tmp_path: Path, monkeypatch) -> None:
+        repo, src = self._worktree(tmp_path, monkeypatch, "P", 3000.0)
+        jar = repo / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
+        _touch(jar, 2000.0)
+        self._watch(monkeypatch, repo, src)
+        reason = jar_freshness_skip_reason(jar)
+        assert reason is not None and "STALE" in reason

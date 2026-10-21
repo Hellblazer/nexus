@@ -40,8 +40,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PartitionAccessSelfHealIntegrationTest {
 
-    private static final String ADMIN = "nexus_admin_selfheal";
-    private static final String ADMIN_PASS = "nexus_admin_selfheal_pass";
+    private static final String ADMIN = PgContainerHelper.TEMPLATE_OWNER;
+    private static final String ADMIN_PASS = PgContainerHelper.TEMPLATE_OWNER_PASSWORD;
     private static final String TENANT = "selfheal-tenant";
     private static final List<String> PARENTS = List.of("chunks", "taxonomy_centroids");
     private static final String WARN_EVENT = "event=partition_access_drift_repaired";
@@ -53,15 +53,8 @@ class PartitionAccessSelfHealIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startDedicated();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);
-        }
+        pg = PgContainerHelper.startMigratedByOwner();
         adminDs = pool(ADMIN, ADMIN_PASS, 2);
-        SchemaMigrator.migrate(adminDs);
-        try (Connection owner = adminDs.getConnection()) {
-            PgContainerHelper.installTestObjects(owner);
-        }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);

@@ -36,7 +36,7 @@ import java.util.*;
  *   GET    /v1/memory/projects          distinct projects with prefix
  *   POST   /v1/memory/search_glob       FTS scoped to project glob
  *   POST   /v1/memory/search_by_tag     FTS scoped to tag
- *   GET    /v1/memory/all               all entries for project
+ *   GET    /v1/memory/all               all entries for project (optional title_kinds filter)
  *   DELETE /v1/memory/delete            delete by (project+title) or id=
  *   POST   /v1/memory/expire            quarantine TTL-expired entries (RDR-207; returns
  *                                       deleted_ids, always empty, and quarantined_ids)
@@ -83,6 +83,21 @@ public final class MemoryHandler implements HttpHandler {
             throw new IllegalArgumentException("query param 'limit' must be a positive integer, got " + parsed);
         }
         return Math.min(parsed, LIST_LIMIT_CEILING);
+    }
+
+    /**
+     * nexus-pxp44: the {@code /all} title filter. Absent or blank is the empty
+     * set (every row); an unknown or empty element is a 400.
+     */
+    public static java.util.Set<MemoryRepository.TitleKind> parseTitleKinds(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return java.util.Set.of();
+        }
+        var kinds = java.util.EnumSet.noneOf(MemoryRepository.TitleKind.class);
+        for (String part : raw.split(",", -1)) {
+            kinds.add(MemoryRepository.TitleKind.fromWireName(part.trim()));
+        }
+        return kinds;
     }
 
     // Jackson configured to handle OffsetDateTime and include null fields in output (SQLite-parity: every column key always present, RDR-152 nexus-fjwxh).
@@ -398,15 +413,21 @@ public final class MemoryHandler implements HttpHandler {
     }
 
     /**
-     * GET /v1/memory/all?project=
+     * GET /v1/memory/all?project=&title_kinds=  (title_kinds optional)
      * Response 200: [full entries]
+     *
+     * <p>nexus-pxp44: {@code title_kinds} is a comma-separated list of named
+     * title shapes ({@code rdr_status}, {@code gate_latest}); the response holds
+     * only rows whose title is any of them. Absent or blank is every row, byte
+     * for byte the old answer; an unknown kind is a 400, so a typo cannot
+     * silently widen the read.
      */
     private void handleAll(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         Map<String, String> params = queryParams(ex.getRequestURI());
         String project = requireParam(params, "project");
 
-        var rows = repo.getAll(tenant, project);
+        var rows = repo.getAll(tenant, project, parseTitleKinds(params.get("title_kinds")));
         HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
     }
 

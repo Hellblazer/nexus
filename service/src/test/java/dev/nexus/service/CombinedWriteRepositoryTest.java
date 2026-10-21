@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -29,6 +31,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -137,25 +140,20 @@ class CombinedWriteRepositoryTest {
     private boolean chunk384Exists(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CHUNKS,
+                CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION.eq(collection),
+                CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)), CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
     private String chunk384Text(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            var rs = ps.executeQuery();
-            return rs.next() ? rs.getString(1) : null;
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION.eq(collection),
+                       CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)), CHUNKS.EMBEDDING_384.isNotNull())
+                .fetch(CHUNKS.CHUNK_TEXT);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
@@ -163,13 +161,12 @@ class CombinedWriteRepositoryTest {
     private String chunk384MetadataJson(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT metadata::text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            var rs = ps.executeQuery();
-            return rs.next() ? rs.getString(1) : null;
+            var metadataText = CHUNKS.METADATA.cast(org.jooq.impl.SQLDataType.CLOB);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(metadataText).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION.eq(collection),
+                       CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)), CHUNKS.EMBEDDING_384.isNotNull())
+                .fetch(metadataText);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
@@ -180,17 +177,15 @@ class CombinedWriteRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, 'minilm-l6-v2-384', ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, text);
-            ps.setString(5, zeroVec);
-            ps.executeUpdate();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
+                .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 
@@ -217,14 +212,11 @@ class CombinedWriteRepositoryTest {
 
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws java.sql.SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", String.class, DSL.inline("lock_timeout"),
+                DSL.val(String.valueOf(lockTimeoutMs)), DSL.inline(true))).fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     // ── 6a: two-connection atomicity — block on external EXCLUSIVE gate, ─────

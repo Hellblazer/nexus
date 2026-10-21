@@ -462,4 +462,272 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_explain_knn(text, text, int)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-lateral-cross-rows-1024" author="nexus-cbo4a">
+        <comment>nexus_test.lateral_cross_rows_1024(text, text): the row count of the bare CROSS JOIN LATERAL
+        nearest-foreign-centroid shape over p_collection's 1024-dim chunks, with no hnsw.* or access-path
+        settings of its own, so it runs under whatever the caller's session set
+        (TaxonomyAssignCrossLateralHnswTest's no-row-hazard reproduction). The ORDER BY needs
+        OPERATOR(nexus.&lt;=&gt;) for the HNSW index to serve it, which the jOOQ DSL has no operator for. EXECUTE
+        with literal values plans the statement once with the values in hand, as the single pgjdbc execution it
+        replaces did. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.lateral_cross_rows_1024(p_tenant text, p_collection text) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n bigint;
+BEGIN
+    EXECUTE format(
+        'SELECT count(*) FROM ('
+        '  SELECT c.chash AS h, c.embedding_1024 AS e FROM nexus.chunks c'
+        '   WHERE c.tenant_id = %L AND c.collection = %L AND c.embedding_1024 IS NOT NULL'
+        ') b CROSS JOIN LATERAL ('
+        '  SELECT ct.topic_id t FROM nexus.taxonomy_centroids ct'
+        '   WHERE ct.collection &lt;&gt; %L AND ct.embedding_1024 IS NOT NULL'
+        '   ORDER BY ct.embedding_1024 OPERATOR(nexus.&lt;=&gt;) b.e, ct.topic_id LIMIT 1'
+        ') n',
+        p_tenant, p_collection, p_collection)
+    INTO v_n;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.lateral_cross_rows_1024(text, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-lock-table" author="nexus-cbo4a">
+        <comment>nexus_test.lock_table(text, text): plpgsql wrapper for LOCK TABLE (nexus-cbo4a batch 6) for
+        PgContainerHelper#lockTable. jOOQ has no LOCK clause. p_table is text cast to regclass inside the body, so
+        PostgreSQL resolves the identity and there is no string to validate; p_mode is checked (non-NULL, one of the
+        eight PostgreSQL lock modes) before it reaches format(). The lock is taken inside the caller's transaction and
+        lives until it ends, which is the point: a caller holds it open on a connection of its own. Returns true so
+        the call is an ordinary one-column select. SECURITY INVOKER so the caller's own privilege authorizes the LOCK.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.lock_table(p_table text, p_mode text) RETURNS boolean
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    IF p_mode IS NULL OR p_mode NOT IN ('ACCESS SHARE', 'ROW SHARE', 'ROW EXCLUSIVE', 'SHARE UPDATE EXCLUSIVE',
+                      'SHARE', 'SHARE ROW EXCLUSIVE', 'EXCLUSIVE', 'ACCESS EXCLUSIVE') THEN
+        RAISE EXCEPTION 'nexus_test.lock_table: not a lock mode: %', p_mode;
+    END IF;
+    EXECUTE format('LOCK TABLE %s IN %s MODE', p_table::regclass, p_mode);
+    RETURN true;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.lock_table(text, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-catalog-snapshot" author="nexus-cbo4a">
+        <comment>nexus_test.catalog_snapshot(): one text row per catalog entry, prefixed with its section (nexus-cbo4a
+        batch 8), for PristineCloneSkipTest, which diffs a clone's catalog before and after applyProductSchema. The
+        nineteen catalog reads (relations with owner, ACL, reloptions and RLS flags, column ACLs, functions with a body
+        hash, schemas, default ACLs, policies, constraints, indexes, triggers, event triggers, extensions, sequences,
+        views, materialized views, the database ACL and settings, roles, memberships, and the changelog journal minus the
+        columns a rerun rewrites) have no typed jOOQ form: pg_get_indexdef, pg_get_constraintdef and format() over several
+        catalogs. They moved here verbatim from that test's Java strings. System schemas are excluded. STABLE and
+        SECURITY INVOKER; it reads catalogs only and lists itself in the function section like any other nexus_test
+        function, so a before and after snapshot still compare equal.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.catalog_snapshot() RETURNS SETOF text
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $$
+SELECT 'relation: ' || t FROM (
+    SELECT format('%s.%s kind=%s owner=%s acl=%s opts=%s rls=%s/%s persist=%s part=%s',
+        n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), c.relacl, c.reloptions,
+        c.relrowsecurity, c.relforcerowsecurity, c.relpersistence, c.relispartition)
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'columnacl: ' || t FROM (
+    SELECT format('%s.%s.%s %s', n.nspname, c.relname, a.attname, a.attacl)
+        FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.attacl IS NOT NULL AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'function: ' || t FROM (
+    SELECT format('%s.%s(%s) owner=%s acl=%s cfg=%s secdef=%s vol=%s kind=%s body=%s',
+        n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner),
+        p.proacl, p.proconfig, p.prosecdef, p.provolatile, p.prokind, md5(p.prosrc))
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'schema: ' || t FROM (
+    SELECT format('%s owner=%s acl=%s', n.nspname, pg_get_userbyid(n.nspowner), n.nspacl)
+        FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'defaultacl: ' || t FROM (
+    SELECT format('role=%s ns=%s type=%s acl=%s', pg_get_userbyid(defaclrole),
+        coalesce(defaclnamespace::regnamespace::text, '-'), defaclobjtype, defaclacl) FROM pg_default_acl
+) s(t)
+UNION ALL
+SELECT 'policy: ' || t FROM (
+    SELECT format('%s on %s cmd=%s permissive=%s roles=%s using=%s check=%s', polname, polrelid::regclass,
+        polcmd, polpermissive, (SELECT string_agg(CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r) END,
+        ',' ORDER BY r) FROM unnest(polroles) r), pg_get_expr(polqual, polrelid),
+        pg_get_expr(polwithcheck, polrelid)) FROM pg_policy
+) s(t)
+UNION ALL
+SELECT 'constraint: ' || t FROM (
+    SELECT format('%s on %s %s validated=%s', conname, conrelid::regclass, pg_get_constraintdef(oid),
+        convalidated) FROM pg_constraint WHERE connamespace NOT IN
+        ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+) s(t)
+UNION ALL
+SELECT 'index: ' || t FROM (
+    SELECT format('%s valid=%s ready=%s', pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisready)
+        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+) s(t)
+UNION ALL
+SELECT 'trigger: ' || t FROM (
+    SELECT format('%s on %s %s enabled=%s', tgname, tgrelid::regclass, pg_get_triggerdef(oid), tgenabled)
+        FROM pg_trigger WHERE NOT tgisinternal
+) s(t)
+UNION ALL
+SELECT 'eventtrigger: ' || t FROM (
+    SELECT format('%s event=%s owner=%s enabled=%s fn=%s tags=%s', evtname, evtevent,
+        pg_get_userbyid(evtowner), evtenabled, evtfoid::regproc, evttags) FROM pg_event_trigger
+) s(t)
+UNION ALL
+SELECT 'extension: ' || t FROM (
+    SELECT format('%s %s ns=%s', extname, extversion, extnamespace::regnamespace) FROM pg_extension
+) s(t)
+UNION ALL
+SELECT 'sequence: ' || t FROM (
+    SELECT format('%s.%s owner=%s type=%s start=%s inc=%s max=%s min=%s cache=%s cycle=%s last=%s',
+        schemaname, sequencename, sequenceowner, data_type, start_value, increment_by, max_value,
+        min_value, cache_size, cycle, last_value) FROM pg_sequences
+) s(t)
+UNION ALL
+SELECT 'view: ' || t FROM (
+    SELECT format('%s.%s owner=%s def=%s', schemaname, viewname, viewowner, md5(definition))
+        FROM pg_views WHERE schemaname NOT IN ('pg_catalog','information_schema')
+) s(t)
+UNION ALL
+SELECT 'matview: ' || t FROM (
+    SELECT format('%s.%s owner=%s def=%s', schemaname, matviewname, matviewowner, md5(definition))
+        FROM pg_matviews
+) s(t)
+UNION ALL
+SELECT 'database: ' || t FROM (
+    SELECT format('owner=%s acl=%s connlimit=%s', pg_get_userbyid(datdba), datacl, datconnlimit)
+        FROM pg_database WHERE datname = current_database()
+) s(t)
+UNION ALL
+SELECT 'databasesetting: ' || t FROM (
+    SELECT format('role=%s cfg=%s', CASE WHEN setrole = 0 THEN '-' ELSE pg_get_userbyid(setrole) END, setconfig)
+        FROM pg_db_role_setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+) s(t)
+UNION ALL
+SELECT 'role: ' || t FROM (
+    SELECT format('%s super=%s inherit=%s createrole=%s createdb=%s login=%s repl=%s bypassrls=%s conn=%s cfg=%s',
+        rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
+        rolbypassrls, rolconnlimit, rolconfig) FROM pg_roles
+) s(t)
+UNION ALL
+SELECT 'membership: ' || t FROM (
+    SELECT format('%s in %s admin=%s', pg_get_userbyid(member), pg_get_userbyid(roleid), admin_option)
+        FROM pg_auth_members
+) s(t)
+UNION ALL
+SELECT 'journal: ' || t FROM (
+    SELECT format('%s|%s|%s|%s', id, author, filename, md5sum) FROM public.databasechangelog
+) s(t);
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.catalog_snapshot()</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-explain-plan" author="nexus-cbo4a">
+        <comment>nexus_test.explain_plan(text, boolean, boolean, boolean, boolean): one text row per line of
+        EXPLAIN (ANALYZE a, VERBOSE v, BUFFERS b, COSTS c) p_stmt (nexus-cbo4a batch C), for
+        PgContainerHelper#explainPlanWith. jOOQ's DSLContext#explain runs a plain EXPLAIN only: no ANALYZE (so no
+        actual loops= counts), no VERBOSE, no BUFFERS and no COSTS OFF, which several plan-shape tests read. The option
+        list is built here from the four booleans, so no caller supplies option text; the statement text is the only
+        string, and the Java wrapper accepts a jOOQ Query only, rendered with every bind inlined (EXPLAIN takes no bind
+        parameters through EXECUTE). A plpgsql FOR .. IN EXECUTE returns every plan row, with no row cap. SECURITY
+        INVOKER and no SET clause: it runs inside the caller's transaction, as the caller's role, so the caller's SET
+        LOCAL planner pins and tenant GUC apply to the plan, and ANALYZE executes the statement under the caller's own
+        row-level security.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.explain_plan(
+    p_stmt    text,
+    p_analyze boolean,
+    p_verbose boolean,
+    p_buffers boolean,
+    p_costs   boolean) RETURNS SETOF text
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_line text;
+BEGIN
+    IF p_stmt IS NULL OR p_analyze IS NULL OR p_verbose IS NULL OR p_buffers IS NULL OR p_costs IS NULL THEN
+        RAISE EXCEPTION 'nexus_test.explain_plan: no argument may be NULL';
+    END IF;
+    FOR v_line IN EXECUTE format('EXPLAIN (ANALYZE %s, VERBOSE %s, BUFFERS %s, COSTS %s) %s',
+                                 p_analyze::text, p_verbose::text, p_buffers::text, p_costs::text, p_stmt)
+    LOOP
+        RETURN NEXT v_line;
+    END LOOP;
+    RETURN;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.explain_plan(text, boolean, boolean, boolean, boolean)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-cosine-order" author="nexus-cbo4a">
+        <preConditions onFail="CONTINUE" onFailMessage="nexus.vector does not exist yet; retried on the next update">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'nexus' AND t.typname = 'vector'</sqlCheck>
+        </preConditions>
+        <comment>nexus_test.cosine_order(nexus.vector, nexus.vector): the pgvector cosine-distance operator
+        (nexus.&lt;=&gt;) as a function, so a typed jOOQ ORDER BY can carry it (nexus-cbo4a batch D). jOOQ has no form
+        for OPERATOR(nexus.&lt;=&gt;), and Routines.cosineDistance1 is pgvector's C function, which an HNSW index never
+        serves. This one is meant to be served: LANGUAGE sql with a single-expression body, IMMUTABLE, PARALLEL SAFE,
+        not STRICT, no SET clause and SECURITY INVOKER (a SET clause or SECURITY DEFINER blocks inline_function; the
+        SET-clause twin below shows the blocked form; whether STRICT would also block it is not tested), so the planner substitutes the body before it matches ORDER BY pathkeys against the index
+        and the plan carries the operator, not this function's name. NexusTestCosineOrderInliningTest EXPLAINs it
+        against a cosine_distance control; a plan that names nexus_test.cosine_order means the inlining failed.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.cosine_order(a nexus.vector, b nexus.vector) RETURNS double precision
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+AS $$
+    SELECT a OPERATOR(nexus.&lt;=&gt;) b
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.cosine_order(nexus.vector, nexus.vector)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-cosine-order-blocked" author="nexus-cbo4a">
+        <preConditions onFail="CONTINUE" onFailMessage="nexus.vector does not exist yet; retried on the next update">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'nexus' AND t.typname = 'vector'</sqlCheck>
+        </preConditions>
+        <comment>nexus_test.cosine_order_blocked(nexus.vector, nexus.vector): cosine_order's twin with one difference, a
+        SET clause (pg_proc.proconfig is not null), which makes inline_function refuse it. It exists only as the
+        detector's own control in NexusTestCosineOrderInliningTest: a plan that names this function, sorts and has no
+        Order By line is what a failed inlining looks like, so the test proves its assertions can tell the two apart.
+        Nothing else calls it.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.cosine_order_blocked(a nexus.vector, b nexus.vector) RETURNS double precision
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SET search_path = pg_catalog
+AS $$
+    SELECT a OPERATOR(nexus.&lt;=&gt;) b
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.cosine_order_blocked(nexus.vector, nexus.vector)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

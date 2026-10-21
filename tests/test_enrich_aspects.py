@@ -182,6 +182,7 @@ class TestRouting:
         assert "No extractor config" in result.output
         assert "knowledge__" in result.output
 
+    @pytest.mark.t2_tenant
     def test_unsupported_docs_collection_names_the_opt_in(self, env) -> None:
         """nexus-ft04v.23 kept a docs__-specific note on this refusal; since
         nexus-kk4ut it names the opt-in instead of the old z70w explanation,
@@ -198,6 +199,7 @@ class TestRouting:
 # ── --dry-run ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDryRun:
     def test_dry_run_reports_count_and_cost_no_subprocess(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -315,6 +317,7 @@ class TestDryRun:
 # ── nexus-ow9f: cost estimate distinguishes deterministic extractor ─────────
 
 
+@pytest.mark.t2_tenant
 class TestDeterministicCostEstimate:
     """The ``rdr-frontmatter-v1`` extractor is a pure-Python parser
     (``parser_fn`` set, ``prompt_template`` empty). Reporting an LLM-dispatch
@@ -382,6 +385,7 @@ class TestDeterministicCostEstimate:
 # shape-routed collection ────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestExtractorBanner:
     """The pre-run "N document(s) in 'x' (extractor=..., ...)" line named
     only ``select_config``'s BASE extractor for ``knowledge__*``, which is a
@@ -461,6 +465,7 @@ class TestDryRunSurfacesSourceUri:
     diagnosis (cross-project catalog corruption).
     """
 
+    @pytest.mark.t2_tenant
     def test_dry_run_skip_lines_include_source_uri(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -501,6 +506,7 @@ class TestDryRunSurfacesSourceUri:
 # ── nexus-v9az: relative-vs-absolute path mismatch ─────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestSourceUriResolutionForChromaLookup:
     """nexus-v9az: when an entry's ``file_path`` is relative (the
     nexus-3e4s anchor guard rewrites them at register time) but T3
@@ -636,6 +642,7 @@ class TestSourceUriResolutionForChromaLookup:
 # ── default extraction path (no validate, no re-extract) ────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDefaultExtraction:
     def test_extracts_and_upserts_each_entry(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -812,6 +819,7 @@ class TestDefaultExtraction:
 
 
 class TestReExtract:
+    @pytest.mark.t2_tenant
     def test_re_extract_filters_to_outdated_rows(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -874,6 +882,7 @@ class TestReExtract:
 
 
 class TestValidateSample:
+    @pytest.mark.t2_tenant
     def test_validate_sample_skipped_when_zero(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -906,6 +915,7 @@ class TestValidateSample:
         assert "Validating" not in result.output
         assert verify_calls == []
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_runs_verify_and_writes_failures(
         self,
         env,
@@ -982,6 +992,7 @@ class TestValidateSample:
         assert all(e == "reassembled OCR prose from T3 chunks" for e in seen_evidence)
         assert all("paper content" not in e for e in seen_evidence)
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_skips_when_indexed_text_unavailable(
         self,
         env,
@@ -1037,6 +1048,7 @@ class TestValidateSample:
         from nexus.commands.enrich import _DEFAULT_VALIDATE_SAMPLE_PCT
         assert _DEFAULT_VALIDATE_SAMPLE_PCT == 5
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_never_writes_to_cwd(
         self,
         env,
@@ -1079,6 +1091,7 @@ class TestValidateSample:
         expected_path = nexus_config_dir() / "aspect_validation_failures.jsonl"
         assert str(expected_path) in result.output
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_validation_out_override(
         self,
         env,
@@ -1119,6 +1132,7 @@ class TestValidateSample:
         row = json.loads(custom_out.read_text().strip().splitlines()[0])
         assert row["evidence_truncated"] is False
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_full_hydration_beyond_prior_truncation_point(
         self,
         env,
@@ -1164,6 +1178,7 @@ class TestValidateSample:
         assert seen_evidence == [full_text]
         assert "END-OF-DOCUMENT-MARKER" in seen_evidence[0]
 
+    @pytest.mark.t2_tenant
     def test_validate_sample_truncated_evidence_is_unverifiable_not_disagreement(
         self,
         env,
@@ -1322,6 +1337,7 @@ class TestGroupStructure:
 # ── Day 2 Operations: list / info / delete ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestDay2Ops:
     """RDR-089 §Day 2 Operations: list, info, delete."""
 
@@ -1640,6 +1656,7 @@ class TestDeleteAll:
 
     # ── dry-run default ──────────────────────────────────────────────────
 
+    @pytest.mark.t2_tenant
     def test_dry_run_reports_count_and_writes_nothing(self, env) -> None:
         from nexus.db.t2 import T2Database
 
@@ -1660,6 +1677,7 @@ class TestDeleteAll:
 
     # ── actual bulk delete ───────────────────────────────────────────────
 
+    @pytest.mark.t2_tenant
     def test_no_dry_run_removes_every_row_for_collection_only(
         self, env,
     ) -> None:
@@ -1689,6 +1707,7 @@ class TestDeleteAll:
             assert db.document_aspects.list_by_collection("knowledge__delos") == []
             assert len(db.document_aspects.list_by_collection("knowledge__other")) == 1
 
+    @pytest.mark.t2_tenant
     def test_no_dry_run_requires_confirmation_without_yes(self, env) -> None:
         from nexus.db.t2 import T2Database
 
@@ -1711,6 +1730,7 @@ class TestDeleteAll:
 
     # ── unknown / empty collection ───────────────────────────────────────
 
+    @pytest.mark.t2_tenant
     def test_unknown_collection_refuses(self, env) -> None:
         """A name with zero aspect rows AND zero catalog entries is a
         refusal, not a silent zero-row dry run."""
@@ -1721,6 +1741,7 @@ class TestDeleteAll:
         assert result.exit_code != 0
         assert "No catalog rows in" in result.output
 
+    @pytest.mark.t2_tenant
     def test_known_collection_with_no_aspect_rows_is_a_noop(self, env) -> None:
         """A collection the catalog DOES know (has documents) but with zero
         aspect rows is a no-op, not a refusal -- there is nothing wrong
@@ -1737,6 +1758,7 @@ class TestDeleteAll:
 # ── nexus-r0kum (review S2): the CLI batch path applies the same refusal ──────
 
 
+@pytest.mark.t2_tenant
 class TestCliBatchAttribution:
     """`nx enrich aspects <collection>` is the third complete_aspect writer
     (after the worker's row and batch paths). A file-routed record whose
@@ -1802,6 +1824,7 @@ class TestCliBatchAttribution:
             assert db.document_aspects.list_by_collection("rdr__nexus-foo") == []
 
 
+@pytest.mark.t2_tenant
 class TestDocsOptInEnrich:
     """nexus-kk4ut: ``nx enrich aspects`` on an opted-in docs__ collection
     extracts its prose files only, and a collection whose files are all

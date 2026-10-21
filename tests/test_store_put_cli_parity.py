@@ -139,6 +139,7 @@ def _install_recording_registry(monkeypatch):
 class TestStorePutCli:
     """``nx store put`` fires single, batch, document chains identically to MCP."""
 
+    @pytest.mark.t2_tenant
     def test_fires_all_three_chains_in_one_invocation(self, monkeypatch, tmp_path):
         from nexus.cli import main
 
@@ -171,6 +172,7 @@ class TestStorePutCli:
 class TestMemoryPromoteCli:
     """``nx memory promote`` fires the chains when promoting T2 → T3."""
 
+    @pytest.mark.t2_tenant
     def test_fires_all_three_chains_when_promoting(
         self, monkeypatch, tmp_path,
     ):
@@ -219,6 +221,7 @@ class TestMemoryPromoteCli:
 class TestStoreImportCli:
     """``nx store import`` fires the chains for the imported batch."""
 
+    @pytest.mark.t2_tenant
     def test_fires_chains_with_full_batch(self, monkeypatch, tmp_path):
         """A 3-record export imports as a 3-element batch on the chains."""
         import gzip
@@ -292,6 +295,7 @@ class TestCrossCallerIdentityParity:
     these three callers minted three documents with contradictory content
     (the production symptom: 1.1.1/1.1.2/1.1.3)."""
 
+    @pytest.mark.t2_tenant
     def test_cli_mcp_and_promote_reputs_reconcile_onto_one_document(
         self, monkeypatch, tmp_path,
     ):
@@ -365,6 +369,7 @@ class TestStorePutManifestReplace:
     content, the document's manifest contains EXACTLY the new chash — the
     old chash row is gone, not merely uncounted."""
 
+    @pytest.mark.t2_tenant
     def test_reput_replaces_manifest_not_appends(self, monkeypatch, tmp_path):
         import hashlib
 

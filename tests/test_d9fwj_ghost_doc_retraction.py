@@ -58,6 +58,8 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog, active_reader, count_documents, seed_manifest_chunks
 
+pytestmark = pytest.mark.t2_tenant
+
 _REAL_COLLECTION = "knowledge__d9fwj-ghost__bge-base-en-v15-768__v1"
 
 

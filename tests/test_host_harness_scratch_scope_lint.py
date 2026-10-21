@@ -188,6 +188,14 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         1, "CONTAINER: `store_put` is a tool name in the always-load set this "
            "file patches into the container's installed core.py; it calls no tool.",
     ),
+    # nexus-ppuwc: the macOS test guest on hellmini. row1.sh runs only inside
+    # a per-run tart VM cloned from a clean image and deleted at the end.
+    "tests/e2e/macos-guest/row1.sh": (
+        1, "CONTAINER: runs only inside a throwaway tart macOS VM (a per-run "
+           "clone of nexus-mac-clean, deleted at the end of the run); its "
+           "setup provisions the VM's own bundled PG/engine, and the one "
+           "`store_put` prompt stores the probe note there.",
+    ),
     "tests/e2e/migration-rehearsal/rehearse_acquire.sh": (
         3, "CONTAINER: runs INSIDE the container (own header comment: "
            "\"PUBLISHED-ARTIFACT acquire gate\"); provisions its own bundled "

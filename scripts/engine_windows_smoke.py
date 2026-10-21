@@ -321,7 +321,7 @@ class UrllibHttp:
 
 def engine_env(
     *, engine_dir: Path, platform: sm.Platform, base: Mapping[str, str], db_url: str, db_user: str,
-    port: int, model_root: Path,
+    port: int, model_root: Path, ort_native_root: Path | None = None,
 ) -> dict[str, str]:
     """Scrubbed OS basics, PATH = engine directory + OS directories, plus the engine's own settings."""
     env = sm.scrubbed_env(engine_dir, platform, base)
@@ -331,6 +331,9 @@ def engine_env(
         # as service/native-smoke.sh: the posture the local launch ships
         NX_OWNERLESS_WRITE_MODE="enforce",
     )
+    if ort_native_root is not None:
+        # nexus-8ool4: a per-run native-library cache, so the leg proves THIS binary extracts and loads it
+        env["NX_ORT_NATIVE_DIR"] = str(ort_native_root)
     return env
 
 
@@ -418,6 +421,26 @@ def check_shutdown_log(text: str) -> None:
         raise SmokeError(
             f"the engine log lacks event={', event='.join(missing)}: the stop did not run the engine's own "
             f"shutdown path; log tail:\n{text[-1500:]}"
+        )
+
+
+_ORT_NATIVE_RE = re.compile(r'\bevent=ort_native_dir source=(?:extracted|reused) dir="[^"]+"')
+_ORT_NATIVE_FAILED = ("event=ort_native_dir_unavailable", "event=ort_native_dir_failed", "event=ort_native_dir_untrusted")
+
+
+def check_ort_native_log(text: str) -> None:
+    """nexus-8ool4: the engine loaded ONNX Runtime from the shared per-version directory.
+
+    ``OrtNativeDir`` logs ``event=ort_native_dir source=extracted|reused dir="..."`` once the property is
+    set; its unavailable/failed/untrusted events mean ORT fell back to unpacking into the temp directory,
+    which is the leak this guards against. Runs at the engine tag cut, on the native binary and Windows."""
+    bad = [ev for ev in _ORT_NATIVE_FAILED if ev in text]
+    if bad:
+        raise SmokeError(f"the engine log carries {', '.join(bad)}: ONNX Runtime fell back to the temp directory; log tail:\n{text[-1500:]}")
+    if _ORT_NATIVE_RE.search(text) is None:
+        raise SmokeError(
+            "the engine log lacks event=ort_native_dir source=extracted|reused dir=\"...\": the engine did not "
+            f"load ONNX Runtime from its shared directory; log tail:\n{text[-1500:]}"
         )
 
 
@@ -545,6 +568,7 @@ def run(
         env = engine_env(
             engine_dir=engine_exe.parent, platform=platform, base=base_env,
             db_url=f"jdbc:postgresql://127.0.0.1:{pg_port}/{DB_NAME}", db_user=user, port=svc_port, model_root=model_root,
+            ort_native_root=work / "ort_native",
         )
         log = work / "engine.log"
         proc = launcher.start([str(engine_exe), "-Duser.timezone=UTC"], env, log)
@@ -563,6 +587,8 @@ def run(
         if status != 200:
             raise SmokeError(f"/v1/vectors/embed returned {status}: {text[:300]!r}; log tail:\n{_tail(log, 1500)}")
         emit(f"SMOKE embed: {check_embedding(text)}-dimensional bge vector (DJL tokenizers JNI + ONNX Runtime JNI ran)")
+        check_ort_native_log(read_log(log))
+        emit("SMOKE ort native: ONNX Runtime loaded from the shared per-version directory (event=ort_native_dir)")
 
         if platform.windows:
             rc, listing = runner.capture(

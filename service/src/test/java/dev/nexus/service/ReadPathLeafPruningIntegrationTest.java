@@ -323,13 +323,13 @@ class ReadPathLeafPruningIntegrationTest {
      * everything the call ran is.
      */
     <T> Seen observe(Supplier<T> call) throws Exception {
-        int from = pg.getLogs().length();
+        int from = PgContainerHelper.serverLog(pg).length();
         call.get();
         String mark = "rp-sentinel-" + sentinel.incrementAndGet();
         probeScope.withTenant(TA, ctx -> ctx.fetch(DSL.select(DSL.inline(mark))).size());
         String delta = null;
         for (int attempt = 0; attempt < 200 && delta == null; attempt++) {
-            String logs = pg.getLogs();
+            String logs = PgContainerHelper.serverLog(pg);
             int at = logs.indexOf(mark, from);
             if (at >= 0) {
                 delta = logs.substring(from, at);
@@ -743,8 +743,7 @@ class ReadPathLeafPruningIntegrationTest {
         // back (twice per call), so every leaf-pruning test that ran after TS2 paid for the bloat (20 minutes for
         // the class, against under 10 seconds for the same tests run before TS2).
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "ALTER ROLE " + PgContainerHelper.SVC_USERNAME
-                + " RESET session_preload_libraries");
+            PgContainerHelper.disableAutoExplainForService(su);
         }
         try (HikariDataSource ts2Ds = svcPool("rp-ts2")) {
             ts2Scope = new TenantScope(ts2Ds);

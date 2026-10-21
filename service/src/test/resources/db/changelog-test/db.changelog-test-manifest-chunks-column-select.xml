@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: GRANT SELECT on every nexus.catalog_document_chunks column EXCEPT chash to ${role}, in
+    Liquibase XML instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests
+    included). jOOQ's grant(..) takes a table, never a column list.
+
+    CatalogManifestSweepRepositoryTest revokes the table-level SELECT through jOOQ first, so this column-level
+    grant leaves only the chash read (the sweep's before-read, currentManifestChashes) failing while the
+    manifest write's own DELETE and INSERT carry on. The test restores the table-level grant through jOOQ.
+    Run by that test directly; runAlways, bookkeeping in its own table.
+    ${role} is a fixed test literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="manifest-chunks-column-select" author="nexus-cbo4a" runAlways="true">
+        <sql>GRANT SELECT (tenant_id, doc_id, "position", chunk_index, line_start, line_end, char_start, char_end, collection, embedding_model) ON nexus.catalog_document_chunks TO ${role}</sql>
+    </changeSet>
+</databaseChangeLog>

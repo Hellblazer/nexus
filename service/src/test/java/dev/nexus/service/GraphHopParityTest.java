@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Query;
 import org.jooq.SQLDialect;
+import org.jooq.impl.SQLDataType;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.util.ArrayList;
+import java.time.OffsetDateTime;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -182,39 +192,72 @@ class GraphHopParityTest {
     private void seedExplainFixture(Connection su) throws Exception {
         insertCollection(su, TENANT_A, COLL_EXPLAIN);
         // seed doc
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "VALUES ('" + TENANT_A + "', 'exseed', 'Seed', 'exauthor', 2024, 'paper', 'research', '" +
-            COLL_EXPLAIN + "')");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 'Doc '||g, 'exauthor', 2024, 'paper', 'research', '" +
-            COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var series = DSL.generateSeries(1, EXPLAIN_ROWS).as("s", "g");
+        Field<Integer> g = series.field("g", Integer.class);
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "exseed")
+            .set(CATALOG_DOCUMENTS.TITLE, "Seed")
+            .set(CATALOG_DOCUMENTS.AUTHOR, "exauthor")
+            .set(CATALOG_DOCUMENTS.YEAR, 2024)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL_EXPLAIN)
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENTS.TENANT_ID),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline("exauthor"),
+                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"),
+                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
+                .from(series))
+            .execute();
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
         // decoded at the seam.
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // nexus.chunks row before the manifest row below -- chunk insert first.
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
-            "' AND name = '" + COLL_EXPLAIN + "'), 'ex'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
-            "' AND name = '" + COLL_EXPLAIN + "') " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // Embedding: [(g % 100) / 100, 1, 0 ... 0], built as pgvector text and cast to the generated
+        // field's own vector type.
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+            .select(ctx.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(COLL_EXPLAIN, CHUNKS.COLLECTION),
+                    DSL.function("decode", SQLDataType.BLOB,
+                        DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
+                        DSL.inline("hex")),
+                    DSL.val(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN), CHUNKS.EMBEDDING_MODEL),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.cast(DSL.concat(DSL.inline("["),
+                            DSL.cast(DSL.cast(g.mod(100), SQLDataType.DOUBLE).div(100.0), SQLDataType.VARCHAR),
+                            DSL.inline(",1"), DSL.repeat(DSL.inline(",0"), 1022), DSL.inline("]")),
+                        CHUNKS.EMBEDDING_1024.getDataType()))
+                .from(series))
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline(0),
+                    DSL.function("decode", SQLDataType.BLOB,
+                        DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
+                        DSL.inline("hex")),
+                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                    DSL.val(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN),
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
+                .from(series))
+            .execute();
         // edges exseed --cites--> ex1..exN
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) " +
-            "SELECT '" + TENANT_A + "', 'exseed', 'ex'||g, 'cites', 'test' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_LINKS.TENANT_ID), DSL.inline("exseed"),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline("cites"), DSL.inline("test"))
+                .from(series))
+            .execute();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -224,14 +267,10 @@ class GraphHopParityTest {
     @Test @Order(10)
     void signature_queryVectorFirst_chashInResult() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args, " +
-                "       pg_catalog.pg_get_function_result(p.oid)    AS result " +
-                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                " WHERE n.nspname = 'nexus' AND p.proname = 'search_graph_hop_1024'");
-            assertThat(rs.next())
-                .as("nexus.search_graph_hop_1024 must exist (catalog-007)").isTrue();
-            String args = rs.getString("args");
+            var sig = PgCatalogProbes.routineSignature(DSL.using(su, SQLDialect.POSTGRES), "nexus", "search_graph_hop_1024");
+            assertThat(sig)
+                .as("nexus.search_graph_hop_1024 must exist (catalog-007)").isNotNull();
+            String args = sig.arguments();
             assertThat(args)
                 .as("query vector must be the FIRST argument, typed `vector` (Finding 5a)")
                 .startsWith("p_query nexus.vector");
@@ -244,7 +283,7 @@ class GraphHopParityTest {
                 .contains("p_direction text")
                 .contains("p_where jsonb")
                 .contains("p_n integer");
-            assertThat(rs.getString("result"))
+            assertThat(sig.result())
                 .as("audit HIGH: result table MUST carry the matched chunk's chash so the "
                     + "query() repoint (rzqto) populates RDR-086 chunk_text_hash from the "
                     + "MATCHED chunk, not a per-doc manifest guess")
@@ -341,15 +380,13 @@ class GraphHopParityTest {
     @Test @Order(50)
     void chashColumn_matchesSeededChunkChash() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT id, chash FROM nexus.search_graph_hop_1024(" +
-                queryVecLiteral(1024) + ", ARRAY['g0']::text[], " +
-                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
-                + "') ORDER BY distance");
+            var fn = SEARCH_GRAPH_HOP_1024.call(VectorSeeds.vecXY(1024, 1f, 0f), new String[] {"g0"},
+                new String[] {COLL_G}, "cites", 1, "out", null, 10, "voyage-context-3", TENANT_A);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(fn.ID, fn.CHASH).from(fn).orderBy(fn.DISTANCE).fetch();
             int seen = 0;
-            while (rs.next()) {
-                String id = rs.getString("id");
-                String chash = rs.getString("chash");
+            for (var rec : rows) {
+                String id = rec.get(fn.ID);
+                String chash = rec.get(fn.CHASH);
                 assertThat(chash)
                     .as("the chash column must be the MATCHED chunk's chash for doc " + id)
                     .isEqualTo(validChash(id));
@@ -368,9 +405,11 @@ class GraphHopParityTest {
         try (Connection su = pg.createConnection("")) {
             // Stamp metadata on g1's chunk only; g0's stays NULL. Late-order safe:
             // no earlier test passes p_where or reads chunk metadata.
-            su.createStatement().execute(
-                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET metadata = '{\"lang\": \"java\"}'::jsonb " +
-                "WHERE collection = '" + COLL_G + "' AND chash = decode('" + validChash("g1") + "', 'hex')");
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{\"lang\": \"java\"}"))
+                .where(CHUNKS.COLLECTION.eq(COLL_G))
+                .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(validChash("g1"))))
+                .execute();
 
             // NULL where: unfiltered — the pre-catalog-012 behavior is preserved.
             assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out", null, 10))
@@ -542,29 +581,35 @@ class GraphHopParityTest {
         // real function call at corpus scale — that recall/latency gate is conexus
         // xr7.8.9 / nexus-0zcn9, deferred per the houg9 audit. The disabled GUCs force
         // reachability, not representativeness.
-        String inner =
-            "SELECT d.tumbler " +
-            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
-            "  JOIN nexus.catalog_documents d " +
-            "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
-            "  JOIN (SELECT DISTINCT to_tumbler AS tumbler FROM nexus.catalog_links " +
-            "         WHERE from_tumbler = 'exseed' AND link_type = 'cites') rd " +
-            "    ON rd.tumbler = d.tumbler " +
-            // RDR-225: a literal tenant and model prune the plan to the one model/tenant leaf the
-            // fixture lives in, as the engine's own call does (it always knows both).
-            " WHERE c.tenant_id = '" + TENANT_A + "' AND c.embedding_model = 'voyage-context-3'" +
-            " AND c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
-            // RDR-191 repoint (nexus-o8dil.16/.48, Step G cluster-B triage): the unified
-            // nexus.chunks table carries three nullable embedding_384/768/1024 columns,
-            // not one bare `embedding` column - this test's own hand-rolled probe SQL
-            // (not production code; DimTables.CHUNKS_TABLE_NAME above already targets the
-            // unified table) was never updated post-repoint, so `c.embedding` no longer
-            // resolves (PSQLException: column c.embedding does not exist). The assertion
-            // below already targets idx_chunks_embedding_1024, so name that dim's column.
-            " ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) " + queryVecLiteral(1024) + " LIMIT 10";
-        String plan = explain(inner);
+        // The same shape as the SQL it replaces: chunks c JOIN manifest m JOIN documents d JOIN (the reached set,
+        // SELECT DISTINCT to_tumbler FROM catalog_links WHERE from = exseed AND type = cites) rd, rank by the HNSW
+        // operator, LIMIT 10. nexus_test.cosine_order is that operator as an inlinable function
+        // (NexusTestCosineOrderInliningTest). explainPlanWith renders every bind as a literal, so the tenant, model,
+        // collection and probe vector are plan-time constants exactly as the old text wrote them.
+        // RDR-225: a literal tenant and model prune the plan to the one model/tenant leaf the
+        // fixture lives in, as the engine's own call does (it always knows both).
+        var rd = DSL.selectDistinct(CATALOG_LINKS.TO_TUMBLER.as("tumbler"))
+            .from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.FROM_TUMBLER.eq("exseed").and(CATALOG_LINKS.LINK_TYPE.eq("cites")))
+            .asTable("rd");
+        String plan = explain(ctx -> ctx.select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CHUNKS)
+            .join(CATALOG_DOCUMENT_CHUNKS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(CHUNKS.COLLECTION))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH)))
+            .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+            .join(rd).on(rd.field("tumbler", String.class).eq(CATALOG_DOCUMENTS.TUMBLER))
+            .where(CHUNKS.TENANT_ID.eq(TENANT_A))
+            .and(CHUNKS.EMBEDDING_MODEL.eq("voyage-context-3"))
+            .and(CHUNKS.COLLECTION.eq(COLL_EXPLAIN))
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+            // RDR-191 repoint: the unified nexus.chunks table carries three nullable embedding_384/768/1024
+            // columns, so rank by the 1024 one, the dim the fixture lives in and the index asserted below.
+            .orderBy(DSL.function(DSL.name("nexus_test", "cosine_order"), SQLDataType.DOUBLE,
+                CHUNKS.EMBEDDING_1024,
+                DSL.val(VectorSeeds.vecXY(1024, 1f, 0f), CHUNKS.EMBEDDING_1024.getDataType())).asc())
+            .limit(10));
         assertThat(plan)
             .as("materialize-reached-then-rank must use the HNSW index "
                 + "idx_chunks_embedding_1024 (rank OUTSIDE the recursive CTE keeps the "
@@ -595,40 +640,40 @@ class GraphHopParityTest {
                                    String linkType, int depth, String direction,
                                    String whereJson, int n)
             throws Exception {
-        String sql =
-            "SELECT id FROM nexus.search_graph_hop_" + dim + "(" +
-            queryVecLiteral(dim) + ", " +
-            "ARRAY['" + seed + "']::text[], " +
-            "ARRAY['" + collection + "']::text[], " +
-            sqlText(linkType) + ", " +
-            depth + ", " +
-            sqlText(direction) + ", " +
-            (whereJson == null ? "NULL::jsonb" : "'" + whereJson + "'::jsonb") + ", " +
-            n + ", " + sqlText(collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3")
-            + ", " + sqlText(tenantFor(collection)) + ")";
-        return runIds(conn, sql);
+        String model = collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3";
+        var vec = VectorSeeds.vecXY(dim, 1f, 0f);
+        String[] seeds = {seed};
+        String[] colls = {collection};
+        JSONB where = whereJson == null ? null : JSONB.valueOf(whereJson);
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_GRAPH_HOP_384.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            case 768  -> SEARCH_GRAPH_HOP_768.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            case 1024 -> SEARCH_GRAPH_HOP_1024.call(vec, seeds, colls, linkType, depth, direction, where, n,
+                model, tenantFor(collection));
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .select(fn.field("id", String.class)).from(fn).fetch(r -> r.get(0, String.class));
     }
 
-    private String explain(String inner) throws Exception {
+    /**
+     * The plan of {@code query}, as raw lines (not {@code PgContainerHelper.explainPlan}, whose jOOQ table is
+     * '|'-bordered, nexus-ou2za), with the planner steered to reach the index: sequential and bitmap scans, sorts and
+     * hash joins off for the session. Runs as the superuser the fixture was built with.
+     */
+    private String explain(java.util.function.Function<DSLContext, Query> query) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
-                su.createStatement().execute("SET " + guc + " = off");
+                PgContainerHelper.setPlannerGuc(su, guc, "off", false);
             }
-            ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner);
-            StringBuilder sb = new StringBuilder();
-            while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            return sb.toString();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return PgContainerHelper.explainPlanWith(ctx, query.apply(ctx),
+                new PgContainerHelper.ExplainOptions(false, false, false, true)) + "\n";
         }
-    }
-
-    private static List<String> runIds(Connection conn, String sql) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) out.add(rs.getString(1));
-        }
-        return out;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -649,35 +694,51 @@ class GraphHopParityTest {
      */
     private List<String> stitchedGraphOracle(Connection conn, int dim, String collection,
                                              String seed, String linkType, int depth,
-                                             String direction) throws Exception {
-        String dirPred =
-            "out".equals(direction)  ? "l.from_tumbler = r.tumbler"
-          : "in".equals(direction)   ? "l.to_tumbler = r.tumbler"
-          : "(l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)";
-        String sql =
-            "WITH RECURSIVE reach(tumbler, d) AS (" +
-            "    SELECT '" + seed + "', 0 " +
-            "  UNION " +
-            "    SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END, r.d + 1 " +
-            "    FROM reach r JOIN nexus.catalog_links l ON " + dirPred + " " +
-            // nexus-t7m8e: both traversed endpoints must be LIVE — an algorithmic
-            // alias of the function body's own fix, so this oracle stays in
-            // lockstep with search_graph_hop_<dim> rather than silently diverging.
-            "    JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL " +
-            "    JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL " +
-            "    WHERE r.d < " + depth +
-            "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
-            "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
-            "SELECT d.tumbler AS id " +
-            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
-            "  JOIN nexus.catalog_document_chunks m " +
-            "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
-            "  JOIN nexus.catalog_documents d " +
-            "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
-            "  JOIN reached rd ON rd.tumbler = d.tumbler " +
-            " WHERE c.collection = '" + collection + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
-        return runIds(conn, sql);
+                                             String direction) {
+        Field<String> reachTumbler = DSL.field(DSL.name("reach", "tumbler"), CATALOG_LINKS.FROM_TUMBLER.getDataType());
+        Field<Integer> reachDepth = DSL.field(DSL.name("reach", "d"), SQLDataType.INTEGER);
+        Condition dirPred = switch (direction) {
+            case "out" -> CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler);
+            case "in" -> CATALOG_LINKS.TO_TUMBLER.eq(reachTumbler);
+            default -> CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler).or(CATALOG_LINKS.TO_TUMBLER.eq(reachTumbler));
+        };
+        Condition linkTypePred = linkType == null ? DSL.noCondition() : CATALOG_LINKS.LINK_TYPE.eq(linkType);
+        CatalogDocuments fromDoc = CATALOG_DOCUMENTS.as("fd");
+        CatalogDocuments toDoc = CATALOG_DOCUMENTS.as("td");
+        // nexus-t7m8e: both traversed endpoints must be LIVE -- an algorithmic alias of the function body's own
+        // fix, so this oracle stays in lockstep with search_graph_hop_<dim> rather than silently diverging.
+        var reach = DSL.name("reach").fields("tumbler", "d").as(
+            // the cast keeps the seed column text: a bound String travels as varchar, and a recursive CTE refuses a
+            // column whose non-recursive term is varchar and whose recursive term is text
+            DSL.select(DSL.cast(DSL.val(seed), CATALOG_LINKS.FROM_TUMBLER.getDataType()), DSL.inline(0))
+                .union(DSL.select(
+                        DSL.when(CATALOG_LINKS.FROM_TUMBLER.eq(reachTumbler), CATALOG_LINKS.TO_TUMBLER)
+                            .otherwise(CATALOG_LINKS.FROM_TUMBLER),
+                        reachDepth.plus(1))
+                    .from(DSL.table(DSL.name("reach")))
+                    .join(CATALOG_LINKS).on(dirPred)
+                    .join(fromDoc).on(fromDoc.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER).and(fromDoc.DELETED_AT.isNull()))
+                    .join(toDoc).on(toDoc.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER).and(toDoc.DELETED_AT.isNull()))
+                    .where(reachDepth.lt(depth).and(linkTypePred))));
+        var reached = DSL.name("reached").fields("tumbler").as(
+            DSL.selectDistinct(reachTumbler).from(DSL.table(DSL.name("reach"))));
+        Field<String> reachedTumbler = DSL.field(DSL.name("reached", "tumbler"), CATALOG_LINKS.FROM_TUMBLER.getDataType());
+        Field<Vector> embedding = VectorSeeds.chunkEmbedding(dim);
+        return DSL.using(conn, SQLDialect.POSTGRES)
+            .withRecursive(reach, reached)
+            .select(CATALOG_DOCUMENTS.TUMBLER)
+            .from(CHUNKS)
+            .join(CATALOG_DOCUMENT_CHUNKS)
+                .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(CHUNKS.COLLECTION))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH)))
+            .join(CATALOG_DOCUMENTS)
+                .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+            .join(reached).on(reachedTumbler.eq(CATALOG_DOCUMENTS.TUMBLER))
+            .where(CHUNKS.COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .orderBy(Routines.cosineDistance1(embedding, DSL.val(VectorSeeds.vecXY(dim, 1f, 0f), embedding)).asc())
+            .fetch(CATALOG_DOCUMENTS.TUMBLER);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -689,34 +750,52 @@ class GraphHopParityTest {
                          double x, double y) throws Exception {
         String tenant = tenantFor(collection);
         String chash = validChash(tumbler);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc " + tumbler + "', 'a', 2024, " +
-            "'paper', 'research', '" + collection + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+            .set(CATALOG_DOCUMENTS.YEAR, 2024)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
-            tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
-            "' AND name = '" + collection + "'), '" + tumbler + "', " +
-            vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
-            "' AND name = '" + collection + "')) " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, tumbler)
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, (float) x, (float) y))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void link(Connection su, String tenant, String from, String to, String type)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) " +
-            "VALUES ('" + tenant + "', '" + from + "', '" + to + "', '" + type + "', 'test') " +
-            "ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_LINKS)
+            .set(CATALOG_LINKS.TENANT_ID, tenant)
+            .set(CATALOG_LINKS.FROM_TUMBLER, from)
+            .set(CATALOG_LINKS.TO_TUMBLER, to)
+            .set(CATALOG_LINKS.LINK_TYPE, type)
+            .set(CATALOG_LINKS.CREATED_BY, "test")
+            .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                CATALOG_LINKS.LINK_TYPE).doNothing()
+            .execute();
     }
 
     private static String tenantFor(String collection) {
@@ -734,33 +813,15 @@ class GraphHopParityTest {
 
     private static void setDeleted(Connection su, String tenantId, String tumbler, boolean deleted)
             throws Exception {
-        su.createStatement().execute(
-            "UPDATE nexus.catalog_documents SET deleted_at = " +
-            (deleted ? "now()" : "NULL") +
-            " WHERE tenant_id = '" + tenantId + "' AND tumbler = '" + tumbler + "'");
+        Field<OffsetDateTime> deletedAt = deleted
+            ? DSL.currentOffsetDateTime() : DSL.val(null, CATALOG_DOCUMENTS.DELETED_AT);
+        DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenantId).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .execute();
     }
 
     // ── value helpers ────────────────────────────────────────────────────────
-
-    private static String queryVecLiteral(int dim) {
-        return vec2(dim, 1.0, 0.0) + "::nexus.vector";
-    }
-
-    private static String vec2(int dim, double x, double y) {
-        StringBuilder sb = new StringBuilder("'[");
-        sb.append(fmt(x)).append(',').append(fmt(y));
-        for (int i = 2; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
-    }
-
-    private static String fmt(double v) {
-        if (v == Math.rint(v)) return Integer.toString((int) v);
-        return Double.toString(v);
-    }
-
-    private static String sqlText(String v) {
-        return v == null ? "NULL" : "'" + v.replace("'", "''") + "'";
-    }
 
     /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the
      *  full sha256 digest is the canonical chash — the pre-flip [:32] truncation is

@@ -7,6 +7,9 @@
 set -uo pipefail
 REPS=${1:?REPS}; shift
 HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$HERE/../lab_grant.sh"
+lab_docker_flags 1   # one container at a time (nexus-kani0)
 HARNESS=$(cd "$HERE/../.." && pwd)
 WT=$(cd "$HARNESS/../../.." && pwd)
 IMAGE=${IMAGE:-nexus-ab-seeded:2.1.300}
@@ -18,7 +21,7 @@ for rep in $(seq 1 "$REPS"); do
     if [ -s "$OUT/exit.txt" ]; then continue; fi
     mkdir -p "$OUT" && chmod 777 "$OUT"
     echo "$(date -u +%FT%TZ) start $job r$rep" >> "$HERE/out/progress"
-    docker run --rm --name "nxts-$ARM-$NAME-r$rep" \
+    docker run --rm "${LAB_DOCKER_FLAGS[@]+"${LAB_DOCKER_FLAGS[@]}"}" --name "nxts-$ARM-$NAME-r$rep" \
       -e CLAUDE_CODE_OAUTH_TOKEN -e NX_NO_TELEMETRY=1 -e ARM="$ARM" -e MODE="$MODE" \
       -e PROMPT="/harness/ab/tuplespace/prompts/$NAME.txt" \
       -e ANTHROPIC_MODEL="${AB_MODEL:-claude-opus-5-5}" -e ENABLE_TOOL_SEARCH=true \

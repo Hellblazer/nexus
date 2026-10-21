@@ -44,8 +44,9 @@ and get, and the RDR-192 reaper moves it to quarantine once it has had no owner 
 censuses every non-quarantine collection (`nx t3 census-manifest-less`'s
 route), backfills each collection that holds a `legacy-unmanifested` chunk
 (`nx t3 backfill-manifest --no-dry-run --only-gapped`'s call), and records
-completion in the engine's `nexus.ladder_completions` only after a fresh census
-reads zero legacy-unmanifested and zero unclassified chunks. It never deletes a
+completion in the engine's `nexus.ladder_completions` only after a census
+reads zero legacy-unmanifested and zero unclassified chunks (each collection's
+reading taken in that session or kept from an earlier one at most 24 hours old). It never deletes a
 chunk and leaves the `superseded`, `dead-owner` and `no-owner` buckets to the
 reaper.
 
@@ -164,10 +165,28 @@ machinery that performed that migration no longer ships:
      `upgrade_ladder/provisioning.py` `provision_and_serve`. It has not been run
      at the pin on a box with `install.mode: managed`.) Never
      run the pin's `nx guided-upgrade` with `--service-url`, and never aim
-     `nx upgrade` at a managed endpoint. That path is unsupported: the engine
-     retired the `/v1/staging` routes the 6.x migration lands through
-     (nexus-z0o2p.27). What the path did against a current engine before the
-     routes went has not been measured (nexus-6g218); do not rely on it
+     `nx upgrade` at a managed endpoint. That path is unsupported, and it
+     failed in every case measured (nexus-6g218, T2
+     `nexus/6-18-1-upgrade-cloud-posture-2026-10-17`: gate jars of the last
+     commit with the `/v1/staging` routes and of develop, over loopback http,
+     bge posture, one tenant; the managed endpoint itself was not used).
+     `nx upgrade` stopped before writing anything ("upgrade ladder did not
+     converge ... HTTP 422: collection ... is not registered").
+     `nx guided-upgrade --service-url` refused at its readiness check ("lease
+     is NOT discoverable") when no local service lease existed; with a
+     synthetic lease standing in for a running 6.x service it got past that
+     check (behaviour with a real local service plus a managed URL was not
+     measured) and then also needed `NX_SERVICE_TOKEN` exported. Past both,
+     the develop engine, which has no `/v1/staging` routes (retired in
+     nexus-z0o2p.27), answered the first landing call with HTTP 404 and
+     nothing was written. On the last build that still had those routes, a
+     store whose collections keep their embedding model and has no document
+     aspects was reported "Migration VERIFIED" (on a rerun, after the first run
+     failed with a taxonomy HTTP 422) while every catalog manifest
+     row, topic assignment, frecency and relevance_log row keyed by the 16- and
+     32-hex ids measured was discarded; a store built by 6.18.1's own seeder,
+     with aspects and model-changing collections, failed loudly instead (HTTP
+     422 and 409). Use the local path above.
    - **Stop any current-engine local service first.** A 7.x install may have
      left its local service running (`nx daemon service status`; stop it with
      `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
@@ -222,8 +241,10 @@ not been rehearsed end to end.** The verbs below exist and their flags match
 `--help`, and the gates named below were read in source, but nobody has run the
 whole sequence against a cloud tenant and counted what arrived (nexus-xbqh9
 will). Treat it as a plan, check counts as you go, and expect to find
-something. What hop 1 does when aimed at a current managed engine is likewise
-unmeasured (nexus-6g218).
+something. Hop 1 aimed at a current engine failed before writing anything in
+every case measured, and on the last staging-era build one store shape lost its
+pointers under a success message (nexus-6g218; see step 2 above for what was
+measured and how).
 
 **Pick the path by what the data is:**
 

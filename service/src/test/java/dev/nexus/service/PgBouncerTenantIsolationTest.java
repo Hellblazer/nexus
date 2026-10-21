@@ -5,17 +5,13 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,11 +19,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -93,23 +91,10 @@ class PgBouncerTenantIsolationTest {
             .withNetworkAliases(PG_ALIAS);
         pg.start();
 
-        // Create the production service role + apply the schema (grants-nexus-svc.xml
-        // grants nexus_svc DML), exactly as the other PG tests do.
+        // Apply the product schema; role-001-nexus-svc.xml (first include) creates
+        // nexus_svc and grants-nexus-svc.xml grants it DML (nexus-cbo4a batch 9).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='"
-                + PgContainerHelper.SVC_USERNAME + "') THEN CREATE ROLE "
-                + PgContainerHelper.SVC_USERNAME + " LOGIN PASSWORD '"
-                + PgContainerHelper.SVC_PASSWORD + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            try (var lq = new Liquibase("db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db)) {
-                lq.update(new Contexts());
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
 
         pgbouncer = new GenericContainer<>(PGBOUNCER_IMAGE)
@@ -172,7 +157,7 @@ class PgBouncerTenantIsolationTest {
     void cleanMemory() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.memory");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(MEMORY).execute();
         }
     }
 
@@ -291,29 +276,26 @@ class PgBouncerTenantIsolationTest {
     private void registerFixtureDoc(String tenant, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, tumbler);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "hygiene-001 test fixture")
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
         }
     }
 
     /** Read next_retry_at for a row via the superuser connection (bypasses RLS). */
     private OffsetDateTime readNextRetryAt(String tenant, String sourcePath) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            try (var ps = su.prepareStatement(
-                    "SELECT next_retry_at FROM nexus.aspect_extraction_queue "
-                    + "WHERE tenant_id = ? AND source_path = ?")) {
-                ps.setString(1, tenant);
-                ps.setString(2, sourcePath);
-                ResultSet rs = ps.executeQuery();
-                assertThat(rs.next()).as("row must exist for readNextRetryAt").isTrue();
-                return rs.getObject("next_retry_at", OffsetDateTime.class);
-            }
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant),
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath))
+                .fetchAny();
+            assertThat(row).as("row must exist for readNextRetryAt").isNotNull();
+            return row.value1();
         }
     }
 }

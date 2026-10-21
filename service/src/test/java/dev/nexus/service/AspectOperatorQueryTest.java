@@ -2,6 +2,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
@@ -9,6 +11,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.*;
 
 /**
@@ -57,10 +60,12 @@ class AspectOperatorQueryTest {
             // Seed catalog_documents tumblers for doc_id FK constraint (nexus-b7v6i)
             for (String tumbler : List.of("op-doc-1", "op-doc-2", "op-doc-3", "op-doc-4", "op-doc-b1")) {
                 for (String tenant : List.of(TENANT_A, TENANT_B)) {
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-                        "VALUES ('" + tenant + "', '" + tumbler + "', 'Fixture " + tumbler + "') " +
-                        "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                    DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                        .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                        .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                        .set(CATALOG_DOCUMENTS.TITLE, "Fixture " + tumbler)
+                        .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                        .execute();
                 }
             }
         }

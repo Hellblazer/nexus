@@ -797,6 +797,7 @@ def test_since_head_run_with_nothing_stored_at_excluded_paths_skips_the_sweep(tm
     assert any("no deletions in delta" in p for p in phases), phases
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main
@@ -1008,6 +1009,7 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     db.gc_restore_rereferenced_bounded = None
     db.gc_quarantine_orphans_bounded = None
     db.gc_expire_quarantine = None
+    db.gc_expire_quarantine_bounded = None  # RDR-222 A1 (nexus-1579m): the loop is tried first
     return db, cols
 
 
@@ -1102,7 +1104,7 @@ def test_prune_collection_serverside_never_registers_the_quarantine_sibling(
     calls: list[str] = []
     monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: calls.append("restore") or 0)
     monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: calls.append("quarantine") or (0, []))
-    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: calls.append("expire") or (0, 0))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: calls.append("expire") or (0, 0, True))
 
     origin = "code__nexus-1-1__voyage-code-3__v1"
     qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
@@ -1126,7 +1128,7 @@ def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quara
 
     monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: 3)
     monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: (0, []))
-    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0, True))
 
     origin = "code__nexus-1-1__voyage-code-3__v1"
     qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
@@ -1151,6 +1153,31 @@ def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quara
         c.args and c.args[0] == "gc_pruned_orphan_chunks_serverside"
         for c in log.info.call_args_list
     )
+
+
+def test_prune_collection_serverside_warns_when_the_expiry_has_no_route_after_the_quarantine_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-222 A1 (nexus-1579m): a client object with neither expiry method answers `None` to the expiry
+    (not 'nothing to expire'); the pass still succeeds, because the move did, and says so in a warning."""
+    import nexus.catalog.chunk_quarantine as cq
+    from nexus.indexer import _prune_collection_serverside
+
+    monkeypatch.setattr(cq, "restore_rereferenced_across_serverside", lambda *a, **k: 0)
+    monkeypatch.setattr(cq, "quarantine_orphans_bounded_serverside", lambda *a, **k: (4, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: None)
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    with patch("nexus.indexer._log") as log:
+        result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    (event,) = [
+        c for c in log.warning.call_args_list
+        if c.args and c.args[0] == "gc_expire_quarantine_route_missing_after_quarantine_succeeded"
+    ]
+    assert event.kwargs["collection"] == origin
 
 
 def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
@@ -1970,6 +1997,7 @@ def _assert_int(r): assert isinstance(r, int) and not isinstance(r, bool)
 # ("signal") crossed with the kind-triple, so all 9 original signals keep
 # independent node ids ([code-int_not_bool], [code-zero_when_skipped], ...)
 # while the runner/kwargs boilerplate still collapses to one body.
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "runner,content_bytes,model,positive_kwargs,expected_positive",
     [
@@ -2928,6 +2956,82 @@ def test_run_index_registration_loop_skips_when_vectors_opt_out_of_service(tmp_p
         "the pre-sweep loop registered against the engine while the vector "
         f"backend was opted out of service mode: {registered_names!r}"
     )
+
+
+def test_local_mode_chunk_metadata_names_the_model_the_engine_embeds_with(tmp_path, monkeypatch):
+    """7.77.0 shakeout N6 (nexus-s80u9): on a local install without the
+    ``[local]`` extra the Python-side EF falls back to MiniLM, but T3 embeds
+    server-side with the model the collection NAME pins (bge-768 by default).
+    The indexer stamped the Python EF's model into every chunk, so
+    ``nx search --json`` reported ``all-MiniLM-L6-v2`` on bge-768 collections.
+    The label is the collection's own model token, the same value
+    ``nx store put``, ``nx index md`` and the catalog row carry."""
+    from nexus.indexer import _run_index  # noqa: PLC0415 — deferred import, same idiom as the sibling tests
+
+    class _MiniLMOnlyEF:
+        model_name = "all-MiniLM-L6-v2"
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # overrides this module's cloud_mode pin
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "README.md").write_text("# Title\n\nSome prose for the docs collection.\n")
+    reg = {
+        "collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "code_collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "docs_collection": "docs__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+    }
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.db.local_ef.LocalEmbeddingFunction": {"return_value": _MiniLMOnlyEF()},
+    }):
+        _run_index(repo, _reg(reg))
+
+    assert set(ups) >= {reg["code_collection"], reg["docs_collection"]}, ups.keys()
+    for name in (reg["code_collection"], reg["docs_collection"]):
+        models = {m.get("embedding_model") for m in ups[name]}
+        assert models == {"bge-base-en-v15-768"}, (name, models)
+
+
+def test_rdr_chunks_are_labelled_with_the_rdr_collections_own_model_token(tmp_path, monkeypatch):
+    """nexus-s80u9 review round: the rdr pass reused ``docs_model``, so an rdr
+    collection whose name carries a different token from the docs collection's
+    was labelled with the docs collection's. The label is the rdr collection's
+    own token (a conformant name pins one)."""
+    from nexus.indexer import _run_index, _repo_collection_or_legacy as _real  # noqa: PLC0415 — deferred import, same idiom as the sibling tests
+
+    class _MiniLMOnlyEF:
+        model_name = "all-MiniLM-L6-v2"
+
+    rdr_name = "rdr__repo-1a2b3c4d__minilm-l6-v2-384__v1"
+
+    def _names(repo_path, content_type):
+        return rdr_name if content_type == "rdr" else _real(repo_path, content_type)
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    monkeypatch.setattr("nexus.indexer._repo_collection_or_legacy", _names)
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "README.md").write_text("# Title\n\nSome prose for the docs collection.\n")
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
+    reg = {
+        "collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "code_collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "docs_collection": "docs__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+    }
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.db.local_ef.LocalEmbeddingFunction": {"return_value": _MiniLMOnlyEF()},
+    }):
+        _run_index(repo, _reg(reg))
+
+    assert {m.get("embedding_model") for m in ups[rdr_name]} == {"minilm-l6-v2-384"}, ups.keys()
+    assert {m.get("embedding_model") for m in ups[reg["docs_collection"]]} == {"bge-base-en-v15-768"}
 
 
 def test_run_index_registers_rdr_collection_when_rdr_files_exist(tmp_path):

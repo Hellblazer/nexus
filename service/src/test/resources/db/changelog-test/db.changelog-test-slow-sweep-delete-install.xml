@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: installs the slow BEFORE DELETE trigger on nexus.chunks that CatalogManifestSweepRepositoryTest
+    uses to force a real statement_timeout (57014) at the sweep's DELETE, in Liquibase XML instead of Java SQL
+    strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ OSS has no CREATE
+    FUNCTION and no CREATE TRIGGER. The function sleeps 6 s, past SWEEP_STATEMENT_TIMEOUT_MS (5000 ms), so the
+    server cancels the statement on every run.
+
+    The body holds dollar quotes, hence splitStatements="false". Paired with
+    db.changelog-test-slow-sweep-delete-drop.xml; run by that test directly.
+    runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="slow-sweep-delete-install" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION test_slow_sweep_delete() RETURNS trigger AS $$
+BEGIN PERFORM pg_sleep(6); RETURN OLD; END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER test_slow_sweep_delete_trigger BEFORE DELETE ON nexus.chunks
+FOR EACH ROW EXECUTE FUNCTION test_slow_sweep_delete();
+        </sql>
+    </changeSet>
+</databaseChangeLog>

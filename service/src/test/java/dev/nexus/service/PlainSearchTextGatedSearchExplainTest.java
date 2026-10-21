@@ -100,10 +100,9 @@ class PlainSearchTextGatedSearchExplainTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
             // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, "
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.plain_search_1024, "
                 + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024, "
-                + "nexus.text_gated_search_by_chash_1024 TO " + SVC_ROLE);
+                + "nexus.text_gated_search_by_chash_1024", SVC_ROLE);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -523,7 +522,7 @@ class PlainSearchTextGatedSearchExplainTest {
                     "enable_sort", "enable_hashjoin")) {
                 PgSession.setLocal(ctx, guc, "off");
             }
-            return ctx.explain(queryBuilder.apply(ctx)).plan();
+            return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
         });
     }
 
@@ -532,7 +531,7 @@ class PlainSearchTextGatedSearchExplainTest {
     private String explainSeqscanOff(Function<DSLContext, ? extends Query> queryBuilder) {
         return tenantScope.withTenant(TENANT, ctx -> {
             PgSession.setLocal(ctx, "enable_seqscan", "off");
-            return ctx.explain(queryBuilder.apply(ctx)).plan();
+            return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
         });
     }
 

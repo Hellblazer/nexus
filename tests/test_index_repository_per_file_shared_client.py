@@ -97,6 +97,7 @@ def _instrument_t2database(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return tally
 
 
+@pytest.mark.t2_tenant
 def test_index_repository_shares_one_t2_client_across_n_per_file_hook_failures(
     tiny_repo: Path,
     registry: RepoRegistry,

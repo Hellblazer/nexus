@@ -41,6 +41,8 @@ from nexus.mcp.core import store_delete
 from tests.conftest import make_vector_test_client
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title, seed_manifest_chunks
 
+pytestmark = pytest.mark.t2_tenant
+
 # Two DISTINCT, already-conformant physical collection names -- passed
 # through t3_collection_name untouched, so there is no ambiguity about
 # which physical collection either call targets.

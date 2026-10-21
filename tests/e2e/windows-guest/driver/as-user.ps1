@@ -22,6 +22,7 @@ $b = "$env:USERPROFILE\nx-gate"
 $argText = (@($A1, $A2) | Where-Object { $_ }) -join ' '
 (@'
 $host.UI.RawUI.WindowTitle = 'Phase 5 gate: @SCRIPT@ (standard user)'
+$env:NX_NO_TELEMETRY = '1'
 $log = "$env:USERPROFILE\nx-gate\asuser.log"
 $member = [bool](@(whoami /groups) -match 'S-1-5-32-544')
 "asuser start user=$env:USERNAME administrators-member=$member" | Tee-Object -FilePath $log

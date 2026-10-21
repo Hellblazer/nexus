@@ -60,15 +60,17 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 #
 # THIS GATE RUNS THE LOCAL SERVICE KEYLESS, BGE-768 ONLY (nexus-w6h2m,
 # 2026-07-28). `nx init --service` stamps bge-768 and no Voyage key reaches
-# the service, so it embeds with bge-768 and nothing else — that is a
-# deliberate posture for THIS gate, not the engine's ceiling: a keyed local
-# service embeds with Voyage instead (nexus-umm29 carve-out). Either way the
-# service serves ONE embedding mode at a time (RDR-210 tracks the dual-mode
-# engine that would end that). So tests that need the SERVICE to embed
-# voyage-* collections are cloud-mode tests and are marked `cloud_mode` and
-# deselected here; the gate no longer needs a Voyage key for its own corpus.
-# COVERAGE GAP: no gate in this repo boots the local service keyed — a keyed
-# local engine is untested end-to-end.
+# the service, so it embeds with bge-768 and nothing else. That is the
+# deliberate posture of THIS gate and it stays (RDR-210 Phase 3 Step 2). The
+# engine itself, from the tag that carries RDR-210 P2.7, can serve bge-768
+# and Voyage side by side when a key reaches it; the supervisor passes the
+# key to a local engine only under the nexus-r5f3c rule until the Phase 3
+# client release (nexus-wypwq), so an installed local service is still one
+# posture today. Tests that need the SERVICE to embed voyage-* collections
+# are cloud-mode tests, marked `cloud_mode` and deselected here; the gate
+# needs no Voyage key for its own corpus.
+# COVERAGE GAP: no gate in this repo boots the local service keyed, dual
+# or not, so a keyed local engine is untested end-to-end.
 #
 # It used to carry those tests and pass, because it was never actually running
 # local: the CHROMA_* secrets made is_local_mode() answer False, `nx init
@@ -276,21 +278,21 @@ echo "[gate] scratch config: $SCRATCH"
 #               INSTALLED tool's version, not the tree under test -- reddening a
 #               release leg in which all 560 tests passed.
 #
-# THE MIRROR IS A DENYLIST, NOT AN ALLOWLIST, and that distinction is the whole
-# design. The first attempt symlinked a hand-picked set (.cache/.local/.claude)
-# back into a fresh HOME and broke on the SECOND thing it touched: the Maven
-# jar rebuild died because ~/.testcontainers.properties (which carries
-# ``testcontainers.ryuk.disabled=true``) and ~/.docker (which holds the socket
-# at ~/.docker/run/docker.sock) were both absent, so testcontainers fell back
-# to its ryuk-enabled default and could not reach the daemon. An allowlist of
-# "things HOME is for" cannot be completed by enumeration -- every tool that
-# reads $HOME would have to be known in advance.
-#
-# So: mirror EVERYTHING, shadow ONE path. Every top-level entry of the real
-# HOME is symlinked through; ~/.config is recreated as a real directory whose
-# entries are likewise symlinked through EXCEPT ``nexus``, which becomes a
-# fresh empty scratch dir. Net effect: exactly one path in the whole home is
-# fenced, and any tool needing anything else is unaffected by construction.
+# THE HOME IS EMPTY, WITH A SHORT ALLOWLIST (nexus-ld3aa). The first attempt
+# (nexus-pfuns) symlinked a hand-picked set (.cache/.local/.claude) and broke on
+# the SECOND thing it touched: the Maven jar rebuild died because
+# ~/.testcontainers.properties (``testcontainers.ryuk.disabled=true``) and
+# ~/.docker (then the socket at ~/.docker/run/docker.sock) were absent. The remedy
+# then was to mirror everything and shadow a denylist, but a mirrored entry
+# fails SILENTLY and destructively (2026-09-12 a global identity file overwritten;
+# 2026-09-30 a live nexus-service unit replaced) while a missing one fails
+# loudly on the first run. So the fence is inverted: the home starts empty and
+# only the measured read-mostly toolchain caches in FENCE_MIRRORED_ENTRIES
+# (lib/fence_home.sh: .m2/repository .m2/wrapper .testcontainers.properties,
+# nexus-u73rf) are linked through; .docker is not (DOCKER_HOST passes through). uv's roots, the ONNX model root, the
+# HuggingFace hub cache and the substrate cache are pinned by env (fence_uv_env,
+# fence_cache_env), not mirrored. A leg that
+# needs anything else is given it explicitly; the mirror is never widened.
 #
 # NOT A LAYER: sandbox-exec. An earlier revision created a Seatbelt profile
 # denying file-write* under the real config dir, printed "real-config writes
@@ -303,7 +305,7 @@ echo "[gate] scratch config: $SCRATCH"
 
 REAL_HOME="$HOME"
 
-# LAYER 1 -- HOME mirror, shadowing only ~/.config/nexus. The implementation
+# LAYER 1 -- an empty HOME plus the toolchain-cache allowlist. The implementation
 # lives in lib/fence_home.sh so the test suite drives THIS code rather than a
 # reimplementation of it.
 # shellcheck source=tests/e2e/lib/fence_home.sh
@@ -311,8 +313,10 @@ source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
 source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
 # shellcheck source=./scripts/lib/release-props-lease.sh disable=SC1091
 source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
+# shellcheck source=./scripts/lib/gate-jar-cache.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/gate-jar-cache.sh"   # nexus-k6zxp: gate_jar_cache_unshare before the bare package below
 GATE_HOME="$SCRATCH/home"
-fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
+fence_home "$REAL_HOME" "$GATE_HOME"
 export HOME="$GATE_HOME"
 # nexus-q81g7: the service manager is not isolated by HOME. Empty
 # XDG_RUNTIME_DIR / no bus address (Linux) and NX_FENCED_HOME, which makes every
@@ -323,6 +327,8 @@ fence_home_env "$GATE_HOME"
 # builds .venv on a path inside $SCRATCH, which dangles once cleanup() deletes
 # it (nexus-t0pke; see fence_uv_env).
 fence_uv_env "$REAL_HOME"
+# The ONNX model root is shared by env, not by mirroring ~/.cache (nexus-ld3aa).
+fence_cache_env "$REAL_HOME"
 
 # LAYER 2 -- PATH. A bare ``nx`` resolves to the INSTALLED tool, a different
 # build from the tree under test: the 2026-08-24 stamp read 7.16.3 while the
@@ -344,13 +350,14 @@ export PATH="$GATE_SHIM:$PATH"
 # NOTE: no "nx <word>" sequence in this string. tests/test_release_artifact_verb_rot.py
 # extracts `nx <verb>` from release artifacts and checks the verb exists; prose like
 # a bare tool name followed by a word parses as a verb and reddens develop (it did).
-echo "[gate] fenced: HOME mirrored to $HOME, only ~/.config/nexus shadowed; PATH shim active"
+echo "[gate] fenced: HOME is an empty scratch dir at $HOME (toolchain caches only); PATH shim active"
 
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
 # BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->
-# NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py),
-# so the key must be exported by then or the service falls back to ONNX-only
-# and 422s every voyage-* collection. pytest inherits the same exports.
+# NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py)
+# under its current rule, so the key must be exported by then or the service
+# has no Voyage embedder and 422s every voyage-* collection. pytest inherits
+# the same exports. (This gate runs keyless by design; see the header.)
 if [ -f "$REPO_ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -391,6 +398,7 @@ RELEASE_PROPS_SNAPSHOT=""
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
+  local rc=$?
   set +e
   # --with-pg: a plain stop leaves the supervisor's PostgreSQL running by
   # design, and the pg_ctl fallback below needs a pg_ctl on PATH, which
@@ -403,6 +411,14 @@ cleanup() {
     # shellcheck disable=SC1090,SC1091
     source "$SCRATCH/pg_credentials" >/dev/null 2>&1
     pg_ctl -D "$SCRATCH/postgres" stop -m fast >/dev/null 2>&1
+  fi
+  # nexus-7df8e: the fenced home goes with the run. After a FAILED run with
+  # NX_KEEP_FENCED_HOME set it is moved out of $SCRATCH and kept for debugging.
+  if ! fence_remove_home "$GATE_HOME" "$rc" && fence_keep_home "$rc" && [ -d "$GATE_HOME" ]; then
+    KEPT_HOME="${TMPDIR:-/tmp}/nx-kept-gate-home.$$"
+    if mv "$GATE_HOME" "$KEPT_HOME" 2>/dev/null; then
+      echo "[gate] kept the fenced home (NX_KEEP_FENCED_HOME): $KEPT_HOME"
+    fi
   fi
   rm -rf "$SCRATCH"
   # Backstop for a signal mid-jar-build: never leave a stamped
@@ -527,6 +543,12 @@ print(jar_freshness_skip_reason() or "")
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Bare mvnw, deliberately (see the lease comment above) — this process
   # already holds the lease scripts/mvnw-leased.sh would otherwise acquire.
+  # nexus-k6zxp: a build-gate-jar.sh hit or store leaves this jar hard-linked
+  # to the read-only gate-jar cache entry, and the jar plugin rewrites an
+  # existing jar in place -- unlink a shared or read-only jar first, or this
+  # rebuild fails ("jar is read-only") right after the release checklist's
+  # build-gate-jar.sh run. A private writable jar is left alone.
+  gate_jar_cache_unshare "$JAR"
   if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
     release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
     RELEASE_PROPS_SNAPSHOT=""
@@ -590,7 +612,10 @@ else
   echo "       or export NEXUS_SERVICE_BIN=<native binary>" >&2
   exit 2
 fi
-env "${START_ENV[@]}" uv run nx daemon service start
+# --config-dir is explicit (nexus-oacd3): a flagless start carries no directory
+# in its command line, so a sibling leg's `nx daemon service stop` could read it
+# as its own and SIGTERM it (the 7.78.0 battery, exit 143).
+env "${START_ENV[@]}" uv run nx daemon service start --config-dir "$SCRATCH"
 
 # 4. Read the lease.
 LEASE_JSON="$(cat "$SCRATCH"/storage_service_addr.*)"
@@ -800,7 +825,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
 
   # RDR-223 P3: the chunk and its owner land in ONE request. The engine refuses
-  # an ownerless chunk write (upsert-chunks / store-put), so this leg no longer
+  # an ownerless chunk write (upsert-chunks), so this leg no longer
   # posts the raw route and then a manifest write: it posts the combined write
   # the real client uses (write_many with an inline `chunks` array), reusing the
   # smoke document registered in step c. RDR-192 Step 5 still applies: a chunk is
@@ -940,12 +965,13 @@ fi
 # discipline as lived_in above, and for the same reason.
 #
 # WHY IT EXISTS: this gate's corpus spanned TWO embedding modes while the
-# service serves exactly one. Three tests require the SERVICE to embed
+# service this gate boots serves one (it runs keyless). Three tests require the SERVICE to embed
 # voyage-* collections; everything else here is a bge-768 local install,
 # which is what RDR-160 says a local service IS. Whichever way the Voyage key
-# was routed, one half 422'd:
+# was routed to the single-posture engine of that day, one half 422'd:
 #     key withheld -> embedding mode onnx-local -> the voyage tests 422
 #     key plumbed  -> embedding mode voyage     -> the bge tests 422
+# (A dual engine, RDR-210, would serve both; no gate boots one yet.)
 # There was no value of that knob that made the gate green, which is why the
 # first attempt at this (6b04cd1b, reverted in 699369b0) traded one 422
 # cluster for its mirror image and reintroduced the exact failure nexus-r5f3c

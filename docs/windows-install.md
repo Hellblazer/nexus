@@ -250,7 +250,7 @@ shows the four choices from [Two routes](#two-routes) and asks which you want.
 Desktop does not tell you when Nexus is missing, so you have to ask. Do not type
 `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen
 on Claude Desktop 2.42304.0 on macOS). To see progress, ask "Is Nexus set up yet?". When Claude
-says setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
+says setup is done, quit Claude Desktop fully and open it again; a new conversation keeps the old server. Or do steps 1 to 3 first, by hand.
 
 An existing marketplace entry stayed at the release it was added at, which is why an older copy has no setup tool.
 
@@ -369,6 +369,10 @@ Set-ItemProperty 'HKCU:\Environment' -Name Path -Value $path -Type $kind
 Those releases, and 7.74.0, also leave two folders the lines above do not name.
 `%TEMP%\onnxruntime-java<n>` (about 11 MB) holds the engine's last run's ONNX
 Runtime libraries; delete the folders with that name once the stack is stopped.
+Engines after the one carrying nexus-8ool4 extract those libraries once into
+`%USERPROFILE%\.cache\nexus\ort_native` instead (`nx uninstall --remove-data` removes
+that with the rest of `.cache\nexus`), and the `onnxruntime-java<n>` folder they still
+create holds no files.
 `%USERPROFILE%\.djl.ai\tokenizers` (about 13 MB) is the engine's tokenizer
 library; releases after 7.74.0 keep it under `.cache\nexus` instead, but do not touch
 a `.djl.ai` an earlier engine already made. `nx uninstall --remove-data` reports that folder
@@ -449,7 +453,10 @@ with no AppLocker block. Three limits:
   (ONNX Runtime, extracted to the temp folder at every engine start) and
   `%OSDRIVE%\ProgramData\Microsoft\Windows Defender\Platform\*` (Defender's
   own DLL, which it loads into every process). The first two are folders the
-  user can write to.
+  user can write to. These measurements are of engines before the one carrying
+  nexus-8ool4; a later engine loads ONNX Runtime from
+  `.cache\nexus\ort_native`, which the first rule already covers, so the temp
+  rule should no longer be needed for it. That has not been measured on Windows.
 
 #### WDAC (App Control for Business)
 
@@ -473,6 +480,10 @@ C:\Users\<account>\AppData\Local\Temp\PortableGit.exe
 C:\Users\<account>\.cache\nexus\*
 C:\Users\<account>\AppData\Local\Temp\onnxruntime-java*
 ```
+
+(The last line is for engines before the one carrying nexus-8ool4; a later
+engine loads ONNX Runtime from `.cache\nexus\ort_native`, covered by the line
+above it.)
 
 A run with the same policy in audit mode recorded files in these folders and
 nowhere else: uv, the `nx` programs, Claude Code and its installer, the Python
@@ -515,9 +526,14 @@ bundle would not have been enough on its own.
 
 In releases after conexus 7.80.0, where `nx` does run, `nx init` refuses with
 a message that links here when Smart App Control is on (measured on the Home
-machine on 2026-10-15), and `nx doctor` has a
-Smart App Control row (a failure when it is on in local mode, a warning in
-evaluation). Where Windows has no Smart App Control (the setting does not
+machine on 2026-10-15) and an unsigned stand-in executable does not run. The
+registry value alone is not trusted: on restored guests it said on while Windows
+blocked nothing, so the refusal first tries to run a never-seen copy of the
+Python interpreter. A signed interpreter would run under Smart App Control too,
+and then the install proceeds and can still fail with `[WinError 4551]`. `nx doctor` has a
+Smart App Control row (a failure when it is on in local mode and the bundle
+binary is blocked or cannot be tried, a warning when it is on but a program ran
+unblocked, a warning in evaluation). Where Windows has no Smart App Control (the setting does not
 exist, as on Windows 10 and older Windows 11), there is no row.
 
 A new Windows install starts in evaluation mode. On the same Home machine in

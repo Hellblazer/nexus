@@ -29,7 +29,6 @@ import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
-import dev.nexus.service.http.ResolveHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
@@ -38,9 +37,6 @@ import dev.nexus.service.http.TokenAdminHandler;
 import dev.nexus.service.http.TupleHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
-import dev.nexus.service.resolver.ChromaSchemeHandler;
-import dev.nexus.service.resolver.HttpsSchemeHandler;
-import dev.nexus.service.resolver.UriSchemeResolverRegistry;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -196,6 +192,9 @@ public final class NexusService {
     private final java.util.concurrent.ConcurrentHashMap<String, Integer> dataSweepFailuresByTenant =
         new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Bead nexus-0bl77: the evictors behind {@code POST /v1/_test/tenant-reset}; see {@link #tenantKeyedState()}. */
+    private final List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState;
+
     /**
      * nexus-4tosp test seam: overrides the per-tenant data-token sweep call
      * (tenant -&gt; deleted count; throw to simulate that tenant's failure) so
@@ -238,6 +237,15 @@ public final class NexusService {
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
     private final Runnable reaperScheduledTask;
 
+    /** RDR-222 Phase 1 (nexus-yye8l.3): the request ledger the retention arm prunes. */
+    private final dev.nexus.service.db.RequestLedger requestLedger;
+
+    /** Days a finished or lease-expired ledger row is kept, from NX_REQUEST_LEDGER_RETENTION_DAYS (default 7). */
+    private final int requestLedgerRetentionDays;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the ledger retention arm. */
+    private final Runnable requestLedgerRetentionTask;
+
     /**
      * RDR-227 Step 2 (bead nexus-43ulx.23): the source of {@code GET /v1/status}'s {@code per_collection_indexes}
      * object. Bound late, by {@link #perCollectionIndexes(java.util.function.Supplier)}: the status route is
@@ -248,16 +256,22 @@ public final class NexusService {
         perCollectionIndexes;
 
     /**
-     * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
-     * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
-     * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
-     * lifecycle of its own) so {@link #stop()} can close it. Constructed
-     * unconditionally in every constructor overload, so never null.
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj): the boot posture {@code /version} and {@code GET /v1/status}
+     * report beside the embedding mode (profile, reranker, degraded-boot description). Bound late, by
+     * {@link #embedPosture(dev.nexus.service.http.EmbedPosture)}, because both routes are registered in the
+     * constructor. Null until bound; both routes then omit the three keys.
      */
-    private final HttpsSchemeHandler httpsSchemeHandler;
+    private volatile dev.nexus.service.http.EmbedPosture embedPosture;
 
     /**
-     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
+     * nexus-dxsjc: the source of {@code GET /v1/status}'s {@code chunks_leaf_bloat} object, bound late for the same
+     * reason as {@link #perCollectionIndexes}. Null until bound, and the route omits the key until then.
+     */
+    private volatile java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat>
+        chunksLeafBloat;
+
+    /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
      * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
      * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
      * initialiser throws out of the constructor). Mutable only through the holder, for tests.
@@ -369,6 +383,33 @@ public final class NexusService {
         return bind;
     }
 
+    /** Bead nexus-0bl77 (rtg20 phase A): the flag that registers {@code POST /v1/_test/tenant-reset}. */
+    static final String TENANT_RESET_ROUTE_ENV = "NX_TEST_TENANT_RESET_ROUTE";
+
+    /** True only for the exact value {@code 1}: any other value, including {@code true}, leaves the route absent. */
+    static boolean tenantResetRouteEnabled(java.util.function.Function<String, String> env) {
+        String raw = env.apply(TENANT_RESET_ROUTE_ENV);
+        return raw != null && raw.trim().equals("1");
+    }
+
+    /**
+     * Boot refusal (bead nexus-0bl77): the test-only tenant reset route is operator-gated, but it is still a
+     * route that wipes a tenant's cached state, so it is never allowed on an engine reachable beyond loopback.
+     *
+     * @throws IllegalStateException when the flag is on and {@code NX_SERVICE_BIND} resolves to anything but
+     *         {@code 127.0.0.1} or {@code ::1}
+     */
+    static void verifyTenantResetRouteBind(java.util.function.Function<String, String> env) {
+        if (!tenantResetRouteEnabled(env)) {
+            return;
+        }
+        String bind = resolveBindHost(env.apply("NX_SERVICE_BIND"));
+        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
+            throw new IllegalStateException(TENANT_RESET_ROUTE_ENV + "=1 refuses a non-loopback bind (NX_SERVICE_BIND="
+                + bind + "): the test-only tenant reset route must not be reachable beyond this host");
+        }
+    }
+
     /**
      * Full constructor — the production wiring (RDR-155 P4a.2, bead nexus-1k8s1).
      *
@@ -416,8 +457,8 @@ public final class NexusService {
      * nexus-s71lr, deliverable 2).
      *
      * @param localEmbedActivitySupplier reads the live {@code
-     *        Bge768Embedder.activitySnapshot()} for the local-mode branch
-     *        (see {@code Main.java}); {@code null} in cloud/voyage mode or any
+     *        Bge768Embedder.activitySnapshot()} when bge is built
+     *        (see {@code Main.java}); {@code null} when bge is not built (Voyage-only) or any
      *        caller that has no local embedder to report on — {@code
      *        StatusHandler} reports {@code local_embed_activity: null} rather
      *        than fabricating a value.
@@ -467,6 +508,29 @@ public final class NexusService {
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry,
                         ScheduledExecutorService sweepSchedulerOverride) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, sweepSchedulerOverride, System::getenv,
+                () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled());
+    }
+
+    /**
+     * The constructor with the two inputs of the test-only tenant reset route as seams (bead nexus-0bl77): the
+     * environment {@code NX_TEST_TENANT_RESET_ROUTE} and {@code NX_SERVICE_BIND} are read from, and whether
+     * {@code NX_SEARCH_PCI} is on. Package-private: production passes {@code System::getenv} and the boot-resolved
+     * PCI setting through the constructor above.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride,
+                        java.util.function.Function<String, String> env,
+                        java.util.function.BooleanSupplier pciEnabled) throws IOException {
+        // Before anything binds or touches the database: a refused configuration must not half-start.
+        verifyTenantResetRouteBind(env);
+        final boolean tenantResetRoute = tenantResetRouteEnabled(env);
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
 
@@ -509,7 +573,8 @@ public final class NexusService {
 
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
-        var versionHandler = new VersionHandler(dataSource, docEmbedderRouter);
+        var versionHandler = new VersionHandler(dataSource, docEmbedderRouter)
+                .embedPosture(() -> this.embedPosture);
         server.createContext("/version", versionHandler);
 
         // /v1/status — unauthenticated live embed-activity counters (bead
@@ -525,7 +590,9 @@ public final class NexusService {
                         versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
                                 dataSource, java.time.Clock.systemUTC()),
-                        this::perCollectionIndexesStatus));
+                        this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
+                        .embedPosture(() -> this.embedPosture)
+                        .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -539,10 +606,21 @@ public final class NexusService {
         // /v1/* — auth filter applied. catalogRepo wires RDR-204 Phase 1's
         // per-tenant ghost sweep + dormant marking (bead nexus-ft04v.3), fired
         // from AuthFilter.doFilter at each tenant's first request after boot.
-        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo));
+        // IdempotencyKeyGuard (RDR-222 Phase 1, nexus-yye8l.5) follows AuthFilter on every context: an
+        // Idempotency-Key on a route that cannot use it is a 400, never an ignored key.
+        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
+                new dev.nexus.service.http.IdempotencyKeyGuard());
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
+
+        // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
+        // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
+        var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
+        this.requestLedger = requestLedger;
+        var requestsCtx = server.createContext("/v1/requests",
+                new dev.nexus.service.http.RequestHandler(requestLedger));
+        requestsCtx.getFilters().addAll(authFilter);
 
         // /v1/memory/* — memory endpoints
         var memCtx = server.createContext("/v1/memory", new MemoryHandler(memoryRepo));
@@ -620,9 +698,11 @@ public final class NexusService {
         // scope=mint credential (nexus-x1h07, conexus RDR-005 A1). Rate-limited
         // + TTL-ceilinged from env; the AuthFilter confines mint credentials to
         // exactly this surface.
+        // The limiter is held here (not built inside the handler) so the tenant reset route can evict a
+        // tenant's buckets (nexus-0bl77).
+        var mintRateLimiter = dev.nexus.service.http.MintRateLimiter.fromEnv(java.time.Clock.systemUTC());
         var dataTokensCtx = server.createContext("/v1/data-tokens",
-                dev.nexus.service.http.DataTokenHandler.fromEnv(
-                    tokenStore, java.time.Clock.systemUTC()));
+                dev.nexus.service.http.DataTokenHandler.fromEnv(tokenStore, mintRateLimiter));
         dataTokensCtx.getFilters().addAll(authFilter);
 
         // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2;
@@ -631,30 +711,11 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy));
+                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy,
+                        requestLedger));
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
-
-        // /v1/vectors/resolve — URI-scheme resolver (RDR-169 G3, bead nexus-aphki).
-        // A more specific context than /v1/vectors above: com.sun.net.httpserver's
-        // longest-prefix-match routing dispatches POST /v1/vectors/resolve here,
-        // never reaching VectorHandler's default 404 arm. "https" is registered
-        // unconditionally (needs no backend); "chroma" only when a pgvector
-        // repository is wired (mirrors every other embed/vector-dependent
-        // capability's absent-backend degrade — see ResolveHandler's own 503 for
-        // the (collection, chash) form when unregistered).
-        var resolverRegistry = new UriSchemeResolverRegistry();
-        this.httpsSchemeHandler = new HttpsSchemeHandler();
-        resolverRegistry.register("https", httpsSchemeHandler);
-        if (pgVectorRepository != null) {
-            resolverRegistry.register("chroma",
-                    new ChromaSchemeHandler(pgVectorRepository::fetchChunkText));
-        }
-        var resolveCtx = server.createContext("/v1/vectors/resolve",
-                new ResolveHandler(resolverRegistry, pgVectorRepository));
-        resolveCtx.getFilters().addAll(authFilter);
-        log.info("event=resolve_endpoint_registered has_chroma_handler={}", pgVectorRepository != null);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
         // only when a boot-checked TemplateRegistry was supplied (see the constructor
@@ -704,6 +765,18 @@ public final class NexusService {
             );
         }
 
+        // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler, every
+        // SWEEP_INTERVAL_HOURS. The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval, as the
+        // reaper's does: an engine that restarts more often than every six hours must still prune. It is not gated
+        // on the vector backend or the tuple registry: the ledger is a plain table.
+        this.requestLedgerRetentionDays = dev.nexus.service.db.RequestLedger.resolveRetentionDays(System::getenv);
+        this.requestLedgerRetentionTask = surviving("request_ledger_retention_failed",
+            () -> runScheduledLedgerRetention(OffsetDateTime.now(ZoneOffset.UTC)));
+        this.sweepScheduler.scheduleAtFixedRate(
+            this.requestLedgerRetentionTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+            TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
+        );
+
         // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME
         // sweepScheduler, at its own interval (NX_REAPER_INTERVAL_SECONDS, default one hour). It recomputes what
         // is reapable from the manifest on every pass, so it is the safety net for the post-commit sweep's
@@ -745,6 +818,53 @@ public final class NexusService {
             log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
                 pgVectorRepository != null, reaperSettings.enabled());
         }
+
+        // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
+        // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
+        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
+        if (tenantResetRoute) {
+            var resetCtx = server.createContext(dev.nexus.service.http.TenantResetHandler.PATH,
+                    new dev.nexus.service.http.TenantResetHandler(this.tenantKeyedState, pciEnabled));
+            resetCtx.getFilters().addAll(authFilter);
+            log.warn("event=test_tenant_reset_route_enabled path={} evictors={}",
+                    dev.nexus.service.http.TenantResetHandler.PATH,
+                    this.tenantKeyedState.stream().map(dev.nexus.service.db.TenantKeyedState::name).toList());
+        }
+    }
+
+    /** How long the tuple evictor waits for an aborted tenant's parked waits to leave before dropping its groups. */
+    private static final java.time.Duration TENANT_RESET_TUPLE_BOUND = java.time.Duration.ofSeconds(5);
+
+    /**
+     * Every JVM structure keyed by tenant, with the call that clears a tenant from it (bead nexus-0bl77). The names
+     * are the ones {@code TenantKeyedStateGateTest} lists against the fields they clear; adding a tenant-keyed
+     * structure means adding it here AND to that table, or the gate fails.
+     */
+    private List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState(
+            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository) {
+        // TokenCache FIRST (code review B3): it is the one that closes the dead test's bearer. Evicting it before the
+        // tuple evictor, which may wait up to TENANT_RESET_TUPLE_BOUND, keeps the window in which the old token still
+        // authenticates as short as the first call, instead of the length of that wait.
+        return List.of(
+            dev.nexus.service.db.TenantKeyedState.of("TokenCache", tokenCache::invalidateTenant),
+            dev.nexus.service.db.TenantKeyedState.of("TupleWaitRegistry",
+                t -> tupleRepo == null ? 0 : tupleRepo.abortTenantWaiters(t, TENANT_RESET_TUPLE_BOUND)),
+            dev.nexus.service.db.TenantKeyedState.of("CollectionRegistry",
+                dev.nexus.service.db.CollectionRegistry::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("CatalogRepository.ghostSweepCheckedTenants",
+                catalogRepo::evictGhostSweepTenant),
+            dev.nexus.service.db.TenantKeyedState.of("MintRateLimiter", mintRateLimiter::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("OwnerlessLogLimiter",
+                t -> pgVectorRepository == null ? 0 : pgVectorRepository.evictOwnerlessLogTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("ChunkReaper",
+                t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
+                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0));
+    }
+
+    /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
+    List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState() {
+        return tenantKeyedState;
     }
 
     /**
@@ -799,6 +919,30 @@ public final class NexusService {
         this.perCollectionIndexes = supplier;
     }
 
+    /**
+     * Bind the boot posture ({@code embedding_profile}, {@code reranker}, {@code embedding_degraded}) that
+     * {@code /version} and {@code GET /v1/status} report (nexus-un7vj). {@code Main} calls it once, before
+     * {@link #start()}; null unbinds, and both routes then omit the keys.
+     */
+    public void embedPosture(dev.nexus.service.http.EmbedPosture posture) {
+        this.embedPosture = posture;
+    }
+
+    /**
+     * Bind the source of {@code chunks_leaf_bloat} on {@code GET /v1/status} (nexus-dxsjc). {@code Main} calls it once
+     * the leaf bloat sweep exists; the supplier must answer from the sweep's cache, with no catalog query.
+     */
+    public void chunksLeafBloat(
+            java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat> supplier) {
+        this.chunksLeafBloat = supplier;
+    }
+
+    /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */
+    dev.nexus.service.http.StatusHandler.ChunksLeafBloat chunksLeafBloatStatus() {
+        var supplier = chunksLeafBloat;
+        return supplier == null ? null : supplier.get();
+    }
+
     /** The bound object, or null before {@link #perCollectionIndexes(java.util.function.Supplier)} (key omitted). */
     dev.nexus.service.http.StatusHandler.PerCollectionIndexes perCollectionIndexesStatus() {
         var supplier = perCollectionIndexes;
@@ -825,6 +969,30 @@ public final class NexusService {
                 }
             }
         };
+    }
+
+    /**
+     * One cycle of the request-ledger retention arm (RDR-222 Phase 1, bead nexus-yye8l.3): one
+     * {@code withTenant} delete pass per tenant, cutoff = {@code now} minus the retention days. Tenants are
+     * {@link #reaperTenants()}, the default tenant plus every tenant in {@code service_tokens}, not
+     * {@link #runScheduledTupleSweep}'s {@code tuple_tenants}, which is tuple-specific. Every keyed request is
+     * authenticated, so every ledger tenant holds a token; a tenant that lost its last token is skipped until it
+     * holds one again, the safe direction (a liveness gap, never a wrong deletion). A live lease is later than the
+     * cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the next still runs.
+     * Package-private so a test drives the exact method the scheduler runs.
+     */
+    List<dev.nexus.service.db.RequestLedger.RetentionPass> runScheduledLedgerRetention(OffsetDateTime now) {
+        return requestLedger.retainAll(reaperTenants(), now.minusDays(requestLedgerRetentionDays));
+    }
+
+    /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */
+    dev.nexus.service.db.RequestLedger requestLedgerForTests() {
+        return requestLedger;
+    }
+
+    /** The Runnable the scheduler runs for ledger retention. Package-private for the wiring test. */
+    Runnable requestLedgerRetentionTask() {
+        return requestLedgerRetentionTask;
     }
 
     /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */
@@ -1573,7 +1741,6 @@ public final class NexusService {
         if (tupleRepo != null) {
             tupleRepo.shutdown();
         }
-        httpsSchemeHandler.close();
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");

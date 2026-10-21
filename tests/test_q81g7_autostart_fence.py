@@ -3,7 +3,9 @@
 """nexus-q81g7: the test HOME fence must not expose the OS autostart units.
 
 The fence used to symlink every entry of the operator's real ``~/.config`` and
-all of ``~/Library``, shadowing only ``.config/nexus``. A test's HOME therefore
+all of ``~/Library``, shadowing only ``.config/nexus``. (nexus-ld3aa inverted it
+to an empty home plus a toolchain-cache allowlist; the unit dirs are now simply
+absent, and these tests pin that they stay unreachable.) A test's HOME therefore
 resolved ``~/.config/systemd/user`` and ``~/Library/LaunchAgents`` to the real
 directories, so ``upgrade_finish.converge_service_autostart_unit`` found a
 real ``nexus-service.service`` / ``com.nexus.service.plist`` and, on the human
@@ -77,8 +79,7 @@ def _tree(root: Path) -> dict[str, tuple[int, int]]:
 def _assert_unit_dirs_are_empty_and_fenced(home: Path) -> None:
     for rel in _SHADOWED_DIRS:
         shadowed = home / rel
-        assert shadowed.is_dir() and not shadowed.is_symlink(), f"{shadowed} is not a real dir"
-        assert list(shadowed.iterdir()) == [], f"{shadowed} is not empty: {list(shadowed.iterdir())}"
+        assert not shadowed.exists() and not shadowed.is_symlink(), f"{shadowed} resolves in the fenced home"
     for rel in _UNIT_FILES:
         assert not (home / rel).exists(), f"{home / rel} still resolves"
 
@@ -88,26 +89,12 @@ def test_python_fence_hides_the_autostart_unit_dirs(tmp_path: Path) -> None:
     real.mkdir()
     _seed_real_home(real)
 
-    home = fence_home(real, tmp_path / "fenced", ".config/nexus")
+    home = fence_home(real, tmp_path / "fenced")
 
     _assert_unit_dirs_are_empty_and_fenced(home)
-    # Everything else still passes through, including siblings of the shadowed
-    # leaves: this is a denylist, not a rebuild.
-    assert (home / "Library" / "Caches" / "keep.txt").read_text().startswith("an entry")
-    assert (home / ".config" / "xtool" / "hosts.yml").exists()
-
-
-def test_the_autostart_shadows_apply_whatever_shadow_the_caller_names(tmp_path: Path) -> None:
-    """A caller that names only its own shadow (the e2e gate passes
-    ``.config/nexus`` and nothing else) must not get an unfenced unit dir."""
-    real = tmp_path / "real"
-    real.mkdir()
-    _seed_real_home(real)
-
-    home = fence_home(real, tmp_path / "fenced", ".config/something-else")
-
-    _assert_unit_dirs_are_empty_and_fenced(home)
-    assert (home / ".config" / "something-else").is_dir()
+    # Siblings of the unit dirs are hidden too: the home is empty, not a denylist.
+    assert not (home / "Library").exists()
+    assert not (home / ".config").exists()
 
 
 @pytest.mark.skipif(not _SHELL_FENCE.exists(), reason="fence_home.sh missing")
@@ -118,14 +105,14 @@ def test_shell_fence_hides_the_autostart_unit_dirs(tmp_path: Path) -> None:
     gate = tmp_path / "gate"
 
     r = subprocess.run(
-        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home "{real}" "{gate}" ".config/nexus"'],
+        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home "{real}" "{gate}"'],
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
 
     _assert_unit_dirs_are_empty_and_fenced(gate)
-    assert (gate / "Library" / "Caches" / "keep.txt").exists()
-    assert (gate / ".config" / "xtool" / "hosts.yml").exists()
+    assert not (gate / "Library").exists()
+    assert not (gate / ".config").exists()
 
 
 def test_install_fence_makes_the_user_manager_unreachable(

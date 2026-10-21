@@ -1,8 +1,11 @@
 package dev.nexus.service;
 
+import java.util.HexFormat;
+import java.time.OffsetDateTime;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -12,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +25,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -136,36 +141,46 @@ class ChashRepositoryTest {
             }
 
             // Multi-collection chash: 384 + 1024.
-            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("multi"), "2026-07-01 00:00:01+00");
-            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("multi"), "2026-07-01 00:00:02+00");
+            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:01Z"));
+            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:02Z"));
             // Singles per dim table.
-            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("only-384"),  "2026-07-01 00:00:03+00");
-            chunk(su, TENANT_A, 768,  "coll-a-768",  ch("only-768"),  "2026-07-01 00:00:04+00");
-            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("only-1024"), "2026-07-01 00:00:05+00");
+            chunk(su, TENANT_A, 384,  "coll-a-384",  ch("only-384"),  OffsetDateTime.parse("2026-07-01T00:00:03Z"));
+            chunk(su, TENANT_A, 768,  "coll-a-768",  ch("only-768"),  OffsetDateTime.parse("2026-07-01T00:00:04Z"));
+            chunk(su, TENANT_A, 1024, "coll-a-1024", ch("only-1024"), OffsetDateTime.parse("2026-07-01T00:00:05Z"));
             // Rename source: two rows under one collection name, plus a
             // manifest row — the rename must re-home the combined-query join
             // key too (nexus-x6kdz class; .3 critique S2). RDR-225: both rows are 384-d,
             // since a collection has exactly one model (the pre-RDR-225 fixture mixed a 384
             // and a 768 row under one name, the cross-model re-embed history that layout
             // can no longer hold).
-            chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), "2026-07-01 00:00:06+00");
-            chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), "2026-07-01 00:00:07+00");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents " +
-                "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 'Ren Doc', 'a', 2026, " +
-                "'paper', 'research', 'ren-src')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 0, decode('" + ch("ren-1").toHex() + "', 'hex'), 'ren-src', " +
-                "(SELECT embedding_model FROM nexus.catalog_collections " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND name = 'ren-src'))");
+            chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), OffsetDateTime.parse("2026-07-01T00:00:06Z"));
+            chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), OffsetDateTime.parse("2026-07-01T00:00:07Z"));
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "ren-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Ren Doc")
+                .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+                .set(CATALOG_DOCUMENTS.YEAR, 2026)
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                .set(CATALOG_DOCUMENTS.CORPUS, "research")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "ren-src")
+                .execute();
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "ren-doc-1")
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, ch("ren-1").toBytes())
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "ren-src")
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(seed, TENANT_A, "ren-src"))
+                .execute();
             // Rename collision fixture: same chash on both sides.
-            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   "2026-07-01 00:00:08+00");
-            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), "2026-07-01 00:00:09+00");
-            chunk(su, TENANT_A, 384, "ren-collide-dst", ch("collide"),   "2026-07-01 00:00:10+00");
+            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   OffsetDateTime.parse("2026-07-01T00:00:08Z"));
+            chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), OffsetDateTime.parse("2026-07-01T00:00:09Z"));
+            chunk(su, TENANT_A, 384, "ren-collide-dst", ch("collide"),   OffsetDateTime.parse("2026-07-01T00:00:10Z"));
             // Tenant B: same chash value as tenant A's multi — isolation.
-            chunk(su, TENANT_B, 384, "coll-b-384", ch("multi"), "2026-07-01 00:00:11+00");
+            chunk(su, TENANT_B, 384, "coll-b-384", ch("multi"), OffsetDateTime.parse("2026-07-01T00:00:11Z"));
         }
     }
 
@@ -228,14 +243,8 @@ class ChashRepositoryTest {
         // The manifest's denormalized collection re-homed too — renaming
         // chunks without it strands the combined-query join key on the old
         // name (nexus-x6kdz class; .3 critique S2).
-        assertThat(countRows(
-            "SELECT count(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + TENANT_A + "' AND collection = 'ren-dst'"))
-            .isEqualTo(1);
-        assertThat(countRows(
-            "SELECT count(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + TENANT_A + "' AND collection = 'ren-src'"))
-            .isZero();
+        assertThat(manifestRowsIn("ren-dst")).isEqualTo(1);
+        assertThat(manifestRowsIn("ren-src")).isZero();
     }
 
     @Test
@@ -359,13 +368,14 @@ class ChashRepositoryTest {
 
     /** Raw microsecond-precision created_at for one (chash, collection), superuser-side. */
     private String rawCreatedAt(Chash chash, String collection) {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT created_at::text FROM nexus.chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + collection + "' " +
-                "  AND chash = decode('" + chash.toHex() + "', 'hex')")) {
-            if (!rs.next()) throw new IllegalStateException("row not found");
-            return rs.getString(1);
+        try (Connection su = pg.createConnection("")) {
+            var createdAtText = CHUNKS.CREATED_AT.cast(org.jooq.impl.SQLDataType.CLOB);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(createdAtText).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A), CHUNKS.COLLECTION.eq(collection),
+                       CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash.toHex())))
+                .fetch(createdAtText);
+            if (rows.isEmpty()) throw new IllegalStateException("row not found");
+            return rows.get(0);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -394,17 +404,14 @@ class ChashRepositoryTest {
     }
 
     /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
-     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+     *  SQL shape (through jOOQ on that connection), for tests needing manual transaction control. */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", String.class, DSL.inline("lock_timeout"),
+                DSL.val(String.valueOf(lockTimeoutMs)), DSL.inline(true))).fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     private void assertRenameBlocksOnExternalExclusiveGate(String gatedCollection,
@@ -486,28 +493,24 @@ class ChashRepositoryTest {
     // ONE unified nexus.chunks table — dim now selects the embedding_<dim>
     // COLUMN, not the target table.
     private void chunk(Connection su, String tenant, int dim, String collection,
-                       Chash chash, String createdAt) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ", created_at) VALUES " +
-            "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections " +
-            "WHERE tenant_id = '" + tenant + "' AND name = '" + collection + "'), " +
-            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::nexus.vector, " +
-            "TIMESTAMPTZ '" + createdAt + "')");
+                       Chash chash, OffsetDateTime createdAt) throws Exception {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash.toHex()))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk " + chash.toHex().substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
+            .set(CHUNKS.CREATED_AT, createdAt)
+            .execute();
     }
 
-    private static String unitVec(int dim) {
-        StringBuilder sb = new StringBuilder("'[1");
-        for (int i = 1; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
-    }
-
-    private int countRows(String sql) {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
+    /** catalog_document_chunks rows TENANT_A holds for {@code collection}, superuser-side. */
+    private int manifestRowsIn(String collection) {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A), CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

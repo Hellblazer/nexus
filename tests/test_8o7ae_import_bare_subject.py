@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 
 def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
 
     # The source uses the same model token a bare subject resolves to on

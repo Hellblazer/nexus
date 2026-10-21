@@ -45,7 +45,9 @@
 # incident this bead records) can never write service/target at the same
 # time. The lease is shared by every worktree of the repo and a live holder
 # is waited for, bounded by NX_BUILD_LEASE_WAIT (nexus-g6xpa); rc 75 names
-# the holder only once that bound is exhausted. See scripts/lib/build-lease.sh.
+# the holder only once that bound is exhausted. Inside a lab-run grant (LAB_CPUS
+# set, not GitHub Actions) a held lease refuses at once with 75 instead
+# (nexus-dfg0q). See scripts/lib/build-lease.sh.
 #
 # STAMP GUARDED + HELD FOR ITS WHOLE LIFETIME (nexus-iexvl): once the lease
 # above is held, release.properties is checked against git HEAD before this
@@ -62,20 +64,48 @@
 # GATE-JAR CACHE (nexus-g6xpa, 2026-09-07): a fresh worktree used to spend
 # ~9 minutes here rebuilding a jar byte-identical to the primary's. The
 # stamped jar is now cached in the git common dir keyed on the EXACT
-# service/ working-tree content (tracked, modified and untracked non-ignored
-# files, via a throwaway git index) plus the stamped release_version; a hit
-# copies the cached jar into service/target and prints the build_ref that
-# jar carries, a miss builds and stores. "Never rebuild deterministic
+# working-tree content of what the jar is built from -- service/pom.xml,
+# service/src/main/**, service/src/build/** (the jOOQ codegen runner and its
+# generator files), service/mvnw, service/.mvn/** (tracked, modified and
+# untracked non-ignored files, via a throwaway index; src/test, docs and
+# scripts under service/ are NOT part of it, nexus-fkhd3) -- plus the
+# stamped release_version; a hit
+# links the cached jar into service/target (copying only where linking fails,
+# and not at all when service/target already holds it; nexus-k6zxp) and prints
+# the build_ref that jar carries, a miss builds and stores. "Never rebuild deterministic
 # artifacts" (.claude/rules/ci-and-runners.md § CI Cost Discipline), applied to the dev box. A hit
 # therefore REUSES a build_ref: the per-run-unique guarantee below holds per
-# distinct service/ content, not per invocation — a caller that captured the
+# distinct build-input content, not per invocation — a caller that captured the
 # printed value still matches the jar it is given. NX_GATE_JAR_CACHE=off
 # disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
 # scripts/lib/gate-jar-cache.sh.
 #
-#   usage: scripts/build-gate-jar.sh [extra mvn args...]
+# --lab-run <class> (nexus-t6t9f): on a lab pool host (chas, qwent) pass it
+# instead of wrapping this script in lab-run, exactly as scripts/mvnw-leased.sh
+# does (nexus-iqmih). The lease is then taken BEFORE the pool grant, so a build
+# waiting its turn holds no cores, and the Maven build runs as `lab-run -c <class>
+# -- ./mvnw ...`, which makes it visible to the pool scheduler (a bare run is
+# not). A cache HIT starts no lab-run at all: the jar is already built and no
+# grant is taken for it. The build runs as its own process group, recorded as the
+# lease's pgid, with INT/TERM/HUP/QUIT forwarded to it; release.properties is
+# restored and the lease released only once that group is gone, after the group
+# has been re-polled for 3 s following a KILL escalation. If it is still alive at
+# exit, BOTH steps are skipped and a WARNING on stderr says so (the stamp stays
+# until a later run or a hand restore). A signal ends the script with exit 130
+# (TERM used to give 143). See scripts/lib/leased-build.sh.
+#
+#   usage: scripts/build-gate-jar.sh [--lab-run <class>] [extra mvn args...]
 
 set -euo pipefail
+
+# -h/--help anywhere prints this header and exits before any lease, stamp or build. Other arguments go to
+# Maven, which treats --help as its own help and still ran this script's stamp-and-build around it.
+for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+        sed -n '4,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
+        exit 0
+    fi
+done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 props="$repo_root/service/src/main/resources/META-INF/nexus/release.properties"
@@ -86,11 +116,28 @@ source "$repo_root/scripts/lib/build-lease.sh"
 source "$repo_root/scripts/lib/release-props-lease.sh"
 # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
 source "$repo_root/scripts/lib/gate-jar-cache.sh"
-build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-gate-jar.sh "$@"
-# Release on every exit path from here on; the props-restore trap below
-# replaces this once there is a stamp to restore. Without it a failure in
-# the key computation would leak the lease until stale reclaim.
-trap 'build_lease_release service' EXIT
+# shellcheck source=./lib/leased-build.sh disable=SC1091
+source "$repo_root/scripts/lib/leased-build.sh"
+
+lab_class=""
+if [[ "${1:-}" == "--lab-run" ]]; then
+    leased_build_check_lab_run build-gate-jar.sh "${2:-}"
+    lab_class="$2"
+    shift 2
+fi
+
+# Inside a lab-run grant a hand run refuses at once instead of waiting
+# (build_lease_caller_wait, nexus-dfg0q).
+build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh "$@" || {
+    rc=$?
+    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint build-gate-jar.sh "take the lease before the grant: scripts/build-gate-jar.sh --lab-run <class> ... outside lab-run"
+    exit "$rc"
+}
+# Release on every exit path from here on, and never while the build is alive
+# (scripts/lib/leased-build.sh). The finish command below is replaced once there
+# is a stamp to restore. Without this a failure in the key computation would
+# leak the lease until stale reclaim.
+leased_build_init build-gate-jar.sh service
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
 
@@ -115,7 +162,7 @@ print('.'.join(m.groups()))
 # unique to the BUILD that stamped it, so no other build (dev or release)
 # can bake the identical value. A cache hit (nexus-g6xpa) hands back the
 # jar that build produced together with its build_ref, so the value still
-# identifies exactly one artifact; it is per distinct service/ content, not
+# identifies exactly one artifact; it is per distinct build-input content, not
 # per invocation.
 sha="$(cd "$repo_root" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 nonce="$(date +%s)-$$"
@@ -123,22 +170,39 @@ build_ref="${sha}+${nonce}"
 
 # Cache lookup, AFTER the lease is held (so no concurrent stamp is in the
 # tree while the key is computed) and BEFORE this run stamps anything.
-# The key covers service/ content; extra mvn args are part of it too, so a
+# The key covers the build inputs; extra mvn args are part of it too, so a
 # `-Pfoo` build never serves a plain one.
 jar_name="nexus-service-1.0-SNAPSHOT.jar"
-cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"
-if cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
-    mkdir -p "$repo_root/service/target"
-    cp "$cached/jar" "$repo_root/service/target/$jar_name"
-    build_ref="$(cat "$cached/build_ref")"
-    echo "stamped release_version=$ver"
-    echo "stamped build_ref=$build_ref"
-    echo "gate jar cache HIT key=$cache_key (service/ content unchanged since that build; $cached)"
-    echo "built $repo_root/service/target/$jar_name"
-    build_lease_release service
-    exit 0
+# The cache is best-effort end to end: a key that cannot be computed, an entry
+# that cannot be read or copied whole, a root that cannot be written, all fall
+# through to a plain build (nexus-fkhd3 review).
+cache_key=""
+if ! cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"; then
+    echo "gate jar cache disabled for this run: the key could not be computed" >&2
+    cache_key=""
 fi
-echo "gate jar cache MISS key=$cache_key — building"
+target_jar="$repo_root/service/target/$jar_name"
+if [[ -n "$cache_key" ]] && cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
+    mkdir -p "$repo_root/service/target"
+    # Install, then re-verify the RESULT: an entry pruned or damaged between the
+    # lookup's check and this read must become a rebuild, not a bad jar.
+    # gate_jar_cache_install writes nothing when service/target already holds
+    # this key's jar, links the entry's jar in otherwise, and copies only where
+    # linking fails (nexus-k6zxp).
+    if hit_ref="$(cat "$cached/build_ref" 2>/dev/null)" && [[ -n "$hit_ref" ]] \
+        && gate_jar_cache_install "$cache_key" "$cached" "$target_jar" \
+        && _gate_jar_cache_jar_ok "$target_jar" "$hit_ref"; then
+        echo "stamped release_version=$ver"
+        echo "stamped build_ref=$hit_ref"
+        echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached; jar $_GATE_JAR_PLACED)"
+        echo "built $target_jar"
+        build_lease_release service
+        exit 0
+    fi
+    rm -f "$target_jar" "$repo_root/service/target/.gate-jar-key"
+    echo "gate jar cache entry $cached could not be used whole; building" >&2
+fi
+echo "gate jar cache MISS key=${cache_key:-none} — building"
 
 backup="$(mktemp)"
 cp "$props" "$backup"
@@ -149,7 +213,8 @@ cp "$props" "$backup"
 # release-looking JAR. release_props_restore_and_release always restores
 # first and releases second, so no other process can ever observe a freed
 # lease while this file is still stamped.
-trap 'release_props_restore_and_release "$props" "$backup" service' EXIT
+# shellcheck disable=SC2034  # read by the EXIT trap in scripts/lib/leased-build.sh
+LEASED_BUILD_FINISH=(release_props_restore_and_release "$props" "$backup" service)
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"
@@ -164,10 +229,27 @@ echo "stamped build_ref=$build_ref"
 # value in its own process for the smoke-leg compare. Intentional
 # duplication of the <sha>+<epoch>-<pid> shape — keep the two in step.
 
+# The jar plugin rewrites an existing service/target jar IN PLACE, and a cache
+# hit or store leaves that path hard-linked to the cache entry: unlink a shared
+# (or read-only) jar first so the build writes a new inode and the entry's bytes
+# stay what they were (nexus-k6zxp).
+gate_jar_cache_unshare "$repo_root/service/target/$jar_name"
+
 cd "$repo_root/service"
-./mvnw -q package -DskipTests "$@"
+# -Dnexus.jlink.skip=true: the jlink image is not part of the gate jar and nothing
+# reads it here; skipping it saves its writes per miss (service/pom.xml, nexus-0a1hw).
+# A non-zero exit exits this script with the same code (set -e); the EXIT path
+# restores release.properties and releases the lease.
+leased_build_run "$lab_class" ./mvnw -q package -DskipTests -Dnexus.jlink.skip=true "$@"
 
 built_jar="$repo_root/service/target/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }
-gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref"
+if [[ -n "$cache_key" ]]; then
+    # Best-effort: the store warns and returns 0 on a cache that cannot be written.
+    gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref" \
+        || echo "gate jar cache not written; continuing without it" >&2
+fi
+# The build just (re)published the jOOQ generated trees to the shared cache
+# (service/pom.xml, nexus-fkhd3); keep it bounded.
+gate_jar_cache_prune_jooq "$repo_root"
 echo "built $built_jar"

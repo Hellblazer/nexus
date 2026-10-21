@@ -32,7 +32,7 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_normalize_source_uri`, `_default_registry_path`. |
 | `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON). |
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
-| `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared head_hash). |
+| `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared file-content hash, never `head_hash`, which is the indexing commit for repo files: nexus-utkop). |
 | `catalog_spans.py`, `store_hook.py`, `orphan_backfill.py`, `manifest_backfill.py` | Span resolution, post-store registration hook, backfill tooling. |
 | `manifest_heal.py` | Shared manifest-gap heal core (nexus-8g0ch + nexus-c21fk) — rebuilds `document_chunks` manifest rows from T3 chunks already stored, without re-embedding. Consumed by both `nx catalog reconcile` and the `nx index repo` self-heal pass. |
 | `chunk_quarantine.py` | Orphan-chunk soft delete (nexus-xukbj) — moves GC orphans to a sibling `quarantine__*` collection (excluded from every search corpus by construction) instead of hard-deleting; restores chashes that become referenced again. |

@@ -204,6 +204,7 @@ def service_mode_fresh_box(tmp_path, monkeypatch):
     factory.reset_shared_service_catalog_client_for_tests()
 
 
+@pytest.mark.t2_tenant
 def test_store_reap_runs_on_fresh_service_box(service_mode_fresh_box):
     """Pre-fix: the post-delete catalog tombstone reap silently returned
     on any box without a local catalog dir — orphan catalog rows survived

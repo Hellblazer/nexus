@@ -13,6 +13,7 @@ from nexus.db.http_vector_client import (
     is_vector_service_mode,
     reset_http_vector_client_for_tests,
 )
+from tests._epipe_server import skip_on_windows
 from tests._module_seam import module_time
 
 
@@ -136,6 +137,7 @@ class TestUpsertChunks:
         client.upsert_chunks("col", [], [])
         assert posted == []
 
+    @pytest.mark.t2_tenant
     def test_posts_to_upsert_chunks_endpoint_with_default_metadata(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
@@ -155,6 +157,7 @@ class TestUpsertChunks:
         # nexus-rvfwj: the upsert path alone gets the long CCE-batch timeout.
         assert timeout == 600
 
+    @pytest.mark.t2_tenant
     def test_embeddings_seam_b_behavior(self, monkeypatch):
         """Seam B: upsert_chunks_with_embeddings discards the caller's
         embeddings (server embeds server-side); upsert_chunks omits the
@@ -237,32 +240,6 @@ class TestSearch:
 
         client.search("q", ["c"])
         assert "where" not in calls[1]
-
-
-class TestPut:
-    def test_store_put_id_is_the_full_digest(self, monkeypatch):
-        """put() matches T3Database.put(): doc_id is the FULL
-        sha256(content) hexdigest (RDR-180 / nexus-jxizy.3). The
-        nexus-p78a0 rehearsal (run 4) caught this mirror still slicing
-        [:32] — every service-mode store_put then wrote a 16-byte key and
-        409'd on the cohort engine's octet CHECK. This test previously
-        EXPECTED the truncation, pinning the bug in place."""
-        import hashlib
-        client = HttpVectorClient()
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append((path, body))
-            return {"id": body.get("doc_id", "fallback")}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        content = "content here"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
-        assert len(expected_doc_id) == 64
-        returned_id = client.put("col", content, title="my-title")
-        path, body = calls[0]
-        assert path == "/v1/vectors/store-put"
-        assert body["doc_id"] == expected_doc_id
-        assert body["content"] == content
-        assert returned_id == expected_doc_id
 
 
 class TestExistingIdsAndGetByIdStayTruncationSafe:
@@ -952,6 +929,7 @@ class TestFindIdsByTitle:
     AttributeError in service mode. Mirrors ids_for_source's where-filter
     pagination pattern (nexus-vhyua)."""
 
+    @pytest.mark.t2_tenant
     def test_paginates_collects_and_handles_no_matches(self, monkeypatch):
         # Two pages (300 then 2) -> single flat id list; second short page ends it.
         pages = [
@@ -1585,6 +1563,7 @@ class TestTaxonomyServiceModeGuard:
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
+    @pytest.mark.t2_tenant
     def test_taxonomy_assign_batch_hook_no_ops_cleanly_in_service_mode(
         self, monkeypatch
     ):
@@ -1912,6 +1891,7 @@ class TestEmbeddingFetchServiceModeRegression:
         assert failed == {1}
 
 
+@pytest.mark.t2_tenant
 class TestUpsertSkipExisting:
     """RDR-181 bead nexus-f0r8p.5: skip_existing is now a deprecation shim.
 
@@ -1978,6 +1958,7 @@ class TestUpsertSkipExisting:
         assert upserts[0]["ids"] == ["a", "b"]
 
 
+@pytest.mark.t2_tenant
 class TestSkipExistingDeprecationNotice:
     """RDR-181 bead nexus-f0r8p.5: skip_existing (kwarg or the
     NX_UPSERT_SKIP_EXISTING=1 env alias) fires a one-time structlog
@@ -2082,6 +2063,7 @@ class TestSkipExistingDeprecationNotice:
         ), f"expected http_vector_skip_existing_deprecated WARNING, got: {[(r.levelname, r.msg) for r in caplog.records]}"
 
 
+@pytest.mark.t2_tenant
 class TestForceReEmbed:
     """RDR-181 bead nexus-f0r8p.3: plumbing-only — thread force_re_embed onto
     the wire and map the deprecated NX_UPSERT_SKIP_EXISTING=0 escape to it.
@@ -2198,6 +2180,7 @@ class TestPostTypedErrorDetail:
             fp=io.BytesIO(body),
         )
 
+    @pytest.mark.t2_tenant
     def test_422_body_detail_and_fields_reach_the_message(self, monkeypatch):
         import json as _json
         import nexus.db.http_vector_client as hv
@@ -2261,6 +2244,7 @@ class TestUnregisteredCollectionMessage:
         assert "does not exist here" in text and "nx collection list" in text
         assert "/v1/catalog/collections/upsert" not in text
 
+    @pytest.mark.t2_tenant
     def test_the_write_retry_detector_still_recognises_it(self, monkeypatch):
         from nexus.corpus import _looks_like_stale_registration_error
 
@@ -2291,6 +2275,7 @@ class TestUnregisteredCollectionMessage:
             hv._get("/v1/vectors/x")
         assert exc.value.reason == "unregistered_collection"
 
+    @pytest.mark.t2_tenant
     def test_the_write_retry_detector_keys_on_the_reason(self, monkeypatch):
         from nexus.corpus import _looks_like_stale_registration_error
 
@@ -2309,6 +2294,7 @@ class TestUnregisteredCollectionMessage:
         assert exc.value.reason is None
         assert "'knowledge__nope__model-ctx__v1' is not registered" in str(exc.value)
 
+    @pytest.mark.t2_tenant
     def test_a_different_reason_is_not_rewritten_even_if_the_words_appear(self, monkeypatch):
         body = (b'{"error":"collection \'x\' is not registered here","reason":"something_else",'
                 b'"collection":"x"}')
@@ -2318,6 +2304,7 @@ class TestUnregisteredCollectionMessage:
         assert "does not exist here" not in str(exc.value)
         assert exc.value.reason == "something_else"
 
+    @pytest.mark.t2_tenant
     def test_another_422_is_untouched(self, monkeypatch):
         hv = self._raise(monkeypatch, body=b'{"error":"names a different model"}')
         with pytest.raises(VectorServiceError) as exc:
@@ -2389,6 +2376,7 @@ class TestManagedFailureReframe:
         assert exc.value.code == 401
         assert "NX_SERVICE_TOKEN" not in str(exc.value)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("err", ["urlerror", "connection", "timeout"])
     def test_connection_error_local_unchanged(self, monkeypatch, err):
         # NX_SERVICE_URL unset → local/lease topology → original error propagates
@@ -2614,12 +2602,9 @@ class TestEmbedWrite504BackoffFloor:
             fp=io.BytesIO(body),
         )
 
-    @pytest.mark.parametrize("path", [
-        "/v1/vectors/upsert-chunks",
-        "/v1/vectors/store-put",
-    ])
-    def test_504_on_embed_write_route_floors_every_sleep(self, monkeypatch, path):
+    def test_504_on_embed_write_route_floors_every_sleep(self, monkeypatch):
         import nexus.db.http_vector_client as hv
+        path = "/v1/vectors/upsert-chunks"
         calls: list[int] = []
         sleeps: list[float] = []
 
@@ -2708,7 +2693,7 @@ class TestEmbedWrite504BackoffFloor:
                             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
         module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
-            hv._request("POST", "/v1/vectors/store-put",
+            hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=120, body={})
         assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
 
@@ -2716,6 +2701,7 @@ class TestEmbedWrite504BackoffFloor:
 # ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────
 
 
+@pytest.mark.t2_tenant
 def test_per_collection_chunk_cap_values(monkeypatch):
     """nexus-w3hzw (pre-v7.4.0) keyed the cap on the SERVING embedder family:
     unknown/voyage keeps the conservative timeout-derived split (64 CCE / 300
@@ -4073,195 +4059,6 @@ class TestSingleCollectionUnregistered422IsActionable:
         assert excinfo.value.code == 422
 
 
-class TestResolveContent:
-    """RDR-169 G3 (bead nexus-aphki): ``HttpVectorClient.resolve_content`` —
-    POST /v1/vectors/resolve, both request forms, and all four non-2xx
-    status codes the engine handler can return (404, 422, 502, 503), plus
-    the reference_only 404 sub-case (fix round 1, T2
-    critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11): it shares
-    code=404 with a plain chash-not-found, distinguished only in the
-    raised exception's message text (the engine body's ``error`` token is
-    embedded verbatim by ``_post``'s existing generic HTTPError mapping —
-    no new exception type or attribute, same convention as the 422
-    TOO_MANY_TOKENS ``detail`` fields already surfaced there)."""
-
-    def test_source_uri_form_200_returns_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        client = HttpVectorClient()
-        captured: dict = {}
-
-        def fake_post(path, body, **kw):
-            captured["path"] = path
-            captured["body"] = body
-            return {"content": "fetched html", "source_uri": "https://example.com/doc"}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-
-        result = client.resolve_content(source_uri="https://example.com/doc")
-
-        assert captured["path"] == "/v1/vectors/resolve"
-        assert captured["body"] == {"source_uri": "https://example.com/doc"}
-        assert result == {"content": "fetched html", "source_uri": "https://example.com/doc"}
-        # source_uri form: no row, so no retention field.
-        assert "retention" not in result
-
-    def test_chash_form_200_returns_content_and_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        client = HttpVectorClient()
-        captured: dict = {}
-
-        def fake_post(path, body, **kw):
-            captured["path"] = path
-            captured["body"] = body
-            return {
-                "content": "chunk text from pgvector",
-                "source_uri": "chroma://knowledge__nexus__bge-768__v1/abc123",
-                "retention": "reference-only",
-            }
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-
-        result = client.resolve_content(
-            collection="knowledge__nexus__bge-768__v1",
-            chash="a" * 64,
-        )
-
-        assert captured["body"] == {
-            "collection": "knowledge__nexus__bge-768__v1",
-            "chash": "a" * 64,
-        }
-        assert result["retention"] == "reference-only"
-        assert result["content"] == "chunk text from pgvector"
-
-    def test_both_forms_given_raises_value_error_before_any_call(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = HttpVectorClient()
-
-        def fail_post(*a, **k):
-            raise AssertionError("must not call _post when both forms are given")
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fail_post)
-
-        with pytest.raises(ValueError, match="OR"):
-            client.resolve_content(
-                source_uri="https://example.com/doc",
-                collection="col",
-                chash="a" * 64,
-            )
-
-    def test_neither_form_given_raises_value_error(self) -> None:
-        client = HttpVectorClient()
-        with pytest.raises(ValueError, match="required"):
-            client.resolve_content()
-
-    def test_404_chash_not_found_raises_vector_service_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = HttpVectorClient()
-
-        def raise_404(path, body, **kw):
-            raise VectorServiceError("POST /v1/vectors/resolve → HTTP 404: not found", code=404)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_404)
-
-        with pytest.raises(VectorServiceError) as excinfo:
-            client.resolve_content(collection="col", chash="a" * 64)
-        assert excinfo.value.code == 404
-
-    def test_422_unregistered_scheme_raises_vector_service_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = HttpVectorClient()
-
-        def raise_422(path, body, **kw):
-            raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 422: no handler registered for scheme 'file'",
-                code=422,
-            )
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_422)
-
-        with pytest.raises(VectorServiceError) as excinfo:
-            client.resolve_content(source_uri="file:///etc/passwd")
-        assert excinfo.value.code == 422
-        assert "file" in str(excinfo.value)
-
-    def test_502_resolver_failure_raises_vector_service_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = HttpVectorClient()
-
-        def raise_502(path, body, **kw):
-            # "empty" (a 200-with-blank-body https fetch) is the one reason token
-            # the engine actually maps to 502 post-fix-round-1 -- "unreachable" and
-            # "malformed" moved to 422 (RDR-169 G3 fix round 1, T2
-            # critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11 Critical).
-            raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 502: empty — empty body at "
-                "'https://example.com/gone' (HTTP 200)", code=502
-            )
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_502)
-
-        with pytest.raises(VectorServiceError) as excinfo:
-            client.resolve_content(source_uri="https://example.com/gone")
-        assert excinfo.value.code == 502
-
-    def test_503_no_pgvector_repository_raises_vector_service_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = HttpVectorClient()
-
-        def raise_503(path, body, **kw):
-            raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 503: resolve by (collection, chash) "
-                "requires a pgvector repository", code=503
-            )
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_503)
-
-        with pytest.raises(VectorServiceError) as excinfo:
-            client.resolve_content(collection="col", chash="a" * 64)
-        assert excinfo.value.code == 503
-
-    def test_404_reference_only_is_distinguishable_from_chash_not_found(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Both share code=404; the reason token in the raised message is the
-        only thing telling them apart (see the class docstring)."""
-        client = HttpVectorClient()
-
-        def raise_reference_only_404(path, body, **kw):
-            raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 404: reference_only — chunk "
-                "(col, abc123) has no stored text (reference-only retention "
-                "or missing row) — resolve client-side",
-                code=404,
-            )
-
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post", raise_reference_only_404
-        )
-
-        with pytest.raises(VectorServiceError) as excinfo:
-            client.resolve_content(source_uri="chroma://col/abc123")
-        assert excinfo.value.code == 404
-        assert "reference_only" in str(excinfo.value)
-
-        def raise_plain_404(path, body, **kw):
-            raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 404: no chunk found for "
-                "collection='col' chash='deadbeef'",
-                code=404,
-            )
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_plain_404)
-
-        with pytest.raises(VectorServiceError) as excinfo2:
-            client.resolve_content(collection="col", chash="deadbeef")
-        assert excinfo2.value.code == 404
-        assert "reference_only" not in str(excinfo2.value)
-
-
 class TestUpdateChunksMissing:
     """``HttpVectorClient.update_chunks``'s reading of the engine's ``missing`` field
     (nexus-5xn3k.5, memo §3.6). These were pinned through ``doc_indexer._upsert_skip_reembed``,
@@ -4357,3 +4154,66 @@ class TestUpdateChunksMissing:
             client.update_chunks("col", ["b"], [{"y": 2}])
         unreported = [e for e in logs if e["event"] == "update_chunks_missing_unreported"]
         assert [e["log_level"] for e in unreported] == ["warning", "debug"], unreported
+
+
+# ── nexus-40fjk: EPIPE is a restart signature ────────────────────────────────
+
+class TestBrokenPipeIsARestartSignature:
+    """A request written after the restarting service's RST fails with EPIPE, not ECONNRESET
+    (tests/_epipe_server.py says how the EPIPE is ordered on macOS and Linux). It takes the same
+    single idempotent retry as a reset."""
+
+    def test_broken_pipe_is_classified_retryable(self) -> None:
+        import urllib.error
+
+        from nexus.db.http_vector_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(BrokenPipeError(32, "Broken pipe"))
+        assert _is_retryable_endpoint_error(urllib.error.URLError(BrokenPipeError(32, "Broken pipe")))
+
+    def test_the_harness_leaves_a_connection_to_any_other_port_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A foreign connection in the same process (another test's thread, an unrelated client) must
+        # neither take the armed slot nor wait on this server's RST.
+        import http.client
+        import socket
+
+        from tests._epipe_server import order_rst_before_the_first_write, resetting_server
+
+        with resetting_server() as server, socket.socket() as other:
+            other.bind(("127.0.0.1", 0))
+            other.listen(1)
+            order_rst_before_the_first_write(monkeypatch, server)
+            conn = http.client.HTTPConnection("127.0.0.1", other.getsockname()[1], timeout=2)
+            try:
+                conn.connect()  # would raise on the harness's 5 s select if it touched this one
+                assert conn.sock is not None
+                assert server.accepted == 0
+            finally:
+                conn.close()
+
+    @skip_on_windows
+    def test_a_write_after_the_rst_is_retried_once_and_the_second_attempt_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.db.http_vector_client as hvc
+        from tests._epipe_server import (
+            order_rst_before_the_first_write,
+            record_transport_reasons,
+            resetting_server,
+        )
+
+        rows = [{"name": "knowledge__x__minilm__v1", "count": 3}]
+        with resetting_server(reset_first=1, payload=rows) as server:
+            order_rst_before_the_first_write(monkeypatch, server)
+            reasons = record_transport_reasons(monkeypatch)
+            monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (server.base_url, "tok"))
+            monkeypatch.setattr(hvc, "_wait_for_lease_republication", lambda: None)
+            hvc.reset_http_vector_client_for_tests()
+            try:
+                assert hvc._get("/v1/vectors/stats") == rows
+            finally:
+                hvc.reset_http_vector_client_for_tests()
+            # Non-vacuity: the first attempt failed with EPIPE (not ECONNRESET), and was the only
+            # one retried; the retry reached the server and was answered.
+            assert reasons == [BrokenPipeError]
+            assert (server.accepted, server.answered) == (2, 1)

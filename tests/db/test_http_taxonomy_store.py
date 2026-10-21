@@ -645,6 +645,7 @@ class TestTopicCRUD:
     def test_get_topics_empty(self, client: HttpTaxonomyStore) -> None:
         assert client.get_topics() == []
 
+    @pytest.mark.t2_tenant
     def test_import_and_get_topics(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1,
@@ -662,6 +663,7 @@ class TestTopicCRUD:
         assert topics[0]["label"] == "machine-learning"
         assert topics[0]["doc_count"] == 10
 
+    @pytest.mark.t2_tenant
     def test_get_all_topics_filters_by_collection(self, client: HttpTaxonomyStore) -> None:
         # get_topics no longer takes a collection (RDR-152 nexus-1di3r.5 reconciled
         # it to the oracle's parent_id-keyed signature); collection-scoped reads go
@@ -680,6 +682,7 @@ class TestTopicCRUD:
         assert client.get_all_topics(collection="coll-A")[0]["label"] == "ml"
         assert len(client.get_all_topics(collection="coll-B")) == 1
 
+    @pytest.mark.t2_tenant
     def test_get_topics_roots_vs_children(self, client: HttpTaxonomyStore) -> None:
         # parent_id=None -> roots; parent_id=X -> children of X (oracle parity).
         client.import_topic(
@@ -704,6 +707,7 @@ class TestTopicCRUD:
         assert [t["label"] for t in children] == ["child"]
         assert client.get_topics(parent_id=999) == []
 
+    @pytest.mark.t2_tenant
     def test_get_topics_for_collection_with_exclude_id(self, client: HttpTaxonomyStore) -> None:
         for sid, label, dc in ((1, "a", 9), (2, "b", 5), (3, "c", 1)):
             client.import_topic(
@@ -728,6 +732,7 @@ class TestTopicCRUD:
         assert [t["label"] for t in excluded] == ["a", "c"]
         assert all(t["id"] != 2 for t in excluded)
 
+    @pytest.mark.t2_tenant
     def test_get_topic_by_id(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=42, label="deep-learning", parent_id=None,
@@ -741,6 +746,7 @@ class TestTopicCRUD:
     def test_get_topic_by_id_not_found(self, client: HttpTaxonomyStore) -> None:
         assert client.get_topic_by_id(999) is None
 
+    @pytest.mark.t2_tenant
     def test_resolve_label(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=5, label="transformers", parent_id=None,
@@ -753,6 +759,7 @@ class TestTopicCRUD:
     def test_resolve_label_not_found(self, client: HttpTaxonomyStore) -> None:
         assert client.resolve_label("nonexistent") is None
 
+    @pytest.mark.t2_tenant
     def test_get_distinct_collections(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t1", parent_id=None, collection="coll-A",
@@ -767,6 +774,7 @@ class TestTopicCRUD:
         colls = client.get_distinct_collections()
         assert set(colls) == {"coll-A", "coll-B"}
 
+    @pytest.mark.t2_tenant
     def test_update_topic_label(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="old-label", parent_id=None, collection="c",
@@ -779,6 +787,7 @@ class TestTopicCRUD:
         # review_status should not change
         assert t["review_status"] == "pending"
 
+    @pytest.mark.t2_tenant
     def test_rename_topic_sets_accepted(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="draft", parent_id=None, collection="c",
@@ -790,6 +799,7 @@ class TestTopicCRUD:
         assert t["label"] == "final-name"
         assert t["review_status"] == "accepted"
 
+    @pytest.mark.t2_tenant
     def test_mark_topic_reviewed(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t", parent_id=None, collection="c",
@@ -800,6 +810,7 @@ class TestTopicCRUD:
         t = client.get_topic_by_id(1)
         assert t["review_status"] == "accepted"
 
+    @pytest.mark.t2_tenant
     def test_get_unreviewed_topics(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t1", parent_id=None, collection="c",
@@ -817,6 +828,7 @@ class TestTopicCRUD:
 
 
 class TestDeleteAndMerge:
+    @pytest.mark.t2_tenant
     def test_delete_topic_returns_collection(self, client: HttpTaxonomyStore) -> None:
         """CHROMA BOUNDARY: delete_topic returns collection name for chroma cleanup."""
         client.import_topic(
@@ -832,6 +844,7 @@ class TestDeleteAndMerge:
         result = client.delete_topic(9999)
         assert result is None
 
+    @pytest.mark.t2_tenant
     def test_delete_topic_cleans_assignments(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t", parent_id=None, collection="c",
@@ -843,6 +856,7 @@ class TestDeleteAndMerge:
         client.delete_topic(1)
         assert client.get_topic_doc_ids(1) == []
 
+    @pytest.mark.t2_tenant
     def test_merge_topics_returns_source_collection(self, client: HttpTaxonomyStore) -> None:
         """CHROMA BOUNDARY: merge_topics returns source collection for chroma cleanup."""
         client.import_topic(
@@ -866,6 +880,7 @@ class TestDeleteAndMerge:
     # (_FakeCentroidStore — defined later in this module — records delete_ids in
     #  .calls as ("delete_ids", collection, [topic_ids]).)
 
+    @pytest.mark.t2_tenant
     def test_delete_topic_cleans_its_centroid(self, fake_server: str) -> None:
         centroid = _FakeCentroidStore([])
         store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
@@ -880,6 +895,7 @@ class TestDeleteAndMerge:
             "not leak it as a chunk-attracting orphan"
         )
 
+    @pytest.mark.t2_tenant
     def test_merge_topics_cleans_source_centroid_only(self, fake_server: str) -> None:
         centroid = _FakeCentroidStore([])
         store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, centroid_store=centroid)
@@ -907,6 +923,7 @@ class TestDeleteAndMerge:
         assert store.merge_topics(9998, 9999) is None
         assert centroid.calls == [], "a 404 source must not touch the centroid store"
 
+    @pytest.mark.t2_tenant
     def test_delete_topic_centroid_failure_is_swallowed(self, fake_server: str) -> None:
         # The relational delete already committed; a centroid-store hiccup must not
         # raise (stale centroid is recoverable on rebuild, post-commit raise is worse).
@@ -925,6 +942,7 @@ class TestDeleteAndMerge:
         assert store.delete_topic(1) == "c"
         assert store.get_topic_by_id(1) is None
 
+    @pytest.mark.t2_tenant
     def test_merge_reassigns_docs_to_target(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="src", parent_id=None, collection="c",
@@ -943,6 +961,7 @@ class TestDeleteAndMerge:
         assert "doc1" in docs
 
 
+@pytest.mark.t2_tenant
 class TestAssignments:
     def test_assign_and_get_doc_ids(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
@@ -993,6 +1012,7 @@ class TestAssignments:
         assert "docX" in result
 
 
+@pytest.mark.t2_tenant
 class TestTopicTree:
     # RDR-152 nexus-1di3r.3: get_topic_tree is now service-backed via client-side
     # recursion over /topics/root + /topics/children, mirroring the oracle's
@@ -1107,6 +1127,7 @@ class TestLinks:
 
 
 class TestMetaAndRebalance:
+    @pytest.mark.t2_tenant
     def test_record_discover_count(self, client: HttpTaxonomyStore) -> None:
         client.record_discover_count("knowledge__papers", 100)
         # Should not raise; check via needs_rebalance
@@ -1115,14 +1136,17 @@ class TestMetaAndRebalance:
     def test_needs_rebalance_on_new_collection(self, client: HttpTaxonomyStore) -> None:
         assert client.needs_rebalance("new-collection", 50)
 
+    @pytest.mark.t2_tenant
     def test_needs_rebalance_on_large_growth(self, client: HttpTaxonomyStore) -> None:
         client.record_discover_count("coll", 100)
         assert client.needs_rebalance("coll", 200)  # 100% growth
 
+    @pytest.mark.t2_tenant
     def test_needs_rebalance_stable(self, client: HttpTaxonomyStore) -> None:
         client.record_discover_count("coll", 100)
         assert not client.needs_rebalance("coll", 103)  # 3% growth
 
+    @pytest.mark.t2_tenant
     def test_get_last_discover_stamps_omits_unknown_collections(
         self, client: HttpTaxonomyStore,
     ) -> None:
@@ -1194,6 +1218,7 @@ class TestMetaAndRebalance:
 
 
 class TestImportFidelity:
+    @pytest.mark.t2_tenant
     def test_import_topic_preserves_id(self, client: HttpTaxonomyStore) -> None:
         """ETL fidelity: original SQLite id must be preserved."""
         client.import_topic(
@@ -1215,6 +1240,7 @@ class TestImportFidelity:
         assert t["centroid_hash"] == "abc123"
         assert t["review_status"] == "accepted"
 
+    @pytest.mark.t2_tenant
     def test_import_assignment_fidelity(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t", parent_id=None, collection="c",
@@ -1237,6 +1263,7 @@ class TestImportFidelity:
                 assert a["assigned_by"] == "projection"
                 break
 
+    @pytest.mark.t2_tenant
     def test_import_topic_link_fidelity(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="t1", parent_id=None, collection="c",
@@ -1275,6 +1302,7 @@ class TestMiscMethods:
         """clear_icf_cache is a no-op over HTTP."""
         client.clear_icf_cache()  # should not raise
 
+    @pytest.mark.t2_tenant
     def test_get_labels_for_ids(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="alpha", parent_id=None, collection="c",
@@ -1293,6 +1321,7 @@ class TestMiscMethods:
         # nexus-w032x: served by ONE batched request, not three by_id GETs.
         assert _BY_IDS_REQUESTS == [[1, 2, 999]]
 
+    @pytest.mark.t2_tenant
     def test_top_topics_for_collection(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(
             src_id=1, label="ml", parent_id=None, collection="coll-A",
@@ -1535,6 +1564,7 @@ class TestPersist:
             review_status=review, terms=None,
         )
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_returns_ids_and_guards_existing(self, client) -> None:
         specs = [
             {"label": "t0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
@@ -1565,6 +1595,7 @@ class TestPersist:
         assert calls == [("/assignments/prune_projection",
                           {"source_collection_prefix": "code__", "min_similarity": 0.7})]
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_409_is_benign_skip(self, client, monkeypatch) -> None:
         """nexus-n2ls1: pre-advisory-lock engines map a concurrent guard-then-
         insert discovery race to SQLSTATE 23505 → HTTP 409. The topics were
@@ -1592,6 +1623,7 @@ class TestPersist:
         )
         assert out == []
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_409_with_23505_sqlstate_is_benign(self, client, monkeypatch) -> None:
         """nexus-n2ls1 critique HIGH: typed-ladder engines put the sqlstate in
         the 409 body — 23505 (the race's unique violation) is benign."""
@@ -1616,6 +1648,7 @@ class TestPersist:
               "assigned_by": "hdbscan", "doc_ids": []}],
         ) == []
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_409_with_no_topics_raises_naming_the_constraint(
         self, client, monkeypatch,
     ) -> None:
@@ -1651,6 +1684,7 @@ class TestPersist:
         assert "sqlstate=23505" in str(ei.value)
         assert "c-1489" in str(ei.value)
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_409_with_non_unique_sqlstate_propagates(self, client, monkeypatch) -> None:
         """nexus-n2ls1 critique HIGH: the engine maps EVERY class-23 violation
         to 409 — a 23503 (FK) here is a real defect, NOT the discovery race,
@@ -1674,6 +1708,7 @@ class TestPersist:
                   "assigned_by": "hdbscan", "doc_ids": []}],
             )
 
+    @pytest.mark.t2_tenant
     def test_persist_discovered_non_409_http_error_propagates(self, client, monkeypatch) -> None:
         """nexus-n2ls1: ONLY 409 is benign — a 500/422/anything-else must still
         propagate loudly (no new silent-swallow class)."""
@@ -1693,6 +1728,7 @@ class TestPersist:
                   "assigned_by": "hdbscan", "doc_ids": []}],
             )
 
+    @pytest.mark.t2_tenant
     def test_persist_rebuild_replace_and_manual_transfer(self, client) -> None:
         # Seed an old topic + assignment to be cleared.
         ids0 = client.persist_discovered_topics(
@@ -1715,6 +1751,7 @@ class TestPersist:
         # manual transfer applied to ids[1]
         assert client.get_assignments_for_docs(["rbm"]) == {"rbm": ids[1]}
 
+    @pytest.mark.t2_tenant
     def test_persist_rebuild_empty_specs_clears(self, client) -> None:
         client.persist_discovered_topics(
             "c", [{"label": "stale", "doc_count": 0, "terms": "[]",
@@ -1723,6 +1760,7 @@ class TestPersist:
         assert ids == []
         assert client.get_all_topics(collection="c") == []
 
+    @pytest.mark.t2_tenant
     def test_persist_assignments_reuses_assign_topic(self, client) -> None:
         self._seed_topic(client, 1, "a", "c")
         assignments = [
@@ -1741,6 +1779,7 @@ class TestPersist:
         assert stored[(1, 9)]["link_count"] == 1
         assert stored[(1, 9)]["link_types"] == json.dumps(["projection"])
 
+    @pytest.mark.t2_tenant
     def test_purge_collection_returns_count_dict(self, client) -> None:
         ids = client.persist_discovered_topics(
             "c", [{"label": "p", "doc_count": 1, "terms": "[]",
@@ -1752,6 +1791,7 @@ class TestPersist:
         assert out["assignments"] == 1
         assert client.get_all_topics(collection="c") == []
 
+    @pytest.mark.t2_tenant
     def test_purge_collection_taxonomy_only_scope_leaves_cross_collection_projection(
         self, client,
     ) -> None:
@@ -1781,6 +1821,7 @@ class TestPersist:
         assert out_full["assignments"] == 1
         assert client.get_assignments_for_docs(["src-doc"]) == {}
 
+    @pytest.mark.t2_tenant
     def test_read_rebuild_old_state_composes_and_reshapes(self, client) -> None:
         # T2 half: two topics in 'c' + one manual + one hdbscan assignment.
         self._seed_topic(client, 1, "alpha", "c", review="pending")
@@ -1809,6 +1850,7 @@ class TestPersist:
         assert np.array_equal(
             state["old_centroids"], np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32))
 
+    @pytest.mark.t2_tenant
     def test_read_rebuild_old_state_warns_on_labels_no_centroid_carries(
         self, client,
     ) -> None:
@@ -1835,6 +1877,7 @@ class TestPersist:
         assert ev[0]["topic_ids"] == [2]
         assert ev[0]["collection"] == "c"
 
+    @pytest.mark.t2_tenant
     def test_read_rebuild_old_state_is_silent_when_every_label_is_carried(
         self, client,
     ) -> None:
@@ -1902,6 +1945,7 @@ class TestOrchestrators:
         client._centroid_store = _FakeCentroidStore(records)
         return client
 
+    @pytest.mark.t2_tenant
     def test_discover_topics_compose(self, client, monkeypatch) -> None:
         store = self._store(client, [])
         specs = [{"label": "a", "terms": "[]", "doc_count": 2, "doc_ids": ["x1", "x2"],
@@ -1921,6 +1965,7 @@ class TestOrchestrators:
         assert store.discover_topics("c", [], np.array([]), []) == 0
         assert store._centroid_store.calls == []
 
+    @pytest.mark.t2_tenant
     def test_assign_batch_compose(self, client) -> None:
         store = self._store(client, [
             {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 1},
@@ -1929,6 +1974,7 @@ class TestOrchestrators:
         assert n == 1
         assert client.get_assignments_for_docs(["d1"]) == {"d1": 1}
 
+    @pytest.mark.t2_tenant
     def test_rebuild_taxonomy_compose(self, client, monkeypatch) -> None:
         # Old topic id=1 in T2 + matching old centroid in the port.
         client.import_topic(
@@ -1956,6 +2002,7 @@ class TestOrchestrators:
         assert port["embeddings"][0] == [0.0, 1.0]
         assert 1 not in {m["topic_id"] for m in port["metadatas"]}  # old id not reused
 
+    @pytest.mark.t2_tenant
     def test_a_failing_plan_leaves_the_old_centroids_intact(self, client, monkeypatch) -> None:
         """A raise in compute_rebuild_plan must not destroy the live taxonomy.
 
@@ -1999,6 +2046,7 @@ class TestOrchestrators:
         # T2 side untouched too: the operator's label survives.
         assert {t["label"] for t in client.get_all_topics(collection="c")} == {"old"}
 
+    @pytest.mark.t2_tenant
     def test_rebuild_taxonomy_passes_old_state_kwargs(self, client, monkeypatch) -> None:
         # Proves the GLUE: read_rebuild_old_state's dict reaches compute_rebuild_plan
         # under the correct kwarg names (a compose-order test alone can't catch a
@@ -2027,6 +2075,7 @@ class TestOrchestrators:
         assert np.array_equal(
             captured["old_centroids"], np.array([[1.0, 0.0]], dtype=np.float32))
 
+    @pytest.mark.t2_tenant
     def test_split_topic_compose(self, client, monkeypatch) -> None:
         client.import_topic(
             src_id=5, label="parent", parent_id=None, collection="c", centroid_hash=None,
@@ -2063,6 +2112,7 @@ class TestOrchestrators:
         labels = {t["label"] for t in client.get_all_topics(collection="c")}
         assert {"c0", "c1"} <= labels
 
+    @pytest.mark.t2_tenant
     def test_split_topic_raises_split_conservation_violated_when_compute_split_contract_regresses(
         self, client, monkeypatch,
     ) -> None:
@@ -2106,6 +2156,7 @@ class TestOrchestrators:
             store.split_topic(11, 2, fake_client)
         assert store._centroid_store.calls == []
 
+    @pytest.mark.t2_tenant
     def test_split_refuses_when_store_has_no_vectors(self, client, monkeypatch) -> None:
         """No stored vectors -> DECLINE the split; never re-embed to fill the gap.
 
@@ -2162,6 +2213,7 @@ class TestOrchestrators:
         # out, or a refusal leaves the taxonomy worse than it found it.
         assert store._centroid_store.calls == []
 
+    @pytest.mark.t2_tenant
     def test_split_topic_too_few_docs(self, client) -> None:
         client.import_topic(
             src_id=6, label="p", parent_id=None, collection="c", centroid_hash=None,
@@ -2171,6 +2223,7 @@ class TestOrchestrators:
         fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"only": "t"})})
         assert store.split_topic(6, 5, fake_client) == 0  # 1 doc < k=5
 
+    @pytest.mark.t2_tenant
     def test_split_topic_pages_ids_past_250_without_truncation(self, client, monkeypatch) -> None:
         """nexus-hdx2u: the non-service split_topic branch pages doc_ids at
         _PAGE=250 via ``coll.get(ids=batch, ...)``. A topic with more than
@@ -2217,6 +2270,7 @@ class TestOrchestrators:
         # All 260 doc_ids' vectors were read, not truncated to a page-1 subset.
         assert sorted(seen_fetched_ids) == sorted(doc_ids)
 
+    @pytest.mark.t2_tenant
     def test_split_topic_raises_when_collection_overreturns(self, client, monkeypatch) -> None:
         """Consumer-side safety net (nexus-hdx2u): a store-get response can
         never legitimately exceed its request size. A collection stub
@@ -2247,6 +2301,7 @@ class TestOrchestrators:
         with pytest.raises(AssertionError):
             store.split_topic(10, 2, fake_client)
 
+    @pytest.mark.t2_tenant
     def test_split_service_backed_refuses_when_fetch_is_partial(self, client, monkeypatch) -> None:
         """nexus-i6eg8: service-backed split_topic must refuse rather than
         silently persist a partial split when T3 cannot return the topic's

@@ -25,6 +25,7 @@ from nexus.search_engine import (
     SearchDiagnostics,
     apply_file_diversity_cap,
     apply_ranking_boosts,
+    boost_window_size,
     search_cross_corpus,
 )
 from nexus.types import SearchResult
@@ -623,8 +624,12 @@ def search_cmd(
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
     # both surfaces rank identically for identical inputs.
+    # nexus-cbg2s: normalised over the nearest boost_window_size(n) rows, the same
+    # window the MCP search tool uses, so the page does not move with pool depth.
+    _boost_window = boost_window_size(n)
     results = apply_ranking_boosts(
         results, hybrid=hybrid, tuning=tuning, catalog=_scoring_cat,
+        window=_boost_window,
     )
     # nexus-zdzm5 (surface A A8): scoring logs this at debug; a CLI user who
     # typed --hybrid gets a plain note instead of a raw structlog line.
@@ -655,11 +660,26 @@ def search_cmd(
                 f"{_reason}",
                 err=True,
             )
-    if _scored:
+    # RDR-210 Technical Design 12 (nexus-hf29s): when a collection degraded
+    # and others were scored, a scored row's rerank_score and an unscored
+    # row's boosted score are not on one scale, and "scored rows lead" sinks
+    # every row of the degraded family (one rate-limited group would sink a
+    # whole family). Order every row by the calibrated hybrid_score that
+    # apply_ranking_boosts already set; the degrade warning above stays.
+    _partial_rerank = bool(_scored) and want_server_rerank and any(
+        m.get("degraded") for m in rerank_meta.values()
+    )
+    if _scored and _partial_rerank:
+        # apply_ranking_boosts returned the rows in that order already (and
+        # past its boost window in distance order, nexus-cbg2s), so it is kept
+        # as is, not re-sorted by a score that is only defined in the window.
+        results = apply_file_diversity_cap(results)[:n]
+    elif _scored:
         # Scored rows lead, ordered by server relevance (mirrors the retired
         # client reranker: relevance becomes hybrid_score, list order is the
-        # display order). Unscored rows — degraded collections — cannot be
-        # compared on the same scale and follow in their boosted order.
+        # display order). Unscored rows beyond the engine's rerank candidate
+        # cap cannot be compared on the same scale and follow in their
+        # boosted order.
         for r in _scored:
             r.hybrid_score = float(r.metadata["rerank_score"])
         _scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
@@ -686,8 +706,12 @@ def search_cmd(
         # does not stop one file's chunks from dominating a single-collection
         # page — the diversity cap below is what does that, again as the
         # last ordering step before truncation (nexus-0bmhd).
+        #
+        # Only the boost window feeds the page (nexus-cbg2s): a collection with no
+        # row inside the window must not enter the interleave through a row far
+        # down the pool, or the page would depend on how deep the pool went.
         groups: dict[str, list[SearchResult]] = {}
-        for r in results:
+        for r in results[:_boost_window]:
             groups.setdefault(r.collection, []).append(r)
         results = apply_file_diversity_cap(round_robin_interleave(list(groups.values())))[:n]
 

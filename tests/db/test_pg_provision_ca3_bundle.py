@@ -62,6 +62,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install.layout_core import exe_name
+from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     NEXUS_DB_NAME,
@@ -200,36 +201,34 @@ def bins(bundle_bin_env) -> PgBinaries:
 
 
 @pytest.fixture(scope="module")
-def provisioned(bins: PgBinaries, tmp_path_factory):
+def provisioned(bins: PgBinaries):
     """Provision a hermetic cluster *from the bundle* (NEXUS_PG_BIN points at it).
 
     Mirrors the production path: discover_pg_binaries honours NEXUS_PG_BIN, so
     provision() builds the cluster with the bundle binaries.
     """
-    config_dir = tmp_path_factory.mktemp("nexus_ca3_bundle")
-    old_cfg = os.environ.get("NEXUS_CONFIG_DIR")
-    os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+    config_dir = Path(pg_data_tempdir("nexus_ca3_pg_"))
     try:
-        result: ProvisionResult = provision(config_dir, force_new_port=True)
+        old_cfg = os.environ.get("NEXUS_CONFIG_DIR")
+        os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+        try:
+            result: ProvisionResult = provision(config_dir, force_new_port=True)
+        finally:
+            if old_cfg is None:
+                os.environ.pop("NEXUS_CONFIG_DIR", None)
+            else:
+                os.environ["NEXUS_CONFIG_DIR"] = old_cfg
+
+        # nexus-0ajjm: fsync/WAL-size settings a reload can apply (wal_level and DSM keep provision's values).
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
+
+        # nexus-ja4pq: the cluster demands passwords; raw psql below uses the
+        # superuser's recorded one through PGPASSFILE.
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
     finally:
-        if old_cfg is None:
-            os.environ.pop("NEXUS_CONFIG_DIR", None)
-        else:
-            os.environ["NEXUS_CONFIG_DIR"] = old_cfg
-
-    # nexus-ja4pq: the cluster demands passwords; raw psql below uses the
-    # superuser's recorded one through PGPASSFILE.
-    with superuser_pgpass(config_dir):
-        yield result, config_dir
-
-    pgdata = config_dir / "postgres"
-    try:
-        subprocess.run(
-            [str(bins.bin_dir / "pg_ctl"), "-D", str(pgdata), "-m", "immediate", "stop"],
-            capture_output=True, check=False, timeout=10,
-        )
-    except Exception:  # noqa: BLE001 — teardown must not reraise
-        pass
+        # Stop <config_dir>/postgres and remove config_dir (on the run's tmpfs root; pytest does not clean it).
+        stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
 
 # ── Test 1: the bundle ships a complete PG17 with consistent paths ──────────────

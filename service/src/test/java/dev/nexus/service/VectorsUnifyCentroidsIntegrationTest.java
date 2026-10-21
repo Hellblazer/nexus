@@ -19,7 +19,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Arrays;
 
@@ -64,48 +63,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class VectorsUnifyCentroidsIntegrationTest {
 
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-                + "BEGIN "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-                + "  END IF; "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-                + "  END IF; "
-                + "END; "
-                + "$unrelofunc$");
-            su.createStatement().execute(
-                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
-
-    private static final String SVC_ROLE = "nexus_svc";
-    private static final String SVC_PASS = "nexus_svc_pass";
     // Staged OUTSIDE db/changelog/ — see taxonomy-007-unify-centroids.xml's
     // own header and db.changelog-master.xml's comment for the full
     // changelog-parity drift-lint rationale (identical to the chunks side).
@@ -121,31 +78,14 @@ class VectorsUnifyCentroidsIntegrationTest {
     }
 
     private static Rig newRig(String label) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         String role = "nexus_admin_" + label;
         String pass = role + "_pass";
+        // Phase A: the DBA-equivalent bootstrap (migrating role, nexus_svc, CREATE grants,
+        // pg_monitor ADMIN OPTION, extensions, relocation helpers) runs as the db.changelog-test-
+        // nonsuper-owner.xml test changelog, as the superuser, before the NOSUPERUSER walk.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-            su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-            // grants-004-monitor-wal-visibility needs the migration role to hold
-            // pg_monitor WITH ADMIN OPTION before it can grant it onward.
-            su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-            su.createStatement().execute(
-                "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-            // javadoc for the full derivation -- creates the extensions directly as
-            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-            // 001's guard to call mid-walk, since this walk resumes through both
-            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-            // as a NOSUPERUSER role.
-            bootstrapVectorExtensionsForFreshWalk(su, role);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -210,38 +150,25 @@ class VectorsUnifyCentroidsIntegrationTest {
      * no FK to catalog_collections or to nexus.topics (verified by direct
      * read of taxonomy-002-centroids.xml's own header).
      *
-     * <p>Bare (unqualified) {@code ::vector}, deliberately NOT {@code
-     * ::nexus.vector}: every caller of this helper seeds at the {@code
-     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before
-     * search-path-001 (placed near the changelog's end) has relocated the
-     * extension out of {@code public} (nexus-cbo4a batch 9 item 0
-     * discovery).
-     *
-     * <p>KEPT RAW (nexus-cbo4a batch 13 group D): {@code VectorBinding}
-     * (the generated {@code TAXONOMY_CENTROIDS.EMBEDDING_*} fields' jOOQ
-     * binding) renders the {@code ::nexus.vector} cast UNCONDITIONALLY --
-     * converting this INSERT onto the generated table/binding would
-     * silently change what the statement proves (that a bare cast still
-     * resolves via search_path at this point in the walk), the same
-     * exclusion class batch 12 established for
-     * {@code SchemaMigratorIntegrationTest}'s equivalent bare-cast chunks
-     * seed.
+     * <p>The embedding binds as a {@code real[]} ({@code VectorSeeds.LEGACY_EMBEDDING}), deliberately
+     * NOT through the generated {@code TAXONOMY_CENTROIDS.EMBEDDING_*} fields: their {@code VectorBinding}
+     * renders {@code ::nexus.vector}, and every caller of this helper seeds at the {@code
+     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before search-path-001 (placed near the
+     * changelog's end) has relocated the extension out of {@code public} (nexus-cbo4a batch 9 item 0
+     * discovery). pgvector's {@code real[]} to {@code vector} cast is an ASSIGNMENT cast looked up by
+     * type oid, so it resolves in whichever schema the extension sits (nexus-cbo4a 2026-10-18 vector seeds).
      */
     private static void seedCentroid(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                       long topicId, String label) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids_" + dim
-                        + " (tenant_id, collection, topic_id, embedding, label, doc_count) "
-                        + "VALUES (?, ?, ?, ?::vector, ?, ?)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "[" + "0.01,".repeat(dim - 1) + "0.01]");
-                ps.setString(5, label);
-                ps.setInt(6, 3);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DSL.table(DSL.name("nexus", "taxonomy_centroids_" + dim)))
+                .set(DSL.field(DSL.name("tenant_id"), String.class), tenant)
+                .set(DSL.field(DSL.name("collection"), String.class), collection)
+                .set(DSL.field(DSL.name("topic_id"), Long.class), topicId)
+                .set(VectorSeeds.LEGACY_EMBEDDING, VectorSeeds.legacyEmbedding(dim, 0.01f))
+                .set(DSL.field(DSL.name("label"), String.class), label)
+                .set(DSL.field(DSL.name("doc_count"), Integer.class), 3)
+                .execute();
         }
     }
 

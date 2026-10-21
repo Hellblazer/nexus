@@ -31,14 +31,32 @@ SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-smoke.XXXXXX") \
   || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }
 export SMOKE_TMP
 
+# nexus-ub4ge: bounded docker and psql calls. GNU timeout on Linux runners; gtimeout from
+# Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs unbounded as before.
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
 OWN_PG=0
 if [ -z "${NX_DB_URL:-}" ]; then
   OWN_PG=1
+  # nexus-ub4ge: a per-run container name, so this run's `docker rm -f` can never remove a
+  # concurrent smoke's database (the fixed name lp2qo-smoke-pg could), published on loopback
+  # only (its password is nexus:nexus).
+  PGNAME="nx-smoke-pg-$$-${RANDOM}"
   PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
-  docker rm -f lp2qo-smoke-pg >/dev/null 2>&1 || true
-  docker run -d --name lp2qo-smoke-pg -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
-    -e POSTGRES_PASSWORD=nexus -p ${PGPORT}:5432 pgvector/pgvector:pg17 >/dev/null
-  until docker exec lp2qo-smoke-pg pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
+  _bounded 600 docker run -d --name "$PGNAME" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+    -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGPORT}:5432" pgvector/pgvector:pg17 >/dev/null \
+    || { echo "FAIL: could not start the throwaway pgvector container $PGNAME"; exit 2; }
+  PG_UP=0
+  for _ in $(seq 1 90); do
+    _bounded 10 docker exec "$PGNAME" pg_isready -U nexus >/dev/null 2>&1 && { PG_UP=1; break; }
+    sleep 1
+  done
+  [ "$PG_UP" = "1" ] || { echo "FAIL: throwaway pgvector $PGNAME not ready after 90 s"; docker rm -f "$PGNAME" >/dev/null 2>&1; exit 2; }
   sleep 2
   export NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/nexus"
   export NX_DB_USER=nexus NX_DB_PASS=nexus
@@ -74,7 +92,7 @@ NATIVE_SMOKE_CLEANUP_ROWS=0
 cleanup() {
   local rc=$?
   [ -n "${SVCPID:-}" ] && kill "$SVCPID" 2>/dev/null
-  [ "$OWN_PG" = "1" ] && docker rm -f lp2qo-smoke-pg >/dev/null 2>&1
+  [ "$OWN_PG" = "1" ] && _bounded 60 docker rm -f "$PGNAME" >/dev/null 2>&1
   # nexus-rxqqd review follow-up (code-review-expert): the real-Python-client
   # blocks below create their own mktemp -d NEXUS_CONFIG_DIR isolation dirs
   # and rm -rf them on their own normal-path exit, but a Ctrl-C (or any other
@@ -95,9 +113,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# nexus-8ool4: the engine extracts ONNX Runtime's native libraries once into
+# NX_ORT_NATIVE_DIR and loads them from there; onnxruntime-java still makes an
+# (empty) onnxruntime-java<random> directory under java.io.tmpdir. Point both at
+# the per-run scratch dir so the checks below read what THIS native binary did,
+# not the machine's real cache or /tmp.
+export NX_ORT_NATIVE_DIR="$SMOKE_TMP/ort_native"
+mkdir -p "$SMOKE_TMP/jtmp"
+
 # nexus-9gaj7: -Duser.timezone=UTC defense-in-depth alongside Main.main's
 # in-process TimeZone.setDefault(UTC) pin (asserted at boot, fails loud).
-"$BIN" -Duser.timezone=UTC > "$SMOKE_TMP/svc.log" 2>&1 &
+"$BIN" -Duser.timezone=UTC -Djava.io.tmpdir="$SMOKE_TMP/jtmp" > "$SMOKE_TMP/svc.log" 2>&1 &
 SVCPID=$!
 U="http://localhost:${SVCPORT}"
 
@@ -477,9 +503,9 @@ if [ -f "$BGE_MODEL" ]; then
   CHASH2="$(printf 'f%.0s' {1..64})"
   RTEXT1="Mix flour and water, ferment the dough, bake the bread in a hot oven."
   RTEXT2="Quantum chromodynamics describes the strong interaction between quarks."
-  # RDR-223 P3: the engine refuses an ownerless chunk write (store-put and
-  # upsert-chunks), and RDR-192 Step 5 makes every T3 content read go through
-  # live(c) -- nexus.chunk_live_owners(tenant, collection, chash) must find a
+  # RDR-223 P3: the engine refuses an ownerless chunk write (upsert-chunks), and
+  # RDR-192 Step 5 makes every T3 content read go through live(c) --
+  # nexus.chunk_live_owners(tenant, collection, chash) must find a
   # catalog_document_chunks manifest row owned by a non-tombstoned document, or
   # the chunk is invisible to search no matter how well it scores. So the
   # fixture is written the way the real client writes it: register the owning
@@ -512,8 +538,8 @@ print(json.dumps({
   if [ "$rdoc" = "200" ] && [ "$rman" = "200" ] \
      && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-man.out')).get('chunks_written')==2 else 1)" 2>/dev/null; then
     # Raw-route coverage on the native binary: re-post the SAME, now owned,
-    # chashes through /v1/vectors/upsert-chunks and /v1/vectors/store-put (the
-    # only native-image probe of the two chunk-write routes). Owned writes are
+    # chashes through /v1/vectors/upsert-chunks (the only native-image probe of
+    # the chunk-write route). Owned writes are
     # valid before and after the RDR-223 P3.2 refusal of ownerless writes. Same
     # texts as the write_many above, so the ranking conditions below do not move.
     RCOL="$RCOL" CHASH1="$CHASH1" CHASH2="$CHASH2" RTEXT1="$RTEXT1" RTEXT2="$RTEXT2" python3 -c "
@@ -528,19 +554,8 @@ json.dump({'collection': e['RCOL'], 'ids': [e['CHASH1'], e['CHASH2']],
     else
       echo "  FAIL upsert-chunks (owned chashes) -> $rup: $(head -c200 "$SMOKE_TMP/ns-rerank-up.out")"; fail=1
     fi
-    RCOL="$RCOL" CHASH1="$CHASH1" RTEXT1="$RTEXT1" python3 -c "
-import json, os
-e = os.environ
-json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1']}, open(e['SMOKE_TMP'] + '/ns-rerank-sp.in', 'w'))"
-    rsp=$(curl -s -o "$SMOKE_TMP/ns-rerank-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      --data-binary "@$SMOKE_TMP/ns-rerank-sp.in" "$U/v1/vectors/store-put")
-    if [ "$rsp" = "200" ]; then
-      echo "  ok   store-put (owned chash) -> 200"
-    else
-      echo "  FAIL store-put (owned chash) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-rerank-sp.out")"; fail=1
-    fi
     # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. A chash with no manifest row is refused 422
-    # by both chunk-write routes, with the typed reason a client keys on and the combined routes
+    # by the chunk-write route, with the typed reason a client keys on and the combined routes
     # named; the retired reference-only route answers 410. Also the only native-image probe of the
     # refusal path (a new exception type, a record and a new JSON arm).
     ORPHAN="$(printf 'd%.0s' {1..64})"
@@ -548,10 +563,8 @@ json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1'
 import json, os
 e = os.environ
 json.dump({'collection': e['RCOL'], 'ids': [e['ORPHAN']], 'documents': ['an ownerless chunk'],
-           'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))
-json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerless chunk'},
-          open(e['SMOKE_TMP'] + '/ns-orphan-sp.in', 'w'))"
-    # The would-refuse counter on /v1/status, read around the two ownerless writes: the log-only
+           'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))"
+    # The would-refuse counter on /v1/status, read around the ownerless write: the log-only
     # branch below must see it move, not only the 200 (a log-only engine that stopped counting
     # would still answer 200). -1 when the status read fails or the field is absent.
     ownerless_would_refuse_total() {
@@ -566,21 +579,17 @@ except Exception:
     wr_before=$(ownerless_would_refuse_total)
     oup=$(curl -s -o "$SMOKE_TMP/ns-orphan-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       --data-binary "@$SMOKE_TMP/ns-orphan-up.in" "$U/v1/vectors/upsert-chunks")
-    osp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      --data-binary "@$SMOKE_TMP/ns-orphan-sp.in" "$U/v1/vectors/store-put")
-    for leg in up sp; do
-      ocode=$([ "$leg" = up ] && echo "$oup" || echo "$osp")
+    for leg in up; do
+      ocode="$oup"
       if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
         # Writer-census posture: the engine inherits the mode and accepts the write.
         if [ "$ocode" = "200" ]; then echo "  ok   $leg ownerless chash -> 200 (log-only)"; else
           echo "  FAIL $leg ownerless chash (want 200 in log-only) -> $ocode"; fail=1; fi
-        if [ "$leg" = sp ]; then
-          wr_after=$(ownerless_would_refuse_total)
-          if [ "$wr_before" -ge 0 ] && [ "$wr_after" -eq $((wr_before + 2)) ]; then
-            echo "  ok   would-refuse counter moved by 2 ($wr_before -> $wr_after)"
-          else
-            echo "  FAIL would-refuse counter (want +2 over two log-only ownerless writes) -> $wr_before -> $wr_after"; fail=1
-          fi
+        wr_after=$(ownerless_would_refuse_total)
+        if [ "$wr_before" -ge 0 ] && [ "$wr_after" -eq $((wr_before + 1)) ]; then
+          echo "  ok   would-refuse counter moved by 1 ($wr_before -> $wr_after)"
+        else
+          echo "  FAIL would-refuse counter (want +1 over one log-only ownerless write) -> $wr_before -> $wr_after"; fail=1
         fi
       elif [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
 import json, os, sys
@@ -597,6 +606,14 @@ sys.exit(0 if b.get('reason') == 'ownerless_chunk_write' and '/v1/catalog/manife
       echo "  ok   upsert-reference-only (retired) -> 410"
     else
       echo "  FAIL upsert-reference-only (want 410) -> $rro: $(head -c200 "$SMOKE_TMP/ns-orphan-ro.out")"; fail=1
+    fi
+    # nexus-nt76j: the single-chunk store-put route is retired; it answers 410 Gone like upsert-reference-only.
+    rsp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$ORPHAN\",\"content\":\"x\"}" "$U/v1/vectors/store-put")
+    if [ "$rsp" = "410" ]; then
+      echo "  ok   store-put (retired) -> 410"
+    else
+      echo "  FAIL store-put (want 410) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-orphan-sp.out")"; fail=1
     fi
     rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
@@ -641,6 +658,46 @@ fi
 if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log"; then
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log" | head; fail=1
 fi
+
+# nexus-8ool4: the native binary must load ONNX Runtime from the shared directory. The engine
+# logs where it extracted/reused; onnxruntime-java must have put NO library in the temp dir
+# (only an empty onnxruntime-java<random> directory). A native image that initialised
+# OnnxRuntime at build time would read the property too late and fail the second check.
+ORT_LINES=$(grep -E 'ort_native_dir' "$SMOKE_TMP/svc.log" || true)
+if [[ "$ORT_LINES" =~ event=ort_native_dir\ source=(extracted|reused)\ dir= ]]; then
+  echo "  ok   ORT native libraries from the shared directory (source=${BASH_REMATCH[1]})"
+else
+  echo "  FAIL no event=ort_native_dir source=extracted|reused in the service log; saw: ${ORT_LINES:-nothing}"; fail=1
+fi
+# nexus-1g32a: the "no large file in the scratch tmpdir" check passes just as well when the native
+# binary ignores -Djava.io.tmpdir and writes elsewhere, so it needs a positive control: once ONNX
+# Runtime has initialised (the bge embed leg ran), onnxruntime-java has made its empty
+# onnxruntime-java<random> directory, and it must be HERE. Absent after an embed that worked means the
+# property was not honoured and the size check saw nothing to look at. Without the bge model ORT
+# never initialises, so the control cannot run; that is said out loud, like the other model-gated legs.
+# Function form: tests/test_native_smoke_scratch_dir_lint.py runs this exact text against fixtures.
+check_ort_tmpdir() {
+  local tmp="$1" have_model="$2" big dirs
+  big=$(find "$tmp" -type f -size +1000k 2>/dev/null || true)
+  if [ -z "$big" ]; then
+    echo "  ok   no ORT library was unpacked into the temp directory"
+  else
+    echo "  FAIL ONNX Runtime still unpacked large file(s) into the temp directory: $big"; fail=1
+  fi
+  if [ "$have_model" = "1" ]; then
+    dirs=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'onnxruntime-java*' 2>/dev/null || true)
+    if [ -n "$dirs" ]; then
+      echo "  ok   the binary honoured the scratch java.io.tmpdir (onnxruntime-java directory present)"
+    else
+      echo "  FAIL no onnxruntime-java* directory in the scratch java.io.tmpdir $tmp although ORT initialised: the native binary ignored -Djava.io.tmpdir, so the size check above proved nothing"; fail=1
+    fi
+  else
+    echo "  WARN tmpdir positive control NOT covered — ORT never initialised (bge model absent)"
+  fi
+}
+HAVE_BGE=0
+[ -f "$BGE_MODEL" ] && HAVE_BGE=1
+check_ort_tmpdir "$SMOKE_TMP/jtmp" "$HAVE_BGE"
 
 # ── SIGTERM during in-flight local inference (nexus-o5xyx.3) ─────────────────
 # onnxruntime-java's shutdown hook frees ORT's env under a running session.run()
@@ -709,9 +766,14 @@ kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null
 if [ "$OWN_PG" != "1" ]; then
   echo "  skip   voyage-mode phase (external NX_DB_URL — needs a clean DB)"
 else
-  docker exec lp2qo-smoke-pg psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
+  _bounded 60 docker exec "$PGNAME" psql -U nexus -d nexus -c 'CREATE DATABASE voyagesmoke;' >/dev/null 2>&1 || true
   DEADPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+  # RDR-210 P2.1: a keyed engine that finds the bge model files boots `dual`, so this
+  # cloud-shape boot points the model directory at an EMPTY one: it is the Voyage-only
+  # shape on a box that has the real models in ~/.cache too.
+  mkdir -p "$SMOKE_TMP/no-onnx-models"
   NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/voyagesmoke" \
+    NX_ONNX_MODEL_DIR="$SMOKE_TMP/no-onnx-models" \
     NX_VOYAGE_API_KEY=dummy-smoke-key HTTPS_PROXY="http://127.0.0.1:${DEADPORT}" \
     "$BIN" > "$SMOKE_TMP/voyage.log" 2>&1 &
 SVCPID=$!
@@ -738,5 +800,18 @@ if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerExcep
   echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/voyage.log" | head; fail=1
 fi
 fi  # end voyage-mode phase (OWN_PG)
+
+# ── Boot shapes at the probe's edges (RDR-210 P2.2, nexus-hgzx4) ──────────────
+# The cloud shape (key, no bge files) and the two failure boots (neither family; a truncated
+# model) each need a clean database and their own env, so they live in their own script. Stop the
+# voyage-mode engine first; the script boots the same binary three more ways and cleans up after
+# itself. With an external NX_DB_URL (no container to create databases in) it SKIPS loudly.
+echo "boot shapes (cloud shape + the two failure boots):"
+[ -n "${SVCPID:-}" ] && { kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null; SVCPID=""; }
+if [ "$OWN_PG" = "1" ]; then
+  BOOT_SHAPES_PG_CONTAINER="$PGNAME" BOOT_SHAPES_PG_PORT="$PGPORT" BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
+else
+  BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
+fi
 
 if [ "$fail" = "0" ]; then echo "NATIVE SMOKE PASS"; exit 0; else echo "NATIVE SMOKE FAIL"; exit 1; fi

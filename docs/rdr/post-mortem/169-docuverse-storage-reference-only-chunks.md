@@ -56,6 +56,7 @@ engine-service-v0.1.116 with the paired client 7.43.0.
   from Phase A, but nothing called them on a read path, and the bead their
   javadoc pointed at closed through grooming. Found during the Phase B
   landing and wired as `POST /v1/vectors/resolve` (nexus-aphki).
+  2026-10-17: POST /v1/vectors/resolve was removed in every mode, nexus-3t0jv.
 - **Twelve functions missed the column.** The combined-query functions
   behind the four catalog-scoped search tools did not emit retention until
   `vectors-016` (nexus-4k1vz), found the same evening.

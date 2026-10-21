@@ -361,22 +361,15 @@ class PciPlanAndRecallIntegrationTest {
         }
     }
 
-    private void ddl(String statement) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, statement);
-        }
-    }
-
     /**
      * The statement {@link PciBuilderSession} sends, byte for byte in what it sets: the same operator class, the
      * same {@code WITH (m, ef_construction)}, the same predicate. A test index built any other way would be
      * measured for recall the builder does not produce.
      */
-    static String builderDdl(String name, String collection) {
-        return "CREATE INDEX CONCURRENTLY " + name + " ON nexus." + PciCatalogIntegrationTest.leafName(MODEL, TENANT)
-            + " USING hnsw (" + PciCatalogIntegrationTest.column(MODEL) + " nexus.vector_cosine_ops) WITH (m = "
-            + PciBuilderSession.BUILD_M + ", ef_construction = " + PciBuilderSession.BUILD_EF_CONSTRUCTION
-            + ") WHERE collection = " + PciCatalogIntegrationTest.lit(collection);
+    static void buildIndexLikeTheBuilder(Connection su, String name, String collection) throws Exception {
+        PgContainerHelper.createBuilderHnswIndexConcurrently(su, "nexus", PciCatalogIntegrationTest.leafName(MODEL, TENANT),
+            name, PciCatalogIntegrationTest.column(MODEL), collection, PciBuilderSession.BUILD_M,
+            PciBuilderSession.BUILD_EF_CONSTRUCTION);
     }
 
     private void buildIndex(String collection) throws Exception {
@@ -385,7 +378,7 @@ class PciPlanAndRecallIntegrationTest {
 
     private void buildIndexNamed(String name, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, builderDdl(name, collection));
+            buildIndexLikeTheBuilder(su, name, collection);
         }
     }
 
@@ -583,7 +576,7 @@ class PciPlanAndRecallIntegrationTest {
                     .where(DSL.falseCondition()).execute();
                 CompletableFuture<Void> build = CompletableFuture.runAsync(() -> {
                     try (Connection c = pg.createConnection("?ApplicationName=" + appName)) {
-                        PgContainerHelper.runSuperuserDdlOutsideTransaction(c, builderDdl(targetIndex, TARGET));
+                        buildIndexLikeTheBuilder(c, targetIndex, TARGET);
                     } catch (Exception e) {
                         throw new IllegalStateException(e);
                     }
@@ -592,7 +585,10 @@ class PciPlanAndRecallIntegrationTest {
                 try {
                     java.util.function.Supplier<Integer> buildPid = () -> asSuperuser.select(activityPid).from(activity)
                         .where(activityApp.eq(appName)).and(activityWait.eq("Lock")).limit(1).fetchOne(0, Integer.class);
-                    await("the concurrent build to wait on the blocker's lock", () -> buildPid.get() != null);
+                    // A Lock wait alone is not enough: the build can wait on an earlier lock, before its invalid catalog
+                    // entry is committed. The entry is committed once indexIsValid stops reading null.
+                    await("the concurrent build to commit its invalid entry and wait on the blocker's lock",
+                        () -> buildPid.get() != null && indexIsValid(targetIndex) != null);
                     Integer pid = buildPid.get();
 
                     // In flight: the catalog lists the index, and it is not valid.
@@ -608,7 +604,7 @@ class PciPlanAndRecallIntegrationTest {
                     await("the build statement to end", build::isDone);
                     assertThat(build).isCompletedExceptionally();
                     try (Connection su = pg.createConnection("")) {
-                        PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+                        PgContainerHelper.clearConcurrentIndexBuildLock(su);
                     }
                 } finally {
                     // A failed assertion above must not let the build run on once the blocker lets go: end it first.
@@ -666,7 +662,7 @@ class PciPlanAndRecallIntegrationTest {
         }
         step.accept("clear the build's Liquibase lock", () -> {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+                PgContainerHelper.clearConcurrentIndexBuildLock(su);
             }
             return null;
         });
@@ -695,7 +691,9 @@ class PciPlanAndRecallIntegrationTest {
     }
 
     private void dropIfExists(String index) throws Exception {
-        ddl("DROP INDEX IF EXISTS nexus." + index);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.dropIndexIfExists(su, DSL.name("nexus", index));
+        }
     }
 
     /**

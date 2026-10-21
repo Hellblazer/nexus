@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -41,6 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Catalog016SourceUriUniqueTest {
+
+    private static final String CHANGELOG = "db/changelog/catalog-016-source-uri-unique.xml";
 
     private static final String TENANT   = "cat016-tenant";
     private static final String SVC_ROLE = "svc_cat016_test";
@@ -408,14 +409,8 @@ class Catalog016SourceUriUniqueTest {
         // Fidelity test of the SHIPPED 016-0 SQL: seed legacy-shaped dupes with
         // the index dropped, run the changeset's own <sql> text verbatim, and
         // assert the winner rule (most chunks, then earliest indexed_at, then
-        // lowest tumbler). Re-creates the index afterwards via 016-1's SQL.
-        String xml = new String(
-            getClass().getClassLoader()
-                .getResourceAsStream("db/changelog/catalog-016-source-uri-unique.xml")
-                .readAllBytes(),
-            StandardCharsets.UTF_8);
-        String dedupSql = extractSql(xml, 0);
-        String indexSql = extractSql(xml, 1);
+        // lowest tumbler). Re-creates the index afterwards by replaying 016-1.
+        String dedupSql = PgContainerHelper.changesetForwardText(CHANGELOG, "catalog-016-0");
         assertTrue(dedupSql.contains("NO FORCE ROW LEVEL SECURITY"),
             "016-0 must carry the catalog-013-1b FORCE-RLS toggle");
 
@@ -431,7 +426,7 @@ class Catalog016SourceUriUniqueTest {
         // INDEX / replay runs — NULLIF(timestamptz, unknown) fails to bind
         // the '' literal at all ("invalid input syntax for type timestamp
         // with time zone: \"\""). Apply the type-adjusted equivalent ONLY to
-        // this test's in-memory copy of the SQL text: bare `indexed_at`
+        // this test's replay of the SQL text: bare `indexed_at`
         // (NULL still sorts last under "ASC NULLS LAST", identical ordering
         // outcome to NULLIF('','')=NULL on the pre-migration TEXT column).
         // Asserted below so a future rewrite of 016-0's shipped text fails
@@ -442,13 +437,12 @@ class Catalog016SourceUriUniqueTest {
             "016-0's shipped <sql> no longer contains " + legacyNullSentinelExpr
             + " verbatim — the type-adjusted replay substitution below is stale; "
             + "re-derive it against the current changeset text before trusting this test");
-        dedupSql = dedupSql.replace(legacyNullSentinelExpr, "indexed_at");
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.dropIndex(su, DSL.name("nexus", "ux_catalog_documents_live_source_uri"));
             try {
-                runDedupAndAssert(su, dedupSql);
+                runDedupAndAssert(su, legacyNullSentinelExpr);
             } catch (Exception primary) {
                 // Review (78n33): the index is SHARED suite state — an
                 // assertion failure above must not leave it dropped for
@@ -460,9 +454,7 @@ class Catalog016SourceUriUniqueTest {
                 // constraint matching the ON CONFLICT" report one layer up.
                 // Attach as suppressed instead of letting it propagate.
                 try {
-                    for (String stmt : indexSql.split(";")) {
-                        if (!stmt.isBlank()) su.createStatement().execute(stmt);
-                    }
+                    PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-016-1");
                 } catch (Exception recreateFailure) {
                     primary.addSuppressed(recreateFailure);
                 }
@@ -470,13 +462,11 @@ class Catalog016SourceUriUniqueTest {
             }
             // Success path: recreate the index normally — a genuine failure
             // here (not masking anything) surfaces as itself.
-            for (String stmt : indexSql.split(";")) {
-                if (!stmt.isBlank()) su.createStatement().execute(stmt);
-            }
+            PgContainerHelper.replayChangeset(su, CHANGELOG, "catalog-016-1");
         }
     }
 
-    private void runDedupAndAssert(Connection su, String dedupSql) throws Exception {
+    private void runDedupAndAssert(Connection su, String legacyNullSentinelExpr) throws Exception {
         {
             String uri = "file:///legacy/dup.md";
             // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
@@ -493,9 +483,8 @@ class Catalog016SourceUriUniqueTest {
                     OffsetDateTime.parse("2026-01-02T00:00:00Z"))
                 .values(TENANT, "16.3", "loser-no-chunks", uri, 0, (OffsetDateTime) null)
                 .execute();
-            for (String stmt : dedupSql.split(";")) {
-                if (!stmt.isBlank()) su.createStatement().execute(stmt);
-            }
+            PgContainerHelper.replayChangesetSubstituting(su, CHANGELOG, "catalog-016-0",
+                legacyNullSentinelExpr, "indexed_at");
             var winners = DSL.using(su, SQLDialect.POSTGRES)
                 .select(CATALOG_DOCUMENTS.TUMBLER)
                 .from(CATALOG_DOCUMENTS)
@@ -514,14 +503,4 @@ class Catalog016SourceUriUniqueTest {
         }
     }
 
-    /** Extract the Nth &lt;sql&gt; block's text content from changeset XML. */
-    private static String extractSql(String xml, int n) {
-        int idx = -1;
-        for (int i = 0; i <= n; i++) idx = xml.indexOf("<sql", idx + 1);
-        assertTrue(idx >= 0, "changeset <sql> block " + n + " not found");
-        int open = xml.indexOf('>', idx) + 1;
-        int close = xml.indexOf("</sql>", open);
-        return xml.substring(open, close)
-                  .replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
-    }
 }

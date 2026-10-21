@@ -679,8 +679,8 @@ def _record_lockstep_after_bootstrap() -> None:
     """Record the version just installed as the CLI version in lockstep with the plugin.
 
     The installer scripts build the CLI with this command and not through the plugin's setup,
-    which writes the marker after a build it has checked. Without it the first Claude session
-    announces an upgrade and dispatches one (nexus-sv2wx.28). The generation was built at
+    which writes the marker after a build it has checked. Without it the session hook asks the
+    CLI for its own version on every session start (nexus-sv2wx.28). The generation was built at
     :func:`_running_version`, so the marker names a version this command just installed. A
     failed write is a warning: the install is done, and the cost is one spurious nudge.
     """
@@ -689,7 +689,7 @@ def _record_lockstep_after_bootstrap() -> None:
     try:
         lockstep_marker.write_marker(_running_version())
     except OSError as exc:
-        click.echo(f"the lockstep marker could not be written ({exc}); the first Claude session may announce an upgrade", err=True)
+        click.echo(f"the lockstep marker could not be written ({exc}); the Claude session hook falls back to this CLI's own version", err=True)
 
 
 _EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")

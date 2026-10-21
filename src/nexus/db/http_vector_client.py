@@ -3,7 +3,7 @@
 """RDR-152 bead nexus-gmiaf.20 — Seam B HTTP vector client.
 
 Thin Python bridge that routes T3 vector operations (search, query,
-upsert-chunks, store_put, store_get, store_list, store_delete) through
+upsert-chunks, store_get, store_list, store_delete) through
 the Java nexus-service HTTP endpoints rather than hitting a vector
 store / Voyage AI directly from Python.
 
@@ -30,19 +30,21 @@ from __future__ import annotations
 import base64
 import binascii
 import gzip
-import hashlib
 import json
 import math
 import os
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from concurrent.futures import Future
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.db.gateway_backoff import (
     _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES,
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
@@ -304,9 +306,9 @@ def _resolve_endpoint() -> tuple[str, str]:
     # a greenfield managed user who ran `nx config set service_url/service_token`
     # must reach a resolvable endpoint with no env exported). get_credential
     # encodes env>config.yml precedence, so an exported env var still wins.
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    env_url = get_service_url() or None
     env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
     if url is None:
@@ -379,10 +381,30 @@ def _invalidate_endpoint() -> None:
 
 #: A refused connection, or one dropped mid-request. Windows reports a drop as
 #: ``ConnectionAbortedError`` (WinError 10053), a sibling of
-#: ``ConnectionResetError``, not a subclass (RDR-224).
+#: ``ConnectionResetError``, not a subclass (RDR-224). ``BrokenPipeError`` is
+#: the same drop seen on the write side: a client that writes its request after
+#: the restarting service's RST gets EPIPE, not ECONNRESET (always on macOS; on
+#: Linux once the first write after the RST has been told ECONNRESET), nexus-40fjk.
 _RESTART_SIGNATURES: tuple[type[OSError], ...] = (
-    ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError,
+    ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
 )
+
+
+def _proves_request_not_executed(exc: Exception) -> bool:
+    """True when *exc* shows the server never ran the request (nexus-utbip).
+
+    A refused connection never reached the server; a 401 was rejected before the
+    handler ran. A reset, abort or broken pipe proves nothing: the server may
+    have run a non-idempotent sweep to completion before the drop, so a resend
+    can repeat a move that already committed (nexus-ll31n).
+    """
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 401
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(getattr(exc, "reason", None), ConnectionRefusedError)
+    return isinstance(exc, ConnectionRefusedError)
 
 
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
@@ -583,16 +605,77 @@ def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> N
         manager.clear_remint_futile(base_url, tenant)
 
 
+#: RDR-222 Phase 1 (nexus-yye8l.11): the request key a keyed call wants sent as
+#: ``Idempotency-Key``. A thread-local for the reason :data:`_response_header_capture` is one, in
+#: the request direction: ``_request_once`` and ``_post`` take no new parameter (222-research-11),
+#: and the many test doubles that replace them keep their exact shape. It is set by
+#: :func:`_request_key` immediately before ONE POST attempt and cleared in a ``finally`` right
+#: after it, so the status-poll GETs a keyed method makes between attempts carry no key
+#: (nexus-zxgld gap 6). It is never set in ``_post``/``_request``/``_request_once``:
+#: ``_vector_with_retry`` and ``write_with_registration_retry`` re-invoke ``_post`` for each
+#: attempt, so a key minted there would change per attempt and defeat the design.
+_request_key_capture = threading.local()
+
+#: Response headers the keyed-request protocol reads (nexus-zxgld gap 3), captured on every
+#: response, 2xx or not: a keyed method reads ``Retry-After`` off a 409 or a 503, which reach it
+#: as an exception.
+_IDEMPOTENCY_RESPONSE_HEADERS: tuple[str, ...] = (
+    "Idempotency-Key", "Idempotency-Replayed", "Retry-After",
+)
+
+
+def _now() -> datetime:
+    """The wall clock the keyed-sweep poll loop compares a ``lease_until`` against; a seam so a test
+    can advance it without waiting."""
+    return datetime.now(UTC)
+
+
+def new_request_key() -> str:
+    """A fresh request key. ``uuid4``, not UUIDv7: ``uuid.uuid7`` is Python 3.14 and
+    ``requires-python`` is ``>=3.12,<3.14`` (nexus-icdmw item 4). The engine reads any canonical UUID."""
+    return str(uuid.uuid4())
+
+
+@contextmanager
+def _request_key(key: str) -> Iterator[None]:
+    """Send *key* as ``Idempotency-Key`` on the requests made inside the block, then clear it.
+    Wrap ONE ``_post`` attempt, never a whole keyed method."""
+    _request_key_capture.value = key
+    try:
+        yield
+    finally:
+        _request_key_capture.value = None
+
+
 def _stash_response_headers(headers: object) -> None:
     """Best-effort: called from :func:`_request_once` right after a
-    successful response. Never raises -- header capture is a caller-
-    visibility nicety, not a correctness requirement, and must never be
-    the reason a real read fails."""
+    response, a 2xx and (RDR-222) a non-2xx alike. Never raises -- header
+    capture is a caller-visibility nicety, not a correctness requirement,
+    and must never be the reason a real read fails. Captures
+    ``X-Nexus-Skipped-Collections`` (:func:`_pop_response_headers`) and the
+    three request-identity headers (:func:`_pop_idempotency_response_headers`);
+    each call overwrites all of them, so none is ever stale."""
     try:
         value = headers.get("X-Nexus-Skipped-Collections")  # type: ignore[attr-defined]
+        identity = {
+            name: headers.get(name)  # type: ignore[attr-defined]
+            for name in _IDEMPOTENCY_RESPONSE_HEADERS
+        }
     except Exception:  # noqa: BLE001 — best-effort; see docstring
         return
     _response_header_capture.skipped_collections = value
+    _response_header_capture.idempotency = {k: v for k, v in identity.items() if v}
+
+
+def _pop_idempotency_response_headers() -> dict[str, str]:
+    """The request-identity headers (``Idempotency-Key``, ``Idempotency-Replayed``,
+    ``Retry-After``) of this thread's MOST RECENT response, then clear -- a pop, like
+    :func:`_pop_response_headers`. Every response replaces the capture, so a response carrying none
+    leaves it empty; a request that got no response (a socket timeout) leaves the previous one in
+    place, which is why a keyed method pops once before each attempt to clear it, then reads after."""
+    value = getattr(_response_header_capture, "idempotency", None) or {}
+    _response_header_capture.idempotency = {}
+    return dict(value)
 
 
 def _pop_response_headers() -> dict[str, str]:
@@ -616,6 +699,11 @@ def _is_non_replayable_path(path: str) -> bool:
     )
 
 
+#: A body that cannot be read as JSON: the parser refused it, or its bytes are not UTF-8. Both mean a mangled
+#: or cut response (edge HTML, a truncation), never a statement about what the engine did.
+_UNREADABLE_BODY_ERRORS: tuple[type[ValueError], ...] = (json.JSONDecodeError, UnicodeDecodeError)
+
+
 def _response_body(resp: Any) -> bytes:
     """The body bytes of *resp* (a 2xx response or an ``HTTPError``), gunzipped when the engine
     compressed it (``Content-Encoding: gzip``, nexus-tjyzn). Identity bodies pass through."""
@@ -625,7 +713,7 @@ def _response_body(resp: Any) -> bytes:
 
 
 def _request_once(
-    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+    method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
     """One HTTP round-trip against the currently-resolved endpoint.
 
@@ -669,6 +757,11 @@ def _request_once(
     deadline_ms = _request_deadline_ms_for(path)
     if deadline_ms is not None:
         headers[_REQUEST_DEADLINE_HEADER] = str(deadline_ms)
+    # RDR-222 Phase 1 (nexus-yye8l.11): the key of a keyed POST attempt, set by _request_key. Absent
+    # for every other call, which sends exactly what it always sent.
+    request_key = getattr(_request_key_capture, "value", None)
+    if request_key:
+        headers["Idempotency-Key"] = request_key
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -704,6 +797,8 @@ def _request_once(
         # normal-return path is ever reached.
         if exc.code != 401:
             _note_data_token_response(base_url, tenant, exc.code)
+        # RDR-222: a keyed method reads Retry-After / Idempotency-* off a 409 or a 503.
+        _stash_response_headers(exc.headers)
         raise
 
 
@@ -905,6 +1000,28 @@ _ONNX_LOCAL_UPSERT_CHUNK_CAP = _resolve_onnx_local_upsert_chunk_cap(
 _CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
 
 
+def _read_once(
+    row_resolver: "Callable[[str], dict | None] | None",
+) -> "Callable[[str], dict | None] | None":
+    """Wrap *row_resolver* so a name is resolved at most once per call site.
+
+    The cap and the byte budget each ask two questions of the same catalog row (content
+    type for the CCE split, model for the bge split). For a client without a cached
+    resolver each resolution is an uncached ``list_collections`` round trip, so the two
+    questions share one read. ``None`` stays ``None`` (the default path is cached).
+    """
+    if row_resolver is None:
+        return None
+    seen: dict[str, "dict | None"] = {}
+
+    def _resolve(name: str) -> "dict | None":
+        if name not in seen:
+            seen[name] = row_resolver(name)
+        return seen[name]
+
+    return _resolve
+
+
 def per_collection_chunk_cap(
     collection: str, *, row_resolver: "Callable[[str], dict | None] | None" = None,
 ) -> int:
@@ -1049,6 +1166,7 @@ def per_collection_chunk_cap(
     # :func:`_is_cce_collection`. *row_resolver* (nexus-fryrd) is forwarded
     # verbatim -- the write path passes the calling client's OWN row
     # resolver so this content-type read never crosses tenants.
+    row_resolver = _read_once(row_resolver)
     is_cce = _is_cce_collection(collection, row_resolver=row_resolver)
     if is_cce is None:
         # Genuinely unresolvable (no row AND a non-conformant/legacy
@@ -1058,14 +1176,47 @@ def per_collection_chunk_cap(
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
-    if _serving_embedding_mode() == "onnx-local":
+    mode = _serving_embedding_mode()
+    if mode == "onnx-local":
         return _ONNX_LOCAL_UPSERT_CHUNK_CAP
+    # RDR-210 Technical Design 10: on a voyage or dual engine the memory cap binds
+    # exactly the bge collections, decided by the collection's model, not the
+    # engine-wide mode string. An unresolvable collection on a dual engine could be
+    # either family: take the smaller cap, never widen a batch on a guess.
+    is_bge = _collection_is_bge(collection, row_resolver=row_resolver)
+    if is_bge:
+        return _ONNX_LOCAL_UPSERT_CHUNK_CAP
+    if is_bge is None and mode == "dual":
+        return min(_ONNX_LOCAL_UPSERT_CHUNK_CAP, _CCE_UPSERT_CHUNK_CAP)
     if not is_cce:
         return _CODE_UPSERT_CHUNK_CAP
     # Voyage CCE (or unknown mode, which stays on the conservative voyage
     # split — never widen a batch on a guess): slow server-side contextual
     # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
+
+
+def _collection_is_bge(
+    collection: str, *, row_resolver: "Callable[[str], dict | None] | None" = None,
+) -> bool | None:
+    """Whether *collection* is written under a bge model: ``True`` for a ``bge*``
+    model, ``False`` for any other model, ``None`` when the model cannot be
+    determined without a network round trip.
+
+    RDR-210 Technical Design 10. The catalog row's ``embedding_model`` when a row
+    exists (authoritative), else the model segment of a conformant name; the same
+    row-preferred shape as :func:`_is_cce_collection`, and *row_resolver* is
+    forwarded the same way so the read never crosses tenants.
+    """
+    from nexus.corpus import embedding_model_for_collection_name, resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    model = resolve_row_preferred(
+        collection, "embedding_model", embedding_model_for_collection_name,
+        row_resolver=row_resolver,
+    )
+    if not model:
+        return None
+    return str(model).lower().startswith("bge")
 
 
 def _is_cce_collection(
@@ -1173,6 +1324,11 @@ def _upsert_byte_budget(
     exists to bound.
     """
     if _serving_embedding_mode() == "onnx-local":
+        return None
+    # RDR-210 Technical Design 10: a bge collection is memory-bound, not Voyage-token
+    # bound, whatever the engine's mode; the byte budget exists only for Voyage batches.
+    row_resolver = _read_once(row_resolver)
+    if _collection_is_bge(collection, row_resolver=row_resolver):
         return None
     # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see
     # per_collection_chunk_cap's comment and :func:`_is_cce_collection`
@@ -1311,7 +1467,7 @@ def _wait_for_lease_republication() -> None:
 
 
 def _request(
-    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+    method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
     """Round-trip with ONE re-resolve retry on the auto-restart signatures.
 
@@ -1416,6 +1572,10 @@ def _request(
         # auto-restart signature); it propagates straight to the _get/_post handler,
         # which reframes it for managed endpoints (nexus-kf679).
         if not _is_retryable_endpoint_error(exc):
+            raise
+        # nexus-utbip: a non-idempotent sweep route is resent only on evidence the
+        # server never ran it; a reset or broken pipe may follow a completed move.
+        if no_auto_retry and not _proves_request_not_executed(exc):
             raise
         _log.info(
             "vector_endpoint_reresolve",
@@ -1575,7 +1735,7 @@ def _managed_remedy() -> str | None:
     if not base:
         return None
     return (
-        f"the managed nexus service at {base} could not be reached/authenticated "
+        f"the managed nexus service at {log_endpoint(base)} could not be reached/authenticated "
         "— check NX_SERVICE_URL is reachable and NX_SERVICE_TOKEN is valid "
         "(verify with `nx service probe` or `nx doctor`)."
     )
@@ -1619,7 +1779,6 @@ def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
 #: `/v1/vectors/*` route that mutates (as opposed to merely querying)
 #: server-side state.
 _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
-    "/store-put",
     "/store-delete",
     "/update-metadata",
     "/upsert-chunks",
@@ -1685,7 +1844,7 @@ def _request_deadline_ms_for(path: str) -> int | None:
     return None
 
 
-def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
+def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
     ``timeout`` defaults to 120s for read/search/delete paths. The upsert-chunks
@@ -1865,6 +2024,299 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             _note_request(e, "GET", path)
             raise
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
+
+
+# ── RDR-222 Phase 1: keyed sweeps (nexus-yye8l.12) ───────────────────────────
+
+#: Resends of one logical keyed request after an ambiguous outcome, a 503 ``sweep_gate_busy`` or
+#: a status of ``rolled_back``/``unknown``. The first attempt is not a resend: a request makes at
+#: most ``1 + _KEYED_MAX_RESENDS`` POSTs, then surfaces its last outcome.
+_KEYED_MAX_RESENDS = 3
+
+#: Seconds between status polls (RDR-222 Technical Design 4).
+_STATUS_POLL_INTERVAL_S = 5.0
+
+#: Consecutive status polls that fail (not a 404) before the original error surfaces.
+_STATUS_POLL_MAX_FAILURES = 3
+
+#: Longest one ambiguity may spend polling: the engine's 95 s sweep lease plus slack for a skewed
+#: clock. Past it the original error surfaces.
+_STATUS_POLL_BUDGET_S = 180.0
+
+#: Wait before resending after a 503 ``sweep_gate_busy`` that carried no ``Retry-After``.
+_SWEEP_GATE_BUSY_DEFAULT_WAIT_S = 5.0
+
+#: 503 errors that mean the request did not run and the same key may be resent after ``Retry-After``,
+#: mapped to the wait used when the header is absent: the ledger's claim loop was contended
+#: (``request_claim_contended``, ``Retry-After: 1``), on any keyed form; and, on the two quarantine
+#: forms and the bounded expire only (restore takes no sweep gate), the sweep gate was busy
+#: (``sweep_gate_busy``).
+_CLAIM_CONTENDED_DEFAULT_WAIT_S = 1.0
+_NOT_RUN_503_DEFAULT_WAIT_S: dict[str, float] = {
+    "request_claim_contended": _CLAIM_CONTENDED_DEFAULT_WAIT_S,
+}
+_GATE_BUSY_503_DEFAULT_WAIT_S: dict[str, float] = {
+    **_NOT_RUN_503_DEFAULT_WAIT_S,
+    "sweep_gate_busy": _SWEEP_GATE_BUSY_DEFAULT_WAIT_S,
+}
+
+#: Longest a 503's ``Retry-After`` is slept before the first status poll. The poll answers the 503
+#: either way (a request that never reached the engine reads ``unknown``), and an engine without a
+#: ledger answers it 404 and surfaces the 503, so a long ``Retry-After`` must not delay that.
+_RETRY_AFTER_BEFORE_POLL_MAX_S = 5.0
+
+#: How long past ``lease_until`` an ``in_flight`` status keeps being polled before the key is resent.
+#: While a marker transaction holds an expired row the status route can answer ``in_flight`` with a
+#: lease already in the past, so the poll does not stop exactly at ``lease_until``: one more interval.
+_STATUS_POLL_LEASE_GRACE_S = 5.0
+
+#: Longest ``Retry-After`` honoured, whatever the response asked for.
+_RETRY_AFTER_MAX_S = 60.0
+
+#: Socket read timeout of a keyed sweep POST. The engine bounds a bounded sweep at 25 s plus its
+#: gate wait; the edge cuts a request at about 30 s. A timeout is not an error here, it is the
+#: ambiguity the status poll resolves.
+_SWEEP_POST_TIMEOUT_S: float = 120.0
+
+#: (status, ``error`` field) pairs that mean the key itself is wrong: raised, never resent.
+_KEY_REFUSALS: frozenset[tuple[int, str]] = frozenset({
+    (422, "idempotency_key_reused"),
+    (400, "idempotency_key_malformed"),
+    (400, "idempotency_key_unsupported"),
+})
+
+
+def _engine_error(exc: VectorServiceError) -> str:
+    """The ``error`` field of the engine's body, ``""`` when there is none. Dispatch is on this, never
+    on the status alone: a class-23 conflict is also a 409."""
+    body = exc.engine_body
+    value = body.get("error") if isinstance(body, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _retry_after_seconds(headers: dict[str, str]) -> float | None:
+    """``Retry-After`` as seconds (clamped), or ``None`` when absent or not a number of seconds."""
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, min(float(raw), _RETRY_AFTER_MAX_S))
+    except ValueError:
+        return None
+
+
+def _parse_lease(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+class CommittedWithUnknownCounts(dict):
+    """The result of a keyed sweep the ledger reports ``committed`` but whose stored response it cannot
+    give (the row carries no body). The sweep ran exactly once; its counts are unknown, so the dict
+    holds only ``{"committed_unknown_counts": True}`` and no ``moved``, ``restored`` or ``remaining``."""
+
+
+def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, Any]:
+    """Ask ``GET /v1/requests/<key>`` what became of a keyed request, until it can be answered.
+
+    Returns ``("committed", stored_response)``; ``("committed_unknown", None)`` (committed, no body);
+    ``("resend", reason)`` (``rolled_back``, ``unknown``, or ``in_flight`` a full grace past its lease,
+    reason ``"in_flight"``: a resend under the SAME key is safe in every state); or
+    ``("surface", reason)`` with reason ``no_ledger`` (404, the engine has no ledger), ``poll_failed``
+    (the polls kept failing), ``budget`` (the poll budget ran out) or ``unknown_state``. The caller
+    raises the original error for ``surface``.
+
+    ``in_flight`` is polled every :data:`_STATUS_POLL_INTERVAL_S` until the poll body's
+    ``lease_until`` plus :data:`_STATUS_POLL_LEASE_GRACE_S` has passed. The first poll is immediate.
+    """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    started = _now()
+    failures = 0
+    polls = 0
+    while True:
+        polls += 1
+        try:
+            body = _get(f"/v1/requests/{key}", tenant=tenant)
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                _log.info("keyed_sweep_status_route_absent", path=path, request_id=key)
+                return "surface", "no_ledger"
+            failures += 1
+            _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
+        except (
+            urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException,
+            # A mangled poll body (edge HTML, a truncation) says nothing about the request: a failed poll.
+            *_UNREADABLE_BODY_ERRORS,
+        ) as exc:
+            failures += 1
+            _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
+        else:
+            failures = 0
+            state = body.get("state") if isinstance(body, dict) else None
+            _log.info("keyed_sweep_status_poll", path=path, request_id=key, state=state, polls=polls)
+            if state == "committed":
+                response = body.get("response")
+                if isinstance(response, dict):
+                    return "committed", response
+                _log.warning("keyed_sweep_committed_without_response", path=path, request_id=key)
+                return "committed_unknown", None
+            if state in ("rolled_back", "unknown"):
+                return "resend", state
+            if state == "in_flight":
+                lease = _parse_lease(body.get("lease_until"))
+                if lease is not None and _now() > lease + timedelta(seconds=_STATUS_POLL_LEASE_GRACE_S):
+                    # Still in flight a full grace past its lease: the holder is gone. A same-key resend
+                    # takes the key over or is told it is in flight, and either is safe.
+                    return "resend", "in_flight"
+            else:
+                _log.warning("keyed_sweep_unknown_status_state", path=path, request_id=key, state=state)
+                return "surface", "unknown_state"
+        if failures >= _STATUS_POLL_MAX_FAILURES:
+            return "surface", "poll_failed"
+        if (_now() - started).total_seconds() > _STATUS_POLL_BUDGET_S:
+            _log.warning("keyed_sweep_status_poll_budget_spent", path=path, request_id=key, polls=polls)
+            return "surface", "budget"
+        time.sleep(_STATUS_POLL_INTERVAL_S)
+
+
+def _note_unresolved(exc: BaseException, key: str, why: str) -> None:
+    """Say on *exc* (PEP 678) that the keyed request's outcome is not known, and how to find out."""
+    exc.add_note(
+        f"request {key}: outcome unknown ({why}): the sweep may have committed; "
+        f"check GET /v1/requests/{key} before retrying"
+    )
+
+
+def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) -> Any:
+    """POST *body* to a bounded sweep route under one fresh request key, and resolve an ambiguous
+    outcome through the ledger (RDR-222 Phase 1).
+
+    One call is one logical request: the key is minted here, once, and *body* is frozen (the engine
+    keys the request on the SHA-256 of the raw body, so a resend must be byte-identical; the same dict
+    serialises to the same bytes). The key is set around each POST attempt only
+    (:func:`_request_key`), so the status polls between attempts carry none. *gate_busy* is true for
+    the two quarantine forms and the bounded expire (Amendment A1), the only ones that can meet the sweep
+    gate.
+
+    * A 2xx is the result (a replay included).
+    * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
+      ``idempotency_key_unsupported`` raises :class:`IdempotencyKeyRefusedError`, never resent.
+    * A 503 ``sweep_gate_busy`` (*gate_busy* forms) or ``request_claim_contended``: nothing ran.
+      Waits ``Retry-After`` (5 s and 1 s when absent) and resends under the same key.
+    * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``, at
+      most :data:`_RETRY_AFTER_BEFORE_POLL_MAX_S`: the managed edge answers its own 503 for a request
+      that never reached the engine), a socket timeout, a malformed response (a non-HTTP status line, or a
+      200 whose body is not JSON, which is raised as a :class:`VectorServiceError` with no code and the
+      decode error as its cause), or a connection failure
+      that does not prove the engine never ran the request, is ambiguous:
+      :func:`_poll_request_status` answers it, at the resend cap too (the 4th POST's timeout must not
+      surface as a failure when the ledger says committed). Never a re-POST on a 409, and a 409 after a
+      503 is the same thing: a pool-exhaustion 503 leaves the key ``in_flight`` until the 95 s lease
+      lapses, so a resend before then is answered ``request_in_flight`` and the right response is to
+      poll. ``rolled_back`` means that attempt can no longer commit, not that the key is finished: the
+      same-key resend that follows may take the key over and commit.
+    * Every other error is raised exactly as before.
+
+    At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An outcome the ledger
+    could not settle (the engine has no ledger, the polls failed, the budget ran out, the cap) surfaces
+    as the original error with a note naming the key and saying the sweep may have committed. A
+    ``committed`` status with no stored body returns :class:`CommittedWithUnknownCounts`.
+    """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    not_run = _GATE_BUSY_503_DEFAULT_WAIT_S if gate_busy else _NOT_RUN_503_DEFAULT_WAIT_S
+    key = new_request_key()
+    resends = 0
+    while True:
+        _pop_idempotency_response_headers()  # a socket timeout leaves no response to overwrite a stale one
+        try:
+            try:
+                with _request_key(key):
+                    result = _post(path, body, tenant=tenant, timeout=_SWEEP_POST_TIMEOUT_S)
+            except _UNREADABLE_BODY_ERRORS as bad:
+                # A 200 whose body does not parse (edge HTML, a truncation that is not an IncompleteRead):
+                # the page may have committed. Reframed as a transport-level failure (code None, cause the
+                # decode error) so it is polled like the other ambiguous outcomes, and so an unsettled one
+                # surfaces as a VectorServiceError a non-strict caller can skip. A parsed body that is
+                # missing fields is a different thing (a shape defect, raised by the caller as ValueError).
+                raise VectorServiceError(f"{path}: response body is not JSON ({bad})") from bad
+            if _pop_idempotency_response_headers().get("Idempotency-Replayed") == "true":
+                _log.info("keyed_sweep_replayed", path=path, request_id=key)
+            return result
+        except (
+            VectorServiceError, urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException,
+        ) as exc:
+            identity = _pop_idempotency_response_headers()
+            wait_first: float | None = None
+            busy = False
+            error = ""
+            if isinstance(exc, VectorServiceError) and exc.code is not None:
+                error = _engine_error(exc)
+                if (exc.code, error) in _KEY_REFUSALS:
+                    raise IdempotencyKeyRefusedError(
+                        str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
+                        reason=exc.reason, engine_body=exc.engine_body,
+                    ) from exc
+                busy = exc.code == 503 and error in not_run
+                ambiguous = (
+                    (exc.code == 409 and error == "request_in_flight")
+                    or exc.code in (502, 504)
+                    or exc.code == 503
+                )
+                if not busy and not ambiguous:
+                    raise
+                if exc.code == 503:
+                    wait_first = _retry_after_seconds(identity)
+                    if busy and wait_first is None:
+                        wait_first = not_run[error]
+                    elif not busy and wait_first is not None:
+                        wait_first = min(wait_first, _RETRY_AFTER_BEFORE_POLL_MAX_S)
+            else:
+                # A transport failure: the raw exception, or one a managed endpoint reframed as a
+                # VectorServiceError with no code (its cause is the raw one).
+                raw = exc.__cause__ if isinstance(exc, VectorServiceError) else exc
+                if isinstance(raw, Exception) and _proves_request_not_executed(raw):
+                    raise
+            if busy:
+                if resends >= _KEYED_MAX_RESENDS:
+                    _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
+                    raise
+                wait = wait_first if wait_first is not None else _SWEEP_GATE_BUSY_DEFAULT_WAIT_S
+                _log.info("keyed_sweep_not_run_503", path=path, request_id=key, error=error, wait_s=wait)
+                time.sleep(wait)
+                resends += 1
+                continue
+            if wait_first:
+                time.sleep(wait_first)
+            verdict, detail = _poll_request_status(key, tenant, path)
+            if verdict == "committed":
+                return detail
+            if verdict == "committed_unknown":
+                return CommittedWithUnknownCounts(committed_unknown_counts=True)
+            if verdict == "surface":
+                _note_unresolved(exc, key, {
+                    "no_ledger": "this engine keeps no request ledger",
+                    "poll_failed": "the status polls kept failing",
+                    "budget": "the status poll budget ran out",
+                    "unknown_state": "the ledger answered a state this client does not know",
+                }[detail])
+                raise
+            if resends >= _KEYED_MAX_RESENDS:
+                _log.warning("keyed_sweep_resend_cap_reached", path=path, request_id=key, resends=resends)
+                _note_unresolved(exc, key, f"the resend cap of {_KEYED_MAX_RESENDS} was reached, ledger last read {detail}")
+                raise
+            if detail == "in_flight":
+                time.sleep(_STATUS_POLL_INTERVAL_S)  # a still-held key: one interval before the resend, not a burst
+            resends += 1
+            _log.warning("keyed_sweep_resend", path=path, request_id=key, resends=resends)
 
 
 def _warn_skipped_collections(route: str, requested: list[str]) -> None:
@@ -2079,6 +2531,16 @@ class VectorServiceError(RuntimeError):
         #: response and the application never saw the request. Deterministic
         #: in the request body — a caller must not retry it.
         self.edge_refusal = edge_refusal
+
+
+class IdempotencyKeyRefusedError(VectorServiceError):
+    """The engine refused a keyed request's ``Idempotency-Key`` (RDR-222): 422
+    ``idempotency_key_reused`` (the key was first used with another body), or 400
+    ``idempotency_key_malformed`` / ``idempotency_key_unsupported``. Each is a client bug, and a
+    resend can only repeat it, so the keyed methods raise this and never resend. ``code`` and
+    ``engine_body["error"]`` say which. A :class:`VectorServiceError`, so a caller that catches that
+    still catches this.
+    """
 
 
 class PerCollectionEnvelopeError(VectorServiceError):
@@ -2635,7 +3097,6 @@ class HttpVectorClient:
 
     - :meth:`upsert_chunks` / :meth:`upsert_chunks_with_embeddings`
     - :meth:`search`
-    - :meth:`put`
     - :meth:`get_by_id`
     - :meth:`delete_by_id`
     - :meth:`list_collections`
@@ -2664,8 +3125,8 @@ class HttpVectorClient:
     ) -> None:
         self._tenant = tenant
         # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
-        # auto-registers a collection on first write. ``put``/
-        # ``upsert_chunks`` ensure registration before writing; the
+        # auto-registers a collection on first write. ``upsert_chunks``
+        # ensures registration before writing; the
         # registrar is injectable (zero-arg catalog-writer factory, see
         # ``nexus.corpus.ensure_collection_registered``) so this
         # low-level HTTP client never hard-couples to
@@ -2915,9 +3376,9 @@ class HttpVectorClient:
         # already surfaces (RDR-195, ``cda82c8a5``) rather than a silent
         # client-side drop. MAX_DOCUMENT_BYTES is a ChromaDB-era STORAGE
         # quota, not a Voyage EMBED quota — the two must not be conflated
-        # here. ``put()``'s own ``fail_on_oversized=True`` check (this
-        # method's single-chunk, non-paginated sibling, where the 9-row
-        # evidence actually pointed) is untouched by this revert.
+        # here. (The 9-row evidence pointed at ``put()``, the single-chunk,
+        # non-paginated sibling, which enforced its own ``fail_on_oversized=True``
+        # check and has since been retired, nexus-nt76j.)
         n = len(ids)
         byte_budget = (
             None if embeddings is not None
@@ -3096,155 +3557,6 @@ class HttpVectorClient:
             collection_name, ids, documents, metadatas=metadatas,
             force_re_embed=force_re_embed, delete_keys=delete_keys,
         )
-
-    def put(
-        self,
-        collection: str,
-        content: str,
-        title: str = "",
-        tags: str = "",
-        category: str = "",
-        session_id: str = "",
-        source_agent: str = "",
-        store_type: str = "knowledge",
-        ttl_days: int | None = None,
-        catalog_doc_id: str = "",
-    ) -> str:
-        """Upsert *content* into *collection*. Returns the document ID.
-
-        Drop-in parity with ``T3Database.put`` (nexus-7zuzz): same parameter
-        list, same doc_id derivation (the FULL ``sha256(content).hexdigest()``,
-        RDR-180 / nexus-jxizy.3), and metadata built
-        via the SAME :func:`nexus.metadata_schema.make_chunk_metadata` factory
-        that T3Database.put uses — parity by construction, not by duplication.
-        ``ttl_days`` validation is likewise byte-identical to
-        ``T3Database.put``'s own (nexus-tk070.p6b fix-pass, nexus-24rof,
-        RDR-194 D5): ``None``/omitted means permanent; an explicit ``0`` or
-        negative value raises :exc:`ValueError` naming the fix, before any
-        HTTP call is made — see ``T3Database.put``'s docstring for the full
-        derivation.
-
-        ``store_type`` is accepted for API symmetry but intentionally not
-        forwarded: T3Database also ignores it (RDR-101 Phase 5c dropped
-        store_type from ALLOWED_TOP_LEVEL; content_type derives from the
-        collection prefix, identical logic is applied here).
-
-        ``catalog_doc_id`` is an HTTP-path superset: T3Database.put() accepts
-        the param but normalize() strips it from the Chroma write (not in
-        ALLOWED_TOP_LEVEL); on the T3 path catalog association is via the hook
-        chain, not chunk metadata. HttpVectorClient stamps it into the service
-        request body so the Java layer can persist the tumbler cross-reference
-        if the service endpoint accepts it. This is a documented divergence, not
-        a parity gap — see EXCLUSIONS comment in the parity test.
-
-        Single-chunk: one HTTP call per put() call. T3Database.put uses
-        ``fail_on_oversized=True``; this method enforces the SAME check
-        client-side (nexus-xzyr3) before the HTTP call is ever made —
-        the server does NOT reject oversized content on this path (see
-        ``VectorHandler.handleStorePut`` / ``PgVectorRepository
-        .upsertChunksInternal``, neither of which validates byte length).
-        """
-        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
-            embedding_model_for_collection_name,
-            index_model_for_collection,
-            write_with_registration_retry,
-        )
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
-
-        # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): reject an
-        # explicit non-positive ttl_days LOUDLY, before any HTTP call —
-        # never silently reinterpreted. Byte-identical check to
-        # T3Database.put's own (see this method's docstring).
-        if ttl_days is not None and ttl_days <= 0:
-            raise ValueError(
-                f"ttl_days={ttl_days} is invalid: omit the argument or pass "
-                "None for a permanent entry — ttl_days must be a positive "
-                "integer number of days (0 does NOT mean permanent; None does)"
-            )
-
-        # RDR-180 (nexus-p78a0 rehearsal catch, run 4): the natural id is the
-        # FULL digest — this mirror kept the retired [:32] truncation after
-        # T3Database.put was converted, so every service-mode store_put wrote
-        # a 16-byte key and 409'd on the cohort engine's octet CHECK
-        # (chunks_*_chash_octet_check, sqlstate 23514). Parity with
-        # T3Database.put is pinned by test_store_put_id_is_the_full_digest.
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        doc_id = content_hash
-        now_iso = datetime.now(UTC).isoformat()
-
-        # nexus-xzyr3: fail_on_oversized=True parity with T3Database.put()
-        # (t3.py's _write_batch), enforced HERE rather than assumed
-        # server-side. This docstring used to claim "the server is
-        # responsible for rejecting oversized content on the HTTP path" —
-        # that was never true: VectorHandler.handleStorePut and
-        # PgVectorRepository.upsertChunksInternal admit any byte count, so
-        # nine knowledge__knowledge notes up to 32,735 bytes were written
-        # this way between 2026-07-10 and 2026-09-04 (T2
-        # nexus/xzyr3-oversize-rows-2026-09-05). Refuse client-side, before
-        # the HTTP call, exactly like the put path's local-mode twin.
-        doc_bytes = len(content.encode())
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits), matches this module's other call sites
-
-        if doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES:
-            from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-            raise PutOversizedError(
-                doc_id=doc_id,
-                doc_bytes=doc_bytes,
-                max_bytes=QUOTAS.MAX_DOCUMENT_BYTES,
-                collection=collection,
-            )
-
-        # Derive content_type from collection prefix — mirrors T3Database.put
-        # at t3.py:860-870 exactly.
-        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
-
-        content_type = chunk_content_type_for_collection(collection)
-
-        metadata = make_chunk_metadata(
-            content_type=content_type,
-            chunk_text_hash=content_hash,
-            content_hash=content_hash,
-            chunk_start_char=0,
-            chunk_end_char=len(content),
-            indexed_at=now_iso,
-            embedding_model=(
-                embedding_model_for_collection_name(collection)
-                or index_model_for_collection(collection)
-            ),
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            source_agent=source_agent,
-            session_id=session_id,
-        )
-
-        # catalog_doc_id: HTTP-path superset (see docstring). Stamp when present;
-        # omit when empty to keep the body clean for the legacy/no-catalog path.
-        if catalog_doc_id:
-            metadata["catalog_doc_id"] = catalog_doc_id
-
-        body: dict[str, Any] = {
-            "collection": collection,
-            "doc_id": doc_id,
-            "content": content,
-            "metadata": metadata,
-        }
-        # RDR-204 Phase 1 (nexus-f5wwx): this is the ``nx store put`` /
-        # MCP ``store_put`` write path — the primary caller that had no
-        # register_collection call anywhere in its chain and relied
-        # entirely on the engine's now-retired auto-registration.
-        # Cached after the first call per (process, collection); retries
-        # once if the engine's per-tenant boot sweep (bead .3) reaped a
-        # registered-but-chunkless row between registration and this
-        # write.
-        result = write_with_registration_retry(
-            collection,
-            lambda: _post("/v1/vectors/store-put", body, tenant=self._tenant),
-            registrar=self._collection_registrar,
-        )
-        return result.get("id", doc_id)
 
     # ── Read path ────────────────────────────────────────────────────────────
 
@@ -4152,70 +4464,6 @@ class HttpVectorClient:
         except VectorServiceError:
             return False
 
-    def resolve_content(
-        self,
-        *,
-        source_uri: str | None = None,
-        collection: str | None = None,
-        chash: str | None = None,
-    ) -> dict:
-        """POST /v1/vectors/resolve (RDR-169 G3, bead nexus-aphki).
-
-        Resolves a server-reachable URI (``chroma://`` pgvector chunk reassembly,
-        ``https://`` fetch) to its text content, or — given ``collection`` +
-        ``chash`` instead — looks up that chunk's ``metadata.source_uri`` through
-        the engine's existing metadata read and resolves THAT URI. Exactly one of
-        ``source_uri`` or the ``(collection, chash)`` pair is required.
-
-        A client-side scheme (``file://``, ``obsidian://``,
-        ``x-devonthink-item://``, ``nx-scratch://``) is never resolved here — a
-        managed engine cannot reach a tenant's local machine. Those stay the
-        Python bridge's job (``nexus.aspect_readers``); passing one of their URIs
-        raises :class:`VectorServiceError` with ``code=422``.
-
-        Returns ``{"content": ..., "source_uri": ..., "retention": ...}`` —
-        ``retention`` (``"full"`` or ``"reference-only"``) is present only for
-        the ``(collection, chash)`` form, naming the retention of the row looked
-        up, not of whatever its ``source_uri`` resolves to.
-
-        Raises :class:`VectorServiceError` (``.code`` carries the HTTP status)
-        on:
-
-        - 404 — no such chash, the chunk carries no ``metadata.source_uri``,
-          OR the resolved target itself is a reference-only chunk with no
-          stored text (the server has no bytes to serve; resolve it
-          elsewhere). This last case shares ``code=404`` with the other two
-          but is distinguishable in the message text: the engine's body is
-          ``{"error": "reference_only", "detail": ..., "source_uri": ...}``,
-          and ``_post``'s existing generic HTTPError mapping (the same path
-          that already surfaces a 422's ``detail`` field verbatim, RDR-195
-          nexus-kmtlp.11) embeds the body's ``error`` token as the first
-          words after ``"HTTP 404: "`` — no new exception type or attribute,
-          the reason is IN the raised exception's message, same as every
-          other structured error body this client already surfaces.
-        - 422 — an unregistered scheme (``file://``/``obsidian://``/etc., or
-          a genuinely unknown scheme), OR the resolved handler reports a
-          caller-shaped URI problem (a malformed ``chroma://`` URI, a
-          non-``https://`` URI misrouted).
-        - 502 — the resolver hit a genuine fetch/resolver failure (a
-          dangling reference, a non-2xx or empty HTTP response).
-        - 503 — the ``(collection, chash)`` form with no pgvector repository
-          wired.
-        """
-        if source_uri is not None:
-            if collection is not None or chash is not None:
-                raise ValueError(
-                    "resolve_content: pass source_uri OR (collection, chash), not both"
-                )
-            body: dict = {"source_uri": source_uri}
-        elif collection is not None and chash is not None:
-            body = {"collection": collection, "chash": chash}
-        else:
-            raise ValueError(
-                "resolve_content: source_uri, or both collection and chash, is required"
-            )
-        return _post("/v1/vectors/resolve", body, tenant=self._tenant)
-
     def collection_stats(
         self, lifecycle_state: str | None = None, *, routing: bool = False,
     ) -> list[dict]:
@@ -4351,8 +4599,16 @@ class HttpVectorClient:
         same request; an engine that honours them judges the floor under its sweep
         gate on the whole reapable set and may answer ``refused: true`` with nothing
         moved, ``remaining`` still naming the whole reapable set.
+
+        RDR-222 Phase 1: one call is one keyed request (``Idempotency-Key``, a fresh uuid4 minted
+        here). A gateway code or a socket timeout asks ``GET /v1/requests/<key>`` rather than
+        reporting failure: a committed sweep returns its stored response (a ``sample`` over the
+        engine's 64 KB cap comes back cut, with ``"sample_truncated": true``), a rolled-back or unknown
+        one is resent under the same key, and an engine with no ledger surfaces the original error.
+        A 503 ``sweep_gate_busy`` waits ``Retry-After`` and resends. Raises
+        :class:`IdempotencyKeyRefusedError` for a refused key (never resent). At most 3 resends.
         """
-        return _post(
+        return _keyed_sweep_post(
             "/v1/vectors/gc/quarantine-orphans",
             {
                 "collection": collection,
@@ -4362,7 +4618,7 @@ class HttpVectorClient:
                 "row_limit": row_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
             },
-            tenant=self._tenant,
+            tenant=self._tenant, gate_busy=True,
         )
 
     def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
@@ -4389,15 +4645,19 @@ class HttpVectorClient:
         404) — it performs the UNBOUNDED restore regardless of what this
         call asked for. Callers detect that by the absent ``remaining`` key,
         never by inferring engine version.
+
+        RDR-222 Phase 1: one call is one keyed request, resolved through the ledger on an ambiguous
+        outcome exactly as :meth:`gc_quarantine_orphans_bounded` is (restore takes no sweep gate, so
+        it never sees ``sweep_gate_busy``).
         """
-        return _post(
+        return _keyed_sweep_post(
             "/v1/vectors/gc/restore-rereferenced",
             {
                 "quarantine_collection": quarantine_collection,
                 "origin_collection": origin_collection,
                 "row_limit": row_limit,
             },
-            tenant=self._tenant,
+            tenant=self._tenant, gate_busy=False,
         )
 
     def gc_expire_quarantine(
@@ -4425,6 +4685,47 @@ class HttpVectorClient:
                 "force": force,
             },
             tenant=self._tenant,
+        )
+
+    def gc_expire_quarantine_bounded(
+        self, quarantine_collection: str, origin_collection: str, cutoff: str,
+        floor_fraction: float, floor_min_chunks: int, force: bool, row_limit: int,
+        *, count_refused: bool = True,
+    ) -> dict:
+        """POST /v1/vectors/gc/expire-quarantine with ``row_limit`` (RDR-222 Amendment A1, nexus-1579m):
+        the bounded form of :meth:`gc_expire_quarantine`, selected by the same additive per-route toggle
+        as :meth:`gc_restore_rereferenced_bounded`.
+
+        Returns ``{"expired": N, "refused": M | None, "more": bool, "row_limit": L,
+        "floor_refused": bool}`` from an engine that has the bounded form. ``expired`` is this page's
+        rows, ``refused`` describes the sibling as of this page and is ``None`` when ``count_refused``
+        was false, and ``more`` says the page found eligible chashes past its own. An engine that
+        predates the ledger ignores the key and ``row_limit`` and runs the UNBOUNDED expire, answering
+        ``{"expired": N, "refused": M}``: callers detect that by the absent ``more`` key, never by
+        inferring engine version. An engine that has the ledger but not this form answers 400
+        ``idempotency_key_unsupported``, which is raised as :class:`IdempotencyKeyRefusedError` and
+        never resent (no keyless resend: a refused key is a stop).
+
+        One call is one keyed page (a fresh uuid4 ``Idempotency-Key`` minted here, resolved through the
+        ledger on an ambiguous outcome exactly as :meth:`gc_quarantine_orphans_bounded` is); a drain is
+        a loop of these (:func:`nexus.catalog.chunk_quarantine.expire_quarantine_bounded_serverside`).
+        The engine takes the sweep gate for this form, so a 503 ``sweep_gate_busy`` waits ``Retry-After``
+        and resends. The unbounded :meth:`gc_expire_quarantine` stays for hand use and as the capability
+        fallback.
+        """
+        return _keyed_sweep_post(
+            "/v1/vectors/gc/expire-quarantine",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "cutoff": cutoff,
+                "floor_fraction": floor_fraction,
+                "floor_min_chunks": floor_min_chunks,
+                "force": force,
+                "row_limit": row_limit,
+                "count_refused": count_refused,
+            },
+            tenant=self._tenant, gate_busy=True,
         )
 
     def gc_quarantine_restore(
@@ -5534,8 +5835,8 @@ class HttpVectorClient:
         was excluded by ``$ne: 0``, so no behavior change for legacy rows
         either). The only row shape where the two predicates would ever
         diverge — a row explicitly written as JSON null — IS now producible:
-        the p6b fix-pass (nexus-24rof) made ``HttpVectorClient.put`` /
-        ``T3Database.put`` pass ``None`` through for "permanent" (rejecting
+        the p6b fix-pass (nexus-24rof) made ``T3Database.put`` (and the
+        since-retired ``HttpVectorClient.put``) pass ``None`` through for "permanent" (rejecting
         an explicit ``ttl_days <= 0`` loudly), while ``make_chunk_metadata``
         keeps its ``0`` factory default for the indexer pipelines that have
         no --ttl concept. Both null-shaped and 0-shaped permanent rows are
@@ -5682,7 +5983,14 @@ class HttpVectorClient:
         try:
             n = self.count(name)
         except VectorServiceError as exc:
-            if exc.code == 404:
+            # A name with no catalog row gets the engine's typed 422, which is the same
+            # "absent" as a 404. Keyed on the reason; only an engine that sends none is
+            # matched by its wording (as _unregistered_collection_message does).
+            unregistered = exc.code == 422 and (
+                exc.reason == UNREGISTERED_COLLECTION_REASON
+                or (exc.reason is None and "is not registered" in str(exc))
+            )
+            if exc.code == 404 or unregistered:
                 raise KeyError(f"Collection not found: {name!r}") from exc
             raise
         if n == 0:
@@ -6046,7 +6354,7 @@ def _seed_from_probe(client: HttpVectorClient) -> None:
         # The probed engine serves the route: skip the single-flight
         # probe. A later write-off (edge refusal, 5xx) still resets it.
         client._per_collection_confirmed = True
-    if _probed_embedding_mode in ("voyage", "onnx-local"):
+    if _probed_embedding_mode in ("voyage", "onnx-local", "dual"):
         # nexus-vpa9q: the probe already read /version; seeding the memo saves
         # embedding_mode() a second GET /version on the first search.
         client._embedding_mode_memo = _probed_embedding_mode

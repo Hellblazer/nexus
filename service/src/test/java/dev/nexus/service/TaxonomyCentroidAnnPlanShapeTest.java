@@ -138,25 +138,13 @@ class TaxonomyCentroidAnnPlanShapeTest {
         // deterministic); explain() keeps using the unmodified SVC_ROLE/tenantScope
         // above for the actual HNSW-bind proof.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // KEPT RAW (all five statements): no typed jOOQ DDL form for a conditional
-            // CREATE ROLE via DO $$, GRANT USAGE ON SCHEMA, a multi-privilege GRANT ON
-            // TABLE, or ALTER ROLE ... SET -- none covered by a nexus_test bootstrap
-            // function this round (candidates for one, per the task brief).
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
-                + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
-                + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE_REALCALL);
-            // RDR-225: annQuery reads the collection's model from the registry (catalog_collections and the
-            // embedding_models row its dimension comes from), so the same statement grants that read.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO " + SVC_ROLE_REALCALL
-                + "; GRANT SELECT ON nexus.catalog_collections, nexus.embedding_models TO " + SVC_ROLE_REALCALL);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_bitmapscan = off");
+            // The role, its schema USAGE and its table grants are the bootstrap changelog's (nexus-cbo4a batch 9):
+            // DML on every nexus table, a superset of the taxonomy_centroids DML plus catalog_collections and
+            // embedding_models SELECT the RDR-225 registry read in annQuery needs. The planner pins are ALTER
+            // ROLE, which has no jOOQ form, so they go through the validated role-GUC changelog helper.
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_REALCALL, SVC_PASS);
+            PgContainerHelper.setRolePlannerGuc(su, SVC_ROLE_REALCALL, "enable_indexscan", "off");
+            PgContainerHelper.setRolePlannerGuc(su, SVC_ROLE_REALCALL, "enable_bitmapscan", "off");
         }
 
         var cfg = new HikariConfig();
@@ -276,7 +264,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private String explain(Table<?> fn) {
         return tenantScope.withTenant(TENANT, ctx -> {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.explain(ctx.selectFrom(fn)).plan();
+            return PgContainerHelper.explainPlan(ctx, ctx.selectFrom(fn));
         });
     }
 

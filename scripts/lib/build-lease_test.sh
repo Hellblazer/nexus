@@ -20,6 +20,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_lease_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+# Never the real per-user lease-events log (nexus-jqk5c): Test 13 points it at its own files.
+export NX_LEASE_EVENTS_LOG="$WORKDIR/events.log"
 
 PASS=0
 FAIL=0
@@ -45,9 +47,10 @@ rc1=$?
 if [[ $rc1 -eq 0 ]]; then ok "acquire succeeded (rc 0)"; else bad "acquire failed (rc $rc1): $out1"; fi
 leasedir1="$repo1/service/.build-lease/smoke"
 if [[ -d "$leasedir1" ]]; then ok "lease dir exists after acquire"; else bad "lease dir missing after acquire"; fi
-for f in pid ts label command; do
+for f in pid ts label command worktree; do
     if [[ -f "$leasedir1/$f" ]]; then ok "lease has '$f' file"; else bad "lease missing '$f' file"; fi
 done
+if [[ "$(cat "$leasedir1/worktree" 2>/dev/null)" == "$(cd "$repo1" && pwd -P)" ]]; then ok "worktree names the taking checkout's physical path (nexus-qt6q7)"; else bad "worktree file: $(cat "$leasedir1/worktree" 2>&1)"; fi
 bash -c "source '$repo1/scripts/lib/build-lease.sh'; build_lease_acquire smoke >/dev/null 2>&1; build_lease_release smoke"
 if [[ ! -d "$leasedir1" ]]; then ok "lease dir gone after release"; else bad "lease dir still present after release"; fi
 
@@ -119,9 +122,29 @@ leasedir4="$repo4/service/.build-lease/trapped"
 # in that gap kills the holder with nothing to release the lease
 # (nexus-n70xz, seen under a 32-worker suite).
 ready4="$WORKDIR/repo4.ready"
-bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30" &
+# The holder starts with SIGTERM at its default and unblocked. A non-interactive bash
+# cannot trap a signal that was ignored when it started, and a blocked one stays
+# pending, and both pass across exec: a suite launched with TERM ignored or blocked
+# made this case fail with the lease still held at 16 s and the holder alive
+# (5588beead CI shard 3; reproduced in a container both ways, never under CPU load).
+# The disposition the suite inherits is the launcher's business; the property under
+# test is that a holder that CAN receive TERM releases its lease (the HUP twin:
+# nexus-0a1hw).
+holder4_cmd=(bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30")
+if command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'sigprocmask(SIG_UNBLOCK, POSIX::SigSet->new(SIGTERM)); $SIG{TERM} = "DEFAULT"; exec { $ARGV[0] } @ARGV or exit 127' "${holder4_cmd[@]}" &
+else
+    "${holder4_cmd[@]}" &
+fi
 holder4=$!
-for _ in $(seq 1 50); do
+# State, SigBlk and SigIgn of a pid, for the failure message (Linux /proc only).
+_sigs4() {
+    [[ -r "/proc/$1/status" ]] || { printf 'pid %s: no /proc status' "$1"; return; }
+    printf 'pid %s: %s' "$1" "$(awk '/^(State|SigBlk|SigIgn):/ { printf "%s %s ", $1, $2 }' "/proc/$1/status")"
+}
+# Polled up to 15 s: a holder that has to start, source and acquire under a loaded host
+# (nexus-ys8a4) can take well over the 5 s this used to allow.
+for _ in $(seq 1 150); do
     [[ -f "$ready4" ]] && break
     sleep 0.1
 done
@@ -132,14 +155,21 @@ else
     # process actually terminates -- this is what should release the lease
     # WITHOUT needing stale-pid reclaim.
     kill -TERM "$holder4" 2>/dev/null
-    for _ in $(seq 1 50); do
+    term4_at=$SECONDS
+    for _ in $(seq 1 150); do
         [[ ! -d "$leasedir4" ]] && break
         sleep 0.1
     done
     if [[ ! -d "$leasedir4" ]]; then
         ok "lease released by the holder's own EXIT trap after SIGTERM"
     else
-        bad "lease dir still present after SIGTERM'd holder should have released it"
+        # Elapsed seconds tell the two causes apart: well past the 15 s the poll nominally
+        # allows means the host starved the loop itself; about 15 s means the trap really
+        # did not release.
+        # The masks say which: a holder with SIGTERM (bit 15, 0x4000) in SigIgn or SigBlk
+        # never acted on it, a Z state died without its trap, and the suite's own masks
+        # say whether the disposition came from whatever launched the suite.
+        bad "lease dir still present $((SECONDS - term4_at)) s after SIGTERM (polled up to 15 s); the holder should have released it [holder $(_sigs4 "$holder4")] [suite $(_sigs4 $$)]"
     fi
     # A fresh acquire must now succeed cleanly, with NO stale-reclaim
     # WARNING (the lease was released properly, not left stale).
@@ -148,6 +178,8 @@ else
     if [[ $rc4 -eq 0 ]]; then ok "fresh acquire after clean release succeeds"; else bad "fresh acquire failed (rc $rc4): $out4"; fi
     if [[ "$out4" != *"WARNING"* ]]; then ok "fresh acquire is clean (no stale-reclaim WARNING)"; else bad "unexpected WARNING on a cleanly-released lease: $out4"; fi
 fi
+# A holder that survived TERM would hold the suite here for the rest of its sleep.
+kill -KILL "$holder4" 2>/dev/null
 wait "$holder4" 2>/dev/null
 
 # ── Test 5: mid-hold eviction — the lease must survive `mvn clean` ───────
@@ -215,9 +247,12 @@ else
     rc6=$?
     if [[ $rc6 -eq 75 ]]; then ok "acquire from the worktree refuses (rc 75) while the primary holds"; else bad "worktree acquire rc $rc6 (expected 75): $out6"; fi
     if [[ "$out6" == *"primary-holder"* ]]; then ok "refusal names the primary's holder label"; else bad "refusal missing holder label: $out6"; fi
+    if [[ "$(cat "$root6/shared/worktree" 2>/dev/null)" == "$(cd "$repo6" && pwd -P)" ]]; then ok "the shared lease names the primary as the building checkout, not the worktree"; else bad "worktree file: $(cat "$root6/shared/worktree" 2>&1)"; fi
 fi
 kill -9 "$holder6" 2>/dev/null
 wait "$holder6" 2>/dev/null
+bash -c "source '$WORKDIR/repo6-wt/scripts/lib/build-lease.sh'; build_lease_acquire fromwt >/dev/null 2>&1 || exit 9; cat '$root6/fromwt/worktree'; build_lease_release fromwt" > "$WORKDIR/wt6.out" 2>&1
+if [[ "$(cat "$WORKDIR/wt6.out")" == "$(cd "$WORKDIR/repo6-wt" && pwd -P)" ]]; then ok "a lease taken from the worktree names the worktree, not the primary (nexus-qt6q7)"; else bad "worktree-taken lease names: $(cat "$WORKDIR/wt6.out")"; fi
 outo="$(bash -c "export NX_BUILD_LEASE_ROOT='$WORKDIR/override'; source '$repo6/scripts/lib/build-lease.sh'; _build_lease_root")"
 if [[ "$outo" == "$WORKDIR/override" ]]; then ok "NX_BUILD_LEASE_ROOT overrides the resolution"; else bad "override ignored: $outo"; fi
 
@@ -375,6 +410,226 @@ else
         ok "a group that does not exist still reads as dead"
     fi
 fi
+
+# ── Test 11 (nexus-t6t9f): losing the stale-reclaim race is retried, not refused, even at wait 0.
+# A hand run inside a lab-run grant waits 0 s (build_lease_caller_wait). Two contenders racing to
+# reclaim one stale lease: the loser used to read "lost the race ... Retry." as a held lease and
+# refuse with 75, though the lease was free a moment later. `mv` is shadowed by a shell function
+# that fails its first N calls (counted in a file: acquire runs in a $(...) subshell), which is
+# exactly what the loser of the rename sees.
+echo "Test 11: a lost stale-reclaim race is retried at wait 0; a race lost forever still ends in rc 75"
+repo11="$WORKDIR/repo11"
+_fake_repo "$repo11"
+_stale11() {
+    rm -rf "$repo11/service/.build-lease/race"
+    bash -c "source '$repo11/scripts/lib/build-lease.sh'; build_lease_acquire race" >/dev/null 2>&1   # exits without releasing: stale
+}
+_race11() {  # _race11 <failing-mv-calls> <wait>
+    local cnt="$WORKDIR/mv11.count"; : > "$cnt"
+    MV_COUNT="$cnt" MV_FAILS="$1" bash -c "
+        source '$repo11/scripts/lib/build-lease.sh'
+        mv() { echo x >> \"\$MV_COUNT\"; if [[ \$(wc -l < \"\$MV_COUNT\" | tr -d ' ') -le \$MV_FAILS ]]; then return 1; fi; command mv \"\$@\"; }
+        build_lease_acquire_wait race $2 && echo HELD" 2>&1
+}
+_stale11
+start11=$SECONDS
+out11="$(_race11 1 0)"; rc11=$?
+if [[ $rc11 -eq 0 && "$out11" == *HELD* ]]; then ok "one lost reclaim race at wait 0 is retried and the lease is acquired"; else bad "wait 0, one lost race: rc $rc11: $out11"; fi
+if [[ "$(wc -l < "$WORKDIR/mv11.count" | tr -d ' ')" == 2 ]]; then ok "the reclaim ran twice (the lost race, then the retry)"; else bad "reclaim attempts: $(wc -l < "$WORKDIR/mv11.count")"; fi
+if (( SECONDS - start11 < 10 )); then ok "the retry did not wait out a held-lease poll"; else bad "took $((SECONDS - start11))s"; fi
+_stale11
+out11b="$(_race11 1000 0)"; rc11b=$?
+attempts11="$(wc -l < "$WORKDIR/mv11.count" | tr -d ' ')"
+if [[ $rc11b -eq 75 && "$out11b" == *"lost the race"* ]]; then ok "a race lost on every attempt still ends in rc 75 with the reason"; else bad "perpetual race: rc $rc11b: $out11b"; fi
+if (( attempts11 > 1 && attempts11 <= 10 )); then ok "the retries are bounded ($attempts11 attempts)"; else bad "attempts: $attempts11"; fi
+
+# ── Test 12 (nexus-t6t9f): build_lease_untrack_pid points liveness back at the holder's own pid.
+# A holder whose tracked build group has exited but which is itself alive must not be reclaimable.
+echo "Test 12: after build_lease_untrack_pid a live holder is not reclaimed; a non-holder's call is a no-op"
+repo12="$WORKDIR/repo12"
+_fake_repo "$repo12"
+rm -rf "$repo12/service/.build-lease/untrack"
+out12="$WORKDIR/untrack12.out"; rm -f "$out12"
+bash -c "
+    source '$repo12/scripts/lib/build-lease.sh'
+    build_lease_acquire untrack || exit 9
+    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    build_lease_track_pid untrack \$dead
+    echo TRACKED > '$out12'
+    sleep 2
+    build_lease_untrack_pid untrack
+    echo UNTRACKED >> '$out12'
+    sleep 6" >/dev/null 2>&1 &
+holder12=$!
+for _ in $(seq 1 50); do grep -q TRACKED "$out12" 2>/dev/null && break; sleep 0.1; done
+peer12="$(bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_acquire untrack" 2>&1)"; peerrc12=$?
+if [[ $peerrc12 -eq 0 && "$peer12" == *"reclaiming stale"* ]]; then ok "control: while the dead group is tracked the lease reads stale and is reclaimed"; else bad "control: rc $peerrc12: $peer12"; fi
+kill -9 "$holder12" 2>/dev/null; wait "$holder12" 2>/dev/null
+rm -rf "$repo12/service/.build-lease/untrack"
+rm -f "$out12"
+bash -c "
+    source '$repo12/scripts/lib/build-lease.sh'
+    build_lease_acquire untrack || exit 9
+    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    build_lease_track_pid untrack \$dead
+    build_lease_untrack_pid untrack
+    echo UNTRACKED > '$out12'
+    sleep 6" >/dev/null 2>&1 &
+holder12=$!
+for _ in $(seq 1 50); do grep -q UNTRACKED "$out12" 2>/dev/null && break; sleep 0.1; done
+peer12="$(bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_acquire untrack" 2>&1)"; peerrc12=$?
+if [[ $peerrc12 -eq 75 && "$peer12" == *REFUSED* && "$peer12" != *"reclaiming"* ]]; then ok "an untracked live holder is refused, not reclaimed"; else bad "rc $peerrc12: $peer12"; fi
+if [[ ! -e "$repo12/service/.build-lease/untrack/pgid" ]]; then ok "the pgid file is gone"; else bad "pgid file remains"; fi
+# a non-holder (this shell) must not touch the pgid
+printf '%s\n' 99999 > "$repo12/service/.build-lease/untrack/pgid"
+bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_untrack_pid untrack"
+if [[ "$(cat "$repo12/service/.build-lease/untrack/pgid" 2>/dev/null)" == 99999 ]]; then ok "a non-holder's untrack is a no-op"; else bad "a non-holder removed the pgid"; fi
+kill -9 "$holder12" 2>/dev/null; wait "$holder12" 2>/dev/null
+
+# ── Test 13: lease telemetry (nexus-jqk5c) ──────────────────────────────
+# One key=value line per CONTENDED event, appended to NX_LEASE_EVENTS_LOG; an
+# immediate acquire writes nothing; a logging failure changes nothing.
+echo "Test 13: lease events log (one line per contention event, none for an immediate acquire)"
+repo13="$WORKDIR/repo13"
+_fake_repo "$repo13"
+ev13="$WORKDIR/ev13.log"
+lib13="$repo13/scripts/lib/build-lease.sh"
+leasedir13="$repo13/service/.build-lease"
+_ev_lines() { if [[ -f "$1" ]]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
+_ev_shape() {  # the fields every event carries, in order
+    [[ "$1" =~ ^ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\ lease=service\ name=[^\ ]+\ host=[^\ ]+\ pid=[0-9]+\ waited_s=[0-9]+\ outcome=[a-z_]+ ]]
+}
+
+# 13a: an immediate, uncontended acquire writes nothing (and the log is not even created)
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire quiet && build_lease_release quiet" >/dev/null 2>&1
+if [[ ! -e "$ev13" ]]; then ok "an immediate acquire writes no event"; else bad "an immediate acquire wrote: $(cat "$ev13")"; fi
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire_wait quiet 30 && build_lease_release quiet" >/dev/null 2>&1
+if [[ ! -e "$ev13" ]]; then ok "an immediate acquire_wait writes no event"; else bad "an immediate acquire_wait wrote: $(cat "$ev13")"; fi
+
+# 13b: refused (live holder, no wait) -> one refused line naming the holder, label quoted
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$WORKDIR/ev13-holder.log" NX_AGENT="holder agent" bash -c "source '$lib13'; build_lease_acquire busy || exit 9; sleep 25" >/dev/null 2>&1 &
+holder13=$!
+for _ in $(seq 1 50); do [[ -f "$leasedir13/busy/pid" ]] && break; sleep 0.1; done
+out13="$(NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire busy" 2>&1)"; rc13=$?
+if [[ $rc13 -eq 75 ]]; then ok "refused: rc 75"; else bad "refused: rc $rc13: $out13"; fi
+if [[ "$(_ev_lines "$ev13")" == 1 ]]; then ok "refused: exactly one line"; else bad "refused: lines=$(_ev_lines "$ev13"): $(cat "$ev13" 2>&1)"; fi
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if _ev_shape "$line13" && [[ "$line13" == *" name=busy "* && "$line13" == *" waited_s=0 outcome=refused "* && "$line13" == *" holder_pid=$holder13 "* && "$line13" == *' holder_label="holder agent"'* ]]; then ok "refused: line shape ($line13)"; else bad "refused: line: $line13"; fi
+
+# 13c: acquire_wait with max 0 on a live holder -> one refused line (a refusal, not a give-up)
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire_wait busy 0" >/dev/null 2>&1; rc13=$?
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 75 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=0 outcome=refused "* && "$line13" == *" holder_pid=$holder13 "* ]]; then ok "wait 0: one refused line ($line13)"; else bad "wait 0: rc $rc13 lines=$(_ev_lines "$ev13"): $line13"; fi
+
+# 13d: acquire_wait that times out -> ONE gave_up line (the 5s polls log nothing)
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire_wait busy 5" >/dev/null 2>&1; rc13=$?
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 75 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=5 outcome=gave_up "* && "$line13" == *" holder_pid=$holder13 "* ]]; then ok "timeout: one gave_up line ($line13)"; else bad "timeout: rc $rc13 lines=$(_ev_lines "$ev13"): $(cat "$ev13" 2>&1)"; fi
+kill -9 "$holder13" 2>/dev/null; wait "$holder13" 2>/dev/null
+rm -rf "$leasedir13/busy"
+
+# 13e: acquired after a wait -> one acquired_after_wait line carrying the holder that was waited for
+rm -f "$ev13"
+NX_AGENT=releaser bash -c "source '$lib13'; build_lease_acquire hand || exit 9; sleep 2; build_lease_release hand" >/dev/null 2>&1 &
+holder13=$!
+for _ in $(seq 1 50); do [[ -f "$leasedir13/hand/pid" ]] && break; sleep 0.1; done
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire_wait hand 60 && build_lease_release hand" >/dev/null 2>&1; rc13=$?
+wait "$holder13" 2>/dev/null
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 0 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=5 outcome=acquired_after_wait "* && "$line13" == *" holder_pid=$holder13 holder_label=releaser"* ]]; then ok "waited: one acquired_after_wait line ($line13)"; else bad "waited: rc $rc13 lines=$(_ev_lines "$ev13"): $(cat "$ev13" 2>&1)"; fi
+
+# 13f: stale reclaim -> one stale_reclaimed line naming the dead holder
+rm -f "$ev13"
+mkdir -p "$leasedir13/corpse"
+sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+printf '%s\n' "$dead13" > "$leasedir13/corpse/pid"; echo "2026-01-01T00:00:00Z" > "$leasedir13/corpse/ts"; echo dead-agent > "$leasedir13/corpse/label"
+out13="$(NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire corpse && build_lease_release corpse" 2>&1)"; rc13=$?
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 0 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" name=corpse "* && "$line13" == *" waited_s=0 outcome=stale_reclaimed "* && "$line13" == *" holder_pid=$dead13 holder_label=dead-agent"* ]]; then ok "stale: one stale_reclaimed line ($line13)"; else bad "stale: rc $rc13 lines=$(_ev_lines "$ev13"): $(cat "$ev13" 2>&1)"; fi
+
+# 13f2: a wait that ends in a stale reclaim logs ONE line (stale_reclaimed, carrying the wait)
+rm -f "$ev13"
+NX_AGENT=crasher bash -c "source '$lib13'; build_lease_acquire crash || exit 9; sleep 2; kill -9 \$\$" >/dev/null 2>&1 &
+holder13=$!
+for _ in $(seq 1 50); do [[ -f "$leasedir13/crash/pid" ]] && break; sleep 0.1; done
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire_wait crash 60 && build_lease_release crash" >/dev/null 2>&1; rc13=$?
+wait "$holder13" 2>/dev/null
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 0 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=5 outcome=stale_reclaimed "* && "$line13" == *" holder_pid=$holder13 holder_label=crasher"* ]]; then ok "wait ending in a stale reclaim: one stale_reclaimed line, no second acquired_after_wait ($line13)"; else bad "wait+stale: rc $rc13 lines=$(_ev_lines "$ev13"): $(cat "$ev13" 2>&1)"; fi
+
+# 13g: an unwritable log leaves the return code and stderr unchanged
+bad_log13="$WORKDIR/a-file/events.log"; : > "$WORKDIR/a-file"   # a path UNDER a regular file: mkdir and append both fail
+NX_AGENT="holder agent" bash -c "source '$lib13'; build_lease_acquire busy2 || exit 9; sleep 8" >/dev/null 2>&1 &
+holder13=$!
+for _ in $(seq 1 50); do [[ -f "$leasedir13/busy2/pid" ]] && break; sleep 0.1; done
+good13="$(NX_LEASE_EVENTS_LOG="$WORKDIR/ev13-good.log" bash -c "source '$lib13'; build_lease_acquire busy2" 2>&1)"; goodrc13=$?
+badout13="$(NX_LEASE_EVENTS_LOG="$bad_log13" bash -c "source '$lib13'; build_lease_acquire busy2" 2>&1)"; badrc13=$?
+if [[ $badrc13 -eq $goodrc13 && "$badout13" == "$good13" ]]; then ok "an unwritable log changes neither rc nor stderr"; else bad "rc $badrc13 vs $goodrc13; stderr: $badout13 vs $good13"; fi
+# A SUCCESS path under set -e: a stale reclaim whose log write fails. errexit is ignored in
+# `||` and `if` context, so the call is bare, in its own set -e subshell; only a log writer that
+# leaks a non-zero status would end the subshell before SURVIVED.
+# Both ways a log can be unwritable: the mkdir fails (parent is a file) and the append fails
+# (the log is a directory; the mkdir succeeds, so only the guard stops errexit there).
+mkdir -p "$WORKDIR/a-dir-log"
+for how13 in "$bad_log13" "$WORKDIR/a-dir-log"; do
+    mkdir -p "$leasedir13/corpse2"
+    sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+    printf '%s\n' "$dead13" > "$leasedir13/corpse2/pid"; echo dead-agent > "$leasedir13/corpse2/label"
+    badout13="$(NX_LEASE_EVENTS_LOG="$how13" bash -c "set -e; source '$lib13'; build_lease_acquire corpse2 >/dev/null 2>&1; build_lease_release corpse2; echo SURVIVED" 2>&1)"
+    if [[ "$badout13" == SURVIVED ]]; then ok "an unwritable log (${how13##*/}) under set -e does not abort a successful stale reclaim"; else bad "set -e caller (${how13##*/}): [$badout13]"; fi
+done
+kill -9 "$holder13" 2>/dev/null; wait "$holder13" 2>/dev/null
+rm -rf "$leasedir13/busy2"
+
+# 13i: the lease named suite logs as lease=suite (tests/e2e/macos-guest/host.sh takes it through build_lease_acquire)
+rm -f "$ev13"
+sleep 25 & peer13=$!
+mkdir -p "$leasedir13/suite"; printf '%s\n' "$peer13" > "$leasedir13/suite/pid"; echo peer-suite > "$leasedir13/suite/label"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire suite" >/dev/null 2>&1
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ "$line13" == *" lease=suite name=suite "* && "$line13" == *" outcome=refused "* ]]; then ok "the suite lease logs lease=suite ($line13)"; else bad "suite lease line: $line13"; fi
+kill -9 "$peer13" 2>/dev/null; wait "$peer13" 2>/dev/null
+rm -rf "$leasedir13/suite"
+
+# 13j: a stale reclaim that loses the mv race names the CURRENT holder, never the dead one it read
+rm -f "$ev13"
+sleep 25 & peer13=$!
+mkdir -p "$leasedir13/raced" "$WORKDIR/fakebin13"
+sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+printf '%s\n' "$dead13" > "$leasedir13/raced/pid"; echo dead-agent > "$leasedir13/raced/label"
+# a peer wins the reclaim between our read and our mv: the lease is the peer's by the time ours fails
+cat > "$WORKDIR/fakebin13/mv" <<MV
+#!/bin/sh
+rm -rf "\$1"; mkdir "\$1"; echo $peer13 > "\$1/pid"; echo racing-peer > "\$1/label"; exit 1
+MV
+chmod +x "$WORKDIR/fakebin13/mv"
+NX_LEASE_EVENTS_LOG="$ev13" PATH="$WORKDIR/fakebin13:$PATH" bash -c "source '$lib13'; build_lease_acquire raced" >/dev/null 2>&1; rc13=$?
+line13="$(head -1 "$ev13" 2>/dev/null)"
+if [[ $rc13 -eq 75 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" outcome=refused "* && "$line13" == *" holder_pid=$peer13 holder_label=racing-peer"* && "$line13" != *"$dead13"* ]]; then ok "a lost reclaim race logs refused naming the current holder ($line13)"; else bad "lost race: rc $rc13 lines=$(_ev_lines "$ev13"): $line13 (dead=$dead13)"; fi
+kill -9 "$peer13" 2>/dev/null; wait "$peer13" 2>/dev/null
+rm -rf "$leasedir13/raced"
+
+# 13k: a new log is group-writable whatever the caller's umask, an existing one keeps its mode
+rm -f "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "umask 077; source '$lib13'; _build_lease_log_event modes modes 0" >/dev/null 2>&1
+mode13="$(stat -c %a "$ev13" 2>/dev/null || stat -f %Lp "$ev13" 2>/dev/null)"
+if [[ "$mode13" == 664 ]]; then ok "a new events log is mode 664 under umask 077"; else bad "new log mode: $mode13"; fi
+chmod 600 "$ev13"
+NX_LEASE_EVENTS_LOG="$ev13" bash -c "umask 077; source '$lib13'; _build_lease_log_event modes modes 0" >/dev/null 2>&1
+mode13="$(stat -c %a "$ev13" 2>/dev/null || stat -f %Lp "$ev13" 2>/dev/null)"
+if [[ "$mode13" == 600 && "$(_ev_lines "$ev13")" == 2 ]]; then ok "an existing events log keeps its mode"; else bad "existing log mode: $mode13 lines=$(_ev_lines "$ev13")"; fi
+
+# 13h: concurrent writers never interleave a line
+rm -f "$ev13"
+for i in $(seq 1 20); do
+    NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; _build_lease_log_event conc conc 0 \$\$ 'label $i'" >/dev/null 2>&1 &
+done
+wait
+if [[ "$(_ev_lines "$ev13")" == 20 && "$(grep -c -E '^ts=[0-9T:Z-]+ lease=service name=conc host=[^ ]+ pid=[0-9]+ waited_s=0 outcome=conc holder_pid=[0-9]+ holder_label="label [0-9]+"$' "$ev13")" == 20 ]]; then ok "20 concurrent writers: 20 whole lines"; else bad "concurrent: lines=$(_ev_lines "$ev13") whole=$(grep -c -E 'holder_label="label [0-9]+"$' "$ev13")"; fi
 
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"

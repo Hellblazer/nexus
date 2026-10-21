@@ -6,10 +6,15 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.BootPlan;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
+import dev.nexus.service.vectors.EmbeddingProfile;
+import dev.nexus.service.vectors.LocalModelProbe;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.VoyageEmbedder;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -29,15 +34,16 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-204 Phase 1 (bead nexus-ft04v.9) — the GH #1461 profile-change journey,
  * end to end on the engine substrate, as ONE test that crosses a real
- * service restart: boot in ONNX mode, register + write real chunks to a
+ * service restart: boot with the bge model only (no key), register + write real chunks to a
  * {@code code} (bge-768) collection, then simulate the restart (RDR-204
  * Technical Design 1a: {@code nx config set} writes nothing — the restart
  * IS the profile write, modelled here exactly as {@code Main.java} performs
- * it, by constructing a NEW voyage-mode {@link EmbedderRouter} and calling
+ * it, by constructing a NEW {@code dual} {@link EmbedderRouter} and calling
  * {@link EmbedderRouter#seedEmbeddingProfile}) with a Voyage key, and proves:
  *
  * <ol>
@@ -48,15 +54,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       Technical Design 1a: "a profile change never touches an existing
  *       collection's row";</li>
  *   <li>the bge collection is STILL SEARCHABLE — a real vector search
- *       against it, using an embedder compatible with the row's OWN model
- *       (bge-768), returns the chunk written in step 1. {@code
- *       resolveEmbedderStrict} is not yet repointed at the catalog registry
- *       (that is Phase 2 item 2 — see the Phase 1 critique, T2
- *       nexus/critique-rdr-204-phase1-2b18f802f..be19f58b7), so this proves
- *       the DATA and the "route by the row's own model" CONTRACT (Technical
+ *       against it returns the chunk written in step 1. {@code
+ *       resolveEmbedderStrict} dispatches by the catalog row's OWN model
+ *       (bge-768), the "route by the row's own model" contract (Technical
  *       Design 1a: "reads... continue to route by the row's own model and
- *       are never refused") rather than an automatic dispatch this phase
- *       has not built yet;</li>
+ *       are never refused");</li>
  *   <li>a new write for the SAME content type and owner mints a SIBLING
  *       collection carrying the Voyage model — a real chunk lands there too
  *       (a hermetic stand-in embedder self-keyed to the {@code
@@ -64,19 +66,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       the bge row/collection remain untouched afterward.</li>
  * </ol>
  *
- * <p>Hermetic: Testcontainers pgvector/pgvector:pg17. The "Voyage mode"
- * router used to drive the boot-time profile seed ({@code
- * EmbedderRouter(String voyageApiKey, String inputType)}, the exact
- * constructor {@code Main.java} uses when {@code NX_VOYAGE_API_KEY} is
- * present) never has {@code embed()} called on it — only {@code
- * modelToken()} reads (same idiom as {@code
- * CatalogHandlerCollectionUpsertProfileModelTest}, "dummy key: this path
- * never calls embed(), only modelToken() reads"). The sibling collection's
- * actual chunk write instead goes through a separate, deterministic
- * fake embedder self-keyed to {@code voyage-code-3} (the same technique
- * {@code EmbedderRouterEmbeddingProfileSeedTest}'s {@code FakeBge} and
- * {@code CombinedWriteRepositoryTest}'s {@code CountingFakeEmbedder} use),
- * so the write path is exercised for real without a live network call.
+ * <p>RDR-210 Phase 2 Step 5 (bead nexus-9nndg): the restarted service is ONE
+ * production {@code dual} router, built the way {@code Main} builds it from a
+ * {@link BootPlan} ({@code new EmbedderRouter(local, key, inputType, plan.profile())}).
+ * Both collections go through it: the bge row is read AND written by its bge member,
+ * and the Voyage row dispatches to its real {@link VoyageEmbedder}. The earlier form
+ * read the bge collection through a separate bge-only router and wrote the Voyage
+ * collection through a fake embedder, because the Voyage-only router the restart built
+ * refuses a bge row (Gap 6). Neither the separate router nor the Voyage fake remains.
+ *
+ * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, no network. Two things stand in
+ * for what a unit environment cannot hold: the local member is a deterministic bge-768
+ * stand-in (the 416MB model is not on disk; every router test does the same), and the
+ * Voyage chunk is written with a client-supplied vector, the engine's own no-embed path
+ * ({@code chunks[].embedding}, RDR-223), so the Voyage embedder is never called. That
+ * member is still the production one: the test pins that the Voyage row dispatches to a
+ * {@link VoyageEmbedder}, and that a single-family router refuses it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr204Gh1461ProfileRestartJourneyTest {
@@ -88,6 +93,7 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
 
     private static final String CHUNK_TEXT_BGE    = "gh1461 journey bge chunk text";
     private static final String CHUNK_TEXT_VOYAGE = "gh1461 journey voyage sibling chunk text";
+    private static final String CHUNK_TEXT_BGE_AFTER = "gh1461 journey bge chunk written after the restart";
 
     /** Deterministic bge-768 stand-in: one-hot at index {@code text.hashCode() % 768}. */
     private static final class FakeBge768 implements Embedder {
@@ -101,27 +107,6 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
             return out;
         }
         @Override public String modelToken() { return "bge-base-en-v15-768"; }
-    }
-
-    /**
-     * Deterministic voyage-code-3 stand-in — same one-hot technique, 1024-dim,
-     * self-keyed to the real Voyage code token. Used ONLY for the sibling's
-     * chunk write, never for the profile-seed router (which must be the REAL
-     * production Voyage constructor so the per-content-type mapping — code
-     * vs everything-else — is the genuine one, not a single-model local-mode
-     * mapping).
-     */
-    private static final class FakeVoyageCode1024 implements Embedder {
-        @Override public List<float[]> embed(List<String> texts) {
-            List<float[]> out = new ArrayList<>(texts.size());
-            for (String t : texts) {
-                float[] v = new float[1024];
-                v[Math.floorMod(t.hashCode(), 1024)] = 1.0f;
-                out.add(v);
-            }
-            return out;
-        }
-        @Override public String modelToken() { return "voyage-code-3"; }
     }
 
     PostgreSQLContainer<?> pg;
@@ -225,18 +210,42 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
         return Map.of("doc_id", docId, "rows", rows);
     }
 
+    // ── boot construction, as Main does it ───────────────────────────────
+
+    /**
+     * What {@code Main} decides for a boot with the bge files present, an unset {@code NX_EMBED_PROFILE}
+     * and a Voyage key present or not: the probe's presence, the resolved profile, and the plan.
+     */
+    private static BootPlan bootPlan(boolean voyageKey) {
+        var presence = new LocalModelProbe.Presence(true, false, voyageKey, "bge-detail", List.of());
+        return BootPlan.decide(presence, EmbeddingProfile.resolve(null, voyageKey));
+    }
+
+    /**
+     * The router {@code Main} builds from a plan (Main.java: {@code new EmbedderRouter(docLocal,
+     * routerKey, "document", embedProfile)}): the local member only when the plan builds bge, the key only
+     * when one is present, and the plan's own profile. {@code MainEmbedProfileWiringTest} pins that text.
+     */
+    private static EmbedderRouter routerAsMainBuildsIt(BootPlan plan, boolean voyageKey, Embedder bge, String inputType) {
+        return new EmbedderRouter(plan.buildsBge() ? bge : null,
+                voyageKey ? "dummy-voyage-key" : null, inputType, plan.profile());
+    }
+
     // ── the journey ──────────────────────────────────────────────────────
 
     @Test
     void gh1461_bootOnnx_setVoyageKey_restart_bgeStillReadable_newWriteMintsVoyageSibling() throws Exception {
         String chashBge = Chash.ofText("gh1461-bge-chunk").toHex();
+        String chashBgeAfter = Chash.ofText("gh1461-bge-chunk-after-restart").toHex();
 
-        // ── Step 1: boot in ONNX mode. Profile is bge-768 for every content
-        //    type. Register + write real chunks so a bge collection exists
-        //    with vectors. ───────────────────────────────────────────────
+        // ── Step 1: boot with the bge files and NO key. Profile is bge-768 for every content
+        //    type. Register + write real chunks so a bge collection exists with vectors. ──
         FakeBge768 bge = new FakeBge768();
-        EmbedderRouter routerOnnxDoc   = new EmbedderRouter(bge, "document");
-        EmbedderRouter routerOnnxQuery = new EmbedderRouter(bge, "query");
+        BootPlan bootPlan = bootPlan(false);
+        assertThat(bootPlan.profile()).as("keyless unset rule").isEqualTo(EmbeddingProfile.BGE);
+        assertThat(bootPlan.buildsBge()).isTrue();
+        EmbedderRouter routerOnnxDoc = routerAsMainBuildsIt(bootPlan, false, bge, "document");
+        assertThat(routerOnnxDoc.modeName()).isEqualTo("onnx-local");
 
         routerOnnxDoc.seedEmbeddingProfile(tenantScope, TENANT);
         var bootProfile = profileModelsByContentType(TENANT);
@@ -245,7 +254,7 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
             .containsExactlyInAnyOrder("code", "docs", "rdr", "knowledge", "unknown");
         for (var e : bootProfile.entrySet()) {
             assertThat(e.getValue())
-                .as("ONNX-mode boot: content type %s gets bge-768", e.getKey())
+                .as("keyless boot: content type %s gets bge-768", e.getKey())
                 .isEqualTo("bge-base-en-v15-768");
         }
 
@@ -272,15 +281,22 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
             .as("step 1: a real bge-768 chunk landed in nexus.chunks")
             .isTrue();
 
-        // ── Step 2/3: set a Voyage key and RESTART the service against the
-        //    SAME database — the restart IS the profile write (Technical
-        //    Design 1a: `nx config set` writes nothing). Modelled exactly
-        //    as Main.java's Voyage branch constructs its router. ─────────
-        EmbedderRouter routerVoyageProfile = new EmbedderRouter("dummy-voyage-key", "document");
-        routerVoyageProfile.seedEmbeddingProfile(tenantScope, TENANT);
+        // ── Step 2/3: set a Voyage key and RESTART against the SAME database (the restart IS
+        //    the profile write; Technical Design 1a). From here on ONE dual router, built the
+        //    way Main builds it, serves everything. ──────────────────────────────────────
+        BootPlan restartPlan = bootPlan(true);
+        assertThat(restartPlan.profile()).as("keyed unset rule").isEqualTo(EmbeddingProfile.VOYAGE);
+        assertThat(restartPlan.buildsBge()).as("the bge files are still there").isTrue();
+        assertThat(restartPlan.degradation()).as("both families servable: not a degraded boot").isEmpty();
+        assertThat(restartPlan.refusedFamilies()).as("the dual boot refuses neither family").isEmpty();
+        EmbedderRouter routerDual      = routerAsMainBuildsIt(restartPlan, true, bge, "document");
+        EmbedderRouter routerDualQuery = routerAsMainBuildsIt(restartPlan, true, bge, "query");
+        assertThat(routerDual.modeName()).as("the restarted service is the dual router").isEqualTo("dual");
+        assertThat(routerDual.availableModels())
+            .containsExactlyInAnyOrder("bge-base-en-v15-768", "voyage-3", "voyage-code-3", "voyage-context-3");
+        routerDual.seedEmbeddingProfile(tenantScope, TENANT);
 
-        // ── Step 4: the profile now names the Voyage models for EVERY
-        //    content type. ─────────────────────────────────────────────
+        // ── Step 4: the profile now names the Voyage models for EVERY content type. ──
         var restartedProfile = profileModelsByContentType(TENANT);
         assertThat(restartedProfile.get("code"))
             .as("step 4: code content type now profiled to voyage-code-3")
@@ -291,33 +307,39 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
                 .isEqualTo("voyage-context-3");
         }
 
-        // ── Step 5: the EXISTING bge collection's row is UNCHANGED, and a
-        //    vector search against it still returns results — reads route
-        //    by the row's own model and are never refused (Technical
-        //    Design 1a). resolveEmbedderStrict is not yet repointed at the
-        //    registry (Phase 2), so the search below uses an embedder
-        //    compatible with the row's OWN recorded model (bge-768) —
-        //    proving the contract this phase owns (the data survives the
-        //    restart, untouched and queryable), not the not-yet-built
-        //    automatic per-row dispatch. ─────────────────────────────────
+        // ── Step 5: the EXISTING bge collection's row is UNCHANGED, and the SAME dual router
+        //    that holds the Voyage family still reads it, by the row's own model (Technical
+        //    Design 1a: reads route by the row's model and are never refused). ──────────
         var bgeRowAfterRestart = collectionRow(TENANT, COL_BGE);
         assertThat(bgeRowAfterRestart)
             .as("step 5: the bge row must be UNCHANGED after the restart")
             .isEqualTo(bgeRowAtBoot);
+        assertThat(routerDual.resolveEmbedderStrict(tenantScope, TENANT, COL_BGE))
+            .as("step 5: the dual router dispatches the bge row to the bge member")
+            .isSameAs(bge);
 
-        PgVectorRepository searchOnnx = new PgVectorRepository(tenantScope, routerOnnxDoc, routerOnnxQuery);
-        var searchResults = searchOnnx.search(TENANT, CHUNK_TEXT_BGE, List.of(COL_BGE), 5, null);
+        PgVectorRepository searchDual = new PgVectorRepository(tenantScope, routerDual, routerDualQuery);
+        var searchResults = searchDual.search(TENANT, CHUNK_TEXT_BGE, List.of(COL_BGE), 5, null);
         assertThat(searchResults)
-            .as("step 5: a vector search against the bge collection returns results after the switch")
+            .as("step 5: a vector search through the dual router returns the bge collection's chunk")
             .isNotEmpty();
         assertThat(searchResults.get(0).get("id"))
             .as("step 5: the top result is the chunk written before the restart")
             .isEqualTo(chashBge);
 
-        // ── Step 6: a new write for the SAME content type and owner mints
-        //    a SIBLING collection carrying the Voyage model — a real chunk
-        //    lands there (hermetic stand-in, no live Voyage call) — and the
-        //    bge row is STILL unchanged afterward. ──────────────────────
+        // Writes to the bge collection keep working through the dual router too.
+        CombinedWriteService writeDual = new CombinedWriteService(tenantScope, catalogRepo, routerDual);
+        writeDual.writeManyCombined(TENANT, COL_BGE,
+            List.of(chunk(chashBgeAfter, CHUNK_TEXT_BGE_AFTER)),
+            List.of(doc("gh1461.1", List.of(row(1, chashBgeAfter)))),
+            null, false, false);
+        assertThat(chunkExists(TENANT, COL_BGE, chashBgeAfter, 768))
+            .as("step 5: a post-restart write to the bge collection embedded through the dual router")
+            .isTrue();
+
+        // ── Step 6: a new write for the SAME content type and owner mints a SIBLING collection
+        //    carrying the Voyage model; the dual router holds the production Voyage family for
+        //    it, and the bge row is STILL unchanged afterward. ───────────────────────────
         catalogRepo.upsertCollection(TENANT, Map.of(
             "name", COL_VOYAGE, "content_type", "code", "owner_id", TENANT, "model_version", "v1"));
         var voyageRow = collectionRow(TENANT, COL_VOYAGE);
@@ -331,18 +353,29 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
             .as("step 6: the sibling is a genuinely NEW row, not the bge one re-pointed")
             .isNotEqualTo(bgeRowAtBoot);
 
+        Embedder voyageMember = routerDual.resolveEmbedderStrict(tenantScope, TENANT, COL_VOYAGE);
+        assertThat(voyageMember)
+            .as("step 6: the dual router dispatches the Voyage row to its production Voyage member")
+            .isInstanceOf(VoyageEmbedder.class);
+        assertThat(voyageMember.modelToken()).isEqualTo("voyage-code-3");
+        assertThatThrownBy(() -> new EmbedderRouter(bge, null, "document", EmbeddingProfile.BGE)
+                .resolveEmbedderStrict(tenantScope, TENANT, COL_VOYAGE))
+            .as("step 6: a single-family bge router refuses that same row, which is why the journey needs the dual one")
+            .isInstanceOf(EmbeddingModelUnavailableException.class);
+
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", "gh1461.2", "title", "gh1461-journey-voyage-sibling-doc",
             "content_type", "code", "corpus", "code",
             "physical_collection", COL_VOYAGE, "chunk_count", 0));
 
-        EmbedderRouter routerVoyageWrite = new EmbedderRouter(new FakeVoyageCode1024(), "document");
-        CombinedWriteService writeVoyage = new CombinedWriteService(tenantScope, catalogRepo, routerVoyageWrite);
         String chashVoyage = Chash.ofText("gh1461-voyage-sibling-chunk").toHex();
-        writeVoyage.writeManyCombined(TENANT, COL_VOYAGE,
-            List.of(chunk(chashVoyage, CHUNK_TEXT_VOYAGE)),
+        float[] suppliedVoyageVector = new float[1024];
+        suppliedVoyageVector[Math.floorMod(CHUNK_TEXT_VOYAGE.hashCode(), 1024)] = 1.0f;
+        writeDual.writeManyCombined(TENANT, COL_VOYAGE,
+            List.of(Map.of("chash", chashVoyage, "text", CHUNK_TEXT_VOYAGE, "metadata", Map.of(),
+                           "embedding", suppliedVoyageVector)),
             List.of(doc("gh1461.2", List.of(row(0, chashVoyage)))),
-            null, false, false);
+            null, false, false, "voyage-code-3");
 
         assertThat(chunkExists(TENANT, COL_VOYAGE, chashVoyage, 1024))
             .as("step 6: a real voyage-1024 chunk landed in the sibling collection")

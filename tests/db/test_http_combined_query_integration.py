@@ -40,8 +40,8 @@ requires the ``nexus_svc`` role to exist before the JVM boots.
 
 Fixture strategy: same Docker pgvector/pgvector:pg17 pattern as
 ``test_write_seam_gate_integration.py``, own container name
-(``nexus_cq_tripwire_pg17``) so the two gates never collide on a shared
-Docker container when run concurrently.
+(``nexus_cq_tripwire_pg17_<worker>_<pid>``) so neither the two gates nor two
+xdist workers in one module ever share a Docker container.
 
 If a setup here dies with ``PSQLException: The connection attempt failed``,
 suspect the Docker Desktop port-forwarding wedge before the test: after enough
@@ -178,7 +178,10 @@ def _chunk_id(text: str) -> str:
 
 # ── Module-scoped Docker pgvector fixture ─────────────────────────────────────
 
-_CONTAINER_NAME = "nexus_cq_tripwire_pg17"
+# One name per process (nexus-e5zsd): each xdist worker that draws a test from this module runs the
+# module fixture in its own process, and a shared name let one worker's pre-clean ``docker rm -f`` kill
+# another worker's live container.
+_CONTAINER_NAME = f"nexus_cq_tripwire_pg17_{os.environ.get('PYTEST_XDIST_WORKER', 'main')}_{os.getpid()}"
 
 
 @pytest.fixture(scope="module")
@@ -206,6 +209,9 @@ def pg_instance():
             "-e", f"POSTGRES_USER={pg_user}",
             "-e", f"POSTGRES_PASSWORD={pg_pass}",
             "-p", f"{pg_port}:5432",
+            # nexus-szyun: PGDATA on a capped tmpfs, as the Java suites do (PgContainerHelper.PGDATA), so a
+            # throwaway cluster never writes WAL to the docker data-root of whatever host runs this.
+            "--tmpfs", "/var/lib/postgresql/data:rw,size=2g",
             "pgvector/pgvector:pg17",
         ],
         check=True, capture_output=True,

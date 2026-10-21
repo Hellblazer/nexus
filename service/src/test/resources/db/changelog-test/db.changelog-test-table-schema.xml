@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 8: ALTER TABLE ${table} SET SCHEMA ${schema}, in Liquibase XML instead of a Java SQL string
+    (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's open-source DSL has no SET SCHEMA
+    for a table.
+
+    For a test that reproduces a relation sitting in the wrong schema (SchemaMigratorIntegrationTest moves
+    Liquibase's own databasechangelog out of public, the split a role named for a schema produced in the field).
+    Run through PgContainerHelper#setTableSchema, which renders ${table} from a jOOQ Table and validates
+    ${schema}; runAlways, bookkeeping in its own table, whose name is not databasechangelog so the migrator's
+    split-history scan never sees it. Run it as the role that owns the table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="table-schema" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER TABLE ${table} SET SCHEMA ${schema}</sql>
+    </changeSet>
+</databaseChangeLog>

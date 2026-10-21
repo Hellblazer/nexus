@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.SQLDataType;
+import org.jooq.Field;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
@@ -12,8 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,7 +72,9 @@ class ChashProbePlanShapeTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // 255k chunks across three embedding widths outgrow the default 1 GB tmpfs
+        // (ENOSPC on pg_wal, nexus-xynce), so this class takes its own larger container.
+        pg = PgContainerHelper.startDedicated("3g", 4L * 1024 * 1024 * 1024);
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -96,45 +99,66 @@ class ChashProbePlanShapeTest {
         if (pg != null)    pg.stop();
     }
 
+    private static void dropExistingIndex(Connection su, DSLContext ctx, String index) throws Exception {
+        assertThat(PgCatalogProbes.indexExists(ctx, "nexus", index))
+            .as("nexus." + index + " exists before the seed drops it").isTrue();
+        PgContainerHelper.dropIndex(su, DSL.name("nexus", index));
+        assertThat(PgCatalogProbes.indexExists(ctx, "nexus", index))
+            .as("nexus." + index + " is gone after the drop").isFalse();
+    }
+
     private void seedAtCardinality() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Statement st = su.createStatement();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // RDR-191 Phase 4 (lane D5): one unified nexus.chunks table now
             // carries all three embedding columns and ONE (tenant_id, chash)
             // index (idx_chunks_tenant_chash), not one per dim.
+            // jOOQ's dropIndexIfExists renders the index unqualified on POSTGRES, so it would skip these; the
+            // schema-qualified PgContainerHelper.dropIndex drops them, and an index the schema should carry but
+            // does not is a failure here, not a silent no-op.
             for (int dim : new int[] {384, 768, 1024}) {
-                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_embedding_" + dim);
+                dropExistingIndex(su, ctx, "idx_chunks_embedding_" + dim);
             }
-            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_tsv");
-            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_trgm");
+            dropExistingIndex(su, ctx, "idx_chunks_tsv");
+            dropExistingIndex(su, ctx, "idx_chunks_trgm");
 
             for (int dim : new int[] {384, 768, 1024}) {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
                 // RDR-225: each collection carries the one model whose dimension matches its vectors.
                 PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "plan-" + dim,
                     modelFor(dim));
-                st.execute(
-                    "INSERT INTO nexus.chunks" +
-                    " (tenant_id, collection, embedding_model, chash, chunk_text, embedding_" + dim + ") " +
-                    "SELECT '" + TENANT + "', 'plan-" + dim + "', " +
-                    "       '" + modelFor(dim) + "', " +
-                    "       decode(md5('p" + dim + "-' || i) || md5('q" + dim + "-' || i), 'hex'), " +
-                    "       'plan chunk ' || i, v.vec " +
-                    "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i " +
-                    "CROSS JOIN (SELECT ('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector AS vec) v");
+                var series = DSL.generateSeries(1, CHUNKS_PER_DIM).as("s", "i");
+                Field<String> iText = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
+                        CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
+                    .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID),
+                            DSL.val("plan-" + dim, CHUNKS.COLLECTION),
+                            DSL.val(modelFor(dim), CHUNKS.EMBEDDING_MODEL),
+                            DSL.function("decode", SQLDataType.BLOB,
+                                DSL.concat(
+                                    DSL.md5(DSL.concat(DSL.val("p" + dim + "-", CHUNKS.CHUNK_TEXT), iText)),
+                                    DSL.md5(DSL.concat(DSL.val("q" + dim + "-", CHUNKS.CHUNK_TEXT), iText))),
+                                DSL.inline("hex")),
+                            DSL.concat(DSL.inline("plan chunk "), iText),
+                            DSL.val(VectorSeeds.vecXY(dim, 1f, 0f), VectorSeeds.chunkEmbedding(dim)))
+                        .from(series))
+                    .execute();
             }
 
             // A multi-collection sample: one 768-derived chash also lands in
             // the 384-dim collection (chunk text identity, different model).
             // Different collection ('plan-384' vs 'plan-768') means no PK
             // collision on (tenant_id, collection, chash).
-            st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, embedding_model, chash, chunk_text, embedding_384) " +
-                "SELECT '" + TENANT + "', 'plan-384', '" + modelFor(384) + "', " +
-                "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
-                "       ('[1' || repeat(',0', 383) || ']')::nexus.vector");
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, "plan-384")
+                .set(CHUNKS.EMBEDDING_MODEL, modelFor(384))
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(liveChash(768, 42)))
+                .set(CHUNKS.CHUNK_TEXT, "cross-model copy")
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vecXY(384, 1f, 0f))
+                .execute();
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
@@ -142,14 +166,9 @@ class ChashProbePlanShapeTest {
     @Test
     void shippedProbeSqlKeepsTenantChashIndexUnderRlsAtScale() {
         byte[] bytes = Chash.fromHex(liveChash(768, 42)).toBytes();
-        String plan = tenantScope.withTenant(TENANT, ctx -> {
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery(
-                    "EXPLAIN " + ChashRepository.PROBE_SQL, bytes).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
-        });
+        // The product's own constant with the product's own bind (ChashRepository#lookup), explained as a whole plan.
+        String plan = tenantScope.withTenant(TENANT, ctx ->
+            PgContainerHelper.explainPlan(ctx, ctx.resultQuery(ChashRepository.PROBE_SQL, bytes)));
         // RDR-225: nexus.chunks is LIST-partitioned by model then tenant, so the plan names the tenant's
         // LEAF under each model partition (and each leaf's own copy of idx_chunks_tenant_chash, named
         // <leaf>_tenant_id_chash_idx by Postgres), not the parent index. The three leaves that hold the seeded rows must each be
@@ -178,13 +197,10 @@ class ChashProbePlanShapeTest {
 
     @Test
     void seededCardinalityIsReal() throws Exception {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.chunks")) {
-            rs.next();
-            assertThat(rs.getLong(1))
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS))
                 .as("the plan-shape claim is only meaningful at cardinality")
-                .isEqualTo(3L * CHUNKS_PER_DIM + 1);
+                .isEqualTo(3 * CHUNKS_PER_DIM + 1);
         }
     }
 

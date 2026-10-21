@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE ROLE ${role} LOGIN PASSWORD '${pass}' SUPERUSER NOBYPASSRLS.
+    jOOQ has no CREATE ROLE. A SUPERUSER without the BYPASSRLS attribute, the shape that isolates the rolsuper
+    clause of the chunks isolation check. Run through PgContainerHelper#createSuperuserLoginRole, which validates
+    ${role} as a plain identifier and ${pass} as a quote-free word; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="superuser-login-role" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE ROLE ${role} LOGIN PASSWORD '${pass}' SUPERUSER NOBYPASSRLS</sql>
+    </changeSet>
+</databaseChangeLog>

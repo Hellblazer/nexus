@@ -443,7 +443,7 @@ class CatalogHandlerCollectionUpsertProfileModelTest {
         var row = collectionRow(tenant, name);
         assertThat(row).isNotNull();
         assertThat(row.embeddingModel())
-            .as("no model named -- the CCE fallback token, bge-768 in ONNX mode")
+            .as("no model named -- the bge profile's token for every content type (keyless default)")
             .isEqualTo("bge-base-en-v15-768");
         assertThat(row.dimension()).isEqualTo(768);
         assertThat(row.lifecycleState())

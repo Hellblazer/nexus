@@ -2,8 +2,9 @@
 """The RDR-143 version-lockstep marker, as the CLI reads and writes it.
 
 The marker (``<config dir>/cli_lockstep_marker``) holds the CLI version last confirmed to match
-the plugin. The SessionStart hook compares it with the plugin's version; a missing marker makes
-the first session announce an upgrade and dispatch one.
+the plugin. The SessionStart hook compares it with the plugin's version; a missing or stale marker
+makes the hook fall back to the CLI's own `nx --version`, and only a CLI older than the
+plugin, or one that prints no version, makes the session announce an upgrade and dispatch one.
 
 Who writes it:
 

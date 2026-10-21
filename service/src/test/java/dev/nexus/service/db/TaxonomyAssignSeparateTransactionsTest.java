@@ -169,17 +169,20 @@ class TaxonomyAssignSeparateTransactionsTest {
      *  (a system catalog, unaffected by RLS in any case, but consistent with
      *  every other diagnostic query in this test tree). */
     private boolean topicsLockHeldByAnotherBackend() {
-        // Plain JDBC, not DSL.condition("...") -- pg_locks.relation = 'X'::regclass
-        // and pg_backend_pid() are assembled SQL expressions with no typed jOOQ DSL
-        // form (RawSqlGateTest's noRawSqlDslTemplatesInMainOrTestSources scans for
-        // exactly this DSL.condition(String) shape); raw JDBC is the established,
-        // ceiling-tracked escape for a system-catalog diagnostic read like this one.
-        try (Connection su = pg.createConnection("");
-             var st = su.createStatement();
-             var rs = st.executeQuery(
-                 "SELECT count(*) FROM pg_catalog.pg_locks"
-                 + " WHERE relation = 'nexus.topics'::regclass AND pid <> pg_backend_pid()")) {
-            return rs.next() && rs.getInt(1) > 0;
+        // pg_locks.relation is an oid; the relation is named through pg_class/pg_namespace
+        // instead of a regclass cast, and pg_backend_pid() is a plain DSL.function.
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.fetchExists(ctx.selectOne()
+                .from(DSL.table(DSL.name("pg_catalog", "pg_locks")).as("l"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                    .on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("l", "relation"))))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                    .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq("topics"))
+                .and(DSL.field(DSL.name("l", "pid"), Integer.class)
+                    .ne(DSL.function("pg_backend_pid", Integer.class))));
         } catch (Exception e) {
             throw new RuntimeException("pg_locks probe failed", e);
         }

@@ -9,15 +9,28 @@ state in ``HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy``, value
 guest went from 2 to 1 when it was switched on. A Windows without Smart App
 Control (Windows 10, older Windows 11) has no such value: :data:`ABSENT`.
 
-Stdlib only. ``platform`` and ``read_value`` are seams, so the Windows branch
+Stdlib and structlog only. ``platform`` and ``read_value`` are seams, so the Windows branch
 runs under test on every host; production callers pass neither.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Callable
 
-__all__ = ["ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN", "state"]
+import structlog
+
+from nexus.bounded_subprocess import run_bounded
+
+_log = structlog.get_logger(__name__)
+
+__all__ = [
+    "ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN",
+    "BLOCKED_WINERROR", "bundle_binary_blocked", "execution_blocked", "state",
+]
 
 OFF = "off"
 ON = "on"
@@ -60,3 +73,74 @@ def state(
     if value is None:
         return ABSENT
     return _BY_VALUE.get(value, UNKNOWN)
+
+
+#: ERROR_ACCESS_DISABLED_BY_POLICY: "An Application Control policy has blocked
+#: this file", the code CreateProcess returns for a blocked unsigned binary.
+BLOCKED_WINERROR = 4551
+
+
+def _launch_unsigned_copy() -> None:
+    """Run a never-seen executable: this interpreter copied with random bytes
+    appended, so the hash is new on every probe.
+
+    Measured (T2 ``nexus_rdr/224-sac-on-baseline-control-2026-10-17``): the same
+    kind of control ran unblocked on a baseline whose Smart App Control was
+    not enforcing. The True branch (a 4551 from this stand-in) has not been
+    observed. A Authenticode-signed interpreter keeps its signature valid
+    under an appended tail, so it would run under Smart App Control too; the
+    stand-in is only faithful for an unsigned one such as uv's managed Python.
+    """
+    with tempfile.TemporaryDirectory(prefix="nx-sac-probe-", ignore_cleanup_errors=True) as tmp:
+        probe = os.path.join(tmp, "nx-sac-probe.exe")
+        shutil.copyfile(sys.executable, probe)
+        with open(probe, "ab") as handle:
+            handle.write(os.urandom(8))
+        run_bounded([probe, "--version"], timeout=30, stdin=subprocess.DEVNULL)
+
+
+def _classify_launch(launch: Callable[[], None]) -> bool | None:
+    try:
+        launch()
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror == BLOCKED_WINERROR:
+            return True
+        _log.warning("sac_probe_inconclusive", error=type(exc).__name__, winerror=winerror)
+        return None
+    except Exception as exc:  # noqa: BLE001 — an unrunnable probe is "inconclusive", never a crash
+        _log.warning("sac_probe_inconclusive", error=type(exc).__name__)
+        return None
+    return False
+
+
+def execution_blocked(
+    *,
+    platform: str | None = None,
+    launch: Callable[[], None] | None = None,
+) -> bool | None:
+    """True when Windows blocks an unsigned executable from running, False when
+    it runs, None when that cannot be told (not Windows, or the launch failed
+    for another reason). Never raises. *platform* and *launch* are seams."""
+    if (platform if platform is not None else sys.platform) != "win32":
+        return None
+    return _classify_launch(launch or _launch_unsigned_copy)
+
+
+def bundle_binary_blocked(
+    path: str,
+    *,
+    platform: str | None = None,
+    launch: Callable[[], None] | None = None,
+) -> bool | None:
+    """True when Windows blocks the real bundle binary at *path* from running,
+    False when it runs, None when that cannot be told. The faithful probe
+    ``nx doctor`` uses once a bundle exists (nexus-gdqca): no stand-in, so
+    no signed-interpreter hole. Never raises. *platform* and *launch* are seams."""
+    if (platform if platform is not None else sys.platform) != "win32":
+        return None
+
+    def _run_it() -> None:
+        run_bounded([path, "--version"], timeout=30, stdin=subprocess.DEVNULL)
+
+    return _classify_launch(launch or _run_it)

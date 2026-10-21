@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 from nexus._hook_runtime import entry
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+import pytest
 
 
 # -- run(): field extraction, mirroring session_start_cmd -------------------
@@ -172,6 +173,7 @@ def _spawn(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.t2_tenant
 def test_nx_hook_and_nx_hook_click_verb_produce_identical_bytes_end_to_end(
     tmp_path: Path, monkeypatch,
 ) -> None:

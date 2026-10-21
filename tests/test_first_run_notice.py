@@ -168,6 +168,7 @@ class TestApplyEmbedderNotice:
 
 
 class TestCoreMainWiring:
+    @pytest.mark.t2_tenant
     def test_main_applies_embedder_notice_before_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

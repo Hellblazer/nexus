@@ -157,6 +157,7 @@ class TestApplyRemap:
 # ── Unit: round-trip ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestRoundTrip:
     def test_basic_round_trip(self, populated_db: T3Database, tmp_path: Path):
         out, export_result, import_result = _export_import(
@@ -357,6 +358,7 @@ class TestRoundTrip:
 
 
 class TestGzipCompression:
+    @pytest.mark.t2_tenant
     def test_file_format(self, populated_db: T3Database, tmp_path: Path):
         out, _ = _export(populated_db, "code__test", tmp_path)
         with open(out, "rb") as f:
@@ -423,6 +425,7 @@ class TestPagination:
 # ── Unit: service-mode export (GH #1373) ─────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestServiceModeExport:
     """GH #1373: ``make_t3()`` returns ``HttpVectorClient`` in production
     (both local and cloud mode, RDR-155 P4a.2) -- ``export_collection``
@@ -597,6 +600,7 @@ class TestPathRemapping:
 # ── Unit: embedding model validation ─────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestEmbeddingModelValidation:
     def test_same_model_succeeds(self, populated_db: T3Database, tmp_path: Path):
         _, _, result = _export_import(
@@ -632,6 +636,7 @@ class TestEmbeddingModelValidation:
 # ── Unit: format version validation ──────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestFormatVersionValidation:
     def test_current_version_accepted(self, populated_db: T3Database, tmp_path: Path):
         out, _ = _export(populated_db, "code__test", tmp_path)
@@ -663,6 +668,7 @@ class TestFormatVersionValidation:
 # ── Unit: include/exclude filters ────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestIncludeExcludeFilters:
     @pytest.fixture
     def filter_db(self, ephemeral_db: T3Database):
@@ -692,6 +698,7 @@ class TestIncludeExcludeFilters:
 
 
 class TestExportAll:
+    @pytest.mark.t2_tenant
     def test_export_all_produces_one_file_per_collection(
         self, ephemeral_db: T3Database, tmp_path: Path,
     ):
@@ -762,6 +769,7 @@ class TestExportImportCLI:
         output = result.output.lower()
         assert check_word in output or "colon" in output or "empty" in output
 
+    @pytest.mark.t2_tenant
     def test_export_single_collection_success(
         self, runner, env_creds, tmp_path, populated_db: T3Database,
     ):
@@ -804,6 +812,7 @@ class TestExportImportCLI:
         assert kwargs["collection_name"].startswith("knowledge__mynotes__")
         assert kwargs["collection_name"] != "mynotes"
 
+    @pytest.mark.t2_tenant
     def test_import_embedding_mismatch_shows_error(
         self, runner, env_creds, tmp_path, populated_db: T3Database,
     ):
@@ -815,6 +824,7 @@ class TestExportImportCLI:
         assert result.exit_code != 0
         assert "mismatch" in result.output.lower() or "error" in result.output.lower()
 
+    @pytest.mark.t2_tenant
     def test_export_all_produces_files(
         self, runner, env_creds, tmp_path, ephemeral_db: T3Database,
     ):
@@ -853,6 +863,7 @@ class TestErrorTypes:
 # ── Empty collection round-trip ──────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestEmptyCollectionRoundTrip:
     def test_empty_export_and_import(self, ephemeral_db: T3Database, tmp_path: Path):
         ephemeral_db.get_or_create_collection("knowledge__empty", strict=False)
@@ -920,6 +931,7 @@ class TestCorruptMsgpackBody:
 # ── Vector-only entries (document=None) ──────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestVectorOnlyImport:
     """Regression for nexus-fxc1: ``taxonomy__centroids`` and similar
     vector-only collections store ``document=None`` and round-trip that
@@ -1033,6 +1045,7 @@ class TestVectorOnlyImport:
 # ── GH #1370 D1: non-conformant chunk id re-hash ────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestChashRehash:
     """Pre-migration ``.nxexp`` exports carry non-32-char chunk ids
     (Chroma-era ids were 16-char hex). The service backend's
@@ -1198,6 +1211,7 @@ class TestEmbeddingDimensionMismatch:
         assert "1024" in msg
         assert "768" in msg
 
+    @pytest.mark.t2_tenant
     def test_assume_model_corrects_wrong_label(
         self, ephemeral_db: T3Database, tmp_path: Path,
     ):
@@ -1232,6 +1246,7 @@ class TestEmbeddingDimensionMismatch:
         assert "384" in msg
         assert "768" in msg
 
+    @pytest.mark.t2_tenant
     def test_legacy_two_segment_target_exempt_from_dims_check(
         self, ephemeral_db: T3Database, tmp_path: Path,
     ):
@@ -1264,6 +1279,7 @@ class TestEmbeddingDimensionMismatch:
 # ── GH #1370 D3: --skip-existing ────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestSkipExisting:
     """A failing batch previously aborted the entire import with no way
     to resume. ``skip_existing=True`` drops records whose id already
@@ -1378,6 +1394,7 @@ class TestUpsertHintWrapping:
 # ── GH #1370: CLI flag wiring for --assume-model / --skip-existing ─────────
 
 
+@pytest.mark.t2_tenant
 class TestImportFlagsCLI:
     @pytest.fixture
     def runner(self):

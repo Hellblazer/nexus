@@ -8,6 +8,9 @@ ARMS=(); CASES=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do ARMS+=("$1"); shift; done
 [ "${1:-}" = "--" ] && shift
 HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$HERE/../lab_grant.sh"
+lab_docker_flags 1   # one container at a time (nexus-kani0)
 HARNESS=$(cd "$HERE/../.." && pwd)
 WT=$(cd "$HARNESS/../../.." && pwd)
 if [ $# -gt 0 ]; then CASES=("$@"); else
@@ -22,7 +25,7 @@ for rep in $(seq 1 "$REPS"); do
       if [ -s "$OUT/exit.txt" ]; then continue; fi
       mkdir -p "$OUT" && chmod 777 "$OUT"
       echo "$(date -u +%FT%TZ) start $arm $case r$rep" >> "$HERE/out/progress"
-      docker run --rm --name "nxsr-$arm-$case-r$rep" \
+      docker run --rm "${LAB_DOCKER_FLAGS[@]+"${LAB_DOCKER_FLAGS[@]}"}" --name "nxsr-$arm-$case-r$rep" \
         -e CLAUDE_CODE_OAUTH_TOKEN -e NX_NO_TELEMETRY=1 -e ARM="$arm" -e CASE="$case" \
         -e ANTHROPIC_MODEL="${AB_MODEL:-claude-opus-5-5}" -e ENABLE_TOOL_SEARCH=true \
         -v "$WT:/src:ro" -v "$HARNESS:/harness:ro" -v "$HERE/plugins:/plugins:ro" -v "$OUT:/out" \

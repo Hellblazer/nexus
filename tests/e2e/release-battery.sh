@@ -106,8 +106,10 @@ fi
 source "$REPO_ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve || exit 2
 
-# Short root on purpose: leg HOMEs nest .config/nexus/postgres under it
-# and a long ${TMPDIR} would push a PG socket path past the platform limit.
+# Short root on purpose: leg HOMEs nest .config/nexus/postgres under it, and
+# keeping the root short keeps every per-leg path (logs, datadirs) short. It is
+# not a unix-socket guard: the bundled PG is TCP-only (unix_socket_directories
+# = '' in src/nexus/db/pg_provision.py), so no PG socket path exists to overflow.
 STAMP="$(date +%Y%m%d-%H%M%S)"
 WORK="/tmp/nxb-$STAMP-$$"
 LOGS="$WORK/logs"

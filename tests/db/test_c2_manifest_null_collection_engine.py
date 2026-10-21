@@ -62,6 +62,9 @@ fixture request needed (same precedent as
 from __future__ import annotations
 
 from tests._catalog_fixture_ops import ActiveCatalog, active_reader, fk_dropped_for_dangling_seed
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 _SEQ = [0]
 

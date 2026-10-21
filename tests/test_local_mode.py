@@ -524,6 +524,7 @@ class TestMakeT3Local:
 # ── Staleness round-trip ──────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestLocalStaleness:
     @pytest.mark.parametrize(
         ("query_hash", "query_model", "expected"),
@@ -657,6 +658,7 @@ class TestCorpusLocalModels:
 
 
 class TestFrecencyOnlyLocalMode:
+    @pytest.mark.t2_tenant
     def test_frecency_only_no_crash(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NX_LOCAL", "1")
         monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))

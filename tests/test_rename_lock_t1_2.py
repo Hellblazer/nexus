@@ -26,6 +26,8 @@ import pytest
 
 from tests._catalog_fixture_ops import register_real_doc_id
 
+pytestmark = pytest.mark.t2_tenant
+
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # and document_aspects.doc_id now carry REAL FKs to
 # catalog_documents(tenant_id, tumbler) via the engine's POST

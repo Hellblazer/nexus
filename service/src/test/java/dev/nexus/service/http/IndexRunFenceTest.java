@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -13,14 +14,7 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -35,11 +29,11 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -101,11 +95,7 @@ class IndexRunFenceTest {
         // grants-nexus-svc (runAlways, last) grants nexus_svc DML on every table
         // it owns, including catalog-020-5's EXECUTE on the two SQL functions.
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         svcDs = buildSvcDataSource();
@@ -153,12 +143,12 @@ class IndexRunFenceTest {
     @Test
     void catalog021Changeset_recordedInDatabaseChangeLog() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM databasechangelog WHERE id LIKE 'catalog-021-%'");
-            rs.next();
-            assertThat(rs.getLong(1))
+            int applied = DSL.using(su, SQLDialect.POSTGRES).fetchCount(
+                DSL.table(DSL.name("public", "databasechangelog")),
+                DSL.field(DSL.name("id"), String.class).like("catalog-021-%"));
+            assertThat(applied)
                 .as("the catalog-021 CHECK-constraint changeset must be recorded as applied")
-                .isEqualTo(1L);
+                .isEqualTo(1);
         }
     }
 
@@ -168,11 +158,12 @@ class IndexRunFenceTest {
         registerDoc(docId);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertThatThrownBy(() -> su.createStatement().execute(
-                    "UPDATE nexus.catalog_documents SET index_state = 'bogus-typo' " +
-                    "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'"))
+            assertThatThrownBy(() -> setIndexState(su, docId, "bogus-typo"))
                 .as("a typo state must be rejected by the CHECK constraint, not silently stored")
-                .isInstanceOf(SQLException.class);
+                .isInstanceOf(org.jooq.exception.DataAccessException.class)
+                .satisfies(e -> assertThat(((org.jooq.exception.DataAccessException) e).sqlState())
+                    .as("23514 is check_violation: the CHECK constraint, not some other failure")
+                    .isEqualTo("23514"));
         }
     }
 
@@ -183,14 +174,20 @@ class IndexRunFenceTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String state : new String[]{"indexing", "complete", "failed"}) {
-                su.createStatement().execute(
-                    "UPDATE nexus.catalog_documents SET index_state = '" + state + "' " +
-                    "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
+                assertThat(setIndexState(su, docId, state)).as("state %s must be stored", state).isEqualTo(1);
             }
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET index_state = NULL " +
-                "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
+            assertThat(setIndexState(su, docId, null)).as("NULL must be stored").isEqualTo(1);
         }
+    }
+
+    /** Superuser UPDATE of one document's index_state, so the CHECK constraint (not the repo) judges it. */
+    private static int setIndexState(Connection su, String docId, String state) {
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.INDEX_STATE, state)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .execute();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -576,8 +573,7 @@ class IndexRunFenceTest {
         // drop/insert/re-add-NOT-VALID idiom used elsewhere in this file).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
 
         Map<String, Object> doc = Map.of(
@@ -586,12 +582,7 @@ class IndexRunFenceTest {
         var result = repo.writeManifestMany(TENANT, List.of(doc), COLLECTION, Map.of(docId, "wmm-refused-hash"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
         assertThat(result.get("docs"))
             .as("the manifest write itself must still succeed — over-work, never under-work")
@@ -651,8 +642,7 @@ class IndexRunFenceTest {
         // the wire, not just at the repo layer.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
 
         var ex = postCatalog("/v1/catalog/manifest/write_many",
@@ -662,12 +652,7 @@ class IndexRunFenceTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
 
         assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
@@ -737,12 +722,8 @@ class IndexRunFenceTest {
 
         try (Connection holder = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            try (var ps = holder.prepareStatement(
-                    "SELECT pg_advisory_xact_lock(hashtext('indexrun:' || ? || ':' || ?))")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, docId);
-                ps.execute();
-            }
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("indexrun:" + TENANT + ":" + docId)))).fetch();
 
             var completed = new java.util.concurrent.CountDownLatch(1);
             var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
@@ -842,18 +823,12 @@ class IndexRunFenceTest {
     private void writeManifestBypassingFk(String docId, List<Map<String, Object>> rows) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
         repo.writeManifest(TENANT, docId, COLLECTION, rows);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 
@@ -871,13 +846,16 @@ class IndexRunFenceTest {
     private void insertChunk1024(String chashHex) throws RuntimeException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-                "VALUES ('" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), " +
-                "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COLLECTION + "'), " +
-                "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
+                .set(CHUNKS.CHUNK_TEXT, "chunk text")
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vecXY(1024, 1f, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

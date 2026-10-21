@@ -112,6 +112,7 @@ class TestCollectionGCCli:
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
 
+    @pytest.mark.t2_tenant
     def test_no_zombies_clean_summary(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:
@@ -126,6 +127,7 @@ class TestCollectionGCCli:
         assert "0" in result.output
         assert "Nothing to gc" in result.output
 
+    @pytest.mark.t2_tenant
     def test_dry_run_lists_zombies_without_deleting(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:
@@ -157,6 +159,7 @@ class TestCollectionGCCli:
                 "code__zombie-leak",
                 "code__live"} <= names
 
+    @pytest.mark.t2_tenant
     def test_apply_deletes_only_zombies(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:
@@ -188,6 +191,7 @@ class TestCollectionGCCli:
         assert "code__live" in names
         assert "knowledge__operator-loaded" in names
 
+    @pytest.mark.t2_tenant
     def test_unreferenced_with_chunks_is_kept_for_review(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:
@@ -211,6 +215,7 @@ class TestCollectionGCCli:
         names = {c["name"] for c in t3_db.list_collections()}
         assert "knowledge__operator-loaded" in names
 
+    @pytest.mark.t2_tenant
     def test_documents_physical_collection_reference_protects_from_delete(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:
@@ -242,6 +247,7 @@ class TestCollectionGCCli:
             "T3 collection from gc-induced deletion"
         )
 
+    @pytest.mark.t2_tenant
     def test_taxonomy_bypass_schema_excluded(
         self, monkeypatch, runner, t3_db, catalog_env,
     ) -> None:

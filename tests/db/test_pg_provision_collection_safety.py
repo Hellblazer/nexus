@@ -92,6 +92,8 @@ def _cold_cache(monkeypatch, tmp_path):
     # Path.home() reads USERPROFILE on Windows, not HOME.
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "virgin-home"))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    # The suite's HOME fence pins this key to the real cache; it outranks both.
+    monkeypatch.delenv("NX_TEST_SUBSTRATE_CACHE", raising=False)
 
 
 def test_download_failure_degrades_to_skip_sentinel(monkeypatch, tmp_path):
@@ -236,6 +238,7 @@ def test_the_provision_leg_caches_under_xdg_cache_home_when_it_is_set(monkeypatc
     _cold_cache(monkeypatch, tmp_path)
     xdg = tmp_path / "xdg"
     monkeypatch.setenv("XDG_CACHE_HOME", str(xdg))
+    monkeypatch.delenv("NX_TEST_SUBSTRATE_CACHE", raising=False)
     seen: list[Path] = []
 
     def _install(tag, cache_dir):
@@ -253,7 +256,21 @@ def test_a_blank_xdg_cache_home_falls_back_to_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "h"))  # what Path.home() reads on Windows
     monkeypatch.setenv("XDG_CACHE_HOME", "  ")
+    monkeypatch.delenv("NX_TEST_SUBSTRATE_CACHE", raising=False)
     assert sf.substrate_cache_root() == tmp_path / "h" / ".cache" / "nexus-test-substrate"
+
+
+def test_the_fence_pin_outranks_xdg_and_home(monkeypatch, tmp_path):
+    """nexus-ld3aa review: NX_TEST_SUBSTRATE_CACHE is how the empty fenced HOME
+    shares the real substrate cache; it wins over XDG_CACHE_HOME and HOME, and a
+    blank value counts as unset."""
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "h"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("NX_TEST_SUBSTRATE_CACHE", str(tmp_path / "pinned"))
+    assert sf.substrate_cache_root() == tmp_path / "pinned"
+    monkeypatch.setenv("NX_TEST_SUBSTRATE_CACHE", "  ")
+    assert sf.substrate_cache_root() == tmp_path / "xdg" / "nexus-test-substrate"
 
 
 def test_a_failed_provision_is_named_in_the_substrate_setup_error(monkeypatch, tmp_path):

@@ -22,6 +22,7 @@ from nexus.commands.enrich import (
     enrich,
 )
 from nexus.db.http_vector_client import HttpVectorClient
+import pytest
 
 
 # --- _dt_crossref_bib: map the live CrossRef flat dict -> nexus bib dict ----
@@ -141,6 +142,7 @@ def _two_chunk_collection(mock_retry: MagicMock) -> MagicMock:
     return mock_retry
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.mcp_client.devonthink.available", return_value=True)
 @patch("nexus.mcp_client.devonthink.dt_resolve_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
@@ -188,6 +190,7 @@ def test_source_dt_gapfills_when_primary_misses(
     assert update_call[-1].kwargs["metadatas"][0]["bib_year"] == 2013
 
 
+@pytest.mark.t2_tenant
 @patch("nexus.mcp_client.devonthink.available", return_value=False)
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")

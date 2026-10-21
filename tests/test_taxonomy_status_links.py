@@ -29,6 +29,8 @@ from nexus.db.t2 import T2Database
 # counters restarting at the same value collide within one engine session.
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _seed(db_path: Path) -> None:
     with T2Database(db_path) as db:

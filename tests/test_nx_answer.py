@@ -128,6 +128,7 @@ class TestMinConfidenceOverride:
         # ``None`` sentinel is a hit at any threshold (RF-11).
         assert _nx_answer_match_is_hit(None, threshold=0.99) is True
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_nx_answer_accepts_min_confidence_kwarg(self):
         """Override flows into plan_match *and* governs the hit check."""
@@ -164,6 +165,7 @@ class TestMinConfidenceOverride:
         # plan_match saw the caller-supplied floor.
         assert captured.get("min_confidence") == 0.50
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_nx_answer_default_threshold_unchanged(self):
         """With no override, the 0.40 floor still matches RDR-079."""
@@ -230,6 +232,7 @@ class TestMinConfidenceOverride:
             "plan_match must never be reached with an invalid floor"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ok_value", [0.0, 0.25, 0.5, 1.0])
     async def test_nx_answer_accepts_boundary_min_confidence(
@@ -303,6 +306,7 @@ class TestSharedStepBindingResolutionHelper:
     rather than two independently hand-maintained copies with no test
     cross-checking they stayed in sync."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_single_query_fast_path_calls_shared_merge_bindings(self, tmp_path):
         import nexus.mcp_infra as _infra
@@ -327,6 +331,7 @@ class TestSharedStepBindingResolutionHelper:
             "shared merge_bindings helper, not a hand-replicated copy"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_single_query_fast_path_uses_plan_step_default_corpus(self, tmp_path):
         """nexus-rl59s (code review [24061] Critical): the single-step
@@ -394,6 +399,7 @@ class TestSingleQueryPlanBindingUnsatisfiable:
     ``except Exception`` (which used to record step_count=1 with no
     telemetry event, wrongly implying one step actually ran)."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_typed_binding_unsatisfiable_records_step_count_zero(self, tmp_path):
         import nexus.mcp_infra as _infra
@@ -465,6 +471,7 @@ class TestSingleQueryUnresolvedVar:
     proved the validation MECHANISM fires but not a concretely reachable
     scenario for this tool."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_unaliased_question_refused_not_queried_as_literal(self, tmp_path):
         import nexus.mcp_infra as _infra
@@ -523,6 +530,7 @@ class TestSingleQueryUnresolvedVar:
 # ── Single-query limit clamp (review-fix) ───────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestSingleQueryLimitClamp:
     """nexus-nyry9.5 review-fix (code-review IMPORTANT #2, T2
     nyry9.5-code-review-2026-08-20): a plan- or caller-influenced
@@ -657,6 +665,7 @@ class TestRunRecording:
         warn.assert_not_called()
         return seen
 
+    @pytest.mark.t2_tenant
     def test_record_run_trace_true(self, tmp_path):
         from nexus.db.t2 import T2Database
         from nexus.plans.runner import StepRecord
@@ -672,6 +681,7 @@ class TestRunRecording:
             assert seen["question"] == "test question"
             assert seen["final_text"] == "the answer"
 
+    @pytest.mark.t2_tenant
     def test_record_run_trace_false_redacts(self, tmp_path):
         from nexus.db.t2 import T2Database
         from nexus.plans.runner import StepRecord
@@ -689,6 +699,7 @@ class TestRunRecording:
             assert seen["question"] == "[redacted]"
             assert seen["final_text"] == "[redacted]"
 
+    @pytest.mark.t2_tenant
     def test_record_run_lands_via_t2_telemetry(self, tmp_path):
         """Regression for nexus-598n + nexus-pyzk7: the MCP call sites write
         through the telemetry *store* (``db.telemetry``), not a raw ``.conn``.
@@ -1141,6 +1152,7 @@ class TestPlanRunTelemetry:
         assert "Error" in str(result)
 
 
+@pytest.mark.t2_tenant
 class TestPlanLibraryMetrics:
     """Direct tests for the library-level metric increments.
 
@@ -1197,6 +1209,7 @@ class TestPlanLibraryMetrics:
 # ── Plan-miss planner (uses claude_dispatch, no pool) ─────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestPlanMissPlanner:
 
     @pytest.mark.asyncio
@@ -1577,6 +1590,7 @@ class TestGrownPlanDimensionalColumns:
 
 class TestNxTidy:
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_returns_summary_string(self, monkeypatch):
         import nexus.operators.dispatch as _mod
@@ -1590,6 +1604,7 @@ class TestNxTidy:
         assert isinstance(result, str)
         assert "Consolidated." in result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_prompt_contains_topic(self, monkeypatch):
         import nexus.operators.dispatch as _mod
@@ -1605,6 +1620,7 @@ class TestNxTidy:
         await nx_tidy(topic="voyage embeddings")
         assert "voyage embeddings" in captured[0]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_calls_claude_dispatch(self, monkeypatch):
         """nx_tidy must route through claude_dispatch, not a pool."""
@@ -1621,6 +1637,7 @@ class TestNxTidy:
         await nx_tidy(topic="test")
         assert dispatch_calls, "claude_dispatch must be called"
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_default_timeout_is_600s(self, monkeypatch):
         """nx_tidy default timeout is 600s (10 min).
@@ -2060,6 +2077,7 @@ def _fake_t2_ctx(tmp_path):
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerEndToEnd:
     """nx_answer() orchestration wiring with fully mocked sub-calls.
 
@@ -2220,6 +2238,7 @@ class TestNxAnswerEndToEnd:
         assert result["answer_shape"] == "error"
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerBindingAlias:
     """Library plans declare ``required_bindings`` like ``[concept]``,
     ``[area, criterion]``, ``[topic]`` etc., but ``nx_answer`` only
@@ -2396,6 +2415,7 @@ class TestNxAnswerBindingAlias:
 class TestNxAnswerFTS5HitPath:
     """FTS5 sentinel (confidence=None) is treated as a hit, not a miss."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_fts5_sentinel_routes_to_plan_run(self, tmp_path):
         """confidence=None match → plan_run called (not inline planner)."""
@@ -2428,6 +2448,7 @@ class TestNxAnswerFTS5HitPath:
 class TestNxAnswerTimeoutHandling:
     """claude_dispatch timeout raises OperatorTimeoutError → user-readable error."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_plan_miss_timeout_returns_readable_string(self, tmp_path):
         """OperatorTimeoutError from inline planner → graceful error return."""
@@ -2458,6 +2479,7 @@ class TestNxAnswerCostAccounting:
     step reports a known cost. Supersedes the old ``TestNxAnswerCostStub``
     class, which pinned the P5-stub-0.0 contract this bead removes."""
 
+    @pytest.mark.t2_tenant
     def test_cost_usd_sums_known_step_costs(self, tmp_path):
         from nexus.db.t2 import T2Database
         from nexus.plans.runner import StepRecord
@@ -2475,6 +2497,7 @@ class TestNxAnswerCostAccounting:
             )
             assert seen["cost_usd"] == pytest.approx(0.035)
 
+    @pytest.mark.t2_tenant
     def test_cost_usd_none_when_no_step_reports_a_known_cost(self, tmp_path):
         """An isolated/bundle-fallback 'llm' StepRecord with cost_usd=None
         (the dispatch layer genuinely could not observe it, per StepRecord's
@@ -2491,6 +2514,7 @@ class TestNxAnswerCostAccounting:
             )
             assert seen["cost_usd"] is None
 
+    @pytest.mark.t2_tenant
     def test_cost_usd_none_when_no_steps_at_all(self, tmp_path):
         """The call sites that never produce a StepRecord at all (planner
         failure before any dispatch, a binding refusal before plan_run,
@@ -2525,6 +2549,7 @@ class TestNxAnswerCostAccounting:
 class TestNxAnswerLatencyProxy:
     """nx_answer with mocked sub-calls completes in <1s (no blocking calls)."""
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_orchestration_has_no_blocking_calls(self, tmp_path):
         """With all I/O mocked, nx_answer must never call a real sleep or
@@ -2687,6 +2712,7 @@ class TestSubagentTimeoutFloor:
         assert "floor=300" in emitted
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerPlannerRetry:
     """nexus-wr5o: 1-shot retry on OperatorOutputError from claude_dispatch.
 
@@ -2995,6 +3021,7 @@ class TestNxAnswerBudgetSeconds:
         assert "budget_seconds" in sig.parameters
         assert sig.parameters["budget_seconds"].default is None
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_unset_budget_does_not_pass_a_deadline_to_plan_run(self, tmp_path):
         """Regression: omitting budget_seconds must leave plan_run's
@@ -3025,6 +3052,7 @@ class TestNxAnswerBudgetSeconds:
 
         assert captured.get("deadline") is None
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_explicit_budget_passes_a_deadline_to_plan_run(self, tmp_path):
         """budget_seconds=N must translate to a real monotonic deadline
@@ -3059,6 +3087,7 @@ class TestNxAnswerBudgetSeconds:
         assert deadline is not None
         assert before + 30.0 <= deadline <= after + 30.0
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_multi_step_no_operator_plan_now_gets_budget_deadline(self, tmp_path):
         """nexus-nyry9.5 (RDR-196 .r5 review-fix, critic CRITICAL, T2
@@ -3115,6 +3144,7 @@ class TestNxAnswerBudgetSeconds:
         )
         assert before + 5.0 <= deadline <= after + 5.0
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_exhausted_returns_marker_text_not_raw_error(self, tmp_path):
         """A budget-exhausted PlanResult must produce the documented
@@ -3147,6 +3177,7 @@ class TestNxAnswerBudgetSeconds:
         assert "[budget exhausted (time) after step 2 of 2 — partial answer]" in result
         assert "a" in result and "b" in result  # retrieved chunk ids surfaced
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_exhausted_includes_partial_operator_text(self, tmp_path):
         """The reconstructed OperatorTimeoutError.partial_text (captured
@@ -3182,6 +3213,7 @@ class TestNxAnswerBudgetSeconds:
 
         assert "reconstructed partial synthesis" in result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_exhausted_structured_envelope_carries_marker_field(self, tmp_path):
         """structured=True must surface budget_exhausted_at_step as a
@@ -3212,6 +3244,7 @@ class TestNxAnswerBudgetSeconds:
         assert result["budget_exhausted_at_step"] == 2
         assert "[budget exhausted (time) after step 2 of 2" in result["final_text"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_exhausted_marker_uses_plan_result_total_planned_steps_field(
         self, tmp_path,
@@ -3251,6 +3284,7 @@ class TestNxAnswerBudgetSeconds:
             f"got: {result!r}"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_planner_phase_exhausts_budget_returns_marker_not_plan_run(
         self, tmp_path,
@@ -3302,6 +3336,7 @@ class TestNxAnswerBudgetSeconds:
             "of 2 — partial answer]"
         ) in result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_planner_phase_exhaustion_structured_envelope_carries_pre_plan_sentinel(
         self, tmp_path,
@@ -3349,6 +3384,7 @@ class TestNxAnswerBudgetSeconds:
             "of 2"
         ) in result["final_text"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_pre_plan_check_survives_malformed_plan_json(self, tmp_path):
         """code-review Important (T2 nyry9.2-code-review-2026-08-20): a
@@ -3387,6 +3423,7 @@ class TestNxAnswerBudgetSeconds:
             "of 0 — partial answer]"
         ) in result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_seconds_applies_to_miss_plus_grown_plan_combo(
         self, tmp_path,
@@ -3464,6 +3501,7 @@ class TestNxAnswerBudgetSeconds:
         )
         assert before + 1.0 <= deadline <= after + 1.0
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_non_budget_run_structured_envelope_field_is_none(self, tmp_path):
         """A normal (non-budget) structured run must carry the new key
@@ -3489,6 +3527,7 @@ class TestNxAnswerBudgetSeconds:
 
         assert result["budget_exhausted_at_step"] is None
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_budget_exhausted_run_records_outcome_as_failure(self, tmp_path):
         """A budget-exhausted run did not complete — per the nexus-yg49g
@@ -3551,6 +3590,7 @@ class TestNxAnswerBudgetSeconds:
 
 class TestNxAnswerBudgetUsdEnforcement:
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_over_cap_warns_and_runs_zero_planner_spend(self, tmp_path):
         """A plan whose predicted cost exceeds the cap must WARN and
@@ -3598,6 +3638,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert len(over_cap_entries) == 1
         assert "the real answer" in struct_result["final_text"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_over_cap_warning_names_remaining_cap_and_spent_when_nonzero(
         self, tmp_path,
@@ -3669,6 +3710,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert "1.0530" in result, f"full cap missing: {result!r}"
         assert "0.5000" in result, f"already-spent amount missing: {result!r}"
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_mid_run_stop_emits_both_shapes_cost_kind(self, tmp_path):
         """A PlanResult reporting a cost-axis exhaustion must produce
@@ -3707,6 +3749,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert struct_result["budget_exhausted_at_step"] == 2
         assert "[budget exhausted (cost) after step 2 of 2" in struct_result["final_text"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_under_budget_completion_emits_no_marker(self, tmp_path):
         """False-positive guard: a normal completion well under the
@@ -3737,6 +3780,7 @@ class TestNxAnswerBudgetUsdEnforcement:
             "fully measured, must carry no warning of any kind either"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_no_estimate_path_warns_and_runs(self, tmp_path):
         """A plan naming a tool the price table has never heard of is
@@ -3781,6 +3825,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert len(no_estimate_entries) == 1
         assert "an actual answer" in struct_result["final_text"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_inline_planner_cost_included_in_running_sum(self, tmp_path):
         """The inline planner's own claude_dispatch cost, captured via
@@ -3870,6 +3915,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert "budget_usd must be > 0" in zero_result
         assert "budget_usd must be > 0" in negative_result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_enforcement_off_restores_pre_p3c_behavior(self, tmp_path, monkeypatch):
         """Flipping BUDGET_ENFORCEMENT_ENABLED back False must restore
@@ -3915,6 +3961,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         )
         assert "a normal completed answer" in low_result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_unknown_cost_steps_surface_the_blind_spot_warning(self, tmp_path):
         """critic Significant 1 (T2 p3c-critique-2026-08-21): a run
@@ -4002,6 +4049,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         assert len(unknown_cost_entries) == 1
         assert "3 of 5" in unknown_cost_entries[0]["detail"]
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_fully_measured_steps_never_trigger_unknown_cost_warning(
         self, tmp_path,
@@ -4037,6 +4085,7 @@ class TestNxAnswerBudgetUsdEnforcement:
 
         assert "budget warning (unknown-cost)" not in result
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_warning_and_exhaustion_marker_co_occur_marker_leads(
         self, tmp_path,
@@ -4098,6 +4147,7 @@ class TestNxAnswerBudgetUsdEnforcement:
             "exhaustion marker must never break it"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_exhausted_warned_and_oversized_keeps_warning_and_marker(
         self, tmp_path, monkeypatch,
@@ -4155,6 +4205,7 @@ class TestNxAnswerBudgetUsdEnforcement:
         )
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerExcludedCollectionsWarning:
     """nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
     the PERSON READING THE ANSWER): a retrieval step's own output can
@@ -4262,6 +4313,7 @@ class TestNxAnswerExcludedCollectionsWarning:
         ] == []
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerDroppedReduceStepsEnvelope:
     """nexus-4h0oh follow-up (code-review T2 [24199]):
     ``PlanResult.dropped_reduce_steps`` never reached the ``nx_answer``
@@ -4431,6 +4483,7 @@ class TestNxAnswerClassifyPlanPrefixedOperatorNames:
 # ── RDR-196 .p1e: structured-envelope steps/cost_usd ────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestStructuredEnvelopeStepBreakdown:
     """nexus-nyry9.11 (RDR-196 .p1e): ``structured=True`` must surface a
     ``steps`` list (same field names as the wire — ``_step_record_to_wire``)

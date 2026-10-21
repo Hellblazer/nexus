@@ -13,8 +13,11 @@ Embeddings are stored as little-endian float32 bytes (numpy tobytes).
 
 nexus-wbfpw.31 (RDR-192 Step 5, client): each record MAY also carry an
 ``owner`` key -- ``{"source_uri": str, "title": str, "content_type": str,
-"position": int}`` -- naming the chunk's LIVE, own-collection catalog
-document at export time and its manifest position within it. This is an
+"position": int, "index_content_hash": str, "manifest_rows": int}`` -- naming
+the chunk's LIVE, own-collection catalog document at export time and its
+manifest position within it; the last two (nexus-mjikf) are that document's
+content key when it is complete ("" otherwise) and its manifest row count, so
+an import can stamp a document it holds whole with the key. This is an
 UNKNOWN key to every importer predating this change (older importers
 ignore unrecognized record fields), so ``FORMAT_VERSION`` is not bumped.
 Without it, an imported chunk has no catalog document or manifest row at
@@ -38,6 +41,7 @@ import fnmatch
 import gzip
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -335,6 +339,16 @@ def _resolve_export_owners(
             "title": entry.title,
             "content_type": entry.content_type,
             "position": position,
+            # nexus-mjikf: what an import needs to stamp the document with its own content key:
+            # the source document's index_content_hash, only when it is complete, and its manifest
+            # row count, so the import can tell a whole document from one whose shared chunks
+            # were written under another owner (the import uses the key only when it holds every row
+            # and one of the document's chunks witnesses the key, _note_source_evidence). The entry is
+            # read after the manifests, and the three reads are not one snapshot: the source is
+            # assumed quiescent during export. A re-index landing between them usually pairs a new
+            # key with old rows whose chunks carry the old key, which the witness check refuses.
+            "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
+            "manifest_rows": len(manifests.get(chosen, [])),
         }
     return owners
 
@@ -651,6 +665,14 @@ def _locate_owner_group(
     if position is None:
         position = group["seen"]
     group["seen"] += 1
+    # nexus-mjikf: the source document's (content key, manifest rows), as long as every record of
+    # the group names the same pair; any disagreement, or a record without it, poisons it to None.
+    pair = (
+        (owner_meta.get("index_content_hash") or "", owner_meta.get("manifest_rows"))
+        if isinstance(owner_meta, dict) else ("", None)
+    )
+    if group.setdefault("source", pair) != pair:
+        group["source"] = None
     return group, position
 
 
@@ -772,7 +794,8 @@ def _prepass_groups(
     target_collection: str,
 ) -> dict[str, dict]:
     """Read the file once and return its owner groups with their record counts (``seen``) and
-    highest position (``maxpos``), never the records: memory is one small dict per group. The
+    highest position (``maxpos``), never the records: memory is one small dict per group, plus the
+    set of positions of a group whose source key could be used (nexus-mjikf, :func:`_note_source_evidence`). The
     import needs both before it writes anything. A document's LAST PAGE is the one that brings its
     received rows up to its count, which is when it is swept and stamped; and a row that claims a
     position already taken goes past the document's highest one, which only a whole-file scan can
@@ -795,7 +818,79 @@ def _prepass_groups(
                         fallback_title=fallback_title, fallback_content_type=fallback_content_type,
                         target_collection=target_collection)
                 group["maxpos"] = max(group.get("maxpos", -1), position)
+                _note_source_evidence(group, meta, position)
     return groups
+
+
+def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
+    """nexus-mjikf: what lets the import trust a group's source key. A record whose chunk carries
+    the key as its ``content_hash`` WITNESSES it: a native index writes the file's hash on its
+    chunks, while a bundle-wide key stamped by a release before nexus-8hhbk, or an 8hhbk unique
+    key, matches no chunk. Two records at one position mean the group is not one whole manifest
+    (a live export can read a record twice and miss another), so the key is dropped."""
+    source = group.get("source")
+    # Track only a group whose key could ever be used, so an old bundle or an incomplete source
+    # costs nothing beyond the group's small dict.
+    if (not source or not isinstance(source[0], str) or not _CONTENT_KEY.fullmatch(source[0])
+            or not isinstance(source[1], int) or isinstance(source[1], bool)):
+        group.pop("positions", None)
+        return
+    if meta.get("content_hash") == source[0]:
+        group["witnessed"] = True
+    positions = group.setdefault("positions", set())
+    if position in positions:
+        group["source"] = None
+        group.pop("positions", None)
+        return
+    positions.add(position)
+
+
+def _whole_source(group: dict) -> tuple[str, Any] | None:
+    """The group's source (key, manifest rows) pair when the import holds that document whole and a
+    record witnessed the key (:func:`_note_source_evidence`): distinct positions exactly 0..rows-1.
+    Anything short of that is None, which gives the document the unique key."""
+    source = group.get("source")
+    if not source or not group.get("witnessed"):
+        return None
+    rows = source[1]
+    if not isinstance(rows, int) or isinstance(rows, bool):
+        return None
+    # Distinct positions, so "exactly 0..rows-1" is a count plus bounds; never build range(rows) from
+    # a number the bundle supplies.
+    positions = group.get("positions") or set()
+    if len(positions) != rows or not all(0 <= p < rows for p in positions):
+        return None
+    return source
+
+
+#: The shape of a content key an import accepts from a bundle (a sha256 hex digest, the form every
+#: native index and nexus-8hhbk's import key take); anything else gets the unique key (nexus-mjikf).
+_CONTENT_KEY: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
+
+
+def _document_completion_hash(
+    file_hash: str, doc_id: str, sources: list[tuple[str, Any] | None] | None = None, rows: int = 0,
+) -> str:
+    """The ``index_content_hash`` an imported document is stamped ``complete`` with.
+
+    The source document's own key (nexus-mjikf) when the import holds that document whole: it came
+    from ONE owner group, every record of the group carried the same (key, manifest rows) pair, the
+    key is non-empty (the source was complete), and the records number exactly the source's manifest
+    rows. The document is then the same content, so it keys same-as with a native copy and a later
+    native ``nx index`` of the same bytes reads it as current.
+
+    Otherwise a hash of this file and this document, which matches no other document (nexus-8hhbk):
+    the file's sha256, stamped on every document as before, made all of one bundle's PDFs share a
+    key, and a document missing rows (a chunk it shares was exported under another owner, a chunk
+    sits at two positions, or the export filtered one out) must not read as current. A chunk's own
+    ``content_hash`` metadata is never used: it is the first writer's value."""
+    if sources is not None and len(sources) == 1 and sources[0] is not None:
+        key, source_rows = sources[0]
+        if (isinstance(key, str) and _CONTENT_KEY.fullmatch(key)
+                and isinstance(source_rows, int) and not isinstance(source_rows, bool)
+                and source_rows == rows):
+            return key
+    return hashlib.sha256(f"nexus-import:{file_hash}:{doc_id}".encode()).hexdigest()
 
 
 def _wire_embedding_model(
@@ -888,6 +983,8 @@ class _OwnerImport:
         self._kept: dict[str, dict[str, Any]] = {}        # tumbler -> chash sets, counts, index_state
         self._doc_of: dict[str, str] = {}                 # group key -> the document it resolved to
         self._doc_figures: dict[str, tuple[int, int]] = {}   # tumbler -> (records, highest position)
+        #: tumbler -> each of its owner groups' source (key, manifest rows) pair, or None (nexus-mjikf)
+        self._doc_sources: dict[str, list[tuple[str, Any] | None]] = {}
         self._group_failed: set[str] = set()              # group keys that did not resolve (reported)
         self._live_legacy: dict[str, Any] = {}
         self._reader: Any = None
@@ -906,7 +1003,7 @@ class _OwnerImport:
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.catalog.multi_document_write import MultiDocumentImportWriter  # noqa: PLC0415 — deferred to avoid import cycle
         self._reader = make_catalog_reader()
-        self._writer = make_catalog_writer(priority="interactive")
+        self._writer = make_catalog_writer()
         self._import_writer = MultiDocumentImportWriter(
             self._writer, collection=self.collection_name, content_hash=self.file_hash,
             embedding_model=self.embedding_model, force_re_embed=True, metadata_merge=True,
@@ -1004,6 +1101,7 @@ class _OwnerImport:
             self._doc_of[key] = doc
             total, top = self._doc_figures.get(doc, (0, -1))
             self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
+            self._doc_sources.setdefault(doc, []).append(_whole_source(g))
 
     # ── one page ──────────────────────────────────────────────────────────────
 
@@ -1183,7 +1281,9 @@ class _OwnerImport:
                 }
                 continue
             self._import_writer.register_document(
-                d, total_rows=total, max_position=max_position, resume=d in resumable)
+                d, total_rows=total, max_position=max_position, resume=d in resumable,
+                completion_hash=_document_completion_hash(
+                    self.file_hash, d, self._doc_sources.get(d), total))
             self._state[d] = "resume" if d in resumable else "write"
 
     # ── end of stream ─────────────────────────────────────────────────────────

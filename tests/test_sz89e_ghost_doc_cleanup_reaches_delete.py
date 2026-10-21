@@ -27,6 +27,8 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents, seed_manifest_chunks
 
+pytestmark = pytest.mark.t2_tenant
+
 _TARGET = "knowledge__sz89e__voyage-context-3__v1"
 _OTHER = "knowledge__elsewhere__voyage-context-3__v1"
 

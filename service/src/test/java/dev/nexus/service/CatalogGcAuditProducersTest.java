@@ -6,6 +6,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -18,12 +19,15 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -79,9 +83,8 @@ class CatalogGcAuditProducersTest {
             // purge_trash / gc_quarantine_orphans EXECUTE are not part of
             // bootstrapServiceRole's fixed grant set (nexus-cbo4a batch 1b) --
             // kept as explicit grants.
-            su.createStatement().execute("GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.purge_trash(interval)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_quarantine_orphans(int, text, text, text, text, int)", SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -109,18 +112,15 @@ class CatalogGcAuditProducersTest {
 
     private void insertManifestRow(Connection su, String tenant, String docId, String chashHex, String collection)
             throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, (SELECT embedding_model FROM nexus.catalog_collections "
-                + "WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setString(3, chashHex);
-            ps.setString(4, collection);
-            ps.setString(5, tenant);
-            ps.setString(6, collection);
-            ps.execute();
-        }
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenant, collection))
+            .execute();
     }
 
     // ── purge_trash: SQL-side producer (catalog-033-1) ─────────────────────────
@@ -134,10 +134,14 @@ class CatalogGcAuditProducersTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES ('"
-                + TENANT + "', '" + docId + "', 'GC Audit Purge Doc', '" + collection + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(seed, TENANT, collection);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, docId)
+                .set(CATALOG_DOCUMENTS.TITLE, "GC Audit Purge Doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .execute();
         }
         vecRepo.upsertChunks(TENANT, collection, List.of(chash), List.of("gc audit purge text"), List.of(Map.of()));
         try (Connection su = pg.createConnection("")) {
@@ -148,9 +152,11 @@ class CatalogGcAuditProducersTest {
         assertThat(repo.deleteDocument(TENANT, docId)).isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + docId + "'");
+            // 60 days back against a 30-day threshold: no clock drift can matter.
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                .execute();
         }
 
         // Nothing recorded for this operation before the purge runs.
@@ -191,21 +197,8 @@ class CatalogGcAuditProducersTest {
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
             for (String c : List.of(dropped)) {
-                var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                    + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setString(3, c);
-                ps.setString(4, TENANT);
-                ps.setString(5, collection);
-                ps.setString(6, "seed text " + c);
-                ps.setString(7, zeroVec);
-                ps.executeUpdate();
+                seedChunk384(su, collection, c);
             }
         }
         repo.upsertDocument(TENANT, Map.of(
@@ -224,20 +217,7 @@ class CatalogGcAuditProducersTest {
         // manifest INSERT below references it).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, kept);
-            ps.setString(4, TENANT);
-            ps.setString(5, collection);
-            ps.setString(6, "seed text " + kept);
-            ps.setString(7, zeroVec);
-            ps.executeUpdate();
+            seedChunk384(su, collection, kept);
         }
 
         // Replace with a manifest dropping `dropped` (unreferenced elsewhere) -- sweep=true.
@@ -298,20 +278,7 @@ class CatalogGcAuditProducersTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
-                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, orphan);
-            ps.setString(4, TENANT);
-            ps.setString(5, collection);
-            ps.setString(6, "seed text " + orphan);
-            ps.setString(7, zeroVec);
-            ps.executeUpdate();
+            seedChunk384(su, collection, orphan);
         }
         // No manifest row for `orphan` -- it is unreferenced, so quarantineOrphans moves it
         // once it is older than the grace window (RDR-192 Step 8).
@@ -563,15 +530,9 @@ class CatalogGcAuditProducersTest {
     private void insertManifestRowBypassingFk(String docId, String chashHex, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             insertManifestRow(su, TENANT, docId, chashHex, collection);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 
@@ -729,5 +690,19 @@ class CatalogGcAuditProducersTest {
                     .isNull();
             }
         }
+    }
+
+    /** One zero-vector {@code embedding_384} chunk under {@code collection} (registered, model {@code minilm-l6-v2-384}). */
+    private static void seedChunk384(Connection su, String collection, String chashHex) {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+            .set(CHUNKS.CHUNK_TEXT, "seed text " + chashHex)
+            .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 }

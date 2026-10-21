@@ -76,6 +76,7 @@ import secrets
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -609,6 +610,17 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
     _save_pending(config_dir, address, keep)
 
 
+def _transport_error_text(exc: BaseException) -> str:
+    """The exception's class and message for a SKIP line, or the class alone when
+    the message carries an ``@`` (a URL with userinfo, nexus-ujbf8): ``http.client``
+    quotes a tail of the password in ``InvalidURL``, and a redirect target is
+    echoed by ``URLError``."""
+    text = str(exc)
+    if "@" in text:
+        return type(exc).__name__ + " (detail withheld: it carries an '@')"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
@@ -626,6 +638,10 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     is already consumed, and the message is gone with nobody having seen it.
     Raising ``_Skip`` instead keeps the record and lets the next prompt recover.
     """
+    if _ep.has_userinfo(base_url):
+        # Resolution refuses such a URL (nexus-ujbf8); this is the backstop for a
+        # caller that got one anyway. No request is built, so nothing can echo it.
+        raise _Skip(f"{route}: the service URL carries credentials (user:password@); not sent")
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{route}"
     req = urllib.request.Request(
@@ -653,7 +669,10 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
                 outcome["body"] = None      # ClaimNotFound: a confirmed negative
             else:
                 outcome["status"] = exc.code
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
+            # HTTPException (InvalidURL, BadStatusLine, IncompleteRead...) is neither
+            # an OSError nor a ValueError: uncaught, it killed this thread, the
+            # outcome stayed empty and the caller read None as a confirmed negative.
             outcome["error"] = exc
 
     thread = threading.Thread(target=_do, daemon=True)
@@ -664,7 +683,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
             f"{route} exceeded its {call_timeout:.1f}s deadline; the prompt is not waiting for it",
         )
     if "error" in outcome:
-        raise _Skip(f"transport failure on {route}: {outcome['error']}")
+        raise _Skip(f"transport failure on {route}: {_transport_error_text(outcome['error'])}")
     if "status" in outcome:
         raise _Skip(
             f"engine returned HTTP {outcome['status']} on {route}; the outcome is "
@@ -995,6 +1014,14 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
         return "cap"
 
 
+def _host_port(url: str) -> str:
+    """``host[:port]`` of *url* for a SKIP line: scheme, userinfo, path and query
+    dropped (nexus-ujbf8)."""
+    authority = (url.split("://", 1)[1] if "://" in url else url).partition("/")[0]
+    host_port = authority.rpartition("@")[2].partition("?")[0].partition("#")[0]
+    return host_port or "<unparseable-endpoint>"
+
+
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     """Resolve ``(base_url, token, is_local_supervisor)``.
 
@@ -1041,7 +1068,7 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
             token = ""
     if not token:
         raise _Skip(
-            f"resolved {base_url} but found no credential: no data-token lease, no "
+            f"resolved {_host_port(base_url)} but found no credential: no data-token lease, no "
             "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
         )
     return base_url, token, is_local

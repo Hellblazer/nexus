@@ -281,4 +281,93 @@ class EmbedderRouterEmbeddingProfileSeedTest {
                 .as("Voyage mode: unmapped content type falls back to voyage-context-3, same as \"unknown\"")
                 .isEqualTo("voyage-context-3");
     }
+
+    // ── RDR-210 Phase 2 Step 3 (nexus-qhclj): the seeded rows follow the PROFILE ─────
+
+    private void assertSeeded(String tenant, EmbeddingProfile expected) {
+        var rows = profileRows(tenant);
+        assertThat(rows.keySet()).containsExactlyInAnyOrder("code", "docs", "rdr", "knowledge", "unknown");
+        expected.contentTypeTokens().forEach((contentType, token) -> {
+            assertThat(rows.get(contentType).get("model"))
+                    .as("%s profile, content type %s", expected, contentType).isEqualTo(token);
+            assertThat(rows.get(contentType).get("dimension"))
+                    .isEqualTo(expected == EmbeddingProfile.BGE ? 768 : 1024);
+        });
+    }
+
+    @Test
+    void voyageProfile_noKey_seedsVoyageTokens_whileOnlyBgeIsBuilt() {
+        String tenant = LOCAL_TENANT + "-p-voyage-nokey";
+        new EmbedderRouter(new FakeBge(), null, "document", EmbeddingProfile.VOYAGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.VOYAGE);
+        assertThat(profileRows(tenant).get("code").get("model")).isEqualTo("voyage-code-3");
+    }
+
+    @Test
+    void bgeProfile_withKey_seedsBge768ForEveryContentType() {
+        String tenant = LOCAL_TENANT + "-p-bge-key";
+        new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.BGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.BGE);
+    }
+
+    @Test
+    void bgeProfile_noBgeFiles_seedsBgeTokens_whileOnlyVoyageIsBuilt() {
+        String tenant = LOCAL_TENANT + "-p-bge-nofiles";
+        new EmbedderRouter(null, "dummy-key", "document", EmbeddingProfile.BGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.BGE);
+    }
+
+    @Test
+    void voyageProfile_withKey_seedsVoyageTokens() {
+        String tenant = LOCAL_TENANT + "-p-voyage-key";
+        new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.VOYAGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.VOYAGE);
+    }
+
+    @Test
+    void bgeProfile_keylessWithBge_seedsBge() {
+        String tenant = LOCAL_TENANT + "-p-bge-nokey";
+        new EmbedderRouter(new FakeBge(), null, "document", EmbeddingProfile.BGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.BGE);
+    }
+
+    @Test
+    void unsetProfile_keyed_seedsVoyage_keyless_seedsBge() {
+        String keyed = LOCAL_TENANT + "-p-unset-keyed";
+        new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.resolve(null, true))
+                .seedEmbeddingProfile(tenantScope, keyed);
+        assertSeeded(keyed, EmbeddingProfile.VOYAGE);
+
+        String keyless = LOCAL_TENANT + "-p-unset-keyless";
+        new EmbedderRouter(new FakeBge(), null, "document", EmbeddingProfile.resolve("", false))
+                .seedEmbeddingProfile(tenantScope, keyless);
+        assertSeeded(keyless, EmbeddingProfile.BGE);
+    }
+
+    @Test
+    void profileSwitch_bgeToVoyage_overwritesEveryRow_onTheSameRouterShape() {
+        String tenant = LOCAL_TENANT + "-p-switch";
+        new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.BGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.BGE);
+        new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.VOYAGE)
+                .seedEmbeddingProfile(tenantScope, tenant);
+        assertSeeded(tenant, EmbeddingProfile.VOYAGE);
+    }
+
+    @Test
+    void lazySeed_followsTheProfile_notTheBuiltEmbedders() {
+        String tenant = CLOUD_TENANT + "-p-lazy";
+        EmbedderRouter router = new EmbedderRouter(new FakeBge(), "dummy-key", "document", EmbeddingProfile.BGE);
+        router.seedEmbeddingProfileForContentType(tenantScope, tenant, "code");
+        router.seedEmbeddingProfileForContentType(tenantScope, tenant, "not-a-real-content-type");
+        var rows = profileRows(tenant);
+        assertThat(rows.get("code").get("model")).isEqualTo("bge-base-en-v15-768");
+        assertThat(rows.get("not-a-real-content-type").get("model")).isEqualTo("bge-base-en-v15-768");
+    }
 }

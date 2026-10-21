@@ -103,7 +103,7 @@ collections hold at most that many physical rows in the tenant runs exact instea
 walking the shared HNSW index. A malformed value fails the service AT BOOT.
 `NX_OWNERLESS_WRITE_MODE` (RDR-223 Phase 3 Step 2) is `enforce` or `log-only`;
 **unset or blank means `log-only`**, so only an explicit `enforce` refuses a
-`/v1/vectors/upsert-chunks` or `/store-put` write whose chashes have no live
+`/v1/vectors/upsert-chunks` write whose chashes have no live
 manifest row (422, `reason: ownerless_chunk_write`). In `log-only` the write
 proceeds, and the engine logs `ownerless_chunk_write_would_refuse` (once per
 route, tenant and collection per minute, with the request's `User-Agent` and

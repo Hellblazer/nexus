@@ -738,15 +738,13 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         // shape) so it is live again (unvalidated) for the rest of this test.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
         catalogRepo.writeManifest(TENANT, "gate2-gc-expire-doc", coll,
             List.of(Map.of("position", 0, "chash", refChash, "chunk_index", 0)));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
         // unrefChash deliberately has NO manifest row anywhere.
 
@@ -865,7 +863,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // is exactly this test's SUBJECT, so bypass the FK locally: drop
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                              CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
                              CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
@@ -874,9 +872,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                          ghostChash.getBytes(StandardCharsets.US_ASCII), coll,
                          PgContainerHelper.collectionModel(suCtx, TENANT, coll))
                  .execute();
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
         // Real production tombstone path (CatalogRepository.deleteDocument),
         // not a raw UPDATE — matches Order 45's own discipline. Soft
@@ -982,7 +978,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // is exactly this test's SUBJECT, so bypass the FK locally: drop
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                              CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
                              CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
@@ -990,9 +986,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                  .values(TENANT, "gate2-control-doc", 0, ghostChash.getBytes(StandardCharsets.US_ASCII), coll,
                          PgContainerHelper.collectionModel(suCtx, TENANT, coll))
                  .execute();
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
 
         try (Connection su = pg.createConnection("")) {

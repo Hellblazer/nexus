@@ -9,8 +9,8 @@ the RDR-144 384->768 migration originally called bare ``db.delete_collection``
 and so orphaned the old collection's catalog rows (doctor FAILs:
 t3-vs-catalog + collections-drift).
 
-This module is the single source of truth for that cascade so both the delete
-verb and the migration leave the same clean state. Pure (no ``click``):
+This module is the single source of truth for that cascade; its callers are
+``nx collection delete``, ``prune`` and ``reindex``. Pure (no ``click``):
 returns counts; callers render. Every step is best-effort so a partial
 environment (no catalog, no daemon) still deletes what it can.
 """
@@ -30,8 +30,8 @@ class CascadeCounts:
     ``failures`` carries a human-readable message for each derived-state step
     that raised. The physical T3 delete still happens (or already happened),
     but a non-empty ``failures`` means orphan rows may remain; callers should
-    surface it (``nx collection delete`` echoes to stderr, the migration folds
-    it into its outcome). Silence here was the regression both P4-follow-up
+    surface it (``nx collection delete``, ``prune`` and ``reindex`` echo it to
+    stderr). Silence here was the regression both P4-follow-up
     reviewers flagged.
     """
 
@@ -50,6 +50,10 @@ class CascadeCounts:
     quarantine_chunks_deleted: int = 0
     #: T3 chunk rows the engine deleted from the collection itself (its ``chunks`` count).
     chunks_deleted: int = 0
+    #: True when the engine's single-transaction deleteCollection raised (or
+    #: timed out): the delete is UNCONFIRMED, not merely missing derived rows.
+    #: Callers must not report the collection as deleted (nexus-oq5gd).
+    service_delete_failed: bool = False
     failures: list[str] = field(default_factory=list)
 
 
@@ -77,15 +81,16 @@ def purge_collection_cascade(
     """Delete T3 collection *name* and cascade-purge all derived state.
 
     ``db`` is a ``T3Database`` (or any object exposing
-    ``delete_collection(name)``). The T3 delete tolerates an already-absent
-    collection (``t3_absent=True``) and still runs the cascade so a prior
-    half-delete is cleaned up.
+    ``delete_collection(name)``). The engine answers an already-absent
+    collection with zero counts, so the cascade still runs and a prior
+    half-delete (or an unconfirmed one that committed) is cleaned up.
 
     The engine deletes the origin's rows in its ``quarantine-`` siblings with
     it (audited, nexus-wbfpw.71). ``keep_quarantine=True`` asks it not to: for
     a caller that re-registers the SAME name straight away
     (``nx collection reindex``), where taking the rows would destroy
-    restorable data for nothing.
+    restorable data for nothing. It also keeps the empty retired rows that
+    name the collection as successor (rename redirects, nexus-s80u9).
     """
     counts = CascadeCounts()
 
@@ -135,4 +140,8 @@ def purge_collection_cascade(
     except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")
+        counts.service_delete_failed = True
+        # The delete is unconfirmed (it may not have committed), so the pipeline buffer of what may still be a
+        # live collection is left alone; a re-run of the delete takes it once the service confirms (nexus-69n4q).
+        return counts
     return _purge_pipeline_db(name, counts)

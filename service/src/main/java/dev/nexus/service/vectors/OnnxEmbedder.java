@@ -12,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.LongBuffer;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -92,12 +91,8 @@ public final class OnnxEmbedder implements Embedder {
             this.session = ortEnv.createSession(modelPath, sessionOpts);
 
             // DJL HuggingFace tokenizer: truncation to maxLength=256
-            this.tokenizer = HuggingFaceTokenizer.builder()
-                    .optTokenizerPath(Path.of(tokenizerPath))
-                    .optMaxLength(MAX_SEQ_LEN)
-                    .optTruncation(true)
-                    .optPadding(false)   // we pad in embed() so batch works correctly
-                    .build();
+            // nexus-17jvq: through LocalTokenizers, never the DJL builder directly. Padded in embed() so batch works.
+            this.tokenizer = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
 
             log.info("event=onnx_embedder_loaded model={} tokenizer={}", modelPath, tokenizerPath);
         } catch (Exception e) {

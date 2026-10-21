@@ -1,10 +1,10 @@
 package dev.nexus.service;
 
+import java.util.HexFormat;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -17,12 +17,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -232,7 +229,6 @@ class ChunksRlsBehavioralTest {
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantInsert_blockedByWithCheck(int dim) {
         String col = colFor("code", "withcheck", dim);
-        String vec = vectorLiteral(dim);
 
         // Seed a legitimate row for tenant-a.
         insertChunk(dim, TENANT_A, col, "chash-wc-own-" + dim, "own row", dim);
@@ -246,11 +242,14 @@ class ChunksRlsBehavioralTest {
         // Attempt cross-tenant INSERT inside tenant-a's scope: must throw.
         assertThatThrownBy(() ->
             tenantScope.withTenant(TENANT_A, ctx -> {
-                ctx.execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-                    " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") " +
-                    "VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)",
-                    TENANT_B, col, padChash("chash-wc-cross-" + dim), modelFor(dim), "cross-tenant inject", vec);
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT_B)
+                    .set(CHUNKS.COLLECTION, col)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(padChash("chash-wc-cross-" + dim)))
+                    .set(CHUNKS.EMBEDDING_MODEL, modelFor(dim))
+                    .set(CHUNKS.CHUNK_TEXT, "cross-tenant inject")
+                    .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                    .execute();
                 return null;
             })
         ).as("INSERT with tenant_id='tenant-b' inside tenant-a scope must be rejected by RLS WITH CHECK")
@@ -291,9 +290,11 @@ class ChunksRlsBehavioralTest {
         // PK (tenant_id, collection, chash) already scopes this UPDATE to exactly one row.
         assertThatThrownBy(() ->
             tenantScope.withTenant(TENANT_A, ctx -> {
-                ctx.execute(
-                    "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET tenant_id = ? WHERE chash = decode(?, 'hex') AND collection = ?",
-                    TENANT_B, padChash("chash-wcu-own-" + dim), col);
+                ctx.update(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT_B)
+                    .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(padChash("chash-wcu-own-" + dim))))
+                    .and(CHUNKS.COLLECTION.eq(col))
+                    .execute();
                 return null;
             })
         ).as("UPDATE setting tenant_id to tenant-b inside tenant-a scope must be rejected by RLS WITH CHECK")
@@ -342,9 +343,7 @@ class ChunksRlsBehavioralTest {
         // First borrow: stamp tenant-a via withTenant (SET LOCAL, commits, returns conn).
         leakScope.withTenant(TENANT_A, ctx -> {
             // Verify the GUC is active during this txn (sanity check).
-            var result = ctx.fetch("SELECT current_setting(?, true) AS guc",
-                                   TenantConstants.GUC_NAME);
-            assertThat(result.get(0).get("guc", String.class))
+            assertThat(gucOf(ctx))
                 .as("GUC must be set to tenant-a inside withTenant")
                 .isEqualTo(TENANT_A);
             return null;
@@ -354,31 +353,15 @@ class ChunksRlsBehavioralTest {
         // it is the same physical connection). No GUC stamping occurs in this block.
         try (Connection conn = leakDs.getConnection()) {
             // GUC must be NULL or empty (SET LOCAL was txn-local; commit cleared it).
-            String gucValue;
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT current_setting(?, true) AS guc")) {
-                ps.setString(1, TenantConstants.GUC_NAME);
-                try (ResultSet rs = ps.executeQuery()) {
-                    rs.next();
-                    gucValue = rs.getString("guc");
-                }
-            }
+            String gucValue = gucOf(DSL.using(conn, SQLDialect.POSTGRES));
             assertThat(gucValue == null || gucValue.isEmpty())
                 .as("GUC must be NULL or empty on re-borrowed connection (no SET LOCAL bleed): got '" + gucValue + "'")
                 .isTrue();
 
             // RLS must apply fail-closed on the unstamped connection. embedding_<dim>
             // IS NOT NULL scopes to this parameterized run's rows only (unified table).
-            long leakCount;
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND "
-                    + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-                ps.setString(1, col);
-                try (ResultSet rs = ps.executeQuery()) {
-                    rs.next();
-                    leakCount = rs.getLong(1);
-                }
-            }
+            long leakCount = DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(col), VectorSeeds.chunkEmbedding(dim).isNotNull());
             assertThat(leakCount)
                 .as("Unstamped re-borrowed connection must see 0 rows in nexus.chunks (dim=" + dim + ", fail-closed)")
                 .isEqualTo(0L);
@@ -407,8 +390,10 @@ class ChunksRlsBehavioralTest {
         // No embedding_<dim> guard needed: chash is dim-suffixed, so the PK already
         // scopes this DELETE to exactly one row.
         int deleted = tenantScope.withTenant(TENANT_B, ctx ->
-            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
-                        padChash("chash-del-own-" + dim), col));
+            ctx.deleteFrom(CHUNKS)
+                .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(padChash("chash-del-own-" + dim))))
+                .and(CHUNKS.COLLECTION.eq(col))
+                .execute());
         assertThat(deleted)
             .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
             .isEqualTo(0);
@@ -420,8 +405,10 @@ class ChunksRlsBehavioralTest {
 
         // The owner can delete its own row: exactly 1 affected.
         int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
-                        padChash("chash-del-own-" + dim), col));
+            ctx.deleteFrom(CHUNKS)
+                .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(padChash("chash-del-own-" + dim))))
+                .and(CHUNKS.COLLECTION.eq(col))
+                .execute());
         assertThat(ownDelete)
             .as("owner DELETE must affect exactly 1 row")
             .isEqualTo(1);
@@ -444,22 +431,11 @@ class ChunksRlsBehavioralTest {
     }
 
     /**
-     * Build a vector literal string of exactly {@code dim} components, all 0.1.
-     * Format: {@code '[0.1,0.1,...,0.1]'} (pgvector cast-safe string).
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "[", "]"));
-    }
-
-    /**
      * Insert one chunk row for the given tenant via {@link TenantScope#withTenant}.
      * The embedding vector is dim uniform 0.1 components.
      */
     private void insertChunk(int dim, String tenant, String collection, String chash,
                               String chunkText, int embDim) {
-        String vec = vectorLiteral(embDim);
         // RDR-156 P0.2: chash_len_check requires exactly 32 chars — pad test chashes.
         String paddedChash = padChash(chash);
         tenantScope.withTenant(tenant, ctx -> {
@@ -470,12 +446,15 @@ class ChunksRlsBehavioralTest {
             // requires (the bare two-column raw INSERT this used to run 23502s on
             // lifecycle_state NOT NULL).
             PgContainerHelper.insertCollection(ctx, tenant, collection);
-            ctx.execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-                " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +
-                " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)" +
-                " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, paddedChash, modelFor(dim), chunkText, vec);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, HexFormat.of().parseHex(paddedChash))
+                .set(CHUNKS.EMBEDDING_MODEL, modelFor(dim))
+                .set(CHUNKS.CHUNK_TEXT, chunkText)
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(embDim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
             return null;
         });
     }
@@ -487,10 +466,8 @@ class ChunksRlsBehavioralTest {
      */
     private long tenantCount(int dim, String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                    + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL",
-                collection)
-               .get(0, Long.class));
+            (long) ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull()));
     }
 
     /**
@@ -501,15 +478,9 @@ class ChunksRlsBehavioralTest {
      * for OTHER dims (same unified table post-RDR-191) cannot skew the count.
      */
     private long superuserCount(int dim, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull());
         }
     }
 
@@ -521,16 +492,17 @@ class ChunksRlsBehavioralTest {
      * symmetric with {@link #superuserCount}.
      */
     private long unstampedSvcCount(int dim, String collection) throws SQLException {
-        try (Connection conn = svcDs.getConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
-                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection conn = svcDs.getConnection()) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection),
+                VectorSeeds.chunkEmbedding(dim).isNotNull());
         }
+    }
+
+    /** {@code current_setting(<tenant GUC>, true)}: null when the GUC was never set on the session. */
+    private static String gucOf(DSLContext ctx) {
+        return ctx.select(DSL.function("current_setting", String.class,
+                DSL.val(TenantConstants.GUC_NAME), DSL.inline(true)))
+            .fetchOne(0, String.class);
     }
 
     /**

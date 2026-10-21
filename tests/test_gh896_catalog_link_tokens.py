@@ -654,6 +654,7 @@ def _register_catalog_doc(
     return str(tumbler)
 
 
+@pytest.mark.t2_tenant
 class TestRenderResolvesCatalogLinks:
     def test_resolving_tumbler_renders_footnote(self, tmp_path: Path) -> None:
         from nexus.commands.doc import render_cmd
@@ -860,6 +861,7 @@ class TestRenderResolvesCatalogLinks:
         assert "Catalog References" not in body
 
 
+@pytest.mark.t2_tenant
 class TestValidateFailsOnDanglingTumbler:
     def test_resolving_tumbler_validates_clean(self, tmp_path: Path) -> None:
         from nexus.commands.doc import validate_cmd
@@ -944,6 +946,7 @@ class TestValidateFailsOnDanglingTumbler:
         assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 class TestCatalogServiceOutageThroughCli:
     """nexus-sevlu review item 6: the outage path exercised through the
     actual CLI commands, not just the lower-level helper — monkeypatches

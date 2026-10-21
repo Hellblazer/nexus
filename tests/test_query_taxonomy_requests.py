@@ -26,6 +26,8 @@ import pytest
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.mcp import core
 
+pytestmark = pytest.mark.t2_tenant
+
 _N_TOPICS = 7
 _COLLECTION = "knowledge__tnwm2__minilm-l6-v2__v1"
 

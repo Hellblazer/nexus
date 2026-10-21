@@ -17,11 +17,13 @@ dispatch:
 ``search_cross_corpus`` call per registered collection with a canned
 query; classifies each as:
 
-- ``matched``        — raw>0 AND kept>0. Healthy.
-- ``empty``          — raw==0. Empty or corrupt.
-- ``threshold_drop`` — the collection's nearest real neighbours fall past
-  its threshold (nexus-rc45 class, silent threshold-drop). A WARNING, not
-  an exit-2 failure; see below.
+- ``matched``        — kept>0 (rows the collection contributed to the
+  engine's candidate pool), or raw>0 with nothing dropped by the threshold
+  (a pool-limit cut alone is not a threshold problem). Healthy.
+- ``empty``          — raw==0 AND kept==0. Empty or corrupt.
+- ``threshold_drop`` — kept==0 with dropped>0: the collection's nearest real
+  neighbours fall past its threshold (nexus-rc45 class, silent
+  threshold-drop). A WARNING, not an exit-2 failure; see below.
 - ``model_drift``    — registered ``embedding_model`` metadata
   disagrees with :func:`corpus.voyage_model_for_collection`.
   Regression.
@@ -239,11 +241,23 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
     return out
 
 
-def _default_threshold_for(col: str) -> float | None:
+def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
-    from nexus.search_engine import _threshold_for_collection  # noqa: PLC0415 — deferred import
+    from nexus.search_engine import (  # noqa: PLC0415 — deferred import
+        _engine_is_dual,
+        _threshold_for_collection_model,
+        _voyage_thresholds_active,
+    )
 
-    return _threshold_for_collection(col, load_config())
+    # The same rule search applies. Search gates every threshold on
+    # _voyage_thresholds_active, so on an onnx-local or unknown-mode engine it
+    # filters nothing and the probe must not judge by a threshold search would
+    # not apply. Past the gate, a local-model (bge, MiniLM) collection has no
+    # Voyage-calibrated threshold, and neither has a model-less legacy name on
+    # a dual engine (nexus-ndr0t).
+    if not _voyage_thresholds_active(t3):
+        return None
+    return _threshold_for_collection_model(col, load_config(), dual=_engine_is_dual(t3))
 
 
 def _neighbour_probe(
@@ -276,10 +290,12 @@ def _neighbour_probe(
     """
     import statistics  # noqa: PLC0415 — probe path only
 
-    threshold = (threshold_for or _default_threshold_for)(col)
     nearest: list[float] = []
     seen = kept = 0
     try:
+        # Inside the try: the default rule reads the engine's embedding_mode(),
+        # which may raise, and one collection's failure is its own row.
+        threshold = threshold_for(col) if threshold_for else _default_threshold_for(col, t3)
         for text, self_id in samples:
             rows = search_fn(text, [col], n_results + 1, t3,
                              diagnostics_out=[], threshold_override=float("inf"))
@@ -429,12 +445,19 @@ def run_retrieval_quality_probe(
         diag = diag_list[0]
         per_col = diag.per_collection.get(col, (0, 0, None, None))
         raw, dropped = per_col[0], per_col[1]
-        kept = raw - dropped
-        if raw == 0:
+        # nexus-079ly: rows the collection contributed, which on the
+        # per-collection route is not raw - dropped (the global limit cut and
+        # the lexical union both move it).
+        kept = diag.kept_for(col)
+        if kept > 0:
+            outcome = "matched"
+        elif raw == 0:
             outcome = "empty"
-        elif kept == 0:
+        elif dropped > 0:
             outcome = "threshold_drop"
         else:
+            # Rows came back and the threshold dropped none of them, so the
+            # collection answers; only the pool limit cut them.
             outcome = "matched"
         out.append(
             ProbeResult(

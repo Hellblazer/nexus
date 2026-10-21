@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership guard is opt-in at the repository (a null
  * guard is the unguarded write the contract tests and fixtures rely on), so a handler that forgets
- * to pass one would fail OPEN. This scan closes that for the four guarded methods named in
+ * to pass one would fail OPEN. This scan closes that for the three guarded methods named in
  * {@code GUARDED_METHODS}, by a text match over the main sources: every call of one of them
  * outside the repository itself must be in {@code VectorHandler} and must build its guard with
  * {@code ownershipGuard(}. It is a name match, not a proof about routes: a new repository method
@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 final class OwnershipGuardCoverageScan {
 
     private static final List<String> GUARDED_METHODS = List.of(
-        "upsertChunksWithTokens(", "upsertChunksWithVectors(", "putWithTokens(", "upsertChunks(");
+        "upsertChunksWithTokens(", "upsertChunksWithVectors(", "upsertChunks(");
 
     /** File name to the reason it may call a guarded method without a guard. Empty on purpose. */
     private static final java.util.Map<String, String> ALLOWED_CALLERS = java.util.Map.of();
@@ -148,6 +148,6 @@ final class OwnershipGuardCoverageScan {
             }
         }
         assertThat(problems).as("guard coverage").isEmpty();
-        assertThat(handlerCalls).as("non-vacuity: VectorHandler's three guarded call sites were found").isGreaterThanOrEqualTo(3);
+        assertThat(handlerCalls).as("non-vacuity: VectorHandler's two guarded call sites were found").isGreaterThanOrEqualTo(2);
     }
 }

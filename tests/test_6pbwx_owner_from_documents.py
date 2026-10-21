@@ -35,7 +35,7 @@ def test_slug_named_repo_collection_takes_its_documents_owner_and_is_found_by_ow
     t2_service_env, tmp_path,
 ):
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     repo_root = tmp_path / "arcaneum"
     repo_root.mkdir()
     owner = writer.register_owner(
@@ -71,7 +71,7 @@ def test_slug_named_repo_collection_takes_its_documents_owner_and_is_found_by_ow
 @pytest.mark.integration
 def test_knowledge_collection_owner_is_not_rewritten_to_its_documents_tumbler(t2_service_env):
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     curator = writer.register_owner("knowledge", "curator")
     subject = "6pbwx-distributed-systems"
     name = f"knowledge__{subject}__{_CTX_MODEL}__v1"

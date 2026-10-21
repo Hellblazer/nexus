@@ -132,6 +132,7 @@ class TestPipelineStateBypass:
 # ── pipeline_index_pdf integration ──────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestPipelineIndexPdfForce:
 
     @pytest.fixture
@@ -391,6 +392,7 @@ class TestPipelineIndexPdfForce:
 class TestIndexPdfPassesForce:
     """force from the CLI must reach pipeline_index_pdf."""
 
+    @pytest.mark.t2_tenant
     def test_index_pdf_forwards_force_to_streaming_path(
         self, tmp_path: Path,
     ):

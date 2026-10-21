@@ -8,6 +8,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -20,12 +21,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -134,11 +137,10 @@ class PgVectorTombstoneFilterTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live Doc', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_DEAD + "', 'Dead Doc', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(seed, TENANT, COLLECTION);
+            insertDocument(seed, DOC_LIVE, "Live Doc");
+            insertDocument(seed, DOC_DEAD, "Dead Doc");
         }
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
@@ -183,18 +185,24 @@ class PgVectorTombstoneFilterTest {
      * shared {@link #COLLECTION} constant. */
     private static void insertManifestRow(
             Connection su, String docId, String chashHex, int position, String collection) throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "VALUES (?, ?, ?, decode(?, 'hex'), ?, ?)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, docId);
-            ps.setInt(3, position);
-            ps.setString(4, chashHex);
-            ps.setString(5, collection);
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
             // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
-            ps.setString(6, MODEL);
-            ps.execute();
-        }
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+            .execute();
+    }
+
+    private static void insertDocument(DSLContext seed, String tumbler, String title) {
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .execute();
     }
 
     private static Set<String> ids(List<Map<String, Object>> rows) {
@@ -264,9 +272,7 @@ class PgVectorTombstoneFilterTest {
         // tests below — see the CHASH_SHARED field javadoc for why.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE2 + "', 'Live Doc 2', '" + COLLECTION + "')");
+            insertDocument(DSL.using(su, SQLDialect.POSTGRES), DOC_LIVE2, "Live Doc 2");
         }
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk vector to land BEFORE the manifest rows below.

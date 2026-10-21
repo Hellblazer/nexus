@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: GRANT USAGE ON SCHEMA ${schema} TO ${role}, in Liquibase XML instead of a Java SQL string
+    (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's grant(..).on(..) resolves its
+    target to a Table internally, so it can never name a schema.
+
+    The schema-generic sibling of db.changelog-test-t1-schema-usage.xml. Run through
+    PgContainerHelper#grantSchemaUsage; runAlways, bookkeeping in its own table. ${schema} and ${role} are
+    fixed test literals, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="schema-usage" author="nexus-cbo4a" runAlways="true">
+        <sql>GRANT USAGE ON SCHEMA ${schema} TO ${role}</sql>
+    </changeSet>
+</databaseChangeLog>

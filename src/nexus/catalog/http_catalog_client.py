@@ -87,6 +87,7 @@ import time
 import httpx
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
@@ -545,7 +546,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         #: silently zero the auto-linker for any owner registered later
         #: by another process.
         self._resolve_path_owner_cache: dict[str, dict] = {}
-        _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
+        _log.debug("http_catalog_client.init", endpoint=log_endpoint(self._base_url), tenant=tenant)
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent).
@@ -691,8 +692,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Deleting an origin also deletes its rows in its ``quarantine-`` siblings
         (``quarantine_chunks`` in the result; one gc_audit row per sibling).
         ``keep_quarantine=True`` (nexus-wbfpw.71) leaves them, for a caller that
-        re-registers the SAME name straight away (``nx collection reindex``); the
-        field is only sent when true, so an older engine and an older client see
+        re-registers the SAME name straight away (``nx collection reindex``), and
+        also keeps the empty retired rows that name *name* as successor (rename
+        redirects, nexus-s80u9); the field is only sent when true, so an older engine and an older client see
         no change. For a ``quarantine-*`` name the field is ignored and
         ``quarantine_chunks`` is the rows that collection held.
 
@@ -711,7 +713,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         body: dict[str, Any] = {"name": name}
         if keep_quarantine:
             body["keep_quarantine"] = True
-        result = self._post("/collections/delete", body)
+        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): a blind resend
+        # after a read timeout re-runs a physical delete whose own count then
+        # describes the already-emptied collection, so the caller sees a
+        # smaller (often zero) map for a delete that fully succeeded.
+        result = self._post("/collections/delete", body, idempotent=False)
         return (result or {}).get("deleted", {}) or {}
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1704,8 +1710,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         alias cycle — the server's ``CatalogRepository.MergeRefused``
         message, unwrapped by the shared ``_raise_for_status`` machinery.
         """
+        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): the merge is
+        # effect-idempotent, but a blind resend after a read timeout reports
+        # the already-merged state (zero ``links_remapped`` etc.) as the
+        # outcome of this call.
         result = self._post(
             "/merge", {"duplicate": str(duplicate), "canonical": str(canonical)},
+            idempotent=False,
         )
         return dict(result or {})
 
@@ -1995,7 +2006,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         it propagates the raw ``httpx.HTTPStatusError`` so the CLI verb can
         tell "engine too old" apart from "engine answered".
         """
-        return self._post("/ghost-sweep", {"dry_run": dry_run}) or {}
+        # idempotent=dry_run (nexus-oq5gd, nexus-ll31n sibling): a dry run is
+        # a pure read on the engine and keeps the retry. A LIVE sweep makes
+        # one attempt: a blind resend after a read timeout reports the
+        # post-sweep population (``ghosts_deleted`` ~ 0), not what the first
+        # attempt did.
+        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run) or {}
 
     def gc_audit_list(
         self,

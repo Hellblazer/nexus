@@ -32,6 +32,8 @@ from nexus.context import _repo_collections
 from nexus.corpus import _write_intent_embedding_model
 from nexus.registry import RepoRegistry
 
+pytestmark = pytest.mark.t2_tenant
+
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
 # handler unconditionally seeds the tenant's embedding_profile for the
 # request's content_type from the ENGINE's own configured embedder (bead

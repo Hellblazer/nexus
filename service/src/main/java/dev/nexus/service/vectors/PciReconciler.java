@@ -590,7 +590,10 @@ public final class PciReconciler {
         PciSettings uncapped = new PciSettings(settings.enabled(), b, settings.sweepSeconds(), Integer.MAX_VALUE);
         List<Action> preliminary = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, uncapped);
         long parsed = leaf.indexes().stream().filter(Index::parsed).count();
-        long drops = preliminary.stream().filter(a -> a instanceof Drop).count();
+        // A leftover is not a parsed index (it is not in `parsed`), so its drop frees no cap slot either.
+        long drops = preliminary.stream()
+            .filter(a -> a instanceof Drop d && d.reason() != PciReconcilePlanner.DropReason.REINDEX_LEFTOVER)
+            .count();
         long slots = settings.maxPerLeaf() - (parsed - drops);
         List<String> candidates = preliminary.stream().filter(a -> a instanceof Build)
             .map(a -> ((Build) a).collection()).toList();
@@ -652,6 +655,11 @@ public final class PciReconciler {
             // A router set that still lists the dropped index sends its collection to the serving ef_search with no
             // graph behind it: the unsafe direction. A refresh that failed or was skipped is tried once more.
             refreshSweep("drop", true);
+        } else if (outcome == DdlOutcome.STALE) {
+            // The re-read before the DROP found the leftover valid now or gone: nothing was dropped, so nothing is
+            // counted or logged as a drop. pci_drop_skipped_stale (the session) says which.
+            log.info("event=pci_index_drop_stale leaf={} index={} reason={} detail=\"not dropped; the next pass "
+                + "judges what is there\"", leafId(leaf), drop.name(), drop.reason().label());
         } else {
             log.info("event=pci_index_drop_not_done leaf={} index={} outcome={} detail=\"the next pass retries\"",
                 leafId(leaf), drop.name(), outcome);

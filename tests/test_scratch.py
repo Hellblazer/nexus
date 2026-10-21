@@ -98,6 +98,7 @@ def test_scratch_flag_unflag_missing_raises(t1: T1Database, method: str) -> None
 
 # ── AC5: promote → T2 ────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_scratch_promote_to_t2(t1: T1Database, db: T2Database) -> None:
     doc_id = t1.put("promote me to T2", tags="important")
     report = t1.promote(doc_id, project="myproj", title="promoted.md", t2=db)
@@ -105,11 +106,13 @@ def test_scratch_promote_to_t2(t1: T1Database, db: T2Database) -> None:
     assert r is not None and r["content"] == "promote me to T2" and r["tags"] == "important"
     assert report is not None  # PromotionReport returned
 
+@pytest.mark.t2_tenant
 def test_scratch_promote_missing_raises(t1: T1Database, db: T2Database) -> None:
     with pytest.raises(KeyError):
         t1.promote("no-such-id", project="p", title="t.md", t2=db)
 
 
+@pytest.mark.t2_tenant
 def test_promote_returns_new_when_no_overlap(t1: T1Database, db: T2Database) -> None:
     """promote() returns action='new' when T2 has no matching content."""
     doc_id = t1.put("completely unique content xyzzy42")
@@ -119,6 +122,7 @@ def test_promote_returns_new_when_no_overlap(t1: T1Database, db: T2Database) -> 
     assert report.merged is False
 
 
+@pytest.mark.t2_tenant
 def test_promote_returns_overlap_detected_when_fts5_overlap(t1: T1Database, db: T2Database) -> None:
     """promote() returns action='overlap_detected' when T2 has similar content.
 
@@ -134,6 +138,7 @@ def test_promote_returns_overlap_detected_when_fts5_overlap(t1: T1Database, db: 
     assert report.merged is False  # overlap detected, not actually merged
 
 
+@pytest.mark.t2_tenant
 def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Database) -> None:
     """Content is written to T2 whether action is 'new' or 'overlap_detected'."""
     db.put(project="proj", title="old.md", content="overlap content here")
@@ -145,6 +150,7 @@ def test_promote_writes_to_t2_regardless_of_action(t1: T1Database, db: T2Databas
     assert r["content"] == "overlap content here"
 
 
+@pytest.mark.t2_tenant
 def test_promote_overlap_detected_on_superset_content(t1: T1Database, db: T2Database) -> None:
     """Regression (v3.8.0 shakeout): superset content triggers overlap_detected.
 
@@ -175,6 +181,7 @@ def test_promote_overlap_detected_on_superset_content(t1: T1Database, db: T2Data
     assert report.merged is False
 
 
+@pytest.mark.t2_tenant
 def test_promote_returns_new_when_jaccard_below_threshold(
     t1: T1Database, db: T2Database,
 ) -> None:
@@ -198,6 +205,7 @@ def test_promote_returns_new_when_jaccard_below_threshold(
     )
 
 
+@pytest.mark.t2_tenant
 def test_promote_returns_new_when_content_too_short(
     t1: T1Database, db: T2Database,
 ) -> None:
@@ -213,6 +221,7 @@ def test_promote_returns_new_when_content_too_short(
     assert report.action == "new"
 
 
+@pytest.mark.t2_tenant
 def test_promote_overlap_ignores_unrelated_content(
     t1: T1Database, db: T2Database,
 ) -> None:
@@ -444,6 +453,7 @@ def test_get_return_value_reflects_updated_access_count(t1: T1Database) -> None:
     assert result2["access_count"] == 2
 
 
+@pytest.mark.t2_tenant
 def test_promote_does_not_increment_access_count(t1: T1Database, db: T2Database) -> None:
     """I-2 fix: promote() does not inflate access_count."""
     doc_id = t1.put(content="promote without tracking")

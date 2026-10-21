@@ -2,6 +2,7 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import structlog
@@ -73,9 +74,20 @@ _FRECENCY_WEIGHT: float = 0.3
 # guess — while cloud-mode (and local-mode-opted-into-Voyage) legacy
 # names keep the real per-content-type split. See that function's
 # docstring for the full design.
+#
+# RDR-210 Technical Design 12 (nexus-hf29s): ``bge-base-en-v15-768`` is
+# listed at an INTERIM factor of 1.30 (threshold 0.45/1.30; Sam, 2026-10-18),
+# the largest factor 210-research-17 measured inversion counts for. Its derived
+# best-F1 threshold, 0.325, is a factor of 0.45/0.325 = 1.38. It was an unlisted model before, so it fell
+# to the 0.55 default (0.818) and a bge hit and a Voyage hit competed on
+# scales that disagreed by ~1.7x. The inversion count at the derived 1.38 was
+# NOT run (the per-query distance lists behind 210-research-17 are gone), so
+# the value is held at the largest MEASURED factor until nexus-t189m (P4.3)
+# re-measures on real distances.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
+    "bge-base-en-v15-768": 0.45 / 1.30,
 }
 _CALIBRATION_BASELINE: float = _CALIBRATION_THRESHOLDS_BY_MODEL["voyage-code-3"]
 _CALIBRATION_DEFAULT_THRESHOLD: float = 0.55  # matches config.py's "default" key
@@ -88,9 +100,9 @@ def _calibration_factor_for_model(model: str) -> float:
     ``raw_distance * factor`` rescales onto voyage-code-3's absolute
     range. voyage-code-3 itself gets 1.0 (the baseline, no change); a
     model with a more lenient threshold gets a factor < 1.0, shrinking
-    its distances proportionally. An unrecognized model (anything other
-    than the two Voyage models this table knows) falls to the same
-    "default" bucket ``search_engine._threshold_for_collection`` already
+    its distances proportionally, and a tighter one (bge, interim 1.30) a factor
+    > 1.0. An unrecognized model (anything this table does not list)
+    falls, and logs once that it did, to the same "default" bucket ``search_engine._threshold_for_collection`` already
     uses for an unrecognized collection prefix.
 
     Callers MUST gate on :func:`_resolve_calibration_factors`'s
@@ -98,11 +110,37 @@ def _calibration_factor_for_model(model: str) -> float:
     unconditionally, this function has no way to know whether the
     result set actually spans more than one model.
     """
-    threshold = _CALIBRATION_THRESHOLDS_BY_MODEL.get(model, _CALIBRATION_DEFAULT_THRESHOLD)
+    threshold = _CALIBRATION_THRESHOLDS_BY_MODEL.get(model)
+    if threshold is None:
+        _log_unlisted_model_once(model)
+        threshold = _CALIBRATION_DEFAULT_THRESHOLD
     return _CALIBRATION_BASELINE / threshold
 
 
-def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float]:
+#: Models already reported as unmeasured, so a search that resolves the same
+#: unlisted model for every collection logs it once per process, not per call.
+_UNLISTED_MODELS_LOGGED: set[str] = set()
+
+
+def _log_unlisted_model_once(model: str) -> None:
+    """Say, once per model, that *model* has no measured calibration entry
+    and is scored with the default (RDR-210 Technical Design 12: an
+    unmeasured model keeps the default and logs that it did)."""
+    if model in _UNLISTED_MODELS_LOGGED:
+        return
+    _UNLISTED_MODELS_LOGGED.add(model)
+    _log.warning(
+        "calibration_model_unlisted",
+        model=model,
+        default_threshold=_CALIBRATION_DEFAULT_THRESHOLD,
+        consequence="cross-model distances for this model use the default factor",
+    )
+
+
+def _resolve_calibration_factors(
+    results: list[SearchResult],
+    extra_collections: Iterable[str] = (),
+) -> dict[str, float]:
     """Resolve a distance scale-correction factor per COLLECTION for one
     :func:`apply_hybrid_scoring` call, gated on whether the result set
     actually spans more than one embedding model.
@@ -113,6 +151,11 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
     corpus cloud-mode search), every factor is exactly ``1.0`` — a true
     no-op, not a prefix-derived reshuffle. Only when two or more distinct
     models are actually present does a real per-model factor apply.
+
+    *extra_collections* (nexus-cbg2s) get a factor too, but never vote on the
+    gate: they are collections of rows scored AGAINST *results* as the
+    normalisation window (see :func:`apply_hybrid_scoring`'s ``window``), so
+    the model-count decision stays a property of the window alone.
     """
     from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
@@ -127,11 +170,34 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
 
     collections = {r.collection for r in results}
     models = {_model_for(c) for c in collections}
+    covered = collections | set(extra_collections)
 
     if len(models) <= 1:
-        return dict.fromkeys(collections, 1.0)
+        return dict.fromkeys(covered, 1.0)
 
-    return {c: _calibration_factor_for_model(_model_for(c)) for c in collections}
+    return {c: _calibration_factor_for_model(_model_for(c)) for c in covered}
+
+
+def order_by_calibrated_distance(results: list[SearchResult]) -> list[SearchResult]:
+    """*results* nearest first by raw distance on the calibrated scale, as a new list.
+
+    The order a pool is ranked in when the boosts are off, and the one
+    :func:`nexus.search_engine.apply_ranking_boosts` cuts its boost window from
+    (nexus-cbg2s): in a pool that spans two embedding models a prose row at
+    raw rank 40 can sit above a code row at raw rank 10, so a cut by raw
+    distance would drop a row today's page shows. Within one collection the
+    calibration is a monotone rescale, so the first ``w`` rows of this order
+    all lie among the first ``w`` rows of their own collection: any pool
+    that holds each collection's nearest ``w`` rows yields the same first
+    ``w`` here. That is the property that makes the window independent of
+    pool depth. Ties break on collection then id, so the cut never depends on
+    arrival order. Topic credit is left out on purpose: it can lift a row
+    from beyond a shallow pool, which a cut must not depend on.
+    """
+    factors = _resolve_calibration_factors(results)
+    return sorted(
+        results, key=lambda r: (r.distance * factors.get(r.collection, 1.0), r.collection, r.id),
+    )
 
 
 def min_max_normalize(value: float, window: list[float]) -> float:
@@ -206,6 +272,7 @@ def apply_hybrid_scoring(
     frecency_weight: float = _FRECENCY_WEIGHT,
     file_size_threshold: int = 30,
     catalog: Any | None = None,
+    window: list[SearchResult] | None = None,
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
 
@@ -278,11 +345,22 @@ def apply_hybrid_scoring(
     (backward-compatible).  Pass values from TuningConfig to honour
     per-repo configuration.
 
+    *window* (nexus-cbg2s): score *results* AGAINST these rows instead of
+    against themselves. The distance window, the frecency window and the
+    calibration gate all come from *window*; *results* only supplies the
+    rows being scored. A scored row that lies outside the window's range
+    is clamped (``v_norm`` and ``f_norm`` into [0, 1]) rather than going
+    negative. This is how :func:`nexus.search_engine.apply_ranking_boosts`
+    keeps a page independent of pool depth: the rows beyond its fixed
+    nearest window are scored on the window's scale, never on a scale their
+    own presence would move.
+
     Note: Mutates ``hybrid_score`` on each SearchResult in place before
     returning the sorted list.
     """
     if not results:
         return results
+    basis = results if window is None else window
 
     # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): a search
     # RESULT's collection has live chunks but is NOT guaranteed a catalog
@@ -298,8 +376,10 @@ def apply_hybrid_scoring(
         row = get_collection_row(name)
         return bool(row) and row.get("content_type") == "code"
 
-    is_code_by_collection = {c: _is_code_collection(c) for c in {r.collection for r in results}}
-    has_code = any(is_code_by_collection[r.collection] for r in results)
+    is_code_by_collection = {
+        c: _is_code_collection(c) for c in {r.collection for r in results} | {r.collection for r in basis}
+    }
+    has_code = any(is_code_by_collection[r.collection] for r in basis)
 
     if hybrid and not has_code:
         # Debug, not warning: a library warning reaches a CLI user as a raw
@@ -312,11 +392,13 @@ def apply_hybrid_scoring(
     # the result set shares one embedding model (see
     # _resolve_calibration_factors docstring — this is the local-mode
     # no-op gate).
-    calibration_factors = _resolve_calibration_factors(results)
-    distances = [_effective_distance(r, calibration_factors) for r in results]
+    calibration_factors = _resolve_calibration_factors(
+        basis, extra_collections=() if window is None else {r.collection for r in results},
+    )
+    distances = [_effective_distance(r, calibration_factors) for r in basis]
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
-        for r in results
+        for r in basis
         if is_code_by_collection[r.collection]
     ]
 
@@ -330,6 +412,8 @@ def apply_hybrid_scoring(
         # (nexus-yrc7q #8).
         calibrated = _effective_distance(r, calibration_factors)
         v_norm = 1.0 if len(distances) <= 1 else 1.0 - min_max_normalize(calibrated, distances)
+        if window is not None:
+            v_norm = min(1.0, max(0.0, v_norm))
         if hybrid:
             # nexus-tox2m follow-on: apply vector_weight to EVERY result
             # when hybrid=True, not just code__. Before calibration this
@@ -349,6 +433,8 @@ def apply_hybrid_scoring(
             if is_code_by_collection[r.collection]:
                 f_score = r.metadata.get("frecency_score", 0.0)
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
+                if window is not None:
+                    f_norm = min(1.0, max(0.0, f_norm))
             else:
                 f_norm = 0.0
             r.hybrid_score = hybrid_score(v_norm, f_norm, vector_weight, frecency_weight)

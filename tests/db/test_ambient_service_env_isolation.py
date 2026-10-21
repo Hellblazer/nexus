@@ -36,7 +36,12 @@ _CANARIES = [
     # test-suite-compression P1b (2026-08-05): the memory/telemetry
     # missing-port test moved to a shared parametrized suite — this is the
     # telemetry case of it.
-    "tests/db/test_t2_store_config_contract.py::test_missing_port_raises[telemetry]",
+    # Its child constructs the unresolvable-endpoint error on purpose, and the storage-touch
+    # guard charges a child's touch to the test that spawned it (nexus-kt6kj).
+    pytest.param(
+        "tests/db/test_t2_store_config_contract.py::test_missing_port_raises[telemetry]",
+        marks=pytest.mark.expects_unresolvable_endpoint,
+    ),
     "tests/db/test_om64x_stale_port_recovery.py::TestRecoverEndpointFromLease",
     "tests/db/test_om64x_stale_port_recovery.py::TestTokenStoreRecovery",
     "tests/db/test_om64x_stale_port_recovery.py::TestScratchStoreRecovery",

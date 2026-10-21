@@ -125,7 +125,55 @@ public final class HttpUtil {
         }
     }
 
+    /**
+     * The before-send hooks of exchanges whose handler asked for one, keyed by the exchange object. The JDK
+     * server's {@code HttpExchange.setAttribute} is NOT per exchange: it writes the {@code HttpContext}'s shared
+     * attribute map, and one context serves every {@code /v1/vectors} request, so an attribute would let one
+     * request's hook fire on another's response (and two failing sweeps overwrite each other's). This map is
+     * keyed by exchange identity instead: {@code ExchangeImpl} and {@code HttpExchangeImpl} define no
+     * {@code equals} or {@code hashCode}, so a {@link ConcurrentHashMap} here compares by identity.
+     *
+     * <p>Chosen over a {@code ThreadLocal} because it does not depend on the request staying on one thread, and a
+     * stale entry cannot reach a later request that reuses a pooled thread. An entry is removed when {@link #send}
+     * fires it, and {@link #discardBeforeSend} removes any left over when the handler returns.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<HttpExchange, java.util.function.IntConsumer>
+        BEFORE_SEND = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Arm {@code hook} for {@code exchange}: {@link #send} runs it once, with the status it is about to write, before
+     * it writes anything. A keyed sweep (RDR-222 Phase 1) arms it on failure so its ledger row records the status
+     * the handler's exception ladder really sent, not a second copy of the ladder that could drift from it. Every
+     * response of {@code VectorHandler}'s ladder goes through {@code send}. The caller must be the handler of
+     * {@code exchange} and the handler must call {@link #discardBeforeSend} in a {@code finally}.
+     */
+    static void armBeforeSend(HttpExchange exchange, java.util.function.IntConsumer hook) {
+        BEFORE_SEND.put(exchange, hook);
+    }
+
+    /** Drop any hook still armed for {@code exchange}: the handler returned without sending one. */
+    static void discardBeforeSend(HttpExchange exchange) {
+        BEFORE_SEND.remove(exchange);
+    }
+
+    private static volatile java.util.function.Consumer<HttpExchange> sendObserverForTests;
+
+    /**
+     * Test-only seam (nexus-yye8l.5 round 2): called with the exchange at the very top of {@link #send}, before
+     * the before-send hook is looked up, so a test can hold one request there while another one sends. Default
+     * {@code null}; never set by production code.
+     */
+    public static void setSendObserverForTests(java.util.function.Consumer<HttpExchange> observer) {
+        sendObserverForTests = observer;
+    }
+
     public static void send(HttpExchange exchange, int status, String body) throws IOException {
+        var observer = sendObserverForTests;
+        if (observer != null) observer.accept(exchange);
+        if (!BEFORE_SEND.isEmpty()) {
+            var beforeSend = BEFORE_SEND.remove(exchange);
+            if (beforeSend != null) beforeSend.accept(status);
+        }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         if (bytes.length >= GZIP_MIN_BYTES) {
@@ -320,7 +368,7 @@ public final class HttpUtil {
      *       {@code (tenant, collection)} with no catalog row
      *       ({@link #UNREGISTERED_COLLECTION_REASON}); the body also carries
      *       {@code tenant}, {@code collection} and {@code remedy}.</li>
-     *   <li>{@code ownerless_chunk_write} (422): {@code upsert-chunks} or {@code store-put}
+     *   <li>{@code ownerless_chunk_write} (422): {@code upsert-chunks}
      *       was asked to write a chash with no live manifest row in the collection
      *       ({@link #OWNERLESS_CHUNK_WRITE_REASON}, RDR-223 Phase 3 Step 2); the body also
      *       carries {@code unowned_count}, {@code requested_count} and {@code unowned_chashes}

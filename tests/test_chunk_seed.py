@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``tests/_chunk_seed.py`` (RDR-223 P3.1, bead nexus-z0o2p.23): the one place
 a test builds a ``nexus.chunks`` row with no manifest row, now that the engine
-refuses that write on ``/v1/vectors/upsert-chunks``, ``/store-put`` and
-``/upsert-reference-only`` from Phase 3 on.
+refuses that write on ``/v1/vectors/upsert-chunks`` from Phase 3 on (``/store-put``
+and ``/upsert-reference-only`` are retired and answer 410 Gone).
 
 Real engine substrate (``t2_service_env``). What is pinned here is what every
 moved test leans on: the row is physically stored, it has no live owner, it

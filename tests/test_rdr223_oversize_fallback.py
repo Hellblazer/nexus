@@ -248,6 +248,7 @@ def test_every_fallback_writes_through_the_writer_and_never_touches_the_db(
     assert manifest_hook_calls == []                             # and the manifest hook is skipped
 
 
+@pytest.mark.t2_tenant
 def test_a_single_request_file_is_stamped_after_its_hooks_and_a_refusal_there_is_survived(
     tmp_path, monkeypatch, run,
 ) -> None:
@@ -642,6 +643,7 @@ def test_an_application_error_raised_in_a_transport_handler_without_from_is_not_
     assert _transient(exc) is False
 
 
+@pytest.mark.t2_tenant
 def test_an_endpoint_the_client_could_not_re_resolve_aborts_the_run() -> None:
     """The client's re-resolve gives up with ``ServiceEndpointUnresolvableError`` raised inside
     the ConnectError handler that triggered it; the file is not deferred."""

@@ -62,6 +62,40 @@ final class PartitionScratch {
             "databasechangelog_test_p225_scratch", Map.of());
     }
 
+    // ── per-test fixtures on top of the scratch parents (each a test changelog, run on the owner's connection) ──
+
+    /** A relation squatting on the name a tenant's leaf would get, bound to another tenant ('squatter'). */
+    static void createSquatterLeaf(Connection admin, String leaf, String modelPartition) throws Exception {
+        PgContainerHelper.requireTestIdentifier(leaf);
+        PgContainerHelper.requireTestIdentifier(modelPartition);
+        PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-partition-squatter.xml",
+            "databasechangelog_test_p225_squatter", Map.of("leaf", leaf, "parent", modelPartition));
+    }
+
+    /** {@code nexus.t225_other_part}: the right shape (partitioned by model) under the wrong name. */
+    static void createOtherPartitionedTable(Connection admin) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-other-part.xml",
+            "databasechangelog_test_p225_other_part", Map.of());
+    }
+
+    /** {@code t225_extra} on {@code chunks_new}: RESTRICTIVE, FOR SELECT, TO nexus_svc, USING (collection &lt;&gt; ''). */
+    static void addExtraParentPolicy(Connection admin) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-extra-policy.xml",
+            "databasechangelog_test_p225_extra_policy", Map.of());
+    }
+
+    /** The tenant-creation trigger function attached to {@code t225_tokens}, naming the scratch parents. */
+    static void attachTokenTrigger(Connection admin) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-token-trigger.xml",
+            "databasechangelog_test_p225_token_trigger", Map.of());
+    }
+
+    /** {@code nexus.t225_sleepy()}: SET statement_timeout = '300ms', sleeps 1.2 s. */
+    static void createSleepyFunction(Connection admin) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(admin, "db/changelog-test/db.changelog-test-p225-sleepy.xml",
+            "databasechangelog_test_p225_sleepy", Map.of());
+    }
+
     // ── the oracle: an independent implementation of the naming rule ─────────
 
     static String sha256Hex(String s, int chars) {

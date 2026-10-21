@@ -17,6 +17,8 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -175,9 +177,13 @@ class CatalogHandlerRenameTest {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-src");
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-tgt");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'xm-doc-1', 'XM', 'hren__xm-src') ON CONFLICT DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "xm-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "XM")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "hren__xm-src")
+                .onConflictDoNothing()
+                .execute();
         }
         var resp = post("/v1/catalog/collections/rename",
             "{\"old_name\":\"hren__xm-src\",\"new_name\":\"hren__xm-tgt\",\"cross_model\":true}");
@@ -213,10 +219,13 @@ class CatalogHandlerRenameTest {
     private void seedDocumentIn(String collection, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', '" + tumbler + "', 'seeded', '" + collection + "') "
-                + "ON CONFLICT DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "seeded")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .onConflictDoNothing()
+                .execute();
         }
     }
 
@@ -352,18 +361,21 @@ class CatalogHandlerRenameTest {
         var pool = java.util.concurrent.Executors.newFixedThreadPool(1);
         try (Connection lockConn = pg.createConnection("")) {
             lockConn.setAutoCommit(false);
-            try (var st = lockConn.createStatement()) {
-                st.execute("SELECT 1 FROM nexus.catalog_collections WHERE name='hsup__del409-old' FOR UPDATE");
-            }
+            DSL.using(lockConn, SQLDialect.POSTGRES)
+                .selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.NAME.eq("hsup__del409-old"))
+                .forUpdate()
+                .fetch();
             var supersedeFuture = pool.submit(() ->
                 post("/v1/catalog/collections/supersede",
                     "{\"name\":\"hsup__del409-old\",\"superseded_by\":\"hsup__del409-new\"}"));
             // Let the request's guard reads (unblocked SELECTs) complete before its
             // UPDATE reaches the same row and blocks on the lock this connection holds.
             Thread.sleep(300);
-            try (var del = lockConn.createStatement()) {
-                del.execute("DELETE FROM nexus.catalog_collections WHERE name='hsup__del409-old'");
-            }
+            DSL.using(lockConn, SQLDialect.POSTGRES)
+                .deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.NAME.eq("hsup__del409-old"))
+                .execute();
             lockConn.commit();
 
             var resp = supersedeFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);

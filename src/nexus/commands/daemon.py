@@ -174,11 +174,10 @@ def _render_template(
     argv array intact, mirroring ``storage_service_stack_matcher``'s own
     space-safety discipline on the matching side); on the systemd side
     via ``shlex.quote`` so the same holds through ``ExecStart``'s
-    whitespace-split parser. This closes the false-positive surface the
-    matcher's flagless-matches-default rule otherwise has against a live,
-    env-scoped supervisor spawned some OTHER way on this same box (see
-    that function's docstring) — a unit generated from this point on is
-    argv-explicit, never flagless.
+    whitespace-split parser. A flagless supervisor names no directory in its
+    command line, so the stack matcher can only offer it to the environment
+    check (see that function's docstring) — a unit generated from this point
+    on is argv-explicit, never flagless.
     """
     body = _read_template(name)
     if name.endswith(".plist"):
@@ -289,6 +288,34 @@ def _service_autostart_unit_installed() -> Path | None:
     except click.ClickException:
         return None
     return unit_path if unit_path.exists() else None
+
+
+def _resolved_dirs_equal(wanted: Path, baked: Path, *, windows: bool) -> bool:
+    """Whether two RESOLVED config dirs name the same directory; Windows
+    compares case-insensitively. The one comparison the unit-start path and the
+    login-race message (nexus-iedjp) share."""
+    if windows:
+        return str(wanted).casefold() == str(baked).casefold()
+    return wanted == baked
+
+
+def _service_autostart_unit_serves(config_dir: Path) -> bool:
+    """True when the storage-service autostart unit is installed AND bakes
+    *config_dir* as its ``--config-dir`` (nexus-iedjp). Reads the unit file
+    only, never launchctl/systemctl, and never raises: an unreadable or
+    unresolvable unit is not this directory's supervisor."""
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost
+
+    try:
+        unit_path = _service_autostart_unit_installed()
+        if unit_path is None:
+            return False
+        baked = installer.autostart_unit_config_dir(unit_path).resolve()
+        return _resolved_dirs_equal(
+            Path(config_dir).resolve(), baked, windows=_autostart_platform() == "win32"
+        )
+    except (ValueError, OSError, RuntimeError):
+        return False
 
 
 #: Hard ceiling on each launchctl/systemctl invocation. A hung supervisor
@@ -854,7 +881,7 @@ def _start_via_autostart_unit(
         # one-line fallback as an unreadable unit, never a traceback.
         _not_used(f"its --config-dir could not be resolved: {exc}")
         return None
-    if (str(wanted).casefold() != str(baked).casefold()) if windows else wanted != baked:
+    if not _resolved_dirs_equal(wanted, baked, windows=windows):
         _not_used(f"it runs the service for {baked}, not {wanted}")
         return None
 
@@ -1333,6 +1360,14 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         # Printed below, with the refusal; "stopped" or "already stopped"
         # would both be false here.
         pass
+    elif outcome.source == "none" and outcome.unreadable:
+        # nexus-oacd3: a flagless start whose directory could not be read is
+        # left alone, so "already stopped" would be a claim the sweep never
+        # earned. The unreadable-pid warning below names it.
+        click.echo(
+            "No process was identified as this config directory's service, "
+            "but the stop could not be verified."
+        )
     elif outcome.source == "none":
         if outcome.lease_seen:
             click.echo(
@@ -1376,8 +1411,19 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
+    if outcome.unreadable:
+        click.echo(
+            f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
+            "run 'nx daemon service start' without --config-dir and their "
+            "environment could not be read, so it is unknown whether they "
+            "serve this config directory. They were NOT signalled and may "
+            "still be running; stop them by hand if they are this "
+            "directory's service.",
+            err=True,
+        )
     if (
         not outcome.sweep_verified
+        and not outcome.unreadable
         and outcome.source != "process_table_unavailable"
         and not outcome.refused
     ):

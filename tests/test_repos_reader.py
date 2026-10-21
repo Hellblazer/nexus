@@ -141,6 +141,7 @@ def _seed_owner_with_collections(
     return str(owner)
 
 
+@pytest.mark.t2_tenant
 class TestFromCatalog:
     def test_returns_correct_fields_for_registered_repo(
         self, cat: Catalog, repo: Path,
@@ -292,6 +293,7 @@ class TestFromRegistry:
         assert rec.status == "registered"
 
 
+@pytest.mark.t2_tenant
 class TestReadDualShim:
     def test_catalog_wins_when_present(
         self, cat: Catalog, repo: Path, tmp_path: Path,
@@ -374,6 +376,7 @@ class TestReadDualShim:
         assert diffs["code_collection"]["registry"] == "code__myrepo-FAKE"
 
 
+@pytest.mark.t2_tenant
 class TestListReposDual:
     def test_returns_catalog_only_paths_when_no_registry(
         self, cat: Catalog, repo: Path, tmp_path: Path,
@@ -453,6 +456,7 @@ class TestShimWarnGraduation:
         monkeypatch.setenv("NEXUS_REPOS_SHIM_WARN", value)
         assert _shim_log_level() == "warning"
 
+    @pytest.mark.t2_tenant
     def test_fallback_event_fires_at_warning_when_promoted(
         self, cat: Catalog, repo: Path, tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,

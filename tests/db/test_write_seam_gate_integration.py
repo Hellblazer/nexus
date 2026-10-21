@@ -141,7 +141,10 @@ def _chunk_id(text: str) -> str:
 
 # ── Module-scoped Docker pgvector fixture ─────────────────────────────────────
 
-_CONTAINER_NAME = "nexus_write_seam_gate_pg17"
+# One name per process (nexus-e5zsd): each xdist worker that draws a test from this module runs the
+# module fixture in its own process, and a shared name let one worker's pre-clean ``docker rm -f`` kill
+# another worker's live container.
+_CONTAINER_NAME = f"nexus_write_seam_gate_pg17_{os.environ.get('PYTEST_XDIST_WORKER', 'main')}_{os.getpid()}"
 
 
 @pytest.fixture(scope="module")
@@ -168,6 +171,9 @@ def pg_instance():
             "-e", f"POSTGRES_USER={pg_user}",
             "-e", f"POSTGRES_PASSWORD={pg_pass}",
             "-p", f"{pg_port}:5432",
+            # nexus-szyun: PGDATA on a capped tmpfs, as the Java suites do (PgContainerHelper.PGDATA), so a
+            # throwaway cluster never writes WAL to the docker data-root of whatever host runs this.
+            "--tmpfs", "/var/lib/postgresql/data:rw,size=2g",
             "pgvector/pgvector:pg17",
         ],
         check=True, capture_output=True,

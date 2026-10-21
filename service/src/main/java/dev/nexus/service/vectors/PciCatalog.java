@@ -65,13 +65,26 @@ import java.util.regex.Pattern;
  * name matches {@code ^pci_[0-9a-f]{24}$} (the shape {@link #indexName} makes), its access method is {@code hnsw}
  * ({@code pg_am} through {@code pg_class.relam}), its predicate is exactly {@code (collection = '<name>'::text)}, and
  * its leaf's own and parent bounds are single-value LIST bounds. Every other index whose name starts with
- * {@code pci_} is <i>unparsed</i>: an operator-made index ({@code pci_foo}), a REINDEX CONCURRENTLY leftover
- * ({@code pci_<hash>_ccnew}), a non-hnsw index, a hand-edited predicate, or a PostgreSQL that deparses differently.
- * An unparsed index is listed with a {@code null} collection and counted by {@link Snapshot#unparsedCount()} (the
- * status object reports it), whatever its validity. It is never routed to ({@link Snapshot#hasValidIndex} cannot
- * return true for it), never built, and never dropped: no DDL consumer may act on an index that is not
- * {@link Index#parsed()}. This NARROWS the RDR Schema sentence saying operator-made {@code pci_} indexes follow the
- * build and retire rules; the RDR's Schema paragraph carries the narrowed rule (nexus-43ulx.23).
+ * {@code pci_} is <i>unparsed</i>: an operator-made index ({@code pci_foo}), a non-hnsw index, a hand-edited
+ * predicate, a valid REINDEX CONCURRENTLY product ({@code pci_<hash>_ccnew}), or a PostgreSQL that deparses
+ * differently. An unparsed index is listed with a {@code null} collection and counted by
+ * {@link Snapshot#unparsedCount()} (the status object reports it), whatever its validity. It is never routed to
+ * ({@link Snapshot#hasValidIndex} cannot return true for it), never built, and never dropped: no DDL consumer may act
+ * on an index that is not {@link Index#parsed()}. This NARROWS the RDR Schema sentence saying operator-made
+ * {@code pci_} indexes follow the build and retire rules; the RDR's Schema paragraph carries the narrowed rule
+ * (nexus-43ulx.23).
+ *
+ * <p><b>REINDEX CONCURRENTLY leftovers</b> (Sam, 2026-10-18, nexus-rn1yd; T2
+ * {@code nexus_rdr/227-decision-4-amendment-reindex-leftovers}). One carve-out from the unparsed rule: an index named
+ * {@code ^pci_[0-9a-f]{24}_cc(new|old)[0-9]*$} (PostgreSQL's REINDEX CONCURRENTLY names for a builder index; the
+ * digits come from {@code ChooseRelationName} on a collision) that is {@code indisvalid} false and passes every OTHER
+ * condition of the parsed rule (hnsw, parsing predicate, both leaf bounds parsed, {@code standard_conforming_strings}
+ * on) is a <i>leftover</i>: {@link Index#leftover()} true, {@link Index#leftoverOf()} the collection its predicate
+ * selects. It stays NOT parsed in the routing sense ({@link Index#parsed()} false, never routed to, never counted
+ * against a cap, never taken as "has a pci_ index" for build eligibility) and is counted by
+ * {@link Snapshot#reindexLeftoverCount()} INSTEAD of {@link Snapshot#unparsedCount()}, so no index is counted twice.
+ * The reconciler drops it. A VALID {@code _ccnew} or {@code _ccold}, and every other unparsed index, keep decision 4:
+ * never touched. The attribution is {@link #leftoverCollection}, beside {@link #attributedCollection}.
  *
  * <p><b>Deparse depends on a setting.</b> {@code pg_get_expr} writes string literals according to
  * {@code standard_conforming_strings} (backslashes are doubled when it is off). The read takes the setting in the same
@@ -94,6 +107,9 @@ public final class PciCatalog {
     /** The shape of every name {@link #indexName} makes; any other {@code pci_} name is not the builder's. */
     private static final Pattern BUILDER_NAME = Pattern.compile("^pci_[0-9a-f]{24}$");
 
+    /** What REINDEX CONCURRENTLY makes of a builder name: {@code _ccnew} or {@code _ccold}, then a collision counter. */
+    private static final Pattern LEFTOVER_NAME = Pattern.compile("^pci_[0-9a-f]{24}_cc(?:new|old)[0-9]*$");
+
     /** The only access method the router and the builder deal in. */
     private static final String ACCESS_METHOD = "hnsw";
 
@@ -104,14 +120,38 @@ public final class PciCatalog {
     /**
      * One {@code pci_} index on a leaf.
      *
-     * @param name       the index name
-     * @param valid      {@code pg_index.indisvalid}; false while a concurrent build runs and after one fails
-     * @param collection the collection its predicate selects, or {@code null} when the index is unparsed
+     * @param name         the index name
+     * @param valid        {@code pg_index.indisvalid}; false while a concurrent build runs and after one fails
+     * @param collection   the collection its predicate selects, or {@code null} when the index is unparsed
+     * @param leftoverOf   the collection its predicate selects when the index is a REINDEX CONCURRENTLY leftover
+     *                     (see the class comment), else {@code null}; never set together with {@code collection}, and
+     *                     never set on a valid index (the constructor refuses both)
      */
-    public record Index(String name, boolean valid, String collection) {
-        /** False for an unparsed index, which no consumer may route to, build or drop. */
+    public record Index(String name, boolean valid, String collection, String leftoverOf) {
+        public Index {
+            if (collection != null && leftoverOf != null) {
+                throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
+            }
+            if (valid && leftoverOf != null) {
+                // A leftover is INVALID by definition (leftoverCollection refuses a valid index). Refusing the pair
+                // here means no consumer, planner or executor, can ever be handed a valid index as a leftover.
+                throw new IllegalArgumentException("a valid index is never a REINDEX CONCURRENTLY leftover: " + name);
+            }
+        }
+
+        /** An index that is parsed or plain unparsed, not a leftover. */
+        public Index(String name, boolean valid, String collection) {
+            this(name, valid, collection, null);
+        }
+
+        /** False for an unparsed index and for a leftover: no consumer may route to or build against it. */
         public boolean parsed() {
             return collection != null;
+        }
+
+        /** True for a REINDEX CONCURRENTLY leftover, the one kind of non-parsed index the reconciler drops. */
+        public boolean leftover() {
+            return leftoverOf != null;
         }
     }
 
@@ -142,6 +182,7 @@ public final class PciCatalog {
         private final int validCount;
         private final int invalidCount;
         private final int unparsedCount;
+        private final int reindexLeftoverCount;
 
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
@@ -149,9 +190,12 @@ public final class PciCatalog {
             int validIndexes = 0;
             int invalidIndexes = 0;
             int unparsedIndexes = 0;
+            int leftoverIndexes = 0;
             for (Leaf leaf : this.leaves) {
                 for (Index index : leaf.indexes()) {
-                    if (!index.parsed()) {
+                    if (index.leftover()) {
+                        leftoverIndexes++;
+                    } else if (!index.parsed()) {
                         unparsedIndexes++;
                     } else if (index.valid()) {
                         validIndexes++;
@@ -165,6 +209,7 @@ public final class PciCatalog {
             this.validCount = validIndexes;
             this.invalidCount = invalidIndexes;
             this.unparsedCount = unparsedIndexes;
+            this.reindexLeftoverCount = leftoverIndexes;
         }
 
         /**
@@ -219,9 +264,17 @@ public final class PciCatalog {
             return invalidCount;
         }
 
-        /** {@code pci_} indexes that failed any part of the parsed rule, whatever their validity. */
+        /**
+         * {@code pci_} indexes that failed any part of the parsed rule, whatever their validity, EXCLUDING the
+         * REINDEX CONCURRENTLY leftovers, which {@link #reindexLeftoverCount()} counts instead.
+         */
         public int unparsedCount() {
             return unparsedCount;
+        }
+
+        /** Invalid {@code _ccnew}/{@code _ccold} leftovers of a builder index (nexus-rn1yd); not in any other count. */
+        public int reindexLeftoverCount() {
+            return reindexLeftoverCount;
         }
     }
 
@@ -283,6 +336,11 @@ public final class PciCatalog {
         return name != null && BUILDER_NAME.matcher(name).matches();
     }
 
+    /** Whether {@code name} has the shape REINDEX CONCURRENTLY gives a builder index's leftover. */
+    static boolean isLeftoverName(String name) {
+        return name != null && LEFTOVER_NAME.matcher(name).matches();
+    }
+
     /**
      * The collection an index selects, from its deparsed predicate ({@code pg_get_expr(indpred, indrelid)}), which
      * for the builder's indexes reads {@code (collection = '<name>'::text)}. A quote inside the name is doubled in
@@ -307,6 +365,23 @@ public final class PciCatalog {
                                                  boolean leafBoundsParsed, String standardConformingStrings) {
         if (!"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)
             || !isBuilderName(indexName)) {
+            return Optional.empty();
+        }
+        return parseCollection(deparsedPredicate);
+    }
+
+    /**
+     * The one decision of the leftover carve-out (nexus-rn1yd): the collection a REINDEX CONCURRENTLY leftover was
+     * made from, or empty when the index is not one. It holds only for an INVALID index whose name is
+     * {@code ^pci_[0-9a-f]{24}_cc(new|old)[0-9]*$} and that passes the same other conditions as
+     * {@link #attributedCollection}: hnsw, a parsing predicate, both leaf bounds parsed and
+     * {@code standard_conforming_strings} {@code on}. A valid index is never a leftover.
+     */
+    static Optional<String> leftoverCollection(String indexName, String accessMethod, String deparsedPredicate,
+                                               boolean leafBoundsParsed, String standardConformingStrings,
+                                               boolean valid) {
+        if (valid || indexName == null || !isLeftoverName(indexName)
+            || !"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)) {
             return Optional.empty();
         }
         return parseCollection(deparsedPredicate);
@@ -460,7 +535,11 @@ public final class PciCatalog {
             // An index cannot be attributed to a (model, tenant) when either bound did not parse.
             String collection = attributedCollection(indexName, method, predicate,
                 model != null && tenant != null, stringsSetting).orElse(null);
-            indexes.add(new Index(indexName, Boolean.TRUE.equals(valid), collection));
+            boolean isValid = Boolean.TRUE.equals(valid);
+            String leftoverOf = collection != null ? null
+                : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
+                    isValid).orElse(null);
+            indexes.add(new Index(indexName, isValid, collection, leftoverOf));
         }
 
         Leaf build() {

@@ -30,6 +30,8 @@ from structlog.testing import capture_logs
 
 from nexus.plans.match import Match
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _match(plan_id: int, confidence: float, *tools: str, name: str = "") -> Match:
     plan_json = json.dumps({"steps": [{"tool": t, "args": {}} for t in tools]})

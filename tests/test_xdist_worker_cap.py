@@ -54,6 +54,8 @@ making a killed battery reap its own clusters.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from tests._xdist_cap import (
@@ -222,3 +224,259 @@ class TestDegradesRatherThanCrashes:
         cfg = Cfg()
         _clamp_xdist_workers(cfg)  # must not raise
         assert cfg.option.numprocesses == 16  # and must not have changed anything
+
+
+class TestMemoryCap:
+    """nexus-vo9qn. The run's tmpfs decision is final, so the worker count must
+    keep the grant from filling: grant memory / a measured per-worker budget."""
+
+    GIB = 1024**3
+
+    def test_the_budget_covers_the_measured_per_worker_peak(self) -> None:
+        from tests._xdist_cap import BYTES_PER_WORKER
+
+        # lab-l, 48 GB, 16 workers peaked 39.4 GB anon incl. shmem (labrun sampler)
+        assert BYTES_PER_WORKER >= 39.4e9 / 16
+        # lab-m, 16 GB, -n 8 peaked 14.5 GB: the budget must not exceed what fits
+        assert BYTES_PER_WORKER >= 14.5e9 / 8
+        # The FULL Python suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f, figures in MiB): lab-l
+        # at -n auto = 16 workers peaked 47,795 MiB of the 49,152 MiB grant, 2,987 MiB a worker, 1,357 MiB
+        # from exit 137.
+        assert BYTES_PER_WORKER >= self.FULL_SUITE_PEAK_MIB * self.MIB / 16
+
+    MIB = 1024**2
+    FULL_SUITE_PEAK_MIB = 47_795
+
+    def test_a_full_suite_in_lab_l_keeps_two_gib_of_its_grant_free(self) -> None:
+        """Proportional: the measured peak scaled to the capped worker count must leave 2 GiB of the grant.
+        Red at the old 2560 MiB budget, whose 16 workers are the measured 47,795 MiB (1,357 MiB free)."""
+        from tests._xdist_cap import cap_from_memory
+
+        grant = 48 * self.GIB
+        per_worker = self.FULL_SUITE_PEAK_MIB * self.MIB / 16
+        assert cap_from_memory(grant_bytes=grant) * per_worker <= grant - 2 * self.GIB
+
+    @pytest.mark.parametrize(
+        "cls,grant_gib,workers",
+        [("lab-s", 4, 1), ("lab-m", 16, 5), ("lab-6c18g", 18, 5), ("lab-l", 48, 15), ("lab-xl", 96, 30)],
+    )
+    def test_cap_per_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
+
+    def test_lab_l_runs_fifteen_workers_and_lab_m_five(self) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[0] == 15
+        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 5
+
+    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 3)])
+    def test_cap_per_mac_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
+
+    def test_the_clamp_note_names_tmpfs_only_on_linux(self) -> None:
+        # nexus-pnyfq: macOS lab grants carry LAB_MEM_MB, but their clusters are not on tmpfs.
+        from tests._xdist_cap import memory_clamp_note
+
+        linux = memory_clamp_note(requested=8, cap=6, platform="linux")
+        mac = memory_clamp_note(requested=8, cap=4, platform="darwin")
+        assert "tmpfs" in linux and "8 -> 6" in linux
+        assert "tmpfs" not in mac and "no cgroups" in mac and "8 -> 4" in mac
+
+    def test_never_below_one(self) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=1) == 1
+
+    def test_grant_is_the_smaller_of_lab_mem_and_the_cgroup(self) -> None:
+        from tests._xdist_cap import grant_memory_bytes
+
+        env = {"LAB_MEM_MB": "16384"}
+        assert grant_memory_bytes(env=env, cgroup_limit=None) == 16 * self.GIB
+        assert grant_memory_bytes(env=env, cgroup_limit=8 * self.GIB) == 8 * self.GIB
+        assert grant_memory_bytes(env={}, cgroup_limit=12 * self.GIB) == 12 * self.GIB
+        assert grant_memory_bytes(env={}, cgroup_limit=None) is None
+
+    @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
+    def test_a_garbled_lab_mem_is_ignored(self, raw: str) -> None:
+        from tests._xdist_cap import grant_memory_bytes
+
+        assert grant_memory_bytes(env={"LAB_MEM_MB": raw}, cgroup_limit=None) is None
+
+    def test_no_limit_visible_means_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        monkeypatch.delenv("LAB_MEM_MB", raising=False)
+        monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
+        assert mod.effective_memory_cap() is None
+
+    def test_a_visible_grant_caps_and_the_opt_out_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        monkeypatch.setenv("LAB_MEM_MB", str(16 * 1024))
+        monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
+        assert mod.effective_memory_cap() == 5
+        monkeypatch.setenv(mod.NO_CAP_ENV, "1")
+        assert mod.effective_memory_cap() is None
+
+    def test_a_broken_probe_yields_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        def boom():
+            raise OSError("no cgroup")
+
+        monkeypatch.setattr(sub, "cgroup_memory_limit", boom)
+        monkeypatch.delenv(mod.NO_CAP_ENV, raising=False)
+        assert mod.effective_memory_cap() is None
+
+    def test_conftest_clamps_to_the_memory_cap_and_says_why(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import tests._xdist_cap as mod
+        from tests.conftest import _clamp_xdist_workers
+
+        monkeypatch.setattr(mod, "effective_cap", lambda: None)
+        monkeypatch.setattr(mod, "effective_memory_cap", lambda: 6)
+
+        class Opt:
+            numprocesses = 8
+
+        class Cfg:
+            option = Opt()
+
+        cfg = Cfg()
+        _clamp_xdist_workers(cfg)
+        assert cfg.option.numprocesses == 6
+        out = capsys.readouterr().out
+        assert "8 -> 6" in out and "NX_XDIST_NO_CAP" in out
+        # nexus-pnyfq: the tmpfs explanation is Linux's; a macOS grant has no tmpfs clusters.
+        assert ("tmpfs" in out) == sys.platform.startswith("linux"), out
+
+    def test_conftest_leaves_a_request_within_the_memory_cap(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import tests._xdist_cap as mod
+        from tests.conftest import _clamp_xdist_workers
+
+        monkeypatch.setattr(mod, "effective_cap", lambda: None)
+        monkeypatch.setattr(mod, "effective_memory_cap", lambda: 16)
+
+        class Opt:
+            numprocesses = 16
+
+        class Cfg:
+            option = Opt()
+
+        cfg = Cfg()
+        _clamp_xdist_workers(cfg)
+        assert cfg.option.numprocesses == 16
+
+
+class TestSetWorkerCount:
+    """nexus-vo9qn. xdist 3.8.0 turns ``-n N`` into ``option.tx = ["popen"] * N``
+    in ``pytest_cmdline_main``, before conftest's ``pytest_configure``, and spawns
+    ``len(tx)`` workers. A clamp that sets ``numprocesses`` only is inert."""
+
+    def test_the_generated_tx_list_follows_the_count(self) -> None:
+        from tests._xdist_cap import set_worker_count
+
+        class Opt:
+            numprocesses = 4
+            tx = ["popen"] * 4
+
+        opt = Opt()
+        set_worker_count(opt, 2)
+        assert opt.numprocesses == 2 and opt.tx == ["popen", "popen"]
+
+    def test_a_hand_written_tx_is_left_alone(self) -> None:
+        from tests._xdist_cap import set_worker_count
+
+        class Opt:
+            numprocesses = 4
+            tx = ["popen", "ssh=box"]
+
+        opt = Opt()
+        set_worker_count(opt, 2)
+        assert opt.numprocesses == 2 and opt.tx == ["popen", "ssh=box"]
+
+
+# A tiny rootdir whose conftest runs the REAL ``_clamp_xdist_workers`` at the real
+# ``pytest_configure`` time, against real xdist; ``setup`` fakes the box.
+_PROBE_CONFTEST = '''
+{setup}
+from tests.conftest import _clamp_xdist_workers
+
+
+def pytest_configure(config):
+    _clamp_xdist_workers(config)
+'''
+_PROBE_TEST = '''
+import pytest
+
+
+@pytest.mark.parametrize("i", range(8))
+def test_p(i):
+    pass
+'''
+
+
+def _run_real_xdist(tmp_path, *, setup: str, env_extra: dict[str, str], n: int):
+    """Run a real ``pytest -n N`` (real xdist workers) in a scratch rootdir and
+    return ``(created, total, output)`` from xdist's "created: A/B workers"."""
+    import os
+    import re
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    (tmp_path / "conftest.py").write_text(_PROBE_CONFTEST.format(setup=setup))
+    (tmp_path / "test_probe.py").write_text(_PROBE_TEST)
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("LAB_MEM_MB", "NX_XDIST_NO_CAP", "PYTEST_ADDOPTS")
+    }
+    env["PYTHONPATH"] = str(repo)
+    env["NX_TEST_T2_SUBSTRATE"] = "none"  # the child needs no engine (nexus-fam6l)
+    env.update(env_extra)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=",
+         "-n", str(n), "-v", f"--basetemp={tmp_path / 'bt'}", str(tmp_path)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=240,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    m = re.search(r"created: (\d+)/(\d+) workers", out)
+    assert m, out
+    return int(m.group(1)), int(m.group(2)), out
+
+
+class TestClampsReallyReduceWorkers:
+    """The fake-Cfg tests above cannot see that the clamp is inert; only a real
+    xdist run can. Each asserts the worker count xdist actually created."""
+
+    def test_the_memory_cap_creates_fewer_workers(self, tmp_path) -> None:
+        # 6600 MiB grant / 3264 MiB per worker = 2 workers (a tighter cgroup can
+        # only lower it).
+        created, total, out = _run_real_xdist(
+            tmp_path, setup="", env_extra={"LAB_MEM_MB": "6600"}, n=4,
+        )
+        assert "clamped 4 ->" in out
+        assert 1 <= created <= 2 and created == total
+
+    def test_the_sysv_cap_creates_fewer_workers(self, tmp_path) -> None:
+        # 32 segments, 22 in use, reserve 8 -> room for 2 workers.
+        setup = (
+            "import tests._xdist_cap as c\n"
+            "c._sysctl_int = lambda name: 32\n"
+            "c.segments_in_use = lambda: 22\n"
+        )
+        created, total, out = _run_real_xdist(tmp_path, setup=setup, env_extra={}, n=4)
+        assert "SysV shared memory" in out
+        assert created == total == 2

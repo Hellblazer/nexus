@@ -757,7 +757,7 @@ the local disk preflight.
 - The Java upsert's conflict target becomes the four-column PK.
 - The no-leaf error is mapped to a 500.
 - A lock timeout (SQLSTATE 55P03) during token issuance is mapped to a retryable 503 in `TokenAdminHandler` and `DataTokenHandler`, not to `HttpUtil`'s default 500.
-- The jOOQ record-count guard is bumped in the same change as the schema. The jOOQ exclude pattern (service/pom.xml `excludes`) lands with the schema change, in the Phase 1 changeset's commit, and covers partition leaves, model partitions, `chunks_retired_225` and the `_new` names (`chunks_new`, `taxonomy_centroids_new` and what is created under them), so only the parents generate classes.
+- The jOOQ record-count guard is bumped in the same change as the schema. The jOOQ exclude pattern (service/pom.xml `excludes`) lands with the schema change, in the Phase 1 changeset's commit, and covers partition leaves, model partitions, `chunks_retired_225` (until `vectors-036-1` dropped it and its exclude, nexus-3wh8d.22) and the `_new` names (`chunks_new`, `taxonomy_centroids_new` and what is created under them), so only the parents generate classes.
 
 #### Step 2: Read path
 
@@ -822,6 +822,8 @@ The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-t
 2026-10-06: `nexus.drop_tenant_partitions(tenant)` exists (changeset `vectors-030-1`, nexus-3wh8d.7) and the runbook calls it, as the schema owner, for its first two statements: it deletes the tenant's manifest, topic-assignment and orphaned-at rows, then DETACHes and DROPs the tenant's leaf under every model partition of `chunks` and `taxonomy_centroids`, and returns the number of leaves dropped. It refuses `default`, a second call returns 0, and it is not SECURITY DEFINER and is granted to no engine role. It does not delete the tenant's tokens: the runbook deletes them afterwards as its own statement.
 
 #### Step 3: Drop `chunks_retired_225` after 14 days
+
+2026-10-21 (as built, nexus-3wh8d.22): changeset `vectors-036-1` (`vectors-036-drop-retired-225.xml`, after `vectors-035`, before the runAlways grants) drops `chunks_retired_225` and `taxonomy_centroids_retired_225`, each with its `_retired_225` indexes, constraints and policies. For each table that exists it logs `vectors-036-1: dropping nexus.<table> (N row(s))` with `RAISE NOTICE` (counted with FORCE RLS switched off, since the migrating role has no BYPASSRLS) and runs `DROP TABLE IF EXISTS`, with no CASCADE, so a dependent view fails the drop and leaves both tables in place. An absent table is skipped. The changeset comment states the DATA EFFECT (irreversible) and the local window: the time between the engine release carrying `vectors-030-1` and the one carrying this changeset, zero for an install that crosses both in one boot. The rollback recreates both tables empty in the shape `vectors-030-1` leaves, because `vectors-030-1`'s rollback raises when `nexus.chunks` is partitioned and a retired table is missing; `P225DropRetiredIntegrationTest` compares columns, indexes, constraints, policies, RLS and FORCE, reloptions, owner and triggers between the walked state and the rolled-back one. The jOOQ exclude for the retired names and the two schema-parity inventory entries are removed in the same change. Not yet run: the PITR-fork walk of the changelog through this changeset, and the cloud deploy.
 
 ### Day 2 Operations
 

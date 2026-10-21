@@ -69,13 +69,13 @@ class MigrationJobsDroppedTest {
     @Test
     void migrationJobsTable_existsPreDrop_absentPostDrop() throws Exception {
         Path preDropRoot = buildPreDropChangelogRoot();
-        // startDedicated(): same rationale as Taxonomy014TenantFkRepointTest's
+        // startEmptyDatabase(): same rationale as Taxonomy014TenantFkRepointTest's
         // identical choice — this test asserts on the migration PROCESS itself
         // (a specific fresh single-pass apply history distinguishing pre- vs
         // post-drop schema state); the shared-cluster start() hands back an
         // already-fully-migrated database (migration-002-1 already applied),
         // which would make every assertion below vacuous.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -123,7 +123,7 @@ class MigrationJobsDroppedTest {
         // unmodified: a bare migrateFull() from a fresh box IS this changeset
         // applying moments after migration-001-1 created the table in the SAME
         // walk.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             assertThatCode(() -> {
                 try (Connection su = pg.createConnection("")) {

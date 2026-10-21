@@ -1,4 +1,5 @@
 {
-  "_comment": "Hooks are registered by conexus/hooks/hooks.json and MUST NOT be re-registered here: a hook registered in both places fires twice (nexus-3h0u6). The RDR-184 orchestration hooks this comment used to name were deleted at cleanup step A1 (nexus-0r1uz).",
-  "hooks": {}
+  "hooks": {},
+  "enabledPlugins": {},
+  "_comment": "Hooks are registered by conexus/hooks/hooks.json and MUST NOT be re-registered here: a hook registered in both places fires twice (nexus-3h0u6). The RDR-184 orchestration hooks this comment used to name were deleted at cleanup step A1 (nexus-0r1uz)."
 }

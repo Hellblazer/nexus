@@ -134,6 +134,7 @@ class _FakeCache:
         return self._hits[:n]
 
 
+@pytest.mark.t2_tenant
 def test_plan_requiring_unavailable_typed_binding_is_not_offered(library) -> None:
     """The defect: a type-scoped plan offered to a type-agnostic caller."""
     from nexus.plans.matcher import plan_match
@@ -154,6 +155,7 @@ def test_plan_requiring_unavailable_typed_binding_is_not_offered(library) -> Non
     )
 
 
+@pytest.mark.t2_tenant
 def test_the_same_plan_is_offered_when_the_binding_is_available(library) -> None:
     """Non-vacuity: the drop is caused by the binding, not by the seed."""
     from nexus.plans.matcher import plan_match
@@ -171,6 +173,7 @@ def test_the_same_plan_is_offered_when_the_binding_is_available(library) -> None
     assert [m.plan_id for m in matches] == [pid]
 
 
+@pytest.mark.t2_tenant
 def test_a_plan_default_satisfies_the_binding(library) -> None:
     """A plan carrying its own default needs nothing from the caller."""
     from nexus.plans.matcher import plan_match
@@ -187,6 +190,7 @@ def test_a_plan_default_satisfies_the_binding(library) -> None:
     assert [m.plan_id for m in matches] == [pid]
 
 
+@pytest.mark.t2_tenant
 def test_free_text_bindings_never_cause_a_drop(library) -> None:
     """concept/area/topic are aliasable from the question — always offered."""
     from nexus.plans.matcher import plan_match
@@ -203,6 +207,7 @@ def test_free_text_bindings_never_cause_a_drop(library) -> None:
     assert [m.plan_id for m in matches] == [pid]
 
 
+@pytest.mark.t2_tenant
 def test_omitting_available_bindings_preserves_prior_behaviour(library) -> None:
     """Back-compat: callers that don't declare their bindings are unfiltered."""
     from nexus.plans.matcher import plan_match
@@ -218,6 +223,7 @@ def test_omitting_available_bindings_preserves_prior_behaviour(library) -> None:
     assert [m.plan_id for m in matches] == [pid]
 
 
+@pytest.mark.t2_tenant
 def test_the_drop_is_logged_not_silent(library) -> None:
     """Shrinking the pool silently is the same defect class as widening."""
     from nexus.plans.matcher import plan_match
@@ -244,6 +250,7 @@ def test_the_drop_is_logged_not_silent(library) -> None:
     assert dropped[0]["detail"][0]["binding"] == "content_type"
 
 
+@pytest.mark.t2_tenant
 def test_a_satisfiable_plan_still_wins_when_a_sibling_is_dropped(library) -> None:
     """The pool narrows to the runnable plan rather than emptying."""
     from nexus.plans.matcher import plan_match
@@ -283,6 +290,7 @@ def test_a_satisfiable_plan_still_wins_when_a_sibling_is_dropped(library) -> Non
     assert len(dropped) == 1
 
 
+@pytest.mark.t2_tenant
 def test_the_fts5_fallback_path_also_drops_unrunnable_plans(library) -> None:
     """No T1 cache: the keyword path must apply the same gate."""
     from nexus.plans.matcher import plan_match
@@ -301,6 +309,7 @@ def test_the_fts5_fallback_path_also_drops_unrunnable_plans(library) -> None:
     )
 
 
+@pytest.mark.t2_tenant
 def test_the_fts5_fallback_still_offers_runnable_plans(library) -> None:
     """Non-vacuity for the FTS5 gate — the drop is the binding, not the path."""
     from nexus.plans.matcher import plan_match
@@ -325,6 +334,7 @@ def test_the_fts5_fallback_still_offers_runnable_plans(library) -> None:
 # mode, so they were unobservable on the fallthrough path too.
 
 
+@pytest.mark.t2_tenant
 def test_scope_conflict_drop_is_logged_when_a_sibling_wins(library) -> None:
     """RDR-091 I-4 added this record so operators could see scope degrading."""
     from nexus.plans.matcher import plan_match
@@ -350,6 +360,7 @@ def test_scope_conflict_drop_is_logged_when_a_sibling_wins(library) -> None:
     ), "scope conflict dropped a candidate on the winning-sibling path with no record"
 
 
+@pytest.mark.t2_tenant
 def test_always_failing_drop_is_logged_when_a_sibling_wins(library) -> None:
     """nexus-vtp8h's skip must be visible when it is not the only candidate."""
     from nexus.plans.matcher import plan_match

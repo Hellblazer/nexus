@@ -8,9 +8,11 @@ line), nexus-9a6io (the published-client gate that expects the refusal).
 
 ## What is refused
 
-`POST /v1/vectors/upsert-chunks` and `POST /v1/vectors/store-put` answer 422 with
+`POST /v1/vectors/upsert-chunks` answers 422 with
 `reason: ownerless_chunk_write` when any chash in the request has no live manifest row in
-the collection. Every client released before the RDR-223 Phase 2 migration writes that
+the collection. (`POST /v1/vectors/store-put` refused the same way until the route was
+retired, nexus-nt76j; it now answers 410 Gone, and no client from v7.68.0 on sends it.)
+Every client released before the RDR-223 Phase 2 migration writes that
 way for `nx store put`, `nx index md` and the other note and document writers, so those
 clients stop working against an enforcing engine until they are upgraded **and
 restarted**. A client from the paired release writes the chunks and the owner rows in one
@@ -127,7 +129,7 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    do not wait for the flip, so a cut is never held open for it. Only with a positive control, because the engine logs only
    would-refuse lines and silence is also what a powered-off host looks like. Proceed
    when all of these hold, for Sam to confirm:
-   - the WAF or ALB request counts for `store-put` and `upsert-chunks` are **non-zero for
+   - the WAF or ALB request counts for `upsert-chunks` are **non-zero for
      each of the two source addresses after the restart**, so a quiet log means "writers ran
      and nothing was ownerless" and not "nothing ran";
    - `Process freshness` is green on each machine behind each address;

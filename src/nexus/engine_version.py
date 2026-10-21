@@ -664,7 +664,16 @@ from __future__ import annotations
 #: (nexus-y6aj0), ONNX intra-op threads follow a CPU limit (nexus-qe5y2), and
 #: a response sent with a large request body unread says `Connection: close`
 #: (nexus-632u4). No changeset, no wire entry, no new `/version` field.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 160)
+#:
+#: 7.83.0 pairs with engine-service-v0.1.162 (tagged on 47e23a841). No client
+#: release pinned v0.1.161 (cloud ran it), so local installs move from v0.1.160
+#: (which already carried the RDR-225 walk, vectors-030 to -032) and apply
+#: vectors-033 to vectors-036: the request ledger (RDR-222), leaf autovacuum,
+#: the bounded quarantine expiry and the drop of the retired pre-walk tables
+#: (IRREVERSIBLE). The
+#: store-put route answers 410 (nexus-nt76j, the one [not-additive] wire
+#: entry), so the engine deploys paired with this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 162)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -99,28 +99,34 @@ The commands are the same on Windows; [Installing nexus on Windows](windows-inst
 
 **Audience**: Claude Desktop users who open chat or Cowork sessions.
 
+**This is the recommended Desktop route.** The `.mcpb` extension (Surface 3) does not update itself; the account plugin runs the `nx` you have installed and installs the CLI for you. The record behind it (RDR-228): one live Desktop conversation on macOS, and Desktop's local half on macOS and Windows driven through an MCP client that starts the plugin's server as Desktop does; no live Windows Desktop conversation was run. If you run the `.mcpb`, switch to this surface, and once the plugin works remove the extension (Settings → Connectors → Desktop → Conexus → Uninstall) so two servers do not run.
+
 Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab read `~/.claude`, which is where `claude plugin install` writes. Chat and Cowork read the plugins enabled on your claude.ai account, which Desktop downloads itself. A plugin installed only from the command line is not visible to chat or Cowork: on a clean Windows 11 machine with only the CLI plugin installed, the Code tab found the plugin and chat and Cowork found none (measured 2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0).
 
 Install, with the same two routes as Surface 1:
 
 1. **Route one.** Run the one command from Surface 1 in a terminal. It cannot reach the plugin store of your claude.ai account, so you still do the plugin step of route two in the application.
-2. **Route two.** Install `uv`. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it). If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Then open a conversation and say "Set up Nexus". Claude calls the plugin's `setup` tool, shows the four choices from Surface 1, and asks which you want. Desktop shows no message when Nexus is missing, because the session-start hook runs in a cloud workspace and not on your machine (measured 2026-10-16: a Desktop conversation starts no local Claude Code session), so you have to ask. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). Desktop has no progress display: ask "Is Nexus set up yet?" and Claude reads the status with `setup_status`. When it says setup is done, start a new conversation.
+2. **Route two.** Install `uv`. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it). If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Then open a conversation and say "Set up Nexus". Claude calls the plugin's `setup` tool, shows the four choices from Surface 1, and asks which you want. Desktop shows no message when Nexus is missing, because the session-start hook runs in a cloud workspace and not on your machine (measured 2026-10-16: a Desktop conversation starts no local Claude Code session), so you have to ask. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). Desktop has no progress display: ask "Is Nexus set up yet?" and Claude reads the status with `setup_status`. When it says setup is done, quit Claude Desktop fully and open it again: Desktop keeps the plugin's server running across conversations, so a new conversation still talks to the stand-in.
 
 The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has only the two setup tools (see "First run" under Surface 1). To install the CLI by hand instead, see "Install by hand" under Surface 1.
 
-To upgrade after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 while 7.77.1 was current), and conexus could not be enabled from it until the marketplace was removed and added again. Why it does not follow new release tags is not yet understood.
+The plugin copy does not follow release tags. To upgrade it after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 through 15 releases, while Desktop synced every 20 minutes), and conexus could not be enabled from it until the marketplace was removed and added again (RDR-228 Key Discovery 6). Why it does not follow new release tags is not yet understood. Nexus itself is updated through the CLI: run `nx self install`, and the plugin then runs whichever CLI is installed.
 
 Having both the account plugin and the CLI plugin is fine. The Code tab logged that the plugin exists in both places and used the account copy, so there is one set of tools.
 
-Not yet confirmed: that the `nexus` and `nexus-catalog` MCP servers connect in a chat or Cowork session after the account install. An earlier install on the same machine connected `sequential-thinking` and failed the two `nx-mcp` servers with `MCP error -32000: Connection closed`, while `nx-mcp` run by hand on that machine started cleanly (nexus-qkb9v).
+Both Nexus servers (`nexus` and `nexus-catalog`) connected from the account plugin on both the macOS and the Windows machine; Desktop starts them on the host with a login-shell `PATH` (RDR-228 Key Discovery 5, conexus 7.77.1). An earlier install on the same macOS machine, before the plugin ran the installed `nx-mcp`, failed both with `MCP error -32000: Connection closed` (nexus-qkb9v).
 
 State is shared with the host CLI Claude and any other session running against the same service. `tests/test_cowork_sdk_bridge.py` covers the host-side round trip through T2.
+
+Session scratch (T1) is not available in a Desktop chat. The chat's Nexus server has no session id (Claude Desktop sets none, and the server does not borrow the last Claude Code session's), so the `scratch` tools report that T1 is unavailable for the process; search, memory, store and catalog work as usual, and T2 (`memory_put`) is the store that carries notes across conversations. A server you configure yourself can be given a scratch scope by setting `NX_SESSION_ID` in its environment; the account plugin's server entry is not editable, so there T1 stays unavailable.
 
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
 **Audience**: Claude Desktop users who do NOT have Claude Code installed.
 
-The plugin route in Surface 2 is the one that installs the CLI for you. The extension is an alternative, and it needs the CLI and the service installed by hand first ("Install by hand" under Surface 1).
+**Not the recommended route.** The extension does not update itself, so users sit on old versions; prefer the account plugin in Surface 2. The extension stays available.
+
+The plugin route in Surface 2 is the one that installs the CLI for you. The extension is an alternative, and it needs the CLI and the service installed by hand first ("Install by hand" under Surface 1). Do not run the extension and the plugin together: once the plugin works, uninstall the extension (see "Uninstall" below), because two servers run side by side otherwise.
 
 Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 
@@ -171,20 +177,27 @@ After upgrading conexus or after the plugin rename (`nx` → `conexus` at v5.0.0
 
 Both warnings include the resolution commands; `nx doctor` is the single explicit-invocation surface that consolidates them.
 
-For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it emits a one-line warning to stderr naming the GitHub release URL to re-download:
+For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it writes a warning to stderr, which Claude Desktop puts only in the extension's log (`~/Library/Logs/Claude/mcp-server-Conexus.log` on macOS); a user who never opens that log does not see it, so this page and the install page are the main way `.mcpb` users learn of the plugin route. The warning says the extension does not update itself and names the recommended route, the conexus plugin (Surface 2), with the switch steps and the release URL as the manual fallback:
 
 ```
-[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. Re-download
-the .mcpb from https://github.com/Hellblazer/nexus/releases/latest and
-re-install in Claude Desktop to upgrade. (Set NX_MCPB_SKIP_UPDATE_CHECK=1
-to silence.)
+[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. This .mcpb
+extension does not update itself. The recommended Desktop route is the
+conexus plugin: it runs the nx you have installed, so `nx self install`
+updates Nexus for it. In Claude Desktop open Customize -> Plugins, add the
+marketplace Hellblazer/nexus (if you added it before, remove it and add it
+again, because the plugin copy does not follow new releases), install
+conexus, say "Set up Nexus", then quit Claude Desktop fully and open it
+again. Afterwards remove the Conexus extension (Settings -> Connectors) so
+two servers do not run. To stay on the .mcpb, re-download it from
+https://github.com/Hellblazer/nexus/releases/latest and re-install it.
+(Set NX_MCPB_SKIP_UPDATE_CHECK=1 to silence.)
 ```
 
 The check is non-fatal: a network failure, timeout, or unreachable PyPI never blocks startup. Set `NX_MCPB_SKIP_UPDATE_CHECK=1` in the environment to opt out entirely.
 
 ## Updating the Desktop Extension
 
-The `.mcpb` does **not** auto-update. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
+The `.mcpb` does **not** auto-update, and the account plugin (Surface 2) is the recommended Desktop route, because it runs your installed `nx` and installs the CLI for you; the plugin copy itself is upgraded by removing and re-adding the marketplace (see Surface 2). If you stay on the `.mcpb`, the steps below are the only update path. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
 
 So the update is a manual, idempotent re-install:
 

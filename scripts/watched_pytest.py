@@ -29,6 +29,10 @@ What it adds to the command:
 Exit codes: the command's own when it finished, 124 stalled, 125 killed by a
 console Ctrl event, 126 hit ``--max-total``, 2 bad arguments. Stdlib only.
 
+A command that names no test selection (no path, node id, ``-k``, ``-m``, ``--lf`` or ``--sw``) gets
+a one-line hint: a hand full suite mostly repeats a green run of the same tree, develop CI's or
+another agent's (nexus-clmlb). It never blocks.
+
 ``-q`` is refused, because quiet output hides which test is running. Under
 xdist (``-n``) the hung test cannot be named from the log; the report gives the
 last result line instead.
@@ -136,6 +140,42 @@ def build_command(command: list[str], faulthandler_s: float) -> list[str]:
     if "-q" in command or "--quiet" in command:
         raise ValueError("-q hides which test is running; drop it (this script adds -v)")
     return [*command, "-v", "-o", f"faulthandler_timeout={int(faulthandler_s)}"]
+
+
+#: pytest options whose value is the NEXT argument, so that argument is not a test selection.
+_VALUE_OPTIONS = frozenset({
+    "-n", "-m", "-k", "-o", "-p", "-c", "-W", "--tb", "--maxfail", "--durations", "--rootdir",
+    "--deselect", "--ignore", "--ignore-glob", "--basetemp", "--junitxml", "--dist", "--timeout",
+    "--confcutdir", "--log-level", "--import-mode",
+})
+
+#: Arguments that select a subset of the suite on their own.
+_SELECTING_FLAGS = ("-k", "--keyword", "-m", "--lf", "--last-failed", "--sw", "--stepwise", "--pyargs")
+
+SELECTION_HINT = (
+    "hint: no test selection (path, node id, -k or -m), so this is a full suite. If this tree already "
+    "has a green full run (develop CI or a hand run), do not repeat it; otherwise announce its change "
+    "class, the tree sha and that no green full run of it exists (AGENTS.md rule 13, nexus-clmlb)."
+)
+
+
+def selection_hint(command: list[str]) -> str | None:
+    """`SELECTION_HINT` when the pytest command selects no tests, else None. Advisory only."""
+    try:
+        start = next(i for i, arg in enumerate(command)
+                     if arg == "pytest" or arg.endswith(("/pytest", "\\pytest", "pytest.exe")))
+    except StopIteration:
+        return None
+    args = command[start + 1:]
+    for i, arg in enumerate(args):
+        if arg.startswith(_SELECTING_FLAGS):
+            return None
+        if arg.startswith("-"):
+            continue
+        if i > 0 and args[i - 1] in _VALUE_OPTIONS:
+            continue
+        return None
+    return SELECTION_HINT
 
 
 def classify(returncode: int, *, stalled: bool, over_total: bool) -> tuple[str, int]:
@@ -301,6 +341,8 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
     except ValueError as exc:
         sys.stderr.write(f"watched_pytest: {exc}\n")
         return 2
+    if (hint := selection_hint(args.command)) is not None:
+        print(f"watched_pytest: {hint}", file=out)
     log_path = Path(args.log)
     status_path = Path(args.status) if args.status else None
     _ignore_console_ctrl()

@@ -305,9 +305,15 @@ def _collecting_handler(failures: list[tuple[str, BaseException]]):
     until it is made writable. Anything that still fails is RECORDED, not
     swallowed -- ``ignore_errors=True`` is what let a locked, half-deleted
     venv be reported as reaped.
+
+    Only ``os.unlink`` and ``os.rmdir`` are re-called: rmtree also hands over
+    ``os.open``, ``os.scandir`` and ``os.lstat``, which need more than a path
+    on the POSIX fd walk (the TypeError of 5588beead). ``_reap`` takes the
+    platform as a parameter, so this handler can meet that walk; such a
+    failure is recorded as it came.
     """
     def handler(func, path, exc) -> None:
-        if isinstance(exc, PermissionError):
+        if isinstance(exc, PermissionError) and func in (os.unlink, os.rmdir):
             try:
                 os.chmod(path, stat.S_IWRITE)
                 func(path)

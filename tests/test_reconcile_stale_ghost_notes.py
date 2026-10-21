@@ -21,6 +21,8 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+pytestmark = pytest.mark.t2_tenant
+
 COL = "knowledge__knowledge__voyage-context-3__v1"
 RDR_COL = "rdr__1-1__voyage-context-3__v1"
 

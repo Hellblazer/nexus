@@ -2,8 +2,12 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.PgContainerHelper;
+import org.jooq.CloseableResultQuery;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Record1;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -13,9 +17,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -56,7 +59,7 @@ class PgSessionStatementTimeoutIntegrationTest {
             assertThat(currentSetting(ctx)).isEqualTo("200ms");
 
             long started = System.nanoTime();
-            assertThatThrownBy(() -> ctx.resultQuery("SELECT pg_sleep(30)").fetch())
+            assertThatThrownBy(() -> ctx.select(DSL.function("pg_sleep", Object.class, DSL.inline(30))).fetch())
                 .isInstanceOf(DataAccessException.class)
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo(QUERY_CANCELED));
             long elapsedMs = (System.nanoTime() - started) / 1_000_000;
@@ -92,7 +95,11 @@ class PgSessionStatementTimeoutIntegrationTest {
     }
 
     private static String currentSetting(DSLContext ctx) {
-        return ctx.resultQuery("SELECT current_setting('statement_timeout')")
+        return currentSetting(ctx, "statement_timeout");
+    }
+
+    private static String currentSetting(DSLContext ctx, String name) {
+        return ctx.select(DSL.function("current_setting", String.class, DSL.val(name)))
                   .fetchOne(0, String.class);
     }
 
@@ -111,15 +118,12 @@ class PgSessionStatementTimeoutIntegrationTest {
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(false);
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
-            String before = ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                               .fetchOne(0, String.class);
+            String before = currentSetting(ctx, "plan_cache_mode");
             assertThat(before).isEqualTo("auto");
             PgSession.setSearchPlanCacheMode(ctx);
-            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                          .fetchOne(0, String.class)).isEqualTo("force_custom_plan");
+            assertThat(currentSetting(ctx, "plan_cache_mode")).isEqualTo("force_custom_plan");
             c.rollback();
-            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
-                          .fetchOne(0, String.class)).isEqualTo(before);
+            assertThat(currentSetting(ctx, "plan_cache_mode")).isEqualTo(before);
         }
     }
 
@@ -147,32 +151,39 @@ class PgSessionStatementTimeoutIntegrationTest {
             .isGreaterThan(0);
     }
 
+    private static final Field<String> RELNAME = DSL.field(DSL.name("relname"), String.class);
+    private static final Table<?> PG_CLASS = DSL.table(DSL.name("pg_catalog", "pg_class"));
+    private static final Table<?> PG_PREPARED_STATEMENTS = DSL.table(DSL.name("pg_prepared_statements"));
+    private static final Field<String> STATEMENT = DSL.field(DSL.name("statement"), String.class);
+    private static final Field<Long> GENERIC_PLANS = DSL.field(DSL.name("generic_plans"), Long.class);
+    private static final Field<Long> CUSTOM_PLANS = DSL.field(DSL.name("custom_plans"), Long.class);
+
     /** {generic_plans, custom_plans} for one statement executed 8x on one connection. */
     private long[] planCounts(String mode) throws Exception {
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(false);
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
             PgSession.setLocal(ctx, "plan_cache_mode", mode);
-            // Same PreparedStatement object, 8 executions: pgjdbc switches to a
-            // named server-side statement at the 5th and Postgres tracks its plans.
-            try (PreparedStatement ps = c.prepareStatement(
-                     "SELECT count(*) FROM pg_class WHERE relname = ?")) {
+            // keepStatement(true) makes jOOQ hold ONE JDBC PreparedStatement across the 8 fetches (jOOQ's
+            // default is prepare-execute-close each time, which would not be the same object): pgjdbc
+            // switches to a named server-side statement at the 5th execution of it and Postgres tracks its
+            // plans. The statement is found in pg_prepared_statements by the exact text jOOQ rendered, with
+            // pgjdbc's ? -> $1 placeholder rewrite applied.
+            String sent;
+            try (CloseableResultQuery<Record1<Integer>> q = ctx.selectCount().from(PG_CLASS).where(RELNAME.eq("pg_class")).keepStatement(true)) {
+                sent = ctx.render(q).replace("?", "$1");
                 for (int i = 0; i < 8; i++) {
-                    ps.setString(1, "pg_class");
-                    try (ResultSet rs = ps.executeQuery()) {
-                        rs.next();
-                    }
+                    q.fetch();
                 }
             }
-            try (PreparedStatement q = c.prepareStatement(
-                     "SELECT coalesce(sum(generic_plans),0), coalesce(sum(custom_plans),0)"
-                     + " FROM pg_prepared_statements WHERE statement LIKE '%pg_class WHERE relname%'");
-                 ResultSet rs = q.executeQuery()) {
-                rs.next();
-                long[] out = {rs.getLong(1), rs.getLong(2)};
-                c.rollback();
-                return out;
-            }
+            var counts = ctx.select(DSL.coalesce(DSL.sum(GENERIC_PLANS), BigDecimal.ZERO),
+                                    DSL.coalesce(DSL.sum(CUSTOM_PLANS), BigDecimal.ZERO))
+                .from(PG_PREPARED_STATEMENTS)
+                .where(STATEMENT.eq(sent))
+                .fetchOne();
+            long[] out = {counts.value1().longValue(), counts.value2().longValue()};
+            c.rollback();
+            return out;
         }
     }
 }

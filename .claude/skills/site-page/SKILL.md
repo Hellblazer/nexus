@@ -33,7 +33,8 @@ History, earlier attempts, and design rationale belong in the essay, once. A how
 
 ## 3. Register (both genres)
 
-- Plain technical English for non-native readers. Active voice, no semicolons, no idioms or phrasal verbs, one term per concept.
+- Plain technical English for non-native readers. Active voice, no idioms or phrasal verbs, one term per concept.
+- No semicolons on a `web/` how-to page. A `docs/exploration` essay may use them. The prose editor applies this rule to how-to pages only.
 - Sentence boundaries follow the logic. When one fact follows from another, join them with because / so / and in one sentence; start a new sentence for a new idea. A paragraph of four-to-ten-word sentences parses but loses the connectives that say why, and reads as a list with the bullets removed. Review pushes only toward shorter sentences (the long-sentence scan has no opposite), so §5's scan measures both directions.
 - Say each thing once. The lede, a figure caption and the body that narrate the same flow are three copies; keep the body, and let the caption name what the figure shows.
 - Every paragraph and every section opener starts with its claim. Never two setup sentences and then the point.

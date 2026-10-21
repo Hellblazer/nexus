@@ -209,7 +209,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
+import stat
+import sys
 import threading
 import time
 import urllib.error
@@ -224,6 +228,11 @@ from uuid import uuid4
 import structlog
 
 from nexus import _locking
+from nexus._log_safe_url import (
+    endpoint_host_port as _endpoint_host_port,
+    log_endpoint as _log_endpoint,
+    scrub_transport_error,
+)
 from nexus._winsec import make_user_dir, open_private
 from nexus.rate_brake import parse_retry_after
 
@@ -281,6 +290,74 @@ _LEASE_FORMAT_VERSION: int = 1
 #: lease itself -- the lock guards only the miss-then-mint critical section,
 #: never a read.
 _MINT_LOCK_PREFIX: str = "data_token_mint_lock."
+
+#: Exact shape of a mint-lock file name: the prefix plus the FULL 64-hex
+#: sha256 :func:`_lease_key` produces. The reaper (nexus-ndfc1) touches a
+#: directory entry only on a full match, so a stray backup suffix, a short
+#: hash or the sibling ``data_token_lease.*`` family can never be removed
+#: by it.
+_MINT_LOCK_NAME_RE: re.Pattern[str] = re.compile(re.escape(_MINT_LOCK_PREFIX) + r"[0-9a-f]{64}")
+
+#: A mint lock unused for this long is reap-eligible (nexus-ndfc1). One lock
+#: file exists per (host:port, tenant) ever minted against, so they
+#: otherwise accumulate for ever (82 on one laptop). One day: safety does
+#: NOT rest on the age. It rests on the reaper's non-blocking flock probe
+#: and its inode-identity check under that lock, so a short age costs only
+#: an occasional re-created file. A longer age also holds more files at a
+#: steady state (about 430 at 7 days under a 61-new-key/day burst).
+#: "Unused" is the file's mtime, which :func:`_open_mint_lock` refreshes on
+#: every mint that reaches the lock (flock itself never changes it).
+_MINT_LOCK_STALE_AFTER_S: float = 24 * 3600.0
+
+#: Most files one mint may remove (nexus-ndfc1): the reap runs inline on
+#: the mint path, so its cost is capped. A backlog drains over several
+#: mints. At most ``4 * K`` held-or-failing candidates are tried per call.
+_MINT_LOCK_REAP_MAX_PER_MINT: int = 8
+
+#: Times :meth:`DataTokenManager._mint_guarded` reopens its lock file when,
+#: once locked, the descriptor no longer names the file at the path (a reaper
+#: unlinked it between our open and our lock). Past the bound the mint goes
+#: ahead under the lock it holds, on a dead inode, so it can run concurrently
+#: with a minter holding the new file. Reaching the bound takes five unlinks
+#: of a file just created or touched, which the reaper's mtime-under-lock
+#: check forbids; only an external delete or a filesystem mtime skewed by more
+#: than a day gets there (measured: T2 nexus/confirm-ndfc1-74c739621-2026-10-17).
+_MINT_LOCK_REOPEN_MAX: int = 5
+
+#: How long a lease publish that does not already hold the same-key lock waits
+#: for it (nexus-fcwbd). A holder is a reaper (microseconds) or a cold minter
+#: in its mint (seconds at worst); past this the publish is skipped, since the
+#: lease is only an optimization for the NEXT cold process.
+_LEASE_PUBLISH_LOCK_WAIT_S: float = 2.0
+
+#: The Windows reap skip is logged once per process, not once per mint.
+_reap_skip_logged: bool = False
+
+#: Exact shape of a lease file name (nexus-4gmw8): the prefix plus the full
+#: 64-hex :func:`_lease_key`. The lease reaper touches only a full match, so
+#: the ``.<pid>.<uuid>.tmp`` publish temp files, a backup suffix or the
+#: sibling ``data_token_mint_lock.*`` family are never candidates.
+_LEASE_NAME_RE: re.Pattern[str] = re.compile(re.escape(_DATA_TOKEN_LEASE_PREFIX) + r"[0-9a-f]{64}")
+
+#: A lease is reap-eligible once its ``expires_at`` is more than this many
+#: seconds in the past (nexus-4gmw8). The reader already refuses a lease at
+#: or below 20% of its TTL, so a lease past ``expires_at`` is dead to every
+#: reader; the margin is only slack for wall-clock disagreement between
+#: processes (a clock stepped back, a test's injected wall clock), so the
+#: reaper never removes a lease some other process may still count as live.
+_LEASE_EXPIRED_MARGIN_S: float = 300.0
+
+#: Most leases one mint may remove, and the cap on how many candidates (oldest
+#: write first) one call examines: ``4 * K``. A backlog drains over several
+#: mints. Same bound and same reasoning as :data:`_MINT_LOCK_REAP_MAX_PER_MINT`.
+_LEASE_REAP_MAX_PER_MINT: int = 8
+
+#: A lease file larger than this is not a lease; it is read no further and
+#: counts as unparseable.
+_LEASE_READ_MAX_BYTES: int = 64 * 1024
+
+#: Open flags that never follow a symlink and never block on a FIFO.
+_OPEN_PLAIN_FILE: int = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 #: Poll interval while a non-blocking flock acquire attempt is retried
 #: (nexus-nnr26) -- mirrors nexus.db.t1._lock_guarded_mint_or_borrow's
@@ -380,14 +457,459 @@ class DataTokenMintError(RuntimeError):
     """
 
 
+def _fd_names_path(fd: int, path: str | Path) -> bool:
+    """True when the open descriptor ``fd`` is the regular file ``path``
+    names right now: same (st_dev, st_ino), and ``path`` is not a symlink.
+
+    A lock only serializes holders of the SAME inode. A holder of an
+    unlinked inode is alone, whatever the path now names (nexus-ndfc1
+    review B1/B2), so both the reaper (before it unlinks) and the minter
+    (once it holds the lock) ask this. False on any OSError (the path is
+    gone).
+    """
+    try:
+        held = os.fstat(fd)
+        named = os.stat(str(path), follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(named.st_mode) and (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _write_lock_record(fd: int, record: dict[str, Any]) -> None:
+    """Write *record* as the one JSON first line of a lock file this process
+    just created, then put the position back at 0. Best-effort: attribution
+    never fails the caller."""
+    try:
+        os.write(fd, (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8"))
+        # Windows msvcrt.locking locks from the CURRENT position: put it
+        # back at 0 so every process's one-byte range is the same byte.
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        pass
+
+
+def _open_mint_lock(
+    lock_path: Path, describe: Callable[[], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Open (creating if absent) the mint lock file and mark it used.
+
+    Returns ``(fd, record)``; ``record`` is not None only for the call that
+    brought the file into being (``O_EXCL``), which is the one moment worth
+    attributing (nexus-28bzt): it is ``describe()``'s dict, also written to
+    the lock file as one JSON line so the stray file names its own writer
+    (an info log is dropped in CLI mode). The mtime is refreshed on a REUSE,
+    through the descriptor so the touch lands on the inode just opened and
+    not on whatever the path names by then, so
+    :func:`_reap_stale_mint_locks` measures time since last use, not since
+    first creation; that touch is best-effort and never fails the mint.
+    """
+    flags = os.O_WRONLY | os.O_CREAT
+    mode = 0o600
+    try:
+        fd = os.open(str(lock_path), flags | os.O_EXCL, mode)
+    except FileExistsError:
+        fd = os.open(str(lock_path), flags, mode)
+    else:
+        try:
+            record = describe() if describe is not None else {}
+        except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+            record = {}
+        _write_lock_record(fd, record)
+        return fd, record
+    try:
+        os.utime(fd)
+    except (OSError, NotImplementedError, TypeError):
+        pass
+    return fd, None
+
+
+def _home_matches_pwd_home() -> bool | None:
+    """Whether ``$HOME`` is the account's real home (pwd database), or None
+    when that cannot be asked (Windows, or a lookup failure)."""
+    try:
+        import pwd  # noqa: PLC0415 -- POSIX-only; its ImportError arm IS the non-POSIX branch
+
+        real = pwd.getpwuid(os.getuid()).pw_dir
+        home = os.environ.get("HOME")
+        if not home:
+            return False
+        return os.path.realpath(home) == os.path.realpath(real)
+    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+        return None
+
+
+def _parent_process_name() -> str | None:
+    try:
+        from nexus.session import _command_name_of  # noqa: PLC0415 -- paid only on a first lock creation
+
+        return _command_name_of(os.getppid()) or None
+    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+        return None
+
+
+def _creator_fields(config_dir: Path, *, parent_name: bool = True) -> dict[str, Any]:
+    """The process-level fields every lock creation record carries.
+    ``parent_name=False`` leaves the name ``None`` instead of running ``ps``
+    (:func:`_parent_process_name`), for a caller on a hot path."""
+    try:
+        cwd: str | None = os.getcwd()
+    except OSError:
+        cwd = None
+    return {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "parent_name": _parent_process_name() if parent_name else None,
+        "argv0": sys.argv[0] if sys.argv else None,
+        "pytest_current_test": os.environ.get("PYTEST_CURRENT_TEST"),
+        "nexus_config_dir": os.environ.get("NEXUS_CONFIG_DIR"),
+        "config_dir": str(config_dir),
+        "cwd": cwd,
+        "home_matches_pwd_home": _home_matches_pwd_home(),
+    }
+
+
+def _mint_lock_creation_record(
+    base_url: str, tenant: str, lock_path: Path, config_dir: Path,
+) -> dict[str, Any]:
+    """Who is creating this lock file (nexus-28bzt). Written to the file and
+    logged. Never a token or credential: the endpoint is host:port only and
+    nothing here reads a request, header or lease."""
+    return {
+        **_creator_fields(config_dir),
+        "endpoint": _endpoint_host_port(base_url),
+        "tenant": tenant,
+        "lock_file": lock_path.name,
+    }
+
+
+def _reap_lock_creation_record(lock_path: Path, lease_path: Path | None) -> dict[str, Any]:
+    """The same attribution for a lock the lease reaper creates (nexus-fcwbd):
+    the reaper knows the lease file, not the endpoint or tenant, which are
+    hashed into the key. ``created_by`` is what a stray file's reader asks."""
+    return {
+        # No ps spawn: the reaper runs on every cold mint (pid and ppid name the parent).
+        **_creator_fields(lock_path.parent, parent_name=False),
+        "created_by": "lease-reaper",
+        "lock_file": lock_path.name,
+        "lease_file": lease_path.name if lease_path is not None else None,
+    }
+
+
+def _open_mint_lock_logged(
+    base_url: str, tenant: str, lock_path: Path, config_dir: Path,
+) -> int:
+    """:func:`_open_mint_lock`, plus the one ``data_token_mint_lock_created``
+    info event (same fields as the line in the file) when this call created
+    the file. Raises OSError like the open."""
+    fd, record = _open_mint_lock(
+        lock_path, lambda: _mint_lock_creation_record(base_url, tenant, lock_path, config_dir),
+    )
+    if record is not None:
+        try:
+            _log.info("data_token_mint_lock_created", **record)
+        except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+            pass
+    return fd
+
+
+def _reap_stale_mint_locks(
+    config_dir: Path,
+    *,
+    keep: Path | None = None,
+    now: float | None = None,
+    max_removals: int = _MINT_LOCK_REAP_MAX_PER_MINT,
+) -> int:
+    """Remove mint-lock files unused for :data:`_MINT_LOCK_STALE_AFTER_S`
+    and not currently held (nexus-ndfc1). Returns the number removed.
+
+    Called inline at mint time, never from a background thread. Never
+    raises: every failure is a ``debug`` log and the file is left alone.
+
+    A file is touched only when its name matches
+    :data:`_MINT_LOCK_NAME_RE` exactly and it is a regular file, never
+    ``keep`` (the caller's own lock). "Not held" is established with the
+    module's own lock primitive: open without creating (no symlink follow,
+    non-blocking so a name swapped to a FIFO cannot hang the mint), require a
+    regular file, take a NON-BLOCKING exclusive lock, and skip the file on
+    contention. Under the lock the mtime is re-read from the descriptor and
+    the path must still name THIS inode (:func:`_fd_names_path`): another
+    reaper may have unlinked it and a minter re-created the path since we
+    opened, and unlinking by path would then remove the minter's live lock.
+    The unlink happens while the lock is held.
+
+    A minter that opened the file just before the unlink sees, once it holds
+    the lock, that its descriptor no longer names the path, and reopens
+    (:meth:`DataTokenManager._mint_guarded`).
+
+    Skipped on Windows: an open handle blocks the delete, so every attempt
+    would fail; the scan is not run (one debug log per process).
+
+    The sibling ``data_token_lease.*`` family is reaped by
+    :func:`_reap_expired_leases` (nexus-4gmw8), not here.
+    """
+    global _reap_skip_logged
+    if sys.platform == "win32":
+        if not _reap_skip_logged:
+            _reap_skip_logged = True
+            _log.debug("data_token_mint_lock_reap_skipped", reason="win32: an open handle blocks unlink")
+        return 0
+    removed = 0
+    try:
+        cutoff = (time.time() if now is None else now) - _MINT_LOCK_STALE_AFTER_S
+        candidates: list[Path] = []
+        with os.scandir(config_dir) as it:
+            for entry in it:
+                if not _MINT_LOCK_NAME_RE.fullmatch(entry.name):
+                    continue
+                if keep is not None and entry.name == keep.name:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                except OSError:
+                    continue
+                candidates.append(Path(entry.path))
+    except Exception as exc:  # noqa: BLE001 -- the reap must never reach the mint
+        _log.debug("data_token_mint_lock_reap_scan_failed", error=str(exc))
+        return 0
+
+    open_flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    for path in candidates[: max_removals * 4]:
+        if removed >= max_removals:
+            break
+        fd: int | None = None
+        try:
+            fd = os.open(str(path), open_flags)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                continue  # swapped to a FIFO/device since the scan
+            try:
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: non-blocking held-probe for the stale mint-lock reaper (nexus-ndfc1), not a lifecycle election
+            except BlockingIOError:
+                continue  # held by a live process: never reaped
+            try:
+                if os.fstat(fd).st_mtime >= cutoff:
+                    continue  # touched since the scan
+                if not _fd_names_path(fd, path):
+                    continue  # the path is another file now: not ours to unlink
+                os.unlink(str(path))
+                removed += 1
+            finally:
+                _locking.unlock_fd(fd)  # lifecycle-gate-allow: release the reaper's held-probe lock (nexus-ndfc1)
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not stop the rest or the mint
+            _log.debug("data_token_mint_lock_reap_failed", file=path.name, error=str(exc))
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    if removed:
+        _log.debug("data_token_mint_lock_reaped", removed=removed)
+    return removed
+
+
+def _open_plain_file(path: str | Path, flags: int) -> int:
+    """Open *path* without following a symlink or blocking on a FIFO, and
+    require a regular file. Raises OSError otherwise (the fd is closed)."""
+    fd = os.open(str(path), flags | _OPEN_PLAIN_FILE)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{Path(path).name} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _lease_is_dead(raw: bytes, mtime: float, now: float) -> bool:
+    """Whether a lease file's content says it is past use (nexus-4gmw8).
+
+    Read the way :meth:`DataTokenManager._read_lease` reads it: JSON with the
+    current ``format_version`` and a numeric ``expires_at`` in wall-clock
+    seconds. Dead means ``expires_at`` is more than
+    :data:`_LEASE_EXPIRED_MARGIN_S` before *now*. A file that cannot be read
+    that way (not JSON, another format version, no or non-finite
+    ``expires_at``, oversize) is not known to be dead: it counts as dead only
+    when its own mtime is also older than :data:`_MINT_LOCK_STALE_AFTER_S`.
+    """
+    try:
+        if len(raw) > _LEASE_READ_MAX_BYTES:
+            raise ValueError("oversize")
+        data = json.loads(raw)
+        if data.get("format_version") != _LEASE_FORMAT_VERSION:
+            raise ValueError("format version")
+        expires_at = float(data["expires_at"])
+        if not math.isfinite(expires_at):
+            raise ValueError("expires_at")
+    except (ValueError, KeyError, TypeError, AttributeError):  # JSON and unicode decode errors are ValueErrors
+        return mtime < now - _MINT_LOCK_STALE_AFTER_S
+    return expires_at < now - _LEASE_EXPIRED_MARGIN_S
+
+
+def _open_reap_lock(lock_path: Path, *, lease_path: Path | None = None) -> tuple[int, bool]:
+    """Open the same-key mint lock for the lease reaper: ``(fd, created)``.
+
+    An existing lock is opened as it is (no mtime touch: that would keep a
+    stale lock alive for ever). A missing one is created, because a lease can
+    outlive its lock (the mint-lock reaper removes locks after a day); the
+    caller removes a file it created. A file it created carries a first-line
+    JSON record naming ``created_by: lease-reaper`` (nexus-fcwbd), so one left
+    behind by a SIGKILL between create and unlink, or kept by a minter that
+    won the race, names its creator like every other lock (nexus-ndfc1).
+    """
+    try:
+        return _open_plain_file(lock_path, os.O_WRONLY), False
+    except FileNotFoundError:
+        pass
+    try:
+        fd = open_private(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _OPEN_PLAIN_FILE)
+    except FileExistsError:
+        return _open_plain_file(lock_path, os.O_WRONLY), False
+    try:
+        record = _reap_lock_creation_record(lock_path, lease_path)
+    except Exception:  # noqa: BLE001 -- attribution must never fail a reap
+        record = {"created_by": "lease-reaper"}
+    _write_lock_record(fd, record)
+    return fd, True
+
+
+def _reap_one_lease(lease_path: Path, config_dir: Path, now: float) -> bool:
+    """Remove *lease_path* if it is dead, under its same-key mint lock.
+    True when removed. May raise OSError; the caller logs it."""
+    fd = _open_plain_file(lease_path, os.O_RDONLY)
+    try:
+        raw, mtime = os.read(fd, _LEASE_READ_MAX_BYTES + 1), os.fstat(fd).st_mtime
+    finally:
+        os.close(fd)
+    if not _lease_is_dead(raw, mtime, now):
+        return False  # the common case: a live lease costs one read
+
+    lock_path = config_dir / (_MINT_LOCK_PREFIX + lease_path.name[len(_DATA_TOKEN_LEASE_PREFIX):])
+    lock_fd, created = _open_reap_lock(lock_path, lease_path=lease_path)
+    try:
+        try:
+            _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: non-blocking same-key probe for the expired-lease reaper (nexus-4gmw8), not a lifecycle election
+        except BlockingIOError:
+            return False  # a minter holds it: it may be about to write this very lease
+        try:
+            # Same discipline as the mint-lock reaper: the lock only means
+            # something if it is the file the path names now.
+            if not _fd_names_path(lock_fd, lock_path):
+                return False
+            lease_fd = _open_plain_file(lease_path, os.O_RDONLY)
+            try:
+                # Re-read under the lock: every publish happens while its
+                # publisher holds this lock (the guarded mint, the refresh
+                # and the unguarded mint, nexus-fcwbd), so a lease replaced
+                # after this read cannot be the one the unlink below removes.
+                raw, mtime = os.read(lease_fd, _LEASE_READ_MAX_BYTES + 1), os.fstat(lease_fd).st_mtime
+                if not _lease_is_dead(raw, mtime, now) or not _fd_names_path(lease_fd, lease_path):
+                    return False
+                os.unlink(str(lease_path))
+            finally:
+                os.close(lease_fd)
+            return True
+        finally:
+            try:
+                if created and _fd_names_path(lock_fd, lock_path):
+                    os.unlink(str(lock_path))  # a lock made only for this reap; a minter that opened it reopens
+            finally:
+                _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: release the expired-lease reaper's same-key lock (nexus-4gmw8)
+    finally:
+        os.close(lock_fd)
+
+
+def _reap_expired_leases(
+    config_dir: Path,
+    *,
+    now: float,
+    keep: Path | None = None,
+    max_removals: int = _LEASE_REAP_MAX_PER_MINT,
+) -> int:
+    """Remove expired ``data_token_lease.*`` files (nexus-4gmw8). Returns the
+    number removed.
+
+    One lease is written per (host:port, tenant) and nothing removed a lease
+    for an endpoint that never came back, so expired 0600 token files piled up
+    beside the mint locks. Called inline at mint time, after the mint-lock
+    reap, never from a background thread; never raises (every failure is a
+    ``debug`` log and the file is left alone).
+
+    Guards, the same as the mint-lock reaper's: an exact name match
+    (:data:`_LEASE_NAME_RE`), a regular file only (opened without following a
+    symlink and without blocking), never ``keep`` (the caller's own lease),
+    skipped on Windows (an open handle blocks the delete), at most
+    *max_removals* per call and ``4 * max_removals`` examined, oldest write
+    first so live leases cannot starve the dead ones.
+
+    A lease is removed only while the SAME-KEY mint lock
+    (``data_token_mint_lock.<same 64 hex>``) is held non-blocking by the
+    reaper. Every publish of a lease happens under that lock (nexus-fcwbd):
+    the guarded cold mint holds it for the whole mint, and the refresh path in
+    ``bearer_for`` and the unguarded mint take it for the publish
+    (:meth:`DataTokenManager._publish_lease_locked`). So a held lock means a
+    publisher may be mid-write and the lease is skipped. The one unlocked
+    write is the fallback when the lock file cannot be opened or locked at all
+    (a lease is only an optimization, and a directory that refuses the lock
+    usually refuses the lease). Under the lock the lease is read again, and the
+    path must still name the inode that was read (:func:`_fd_names_path`)
+    before it is unlinked, which also covers a fallback publish that lands in
+    between (one extra mint by a sibling cold process, never an error). *now*
+    is the wall clock the lease reader uses (``expires_at`` is wall-clock
+    seconds). See :func:`_lease_is_dead` for what dead means.
+    """
+    if sys.platform == "win32":
+        return 0
+    removed = 0
+    try:
+        candidates: list[tuple[float, Path]] = []
+        with os.scandir(config_dir) as it:
+            for entry in it:
+                if not _LEASE_NAME_RE.fullmatch(entry.name):
+                    continue
+                if keep is not None and entry.name == keep.name:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    candidates.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+        candidates.sort(key=lambda c: c[0])
+    except Exception as exc:  # noqa: BLE001 -- the reap must never reach the mint
+        _log.debug("data_token_lease_reap_scan_failed", error=str(exc))
+        return 0
+
+    for _, lease_path in candidates[: max_removals * 4]:
+        if removed >= max_removals:
+            break
+        try:
+            if _reap_one_lease(lease_path, config_dir, now):
+                removed += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not stop the rest or the mint
+            _log.debug("data_token_lease_reap_failed", file=lease_path.name, error=str(exc))
+    if removed:
+        _log.debug("data_token_lease_reaped", removed=removed)
+    return removed
+
+
 def _host(url: str) -> str:
-    """Return ``host[:port]`` for *url* — never the full URL (which may
-    carry a path) and never the credential — for log-safe endpoint identity.
+    """The whole netloc of *url*: ``[user[:password]@]host[:port]``.
+
+    This is the HASH INPUT of :func:`_lease_key`, and nothing else. It is
+    deliberately left as it was so no existing ``data_token_lease.*`` or
+    ``data_token_mint_lock.*`` file is renamed (changing it would orphan every
+    lease and lock on disk). It can carry userinfo, so it must never reach a
+    log event, an exception message or a file body: use :func:`_log_endpoint`
+    for those (nexus-q26w1).
     """
     try:
         netloc = urllib.parse.urlsplit(url).netloc
         return netloc or url
-    except Exception:  # noqa: BLE001 — logging helper must never raise
+    except Exception:  # noqa: BLE001 — a key-derivation helper must never raise
         return url
 
 
@@ -665,23 +1187,24 @@ class DataTokenManager:
                 if leased is not None:
                     self._cache[key] = leased
                     _log.info(
-                        "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                        "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                     )
                     return leased.token
                 # nexus-nnr26: genuine miss AND no fresh lease — serialize
                 # concurrent cold-start racers via a non-blocking flock so
                 # only the lock holder mints; every other racer borrows
-                # instead of independently minting a competing token. This
-                # is the ONLY path that ever touches the lock file — the
-                # lease-hit branch above stays entirely lock-free.
+                # instead of independently minting a competing token. The
+                # lease-hit branch above stays entirely lock-free; the refresh
+                # below takes the lock only to publish its lease
+                # (_publish_lease_locked, nexus-fcwbd).
                 fresh = self._mint_guarded(base_url, tenant, credential)
                 self._cache[key] = fresh
                 return fresh.token
             fresh = self._mint(base_url, tenant, credential)
             self._cache[key] = fresh
-            self._write_lease(base_url, tenant, fresh)
+            self._publish_lease_locked(base_url, tenant, fresh)
             _log.info(
-                "data_token_refresh", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+                "data_token_refresh", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
             )
             return fresh.token
 
@@ -714,7 +1237,7 @@ class DataTokenManager:
                 # invalidated from the file it was about to lose.
                 self._delete_lease(base_url, tenant, expected_token=popped.token)
         if popped is not None:
-            _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+            _log.info("data_token_invalidated", tenant=tenant, endpoint=_log_endpoint(base_url))
 
     def _is_futile_locked(self, key: tuple[str, str]) -> bool:
         """The windowed futility check (Sam's decision, nexus-umue1 review
@@ -786,7 +1309,7 @@ class DataTokenManager:
             # the delete, miss the cache, and borrow the token this call just
             # invalidated back out of the lease file (see invalidate).
             self._delete_lease(base_url, tenant, expected_token=popped.token)
-        _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+        _log.info("data_token_invalidated", tenant=tenant, endpoint=_log_endpoint(base_url))
         return True
 
     def mark_remint_futile(self, base_url: str, tenant: str) -> None:
@@ -939,7 +1462,7 @@ class DataTokenManager:
         except OSError:
             return None  # absent — the common case, not worth a log line
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            _log.debug("data_token_lease_unparseable", tenant=tenant, endpoint=_host(base_url))
+            _log.debug("data_token_lease_unparseable", tenant=tenant, endpoint=_log_endpoint(base_url))
             return None
         if not token:
             return None
@@ -988,14 +1511,14 @@ class DataTokenManager:
             os.replace(str(tmp), str(path))
         except OSError as exc:
             _log.warning(
-                "data_token_lease_write_failed", tenant=tenant, endpoint=_host(base_url), error=str(exc),
+                "data_token_lease_write_failed", tenant=tenant, endpoint=_log_endpoint(base_url), error=str(exc),
             )
 
     def _delete_lease(
         self, base_url: str, tenant: str, *, expected_token: str | None = None,
     ) -> None:
         """Remove the cross-process lease file, best-effort/idempotent
-        (mirrors :func:`nexus.db.t1.clear_t1_session_lease`).
+        (mirrors :func:`nexus.db.t1.end_owned_t1_session_lease`).
 
         With ``expected_token`` given (the :meth:`invalidate` path), the
         file is unlinked ONLY when its on-disk token still equals that
@@ -1061,20 +1584,23 @@ class DataTokenManager:
         try:
             make_user_dir(config_dir)
             lock_path = _data_token_mint_lock_path(base_url, tenant, config_dir)
-            lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+            lock_fd = _open_mint_lock_logged(base_url, tenant, lock_path, config_dir)
         except OSError as exc:
-            _log.warning(
-                "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_host(base_url), error=str(exc),
-            )
-            fresh = self._mint(base_url, tenant, credential)
-            self._write_lease(base_url, tenant, fresh)
-            _log.info(
-                "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
-            )
-            return fresh
+            return self._mint_unguarded(base_url, tenant, credential, exc)
 
-        deadline = time.monotonic() + self._lock_wait_ceiling_seconds
         try:
+            # nexus-ndfc1: opportunistic, bounded, inline, never raises. Our
+            # own lock was just opened and touched, so it is never a
+            # candidate. Inside the try so a BaseException cannot leak the fd.
+            _reap_stale_mint_locks(config_dir, keep=lock_path)
+            # nexus-4gmw8: and expired leases, under their own same-key locks.
+            _reap_expired_leases(
+                config_dir, now=self._wall_clock(),
+                keep=_data_token_lease_path(base_url, tenant, config_dir),
+            )
+
+            deadline = time.monotonic() + self._lock_wait_ceiling_seconds
+            reopens = 0
             while True:
                 try:
                     _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: non-blocking mint-on-miss mutex (nexus-nnr26), not a lifecycle election
@@ -1084,14 +1610,14 @@ class DataTokenManager:
                     leased = self._read_lease(base_url, tenant)
                     if leased is not None:
                         _log.info(
-                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                            "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                         )
                         return leased
                     if time.monotonic() >= deadline:
                         raise DataTokenMintError(
                             f"data-token mint-on-miss lock wait exceeded "
                             f"{self._lock_wait_ceiling_seconds:.0f}s for "
-                            f"{_host(base_url)} tenant={tenant!r} — a sibling "
+                            f"{_log_endpoint(base_url)} tenant={tenant!r} — a sibling "
                             "process holds the mint lock without publishing "
                             "a lease. This can mean the sibling's own mint "
                             "failed or is genuinely stuck, OR that the mint "
@@ -1108,6 +1634,20 @@ class DataTokenManager:
                         )
                     self._sleep(_MINT_LOCK_POLL_INTERVAL_S)
                     continue
+                if reopens < _MINT_LOCK_REOPEN_MAX and not _fd_names_path(lock_fd, lock_path):
+                    # nexus-ndfc1 review B2: a reaper unlinked the file we
+                    # opened before we locked it. A lock on an unlinked inode
+                    # serializes nothing (the next creator locks a new file),
+                    # so drop it and lock whatever the path names now.
+                    reopens += 1
+                    _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: drop a lock on an unlinked inode (nexus-ndfc1)
+                    try:
+                        new_fd = _open_mint_lock_logged(base_url, tenant, lock_path, config_dir)
+                    except OSError as exc:
+                        return self._mint_unguarded(base_url, tenant, credential, exc)
+                    os.close(lock_fd)
+                    lock_fd = new_fd
+                    continue
                 try:
                     # Double-check under the lock: a racer may have won
                     # and published between our last poll and acquiring
@@ -1115,17 +1655,100 @@ class DataTokenManager:
                     leased = self._read_lease(base_url, tenant)
                     if leased is not None:
                         _log.info(
-                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                            "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                         )
                         return leased
                     fresh = self._mint(base_url, tenant, credential)
                     self._write_lease(base_url, tenant, fresh)
                     _log.info(
-                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
                     )
                     return fresh
                 finally:
                     _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: release the mint-on-miss mutex (nexus-nnr26)
+        finally:
+            os.close(lock_fd)
+
+    def _mint_unguarded(
+        self, base_url: str, tenant: str, credential: str, cause: OSError,
+    ) -> _CachedToken:
+        """Mint without the lock: the lock file cannot be opened, and the
+        mint (which the credential otherwise allows) must not be blocked by
+        an optimization."""
+        _log.warning(
+            "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_log_endpoint(base_url), error=str(cause),
+        )
+        fresh = self._mint(base_url, tenant, credential)
+        self._publish_lease_locked(base_url, tenant, fresh)
+        _log.info(
+            "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
+        )
+        return fresh
+
+    def _publish_lease_locked(self, base_url: str, tenant: str, cached: _CachedToken) -> None:
+        """Publish *cached* while holding the same-key mint lock (nexus-fcwbd).
+
+        The lease reaper removes a dead lease only under this lock, so a
+        publisher that does not hold it can have a fresh lease deleted in the
+        window between the reaper's inode check and its unlink. Used by the
+        paths that do not already hold the lock (the refresh in
+        :meth:`bearer_for` and :meth:`_mint_unguarded`); the guarded cold
+        mint holds it already and calls :meth:`_write_lease` directly.
+
+        Best-effort, like the lease itself, and never raises: a lock that
+        cannot be opened or flocked falls back to the plain write (it is an
+        optimization, and a dir that refuses the lock file usually refuses the
+        lease); a lock still held when :data:`_LEASE_PUBLISH_LOCK_WAIT_S` is
+        spent means a reaper or a cold minter is in the middle of this key, so
+        the lease is left to it and the caller already has its token.
+        """
+        config_dir = self._resolve_config_dir()
+        try:
+            make_user_dir(config_dir)
+            lock_path = _data_token_mint_lock_path(base_url, tenant, config_dir)
+            lock_fd = _open_mint_lock_logged(base_url, tenant, lock_path, config_dir)
+        except OSError:
+            self._write_lease(base_url, tenant, cached)
+            return
+        try:
+            deadline = time.monotonic() + _LEASE_PUBLISH_LOCK_WAIT_S
+            reopens = 0
+            while True:
+                try:
+                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: non-blocking same-key mutex for the lease publish (nexus-fcwbd), not a lifecycle election
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _log.debug(
+                            "data_token_lease_publish_skipped_lock_held", tenant=tenant,
+                            endpoint=_log_endpoint(base_url),
+                        )
+                        return
+                    self._sleep(_MINT_LOCK_POLL_INTERVAL_S)
+                    continue
+                except OSError:
+                    # ENOLCK / EOPNOTSUPP: a filesystem that cannot flock (NFS,
+                    # some FUSE mounts). The caller holds a good token and the
+                    # lease is an optimization: write it unlocked.
+                    self._write_lease(base_url, tenant, cached)
+                    return
+                if reopens < _MINT_LOCK_REOPEN_MAX and not _fd_names_path(lock_fd, lock_path):
+                    # A reaper unlinked the file between our open and our lock:
+                    # a lock on an unlinked inode serializes nothing.
+                    reopens += 1
+                    _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: drop a lock on an unlinked inode (nexus-fcwbd)
+                    try:
+                        new_fd = _open_mint_lock_logged(base_url, tenant, lock_path, config_dir)
+                    except OSError:
+                        self._write_lease(base_url, tenant, cached)
+                        return
+                    os.close(lock_fd)
+                    lock_fd = new_fd
+                    continue
+                try:
+                    self._write_lease(base_url, tenant, cached)
+                finally:
+                    _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: release the lease-publish mutex (nexus-fcwbd)
+                return
         finally:
             os.close(lock_fd)
 
@@ -1145,13 +1768,25 @@ class DataTokenManager:
         status: int
         payload: dict[str, Any]
         for attempt in range(1, _MINT_MAX_ATTEMPTS + 1):
+            mint_error: DataTokenMintError | None = None
             try:
                 status, payload, resp_headers = self._poster(url, headers, body)
             except Exception as exc:  # noqa: BLE001 — any transport failure becomes the typed mint error
-                _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_host(url), error=str(exc))
-                raise DataTokenMintError(
-                    f"data-token mint request to {_host(url)} failed: {exc}"
-                ) from exc
+                # A transport error can quote the URL it choked on:
+                # ``http.client.InvalidURL`` for ``https://user:pw@host`` says
+                # "nonnumeric port: 'pw@host'", and for a percent-encoded or
+                # colon-bearing password a decoded or truncated tail of it.
+                # The text is replaced whole when it quotes any of that
+                # (nexus-q26w1), and the error is raised OUTSIDE this handler:
+                # neither ``__cause__`` nor ``__context__`` may carry the
+                # original, whose message would print in a traceback.
+                reason = scrub_transport_error(exc, url)
+                _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url), error=reason)
+                mint_error = DataTokenMintError(
+                    f"data-token mint request to {_log_endpoint(url)} failed: {reason}"
+                )
+            if mint_error is not None:
+                raise mint_error from None
 
             if status not in _RETRYABLE_MINT_STATUSES or attempt == _MINT_MAX_ATTEMPTS:
                 break
@@ -1172,7 +1807,7 @@ class DataTokenManager:
                 delay = _MINT_BACKOFF_SCHEDULE[attempt - 1]
             _log.warning(
                 "data_token_mint_retry",
-                tenant=body_tenant, endpoint=_host(url), status=status,
+                tenant=body_tenant, endpoint=_log_endpoint(url), status=status,
                 attempt=attempt, delay=delay, retry_after_present=retry_after is not None,
             )
             self._sleep(delay)
@@ -1180,7 +1815,7 @@ class DataTokenManager:
         if status == 403:
             err = payload.get("error", "") if isinstance(payload, dict) else str(payload)
             _log.error(
-                "data_token_mint_failed", tenant=body_tenant, endpoint=_host(url),
+                "data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url),
                 status=403, error=err,
             )
             # nexus-ssqk9: name BOTH the configured/requested tenant and the
@@ -1188,7 +1823,7 @@ class DataTokenManager:
             # tenant does not match its OWN bound tenant, and the client has
             # no way to learn that bound tenant except from this message.
             raise DataTokenMintError(
-                f"data-token mint failed (403) against {_host(url)}: {err}. "
+                f"data-token mint failed (403) against {_log_endpoint(url)}: {err}. "
                 f"Sent tenant={body_tenant!r} (mint_tenant config="
                 f"{configured_mint_tenant or '(unset)'!r}, caller-supplied "
                 f"tenant={tenant!r}). A mint-locked credential is bound to "
@@ -1199,11 +1834,11 @@ class DataTokenManager:
         if status != 200:
             err = payload.get("error", "") if isinstance(payload, dict) else str(payload)
             _log.error(
-                "data_token_mint_failed", tenant=body_tenant, endpoint=_host(url),
+                "data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url),
                 status=status, error=err,
             )
             raise DataTokenMintError(
-                f"data-token mint failed ({status}) against {_host(url)}: {err}. "
+                f"data-token mint failed ({status}) against {_log_endpoint(url)}: {err}. "
                 f"Remedy: verify the configured mint_token credential is valid, "
                 f"unrevoked, and (if mint-locked) bound to tenant {body_tenant!r} "
                 f"('nx config set mint_token <bearer>')."
@@ -1211,9 +1846,9 @@ class DataTokenManager:
 
         token = payload.get("data_token") if isinstance(payload, dict) else None
         if not token:
-            _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_host(url), error="no data_token in response")
+            _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url), error="no data_token in response")
             raise DataTokenMintError(
-                f"data-token mint against {_host(url)} returned no 'data_token' field"
+                f"data-token mint against {_log_endpoint(url)} returned no 'data_token' field"
             )
         ttl = payload.get("expires_in_seconds", self._default_ttl_seconds)
         try:

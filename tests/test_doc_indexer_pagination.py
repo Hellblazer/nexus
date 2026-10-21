@@ -28,6 +28,8 @@ import pytest
 from nexus.doc_indexer import _index_document
 from tests.conftest import set_credentials
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _no_catalog_identity(monkeypatch):

@@ -26,6 +26,8 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def local_t3() -> T3Database:

@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
-# Scenario 07 — does permissions.allow wildcard preempt PermissionRequest hook?
-# Two sub-runs: with allow rule (hook should NOT fire if preempted), without (hook SHOULD fire).
-# Critical for the "delete auto-approve-nx-mcp.sh" decision.
+# Scenario 07 — with an allow rule for an MCP tool present, does the PermissionRequest
+# hook for it still fire? Two sub-runs: with the allow rule (A), without (B).
+#
+# THIS IS AN OBSERVATION, NOT A CONTRACT. Whether an allow rule pre-empts a
+# PermissionRequest hook has flipped across Claude Code versions, so the scenario reports
+# what the build under test did and compares it with the answer recorded for the same build
+# in docs/tables/cc-version-answers.toml (cc_preempt_verdict, runner.sh): the same answer
+# passes, a different one FAILS "answer changed since <version>", a version with no row prints
+# INFO "record this version's answer". Nothing may be deleted or relied on from either answer;
+# re-measure on every Claude Code pin bump. In particular the nx_hook_shim auto-approve verb
+# (registered on PreToolUse and PermissionRequest) stays as a hedge whichever way this lands.
+#
+# nexus-qsmc5: this scenario pins defaultMode "default" and used to launch through
+# claude_start, which passes --dangerously-skip-permissions: under that flag the permission
+# gate is bypassed entirely, so the tool ran with AND without an allow rule and the
+# PermissionRequest hook never fired, and the old verdict reported that as an answer. It now
+# launches with claude_start_enforced (no bypass flag), so the gate is real, and
+# cc_preempt_verdict treats sub-run B (no allow rule) as the control: the call must reach a
+# permission gate there, either the hook firing or the prompt appearing. A pending prompt is
+# dismissed before exit. Each sub-run's evidence (hook log, stub log, pane tail, transcripts,
+# settings) and the verdict lines are kept (cc_keep_evidence, cc_note).
 
 cat > "$TEST_HOME/.claude/perm_hook.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -43,7 +61,8 @@ EOF
 
 : > "$HOOK_LOG"
 : > "$STUB_LOG"
-claude_start
+cc_reset_transcripts
+claude_start_enforced
 # Deferred-tool warmup (see README "Deferred MCP tools"): load the schema before
 # the measured call so it doesn't race discovery.
 claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
@@ -55,7 +74,12 @@ hook_fired_with_allow=0
 [[ -s "$HOOK_LOG" ]] && hook_fired_with_allow=1
 tool_ran_with_allow=0
 [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_with_allow=1
+prompt_with_allow=0
+cc_permission_prompt_up && prompt_with_allow=1
 
+cc_save_pane 60
+cc_keep_evidence "07-allow-present"
+cc_dismiss_permission_prompt
 claude_exit
 
 # ── Sub-run B: allow wildcard ABSENT — does hook fire?
@@ -76,7 +100,8 @@ EOF
 
 : > "$HOOK_LOG"
 : > "$STUB_LOG"
-claude_start
+cc_reset_transcripts
+claude_start_enforced
 # Deferred-tool warmup (see README "Deferred MCP tools"): load the schema before
 # the measured call so it doesn't race discovery.
 claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
@@ -88,32 +113,18 @@ hook_fired_without_allow=0
 [[ -s "$HOOK_LOG" ]] && hook_fired_without_allow=1
 tool_ran_without_allow=0
 [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_without_allow=1
+prompt_without_allow=0
+cc_permission_prompt_up && prompt_without_allow=1
 
+cc_save_pane 60
+cc_keep_evidence "07-allow-absent"
+cc_dismiss_permission_prompt
 claude_exit
 
-# ── Verdict
-echo "    sub-A (allow present): hook_fired=$hook_fired_with_allow tool_ran=$tool_ran_with_allow"
-echo "    sub-B (allow absent):  hook_fired=$hook_fired_without_allow tool_ran=$tool_ran_without_allow"
-
-# VALIDITY NOTE (reworked 2026-05-31): the hook-firing signal is only meaningful
-# if the tool actually RAN — a tool that never reached the permission gate can't
-# exercise a PermissionRequest hook, so "hook never fires" would be vacuous. With
-# the stub now connected via .mcp.json + --mcp-config, tool_ran=1 confirms the
-# call reached the gate, so hook_fired is a real measurement. The empirically
-# observed outcome (tool runs both ways, hook never fires) is the answer to this
-# scenario's question (the auto-approve-sn/nx-mcp decision): under
-# skipDangerousModePermissionPrompt the gate is bypassed entirely, so a
-# PermissionRequest-based auto-approver is redundant. That is a PASS, not a fail.
-if [[ $tool_ran_with_allow -eq 0 || $tool_ran_without_allow -eq 0 ]]; then
-    fail "tool did not run in at least one sub-run — server not connected; cannot assess the PermissionRequest gate (would be vacuous)"
-elif [[ $hook_fired_with_allow -eq 0 && $hook_fired_without_allow -eq 0 ]]; then
-    pass "skipDangerousMode bypasses the PermissionRequest gate: tool auto-runs with AND without an allow rule, hook never fires (a PermissionRequest auto-approver is therefore redundant under skipDangerousMode)"
-elif [[ $hook_fired_with_allow -eq 0 && $hook_fired_without_allow -eq 1 ]]; then
-    pass "allow wildcard PREEMPTS the PermissionRequest hook (fires only when no allow rule)"
-elif [[ $hook_fired_with_allow -eq 1 && $hook_fired_without_allow -eq 1 ]]; then
-    pass "PermissionRequest hook fires regardless of allow rule (an auto-approver would still run if kept)"
-else
-    fail "unexpected: hook fires WITH allow but not WITHOUT — investigate"
-fi
+# ── Verdict (cc_preempt_verdict, runner.sh): sub-run B is the control that the
+# permission gate is real; sub-run A then reports whether the hook fired with the allow rule
+# present, for this Claude Code build.
+cc_preempt_verdict "$hook_fired_with_allow" "$tool_ran_with_allow" "$prompt_with_allow" \
+    "$hook_fired_without_allow" "$tool_ran_without_allow" "$prompt_without_allow"
 
 scenario_end

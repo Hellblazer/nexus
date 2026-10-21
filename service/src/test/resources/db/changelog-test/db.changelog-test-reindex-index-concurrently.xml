@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): REINDEX INDEX CONCURRENTLY
+    ${schema}.${index}. jOOQ's open-source DSL has no REINDEX. Run through
+    PgContainerHelper#reindexIndexConcurrently, which checks both names (plain identifiers). runInTransaction="false":
+    PostgreSQL refuses REINDEX CONCURRENTLY inside a transaction block. It runs on the caller's own connection, so
+    session settings the caller made first (statement_timeout, application_name) apply to it. The statement blocks
+    until it ends, so a test that watches it mid-flight runs the helper on a thread of its own. runAlways;
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="reindex-index-concurrently" author="nexus-cbo4a" runAlways="true" runInTransaction="false">
+        <sql>REINDEX INDEX CONCURRENTLY ${schema}.${index}</sql>
+    </changeSet>
+</databaseChangeLog>

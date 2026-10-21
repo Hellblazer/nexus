@@ -57,6 +57,7 @@ extend the tier.
 from __future__ import annotations
 
 import threading
+from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -522,8 +523,13 @@ class T2Database:
     def search_by_tag(self, query: str, tag: str) -> list[dict[str, Any]]:
         return self.memory.search_by_tag(query, tag)
 
-    def get_all(self, project: str) -> list[dict[str, Any]]:
-        return self.memory.get_all(project)
+    def get_all(
+        self,
+        project: str,
+        *,
+        title_kinds: Collection[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.memory.get_all(project, title_kinds=title_kinds)
 
     def delete(
         self,

@@ -186,6 +186,12 @@ public final class TupleHandler implements HttpHandler {
                 case "/park_stats" -> handleParkStats(exchange, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"unknown tuples op: " + op + "\"}");
             }
+        } catch (dev.nexus.service.db.TenantResetException e) {
+            // nexus-0bl77: a parked wait whose tenant the test-only reset route just reset; not a TupleException.
+            log.info("event=tuples_handler_tenant_reset op={}", op);
+            HttpUtil.send(exchange, e.httpStatus(),
+                    "{\"error\":" + HttpUtil.jsonString(e.code())
+                            + ",\"detail\":" + HttpUtil.jsonString(e.getMessage()) + "}");
         } catch (TupleException e) {
             log.warn("event=tuples_handler_typed_error op={} code={} detail={}", op, e.code(), e.getMessage());
             HttpUtil.send(exchange, e.httpStatus(),

@@ -451,7 +451,7 @@ _COMMAND_LEVEL_REASONS: dict[str, str] = {
         "records the file as failed."
     ),
     "PutOversizedError": (
-        "Raised from T3Database.put and HttpVectorClient.put (nexus-xzyr3: "
+        "Raised from T3Database.put (and the since-retired HttpVectorClient.put; nexus-xzyr3: "
         "the MCP store_put / `nx store put` path, db/t3.py and "
         "db/http_vector_client.py), both of which have 'no chunker "
         "upstream' unlike the doc_indexer pipeline -- not reachable from "

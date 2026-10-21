@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.VectorSeeds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -20,12 +21,12 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -518,30 +519,6 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat((List<?>) vecRepo.presentRows(tenant, COLLECTION_A, List.of()).get("ids")).isEmpty();
     }
 
-    // ── fetchChunkText: the chroma:// permalink is a physical read ───────────
-
-    /**
-     * RDR-192 Phase 2 gate M7 (nexus-wbfpw.35): {@link PgVectorRepository#fetchChunkText}
-     * backs the {@code chroma://<collection>/<chash>} resolver and reads by (collection, chash)
-     * with no liveness filter, while search, get and list are live(c). That is the contract for
-     * a content-addressed permalink, so it is pinned rather than left implicit: the two rows live(c)
-     * hides in this collection (R1 unowned, R3 tombstoned-owner only) still resolve, and so does a live
-     * one.
-     */
-    @Test
-    void fetchChunkText_readsPhysically_regardlessOfLiveness() throws Exception {
-        String tenant = "wbfpw1-ro";
-        Fixture fx = seedLivenessFixture(tenant);
-
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r2())).as("R2, live").isEqualTo("r2 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r1())).as("R1, unowned, hidden by live(c)")
-            .isEqualTo("r1 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r3()))
-            .as("R3, owner tombstoned, hidden by live(c)").isEqualTo("r3 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_B, fx.r1()))
-            .as("a chash stored only in A does not resolve in B").isNull();
-    }
-
     // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────
 
     @Test
@@ -625,32 +602,19 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             "2026-01-01T00:00:00Z", null);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            float[] v = new float[384];
-            v[0] = 1.0f;
-            // SANCTIONED RAW (nexus-wbfpw.1, TEST-TREE RATCHET): mirrors the identical
-            // seed helper TaxonomyUnassignedChashesRepositoryTest#seedCentroid already
-            // uses -- no public writer exists for a bare centroid row outside the real
-            // assignment pipeline, and jOOQ's generated pgvector Binding is not reachable
-            // from this seam without hand-rolling the same literal this precedent uses.
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, label, embedding_384, embedding_model) VALUES (?, ?, ?, ?, ?::nexus.vector,"
-                    + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "seed-centroid-" + label);
-                StringBuilder sb = new StringBuilder(v.length * 4 + 2).append('[');
-                for (int i = 0; i < v.length; i++) {
-                    if (i > 0) sb.append(',');
-                    sb.append(v[i]);
-                }
-                sb.append(']');
-                ps.setString(5, sb.toString());
-                ps.setString(6, tenant);
-                ps.setString(7, collection);
-                ps.executeUpdate();
-            }
+            // No public writer exists for a bare centroid row outside the real assignment
+            // pipeline, so the row is seeded through the generated table with the
+            // Vector-bound embedding_384 field.
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(TAXONOMY_CENTROIDS)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
+                .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
+                .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-" + label)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_384, VectorSeeds.vecXY(384, 1f, 0f))
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .execute();
         }
     }
 

@@ -22,6 +22,19 @@ entries in project `aurora`, four knowledge notes), cleanly stopped, and the
 conexus+sn plugins installed, then `docker commit`ed. Each run starts a fresh
 container from it, so writes never leak between runs.
 
+Every image here carries `ENV NX_NO_TELEMETRY=1` (the Dockerfile sets it), so
+no container sends conexus an install ping, whoever starts it and with
+whatever flags (nexus-ca5rw: 121 one-ping installs on 10-15 came from
+containers of this image). An image built before that line, or committed
+from one, gets it with one layer under the same tag:
+
+```bash
+printf 'FROM %s\nENV NX_NO_TELEMETRY=1\n' nexus-ab-seeded:2.1.300 | docker build -q -t nexus-ab-seeded:2.1.300 -
+```
+
+`claude plugin eval` still does not pass it to plugin MCP servers;
+`ab/skillroute/pe_in_container.sh` names it in the evaluated copy's `.mcp.json`.
+
 - `ab_in_container.sh`: starts the proxy and the engine, patches the installed
   conexus `.mcp.json` per `ARM` (A: `alwaysLoad: true`; B: `false`; C: key
   removed plus `arm_c_core_meta.py` appended to the installed `core.py`, which

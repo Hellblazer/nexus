@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -28,6 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -406,30 +408,26 @@ class CombinedWriteRacedEmbedCounterTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME
-                + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, 'minilm-l6-v2-384', ?, ?::nexus.vector)"
-                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, COLLECTION);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, text);
-            ps.setString(5, zeroVec);
-            ps.executeUpdate();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
+                .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 
     private void deleteChunk(String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, COLLECTION);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            int n = ps.executeUpdate();
+            int n = DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT),
+                       CHUNKS.COLLECTION.eq(COLLECTION),
+                       CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)))
+                .execute();
             assertThat(n).as("the concurrent delete removes exactly one row").isEqualTo(1);
         }
     }

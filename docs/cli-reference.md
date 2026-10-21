@@ -1320,7 +1320,11 @@ until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
 narrower scope.
 
 `--dry-run` reports what a pass WOULD create — per generator, by link type, by
-creator, and source fan-out — and writes nothing. The preview runs the SAME
+creator, and source fan-out — and writes nothing. With `--pdf` (the default) it
+also reports the stale `same-as` links the write pass would retract
+(nexus-h0uy7: a PDF re-indexed with new bytes no longer duplicates the document
+it was linked to), a count and up to `--sample` of them, and the total link
+count it prints is net of those retractions. The preview runs the SAME
 generators through a recording writer rather than a separate preview path, so
 it cannot drift from the write path. Counts mean "would create", never "would
 attempt": pre-existing links are deduped against and repeated proposals within
@@ -1803,7 +1807,9 @@ Two dispositions, per row:
 
 - **ghosts** — collections nothing references any more (no live row in any
   non-audit `COLLECTION_SCOPED_TABLES` entry). `--apply` physically deletes
-  the registry row.
+  the registry row. A rename's retired row whose successor is still registered
+  is a live redirect, not a ghost: it is left unchanged (counted in `scanned`
+  only); one whose successor is gone is a ghost (nexus-s80u9).
 - **referenced-but-empty (marked dormant)** — collections still referenced
   somewhere but with no `collection_vector_stats` row (nothing to embed or
   read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
@@ -1917,7 +1923,7 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to move any
 
 **Who expires what.** The move frees no storage: moved chunks sit in a `quarantine-*` collection (these collections appear in `nx collection list`) until they expire, and each side expires what it moved (Sam, 2026-10-01), with one engine-side exception for `knowledge__*` (below, Sam, 2026-10-04).
 
-- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` uses only the row-derived name and `quarantine-<collection>`, with no such query, so a chunk stranded under any other name waits for `nx t3 gc`). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
+- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` uses only the row-derived name and `quarantine-<collection>`, with no such query, so a chunk stranded under any other name waits for `nx t3 gc`). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. The expiry is the bounded, request-keyed drain (RDR-222 Amendment A1, nexus-1579m): pages of 2,000 rows, each committed on its own, each sent with an `Idempotency-Key` so a resend after a timeout cannot repeat it. `nx t3 gc` runs it strict: a drain that stops short, an error on the first page, or a page that fails after earlier ones committed is an exit 1 that names the pages and rows that did expire and, for a page the request ledger could not settle, its request key (`GET /v1/requests/<key>` says whether it committed); a page that committed with its count lost makes the line read `at least N expired`, and a refused count the engine did not give reads `refused unknown`. `nx index repo` runs the same loop non-strict: it logs a failed page and carries on. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
 - **The engine expires the chunks its reaper moved**, on its own retention (`NX_REAPER_QUARANTINE_RETENTION_DAYS`, default 14), in every sibling.
 - **The engine also expires the chunks a client moved, in `quarantine-knowledge__*` siblings only** (nexus-wbfpw.75), because no repo index sweeps a knowledge collection and these rows used to wait for a hand-run `nx t3 gc`. Its retention is its own, `NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS` (default 14, an engine setting: the engine cannot see your `NX_GC_QUARANTINE_DAYS`), counted from the row's own `quarantined_at`. It keeps every chunk the origin's manifest references, has no fraction floor, and is audited as `gc_audit` operation `reaper_expire_client_quarantine` (`nx catalog gc-audit list --operation reaper_expire_client_quarantine --json`), distinct from `reaper_expire_quarantine` for the rows the reaper moved. Code, docs and rdr quarantine is never touched by it, and neither is a knowledge row whose sibling or origin is not registered as such (the origin must be live). Your `NX_GC_QUARANTINE_DAYS` does not govern these rows on an engine that carries it: set it to 60 and the engine still deletes a knowledge row at 14 days. Your `nx t3 gc` expiry still works beside it: the engine's rows are a strict subset of what yours would take, and a row one took is simply absent to the other. An engine without this change expires none of these rows; only your `nx t3 gc` does.
 
@@ -2667,7 +2673,7 @@ nx collection list
 
 | Subcommand | Description |
 |------------|-------------|
-| `list [--all]` | All T3 collections with their chunk counts (`CHUNKS` is live, owned chunks; `STORED` is what physically sits in the collection, and exceeds `CHUNKS` for quarantine siblings and chunks with no manifest owner, which `collection shape` and `catalog verify` count; nexus-7q8zg) and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks (dormant) prints `0`. If the catalog cannot be read the listing says so and prints names and counts only. A rename's old name keeps a retired catalog row naming its successor; an empty one is left out unless `--all`, and one still holding chunks shows `STATE` `superseded-><new name>` (nexus-sis0m.3) |
+| `list [--all]` | All T3 collections with their chunk counts (`CHUNKS` is live, owned chunks; `STORED` is what physically sits in the collection, and exceeds `CHUNKS` for quarantine siblings and chunks with no manifest owner, which `collection shape` and `catalog verify` count; nexus-7q8zg) and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks prints `0`. `STATE` is the stored `lifecycle_state`, not derived from the counts: a row reads `dormant` only after a ghost sweep marked it (the engine's one-time sweep at a tenant's first request, or [`nx catalog sweep-ghosts --apply`](#nx-catalog-sweep-ghosts)), and the sweep counts STORED rows, so a collection showing `CHUNKS` `0` with `STORED` above zero (unowned or quarantined rows) stays `live` (nexus-bnh9n). If the catalog cannot be read the listing says so and prints names and counts only. A rename's old name keeps a retired catalog row naming its successor; an empty one is left out unless `--all`, and one still holding chunks shows `STATE` `superseded-><new name>` (nexus-sis0m.3). `nx collection delete <new name>` also removes the empty retired rows that name it, so a rename followed by a delete of the new name leaves nothing for the old one (nexus-s80u9) |
 | `info NAME` | Details for one collection: live chunks (plus stored, when they differ), the index and query model from the collection's catalog row (both the row's and the name's when a model-encoding name disagrees with its row), and the newest document `indexed_at` from the catalog's collection-health aggregate (nexus-ktsa1; it used to page every chunk). On a renamed collection's old name it exits non-zero naming the new one (nexus-sis0m.3) |
 | `aspects NAME [--enable\|--disable] [--yes]` | Show or set the engine's tenant-wide `catalog_collections.aspects_enabled` attribute — the docs__ aspect-extraction opt-in (nexus-l46pu, follow-up to nexus-kk4ut). Bare invocation shows the current value, or, on a row nobody has ever set (`aspects_enabled` is `NULL` — a fresh install, an old engine, or simply untouched), names the local `aspects.docs_collections` fallback answer instead of guessing. `--enable`/`--disable` sets it and prints the tenant-wide blast radius and the LLM-call cost before writing, then prompts for confirmation unless `--yes`/`-y` is given (a non-interactive run without `--yes` refuses rather than hanging). Refuses (nonzero exit) a non-docs__ collection. The engine is AUTHORITATIVE once it has an opinion — an explicit `true`/`false`, never a column default — round 2, T2 critique-nexus-l46pu-tenant-wide-aspects-enabled item 1 — a machine's local `aspects.docs_collections` config.yml entry is consulted only when the engine has none yet |
 | `aspects --from-config [--dry-run] [--yes]` | Sync every registered docs__ collection this machine's local `aspects.docs_collections` list matches onto the engine (sets `aspects_enabled=true` there); the migration path off the local-only list. Prompts once for the whole batch unless `--yes`/`-y` is given. `--dry-run` reports without writing and never prompts. Cannot combine with `NAME` or `--enable`/`--disable` |
@@ -2695,7 +2701,7 @@ nx collection list
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
-The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. If the service does not confirm the delete (a read timeout makes one attempt, so it may or may not have committed), the command stops before it re-registers or re-indexes anything and exits non-zero. Its message says to run `nx collection info NAME`: if the collection still lists chunks, re-run `reindex`; if it reports not found, the delete committed, so re-index from the original sources (`nx index repo`, `nx index md` or `nx index pdf`) and run `nx collection delete NAME` to clear any pipeline rows the unconfirmed delete left. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
 
 **Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
@@ -2763,6 +2769,8 @@ Renders four sections: distance histogram, top-5 cross-projections, orphan chunk
 |------|-------------|
 | `--sort COLUMN` | Sort the table by a named column (`name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`, `median_query_distance_30d`, `cross_projection_rank`, `orphan_catalog_rows`, `hub_domination_score`). Default: `name` |
 | `--format {table,json}` | Output format (default: `table`). `--format=json` returns `{generated_at, collections: [...]}` for dashboards and CI gates |
+
+`zero_hit_rate_30d` is the share of searches in which the collection contributed no rows to the engine's candidate pool (counted before the topic filter, the enrichment cap and the page cut; the pool limit is at least 300 rows, not `--limit`). On the per-collection search route a collection whose rows all lose that pool limit counts as a zero hit although no threshold dropped them; the batched route counts rows kept after the threshold, so the 30-day figure mixes both meanings until the per-collection route is the only one (nexus-079ly).
 
 Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree — catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
 
@@ -2857,24 +2865,24 @@ running pre-swap code, until this bead's deferred PART 3 removes it.
 
 ## nx init
 
-Guided first-run setup for the local embedder (RDR-144). Distinct from
-`nx config init` (the cloud-credentials wizard): `nx init` chooses and
-provisions the on-device embedding model for local mode.
+First-run setup for local mode. Distinct from `nx config init` (the
+cloud-credentials wizard): `nx init` provisions the local service stack and the
+bge-768 embedding model it reads.
 
 ```
 nx init                       # local: provision + interactively offer autostart (default yes)
 nx init --yes                 # accept service-autostart registration, no prompt
 nx init --no-autostart        # provision + start a session supervisor only; register no unit
-nx init --embedder minilm-384 # pick a specific embedder, no prompt
+nx init --embedder minilm-384 # advisory only: the service path provisions bge-768 either way
 nx init --service             # DEPRECATED — plain `nx init` now does this by default
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
+| `--embedder [bge-768\|minilm-384]` | Embedder request for the local service step. `minilm-384` only prints an advisory: the service path provisions bge-768 either way, and an existing `voyage-*` `local.embed_model` is kept. |
 | `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
-| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
+| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, stamps the embedder as bge-768 (keeping an existing `voyage-*` `local.embed_model`), acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see below. Explicit decline always wins, like `--no-autostart`. For a standing opt-out (every future run, every command) use `nx config set beads_prime.manage false` instead. |
 
 **First-run ladder convergence (nexus-9xfx5):** once the backend is serving,
@@ -2901,15 +2909,20 @@ with neither flag declines — a system unit is **never** written without explic
 consent. On yes the OS unit becomes the single process watchdog; on no (or a
 headless host where the unit can't activate) a session supervisor starts instead.
 
-**Local mode** presents the two on-device embedders and records the choice in
-`~/.config/nexus/config.yml` under `local.embed_model`:
+**Local mode** provisions the bge-768 embedder (`BAAI/bge-base-en-v1.5`, 768-dim)
+the service reads and records it in `~/.config/nexus/config.yml` under
+`local.embed_model`. The RDR-144 two-choice picker (bge-768 / minilm-384) was
+removed at RDR-174 P1.3, so `nx init` asks no embedder question. A keyless
+local engine serves bge-768 only and a keyed one serves Voyage only; MiniLM is
+never served locally, and a collection the running engine cannot embed for is
+refused (422). A fresh, bge or minilm
+`local.embed_model` is stamped `BAAI/bge-base-en-v1.5` (one-time ~140 MB model
+download). If `local.embed_model` already holds a `voyage-*` value, `nx init`
+keeps it and says so, adding a second line when no Voyage key is configured
+(nexus-ddmfg); rerunning `nx init`, or the upgrade
+ladder's provision step, does not reset a local-Voyage install to bge-768.
 
-| Choice | Model | Dim | Notes |
-|--------|-------|-----|-------|
-| `bge-768` | BAAI/bge-base-en-v1.5 | 768 | Recommended. Materially better local search. One-time ~140 MB model download. |
-| `minilm-384` | all-MiniLM-L6-v2 | 384 | Bundled, instant, lower quality. |
-
-When `bge-768` is chosen, `nx init` also:
+In local mode `nx init` also:
 
 1. **Does NOT add the `[local]` extra.** It once did, right here, via an
    extras-preserving `uv tool` reinstall — that step went with the RDR-144
@@ -2919,14 +2932,16 @@ When `bge-768` is chosen, `nx init` also:
    silently drops the 768-dim embedder. `nx doctor` flags the case where
    `local.embed_model` is bge-768 but the extra is absent (search silently
    falls back to 384-dim).
-2. **Pre-fetches the model** into the stable cache (`local.fastembed_cache_path`,
-   default `~/.local/share/nexus/fastembed_cache`). Offline failures print an
-   actionable message and retry on the next local search.
-3. **Offers safe migration** of any pre-existing 384-dim collections that would
-   otherwise become silently unsearchable under bge-768 (preview →
-   double-confirm → reindex-first → delete-after-verify; `code__` and manual-note
-   collections are reported, never auto-deleted; mixed file+note collections
-   require an explicit note-loss confirmation and are never migrated under `--yes`).
+2. **Pre-fetches the model** the service reads (the standard bge ONNX, at the
+   stable Java-read path). An offline failure is fatal for `nx init --service`,
+   because the service cannot boot without the file; re-run when online.
+3. **Migrates nothing.** The safe 384-to-768 collection migration it once
+   offered went with the picker (RDR-174 P1.3). `nx init` never re-embeds or
+   deletes a collection. The engine serves one embedding family per boot, so
+   collections embedded with the other family stop serving after a restart
+   until it is switched back or they are re-indexed; RDR-210 tracks the
+   dual-mode engine that serves both side by side. Details under "Local mode
+   with Voyage" below.
 
 **Cloud mode** is a no-op: embeddings run server-side via Voyage. `nx init`
 points you at `nx config init` for credentials.
@@ -2935,10 +2950,9 @@ points you at `nx config init` for credentials.
 the degraded case where `local.embed_model` is `BAAI/bge-base-en-v1.5` but the `[local]`
 extra is missing (so search silently runs at 384-dim).
 
-**Local mode with Voyage (nexus-35ok4 / GH #1461).** `nx init`'s guided
-prompt only offers the two on-device embedders above, but a local install
-CAN use Voyage instead: set `local.embed_model` to a voyage-shaped value
-directly and configure a key —
+**Local mode with Voyage (nexus-35ok4 / GH #1461).** `nx init` stamps
+bge-768, but a local install CAN use Voyage instead: set `local.embed_model` to
+a voyage-shaped value and configure a key (`nx init` then keeps that value) —
 
 ```
 nx config set local.embed_model voyage-code-3
@@ -2991,12 +3005,15 @@ follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
 restart) — that bead's scope now explicitly includes this stale/orphaned
 bge-data-after-a-keyed-write case, not just the engine-restart case.
 
-**Re-running `nx init` reverts this opt-in.** Both `nx init` and the upgrade
-ladder's provision leg unconditionally write `local.embed_model` back to
-bge-768; a later `nx daemon service` restart then boots keyless and the
-Voyage collections become unreadable until you redo the recipe above. RDR-210
-tracks the dual-mode engine (one boot serving both bge-768 and Voyage) that
-removes the need for this opt-in dance and the revert defect together.
+**Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
+already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision
+leg leave it alone and say so (with a second line when no Voyage key is
+configured); they used to write it back to
+bge-768, which stranded the Voyage collections at the next service restart. To
+go back to bge-768 on purpose, run `nx config set local.embed_model
+BAAI/bge-base-en-v1.5` and restart the service; nothing checks first, and the
+Voyage collections stop serving until you switch back. The engine still serves
+one posture per boot; RDR-210 tracks the dual-mode engine.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on
@@ -3281,12 +3298,19 @@ user, run from an elevated Command Prompt. The row is absent on POSIX.
 
 **Smart App Control row (Windows only, nexus-f9bgu.57).** "Smart App Control"
 reads `VerifiedAndReputablePolicyState` under
-`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. On is a failure in local mode,
-because Windows then blocks the unsigned PostgreSQL bundle and the Python uv
-installs, and a warning in cloud mode, where its effect is not measured.
-Evaluation is a warning, because Windows can switch it on later. A state that
-cannot be read is a warning; off passes. `nx init` refuses local provisioning
-while the state is on. See
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. The registry value alone does
+not decide: with it on, in local mode, the row runs the real PostgreSQL bundle
+binary (`--version`, once a bundle is installed; an unsigned stand-in
+executable before that) and asks whether Windows blocks it. A program that ran
+is a warning (the registry says on but nothing is blocked now, and Windows can
+start enforcing). The row is a failure only when the bundle binary is blocked
+(`WinError 4551`) or cannot be tried. In cloud mode on is a warning, where its
+effect is not measured. Evaluation is a warning, because Windows can switch it
+on later. A state that cannot be read is a warning; off passes. `nx init`
+follows the same probe: it refuses local provisioning when the state is on and
+an unsigned stand-in does not run (blocked, or not told), and goes on when it
+runs. A bundle binary blocked after the download raises the same refusal
+instead of a raw `[WinError 4551]`. See
 [Smart App Control](windows-install.md#smart-app-control). The row is absent on
 POSIX, and also on a Windows that has no Smart App Control (the registry value
 does not exist, as on Windows 10 and older Windows 11).
@@ -3385,7 +3409,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--check-embeddings` | Embedding drift probe (nexus-f9duo): samples chunks per collection, embeds their stored text again with the collection's registered model (`POST /v1/vectors/embed`, which stores nothing) and compares with the stored vector. A chunk below cosine 0.99 is named with its collection's median and minimum; healthy engine-written chunks measure 0.998 or above, and the nexus-tysei stale vectors sat at 0.25 to 0.87. `--embeddings-sample N` (default 20, max 300) sets chunks per collection, drawn from non-overlapping windows at random offsets in four equal strata (engine rows are ordered by chash, so a window is not one document or one indexing era); a sampled chunk with text but no stored vector at the collection's dim (a re-embed in progress) is counted and not compared, and a collection with nothing comparable is named NOT CHECKED; `--embeddings-collection NAME` (repeatable) narrows the scope from every collection holding chunks; `--embeddings-seed` repeats a sample (default: today's UTC date, printed in the result). **Exit 1** when any sampled chunk is below the floor, when any collection could not be probed, or when nothing was compared. Opt-in because it costs one embedding call per sampled chunk. Remedy: `nx collection re-embed <collection>`, a production write |
 | `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
-| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff — about 61.5s worst case per document, so `ceil(sample / min(8, sample)) * 61.5s` worst case for the whole run (~2 minutes at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. Residual limitation `backfill-etags` does NOT fix: a host that mints a fresh `ETag` on every response (no stable validator at all) reads `stale` on every run regardless of real content change — treat repeated `stale` against the same host as effectively `unknown`, not a real signal |
+| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff, plus one confirming HEAD after an ETag mismatch — about 81.5s worst case per document, so `ceil(sample / min(8, sample)) * 81.5s` worst case for the whole run (~163 s at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. A host that mints a fresh `ETag` on every response (no stable validator, which `backfill-etags` cannot fix) reads `unknown`, not `stale`: an `https://` ETag mismatch is confirmed with one more HEAD, and an ETag that changes again while `Content-Length` holds (or is absent from both) and no `Last-Modified` is sent is reported as an unstable validator (nexus-ltrjf); a second ETag equal to the recorded one reads `fresh`. A mismatch the second HEAD repeats, or one where the length also moved, stays `stale`, so a fresh-ETag host whose length also varies still reads `stale`. A real change can read `unknown` this way (a same-length rewrite behind per-node ETags, or a page edited between the two HEADs) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 
@@ -3505,7 +3529,7 @@ Exit codes:
 - `0` — the T3 vector store is reachable.
 - `1` — unreachable; the report is not actionable without a working store. Suitable as a CI gate.
 
-**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections are unchanged.
+**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections were unchanged by that rename; `retry` later dropped `etl_seconds` and `etl_count` (nexus-nhym2).
 
 ```
 nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains
@@ -3859,8 +3883,8 @@ still reads green here; the per-collection refusals are in `gc_audit` (`reaper_r
 judged on the time alone.
 
 **Per-collection indexes (nexus-43ulx.24, RDR-227).** `nx doctor`'s "Per-collection indexes" row reads the
-`per_collection_indexes` object of the same `GET /v1/status` body: the read half's `valid`, `invalid` and `unparsed`
-counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
+`per_collection_indexes` object of the same `GET /v1/status` body: the read half's `valid`, `invalid`, `unparsed` and
+`reindex_leftover` counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
 `last_ddl_pass_at`. It fails (hard) on `auth_failed` (restart the engine after a `nexus_admin` rotation) and on
 `no_privilege` (the engine's admin role cannot create indexes on the leaves), checked before the counts so a dead builder
 cannot read green; it warns when `invalid` or `failing` is above zero, when a DDL pass has been in flight for more than an
@@ -3869,10 +3893,65 @@ hour (`pass_started_at`; there is no pass deadline), and when `builder_state` is
 engine's `sweep_seconds`, 600 when absent); it passes on `ok` and `standby` (a peer holds the builder lock; a standby
 with a fresh read passes `invalid` above zero with a note, since the invalid index may be the peer's build in flight), and
 on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
+`reindex_leftover` (nexus-rn1yd) counts the invalid `pci_<hash>_ccnew`/`_ccold` indexes a failed `REINDEX CONCURRENTLY`
+left behind, apart from `unparsed` (an index is counted once). The row shows it ("2 reindex leftover") and warns only
+when `builder_state` is `off`, because then nothing drops it (set `NX_SEARCH_PCI=1`, or `DROP INDEX CONCURRENTLY` it by
+hand); `auth_failed` and `no_privilege` already fail and carry the count, on `ok` the next pass drops it and on `standby`
+a peer does.
 The row is green and says "not applicable" when the engine cannot be reached or its status does not include the object (an
 older engine, or one still starting). An object the row
 cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
 it got. It works in local and managed mode alike, over HTTP only.
+
+**Chunks leaf bloat (nexus-dxsjc, HNSW maintenance policy nexus-4lnn1 R4).** `nx doctor`'s "Chunks leaf bloat" row reads the
+`chunks_leaf_bloat` object of the same `GET /v1/status` body. The object carries **aggregates only**, because the route is
+unauthenticated (Sam's ruling, 2026-10-19): counts over every leaf of `nexus.chunks` (`leaves_total`, `policy_unset`,
+`autovacuum_disabled`, `overdue`, `pinned`, `starved`), `max_overdue_for_seconds`, and the sweep-health fields. It names no leaf. A leaf is
+overdue when its dead rows pass `overdue_base_rows` (1000) plus `overdue_scale_factor` (10%) of its rows, so a small leaf at a high dead
+fraction, which autovacuum leaves alone, is not overdue. Rows is the larger of the statistics' live plus dead tuples and the planner's row
+estimate (`pg_class.reltuples`, the figure autovacuum scales by), so a leaf whose counters a crash or restore zeroed is judged on the estimate. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
+rows remain) or `starved` (overdue for `overdue_warn_after_seconds` with no vacuum finished), how many lack any of the four autovacuum
+settings, and how many have `autovacuum_enabled` off; a `waiting` leaf passes with a note. The warning says the leaf names are in the
+engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. It also warns when the
+engine's view has `expired`, and when its reads have failed since it started and none has succeeded (`ever_read`, `consecutive_failures`).
+Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
+and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
+
+**Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
+body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
+whether search is reranked; `reranker_available` is the engine's answer on whether the reranker's model files are present, read live
+from the files on every response. It reports files on disk, not that a rerank would succeed: files that are present but cannot be
+loaded, and the Voyage reranker, read true. The row warns when it is false, naming the reranker, and says to run
+`nx init --service`; the value is a bare boolean and carries no path. A value that is not a boolean warns. Not
+applicable (green) when the engine cannot be reached or an older engine does not report the key, which is "cannot tell", never "available".
+It works in local and managed mode alike, over HTTP only.
+
+**Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
+threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
+`NX_SEARCH_EXACT_MAX_ROWS` rows (default 20,000). At or below that count the router runs the collection exact; above it
+the collection is routed to its own HNSW index once one is built (`NX_SEARCH_PCI_BUILD_MIN_ROWS`, `NX_SEARCH_PCI`; see
+docs/configuration.md). The threshold is read from `nx doctor`'s own shell. It is an engine setting, so a managed or
+service engine run with another value is invisible to the row, which then uses the default.
+
+What the warning claims depends on each named collection's embedding model, shown on its entry. On `voyage-context-3`
+the index measured 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) at 10,308 rows (`docs__1-2`) and 14,300
+(`rdr__1-79`), under the 0.99 target, and was not measured above 20,000 rows. On any other model the row says "recall on
+<model> is unmeasured". `knowledge` collections are included by analogy: they share `voyage-context-3` with `docs` and
+`rdr`, but no `knowledge` collection was measured, and the warning says so. A `code` collection does not warn at any
+size: it measured recall 1.0 above the threshold, on `voyage-code-3` only. A prose collection exactly at the threshold
+is exact and does not warn. A collection whose `lifecycle_state` is `quarantine`, `dormant` or `disputed`, and a rename
+tombstone, are ignored.
+
+The only remedy the warning gives is to measure: for k of 40, 60, 80, 100 and 120, compare the collection's index top-k
+with an exact top-k, on query vectors written for the collection's own topics, and expect 0.99 or better at every k
+(RDR-227 Gap 1; nexus-a6mys will package it as a script). Raising `NX_SEARCH_EXACT_MAX_ROWS` keeps a collection exact and
+is the engine's remedy when the measurement fails, but it is engine-wide, bounded (docs/configuration.md names 30000
+for this; each exact arm reads every row of its collection, and the 27,893- and 29,355-row code collections
+went from 25-50 ms index arms to 0.6-0.9 s exact arms), and `nx doctor` cannot see the value the engine runs with, so the
+warning stays on after you raise it. A collection with no catalog content type is not classified; the row counts them in
+its detail, and is "not applicable" if none is classified. The `GET /v1/status` object carries counts only, so the row
+reads the collection listing, which `nx doctor` fetches once per run and shares with its "T3 collections" row. The row
+is green and says "not applicable" when the listing is empty or cannot be read, as on a box with no engine.
 
 **Chunk tenant isolation (nexus-wbfpw.48).** `nx doctor`'s "Chunk tenant isolation" row reads
 `chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security
@@ -4283,9 +4362,9 @@ run the plain command:
   path), the file the plugin's SessionStart hook compares with the plugin's
   version. The installer scripts (`web/install.sh`, `web/install.ps1`) build the
   CLI with this command and without the plugin's setup, which writes the same
-  marker after its own checked build; without it the first Claude session would
-  announce an upgrade and dispatch one (nexus-sv2wx.28). A dry run, a refusal and
-  a failed build write nothing, and a marker that cannot be written is a warning,
+  marker after its own checked build; without it the hook falls back to
+  the CLI's own `nx --version` on every session (nexus-sv2wx.28). A dry run, a
+  refusal and a failed build write nothing, and a marker that cannot be written is a warning,
   not a failure.
 
 Two bootstraps running at once are not guarded here; the setup process's lock
@@ -4459,10 +4538,12 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)) |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
+
+Environment: `NX_ASSUME_YES=1` is `--yes`. `NX_UPGRADE_AUTO_DEADLINE_SECONDS` (seconds, default `900`, minimum `60`; anything else falls back to `900` with a warning) is the `--auto` time limit above and is ignored by an interactive `nx upgrade`.
 
 **Restart after the ownerless-write release.** A local install enforces the ownerless-write
 refusal from the first boot of the upgraded engine, so after `nx upgrade` restart every
@@ -4632,7 +4713,7 @@ nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index
 | Flag | Description |
 |------|-------------|
 | `--yes` | Perform the teardown. Without it, `nx uninstall` only previews (dry-run default). |
-| `--remove-data` | Also wipe the local nexus data dir (notes + search index) and the model cache `~/.cache/nexus` (`%USERPROFILE%\.cache\nexus` on Windows; the ONNX models, the engine's DJL tokenizer library under `djl/` in releases after 7.74.0, and MinerU scratch output). The cache goes only after the service stack is confirmed stopped; a model root you set with `NX_ONNX_MODEL_DIR` outside it is kept and named. On Windows, in releases after 7.74.0, it also removes the `onnxruntime-java<n>` directories the engine's last run left in the temp directory (`TMP`, else `TEMP`; normally `%TEMP%`), again only after the confirmed stop and only by the predicate the engine's own boot sweep uses, narrowed to names that are `onnxruntime-java` plus digits (a real directory of regular files, old enough, whose loaded libraries delete); a directory in use or too recent is left and named. `~/.djl.ai/tokenizers`, where engine starts up to 7.74.0 extracted the tokenizer library, is DJL's shared default cache: it is reported and never removed. Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
+| `--remove-data` | Also wipe the local nexus data dir (notes + search index) and the model cache `~/.cache/nexus` (`%USERPROFILE%\.cache\nexus` on Windows; the ONNX models, the engine's DJL tokenizer library under `djl/` in releases after 7.74.0, the ONNX Runtime native libraries the engine extracts once under `ort_native/`, and MinerU scratch output). The cache goes only after the service stack is confirmed stopped; a model root you set with `NX_ONNX_MODEL_DIR`, or a native-library root you set with `NX_ORT_NATIVE_DIR`, outside it is kept and named. On Windows, in releases after 7.74.0, it also removes the `onnxruntime-java<n>` directories the engine's last run left in the temp directory (`TMP`, else `TEMP`; normally `%TEMP%`), again only after the confirmed stop and only by the predicate the engine's own boot sweep uses, narrowed to names that are `onnxruntime-java` plus digits (a real directory of regular files, old enough, whose loaded libraries delete); a directory in use or too recent is left and named. `~/.djl.ai/tokenizers`, where engine starts up to 7.74.0 extracted the tokenizer library, is DJL's shared default cache: it is reported and never removed. Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
 
 **Managed env override:** if `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are exported in
 your shell (not just `config.yml`), `nx uninstall` clears `config.yml` and warns
@@ -5321,7 +5402,7 @@ figures were hand-assembled by composing several existing readers on
    per-collection `zero_hit_rate` — looping the existing `search/stats`
    route over every T3 collection (the same enumeration `nx collection
    health` performs; `zero_hit_rate` costs no extra round trip — it is
-   already on every response). Always rendered as a **LOWER BOUND**: a
+   already on every response; it is the share of searches in which the collection contributed no rows to the engine's candidate pool, and it mixes the batched and per-collection route meanings across its window, nexus-079ly). Always rendered as a **LOWER BOUND**: a
    collection absent from the enumeration is invisible independent of
    any per-call error, so the caveat is unconditional, not gated on
    `errors > 0`. The text form prints the two worst (highest)

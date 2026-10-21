@@ -84,6 +84,7 @@ def test_unreachable_signal_omits_queue_depth_when_unavailable(monkeypatch) -> N
     assert ev["tenant"] == "default"
 
 
+@pytest.mark.t2_tenant
 def test_enqueue_hook_service_mode_unreachable_emits_signal(monkeypatch) -> None:
     """END-TO-END: the signal fires through the REAL enqueue hook (AUTOSTART on +
     SERVICE + spawn raises), not just _ensure_aspect_worker (critic significant)."""

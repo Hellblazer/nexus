@@ -44,7 +44,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.storage_mode import T2_FACADE_STORES
 
-pytestmark = pytest.mark.usefixtures("cloud_mode")
+pytestmark = [pytest.mark.usefixtures("cloud_mode"), pytest.mark.t2_tenant]
 
 
 def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:

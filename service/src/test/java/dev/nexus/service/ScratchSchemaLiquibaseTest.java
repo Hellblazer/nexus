@@ -68,19 +68,13 @@ class ScratchSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // t1 is a separate schema bootstrapServiceRole never touches (it covers
-            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // nexus and nexus_test only); grantT1ScratchTo grants it (nexus-cbo4a).
             // No session search_path is set (Sam's directive, nexus-zrcj7): every
-            // raw statement this class issues already qualifies t1.scratch by hand.
+            // statement this class issues already qualifies t1.scratch.
             // GRANT ... ON SCHEMA has no typed jOOQ DSL form (GrantOnStep#on(...)
-            // resolves to a Table<?> internally -- it can never target a schema) --
-            // kept raw (nexus-cbo4a).
-            su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .grant(DSL.privilege("SELECT"), DSL.privilege("INSERT"),
-                      DSL.privilege("UPDATE"), DSL.privilege("DELETE"))
-               .on(SCRATCH)
-               .to(DSL.role(SVC_ROLE))
-               .execute();
+            // resolves to a Table<?> internally -- it can never target a schema), so
+            // the helper runs that half as a test changelog (nexus-cbo4a).
+            PgContainerHelper.grantT1ScratchTo(su, SVC_ROLE);
         }
 
         svcDs = buildSvcDs();

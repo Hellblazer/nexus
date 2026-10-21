@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Transient-error retry helpers for ChromaDB Cloud, Voyage AI, and the
-migration ETLs.
+"""Transient-error retry helpers for the vector service, Voyage AI, and the
+catalog manifest write.
 
 Leaf module — no other nexus.* imports beyond ``nexus.rate_brake``, which
 is itself a leaf module (stdlib + structlog only, no imports back into
@@ -82,8 +82,8 @@ def _extract_status_and_retry_after(exc: BaseException) -> tuple[int, float | No
        ``from`` clause) — so the chain-walk finds the original HTTPError,
        headers included, without ``VectorServiceError`` needing to carry
        any duplicate state.
-    3. A duck-typed ``.code`` int (mirrors ``_is_retryable_etl_error``'s
-       existing precedent) — a fallback for a caller whose exception was
+    3. A duck-typed ``.code`` int (the same duck-typed
+       shape the vector client's errors carry) — a fallback for a caller whose exception was
        constructed without an intact chain (e.g. a hand-built test double).
        This fallback cannot recover Retry-After (no headers available), so
        it only ever contributes ``retry_after=None``.
@@ -187,8 +187,8 @@ def get_retry_stats() -> dict[str, float | int]:
     """Return a snapshot of retry counters — voyage + vector, time + count.
 
     Returned keys: ``voyage_seconds``, ``voyage_count``, ``vector_seconds``
-    (pre-P0d ``chroma_seconds``), ``vector_count``, ``etl_seconds``,
-    ``etl_count``, ``total_seconds``, ``total_count``, plus (nexus-cy9u7)
+    (pre-P0d ``chroma_seconds``), ``vector_count``,
+    ``total_seconds``, ``total_count``, plus (nexus-cy9u7)
     ``brake_trips`` and ``brake_seconds`` — the process-wide shared
     rate-limit brake's cumulative trip count and seconds paused (see
     ``nexus.rate_brake``). Brake pauses are NOT folded into
@@ -205,10 +205,8 @@ def get_retry_stats() -> dict[str, float | int]:
             "voyage_count": _voyage_retry_count,
             "vector_seconds": _vector_retry_seconds,
             "vector_count": _vector_retry_count,
-            "etl_seconds": _etl_retry_seconds,
-            "etl_count": _etl_retry_count,
-            "total_seconds": _voyage_retry_seconds + _vector_retry_seconds + _etl_retry_seconds,
-            "total_count": _voyage_retry_count + _vector_retry_count + _etl_retry_count,
+            "total_seconds": _voyage_retry_seconds + _vector_retry_seconds,
+            "total_count": _voyage_retry_count + _vector_retry_count,
             "brake_trips": brake.trips,
             "brake_seconds": brake.seconds_paused,
         }
@@ -225,14 +223,11 @@ def reset_retry_stats() -> None:
     """
     global _voyage_retry_seconds, _voyage_retry_count
     global _vector_retry_seconds, _vector_retry_count
-    global _etl_retry_seconds, _etl_retry_count
     with _retry_lock:
         _voyage_retry_seconds = 0.0
         _voyage_retry_count = 0
         _vector_retry_seconds = 0.0
         _vector_retry_count = 0
-        _etl_retry_seconds = 0.0
-        _etl_retry_count = 0
     reset_brake()
 
 
@@ -290,8 +285,8 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
         must never see a real HTTPError — step 3 already matched (and
         returned) on any HTTPError, direct or chained, so a URLError
         instance reaching this line is genuinely connectivity, not a real
-        HTTP status. Mirrors ``_is_retryable_etl_error``'s already-correct
-        equivalent logic below.
+        HTTP status. Matches the direct-type check
+        in step 2b above.
     4. String fallback — plain Exception message body (gateway HTML or service JSON).
     """
     # 1. (retired 2026-08-29) the Chroma/SQLite 'database is locked' leg is
@@ -304,7 +299,6 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
     #     re-resolve retry runs inside the except block, so a
     #     ConnectionResetError raised there chains the 401, and step 3's
     #     chained-status walk classed it non-retryable on the first attempt.
-    #     The ETL classifier checks the direct type first and gets it right.
     if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
         return True
     # 3. Authoritative status-code check across both HTTP-error families.
@@ -435,8 +429,8 @@ def _vector_with_retry(
     after it): 5 x 17s + 4 x 60s = 325s, call it about 5.5 minutes, for
     502/503 on any route or a 504 on a NON-embed-write route.
 
-    nexus-r46u9: on an embed-write route (``/v1/vectors/upsert-chunks`` /
-    ``/store-put``) under a SUSTAINED 504 storm, the inner gateway retry's
+    nexus-r46u9: on an embed-write route (``/v1/vectors/upsert-chunks``)
+    under a SUSTAINED 504 storm, the inner gateway retry's
     three sleeps are each floored at
     :data:`nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S`
     (30s), so the inner total rises from 17s to 3 x 30s = 90s. This
@@ -626,113 +620,6 @@ def _voyage_with_retry(
             delay = min(delay * 2, 10.0)
 
 
-# ── Migration-ETL transient-edge retry (RDR-176 Gap 6) ───────────────────────
-#
-# The managed migration round-trips many records over the nginx edge. A
-# transient edge 403, a connection drop, or a read-timeout intermittently
-# strands a leg (vectors) or records a whole batch failed (T2) — prod
-# observed the vector leg succeeding only after two transient-403 retries.
-# Idempotent upsert / ON CONFLICT makes a BOUNDED re-send safe.
-#
-# This is MIGRATION-SCOPED on purpose: it classifies a 403 as retryable, which
-# would be wrong for a normal runtime store call (a real auth failure must
-# fail fast). It is therefore applied at the ETL call sites, NOT in the shared
-# HTTP-client `_post`. A genuinely-forbidden request still surfaces — it just
-# exhausts the (small) attempt bound first, then raises with its remedy.
-
-#: Transient edge statuses retried at the status level; 400/404/422 are real
-#: client errors and fail fast. Connection drops / read-timeouts retry via the
-#: transport-level checks below.
-#:
-#: RDR-178 Gap 3 (nexus-ob4vc, 2026-07-01 incident): this set used to be
-#: ``{403}`` only. 429/502/503/504 — the CANONICAL transient class for an
-#: overloaded ingress — fell straight through ``_is_retryable_etl_error`` as
-#: "not retryable", so a batch that hit a 502 raised on the FIRST attempt
-#: with zero backoff. (The retry loop that consumed this classifier,
-#: ``_etl_with_retry``, and its ``EtlCircuitBreaker`` were deleted with the
-#: migration ETL, nexus-nhym2; the classifier and this status set have no
-#: production caller left.)
-#: nexus-1jtob (2026-08-23): 403 REMOVED. It was here on a "transient edge
-#: 403" premise asserted in the comments below and never measured. conexus
-#: swept 3,675,603 edge application-log records over 2026-08-19..08-23 and
-#: found ZERO 403s on this path — strong evidence of absence over that window,
-#: though not proof for all history.
-#:
-#: The two 403 populations are real, and this set had them exactly backwards
-#: by path. On the VECTOR path 403s are frequent (151 in four days) and are
-#: DETERMINISTIC AWS WAF refusals keyed on request-body content; that path
-#: already excluded 403 correctly. On THIS path, which included it, no 403 of
-#: any kind was observed. So the set was armed for a mode with no observed
-#: instances while the mode that actually occurs is unpassable — retrying it
-#: 5-8 times with escalating brake amplified load against our own edge for a
-#: request that could never succeed.
-#:
-#: Neither real 403 population is transient: a WAF refusal is deterministic in
-#: the body, and a control-plane 401/403 is an authz verdict. 5xx from the ALB
-#: (``server: awselb/2.0`` with no healthy target) IS transient and stays
-#: retryable via 502/503/504 — the edge is not blanket-untrustworthy, only its
-#: 4xx refusals are deterministic.
-_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
-
-_etl_retry_seconds: float = 0.0
-_etl_retry_count: int = 0
-
-
-def _add_etl_retry(delay: float) -> None:
-    global _etl_retry_seconds, _etl_retry_count
-    with _retry_lock:
-        _etl_retry_seconds += delay
-        _etl_retry_count += 1
-
-
-def _is_retryable_etl_error(exc: BaseException) -> bool:
-    """Return True if *exc* is a transient migration-edge failure worth a bounded
-    retry: a nginx edge 403, a connection drop, or a read-timeout.
-
-    Real client errors (400/404/422), and any 401 (token rotation — handled by
-    the vector client's own auto-restart), are NOT retried here.
-    """
-    # Transport-level httpx (ConnectError, ReadTimeout, RemoteProtocolError, …).
-    if isinstance(exc, httpx.TransportError):
-        return True
-    # httpx response error — transient statuses only; see the frozenset above
-    # for why 403 is NOT among them (nexus-1jtob).
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _RETRYABLE_ETL_HTTP_STATUSES
-    # urllib.error.HTTPError is a URLError subclass — check it FIRST so a 404
-    # does not fall through to the blanket URLError (drop) branch below.
-    if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in _RETRYABLE_ETL_HTTP_STATUSES
-    # urllib transport drop (no HTTP response).
-    if isinstance(exc, urllib.error.URLError):
-        return True
-    # stdlib read-timeout / connection drop (socket.timeout aliases TimeoutError
-    # on 3.10+; ConnectionResetError ⊂ ConnectionError).
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        return True
-    # VectorServiceError-like: an explicit integer ``.code`` (duck-typed so this
-    # leaf module imports no nexus.*). nexus-1jtob: a ``code=403`` wrapper no
-    # longer retries here — see the frozenset above. Such a wrapper also carries
-    # ``edge_refusal=True`` when the ALB/WAF generated it, checked first below
-    # so an edge 4xx can never be retried even if a status is re-added later.
-    code = getattr(exc, "code", None)
-    if isinstance(code, int):
-        # nexus-1jtob: an EDGE-generated 4xx is deterministic in the request
-        # body. Belt-and-braces against a future status re-addition.
-        if getattr(exc, "edge_refusal", False) and 400 <= code < 500:
-            return False
-        return code in _RETRYABLE_ETL_HTTP_STATUSES
-    # Transport drop wrapped with no code: the managed vector path reframes a
-    # urllib/connection/timeout failure as ``VectorServiceError(code=None)`` via
-    # ``raise … from e``. Classify by the chained cause so a managed-path drop /
-    # read-timeout retries exactly like the local-path raw error would (the
-    # code-review gap: code=None wrappers were silently not retried).
-    cause = exc.__cause__ or exc.__context__
-    if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
-        return True
-    return False
-
-
 # ── Catalog manifest-write transient-connection retry (GH #1371) ────────────
 #
 # The catalog manifest-write hook (mcp_infra._manifest_write_loop) is
@@ -744,8 +631,7 @@ def _is_retryable_etl_error(exc: BaseException) -> bool:
 # with zero retry, silently leaving ``catalog_document_chunks`` empty for
 # that document (17 of 24 audited entries in the reported incident).
 #
-# Deliberately narrower than ``_is_retryable_etl_error``: this classifies
-# CONNECTION-level failures only, never by HTTP status code. A real 4xx
+# This classifies CONNECTION-level failures only, never by HTTP status code. A real 4xx
 # from the catalog service (a bad payload, an FK violation) must still fail
 # on the first attempt — that is a genuine data problem, not a transient
 # network blip, and retrying it would only delay the WARNING that makes it
@@ -754,7 +640,7 @@ def _is_retryable_etl_error(exc: BaseException) -> bool:
 #: 1 initial attempt + 3 retries, backing off 0.5s -> 1s -> 2s (~3.5s of
 #: added latency in the worst case). The catalog engine-service is a
 #: local-to-local connection that is usually just slow to start, not down
-#: for minutes — this is a short bounded wait, not the ETL breaker's
+#: for minutes — this is a short bounded wait, not a
 #: sustained-outage pacing.
 _MANIFEST_WRITE_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0)
 
@@ -771,8 +657,7 @@ def _is_connectivity_error(exc: BaseException) -> bool:
     ``__context__``. Does NOT inspect HTTP status codes: an
     ``httpx.HTTPStatusError`` (a real 4xx/5xx response, including a
     documented business refusal like ``IndexRunVerifyRefused``'s 409) is
-    never classified as connectivity here, unlike the migration-scoped
-    ``_is_retryable_etl_error``.
+    never classified as connectivity here.
 
     RENAMED from ``_is_retryable_manifest_connection_error`` (nexus-0dpli):
     originally scoped to catalog manifest-write retries

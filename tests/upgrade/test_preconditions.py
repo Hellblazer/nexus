@@ -145,6 +145,7 @@ def test_unknown_lease_version_fails_toward_stale(tmp_path: pathlib.Path) -> Non
     assert {r.name: r for r in reports}["process"].current is False
 
 
+@pytest.mark.t2_tenant
 def test_converge_coalesces_service_cycles(tmp_path: pathlib.Path) -> None:
     """THE coalescing pin: engine converge installs + cycles the service;
     the process check RE-DERIVES afterward (fresh lease read) and must NOT
@@ -175,6 +176,7 @@ def test_converge_coalesces_service_cycles(tmp_path: pathlib.Path) -> None:
     assert cycles["n"] == 0  # coalesced: no second stop/start
 
 
+@pytest.mark.t2_tenant
 def test_converge_cycles_process_when_engine_already_current(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -200,6 +202,7 @@ def test_converge_cycles_process_when_engine_already_current(
     assert {r.name: r for r in reports}["process"].current is True
 
 
+@pytest.mark.t2_tenant
 def test_failed_engine_cycle_degrades_to_bounded_second_cycle(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -225,6 +228,7 @@ def test_failed_engine_cycle_degrades_to_bounded_second_cycle(
     assert "6.10.0" in process.detail
 
 
+@pytest.mark.t2_tenant
 def test_no_running_process_is_current_not_cycled(tmp_path: pathlib.Path) -> None:
     """No lease = nothing running to cycle (upgrade must not auto-spawn) —
     process reads current-by-absence."""
@@ -241,6 +245,7 @@ def test_no_running_process_is_current_not_cycled(tmp_path: pathlib.Path) -> Non
     assert cycles["n"] == 0
 
 
+@pytest.mark.t2_tenant
 def test_skip_t3_suppresses_converge_actions_but_still_reports(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -287,6 +292,7 @@ def test_upgrade_trigger_threads_skip_t3_into_both_gates() -> None:
     assert "auto_mode" in engine_line  # --auto still gates the install
 
 
+@pytest.mark.t2_tenant
 def test_upgrade_command_threads_flags_into_the_precondition_stage(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,6 +313,7 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
         assert stage.call_args.kwargs == {"auto_mode": True, "skip_t3": False}
 
 
+@pytest.mark.t2_tenant
 def test_engine_converge_is_skipped_when_already_converged(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -433,6 +440,7 @@ class TestPluginLockstepPrecondition:
         assert r.applicable is True
         assert r.current is True
 
+    @pytest.mark.t2_tenant
     def test_converge_reports_include_lockstep_and_never_act_on_it(
         self, tmp_path: pathlib.Path,
     ) -> None:

@@ -226,6 +226,7 @@ class TestConfigDefault:
         assert cfg.get("search", {}).get("hnsw_ef") == 256
 
 
+@pytest.mark.t2_tenant
 class TestDoctorFixFlag:
     def test_doctor_fix_local_mode_outputs_updated_count(self) -> None:
         """doctor --fix in local mode shows updated collection count."""

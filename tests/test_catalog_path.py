@@ -96,6 +96,7 @@ class TestOwnerRecordRepoRoot:
 # ── resolve_path (nexus-1p4g.2) ──────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestResolvePath:
     """Catalog.resolve_path() resolution tests.
 
@@ -257,6 +258,7 @@ class TestMarkdownChunksRelativePath:
 class TestIndexDocumentSourceKey:
     """_index_document uses source_key for staleness check and pruning."""
 
+    @pytest.mark.t2_tenant
     def test_staleness_check_uses_content_hash_when_catalog_absent(self, tmp_path: Path, monkeypatch) -> None:
         """RDR-101 Phase 5c: source_path is gone from chunk metadata.
         When no catalog is initialised (no doc_id), the staleness check

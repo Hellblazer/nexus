@@ -477,6 +477,70 @@ class MemoryHandlerTest {
         assertThat(entries.get(0)).containsKey("content");
     }
 
+    // nexus-pxp44: /all?title_kinds= narrows to the rdr SessionStart hook's two row kinds.
+
+    private void putRdrFixture(String project) throws Exception {
+        for (String title : List.of("042", "7", "RDR-105", "042-gate-latest", "RDR-105-gate-latest",
+                "042-research", "RDR-105-notes", "42-final", "plain title", "gate-latest-not", "-gate-latest")) {
+            post("/v1/memory/put", TENANT,
+                "{\"project\":\"" + project + "\",\"title\":\"" + title
+                    + "\",\"content\":\"body of " + title + "\",\"ttl\":30}");
+        }
+    }
+
+    private List<String> allTitles(String query) throws Exception {
+        var resp = get("/v1/memory/all?" + query, TENANT);
+        assertThat(resp.statusCode()).as(query).isEqualTo(200);
+        return mapper.readValue(resp.body(), LIST_T).stream()
+            .map(m -> (String) m.get("title")).sorted().toList();
+    }
+
+    @Test
+    void all_titleKinds_rdrStatusReturnsOnlyBareNumberAndRdrNumberTitles() throws Exception {
+        putRdrFixture("kinds-status");
+        assertThat(allTitles("project=kinds-status&title_kinds=rdr_status"))
+            .containsExactly("042", "7", "RDR-105");
+    }
+
+    @Test
+    void all_titleKinds_gateLatestReturnsOnlyGateTitles() throws Exception {
+        putRdrFixture("kinds-gate");
+        assertThat(allTitles("project=kinds-gate&title_kinds=gate_latest"))
+            .containsExactly("-gate-latest", "042-gate-latest", "RDR-105-gate-latest");
+    }
+
+    @Test
+    void all_titleKinds_bothKindsAreTheUnionAndNothingElse() throws Exception {
+        putRdrFixture("kinds-both");
+        assertThat(allTitles("project=kinds-both&title_kinds=rdr_status,gate_latest"))
+            .containsExactly("-gate-latest", "042", "042-gate-latest", "7", "RDR-105", "RDR-105-gate-latest");
+    }
+
+    @Test
+    void all_titleKinds_absentOrBlankIsTheUnfilteredRead() throws Exception {
+        putRdrFixture("kinds-none");
+        var unfiltered = get("/v1/memory/all?project=kinds-none", TENANT);
+        var blank = get("/v1/memory/all?project=kinds-none&title_kinds=", TENANT);
+        assertThat(unfiltered.statusCode()).isEqualTo(200);
+        assertThat(blank.body()).isEqualTo(unfiltered.body());
+        assertThat(mapper.readValue(unfiltered.body(), LIST_T)).hasSize(11);
+    }
+
+    @Test
+    void all_titleKinds_unknownOrEmptyElementIs400() throws Exception {
+        assertThat(get("/v1/memory/all?project=x&title_kinds=bogus", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/all?project=x&title_kinds=rdr_status,bogus", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/all?project=x&title_kinds=rdr_status,", TENANT).statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void all_titleKinds_staysTenantScoped() throws Exception {
+        putRdrFixture("kinds-tenant");
+        var resp = get("/v1/memory/all?project=kinds-tenant&title_kinds=rdr_status,gate_latest", OTHER_TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), LIST_T)).isEmpty();
+    }
+
     // ── Test 11: DELETE by (project+title) ───────────────────────────────────
 
     @Test

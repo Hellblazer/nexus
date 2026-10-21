@@ -158,3 +158,24 @@ class TestEngineFloor:
 
         assert result.exit_code != 0
         assert "does not yet expose" not in result.output
+
+
+class TestReadTimeout:
+    """nexus-oq5gd: the live sweep makes ONE attempt, so a read timeout must
+    reach the user as a clean error, not a traceback."""
+
+    @pytest.mark.parametrize("args", [[], ["--apply"]], ids=["dry-run", "apply"])
+    def test_timeout_is_a_clean_error(self, monkeypatch, args):
+        writer = _FakeWriter(raise_exc=httpx.ReadTimeout("slow"))
+        _patch_writer(monkeypatch, writer)
+
+        result = CliRunner().invoke(main, ["catalog", "sweep-ghosts", *args])
+
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        text = result.output.lower()
+        assert "did not answer" in text
+        assert "may have completed" in text
+        assert "re-running it is safe" in text
+        assert writer.closed

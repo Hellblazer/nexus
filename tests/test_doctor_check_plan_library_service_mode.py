@@ -22,6 +22,7 @@ import httpx
 from click.testing import CliRunner
 
 from nexus.commands.doctor import _MIN_GLOBAL_BUILTIN_COUNT, _run_check_plan_library
+import pytest
 
 
 def _row(*, dimensions=None, tags="", project=""):
@@ -133,6 +134,7 @@ def test_unreachable_service_exits_2_state_unknown():
     assert "global-tier builtin count: 0" not in printed
 
 
+@pytest.mark.t2_tenant
 def test_unresolvable_endpoint_also_reports_unknown():
     """ServiceEndpointUnresolvableError is a RuntimeError, NOT an
     httpx.HTTPError — catching only httpx errors would let this escape as

@@ -24,18 +24,24 @@ or a bare ``"bin" / "java"`` anywhere else in ``tests/`` outside a frozen allowl
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import subprocess
 import tempfile
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 from nexus._install.layout_core import exe_name
 from nexus._winsec import grant_user_tree_access
 from nexus.util import process_group, win_job
+
+_log = structlog.get_logger(__name__)
 
 #: True where process groups exist (every POSIX host). Windows has no ``os.killpg``.
 _POSIX: bool = getattr(os, "killpg", None) is not None
@@ -56,6 +62,36 @@ def group_popen_kwargs() -> dict[str, Any]:
     return {"creationflags": win_job.CREATE_NEW_PROCESS_GROUP}
 
 
+@contextlib.contextmanager
+def terminal_signals_default() -> Iterator[None]:
+    """Run the body with SIGINT and SIGHUP at their default dispositions, then put back the prior ones.
+
+    A suite started with ``&`` from a non-interactive shell (a pool launcher) inherits
+    SIGINT=SIG_IGN, and one started under ``nohup`` inherits SIGHUP=SIG_IGN. A child inherits
+    both across exec, where bash cannot trap a signal that was ignored on entry (nexus-frfeh
+    for INT, nexus-ys8a4 for HUP). A test that sends the child either signal, or asserts on
+    the disposition, wraps its spawn in this. ``signal.getsignal`` returns ``None`` for a
+    handler not installed from Python and ``signal.signal`` raises ``ValueError`` off the main
+    thread; in either case that signal is left as it is. Windows has no SIGHUP.
+    """
+    restore: list[tuple[signal.Signals, Any]] = []
+    try:
+        for sig in (signal.SIGINT, getattr(signal, "SIGHUP", None)):
+            if sig is None:
+                continue
+            before = signal.getsignal(sig)
+            try:
+                signal.signal(sig, signal.SIG_DFL)
+            except ValueError:
+                continue
+            if before is not None:
+                restore.append((sig, before))
+        yield
+    finally:
+        for sig, before in restore:
+            signal.signal(sig, before)
+
+
 def popen_in_group(
     argv: list[str], *, popen: Callable[..., subprocess.Popen] | None = None, **kwargs: Any,
 ) -> subprocess.Popen:
@@ -72,7 +108,38 @@ def popen_in_group(
     job = process_group.contain(proc)
     if job is not None:
         _JOBS[proc.pid] = job
+    if is_engine_jvm_argv(argv):
+        _record_engine_child(proc)
     return proc
+
+
+#: The engine jar's file-name prefix (``nexus-service-1.0-SNAPSHOT.jar`` in a build, a versioned name elsewhere).
+_ENGINE_JAR_PREFIX = "nexus-service"
+
+
+def is_engine_jvm_argv(argv: Any) -> bool:
+    """Is *argv* a JVM launch of the engine jar: a list holding ``-jar`` followed by a path whose file name
+    starts with :data:`_ENGINE_JAR_PREFIX`? Shaped like :func:`tests.db._service_fixture.jar_argv` and
+    :func:`tests._engine_substrate.engine_argv`."""
+    if not isinstance(argv, (list, tuple)):
+        return False
+    toks = [str(a) for a in argv]
+    try:
+        jar = toks[toks.index("-jar") + 1]
+    except (ValueError, IndexError):
+        return False
+    return Path(jar.replace("\\", "/")).name.startswith(_ENGINE_JAR_PREFIX)
+
+
+def _record_engine_child(proc: subprocess.Popen) -> None:
+    """Record an engine JVM for the crash sweep, whatever fixture started it (nexus-qsqc6). Best effort: a
+    record that cannot be written warns and never fails the spawn."""
+    from tests._engine_substrate import record_integration_child  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    try:
+        record_integration_child(proc)
+    except Exception as exc:  # noqa: BLE001 - the spawn already happened; losing the record must not lose the proc
+        warnings.warn(f"nexus tests: could not record engine pid {proc.pid} for the crash sweep ({exc})", stacklevel=3)
 
 
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
@@ -174,8 +241,15 @@ def java_available() -> bool:
 
 
 def pg_data_tempdir(prefix: str, *, parent_dir: str | None = None) -> str:
-    """``tempfile.mkdtemp`` for a throwaway PostgreSQL data directory, provisioned the way the
-    product provisions its own (``nexus.db.pg_provision``).
+    """A directory for a throwaway PostgreSQL cluster of an integration fixture,
+    provisioned the way the product provisions its own (``nexus.db.pg_provision``).
+
+    With no *parent_dir* it is created under the substrate's root
+    (``tests._engine_substrate.integration_cluster_dir``): tmpfs on Linux with the
+    same gates and loud fallback, else the tempdir, and recorded so the sweep
+    reaps it if the process is killed (nexus-942h9). The fixture appends
+    :func:`integration_pg_conf` to ``postgresql.conf``. A caller that needs
+    durability semantics, or a place of its own, passes *parent_dir*.
 
     On Windows, ``initdb`` and ``postgres`` drop to a restricted token on which Administrators
     is deny-only, and ``mkdtemp``'s ``0o700`` ACL grants only SYSTEM, Administrators and OWNER
@@ -183,19 +257,101 @@ def pg_data_tempdir(prefix: str, *, parent_dir: str | None = None) -> str:
     ``grant_user_tree_access`` adds an inheritable ACE for the user's own SID. POSIX: plain
     ``mkdtemp``.
     """
+    if parent_dir is None:
+        from tests._engine_substrate import integration_cluster_dir  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+        return integration_cluster_dir(prefix)
     path = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
     grant_user_tree_access(path)
     return path
 
 
+def stop_and_remove_cluster(
+    pg_ctl: str | os.PathLike[str],
+    pgdata: str | os.PathLike[str],
+    *,
+    remove_dir: str | os.PathLike[str] | None = None,
+    run: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Teardown of a cluster made by :func:`pg_data_tempdir`: ``pg_ctl stop -m immediate``, then remove
+    the directory. The removal is in a ``finally``: a ``pg_ctl`` that hangs past its 30 s timeout
+    (``TimeoutExpired``) or cannot be launched must not leave the directory on the run's shared tmpfs
+    root, where it holds RAM until the crash sweep (nexus-szyun). The exception still propagates, so a
+    stuck postmaster is a loud teardown error, not a silent one.
+
+    A timed-out stop and a stop that exits non-zero are both logged: the removal that follows then runs
+    under a postmaster that may still be alive. It exits by itself once its ``postmaster.pid`` is gone, and nothing here waits for that.
+
+    *remove_dir* is the directory to remove when it is not *pgdata* itself: ``pg_provision.provision(dir)``
+    puts the cluster at ``<dir>/postgres`` and its credentials beside it, so a test that provisions on a
+    :func:`pg_data_tempdir` dir stops ``<dir>/postgres`` and removes ``<dir>`` (nexus-0ajjm)."""
+    try:
+        done = run(
+            [str(pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        code = getattr(done, "returncode", 0)
+        if code != 0:
+            # A wrong -D, a postmaster that is not ours, a pg_ctl that cannot signal: the removal below still runs.
+            _log.warning(
+                "stop_and_remove_cluster.stop_failed", pgdata=str(pgdata), removing=str(remove_dir or pgdata),
+                returncode=code, stderr=str(getattr(done, "stderr", "") or "")[-300:],
+            )
+    except subprocess.TimeoutExpired:
+        _log.warning("stop_and_remove_cluster.stop_timed_out", pgdata=str(pgdata), removing=str(remove_dir or pgdata))
+        raise
+    finally:
+        shutil.rmtree(remove_dir if remove_dir is not None else pgdata, ignore_errors=True)
+
+
+def integration_pg_conf(pgdata: str) -> str:
+    """The ``postgresql.conf`` lines an integration cluster made by
+    :func:`pg_data_tempdir` appends: fsync off, and the WAL cap and mmap DSM when it
+    lives on tmpfs (the substrate's conf, nexus-942h9)."""
+    from tests._engine_substrate import integration_cluster_conf  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    return integration_cluster_conf(pgdata)
+
+
+def apply_reloadable_throwaway_conf(
+    pg_ctl: str | os.PathLike[str],
+    config_dir: str | os.PathLike[str],
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> str:
+    """Give a cluster that ``pg_provision.provision(config_dir)`` already started the throwaway settings that a
+    reload can apply (nexus-0ajjm): append :func:`tests._engine_substrate.reloadable_cluster_conf` to
+    ``<config_dir>/postgres/postgresql.conf`` and ``pg_ctl reload``. ``wal_level`` and ``dynamic_shared_memory_type``
+    need a restart, so those clusters keep provision's values. A reload that exits non-zero is logged, not raised: the
+    cluster still works, only slower. Returns the text appended."""
+    from tests._engine_substrate import reloadable_cluster_conf  # noqa: PLC0415 — deferred: _engine_substrate imports this module
+
+    pgdata = Path(config_dir) / "postgres"
+    conf_path = pgdata / "postgresql.conf"
+    if not conf_path.is_file():  # not a provisioned cluster: appending would create a conf nothing reads
+        raise FileNotFoundError(str(conf_path))
+    conf = reloadable_cluster_conf(str(config_dir))
+    with open(conf_path, "a", encoding="utf-8") as f:
+        f.write("\n# nexus-0ajjm: throwaway settings, applied by reload\n" + conf)
+    done = run([str(pg_ctl), "-D", str(pgdata), "reload"], capture_output=True, text=True, timeout=30, check=False)
+    code = getattr(done, "returncode", 0)
+    if code != 0:
+        _log.warning("apply_reloadable_throwaway_conf.reload_failed", pgdata=str(pgdata), returncode=code,
+                     stderr=str(getattr(done, "stderr", "") or "")[-300:])
+    return conf
+
+
 __all__ = [
+    "apply_reloadable_throwaway_conf",
     "group_alive",
     "group_popen_kwargs",
     "java_available",
+    "integration_pg_conf",
     "java_executable",
     "kill_group",
     "pg_data_tempdir",
     "pid_alive",
     "popen_in_group",
+    "stop_and_remove_cluster",
     "stop_group",
 ]

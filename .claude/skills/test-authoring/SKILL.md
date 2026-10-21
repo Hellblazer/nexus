@@ -14,7 +14,8 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 
 | Need | Command | Notes |
 |------|---------|-------|
-| Default dev loop | `uv run pytest -n auto` | ~13min parallel (auto-capped to this box's SysV shared-memory budget, AGENTS.md). THE loop. |
+| Agent hand run | `lab-run -c lab-m -- python3 scripts/watched_pytest.py --stall 180 --status <f> -- uv run pytest <paths, -k or -m>` | Targeted, on chas. No tree gets two green full runs; once pushed, develop CI is the verdict; a hand full suite is announced with its change class, tree sha and "no green full run exists" (AGENTS.md rule 13). Engine: `scripts/mvnw-leased.sh --lab-run`. |
+| Full Python suite | `uv run pytest -n auto` | ~13min parallel (auto-capped to this box's SysV shared-memory budget, AGENTS.md). The pre-push run a `src/nexus/` or `service/` change requires, once per tree (rule 13). |
 | Debugging interleaving/isolation | `uv run pytest` (serial) | ~14min; only when parallelism masks the signal |
 | Repo-structure invariants | `uv run pytest -m lint` | O(repo) meta-tests; PR-gated by CI `test-lint`; run when touching `conexus/`, RDR frontmatter, storage-boundary/hook invariants |
 | Real-substrate depth | `uv run pytest -m integration` | Nightly local-service gate territory |

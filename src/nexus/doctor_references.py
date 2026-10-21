@@ -25,8 +25,9 @@ Bounded wall time: every scheme but ``https://`` is a cheap local check
 call to ``aspect_readers.HTTPS_STAT_MAX_ATTEMPTS`` attempts, each up to
 twice ``aspect_readers.HTTPS_STAT_TIMEOUT_S`` (httpx applies that timeout
 to connect/read/write/pool separately), plus
-``aspect_readers.HTTPS_STAT_RETRY_DELAYS_S`` backoff between attempts —
-about 61.5s worst case per document. Sampled documents are stat'd with up
+``aspect_readers.HTTPS_STAT_RETRY_DELAYS_S`` backoff between attempts, plus
+one confirming HEAD after an ETag mismatch (nexus-ltrjf) — about 81.5s worst
+case per document. Sampled documents are stat'd with up
 to :data:`MAX_CONCURRENCY` (nexus-0ne1m critique, significant #1) concurrent
 threads sharing ONE ``httpx.Client`` — the shared sync ``Client`` is used
 from worker threads here; httpx's own docs make an explicit sharing claim
@@ -50,17 +51,14 @@ nexus-7zhag doctrine). Otherwise exit 1 when any sampled document reads
 indeterminate check (a timeout, a permissions error, a deferred scheme) is
 not evidence of a real problem, only of an inconclusive one.
 
-**Residual limitation, user-facing** (round-2 critique, nexus-0ne1m/
-nexus-tb2yj, significant #S2): a server that mints a FRESH ``ETag`` on
-every response, with no stable ``Last-Modified`` either, makes the
-``https://`` comparison read 'stale' on EVERY run regardless of whether
-the underlying content ever changed. ``nx catalog backfill-etags`` does
-NOT fix this case — it only records another fresh ``ETag`` that will
-mismatch again on the very next check. There is no way from here to
-distinguish that host shape from a real content change; the operator's
-only recourse is to treat a document that reads 'stale' on every run
-against the SAME host as effectively 'unknown' rather than a real
-staleness signal.
+**A host with no stable validator** (round-2 critique, nexus-0ne1m/
+nexus-tb2yj, significant #S2; fixed by nexus-ltrjf): a server that mints a
+FRESH ``ETag`` on every response, with no ``Last-Modified``, used to read
+'stale' on EVERY run. ``nx catalog backfill-etags`` cannot fix that. The
+``https://`` stat now confirms an ETag mismatch with one more HEAD: an ETag
+that changes again while ``Content-Length`` holds (or is absent from both)
+is an unstable validator and reads 'unknown', which never fails this check.
+A fresh-ETag host whose length also varies still reads 'stale'.
 """
 from __future__ import annotations
 
@@ -109,7 +107,8 @@ def _https_worst_case_per_call_s() -> float:
     """Worst-case wall time for ONE https:// stat call — derived from
     ``aspect_readers``' own bounded-retry constants so this cannot drift
     from them (mirrors ``commands/doctor.py``'s own computation)."""
-    return HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+    # + one confirming HEAD after an ETag mismatch (nexus-ltrjf), no retry.
+    return (HTTPS_STAT_MAX_ATTEMPTS + 1) * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
 
 
 def estimated_worst_case_s(sample: int, concurrency: int = MAX_CONCURRENCY) -> float:

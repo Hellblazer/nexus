@@ -19,6 +19,8 @@ import pytest
 
 from nexus.mcp import core
 
+pytestmark = pytest.mark.t2_tenant
+
 KNOWLEDGE_COL = "knowledge__notes__voyage-context-3__v1"
 RDR_COL = "rdr__nexus-1-1__voyage-context-3__v1"
 CODE_COL = "code__nexus-1-1__voyage-code-3__v1"

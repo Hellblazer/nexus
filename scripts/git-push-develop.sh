@@ -44,6 +44,15 @@
 #                    lock/ci-develop-push tuple-space lock. Logged in the
 #                    output; there is no silent skip. Same shape as
 #                    NX_PUSH_SKIP_SCOPE_AUDIT above.
+#   NX_PUSH_BATCH_MINUTES
+#                    Window for the batching hint (default 30; 0 turns it off).
+#                    nexus-cvtxu: develop CI runs one run at a time and a newer
+#                    push replaces the pending one, so pushes queue behind each
+#                    other (2026-10-21: 62 pushes, push-to-verdict p50 25 / p90
+#                    41 min with runs ~15). After a push, when this worktree's
+#                    previous push was inside the window, a PUSH_BATCH_HINT line
+#                    on stderr asks the session to batch (Sam, 2026-10-21). A
+#                    hint, never a refusal; stdout keeps its PUSH_OK contract.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -546,3 +555,20 @@ fi
 
 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
+
+# nexus-cvtxu: the batching hint (see NX_PUSH_BATCH_MINUTES above). The stamp lives
+# in this worktree's own git dir, and a session works in one worktree, so the gap
+# is this session's. Best effort: nothing here can fail the push that just landed.
+_batch_minutes="${NX_PUSH_BATCH_MINUTES:-30}"
+[[ "$_batch_minutes" =~ ^[0-9]+$ ]] || _batch_minutes=30
+_batch_window_s=$(( _batch_minutes * 60 ))
+_batch_gitdir="$(git rev-parse --git-dir 2>/dev/null || true)"
+_batch_stamp="${_batch_gitdir:-.}/nexus-last-develop-push"
+_batch_now="$(date +%s)"
+if [[ -n "$_batch_gitdir" && $_batch_window_s -gt 0 && -f "$_batch_stamp" ]]; then
+  _batch_prev="$(cat "$_batch_stamp" 2>/dev/null || true)"
+  if [[ "$_batch_prev" =~ ^[0-9]+$ ]] && (( _batch_now - _batch_prev < _batch_window_s )); then
+    echo "PUSH_BATCH_HINT this worktree pushed to $branch $(( (_batch_now - _batch_prev) / 60 )) min ago; develop CI runs one run at a time, so each push waits for the one before it. Hold commits and push them together (AGENTS.md rule 8, nexus-cvtxu)." >&2
+  fi
+fi
+[[ -n "$_batch_gitdir" ]] && { printf '%s\n' "$_batch_now" > "$_batch_stamp"; } 2>/dev/null || true

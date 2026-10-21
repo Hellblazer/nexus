@@ -1,8 +1,12 @@
 # docs/tables/
 
 Home for repo-only RDR-201 closed-vocabulary tables, consumed by scripts that
-never ship. It holds none today. The tables under `src/nexus/tables/` ship
-inside the package because their consumers are installed CLIs.
+never ship. It holds one: `cc-version-answers.toml` (nexus-qsmc5), the Claude
+Code version -> observed answer table that cc-validation scenarios 06 and 07
+compare themselves with (`tests/cc-validation/lib/version_answers.py` reads it
+with the stdlib only, so the container's python can). The tables under
+`src/nexus/tables/` ship inside the package because their consumers are
+installed CLIs.
 
 `tests/test_tables_lint.py` globs `*.toml` here (in addition to
 `src/nexus/tables/`) and lints every table it finds.

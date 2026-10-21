@@ -1,0 +1,1 @@
+c_dontask perm=dontAsk hook=none style=direct rule=rule

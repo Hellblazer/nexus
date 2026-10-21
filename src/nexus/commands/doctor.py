@@ -29,12 +29,13 @@ _log = structlog.get_logger(__name__)
 #: derived from aspect_readers' own bounded-retry constants (nexus-tb2yj):
 #: httpx applies its timeout to connect/read/write/pool separately, so one
 #: attempt can take up to 2x HTTPS_STAT_TIMEOUT_S; HTTPS_STAT_MAX_ATTEMPTS
-#: attempts plus the backoff between them is the same "~61.5s" figure
+#: attempts plus the backoff between them, plus one confirming HEAD after an
+#: ETag mismatch (nexus-ltrjf): the "~81.5s" figure
 #: aspect_readers._stat_https_uri's own module comment states. Computed
 #: here (not hand-typed into the --check-references help text below) so it
 #: cannot silently drift from the constants it describes.
 _REFERENCES_HTTPS_WORST_CASE_S: float = (
-    HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+    (HTTPS_STAT_MAX_ATTEMPTS + 1) * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
 )
 #: Whole-run worst case AT THE DEFAULT SAMPLE, concurrency-aware
 #: (nexus-0ne1m critique, significant #1): doctor_references.check_references
@@ -1122,7 +1123,7 @@ def _report_aspect_queue_service() -> None:
 
     click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
     # The spawner declines to start the aspect worker when `claude` is not on
-    # PATH and says so once per process in a log line; this is the durable
+    # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
     # can run. Not applicable (silent) with nothing pending, so a virgin box
     # stays clean. The predicate is the daemon's own, imported at call time.
@@ -1599,14 +1600,11 @@ def _run_check_tier_discipline() -> None:
     Heuristic only — does NOT exit non-zero. Visibility, not
     enforcement.
     """
-    import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    from nexus.session import read_claude_session_id as _read_claude_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    session_id = (
-        _os.environ.get("NX_SESSION_ID", "").strip()
-        or _read_claude_session_id()
-    )
+    # The order tier_writes rows are keyed by: NX_SESSION_ID, then
+    # CLAUDE_CODE_SESSION_ID, then the machine-wide file (nexus-d8yul).
+    session_id = resolve_active_session_id()
     if not session_id:
         click.echo("Tier-discipline check:")
         click.echo("  No current session resolvable (skip).")
@@ -2781,7 +2779,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
          "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
          "applies that timeout to connect/read/write/pool separately, "
-         "plus HTTPS_STAT_RETRY_DELAYS_S backoff). Up to "
+         "plus HTTPS_STAT_RETRY_DELAYS_S backoff, plus one confirming HEAD "
+         "after an ETag mismatch). Up to "
          f"{_REFERENCES_MAX_CONCURRENCY} stats run concurrently sharing one "
          "httpx.Client, so the whole run's worst case is "
          "ceil(sample / min(concurrency, sample)) * that per-call bound -- "
@@ -2793,11 +2792,11 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "'stale' or 'dangling'; 'unknown' never fails this check alone. "
          "Not applicable (exit 0) on a box with no reference-only "
          "documents. Remedy for a document stuck at 'unknown' because it "
-         "predates ETag capture: `nx catalog backfill-etags`. Residual "
-         "limitation backfill-etags does NOT fix: a host that mints a "
-         "fresh ETag on every response reads 'stale' on every run "
-         "regardless of real content change -- treat repeated stale "
-         "against the same host as unknown, not a real signal.",
+         "predates ETag capture: `nx catalog backfill-etags`. A host that "
+         "mints a fresh ETag on every response reads 'unknown': an ETag "
+         "mismatch is confirmed with one more HEAD, and an ETag that "
+         "changes again with no Last-Modified and an unchanged (or absent) "
+         "Content-Length is an unstable validator.",
 )
 @click.option(
     "--references-sample",
@@ -3458,7 +3457,7 @@ def _run_check_t1() -> None:
     * **Session resolves, lease present and fresh.** Healthy. Exit 0.
     * **Session resolves, lease present but expired/corrupt.** Stale
       litter from an ungraceful owner death -- only clean teardown
-      (``clear_t1_session_lease``) removes this file; nothing else sweeps
+      (``end_owned_t1_session_lease``) removes this file; nothing else sweeps
       it (see ``nx doctor``'s orphan-T1-lease health check, which DOES
       reap these). Exit 1.
     """

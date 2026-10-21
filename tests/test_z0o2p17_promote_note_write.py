@@ -41,6 +41,8 @@ from tests._catalog_fixture_ops import documents_by_title
 from tests.conftest import make_vector_test_client
 from tests._module_seam import module_time
 
+pytestmark = pytest.mark.t2_tenant
+
 _COLLECTION = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
 _SRC = pathlib.Path(__file__).parent.parent / "src" / "nexus"
 

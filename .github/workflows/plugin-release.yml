@@ -67,7 +67,7 @@ jobs:
       # fixture's CI-only graceful skip and the job would report green
       # having checked nothing. None of the battery below needs T2 --
       # it is git/YAML/AST-level structure checking, the same category
-      # as ci.yml's dedicated `pytest (lint markers)` job, which sets
+      # as ci.yml's dedicated `test-lint` job (`pytest (lint markers, group N/2)`), which sets
       # this identically for the same reason.
       NX_TEST_T2_SUBSTRATE: "none"
     steps:

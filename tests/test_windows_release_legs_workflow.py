@@ -321,8 +321,9 @@ def test_the_rehearsal_has_the_decided_shape() -> None:
     assert triggers["push"]["paths"], "an unfiltered push trigger would build on every commit"
     assert "workflow_dispatch" in triggers
     assert doc["permissions"] == {"contents": "read"}
-    assert doc["concurrency"]["cancel-in-progress"] is True
-    assert doc["concurrency"]["group"]
+    # one run at a time on develop, the newest push waiting (nexus-1wf1s)
+    assert doc["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/develop' }}"
+    assert doc["concurrency"]["group"].endswith("${{ github.ref }}")
     for job_id, job in _win_jobs(REHEARSAL).items():
         assert "github.actor == 'Hellblazer'" in str(job["if"]), job_id
 
@@ -859,7 +860,7 @@ def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull
     assert "github.actor == 'Hellblazer'" in str(job["if"])
     assert SWITCH in str(job["if"])
     assert "pull_request" not in _triggers(doc)
-    assert doc["concurrency"]["cancel-in-progress"] is True
+    assert doc["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/develop' }}"
 
 
 def test_the_python_resolver_runs_native_commands_with_both_streams_redirected() -> None:
@@ -904,3 +905,20 @@ def test_the_windows_cache_jobs_append_gits_usr_bin_before_the_cache_step(name: 
     assert '"PATH=$env:PATH;$d" >> $env:GITHUB_ENV' in run, "appended through GITHUB_ENV"
     assert "GITHUB_PATH" not in run, "GITHUB_PATH prepends: msys perl/link/find would shadow the build's"
     assert "gzip.exe" in run, "fails loud when Git's gzip is absent"
+
+
+def test_every_module_the_windows_test_set_ignores_is_posix_only() -> None:
+    # The Windows test set leaves POSIX-only modules out rather than widening its skip ceiling
+    # (nexus-oacd3). That is only sound while each ignored module skips itself on win32 at module
+    # level: a Windows-meaningful test added to one would otherwise never run anywhere on Windows.
+    steps = _doc(REHEARSAL)["jobs"]["conformance"]["steps"]
+    run = next(s["run"] for s in steps if s.get("name") == "Windows test set")
+    ignored = re.findall(r"--ignore=(\S+)", run)
+    assert ignored, "non-vacuity: the Windows test set ignores no module, so this check checks nothing"
+    module_skip = re.compile(r"^pytestmark = pytest\.mark\.skipif\(\s*sys\.platform == \"win32\"", re.M)
+    for rel in ignored:
+        path = REPO / rel
+        assert path.is_file(), f"{rel} is ignored by the Windows test set but does not exist"
+        assert module_skip.search(path.read_text(encoding="utf-8")), (
+            f"{rel} is left out of the Windows test set, so it must skip its whole module on win32"
+        )

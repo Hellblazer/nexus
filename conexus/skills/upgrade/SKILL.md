@@ -65,7 +65,8 @@ Everything else is automatic.
 `rdr192-manifest-backfill` censuses every collection for legacy notes that
 have a catalog document but no manifest row (the engine hides them from search
 since RDR-192) and backfills them. It records completion, per tenant, only after
-a fresh census reads zero; the engine's reaper refuses to run on a tenant
+a census reads zero (each collection read in that session or kept from one at
+most 24 hours earlier); the engine's reaper refuses to run on a tenant
 without that record; that refusal is complete only for a tenant with no earlier
 record (an older record still stands, and the reaper's own in-engine census is
 what covers that case). When some note cannot be backfilled the rung DEFERS
@@ -119,9 +120,13 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
   overrides. Read from the 6.18.1 source, not run at the pin. Never run
   the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-  endpoint: that path is unsupported (the engine retired the `/v1/staging`
-  routes it lands through; what it did against a current engine before that is
-  unmeasured, nexus-6g218). Do not set `service_url` first "to save a step".
+  endpoint: that path is unsupported and failed in every case measured
+  (nexus-6g218, local gate jars, not the managed endpoint): against a current
+  engine it stops before writing anything, and on the last build that still had
+  the `/v1/staging` routes a same-model store with no document aspects was
+  reported "Migration VERIFIED" while its 16- and 32-hex pointers were
+  discarded.
+  Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
 - **Voyage-embedded data needs a Voyage-keyed local engine**

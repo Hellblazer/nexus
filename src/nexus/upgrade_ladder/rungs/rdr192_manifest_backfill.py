@@ -16,8 +16,11 @@ grace window (30 days, then deleted 14 days later). Nothing at upgrade time repa
 The upgrade ladder (RDR-185) is the standing mechanism for a data transition
 that must converge on every install: ``nx upgrade`` walks it after the
 preconditions have brought the engine to the pinned tag, each rung detects,
-converges idempotently, and records completion ONLY after a fresh
-``verify()`` (RDR-142). The record lands in the engine's
+converges idempotently, and records completion ONLY after a
+``verify()`` that read a clean census (RDR-142): each collection's reading was
+taken in this session or kept from an earlier one at most 24 hours ago (see THE
+CENSUS RESUMES), and the record's detail says how many came from the note and
+how old the oldest was. The record lands in the engine's
 ``nexus.ladder_completions`` (per tenant, no client-side store), which is also
 where the engine reaper reads it. Hence a rung, not a doctor row (a doctor
 row repairs nothing and leaves no record the reaper can read) and not an
@@ -27,7 +30,8 @@ WHAT IT DOES.
   detect  : CHEAP, no census. ``detect()`` runs from ``nx upgrade --auto`` at
             every session start, ``nx upgrade --dry-run``, ``nx doctor`` and
             the root CLI's version-transition callout, so it costs at most
-            one ledger read (and one small residual-note read when pending).
+            one ledger read and, when pending, one residual-note read and one
+            census-progress-note read.
             Converged only when a completion is on file whose
             ``package_version`` equals the installed version. Otherwise
             pending, and the census belongs to ``converge()``.
@@ -42,14 +46,26 @@ WHAT IT DOES.
             until the count reads zero or a pass makes no progress. The
             backfill never deletes a chunk. A backfill that RAISED is never
             remembered (it is not a residual): the next session start retries.
-  verify  : a census that read every collection and found zero legacy and
-            zero unclassified chunks; the one converge just took counts if it
-            is under a minute old, so a clean tenant pays for one census, not
-            two. A census that cannot run, or whose answer lacks the bucket
+  verify  : a census over every collection that found zero legacy and zero
+            unclassified chunks (each reading taken now or kept from an earlier
+            session, at most CENSUS_PROGRESS_MAX_AGE old); the one converge
+            just took counts if it is under a minute old, so a clean tenant
+            pays for one census, not two. A census that cannot run, or whose answer lacks the bucket
             keys, is unknown, and unknown is not reached (nexus-hdumg); a
             transient outage there defers instead of failing the upgrade.
 
 The completion record carries a census summary in its ``detail``.
+
+THE CENSUS RESUMES (nexus-y67n5). Each collection's census reading is kept in a
+T2 note (:mod:`nexus.upgrade_ladder.census_progress`), so a session cut by the
+``nx upgrade --auto`` time limit hands its readings to the next one, which reads
+only the rest. Readings are at most 24 hours old, are keyed on the listing's
+stored chunk count, and are written every 10 readings so a killed session keeps
+them; a backfilled collection is dropped and read again. The same note counts,
+for ``nx doctor`` (through :meth:`detect`), consecutive sessions the time limit
+cut that made no progress, and consecutive sessions whose census failed at the
+same collection. Every progress-note call is guarded: a failure there is "no
+note", never a failed rung.
 
 A tenant with no collections is converged when the catalog also holds no
 manifest rows; an empty listing over a non-empty catalog is a listing failure
@@ -86,8 +102,13 @@ pins the two literals equal.
 THE RECORD IS AN ATTESTATION, NOT PROOF. The engine can compute this census
 itself, and new legacy-shaped chunks can appear after a completion (RDR-223:
 ``store_put`` registers the document before the chunk write, so a client
-killed between the two leaves a document-owned, manifest-less chunk). The gate
-answers "the client verified a census at package version X"; the reaper bead
+killed between the two leaves a document-owned, manifest-less chunk). A census
+built across sessions is weaker still: a kept reading can be up to 24 hours old
+when the walk finishes, and the stored-chunk-count check that retires a kept
+reading does not see a catalog-side change that leaves the count alone (a
+document registered for a chunk already stored, a manifest row removed). The
+gate answers "the client verified a census at package version X, from readings
+at most 24 hours old"; the reaper bead
 (nexus-2x9xa) must re-check the census in the engine per collection per pass
 and treat this record as necessary, not sufficient.
 
@@ -109,7 +130,15 @@ from typing import Any, Protocol
 
 import structlog
 
+from nexus.upgrade_ladder.census_progress import (
+    CHECKPOINT_EVERY,
+    CensusProgress,
+    T2NoteStore,
+    guarded,
+    is_quarantine_entry,
+)
 from nexus.upgrade_ladder.completion import CompletionRecord
+from nexus.upgrade_ladder.deadline import active_deadline, active_expired
 from nexus.upgrade_ladder.protocol import (
     CompletionLedger,
     ConvergeOutcome,
@@ -141,6 +170,9 @@ _BUCKETS = ("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "uncl
 #: T2 note holding the last failed attempt's residual fingerprint.
 MEMO_PROJECT = "upgrade_ladder_state"
 MEMO_TITLE = f"{RUNG_NAME}.residual"
+#: T2 note holding per-collection census readings and the time-limit cut count
+#: (nexus-y67n5; see :mod:`nexus.upgrade_ladder.census_progress`).
+PROGRESS_TITLE = f"{RUNG_NAME}.census-progress"
 _MEMO_TTL_DAYS = 30
 
 #: Cap on the record ``detail`` (a TEXT column; a summary, not a dump).
@@ -167,6 +199,14 @@ class CensusUnavailable(RuntimeError):
     """The census could not be taken: engine unreachable, older than the
     census route, or an answer that lacks the positive signal. Distinct from
     a census that ran and found something."""
+
+
+class CensusDeadlineReached(CensusUnavailable):
+    """The ``nx upgrade --auto`` ceiling passed between census calls
+    (nexus-dcbof). A census is a read, so stopping loses only the reading; the
+    rung defers and the next session's run takes it again. A subclass of
+    :class:`CensusUnavailable` so every caller that defers on an unavailable
+    census defers on this too."""
 
 
 class BackfillIncompleteError(RuntimeError):
@@ -199,6 +239,10 @@ class CensusReading:
     #: Collections the engine refused as quarantine (out of the census by
     #: construction) that the listing had not already marked as such.
     quarantine_skipped: int = 0
+    #: Readings served from the progress note instead of a census call
+    #: (nexus-y67n5), and the age in seconds of the oldest one.
+    from_note: int = 0
+    oldest_note_age_s: float | None = None
 
     @property
     def legacy_total(self) -> int:
@@ -244,7 +288,9 @@ class CensusReading:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     def summary(self) -> str:
-        """One line for the completion record's ``detail``."""
+        """One line for the completion record's ``detail``, including how many
+        readings were kept from earlier sessions and how old the oldest was, so
+        the attestation says what it rests on."""
         def total(attr: str) -> int:
             return sum(getattr(c, attr) for c in self.collections)
 
@@ -254,8 +300,10 @@ class CensusReading:
             f"chunks={total('scope_chunks')} "
             f"legacy-unmanifested={self.legacy_total} unclassified={self.unclassified_total} "
             f"superseded={total('superseded')} dead-owner={total('dead_owner')} "
-            f"no-owner={total('no_owner')}"
+            f"no-owner={total('no_owner')} from_note={self.from_note}"
         )
+        if self.from_note and self.oldest_note_age_s is not None:
+            text += f" oldest_note_age={self.oldest_note_age_s / 3600:.1f}h"
         return text[:_DETAIL_MAX]
 
 
@@ -359,10 +407,60 @@ class _QuarantineRefusal(Exception):
     """The census route refused a collection as quarantine."""
 
 
-def _default_census() -> CensusReading:
+def _reading_fields(reading: CollectionReading) -> tuple[int, ...]:
+    return (
+        reading.legacy_unmanifested, reading.unclassified, reading.superseded,
+        reading.dead_owner, reading.no_owner, reading.scope_chunks,
+    )
+
+
+def _reading_from_entry(name: str, entry: dict[str, Any]) -> CollectionReading:
+    legacy, unclassified, superseded, dead_owner, no_owner, scope = (int(x) for x in entry["r"])
+    return CollectionReading(
+        collection=name, legacy_unmanifested=legacy, unclassified=unclassified,
+        superseded=superseded, dead_owner=dead_owner, no_owner=no_owner, scope_chunks=scope,
+    )
+
+
+def _listing_stored(row: dict) -> int:
+    """The listing's stored chunk count for a collection, or -1 when the row
+    carries none the cache can trust (a missing key, a non-integer, a negative
+    fallback value). -1 never matches a kept reading."""
+    value = row.get("stored_count", row.get("count"))
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else -1
+
+
+@dataclass
+class CensusTally:
+    """What one session's census walk and backfill did, for the progress
+    note's accounting (nexus-y67n5): a session that kept a new reading or
+    backfilled a collection made progress; a census call that failed names the
+    collection it failed at."""
+
+    fresh_readings: int = 0
+    backfilled: int = 0
+    stalled_at: str | None = None
+
+    @property
+    def progressed(self) -> bool:
+        return self.fresh_readings > 0 or self.backfilled > 0
+
+
+def _default_census(
+    progress: CensusProgress | None = None, version: str = "", tally: CensusTally | None = None
+) -> CensusReading:
     """Census every non-quarantine collection via the engine's read-only
     manifest-less-census route. ``limit=1`` because only the collection-wide
-    ``totals`` are read, which the route reports identically on every page."""
+    ``totals`` are read, which the route reports identically on every page.
+
+    With *progress* (nexus-y67n5) a collection read within the age bound, at
+    this package version, whose stored chunk count in the listing is unchanged,
+    is taken from the note instead of asking the engine again. What this call
+    reads is written to the note every :data:`CHECKPOINT_EVERY` readings and
+    again when the call ends, however it ends (the ``--auto`` time limit, an
+    engine failure), so the next session resumes and a killed one loses little.
+    *tally* receives the count of new readings and the collection a failed call
+    stopped at. Every progress call is guarded."""
     from nexus.db import make_t3  # noqa: PLC0415 — deferred; keeps cold CLI start cheap and breaks an import cycle
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred; same reason
     from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred; same reason
@@ -401,25 +499,98 @@ def _default_census() -> CensusReading:
 
     client = reach(make_t3)
     rows = reach(lambda: client.list_collections(strict=True))
+    cached: dict[str, dict[str, Any]] = {}
+    if progress is not None:
+        listed = {r["name"]: _listing_stored(r) for r in rows if "name" in r}
+        cached = guarded("usable", lambda: progress.usable(version, listed), {})
+    fresh: dict[str, dict[str, Any]] = {}
+    flushed = 0
+    from_note = 0
+    oldest_age_s: float | None = None
     readings: list[CollectionReading] = []
     quarantine_skipped = 0
-    for row in rows:
-        # Catalog-authoritative, never a name-prefix parse (RDR-204):
-        # quarantine siblings are out of the census by construction.
-        if row.get("lifecycle_state") == "quarantine":
-            quarantine_skipped += 1
-            continue
-        name = row["name"]
-        try:
-            page = reach(lambda n=name: client.manifest_less_census(n, limit=1, offset=0))
-        except _QuarantineRefusal:
-            quarantine_skipped += 1
-            _log.info("rdr192_census_skipped_quarantine", collection=name)
-            continue
-        readings.append(_parse_census_page(name, page, row))
+
+    def flush() -> None:
+        nonlocal flushed
+        flushed = len(fresh)
+        guarded("commit", lambda: progress.commit(version, {**cached, **fresh}), None)
+
+    def keep(name: str, stored: int, fields: tuple[int, ...] | None) -> None:
+        """Remember one new reading, and write the note every few of them."""
+        if stored < 0:
+            # The listing could not measure this collection's stored count, so a
+            # reading of it can never be served from the note (usable() refuses
+            # it). Saving it, or counting it as progress, would make every
+            # session on such a listing "progress" and hide STARVED.
+            return
+        if tally is not None:
+            tally.fresh_readings += 1
+        if progress is None:
+            return
+        entry = guarded("entry", lambda: progress.entry(stored=stored, reading=fields), None)
+        if entry is None:
+            return
+        fresh[name] = entry
+        if len(fresh) - flushed >= CHECKPOINT_EVERY:
+            flush()
+
+    try:
+        for row in rows:
+            # Catalog-authoritative, never a name-prefix parse (RDR-204):
+            # quarantine siblings are out of the census by construction.
+            if row.get("lifecycle_state") == "quarantine":
+                quarantine_skipped += 1
+                continue
+            name = row["name"]
+            hit = cached.get(name)
+            if hit is not None:
+                # `usable` already vetted the entry; a reading that still cannot
+                # be rebuilt is not served, the engine is asked instead.
+                is_q = is_quarantine_entry(hit)
+                kept = None if is_q else guarded("reading", lambda: _reading_from_entry(name, hit), None)
+                if is_q or kept is not None:
+                    from_note += 1
+                    age = guarded("age", lambda: progress.age(hit), None)
+                    if age is not None:
+                        oldest_age_s = max(oldest_age_s or 0.0, age.total_seconds())
+                    if kept is None:
+                        quarantine_skipped += 1
+                    else:
+                        readings.append(kept)
+                    continue
+            # nexus-dcbof safe point: between census calls, never inside one. A
+            # census call can take up to its HTTP timeout, so this check is what
+            # keeps the census from outliving the `--auto` ceiling by a whole pass.
+            # A reading served from the note costs no call and needs no check.
+            if active_expired():
+                raise CensusDeadlineReached(
+                    f"the `nx upgrade --auto` time limit passed after {len(readings)} of "
+                    f"{len(rows)} collection(s) were censused; the census resumes from there on the next `nx upgrade`"
+                )
+            try:
+                page = reach(lambda n=name: client.manifest_less_census(n, limit=1, offset=0))
+                reading = _parse_census_page(name, page, row)
+            except _QuarantineRefusal:
+                quarantine_skipped += 1
+                _log.info("rdr192_census_skipped_quarantine", collection=name)
+                keep(name, _listing_stored(row), None)
+                continue
+            except CensusUnavailable:
+                if tally is not None:
+                    tally.stalled_at = name
+                raise
+            readings.append(reading)
+            keep(name, _listing_stored(row), _reading_fields(reading))
+    finally:
+        # Written even when the walk above stopped early: that is the point.
+        if progress is not None and len(fresh) > flushed:
+            flush()
     if not rows:
         _cross_check_empty_listing()
-    return CensusReading(collections=tuple(readings), quarantine_skipped=quarantine_skipped)
+    return CensusReading(
+        collections=tuple(readings), quarantine_skipped=quarantine_skipped,
+        from_note=from_note, oldest_note_age_s=oldest_age_s,
+    )
 
 
 def _parse_census_page(name: str, page: Any, listing_row: dict) -> CollectionReading:
@@ -592,12 +763,19 @@ class Rdr192ManifestBackfillRung:
     """The ladder rung. Every collaborator is constructor injected; the
     defaults call the engine."""
 
-    census_fn: CensusFn = _default_census
+    #: ``None`` runs the engine census with :attr:`progress` (resumable).
+    census_fn: CensusFn | None = None
     backfill_fn: BackfillFn = _default_backfill
     #: The completion record on file (default: the engine's ledger).
     record_fn: RecordFn = _default_record
     installed_version_fn: Callable[[], str] = installed_package_version
     memo: ResidualMemo = field(default_factory=T2ResidualMemo)
+    #: Per-collection census readings and the no-progress cut and stall counts,
+    #: kept across sessions (nexus-y67n5). ``None`` resolves at use (see
+    #: :meth:`_progress`) to the T2-backed default, or a disabled one when the
+    #: *memo* is not the T2 one (so no test reaches a real engine through the
+    #: default, whenever it sets the memo).
+    progress: CensusProgress | None = None
     lock_factory: Callable[[], contextlib.AbstractContextManager[bool]] = _cross_process_lock
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731 — a dataclass default seam, not a def
     max_passes: int = DEFAULT_MAX_PASSES
@@ -608,6 +786,45 @@ class Rdr192ManifestBackfillRung:
     _verify_deferred: bool = field(default=False, init=False, repr=False)
     _record_detail: str = field(default="", init=False, repr=False)
     _last_clean: tuple[CensusReading, datetime] | None = field(default=None, init=False, repr=False)
+    _cut_at: str | None = field(default=None, init=False, repr=False)
+    _tally: CensusTally = field(default_factory=CensusTally, init=False, repr=False)
+
+    def _progress(self) -> CensusProgress:
+        """The progress note in force NOW: the injected one, else the T2-backed
+        default when the memo is the T2 one, else a disabled one. Decided at
+        each use, not at construction, so setting :attr:`memo` afterwards
+        cannot leave a live T2 note behind."""
+        if self.progress is not None:
+            return self.progress
+        store = T2NoteStore(PROGRESS_TITLE) if isinstance(self.memo, T2ResidualMemo) else None
+        return CensusProgress(store, now_fn=self.now_fn)
+
+    def _census(self) -> CensusReading:
+        """The census: the injected one, else the engine's, resuming from (and
+        adding to) the progress note."""
+        if self.census_fn is not None:
+            return self.census_fn()
+        return _default_census(self._progress(), self.installed_version_fn(), self._tally)
+
+    def _forget_backfilled(self, collection: str) -> None:
+        """A backfilled collection changed, so its cached reading is stale."""
+        if self.census_fn is None:
+            progress = self._progress()
+            guarded(
+                "invalidate", lambda: progress.invalidate(self.installed_version_fn(), collection), None
+            )
+
+    def _end_session(self) -> None:
+        """Fold this converge into the progress note's counters (guarded)."""
+        progress, tally = self._progress(), self._tally
+        guarded(
+            "end_session",
+            lambda: progress.end_session(
+                self.installed_version_fn(), cut_at=self._cut_at,
+                stalled_at=tally.stalled_at, progressed=tally.progressed,
+            ),
+            None,
+        )
 
     # ── detect ───────────────────────────────────────────────────────────────
 
@@ -647,6 +864,10 @@ class Rdr192ManifestBackfillRung:
         note = self.memo.load()
         if note and note.get("detail"):
             state += f". Last attempt {note.get('at', '?')} left a residual: {note['detail']}"
+        progress = self._progress()
+        starved = guarded("describe", lambda: progress.describe(version), "")
+        if starved:
+            state += f". {starved}"
         return RungStatus(applicable=True, converged=False, pending_detail=state)
 
     # ── converge ─────────────────────────────────────────────────────────────
@@ -655,6 +876,8 @@ class Rdr192ManifestBackfillRung:
         self._errors.clear()
         self._skipped.clear()
         self._last_clean = None
+        self._cut_at = None
+        self._tally = CensusTally()
         try:
             with self.lock_factory() as acquired:
                 if not acquired:
@@ -663,9 +886,19 @@ class Rdr192ManifestBackfillRung:
                         detail="another nx process is running the RDR-192 backfill; retried on the next `nx upgrade`",
                     )
                 try:
-                    return self._converge_locked(report)
+                    result = self._converge_locked(report)
+                except CensusDeadlineReached as exc:
+                    self._log_deadline_reached("during the census")
+                    self._cut_at = "during the census"
+                    result = ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
                 except CensusUnavailable as exc:
-                    return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
+                    if self._tally.stalled_at is None:
+                        # The engine was unreachable or lacks the route, not a
+                        # collection that fails: nothing to count, counters stand.
+                        return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
+                    result = ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
+                self._end_session()
+                return result
         except OSError as exc:
             # An unwritable config dir cannot take the lock. A rung that cannot
             # run defers; it must not fail `nx upgrade` and skip its later steps.
@@ -700,7 +933,9 @@ class Rdr192ManifestBackfillRung:
                 _log.warning("rdr192_backfill_residual_gated", detail=detail)
                 return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
 
-        reading = self.census_fn()
+        if active_expired():
+            return self._deadline_deferral("before the census")
+        reading = self._census()
         if reading.clean:
             return self._completed(reading)
 
@@ -720,15 +955,25 @@ class Rdr192ManifestBackfillRung:
             if not targets:
                 break
             for target in targets:
+                # nexus-dcbof safe point: between collections. A collection's
+                # backfill is either finished or not started, and what it wrote
+                # is in the database, so the next run's census no longer lists it.
+                if active_expired():
+                    return self._deadline_deferral(
+                        f"in pass {pass_number} before backfilling {target.collection}"
+                    )
                 try:
                     outcome = self.backfill_fn(target.collection)
                 except Exception as exc:  # noqa: BLE001 — one collection's failure must not stop the rest; the next census names what remains
+                    self._forget_backfilled(target.collection)
                     self._errors[target.collection] = f"{type(exc).__name__}: {exc}"
                     _log.warning(
                         "rdr192_backfill_collection_failed",
                         collection=target.collection, error=str(exc),
                     )
                     continue
+                self._forget_backfilled(target.collection)
+                self._tally.backfilled += 1
                 if not isinstance(outcome, BackfillOutcome):
                     outcome = BackfillOutcome(chunks_written=int(outcome or 0))
                 self._skipped[target.collection] = dict(outcome.skipped)
@@ -739,7 +984,9 @@ class Rdr192ManifestBackfillRung:
                     manifest_rows_written=outcome.chunks_written,
                     skipped=outcome.skipped,
                 )
-            after = self.census_fn()
+            if active_expired():
+                return self._deadline_deferral(f"after pass {pass_number}")
+            after = self._census()
             progressed = after.legacy_total < reading.legacy_total
             reading = after
             if not progressed:
@@ -778,15 +1025,41 @@ class Rdr192ManifestBackfillRung:
         _log.warning("rdr192_backfill_residual", detail=detail)
         return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
 
+    def _deadline_deferral(self, where: str) -> ConvergeResult:
+        """The `nx upgrade --auto` ceiling passed at a safe point (nexus-dcbof).
+        Non-fatal and nothing is remembered: backfill progress is already in the
+        database, and the next session's census starts from it."""
+        detail = (
+            f"the `nx upgrade --auto` time limit passed {where}; "
+            "the next `nx upgrade` continues from what is already backfilled and censused"
+        )
+        self._log_deadline_reached(where)
+        self._cut_at = where
+        return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
+
+    @staticmethod
+    def _log_deadline_reached(where: str) -> None:
+        """One event for every cut, census or backfill: where it stopped and
+        how long the run had been going (nexus-dcbof)."""
+        deadline = active_deadline()
+        _log.warning(
+            "rdr192_backfill_deadline_reached",
+            where=where,
+            elapsed_s=None if deadline is None else round(deadline.elapsed(), 1),
+        )
+
     def _completed(self, reading: CensusReading) -> ConvergeResult:
         self.memo.clear()
+        guarded("clear", self._progress().clear, None)
         self._last_clean = (reading, self.now_fn())
         return ConvergeResult(ConvergeOutcome.COMPLETED)
 
     # ── verify ───────────────────────────────────────────────────────────────
 
     def verify(self) -> bool:
-        """A census that read every collection and found nothing to backfill.
+        """A census over every collection that found nothing to backfill (each
+        reading taken now or kept from an earlier session, at most
+        :data:`~nexus.upgrade_ladder.census_progress.CENSUS_PROGRESS_MAX_AGE` old).
 
         Reuses the clean census ``converge`` took moments ago instead of
         taking the same census again (it is a census read, independent of the
@@ -808,7 +1081,7 @@ class Rdr192ManifestBackfillRung:
                 reading = cached
         if reading is None:
             try:
-                reading = self.census_fn()
+                reading = self._census()
             except CensusUnavailable as exc:
                 self._verify_deferred = True
                 self._verify_detail = (

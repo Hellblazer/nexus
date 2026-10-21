@@ -210,9 +210,45 @@ class TestWindowsReap:
         def always(_p):
             raise PermissionError(32, "in use")
 
-        handler(always, str(tmp_path), PermissionError(32, "in use"))
+        target = tmp_path / "held"
+        target.mkdir()
+        try:
+            # The handler chmods its path to S_IWRITE (0o200 on POSIX): aim it at a
+            # subdirectory and restore the mode, so the run's tmp cleanup is not left
+            # an unreadable tmp_path (5588beead CI shard 3).
+            handler(always, str(target), PermissionError(32, "in use"))
+        finally:
+            target.chmod(0o700)
         handler(os.rmdir, str(tmp_path / "x"), OSError(39, "not empty"))
-        assert [p for p, _e in failures] == [str(tmp_path), str(tmp_path / "x")]
+        assert [p for p, _e in failures] == [str(target), str(tmp_path / "x")]
+
+    @pytest.mark.parametrize("func", [os.open, os.scandir, os.lstat], ids=lambda f: f.__name__)
+    def test_the_handler_records_a_walk_function_without_calling_it(self, tmp_path: Path, func) -> None:
+        # rmtree's POSIX fd walk hands over functions that need more than a path;
+        # re-calling one raised TypeError past every except OSError (5588beead).
+        target = tmp_path / "unentered"
+        target.mkdir()
+        before = target.stat().st_mode
+        failures: list = []
+        refused = PermissionError(13, "denied")
+        gc_core._collecting_handler(failures)(func, str(target), refused)
+        assert failures == [(str(target), refused)]
+        assert target.stat().st_mode == before, "no chmod for a function it will not re-call"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_an_unenterable_directory_is_recorded_through_the_real_walk(self, tmp_path: Path) -> None:
+        tree = tmp_path / "gen"
+        (tree / "shut" / "inner").mkdir(parents=True)
+        (tree / "shut").chmod(0)
+        try:
+            if os.access(tree / "shut", os.R_OK):
+                pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+            failures: list = []
+            gc_core._rmtree(tree, gc_core._collecting_handler(failures))
+            assert failures, "an unenterable directory must be recorded, not reported gone"
+            assert all(isinstance(e, OSError) for _p, e in failures), failures
+        finally:
+            (tree / "shut").chmod(0o700)
 
 
 class TestWindowsLegacyLedger:

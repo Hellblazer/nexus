@@ -82,6 +82,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+from collections.abc import Mapping
 
 #: Measured, not assumed (2026-09-12, 16-core macOS box): one Postgres cluster
 #: holds exactly ONE SysV segment, 56 bytes. Modern PG keeps only a tiny
@@ -162,6 +164,23 @@ def cap_from_headroom(
     return max(1, min(by_segments, cpu_count))
 
 
+def set_worker_count(option: object, count: int) -> None:
+    """Make xdist run *count* workers, not just say so.
+
+    ``numprocesses`` alone is inert (nexus-vo9qn, measured on xdist 3.8.0): xdist
+    builds ``option.tx = ["popen"] * numprocesses`` in its ``pytest_cmdline_main``,
+    which runs BEFORE conftest's ``pytest_configure``, and the scheduler spawns
+    ``len(tx)`` workers. A clamp applied afterwards printed "clamped 4 -> 2" and
+    still created 4 workers, so the SysV cap (nexus-6qp25) was inert the same way.
+    ``tx`` is rewritten only when it is xdist's own generated all-``popen`` list;
+    a hand-written ``--tx`` is never produced alongside a ``-n`` count."""
+    tx = getattr(option, "tx", None)
+    generated = isinstance(tx, list) and bool(tx) and all(t == "popen" for t in tx)
+    option.numprocesses = count  # type: ignore[attr-defined]
+    if generated:
+        option.tx = ["popen"] * count  # type: ignore[attr-defined]
+
+
 def clamp_numprocesses(
     *, requested: int | None, cap: int
 ) -> tuple[int | None, str | None]:
@@ -207,3 +226,80 @@ def effective_cap() -> int | None:
         reserve=DEFAULT_RESERVE,
         cpu_count=os.cpu_count() or 1,
     )
+
+
+#: Memory a worker needs from its grant: its engine JVM, its Postgres cluster and
+#: the tmpfs pages that cluster's data and WAL occupy (tmpfs is charged to the
+#: cgroup). nexus-vo9qn, measured on chas with the labrun sampler (nexus_911
+#: proofs, 2026-10-19, tests/db + ddl): lab-l (16 cores, 48 GB) at ``-n auto`` =
+#: 16 workers peaked 39.4 GB anon including shmem = 2.46 GB per worker; lab-m
+#: (8 cores, 16 GB) at ``-n 8`` peaked 14.5 GB = 1.81 GB per worker. Those were
+#: subsets. The FULL suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f) at
+#: ``-n auto`` = 16 workers on lab-l peaked 47,795 MiB of the 49,152 MiB grant,
+#: 2,987 MiB a worker, 1,357 MiB from an OOM kill (exit 137). The budget is 3264
+#: MiB (about 3.2 GiB), so lab-l runs 15 workers (about 44,800 MiB at that peak,
+#: about 4.2 GiB free) and lab-m 5. The per-worker model is kept: the 10-19 subset
+#: points fit no positive fixed cost, so per-worker cost grows with the run. Without this a grant fills as workers grow, the run used to fall
+#: back to disk for later clusters (3.9 GB written in 4 minutes); the session now
+#: never does, so the worker count has to keep the grant from filling. Per class,
+#: from the grant alone: lab-s (4 GiB) 1, lab-m (16) 5, lab-6c18g (18) 5 (CI's
+#: shards run -n 4), lab-l (48) 15, lab-xl (96) 30; on hellmini lab-mac-s (4) 1
+#: and lab-mac-m (10) 3 (nexus-pnyfq).
+BYTES_PER_WORKER = 3264 * 1024**2
+
+
+def _lab_mem_bytes(env: Mapping[str, str]) -> int | None:
+    """The ``lab-run`` grant's memory (``LAB_MEM_MB``), or None when absent/garbled."""
+    raw = (env.get("LAB_MEM_MB") or "").strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        return None
+    return mb * 1024**2 if mb > 0 else None
+
+
+def grant_memory_bytes(
+    *, env: Mapping[str, str] | None = None,
+    cgroup_limit: int | None = None,
+) -> int | None:
+    """The tightest memory limit this run can see: the smaller of ``LAB_MEM_MB``
+    and the cgroup's ``memory.max`` (own path and ancestors), or None when neither
+    is set (a laptop, an unlimited box)."""
+    env = os.environ if env is None else env
+    limits = [v for v in (_lab_mem_bytes(env), cgroup_limit) if v is not None]
+    return min(limits) if limits else None
+
+
+def cap_from_memory(*, grant_bytes: int) -> int:
+    """Workers whose :data:`BYTES_PER_WORKER` fit in the grant; never below 1."""
+    return max(1, grant_bytes // BYTES_PER_WORKER)
+
+
+def effective_memory_cap() -> int | None:
+    """The memory cap for this run right now, or None when it does not apply (no
+    grant or cgroup limit visible, or ``NX_XDIST_NO_CAP`` set). Never raises."""
+    if os.environ.get(NO_CAP_ENV):
+        return None
+    try:
+        from tests._engine_substrate import cgroup_memory_limit  # noqa: PLC0415 — deferred: heavy import, Linux-only data
+
+        grant = grant_memory_bytes(cgroup_limit=cgroup_memory_limit())
+    except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        return None
+    return None if grant is None else cap_from_memory(grant_bytes=grant)
+
+
+def memory_clamp_note(*, requested: int, cap: int, platform: str = sys.platform) -> str:
+    head = (f"xdist workers clamped {requested} -> {cap}: this run's memory grant "
+            f"fits {cap} workers at {BYTES_PER_WORKER // 1024**2} MiB each ")
+    if platform.startswith("linux"):
+        why = ("(engine JVM + Postgres cluster + its tmpfs pages). The run keeps every cluster on "
+               "the tmpfs it chose at the start rather than spilling to disk, so the "
+               "workers must fit the grant (nexus-vo9qn). ")
+    else:
+        # nexus-pnyfq: a macOS lab grant (lab-mac-s/-m) carries LAB_MEM_MB but no cgroup and
+        # no tmpfs clusters: the clamp keeps the run inside what lab-run booked.
+        why = ("(engine JVM + Postgres cluster). This platform has no cgroups, so the grant is "
+               "admission and accounting only; the clamp keeps the run inside what lab-run booked. ")
+    return f"{head}{why}Set {NO_CAP_ENV}=1 to run uncapped."
+

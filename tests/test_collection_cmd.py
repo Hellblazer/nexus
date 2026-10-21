@@ -9,6 +9,7 @@ from tests._catalog_fixture_ops import active_reader
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.collection_purge import CascadeCounts
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import make_vector_test_client
 
@@ -48,6 +49,7 @@ def _invoke(runner, mock_db, args, **kwargs):
 # ── list ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_list_empty(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = []
     result = _invoke(runner, mock_db, ["list"])
@@ -55,6 +57,7 @@ def test_list_empty(runner, env_creds, mock_db) -> None:
     assert "No collections" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_list_shows_names_and_counts(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = [
         {"name": "code__myrepo", "count": 42},
@@ -201,6 +204,7 @@ def test_list_reader_failure_keeps_counts_and_says_so(runner, env_creds, mock_db
 # ── info ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_info_not_found(runner, env_creds, mock_db) -> None:
     mock_db.list_collections.return_value = []
     result = _invoke(runner, mock_db, ["info", "no_such"])
@@ -219,6 +223,7 @@ def _mock_db_for_info(mock_db, name, count, metadatas):
     mock_db.get_or_create_collection.return_value = mock_col
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "col_name,expected_model",
     [
@@ -374,6 +379,27 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert "catalog cascade failed: boom" in result.output
 
 
+def test_delete_with_failed_service_cascade_is_unconfirmed_and_exits_nonzero(
+    runner, env_creds, mock_db,
+) -> None:
+    """nexus-oq5gd: a failed (or timed-out) service deleteCollection must not
+    print "Deleted:"; it says the delete is unconfirmed and how to retry."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code != 0
+    assert "Deleted:" not in result.output
+    assert "unconfirmed" in result.output
+    assert "nx collection delete old" in result.output
+    assert "service deleteCollection failed" in result.output
+
+
 def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
     """nexus-wbfpw.68/.71: deleting an origin takes its quarantine rows in the same engine
     transaction, one gc_audit row per sibling. The user must see that they went."""
@@ -446,10 +472,21 @@ def test_delete_says_nothing_about_quarantine_when_none_went(runner, env_creds, 
 _ORPHAN = "knowledge__shakedown-scratch__minilm-l6-v2-384__v1"
 _MATCHING_VOYAGE = "knowledge__research__voyage-context-3__v1"
 _LEGACY_NAME = "docs__myproj-cafef00d"
+_VOYAGE_MODELS = ["voyage-3", "voyage-code-3", "voyage-context-3"]
+
+
+def _serve_models(monkeypatch: pytest.MonkeyPatch, models: list[str]) -> None:
+    """RDR-210 P1.3 (nexus-11rjq): the engine's ``GET /version`` answers
+    ``embedding_models`` -- the served-model set the orphan finder reads.
+    The fake sits at the HTTP boundary; the finder itself is the real one."""
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get",
+        lambda path, *, tenant="default": {"embedding_models": models},
+    )
 
 
 def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
-    mock_db,
+    mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """nexus-ft04v.27 follow-up: ``_find_dimension_mismatched_collections``
     reads the ``__<model>__`` token via ``collection_model`` instead of a
@@ -464,6 +501,7 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
     from nexus.commands.collection import _find_dimension_mismatched_collections
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _ORPHAN, "count": 1},
         {"name": _MATCHING_VOYAGE, "count": 50},
@@ -473,12 +511,12 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
 
     mismatches, skipped, active_label = _find_dimension_mismatched_collections(mock_db)
 
-    assert active_label == "voyage"
+    assert active_label.startswith("voyage")
     assert mismatches == [{
         "name": _ORPHAN,
         "declared_model": "minilm-l6-v2-384",
         "declared_dim": 384,
-        "active_dim": 1024,
+        "served_models": sorted(_VOYAGE_MODELS),
         "count": 1,
     }]
     # skipped: the legacy 2-segment name (not_conformant) + the
@@ -488,9 +526,10 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
 
 
 def test_prune_dry_run_default_lists_and_does_not_delete(
-    runner, env_creds, mock_db,
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _ORPHAN, "count": 1},
         {"name": _MATCHING_VOYAGE, "count": 50},
@@ -504,10 +543,13 @@ def test_prune_dry_run_default_lists_and_does_not_delete(
     mock_db.delete_collection.assert_not_called()
 
 
-def test_prune_yes_deletes_via_cascade(runner, env_creds, mock_db) -> None:
+def test_prune_yes_deletes_via_cascade(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from nexus.db.collection_purge import CascadeCounts
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
 
     with patch(
@@ -521,9 +563,12 @@ def test_prune_yes_deletes_via_cascade(runner, env_creds, mock_db) -> None:
     mock_cascade.assert_called_once_with(mock_db, _ORPHAN)
 
 
-def test_prune_dry_run_flag_overrides_yes(runner, env_creds, mock_db) -> None:
+def test_prune_dry_run_flag_overrides_yes(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """--dry-run always wins, even alongside --yes: fail-safe on user data."""
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
 
     with patch(
@@ -536,8 +581,11 @@ def test_prune_dry_run_flag_overrides_yes(runner, env_creds, mock_db) -> None:
     mock_cascade.assert_not_called()
 
 
-def test_prune_no_mismatches_reports_clean(runner, env_creds, mock_db) -> None:
+def test_prune_no_mismatches_reports_clean(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _MATCHING_VOYAGE, "count": 50}]
     result = _invoke(runner, mock_db, ["prune"])
     assert result.exit_code == 0, result.output
@@ -545,8 +593,11 @@ def test_prune_no_mismatches_reports_clean(runner, env_creds, mock_db) -> None:
     assert "voyage" in result.output
 
 
-def test_prune_skips_non_conformant_names(runner, env_creds, mock_db) -> None:
+def test_prune_skips_non_conformant_names(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _MATCHING_VOYAGE, "count": 50},
         {"name": _LEGACY_NAME, "count": 3},
@@ -557,7 +608,9 @@ def test_prune_skips_non_conformant_names(runner, env_creds, mock_db) -> None:
     assert "1 non-conformant collection name(s) skipped" in result.output
 
 
-def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> None:
+def test_prune_active_dim_unknown_lists_nothing(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A probe that cannot resolve the active embedder must never guess —
     guessing wrong would flag (and with --yes, delete) healthy collections.
 
@@ -566,6 +619,10 @@ def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> N
     dimension-mismatched collections found (active embedder: unknown)"
     read as verified-clean when nothing was actually checked."""
     mock_db.embedding_mode.return_value = None
+    # An engine older than the field: /version answers, embedding_models absent.
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", lambda path, *, tenant="default": {},
+    )
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     result = _invoke(runner, mock_db, ["prune", "--yes"])
     assert result.exit_code == 0, result.output
@@ -574,10 +631,13 @@ def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> N
     mock_db.delete_collection.assert_not_called()
 
 
-def test_prune_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
+def test_prune_surfaces_cascade_failures(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from nexus.db.collection_purge import CascadeCounts
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     fake = CascadeCounts(failures=["catalog cascade failed: boom"])
 
@@ -589,6 +649,32 @@ def test_prune_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert result.exit_code == 0, result.output
     assert "warn:" in result.output
     assert "catalog cascade failed: boom" in result.output
+
+
+def test_prune_with_failed_service_cascade_counts_only_confirmed_deletes(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-oq5gd: same rule as delete: an unconfirmed delete is not counted
+    as deleted, the loop still visits every collection, and the exit is non-zero."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    _serve_models(monkeypatch, _VOYAGE_MODELS)  # RDR-210 P1.3: the engine's embedding_models decides
+    mock_db.embedding_mode.return_value = "voyage"
+    mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade", return_value=fake,
+    ):
+        result = _invoke(runner, mock_db, ["prune", "--yes"])
+
+    assert result.exit_code != 0
+    assert "Deleted 0 collection(s)." in result.output
+    assert "unconfirmed" in result.output
+    assert _ORPHAN in result.output
 
 
 def test_prune_local_mode_active_dim_from_local_model_token(
@@ -612,7 +698,7 @@ def test_prune_local_mode_active_dim_from_local_model_token(
     assert result.exit_code == 0, result.output
     assert _ORPHAN in result.output
     assert "384d" in result.output
-    assert "active=768d" in result.output
+    assert "not served" in result.output
 
 
 # ── verify ──────────────────────────────────────────────────────────────────
@@ -679,6 +765,7 @@ def test_reindex_not_found(runner, env_creds, mock_db) -> None:
     assert "not found" in result.output.lower() or "error" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_routes_delete_through_cascade_not_client_delete(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -707,7 +794,7 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
         [{"source_path": str(doc_file)}],
     )
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
@@ -716,6 +803,42 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
+def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-69n4q: a failed (or timed-out) service deleteCollection leaves the old collection in place;
+    reindex must stop before re-registering or re-indexing into it, and say how to retry."""
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(doc_file)}],
+        [{"source_path": str(doc_file)}],
+    )
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake), \
+         patch("nexus.corpus.ensure_collection_registered") as register, \
+         patch("nexus.doc_indexer.index_markdown", return_value=1) as index_md, \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
+    assert result.exit_code != 0
+    assert "unconfirmed" in result.output
+    assert "may or may not have been deleted" in result.output
+    assert "nx collection info knowledge__test" in result.output
+    assert "nx collection reindex knowledge__test" in result.output
+    assert "reports not found" in result.output and "original sources" in result.output
+    assert "nx index md" in result.output and "nx collection delete knowledge__test" in result.output
+    assert "service deleteCollection failed" in result.output
+    index_md.assert_not_called()
+    register.assert_not_called()
+
+
+@pytest.mark.t2_tenant
 def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -740,7 +863,7 @@ def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
     writer = MagicMock()
     name = "docs__myrepo__stub-code-1024__v5"
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade"), \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()), \
          patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
@@ -772,6 +895,7 @@ def _setup_reindex_mock(mock_db, metadatas_check, metadatas_batch, before_count=
     return VerifyResult(status="skipped", doc_count=after_count)
 
 
+@pytest.mark.t2_tenant
 def test_reindex_aborts_on_sourceless(runner, env_creds, mock_db) -> None:
     mock_db.collection_info.return_value = {"count": 3, "metadata": {}}
     mock_col = MagicMock()
@@ -845,6 +969,7 @@ def test_reindex_refuses_when_all_entries_sourceless(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -879,7 +1004,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
         return_value=str(doc_file),
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -893,6 +1018,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     runner, env_creds, mock_db, tmp_path,
 ) -> None:
@@ -937,7 +1063,7 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -982,6 +1108,7 @@ def test_reindex_treats_doc_id_with_no_catalog_entry_as_sourceless(
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")
@@ -992,7 +1119,7 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
         before_count=2, after_count=1,
     )
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test", "--force"])
@@ -1003,6 +1130,7 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_reindex_rdr_uses_batch(runner, env_creds, mock_db, tmp_path) -> None:
     rdr_file = tmp_path / "rdr-001.md"
     rdr_file.write_text("# RDR 001\ncontent here")
@@ -1019,6 +1147,7 @@ def test_reindex_rdr_uses_batch(runner, env_creds, mock_db, tmp_path) -> None:
     assert kwargs.get("force") is True
 
 
+@pytest.mark.t2_tenant
 def test_reindex_runs_verify_after(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")
@@ -1035,6 +1164,7 @@ def test_reindex_runs_verify_after(runner, env_creds, mock_db, tmp_path) -> None
     assert "2" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_reindex_warns_on_missing_source_files(runner, env_creds, mock_db) -> None:
     from nexus.db.t3 import VerifyResult
     missing = "/nonexistent/path/that/does/not/exist.md"
@@ -1077,6 +1207,7 @@ def test_run_collection_postprocessing_swallows_t2_t3_errors() -> None:
         )
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_echoes_per_collection_progress() -> None:
     """nexus-47ubt: a slow ``_discover_taxonomy`` on one collection must not
     leave the operator staring at silence between "Building staleness
@@ -1103,6 +1234,7 @@ def test_run_collection_postprocessing_echoes_per_collection_progress() -> None:
     assert any("discovering docs__b" in ln and "2/2" in ln for ln in lines)
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_survives_broken_echo() -> None:
     """A progress-echo failure (e.g. BrokenPipeError on a closed stdout) must
     not abort the taxonomy-discover loop for the remaining collections —
@@ -1200,6 +1332,7 @@ def test_collections_from_registry_info_dedupes() -> None:
     assert len(out) == len(set(out))
 
 
+@pytest.mark.t2_tenant
 def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
     """Review #757: prove the warning suppression end-to-end. The alias
     must never reach ``_discover_taxonomy`` (which is where the
@@ -1265,6 +1398,7 @@ def test_index_repo_cmd_help_shows_corpus_flag(runner) -> None:
     assert "knowledge" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> None:
     """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): ``--corpus
     knowledge`` registers a ``knowledge__*`` collection on the
@@ -1331,6 +1465,7 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
     assert "knowledge__" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): omitting
     ``--corpus`` is the default; no ``knowledge__`` collection is
@@ -1416,6 +1551,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
     assert "2" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_reembed_no_dry_run_writes_via_server(
     runner, env_creds, tmp_path, monkeypatch,
     cloud_mode,
@@ -1487,6 +1623,7 @@ def test_reembed_no_dry_run_writes_via_server(
     assert call["embeddings"] is None
 
 
+@pytest.mark.t2_tenant
 def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_mode) -> None:
     """nexus-tysei: voyage-context-3 re-embeds in place. It was refused
     (nexus-bw65) while the client embedded a document's chunks together;
@@ -1530,6 +1667,7 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
     assert upsert_calls[0]["embeddings"] is None
 
 
+@pytest.mark.t2_tenant
 def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, cloud_mode) -> None:
     """nexus-tysei: every chunk in an upsert is embedded before the request
     answers, and the edge gives upsert-chunks 55 s, so a 300-row page goes
@@ -1567,6 +1705,7 @@ def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, 
     assert seen == ids
 
 
+@pytest.mark.t2_tenant
 def test_reembed_skips_empty_documents(
     runner, env_creds, monkeypatch,
 ) -> None:
@@ -1607,24 +1746,22 @@ def test_reembed_skips_empty_documents(
     assert "skipped 1" in result.output
 
 
-def test_prune_service_mode_bge_config_without_fastembed_resolves_service_dim(
+def test_prune_service_mode_served_set_comes_from_the_engine_not_client_config(
     runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh-install MVV regression (6.17.0 prep): on a service-mode box the
-    persisted local.embed_model (the SERVICE's embedder, bge-768) is the
-    active dim — NOT local_model_token(), which resolves the client Python
-    EF and deliberately falls back to minilm-384 when the [local] extra is
-    absent (T3 embeds server-side; the client EF only serves T1). Using the
-    EF token flagged every healthy bge-768 collection as an orphan on a
-    virgin box."""
+    """Fresh-install MVV regression (6.17.0 prep), restated for the served-model
+    set (RDR-210 P1.3): the SERVICE embeds, so its ``/version``
+    ``embedding_models`` is the truth -- NOT ``local_model_token()``, which
+    resolves the client Python EF and deliberately falls back to minilm-384
+    when the [local] extra is absent. Using the EF token flagged every healthy
+    bge-768 collection as an orphan on a virgin box."""
     mock_db.embedding_mode.return_value = "onnx-local"
+    _serve_models(monkeypatch, ["bge-base-en-v15-768"])
     mock_db.list_collections.return_value = [
         {"name": "knowledge__knowledge__bge-base-en-v15-768__v1", "count": 1},
     ]
-    monkeypatch.setattr(
-        "nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5",
-    )
-    # The client-EF resolver reports minilm (no fastembed) — must NOT win.
+    # The client-side resolvers report minilm (no fastembed) -- must NOT win.
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
     monkeypatch.setattr(
         "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
     )
@@ -1634,22 +1771,15 @@ def test_prune_service_mode_bge_config_without_fastembed_resolves_service_dim(
     assert "bge-base-en-v15-768" in result.output
 
 
-def test_prune_no_recorded_choice_falls_back_to_ef_token(
+def test_prune_lists_minilm_when_the_engine_serves_only_bge(
     runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy box with no local.embed_model record: the EF auto-select is
-    the only signal and remains authoritative."""
     mock_db.embedding_mode.return_value = "onnx-local"
-    mock_db.list_collections.return_value = [
-        {"name": _ORPHAN, "count": 1},
-    ]
-    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
-    monkeypatch.setattr(
-        "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
-    )
+    _serve_models(monkeypatch, ["bge-base-en-v15-768"])
+    mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     result = _invoke(runner, mock_db, ["prune"])
     assert result.exit_code == 0, result.output
-    assert "No dimension-mismatched collections found" in result.output
+    assert _ORPHAN in result.output
 
 
 def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, mock_db) -> None:
@@ -1664,7 +1794,7 @@ def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, moc
         "ids": ["a"], "metadatas": [{"source_path": "/repo/x.py"}],
     }
     mock_db.get_or_create_collection.return_value = mock_col
-    with patch("nexus.db.collection_purge.purge_collection_cascade") as cascade:
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as cascade:
         result = _invoke(runner, mock_db, ["reindex", "code__myrepo"])
     assert result.exit_code != 0
     assert "nx index repo" in result.output

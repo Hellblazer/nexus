@@ -53,6 +53,7 @@ from nexus.db.pg_provision import (
 
 # THE GATE RESOLVES THROUGH THE SELF-PROVISIONING SEAM, NEVER AMBIENT
 # DISCOVERY — see tests/db/test_pg_provision.py's identical header comment.
+from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from tests.db._service_fixture import pg_bin_dir  # noqa: E402 — gate needs it here
 
@@ -105,7 +106,7 @@ def bins() -> PgBinaries:
 
 
 @pytest.fixture
-def upgrade_shaped_cluster(bins: PgBinaries, tmp_path_factory):
+def upgrade_shaped_cluster(bins: PgBinaries):
     """A freshly-provisioned, RUNNING cluster with nexus_admin's pg_monitor
     ADMIN OPTION revoked — simulating a pre-nexus-hzhgl install whose
     on-disk engine has since been converged, but which has never had
@@ -118,42 +119,40 @@ def upgrade_shaped_cluster(bins: PgBinaries, tmp_path_factory):
     load-bearing. A fresh hermetic cluster per test keeps each test's
     precondition self-evident.
     """
-    config_dir = tmp_path_factory.mktemp("nexus_upgrade_shaped")
-    old_env = os.environ.get("NEXUS_CONFIG_DIR")
-    os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+    config_dir = Path(pg_data_tempdir("nexus_upgrade_pg_"))
     try:
-        result = provision(config_dir, force_new_port=True)
+        old_env = os.environ.get("NEXUS_CONFIG_DIR")
+        os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+        try:
+            result = provision(config_dir, force_new_port=True)
+        finally:
+            if old_env is None:
+                os.environ.pop("NEXUS_CONFIG_DIR", None)
+            else:
+                os.environ["NEXUS_CONFIG_DIR"] = old_env
+
+        # nexus-0ajjm: fsync/WAL-size settings a reload can apply (wal_level and DSM keep provision's values).
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
+
+        # nexus-ja4pq: the cluster demands passwords; the raw psql calls here and in
+        # the tests present the superuser's recorded one through PGPASSFILE.
+        with superuser_pgpass(config_dir):
+            os_user = _os_user()
+            # A from-scratch _create_roles run only ever grants pg_monitor WITH
+            # ADMIN OPTION, so a plain REVOKE cleanly reproduces the "never
+            # granted" precondition of a pre-round-2 install (same technique as
+            # tests/db/test_pg_provision.py's round-2 regression test).
+            _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+                  "REVOKE pg_monitor FROM nexus_admin")
+            assert _query(
+                bins, result.port, NEXUS_DB_NAME, os_user,
+                "SELECT pg_has_role('nexus_admin', 'pg_monitor', 'member')",
+            ) == "f", "revoke precondition failed"
+
+            yield result, config_dir
     finally:
-        if old_env is None:
-            os.environ.pop("NEXUS_CONFIG_DIR", None)
-        else:
-            os.environ["NEXUS_CONFIG_DIR"] = old_env
-
-    # nexus-ja4pq: the cluster demands passwords; the raw psql calls here and in
-    # the tests present the superuser's recorded one through PGPASSFILE.
-    with superuser_pgpass(config_dir):
-        os_user = _os_user()
-        # A from-scratch _create_roles run only ever grants pg_monitor WITH
-        # ADMIN OPTION, so a plain REVOKE cleanly reproduces the "never
-        # granted" precondition of a pre-round-2 install (same technique as
-        # tests/db/test_pg_provision.py's round-2 regression test).
-        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
-              "REVOKE pg_monitor FROM nexus_admin")
-        assert _query(
-            bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT pg_has_role('nexus_admin', 'pg_monitor', 'member')",
-        ) == "f", "revoke precondition failed"
-
-        yield result, config_dir
-
-    pgdata = config_dir / "postgres"
-    try:
-        subprocess.run(
-            [str(bins.pg_ctl), "-D", str(pgdata), "-m", "immediate", "stop"],
-            capture_output=True, check=False, timeout=10,
-        )
-    except Exception:  # noqa: BLE001 — teardown must not reraise
-        pass
+        # Stop <config_dir>/postgres and remove config_dir (on the run's tmpfs root; pytest does not clean it).
+        stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
 
 def _make_supervisor(result: ProvisionResult, config_dir: Path, *, creds: dict[str, str] | None = None):

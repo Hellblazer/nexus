@@ -489,6 +489,7 @@ class TestConsoleHealthTwin:
             f"must not report a count it could not obtain: {data}"
         )
 
+    @pytest.mark.t2_tenant
     def test_catalog_age_is_marked_frozen_in_service_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, service_mode: None,
     ) -> None:
@@ -549,6 +550,7 @@ class TestEndpointUnresolvableDegradesCleanly:
         assert issubclass(ServiceEndpointUnresolvableError, RuntimeError)
         assert not issubclass(ServiceEndpointUnresolvableError, httpx.HTTPError)
 
+    @pytest.mark.t2_tenant
     def test_aspect_queue_check_survives_unresolvable_endpoint(
         self, service_mode: None,
     ) -> None:
@@ -565,6 +567,7 @@ class TestEndpointUnresolvableDegradesCleanly:
         assert "UNKNOWN" in printed, printed
         assert "0 pending" not in printed
 
+    @pytest.mark.t2_tenant
     def test_trim_reports_UNKNOWN_and_exits_nonzero_on_unresolvable_endpoint(
         self, service_mode: None,
     ) -> None:

@@ -16,6 +16,8 @@ import nexus.health as health_mod
 from nexus.cli import main
 from nexus.health import HealthResult
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _stub_sweep(monkeypatch, results: list[HealthResult]) -> None:
     monkeypatch.setattr(

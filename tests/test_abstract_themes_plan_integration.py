@@ -97,7 +97,7 @@ import pytest
 import pytest_asyncio
 from tests.conftest import make_vector_test_client
 
-pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
+pytestmark = [pytest.mark.integration, pytest.mark.lived_in, pytest.mark.t2_tenant]
 
 
 # ── Fixture authoring constants ──────────────────────────────────────────────
@@ -362,16 +362,16 @@ async def _reset_singletons_between_tests():
     reset_singletons()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def builtin_plans_library():
     """Fresh plan library with every shipped builtin template loaded.
 
     Ported (nexus-i711w Stage 2 sub-stage A3): the SQLite PlanLibrary is
     deleted; HttpPlanLibrary is the only plan library. The store resolves
-    its endpoint + token ONCE at construction, so this module-scoped
-    instance pins the tenant of whichever test first requests it — every
-    later test in the module reads the same tenant's library, which is
-    exactly the module-shared-fixture semantics the old on-disk file had.
+    its endpoint + token ONCE at construction, so it is built per test, in
+    that test's tenant: a module-scoped one ran during the first test's setup
+    before its tenant existed (the storage-touch guard's unprovisioned_touch)
+    and pinned a tenant the pool wipes between tests (nexus-j23ni, nexus-7zloy).
     (``_add_plan_dimensional_identity`` went with the SQLite library — the
     dimensional-identity schema ships in the engine's Liquibase changelog.)
     """
@@ -398,7 +398,7 @@ def builtin_plans_library():
     return lib
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def populated_session_cache(builtin_plans_library):
     """Real-EphemeralClient cache populated from the loaded library."""
     from nexus.plans.session_cache import PlanSessionCache

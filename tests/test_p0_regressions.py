@@ -195,6 +195,7 @@ def test_semantic_chunker_sets_char_offsets() -> None:
 
 # ── Test 7: doc_indexer atomicity — originals survive a failed add() ──────────
 
+@pytest.mark.t2_tenant
 def test_index_markdown_atomicity_originals_survive_add_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

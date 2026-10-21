@@ -7,7 +7,8 @@
     EXPLAIN of a call shows only "Function Scan on text_gate_probe_384" and says nothing about the plan of
     its body. auto_explain with log_nested_statements writes the body's own plan, as ${svcRole} (the role
     the production service connects as, so the owner policy and the row-level-security qual are exactly
-    the ones production has), to the server log, which the test reads back through the container's log.
+    the ones production has), to the server log, which the test reads back with PgContainerHelper#serverLog
+    (a file in the container with the DDL counter on, not Docker's log).
 
     Per-role and session_preload_libraries, not shared_preload_libraries and not a server-wide minimum
     duration of zero: only sessions opened AFTER this runs, as ${svcRole}, are affected, so a test seeds

@@ -148,11 +148,24 @@ public final class CollectionRegistry {
      * the profile change, mirroring the post-commit discipline of {@link
      * #evict}.
      *
+     * <p>Also the {@code CollectionRegistry} evictor of the test-only tenant reset
+     * route (bead nexus-0bl77): after the reset deletes the tenant's
+     * {@code catalog_collections} rows, a cached pair would be a stale positive.
+     *
      * @param tenant the tenant whose cached entries should be forgotten
+     * @return the number of cached pairs removed
      */
-    public static void evictTenant(String tenant) {
+    public static int evictTenant(String tenant) {
         String prefix = tenant + '|';
-        KNOWN.keySet().removeIf(k -> k.startsWith(prefix));
+        int[] removed = {0};
+        KNOWN.keySet().removeIf(k -> {
+            boolean mine = k.startsWith(prefix);
+            if (mine) {
+                removed[0]++;
+            }
+            return mine;
+        });
+        return removed[0];
     }
 
     /** Test-only: clears all cached entries. */

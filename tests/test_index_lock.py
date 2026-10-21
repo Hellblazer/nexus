@@ -137,6 +137,7 @@ def test_repo_lock_path_is_stable(tmp_path: Path) -> None:
 # ── lock held during indexing ─────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_lock_is_held_during_indexing(tmp_path: Path, registry, lock_home: Path) -> None:
     """Non-blocking lock attempt fails while index_repository holds the lock."""
     from nexus.indexer import _repo_lock_path
@@ -184,6 +185,7 @@ def test_on_locked_skip_returns_empty_when_locked(tmp_path: Path, registry, lock
     assert not any(c == call(tmp_path, status="indexing") for c in registry.update.call_args_list)
 
 
+@pytest.mark.t2_tenant
 def test_on_locked_skip_runs_when_unlocked(tmp_path: Path, registry, lock_home: Path) -> None:
     """on_locked=skip acquires the lock and runs when not contested."""
     with patch("nexus.indexer._run_index", return_value={"rdr_indexed": 0}) as mock_run:
@@ -194,9 +196,32 @@ def test_on_locked_skip_runs_when_unlocked(tmp_path: Path, registry, lock_home: 
     assert result == {"rdr_indexed": 0}
 
 
+@pytest.mark.t2_tenant
+def test_pdf_same_as_relink_runs_after_the_run_on_its_changed_set(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """nexus-h0uy7: the same-as prune runs once _run_index has returned,
+    when the fence has stamped the changed documents' keys, on the set the
+    run itself recorded as changed."""
+    def _fake_run(*_args, fence_run_state, **_kwargs):
+        fence_run_state["needs_fence"] = {"1.1.2": ("h", "docs__repo")}
+        return {}
+
+    seen: list[set[str]] = []
+    with patch("nexus.indexer._run_index", side_effect=_fake_run), \
+            patch("nexus.indexer._current_head", return_value="abc123"), \
+            patch(
+                "nexus.indexer._relink_changed_pdfs",
+                side_effect=lambda state: seen.append(set(state["needs_fence"])),
+            ):
+        index_repository(tmp_path, registry)
+    assert seen == [{"1.1.2"}]
+
+
 # ── on_locked=wait ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_on_locked_wait_blocks_then_runs(tmp_path: Path, registry, lock_home: Path) -> None:
     """on_locked=wait blocks while lock is held, then runs after release."""
     from nexus.indexer import _repo_lock_path
@@ -387,6 +412,7 @@ def test_head_hash_updated_when_no_files_deferred_or_failed(
 # ── lock released after indexing ─────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_lock_released_after_indexing(tmp_path: Path, registry, lock_home: Path) -> None:
     """Lock is released after index_repository returns (success or failure)."""
     from nexus.indexer import _repo_lock_path
@@ -420,6 +446,7 @@ def test_lock_released_on_exception(tmp_path: Path, registry, lock_home: Path) -
 # ── skip contender must not corrupt or unlock a live holder ─────────────────
 
 
+@pytest.mark.t2_tenant
 def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
     tmp_path: Path, registry, lock_home: Path,
 ) -> None:
@@ -495,6 +522,7 @@ def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
 # ── CLI --on-locked option ────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_cli_on_locked_default_is_wait(runner: CliRunner, lock_home: Path) -> None:
     """nx index repo uses on_locked='wait' by default."""
     repo = lock_home / "myrepo"
@@ -514,6 +542,7 @@ def test_cli_on_locked_default_is_wait(runner: CliRunner, lock_home: Path) -> No
     assert kwargs.get("on_locked", "wait") == "wait"
 
 
+@pytest.mark.t2_tenant
 def test_cli_on_locked_skip(runner: CliRunner, lock_home: Path) -> None:
     """nx index repo --on-locked=skip passes on_locked='skip'."""
     repo = lock_home / "myrepo"

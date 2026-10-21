@@ -64,6 +64,7 @@ def repo_with_owner(catalog, tmp_path, monkeypatch):
 
 # ── RepoRegistry.add: catalog-aware path ────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_repo_registry_add_with_catalog_emits_conformant(
     repo_with_owner: Path, catalog: Catalog, tmp_path: Path,
 ) -> None:
@@ -75,6 +76,7 @@ def test_repo_registry_add_with_catalog_emits_conformant(
     assert is_conformant_collection_name(info["docs_collection"])
 
 
+@pytest.mark.t2_tenant
 def test_repo_registry_add_with_catalog_uses_canonical_models(
     repo_with_owner: Path, catalog: Catalog, tmp_path: Path,
 ) -> None:
@@ -85,6 +87,7 @@ def test_repo_registry_add_with_catalog_uses_canonical_models(
     assert "voyage-context-3" in info["docs_collection"]
 
 
+@pytest.mark.t2_tenant
 def test_repo_registry_add_with_catalog_lands_at_v1(
     repo_with_owner: Path, catalog: Catalog, tmp_path: Path,
 ) -> None:
@@ -119,6 +122,7 @@ def test_repo_registry_add_without_catalog_synthesises_conformant(tmp_path: Path
     assert is_conformant_collection_name(info["docs_collection"])
 
 
+@pytest.mark.t2_tenant
 def test_repo_registry_add_catalog_without_owner_synthesises_conformant(
     catalog: Catalog, tmp_path: Path, monkeypatch,
 ) -> None:
@@ -147,6 +151,7 @@ def test_repo_registry_add_catalog_without_owner_synthesises_conformant(
 
 # ── _repo_collection_or_legacy ─────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_repo_collection_or_legacy_uses_catalog_when_initialized(
     repo_with_owner: Path, catalog: Catalog, monkeypatch, tmp_path: Path,
 ) -> None:
@@ -158,6 +163,7 @@ def test_repo_collection_or_legacy_uses_catalog_when_initialized(
     assert is_conformant_collection_name(name)
 
 
+@pytest.mark.t2_tenant
 def test_repo_collection_or_legacy_synthesises_conformant_when_catalog_absent(
     tmp_path: Path, monkeypatch,
 ) -> None:

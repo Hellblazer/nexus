@@ -500,7 +500,7 @@ class TestLiveSessionLease:
     def test_publish_read_clear_roundtrip(self, tmp_path: Path) -> None:
         """Unit-level: the lease helpers round-trip a token and clear cleanly."""
         from nexus.db.t1 import (
-            clear_t1_session_lease,
+            end_owned_t1_session_lease,
             publish_t1_session_lease,
             read_t1_session_lease,
         )
@@ -512,10 +512,10 @@ class TestLiveSessionLease:
         # A DIFFERENT session id must not see this lease.
         assert read_t1_session_lease("sess-2", tmp_path) is None
 
-        clear_t1_session_lease("sess-1", tmp_path)
+        end_owned_t1_session_lease("sess-1", tmp_path, set(), lambda: None)
         assert read_t1_session_lease("sess-1", tmp_path) is None
         # Double-clear is a no-op, not an error.
-        clear_t1_session_lease("sess-1", tmp_path)
+        end_owned_t1_session_lease("sess-1", tmp_path, set(), lambda: None)
 
     def test_lease_file_mode_is_0600(self, tmp_path: Path) -> None:
         """Owner-only: mode 0o600 on POSIX, an owner-only DACL on Windows."""
@@ -582,6 +582,7 @@ class TestLiveSessionLease:
         )
         assert entry["content"] == "written by the live MCP session"
 
+    @pytest.mark.t2_tenant
     def test_no_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -602,16 +603,17 @@ class TestLiveSessionLease:
         assert "missing or expired" in msg
         assert "predecessor scopes are readable only while their lease is fresh" in msg
 
+    @pytest.mark.t2_tenant
     def test_lease_after_clear_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """After clear_t1_session_lease (MCP teardown), a later process with
+        """After end_owned_t1_session_lease (MCP teardown), a later process with
         the SAME explicit session id (NX_SESSION_ID) must fail loud -- not
         silently read a removed lease's replacement (the shared
         CLI-dedicated identity)."""
         from nexus.db.t1 import (
             T1ServerNotFoundError,
-            clear_t1_session_lease,
+            end_owned_t1_session_lease,
             get_t1_database,
             publish_t1_session_lease,
         )
@@ -619,7 +621,7 @@ class TestLiveSessionLease:
         live_session_id = "live-mcp-session-torn-down"
         live_token = _mint_live_session_token(fake_service, live_session_id)
         publish_t1_session_lease(live_session_id, live_token, config_dir)
-        clear_t1_session_lease(live_session_id, config_dir)
+        end_owned_t1_session_lease(live_session_id, config_dir, set(), lambda: None)
 
         monkeypatch.setenv("NX_SESSION_ID", live_session_id)
 
@@ -721,6 +723,7 @@ class TestStaleLeaseFallthrough:
     (TestBranch0StaleLeaseRecovery below) -- that path never reaches
     get_t1_database()'s CLI-dedicated branch at all."""
 
+    @pytest.mark.t2_tenant
     def test_stale_lease_fails_loud_for_explicit_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -794,6 +797,7 @@ class TestExplicitVsBareFailLoudGate:
         assert result.session_id == _cli_dedicated_session_id(config_dir)
         assert result.session_id != "file-resolved-not-explicit"
 
+    @pytest.mark.t2_tenant
     def test_claude_code_session_id_env_is_also_explicit(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -828,6 +832,7 @@ class TestExplicitVsBareFailLoudGate:
         assert isinstance(result, HttpScratchStore)
         assert result.session_id == live_session_id
 
+    @pytest.mark.t2_tenant
     def test_repro_guard_nx_scratch_list_errors_not_shared_entries(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -905,6 +910,7 @@ class TestSharedFallbackEscapeHatch:
         assert "t1_shared_scope_fallback" in captured.out
         assert "escape-hatch-warning-probe" in captured.out
 
+    @pytest.mark.t2_tenant
     def test_escape_hatch_value_other_than_1_does_not_activate(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
@@ -968,6 +974,7 @@ class TestSharedFallbackEscapeHatch:
 # parent (the exact shape pre_close_verification_hook.sh's export produces).
 
 
+@pytest.mark.t2_tenant
 class TestSessionEndNeverClearsSharedScope:
     def test_lease_less_explicit_session_end_survives_shared_scope(
         self, fake_service, config_dir, monkeypatch
@@ -1449,7 +1456,7 @@ class TestMintErrorWrapping:
 # The lease helpers and get_t1_database()'s consumption of them are covered
 # above; this class proves the OTHER half -- that _t1_lifespan's
 # Branch 0 (the live MCP session's own mint path) actually calls
-# publish_t1_session_lease / clear_t1_session_lease at the right times, not
+# publish_t1_session_lease / end_owned_t1_session_lease at the right times, not
 # just that the helpers work in isolation. code-review-expert previously
 # caught a real wiring gap in this exact function (the NX_T1_ISOLATED HIGH
 # finding on nexus-rn3wo.1's first pass), so the wiring itself -- not only

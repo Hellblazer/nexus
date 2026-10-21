@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -390,7 +389,7 @@ class ChunkLastWrittenAtIntegrationTest {
             throws SQLException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-225: the manifest row carries the model of the collection it names.
             suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS,
@@ -400,9 +399,7 @@ class ChunkLastWrittenAtIntegrationTest {
                .values(TENANT, docId, 0, Chash.fromHex(chashHex).toBytes(), collection,
                     PgContainerHelper.collectionModel(suCtx, TENANT, collection))
                .execute();
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 

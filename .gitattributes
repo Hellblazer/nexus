@@ -6,3 +6,9 @@
 # Windows ships core.autocrlf=true, which turned the appliance endpoint fixture's
 # trailing \n into \r\n on the win-release runner (nexus-f9bgu.14).
 tests/fixtures/** -text
+# The rdr161 Sigstore bundles are genuine release artifacts, byte-exact too.
+tests/daemon/fixtures/rdr161/** -text
+# The DDL counter's golden log and probe SQL are byte-exact and shared by two parsers: tests/test_ddl_counter.py
+# compares the Java copies with tests/fixtures/ddl byte for byte, and the probe file is mounted into a Linux
+# container, so no end-of-line conversion on any checkout (nexus-sz651).
+service/src/test/resources/ddl/** -text

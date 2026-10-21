@@ -139,6 +139,7 @@ from tests.test_cp46b_runfence_repo_staleness import (  # noqa: E402, F401
 
 
 class TestStaleChunkMetadataDoesNotForceReindex:
+    @pytest.mark.t2_tenant
     def test_complete_doc_skipped_when_chunk_metadata_hash_is_stale(
         self, tmp_path: Path, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,

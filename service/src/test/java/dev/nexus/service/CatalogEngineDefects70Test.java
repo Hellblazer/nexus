@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
@@ -14,6 +15,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -63,6 +66,16 @@ class CatalogEngineDefects70Test {
         return m;
     }
 
+    /** RDR-225: a chunk's vector width must be its collection's model's dimension. */
+    private static int dimOf(String model) {
+        return switch (model) {
+            case "minilm-l6-v2-384" -> 384;
+            case "bge-base-en-v15-768" -> 768;
+            case "voyage-code-3", "voyage-context-3", "voyage-3" -> 1024;
+            default -> throw new IllegalArgumentException("unknown embedding model " + model);
+        };
+    }
+
     /**
      * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
      * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
@@ -75,20 +88,6 @@ class CatalogEngineDefects70Test {
      * as catalog_document_chunks, so a wrong-length stub would itself violate that
      * check rather than reaching whatever violation a given test is actually after.
      */
-    private static String stubVector(int dim) {
-        return "[" + "0.1,".repeat(dim - 1) + "0.1]";
-    }
-
-    /** RDR-225: a chunk's vector width must be its collection's model's dimension. */
-    private static int dimOf(String model) {
-        return switch (model) {
-            case "minilm-l6-v2-384" -> 384;
-            case "bge-base-en-v15-768" -> 768;
-            case "voyage-code-3", "voyage-context-3", "voyage-3" -> 1024;
-            default -> throw new IllegalArgumentException("unknown embedding model " + model);
-        };
-    }
-
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
             return;
@@ -107,11 +106,15 @@ class CatalogEngineDefects70Test {
             // (the fixture collections span 1024-d voyage names and model-less names that default to 768-d).
             final String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
             final int dim = dimOf(model);
-            return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, chashHex, model, stubVector(dim));
+            return ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         });
     }
 
@@ -649,7 +652,7 @@ class CatalogEngineDefects70Test {
                 List.of(row(0, ch("defects70-eldyi-stampidx-0")))))
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
 
-        // Read indexed_at directly (raw SQL, bypassing the deleted_at read
+        // Read indexed_at directly (superuser jOOQ select, bypassing the deleted_at read
         // filter — getDocument would just return null for a tombstoned row)
         // and confirm it is exactly the pre-tombstone value: untouched by the
         // refused attempt above, proving the whole transaction rolled back
@@ -663,27 +666,24 @@ class CatalogEngineDefects70Test {
      * Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi).
      *
      * <p>nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
-     * — a bare {@code getString()} on a timestamptz column returns the JDBC driver's own
-     * default rendering (space-separated, offset without a colon), not the ISO string
-     * this test wrote. Render explicitly via the SAME fixed-width-micros to_char shape
-     * catalog-031's rollback USING clause uses, so this raw-SQL probe stays byte-exact
-     * against the ISO strings this file writes through updateDocument.
+     * — read back as an {@link java.time.OffsetDateTime} and rendered here in the
+     * fixed-width-micros UTC shape ({@code 2020-01-01T00:00:00.000000+00:00}) the ISO
+     * strings this file writes through updateDocument use, so the probe stays byte-exact
+     * against them.
      */
     private String rawIndexedAt(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "SELECT to_char(indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"') "
-                + "FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, tumbler);
-                try (var rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new IllegalStateException("rawIndexedAt found no row for " + tumbler);
-                    }
-                    return rs.getString(1);
-                }
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.INDEXED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .fetch();
+            if (rows.isEmpty()) {
+                throw new IllegalStateException("rawIndexedAt found no row for " + tumbler);
             }
+            var indexedAt = rows.get(0).get(CATALOG_DOCUMENTS.INDEXED_AT);
+            return indexedAt == null ? null : indexedAt.withOffsetSameInstant(java.time.ZoneOffset.UTC)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'+00:00'"));
         }
     }
 
@@ -1244,7 +1244,9 @@ class CatalogEngineDefects70Test {
     //
     // The Python coverage (tests/test_catalog_reconcile.py, 15 tests) died with
     // the local catalog because every one of them seeded DAMAGED catalog state
-    // via raw SQL with caller-pinned tumblers, and the service substrate exposes
+    // with caller-pinned tumblers written straight into the tables (the Java
+    // fixtures below write the same damage through the generated jOOQ tables),
+    // and the service substrate exposes
     // no public API that can create that damage — by design: writeManifestRows,
     // appendManifestChunks and purgeManifest all fold chunk_count, so no public
     // call can produce the count/manifest DISAGREEMENT the verb exists to repair.
@@ -1266,24 +1268,24 @@ class CatalogEngineDefects70Test {
                                   String metadataJson) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, physical_collection, "
-                + " chunk_count, metadata, file_path, corpus, head_hash, indexed_at, source_uri) "
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "damaged-" + tumbler)
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, chunkCount)
+                .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(metadataJson))
+                .set(CATALOG_DOCUMENTS.FILE_PATH, "")
+                .set(CATALOG_DOCUMENTS.CORPUS, "")
+                .set(CATALOG_DOCUMENTS.HEAD_HASH, "")
                 // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
-                // — '' is invalid input for that type (PSQLException); NULL is the correct
-                // "unset" representation. file_path/corpus/head_hash stay TEXT NOT NULL
-                // DEFAULT '' (untouched by this migration), so '' remains correct for those.
-                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', NULL, ?)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, tumbler);
-                ps.setString(3, "damaged-" + tumbler);
-                ps.setString(4, collection);
-                ps.setInt(5, chunkCount);
-                ps.setString(6, metadataJson);
-                ps.setString(7, "file:///defects70/damaged/" + tumbler + ".md");
-                ps.executeUpdate();
-            }
+                // — '' is invalid input for that type; NULL is the correct "unset" representation.
+                // file_path/corpus/head_hash stay TEXT NOT NULL DEFAULT '' (untouched by that
+                // migration), so '' remains correct for those.
+                .setNull(CATALOG_DOCUMENTS.INDEXED_AT)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///defects70/damaged/" + tumbler + ".md")
+                .execute();
         }
     }
 
@@ -1302,14 +1304,15 @@ class CatalogEngineDefects70Test {
             su.setAutoCommit(true);
             // RDR-225: this tenant holds no service token, so its partition leaves exist only once asked for.
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
-            try (var st = su.createStatement()) {
-                st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024) "
-                    + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), 'voyage-code-3', '"
-                    + text.replace("'", "''") + "', "
-                    + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CHUNKS.EMBEDDING_MODEL, "voyage-code-3")
+                .set(CHUNKS.CHUNK_TEXT, text)
+                .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 
@@ -1327,17 +1330,14 @@ class CatalogEngineDefects70Test {
     private void forceStaleChunkCount(String tumbler, int staleCount) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "UPDATE nexus.catalog_documents SET chunk_count = ? "
-                + "WHERE tenant_id = ? AND tumbler = ?")) {
-                ps.setInt(1, staleCount);
-                ps.setString(2, TENANT);
-                ps.setString(3, tumbler);
-                int n = ps.executeUpdate();
-                if (n != 1) {
-                    throw new IllegalStateException(
-                        "forceStaleChunkCount seeded " + n + " rows for " + tumbler + ", expected 1");
-                }
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, staleCount)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .execute();
+            if (n != 1) {
+                throw new IllegalStateException(
+                    "forceStaleChunkCount seeded " + n + " rows for " + tumbler + ", expected 1");
             }
         }
     }

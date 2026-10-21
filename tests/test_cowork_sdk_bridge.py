@@ -23,6 +23,8 @@ import pytest
 
 from nexus.mcp import core
 
+pytestmark = pytest.mark.t2_tenant
+
 _SENTINEL_PROJECT = "_cowork_test"
 
 

@@ -584,6 +584,7 @@ class TestExecutedFailedSplit:
         assert payload["executed_failed_count"] == 2
         assert payload["degenerate_count"] == 1
 
+    @pytest.mark.t2_tenant
     def test_default_steps_breakdown_excludes_failed_rows(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -606,6 +607,7 @@ class TestExecutedFailedSplit:
             "default (executed-ok-only) breakdown"
         )
 
+    @pytest.mark.t2_tenant
     def test_include_failed_folds_failed_rows_into_breakdown(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -717,6 +719,7 @@ class TestExecutedFailedSplit:
             "2min_to_5min": 0, "over_5min": 0,
         }
 
+    @pytest.mark.t2_tenant
     def test_last_step_only_signal_without_steps_defaults_to_executed_ok(
         self, monkeypatch,
     ) -> None:
@@ -884,6 +887,7 @@ class TestByPlanZeroSentinel:
     bucket -- Python truthiness (`if plan_id else "fallback"`) used to
     collapse the two."""
 
+    @pytest.mark.t2_tenant
     def test_plan_id_zero_gets_its_own_bucket_not_fallback(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -988,6 +992,7 @@ def _steps_result(*, steps_supported: bool = True) -> dict:
 
 
 class TestStepsFlag:
+    @pytest.mark.t2_tenant
     def test_steps_flag_requests_include_steps(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -1023,6 +1028,7 @@ class TestStepsFlag:
         CliRunner().invoke(answer_runs_cmd, [])
         assert captured["include_steps"] is False
 
+    @pytest.mark.t2_tenant
     def test_json_step_breakdown_by_operator_and_source(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -1061,6 +1067,7 @@ class TestStepsFlag:
         assert breakdown["by_operator"]["summarize"]["median_cost_usd"] == pytest.approx(0.03)
         assert breakdown["by_source"]["llm"]["median_cost_usd"] == pytest.approx(0.03)
 
+    @pytest.mark.t2_tenant
     def test_by_operator_median_over_multiple_steps(self, monkeypatch) -> None:
         """A real multi-value median (not just n=1) -- three 'summarize'
         steps across three rows with costs 0.01/0.02/0.09 -> median
@@ -1109,6 +1116,7 @@ class TestStepsFlag:
         assert agg["median_cost_usd"] == pytest.approx(0.02)
         assert agg["median_elapsed_ms"] == pytest.approx(200)
 
+    @pytest.mark.t2_tenant
     def test_json_cost_consistency_violation_flagged(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 
@@ -1158,6 +1166,7 @@ class TestStepsFlag:
         json_payload = json.loads(json_result.stdout)
         assert json_payload["step_breakdown"] == {"steps_supported": False}
 
+    @pytest.mark.t2_tenant
     def test_unknown_step_cost_excluded_from_sum_but_count_shown(
         self, monkeypatch,
     ) -> None:
@@ -1298,6 +1307,7 @@ class TestPredictedCostColumn:
         assert entry["predicted_cost_usd"] is None
         assert entry["predicted_basis"] == "unavailable"
 
+    @pytest.mark.t2_tenant
     def test_add_predicted_costs_skips_fallback_key_directly(self) -> None:
         # Direct unit test of the helper (not through the CLI): the
         # "fallback" bucket (genuine planner-error miss, no plan_id at
@@ -2046,6 +2056,7 @@ class TestFourWaySplitPopulationLabelling:
     headless cost population -- the --steps breakdown must exclude a
     handed-off row's steps even though it carries real StepRecords."""
 
+    @pytest.mark.t2_tenant
     def test_steps_breakdown_excludes_handed_off_rows(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
 

@@ -10,7 +10,8 @@ direct SQL, real ``HttpLadderStore`` completion ledger, real T2 memo) lives in
 ``test_rdr192_manifest_backfill_substrate.py``.
 
 The property under test is the one the reaper depends on: a completion
-record exists ONLY when a fresh census read zero legacy-unmanifested chunks,
+record exists ONLY when a census read zero legacy-unmanifested chunks (each
+reading taken in the session or kept from an earlier one at most 24 hours ago),
 because ``reapable(c)`` treats a manifest-less chunk as garbage and the
 reaper (nexus-2x9xa) refuses to run on a tenant without that record.
 """
@@ -918,6 +919,7 @@ def test_the_real_lock_excludes_a_second_holder_and_frees_on_release() -> None:
         assert again is True, "the lock is released when the holder leaves"
 
 
+@pytest.mark.t2_tenant
 def test_default_census_maps_an_unresolvable_endpoint_to_a_clean_message(monkeypatch) -> None:
     """The endpoint error's own text explains a retired Chroma path; that is
     noise in `nx upgrade` output (verify round N7)."""

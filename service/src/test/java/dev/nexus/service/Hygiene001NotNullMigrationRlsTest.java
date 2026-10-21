@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import org.jooq.impl.SQLDataType;
+import org.jooq.DSLContext;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -9,14 +11,23 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -39,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * real NOSUPERUSER/NOBYPASSRLS role for the ENTIRE migration, exactly like
  * {@link SchemaMigratorIntegrationTest} and {@link AspectDocIdBackfillTest}.
  *
- * <p>Uses a DEDICATED container ({@link PgContainerHelper#startDedicated()})
+ * <p>Uses an EMPTY database on the shared cluster ({@link PgContainerHelper#startEmptyDatabase()})
  * and Liquibase's changeset-count-limited {@code update(int, ...)}
  * ({@link #migrateUpTo}, the exact idiom {@code AspectDocIdBackfillTest}
  * already established) to migrate up to — but NOT including —
@@ -58,51 +69,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class Hygiene001NotNullMigrationRlsTest {
 
-    /** Package-visible (nexus-ft04v.4/.5): {@link Hygiene002CollectionAttributesWalkTest}
-     *  reuses this exact bootstrap for its own real NOBYPASSRLS migrating-role walk
-     *  rather than duplicating it — RawSqlGateTest's TEST_TREE_RAW_SQL_CEILING ratchet
-     *  is reduce-only, so a second copy of this raw-SQL bootstrap is not an option. */
-    static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-                + "BEGIN "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-                + "  END IF; "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-                + "  END IF; "
-                + "END; "
-                + "$unrelofunc$");
-            su.createStatement().execute(
-                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
-
     private static final String TARGET_CHANGESET_ID = "hygiene-001-1";
+    private static final OffsetDateTime LEGACY_EXTRACTED_AT = OffsetDateTime.parse("2025-01-01T00:00:00Z");
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT_1 = "hygiene001-rls-tenant-1";
     private static final String TENANT_2 = "hygiene001-rls-tenant-2";
@@ -110,7 +78,7 @@ class Hygiene001NotNullMigrationRlsTest {
     @Test
     void hygieneChangeset_deletesOrphansAndBackfillsAcrossTwoTenants_andNotNullTakesEffect()
             throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene001_test";
             final String pass = "nexus_admin_hygiene001_test_pass";
@@ -155,23 +123,14 @@ class Hygiene001NotNullMigrationRlsTest {
                 // Phase 3 runs hygiene-001-5/-8 against it.
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks DROP CONSTRAINT chunks_chash_octet_check");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks "
-                        + "DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
+                    DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
+                    DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+                        .dropConstraint("catalog_document_chunks_chash_octet_check").execute();
 
                     seedLegacyChunkAndManifest(su, TENANT_1, "legacywidthchsh1");
                     seedLegacyChunkAndManifest(su, TENANT_2, "legacywidthchsh2");
 
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks "
-                        + "ADD CONSTRAINT chunks_chash_octet_check "
-                        + "CHECK (octet_length(chash) = 32) NOT VALID");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks "
-                        + "ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                        + "CHECK (octet_length(chash) = 32) NOT VALID");
+                    PgContainerHelper.readdChashOctetChecksNotValid(su);
                 }
 
                 // Phase 2c (coordinator item E, review round): catalog_collections
@@ -198,26 +157,26 @@ class Hygiene001NotNullMigrationRlsTest {
                 // Phase 4: assert per-tenant outcomes.
                 try (Connection su = pg.createConnection("")) {
                     for (String tenant : List.of(TENANT_1, TENANT_2)) {
-                        ResultSet orphan = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.document_aspects "
-                            + "WHERE tenant_id = '" + tenant + "' AND source_path = 'orphan.md'");
-                        assertThat(orphan.next())
+                        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                        assertThat(ctx.fetchExists(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant),
+                                DOCUMENT_ASPECTS.SOURCE_PATH.eq("orphan.md")))
                             .as("hygiene-001-1's DELETE WHERE doc_id IS NULL must have removed "
                                 + "the orphan row for tenant " + tenant + " -- a false result here "
                                 + "means the toggle-wrapped DELETE silently no-op'd under FORCE RLS "
                                 + "(the exact nexus-1wjmq production incident)")
                             .isFalse();
 
-                        ResultSet legit = su.createStatement().executeQuery(
-                            "SELECT doc_id, source_uri FROM nexus.document_aspects "
-                            + "WHERE tenant_id = '" + tenant + "' AND source_path = 'legit.md'");
-                        assertThat(legit.next())
+                        var legit = ctx.select(DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                            .from(DOCUMENT_ASPECTS)
+                            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant), DOCUMENT_ASPECTS.SOURCE_PATH.eq("legit.md"))
+                            .fetch();
+                        assertThat(legit)
                             .as("the legit row for tenant " + tenant + " must survive the DELETE")
-                            .isTrue();
-                        assertThat(legit.getString("doc_id"))
+                            .isNotEmpty();
+                        assertThat(legit.get(0).get(DOCUMENT_ASPECTS.DOC_ID))
                             .as("the legit row's pre-existing doc_id must be untouched")
                             .isEqualTo(tenant + "-doc-1");
-                        assertThat(legit.getString("source_uri"))
+                        assertThat(legit.get(0).get(DOCUMENT_ASPECTS.SOURCE_URI))
                             .as("hygiene-001-1's UPDATE must have backfilled the legit row's "
                                 + "NULL source_uri to '' for tenant " + tenant + " -- a null/absent "
                                 + "result here means that toggle-wrapped UPDATE also no-op'd")
@@ -229,18 +188,16 @@ class Hygiene001NotNullMigrationRlsTest {
                         // class (nexus-lgdel), never left behind and never
                         // aborting the walk.
                         String legacyChash = "legacywidthchsh" + (tenant.equals(TENANT_1) ? "1" : "2");
-                        ResultSet chunkGone = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.chunks WHERE tenant_id = '" + tenant
-                            + "' AND chash = '" + legacyChash + "'");
-                        assertThat(chunkGone.next())
+                        byte[] legacyChashBytes = legacyChash.getBytes(StandardCharsets.US_ASCII);
+                        assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant),
+                                CHUNKS.CHASH.eq(legacyChashBytes)))
                             .as("hygiene-001-5's DELETE WHERE octet_length(chash) <> 32 must have "
                                 + "removed the legacy-width chunks row for tenant " + tenant)
                             .isFalse();
 
-                        ResultSet manifestGone = su.createStatement().executeQuery(
-                            "SELECT 1 FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant
-                            + "' AND chash = '" + legacyChash + "'");
-                        assertThat(manifestGone.next())
+                        assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS,
+                                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant),
+                                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(legacyChashBytes)))
                             .as("the legacy-width chunk's catalog_document_chunks manifest row must "
                                 + "also be gone for tenant " + tenant + " -- either via hygiene-001-5's "
                                 + "own FK-safety pre-delete (ahead of the chunks DELETE) or "
@@ -253,14 +210,17 @@ class Hygiene001NotNullMigrationRlsTest {
                         // documents (2026-01-01, the earlier of the two seeded),
                         // never the later document's indexed_at and never now().
                         String collA = tenant + "__created-at-two-docs__v1";
-                        ResultSet collAIsMin = su.createStatement().executeQuery(
-                            "SELECT created_at = '2026-01-01T00:00:00+00:00'::timestamptz AS is_min "
-                            + "FROM nexus.catalog_collections "
-                            + "WHERE tenant_id = '" + tenant + "' AND name = '" + collA + "'");
-                        assertThat(collAIsMin.next())
+                        var collACreatedAt = ctx.select(CATALOG_COLLECTIONS.CREATED_AT).from(CATALOG_COLLECTIONS)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(collA))
+                            .fetch();
+                        assertThat(collACreatedAt)
                             .as("collection A must exist for tenant " + tenant)
-                            .isTrue();
-                        assertThat(collAIsMin.getBoolean("is_min"))
+                            .isNotEmpty();
+                        assertThat(collACreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT))
+                            .as("collection A's created_at must be backfilled (NOT NULL) for tenant " + tenant)
+                            .isNotNull();
+                        assertThat(collACreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT).toInstant()
+                                .equals(OffsetDateTime.parse("2026-01-01T00:00:00+00:00").toInstant()))
                             .as("collection A's created_at must equal the MIN indexed_at "
                                 + "(2026-01-01) of its two documents for tenant " + tenant
                                 + " -- not the later document's indexed_at (2026-06-01) and "
@@ -271,40 +231,50 @@ class Hygiene001NotNullMigrationRlsTest {
                         // returns no row, so COALESCE must fall back to now() --
                         // created_at must still end up NOT NULL, never left NULL.
                         String collB = tenant + "__created-at-no-docs__v1";
-                        ResultSet collBCreatedAt = su.createStatement().executeQuery(
-                            "SELECT created_at FROM nexus.catalog_collections "
-                            + "WHERE tenant_id = '" + tenant + "' AND name = '" + collB + "'");
-                        assertThat(collBCreatedAt.next())
+                        var collBCreatedAt = ctx.select(CATALOG_COLLECTIONS.CREATED_AT).from(CATALOG_COLLECTIONS)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(collB))
+                            .fetch();
+                        assertThat(collBCreatedAt)
                             .as("collection B must exist for tenant " + tenant)
-                            .isTrue();
-                        assertThat(collBCreatedAt.getTimestamp("created_at"))
+                            .isNotEmpty();
+                        assertThat(collBCreatedAt.get(0).get(CATALOG_COLLECTIONS.CREATED_AT))
                             .as("collection B has no documents for tenant " + tenant
                                 + " -- created_at must fall back to now(), never left NULL")
                             .isNotNull();
                     }
 
                     // NOT NULL genuinely took effect -- not merely "no NULL rows remain
-                    // right now". A raw INSERT with doc_id IS NULL must be rejected.
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                        + "   extractor_name, source_uri, doc_id) "
-                        + "VALUES ('" + TENANT_1 + "', 'post-migration-coll', 'post-migration.md', "
-                        + "now(), 'v1', 'ex', 'file:///post.md', NULL)"))
+                    // right now". An INSERT with doc_id IS NULL must be rejected.
+                    assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                        .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT_1)
+                        .set(DOCUMENT_ASPECTS.COLLECTION, "post-migration-coll")
+                        .set(DOCUMENT_ASPECTS.SOURCE_PATH, "post-migration.md")
+                        .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+                        .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                        .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "ex")
+                        .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///post.md")
+                        .setNull(DOCUMENT_ASPECTS.DOC_ID)
+                        .execute())
                         .as("SET NOT NULL on doc_id must genuinely reject a fresh NULL insert "
                             + "post-migration")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(DataAccessException.class)
+                        .hasRootCauseInstanceOf(PSQLException.class)
                         .hasMessageContaining("null value in column \"doc_id\"");
 
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                        + "   extractor_name, source_uri, doc_id) "
-                        + "VALUES ('" + TENANT_1 + "', 'post-migration-coll', 'post-migration-2.md', "
-                        + "now(), 'v1', 'ex', NULL, '" + TENANT_1 + "-doc-1')"))
+                    assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                        .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT_1)
+                        .set(DOCUMENT_ASPECTS.COLLECTION, "post-migration-coll")
+                        .set(DOCUMENT_ASPECTS.SOURCE_PATH, "post-migration-2.md")
+                        .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+                        .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                        .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "ex")
+                        .setNull(DOCUMENT_ASPECTS.SOURCE_URI)
+                        .set(DOCUMENT_ASPECTS.DOC_ID, TENANT_1 + "-doc-1")
+                        .execute())
                         .as("SET NOT NULL on source_uri must genuinely reject a fresh NULL insert "
                             + "post-migration")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(DataAccessException.class)
+                        .hasRootCauseInstanceOf(PSQLException.class)
                         .hasMessageContaining("null value in column \"source_uri\"");
                 }
             }
@@ -323,34 +293,41 @@ class Hygiene001NotNullMigrationRlsTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             String collection = tenant + "__coll__voyage-context-3__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collection + "')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-doc-1', 'Doc', '" + collection + "')");
+            insertBareCollection(su, tenant, collection);
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .execute();
 
             // Orphan: doc_id IS NULL, no catalog document attributes it (the
             // 554-row chroma:// class the changeset's header describes) --
             // must be DELETED.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects "
-                + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                + "   extractor_name, source_uri, doc_id) "
-                + "VALUES ('" + tenant + "', '" + collection + "', 'orphan.md', "
-                + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', 'legacy-extractor', "
-                + "'chroma://" + collection + "/orphan.md', NULL)");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
+                .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "orphan.md")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, LEGACY_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "legacy-model")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "legacy-extractor")
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, "chroma://" + collection + "/orphan.md")
+                .setNull(DOCUMENT_ASPECTS.DOC_ID)
+                .execute();
 
             // Legit: doc_id already attributes to a real catalog document,
             // source_uri IS NULL (the straggler class) -- must SURVIVE with
             // doc_id unchanged and source_uri backfilled to ''.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects "
-                + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                + "   extractor_name, source_uri, doc_id) "
-                + "VALUES ('" + tenant + "', '" + collection + "', 'legit.md', "
-                + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', 'legacy-extractor', "
-                + "NULL, '" + tenant + "-doc-1')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
+                .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "legit.md")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, LEGACY_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "legacy-model")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "legacy-extractor")
+                .setNull(DOCUMENT_ASPECTS.SOURCE_URI)
+                .set(DOCUMENT_ASPECTS.DOC_ID, tenant + "-doc-1")
+                .execute();
         }
     }
 
@@ -383,19 +360,38 @@ class Hygiene001NotNullMigrationRlsTest {
     private static void seedLegacyChunkAndManifest(Connection su, String tenant, String legacyChash)
             throws Exception {
         String collection = tenant + "__coll__voyage-context-3__v1";
-        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this INSERT
-        // runs at migrateUpTo's TARGET_CHANGESET_ID point, well before search-path-001
-        // (placed near the changelog's end) has relocated the extension -- it is
-        // still in `public` here (nexus-cbo4a batch 9 item 0 discovery, same class as
-        // SchemaMigratorIntegrationTest's lateUpgradingDeployment... test).
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + collection + "', '" + legacyChash + "', "
-            + "'legacy un-rekeyed chunk text', ('[" + "0,".repeat(383) + "0]')::vector)");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + tenant + "-doc-1', 0, '" + legacyChash + "', '"
-            + collection + "')");
+        // The embedding binds as a real[], deliberately NOT through the generated Vector
+        // binding (which renders ::nexus.vector): this INSERT runs at migrateUpTo's
+        // TARGET_CHANGESET_ID point, well before search-path-001 (placed near the
+        // changelog's end) has relocated the extension -- it is still in `public` here
+        // (nexus-cbo4a batch 9 item 0 discovery, same class as SchemaMigratorIntegrationTest's
+        // lateUpgradingDeployment... test). pgvector's real[] -> vector ASSIGNMENT cast is
+        // looked up by type oid, so it resolves in either schema. embedding_model stays
+        // unset (the column is nullable at this walk point).
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        // The 16 ASCII characters become 16 raw bytes, the same value the bytea
+        // escape-format literal produced.
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, legacyChash.getBytes(StandardCharsets.US_ASCII))
+            .set(CHUNKS.CHUNK_TEXT, "legacy un-rekeyed chunk text")
+            .set(DSL.field(DSL.name("embedding_384"), SQLDataType.REAL.array()), VectorSeeds.legacyEmbedding(384, 0f))
+            .execute();
+        // Positive control: the "chunk is gone" assertions after the walk are vacuous unless this
+        // legacy-width row is actually present (read back, not the insert's own return value).
+        assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant)
+                .and(CHUNKS.COLLECTION.eq(collection))
+                .and(CHUNKS.CHASH.eq(legacyChash.getBytes(StandardCharsets.US_ASCII)))))
+            .as("legacy-width chunks seed for tenant %s must be present", tenant).isEqualTo(1);
+        // chunk_index stays unset: a typed insert emits only the columns set.
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tenant + "-doc-1")
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, legacyChash.getBytes(StandardCharsets.US_ASCII))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .execute();
     }
 
     /**
@@ -414,10 +410,9 @@ class Hygiene001NotNullMigrationRlsTest {
      *       {@code now()} -- proving the fallback arm, not just the MIN arm.</li>
      * </ul>
      *
-     * {@code indexed_at} is TEXT (catalog-001-baseline.xml), so the two seeded
-     * values are ISO-8601 strings that also sort correctly LEXICOGRAPHICALLY as
-     * chronological order (same format/width, differing only in the month
-     * digits) -- matching what {@code min(d.indexed_at)} actually computes.
+     * {@code indexed_at} is already timestamptz at this walk point (catalog-031
+     * precedes hygiene-001 in the master changelog), so the two seeded values are
+     * real instants and {@code min(d.indexed_at)} is a chronological minimum.
      */
     private static void seedCollectionCreatedAtScenario(PostgreSQLContainer<?> pg, String tenant)
             throws Exception {
@@ -425,51 +420,47 @@ class Hygiene001NotNullMigrationRlsTest {
             su.setAutoCommit(true);
 
             String collA = tenant + "__created-at-two-docs__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collA + "')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "  (tenant_id, tumbler, title, physical_collection, indexed_at) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-created-at-doc-1', 'Doc1', '"
-                + collA + "', '2026-01-01T00:00:00+00:00')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "  (tenant_id, tumbler, title, physical_collection, indexed_at) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-created-at-doc-2', 'Doc2', '"
-                + collA + "', '2026-06-01T00:00:00+00:00')");
+            insertBareCollection(su, tenant, collA);
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-created-at-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc1")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collA)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .execute();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-created-at-doc-2")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc2")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collA)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-06-01T00:00:00Z"))
+                .execute();
 
             String collB = tenant + "__created-at-no-docs__v1";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + tenant + "', '" + collB + "')");
+            insertBareCollection(su, tenant, collB);
         }
     }
 
-    /** Minimal DBA-equivalent bootstrap, mirroring AspectDocIdBackfillTest's identical helper.
-     *  Package-visible (nexus-ft04v.4/.5): see {@link #bootstrapVectorExtensionsForFreshWalk}. */
+    /**
+     * A {@code catalog_collections} row with only tenant and name. PgContainerHelper.insertCollection makes
+     * the same bare insert when the mid-walk schema has no lifecycle_state yet, but otherwise also creates
+     * tenant partitions and sets later columns; this seed stays the plain two-column row it always was.
+     */
+    private static void insertBareCollection(Connection su, String tenant, String name) {
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant)
+            .set(CATALOG_COLLECTIONS.NAME, name)
+            .execute();
+    }
+
+    /** Minimal DBA-equivalent bootstrap: the migrating role, nexus_svc, the CREATE grants, the extensions
+     *  and the relocation helpers, all through {@link PgContainerHelper#bootstrapNonSuperuserOwner}'s test
+     *  changelog (no SQL text here). Package-visible (nexus-ft04v.4/.5): reused by the other walk tests
+     *  that need a real NOSUPERUSER migrating role. */
     static void bootstrapAdminRole(PostgreSQLContainer<?> pg, String role, String pass)
             throws Exception {
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-            su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-            su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-            su.createStatement().execute(
-                "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
-                + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-            // javadoc for the full derivation -- creates the extensions directly as
-            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-            // 001's guard to call mid-walk, since this walk resumes through both
-            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-            // as a NOSUPERUSER role.
-            bootstrapVectorExtensionsForFreshWalk(su, role);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
         }
     }
 

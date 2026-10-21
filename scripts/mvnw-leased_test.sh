@@ -14,11 +14,16 @@ set -u -o pipefail
 # root: the lease dir is then missing from the fake repo, and the fixture
 # leases this suite writes would land in the shared root.
 unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+# A lab-run grant exports LAB_CPUS, which changes the wrapper's behaviour
+# (nexus-iqmih); the cases that want it set it themselves.
+unset LAB_CPUS GITHUB_ACTIONS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/mvnw_leased_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+# Never the real per-user lease-events log (nexus-jqk5c).
+export NX_LEASE_EVENTS_LOG="$WORKDIR/lease-events.log"
 
 PASS=0
 FAIL=0
@@ -37,8 +42,13 @@ skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
 # or nesting depth. Probing this ONCE, honestly, and skipping the
 # OS-level SIGINT sub-test with a clear reason when it is unavailable, beats
 # either a fabricated pass or a false failure that blames the code for an
-# environment property. TERM is NOT subject to this rule and needs no probe
-# — Test 4 already proves it works end to end.
+# environment property. TERM is subject to the same rule: build-lease_test.sh's
+# Test 4 failed in CI (5588beead) when its suite started with TERM ignored or
+# blocked, so that test now resets TERM for its holder. Test 4 here sends TERM
+# too: the pytest wrapper (test_shell_suite_wiring.py, via tests/_sigterm_guard.py)
+# starts this suite with TERM at its default and unblocked, and tests/conftest.py
+# names any test that leaves TERM ignored or blocked (nexus-yqzpw); a direct run
+# from a shell that ignores TERM has neither and would fail Test 4.
 #
 # The subshell must signal ITSELF. `$$` inside `( ... )` is the PARENT
 # script's pid, not the subshell's, and until nexus-fd3zf this probe used
@@ -60,6 +70,8 @@ _sigint_delivery_works() {
 repo="$WORKDIR/repo"
 mkdir -p "$repo/scripts/lib" "$repo/service/target" "$repo/service/.build-lease"
 cp "$HERE/lib/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
+cp "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/gate-jar-cache.sh"
+cp "$HERE/lib/leased-build.sh" "$repo/scripts/lib/leased-build.sh"
 cp "$HERE/mvnw-leased.sh" "$repo/scripts/mvnw-leased.sh"
 chmod +x "$repo/scripts/mvnw-leased.sh"
 
@@ -109,6 +121,109 @@ else
     bad "lease still held after mvnw-leased.sh exited"
 fi
 
+# ── Test 1a (nexus-k6zxp): a gate-jar cache hit leaves service/target's jar
+# hard-linked to the cache entry, and the jar plugin rewrites an existing jar in
+# place. A goal that reaches `package` must unlink a shared jar first; one that
+# stops short of it must not touch the link.
+echo "Test 1a: a package goal unlinks a cache-shared jar; a test goal leaves the link"
+entry1a="$WORKDIR/cache-entry-jar"; tjar1a="$repo/service/target/nexus-service-1.0-SNAPSHOT.jar"
+echo "cached jar bytes" > "$entry1a"; chmod a-w "$entry1a"
+ln "$entry1a" "$tjar1a"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q test >/dev/null 2>&1
+[[ "$tjar1a" -ef "$entry1a" ]] && ok "a test goal leaves the shared jar linked" || bad "a test goal unlinked the jar"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q package -DskipTests >/dev/null 2>&1
+[[ ! -e "$tjar1a" ]] && ok "a package goal unlinked the shared jar before mvnw ran" || bad "shared jar still in service/target after a package goal"
+[[ "$(cat "$entry1a")" == "cached jar bytes" ]] && ok "the cache entry is intact" || bad "cache entry changed"
+echo "private jar" > "$tjar1a"
+MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q package >/dev/null 2>&1
+[[ -f "$tjar1a" ]] && ok "an unshared writable jar is left for the build to replace" || bad "private jar removed"
+# Every goal that reaches the jar: the phases after package, and the plugin
+# goals that write it directly, bare or prefixed.
+for goal1a in verify install deploy integration-test jar:jar shade:shade \
+        org.apache.maven.plugins:maven-jar-plugin:3.4.1:jar \
+        org.apache.maven.plugins:maven-shade-plugin:3.6.0:shade; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ ! -e "$tjar1a" ]] && ok "goal '$goal1a' unlinked the shared jar" || bad "goal '$goal1a' left the shared jar linked"
+done
+# nexus-8qdpe: one quoted argument naming several goals is split before matching.
+for goal1a in "clean package" "  install -DskipTests"; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ ! -e "$tjar1a" ]] && ok "quoted '$goal1a' unlinked the shared jar" || bad "quoted '$goal1a' left the shared jar linked"
+done
+for goal1a in compile test test-compile clean "clean test" ""; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ "$tjar1a" -ef "$entry1a" ]] && ok "goal '$goal1a' leaves the shared jar linked" || bad "goal '$goal1a' unlinked the jar"
+done
+rm -f "$tjar1a" "$entry1a"
+
+# ── Test 1b: --lab-run <class> takes the lease FIRST, then runs mvnw under
+# lab-run (nexus-iqmih). Waiting for the lease inside a lab grant held pool
+# cores and memory while a single holder built; outside it, the wait costs
+# nothing. The stub lab-run records its args, whether the lease was already
+# held when it started, and runs the command it was given.
+echo "Test 1b: --lab-run <class> acquires the lease, then runs mvnw under lab-run"
+stubbin="$WORKDIR/stubbin"
+mkdir -p "$stubbin"
+cat > "$stubbin/lab-run" <<STUB
+#!/usr/bin/env bash
+{
+    echo "LABRUN_ARGS=\$*"
+    if [[ -f "$leasedir/pid" ]]; then echo "LEASE_HELD_AT_START=yes"; else echo "LEASE_HELD_AT_START=no"; fi
+} > "\$LABRUN_STUB_MARKER"
+[[ "\$1" == "-c" && "\$3" == "--" ]] || exit 64
+shift 3
+exec "\$@"
+STUB
+chmod +x "$stubbin/lab-run"
+marker1b="$WORKDIR/stub-invocation-1b.txt"
+labmarker="$WORKDIR/labrun-invocation.txt"
+rm -f "$marker1b" "$labmarker"
+PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$labmarker" MVNW_STUB_MARKER="$marker1b" \
+    "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test -Dtest=Foo
+rc1b=$?
+if [[ $rc1b -eq 0 ]]; then ok "wrapper exited 0 under --lab-run"; else bad "wrapper exited $rc1b under --lab-run"; fi
+labcontent="$(cat "$labmarker" 2>/dev/null)"
+if [[ "$labcontent" == "LABRUN_ARGS=-c lab-m -- python3 -c "*" ./mvnw -q test -Dtest=Foo"* ]]; then
+    ok "lab-run got the class and ./mvnw with the args untouched"
+else
+    bad "lab-run args mismatch: ${labcontent:-<lab-run never invoked>}"
+fi
+if [[ "$labcontent" == *"LEASE_HELD_AT_START=yes"* ]]; then
+    ok "the lease was already held when lab-run started (lease before grant)"
+else
+    bad "lab-run started without the lease held: $labcontent"
+fi
+if [[ "$(cat "$marker1b" 2>/dev/null)" == *"ARGS=-q test -Dtest=Foo"* ]]; then
+    ok "mvnw ran inside lab-run with the args untouched"
+else
+    bad "mvnw was not run inside lab-run"
+fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released after the --lab-run build"; else bad "lease still held after the --lab-run build"; fi
+
+echo "Test 1c: --lab-run with no lab-run on PATH fails loud and takes no lease"
+marker1c="$WORKDIR/stub-invocation-1c.txt"
+rm -f "$marker1c"
+out1c="$(PATH="/usr/bin:/bin" MVNW_STUB_MARKER="$marker1c" "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test 2>&1)"
+rc1c=$?
+if [[ $rc1c -eq 127 ]]; then ok "rc 127 when lab-run is missing"; else bad "rc $rc1c (expected 127): $out1c"; fi
+if [[ ! -f "$marker1c" && ! -d "$leasedir" ]]; then ok "no mvnw run, no lease left"; else bad "mvnw ran or the lease was left held"; fi
+
+echo "Test 1d: --lab-run without a class is a usage error"
+out1d="$(MVNW_STUB_MARKER="$WORKDIR/unused" "$repo/scripts/mvnw-leased.sh" --lab-run 2>&1)"
+rc1d=$?
+if [[ $rc1d -eq 64 ]]; then ok "rc 64 for --lab-run with no class"; else bad "rc $rc1d (expected 64): $out1d"; fi
+
+echo "Test 1e: --lab-run inside a lab-run grant is refused (no nested grant)"
+marker1e="$WORKDIR/stub-invocation-1e.txt"
+rm -f "$marker1e"
+out1e="$(LAB_CPUS=8 PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/unused-lab" MVNW_STUB_MARKER="$marker1e" "$repo/scripts/mvnw-leased.sh" --lab-run lab-m -q test 2>&1)"
+rc1e=$?
+if [[ $rc1e -eq 64 && "$out1e" == *"inside a lab-run grant"* ]]; then ok "rc 64 naming the nested grant"; else bad "rc $rc1e (expected 64): $out1e"; fi
+if [[ ! -f "$marker1e" && ! -d "$leasedir" ]]; then ok "no mvnw run, no lease left"; else bad "mvnw ran or the lease was left held"; fi
+
 # ── Test 2: refuses (rc 75) and never invokes mvnw when the lease is held ─
 echo "Test 2: mvnw-leased.sh refuses when the lease is already held"
 bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_acquire service || exit 9; sleep 10" &
@@ -129,6 +244,20 @@ else
     rc2=$?
     if [[ $rc2 -eq 75 ]]; then ok "wrapper refused with rc 75"; else bad "wrapper returned rc $rc2 (expected 75): $out2"; fi
     if [[ ! -f "$marker2" ]]; then ok "fake mvnw was never invoked while lease was held"; else bad "fake mvnw ran despite the lease being held"; fi
+    # nexus-dfg0q (Sam 2026-10-19): a hand run inside a lab-run grant (LAB_CPUS
+    # set, not GitHub Actions) REFUSES at once instead of waiting, whatever
+    # NX_BUILD_LEASE_WAIT says: waiting there holds the grant's cores.
+    t0=$SECONDS
+    out2w="$(LAB_CPUS=8 NX_BUILD_LEASE_WAIT=60 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    rc2w=$?
+    if [[ $rc2w -eq 75 && $((SECONDS - t0)) -lt 15 ]]; then ok "inside a grant, a held lease refuses at once with rc 75"; else bad "inside a grant: rc $rc2w after $((SECONDS - t0)) s (expected 75 at once): $out2w"; fi
+    if [[ "$out2w" == *"--lab-run <class>"* ]]; then ok "the refusal names the --lab-run form"; else bad "refusal does not name --lab-run: $out2w"; fi
+    if [[ ! -f "$marker2" ]]; then ok "no mvnw run inside the grant"; else bad "mvnw ran inside the grant"; fi
+    if [[ "$out2" != *"inside a lab-run grant"* ]]; then ok "outside a grant, no grant wording"; else bad "grant wording outside a grant: $out2"; fi
+    # A CI job on the pool also has LAB_CPUS, and waiting its turn there is the
+    # scheduler's own serialisation: GitHub Actions keeps the configured wait.
+    out2c="$(GITHUB_ACTIONS=true LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    if [[ "$out2c" != *"inside a lab-run grant"* ]]; then ok "a CI job inside a grant keeps the plain wait semantics"; else bad "CI job got the hand-run refusal: $out2c"; fi
 fi
 kill -9 "$holder_pid" 2>/dev/null
 wait "$holder_pid" 2>/dev/null
@@ -325,10 +454,14 @@ if _sigint_delivery_works; then
     _test_signal_forwarding INT 5b
 else
     skip "OS-level SIGINT delivery is unavailable in this execution environment (a trap installed in THIS shell, self-signaled via 'kill -INT \$\$' in the same command, never fired — reproduced deterministically; bash documents 'signals ignored upon entry to the shell cannot be trapped or reset', and that disposition is inherited by every descendant regardless of set -m or nesting). This is an environment property, not evidence about mvnw-leased.sh's code, so it is not reported as a failure. Falling back to two logic-level checks that do not depend on OS SIGINT delivery reaching the wrapper's own trap:"
-    if grep -q "trap '_forward_signal INT' INT" "$repo/scripts/mvnw-leased.sh"; then
-        ok "mvnw-leased.sh registers an INT trap wired to the SAME _forward_signal function TERM uses (verified end-to-end by Test 4) — not just TERM"
+    # The traps live in scripts/lib/leased-build.sh since nexus-t6t9f; mvnw-leased.sh installs them
+    # by calling leased_build_init.
+    if grep -q "trap '_leased_build_forward_signal INT' INT" "$repo/scripts/lib/leased-build.sh" &&
+        grep -q "trap '_leased_build_forward_signal TERM' TERM" "$repo/scripts/lib/leased-build.sh" &&
+        grep -q '^leased_build_init mvnw-leased.sh service' "$repo/scripts/mvnw-leased.sh"; then
+        ok "mvnw-leased.sh installs (via leased_build_init) an INT trap wired to the SAME forward function TERM uses (verified end-to-end by Test 4) — not just TERM"
     else
-        bad "mvnw-leased.sh no longer registers 'trap ... INT' at all — SIGINT forwarding is unwired"
+        bad "the INT trap is no longer installed by leased_build_init, or mvnw-leased.sh no longer calls it — SIGINT forwarding is unwired"
     fi
     # Prove the underlying OS primitive _forward_signal relies on for INT
     # specifically (`kill -s INT -- -PGID`) actually terminates a live
@@ -370,10 +503,19 @@ else
     for attempt in 1 2; do
         _sleep_with_default_sigint
         probe_pid=$!
+        # Poll until the job has exec'd its sleep: until then SIGINT is still ignored (the
+        # interpreter has not reset it), so a signal sent during a slow interpreter start on a
+        # loaded host is dropped and the probe reads as "did not terminate" (nexus-ys8a4). Bounded
+        # at 10 s; on timeout we signal anyway and the existing retry/verdict logic decides.
+        for _ in $(seq 1 100); do
+            probe_comm="$(ps -o comm= -p "$probe_pid" 2>/dev/null)"
+            [[ "${probe_comm##*/}" == "sleep" ]] && break
+            sleep 0.1
+        done
         sleep 0.2   # let the new job's process group settle before signaling it
         died=0
         if kill -s INT -- "-$probe_pid" 2>/dev/null; then
-            for _ in $(seq 1 20); do
+            for _ in $(seq 1 100); do
                 kill -0 -- "-$probe_pid" 2>/dev/null || { died=1; break; }
                 sleep 0.1
             done
@@ -390,6 +532,123 @@ else
     done
     wait "$probe_pid" 2>/dev/null
 fi
+
+# ── Test 4b: SIGTERM under --lab-run when lab-run does NOT forward it
+# (nexus-iqmih review). On chas lab-run ends in sudo and a systemd scope; the
+# build runs in its own process group, and a TERM that kills sudo need not
+# reach it. The stub lab-run below dies on TERM and leaves its command
+# running, the worst case. The wrapper must signal the build's own group and
+# hold the lease until that group is gone.
+echo "Test 4b: SIGTERM under --lab-run reaches the build even when lab-run does not forward it"
+cat > "$stubbin/lab-run" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == "-c" && "$3" == "--" ]] || exit 64
+shift 3
+trap 'exit 143' TERM
+# Its own process group for the command, as sudo with a pty gives it.
+set -m
+"$@" &
+set +m
+wait $!
+STUB
+chmod +x "$stubbin/lab-run"
+started4b="$WORKDIR/stub4b-started.txt"
+rm -f "$started4b"
+cat > "$repo/service/mvnw" <<STUB
+#!/usr/bin/env bash
+echo "\$\$" > "$started4b"
+sleep 30
+STUB
+chmod +x "$repo/service/mvnw"
+set -m
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build &
+wrapper4b=$!
+set +m
+for _ in $(seq 1 100); do [[ -f "$started4b" ]] && break; sleep 0.1; done
+if [[ ! -f "$started4b" ]]; then
+    bad "fake mvnw never started under the stub lab-run (setup failure)"
+    kill -9 "$wrapper4b" 2>/dev/null
+else
+    build4b="$(cat "$started4b")"
+    # Let the wrapper's poll pick up the build's group before signalling.
+    for _ in $(seq 1 30); do [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build4b" ]] && break; sleep 0.1; done
+    if [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build4b" ]]; then
+        ok "the lease's pgid names the build's own group, not lab-run's"
+    else
+        bad "the lease's pgid is $(cat "$leasedir/pgid" 2>/dev/null), not the build's group $build4b"
+    fi
+    kill -s TERM "$wrapper4b" 2>/dev/null
+    released_while_alive=0
+    for _ in $(seq 1 400); do
+        if [[ ! -d "$leasedir" ]] && kill -0 -- "-$build4b" 2>/dev/null; then released_while_alive=1; fi
+        kill -0 "$wrapper4b" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$build4b" 2>/dev/null; then
+        bad "the build's group is still alive after the wrapper exited: TERM never reached it"
+        kill -9 -- "-$build4b" 2>/dev/null
+    else
+        ok "TERM reached the build's own group"
+    fi
+    if [[ $released_while_alive -eq 0 && ! -d "$leasedir" ]]; then
+        ok "the lease was released only after the build's group was gone"
+    else
+        bad "lease released while the build ran ($released_while_alive) or still held after"
+        bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_release service" 2>/dev/null
+    fi
+fi
+wait "$wrapper4b" 2>/dev/null
+
+# ── Tests 4c/4d (nexus-dfg0q, from the iqmih confirmation): under --lab-run a
+# non-zero build exit propagates, and a TERM while lab-run is still queued for
+# its grant releases the lease without ever starting the build.
+echo "Test 4c: a non-zero mvnw exit propagates under --lab-run"
+cat > "$stubbin/lab-run" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == "-c" && "$3" == "--" ]] || exit 64
+shift 3
+exec "$@"
+STUB
+chmod +x "$stubbin/lab-run"
+cat > "$repo/service/mvnw" <<'STUB'
+#!/usr/bin/env bash
+exit 7
+STUB
+chmod +x "$repo/service/mvnw"
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build >/dev/null 2>&1
+rc4c=$?
+if [[ $rc4c -eq 7 ]]; then ok "exit 7 from mvnw comes back as 7"; else bad "rc $rc4c (expected 7)"; fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released after the failed build"; else bad "lease left held after a failed build"; fi
+
+echo "Test 4d: TERM while lab-run is queued releases the lease and never starts the build"
+queued="$WORKDIR/stub4d-queued.txt"; started4d="$WORKDIR/stub4d-started.txt"
+rm -f "$queued" "$started4d"
+cat > "$stubbin/lab-run" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == "-c" && "\$3" == "--" ]] || exit 64
+shift 3
+touch "$queued"
+sleep 30    # queued for a grant
+exec "\$@"
+STUB
+chmod +x "$stubbin/lab-run"
+cat > "$repo/service/mvnw" <<STUB
+#!/usr/bin/env bash
+touch "$started4d"
+STUB
+chmod +x "$repo/service/mvnw"
+set -m
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build >/dev/null 2>&1 &
+wrapper4d=$!
+set +m
+for _ in $(seq 1 100); do [[ -f "$queued" ]] && break; sleep 0.1; done
+kill -s TERM "$wrapper4d" 2>/dev/null
+for _ in $(seq 1 200); do kill -0 "$wrapper4d" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$wrapper4d" 2>/dev/null; then bad "wrapper still alive 20 s after TERM while queued"; kill -9 "$wrapper4d" 2>/dev/null; else ok "wrapper exited on TERM while queued"; fi
+sleep 0.5
+if [[ ! -f "$started4d" ]]; then ok "the build never started"; else bad "the build started after TERM"; fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released"; else bad "lease left held after TERM while queued"; bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_release service" 2>/dev/null; fi
+wait "$wrapper4d" 2>/dev/null
 
 echo
 echo "mvnw-leased_test.sh: $PASS passed, $FAIL failed, $SKIP skipped"

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 6: GRANT SELECT on every nexus.tuples column EXCEPT body to ${role}, in Liquibase XML
+    instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's
+    grant(..) takes a table, never a column list.
+
+    NexusServiceTupleSweepIsolationTest revokes the table-level SELECT through jOOQ first, so this column-level
+    grant leaves only the full-row read (the release arm's FOR NO KEY UPDATE select, which reads body) failing
+    with a real "permission denied for column body", while the purge arm's one-column read of id carries on.
+    The test restores the table-level grant through jOOQ. Run by that test directly; runAlways, bookkeeping in
+    its own table. ${role} is a fixed test literal, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="tuples-column-select" author="nexus-cbo4a" runAlways="true">
+        <sql>
+            GRANT SELECT (id, tenant_id, subspace, template, keys, dims, claim_state, claimant, claim_id, lease_until,
+                          attempts, consumed_at, consumed_by, expires_at, created_at) ON nexus.tuples TO ${role}
+        </sql>
+    </changeSet>
+</databaseChangeLog>

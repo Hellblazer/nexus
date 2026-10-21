@@ -33,7 +33,9 @@ import java.util.List;
  *
  * <p><b>Why a sweep and not a fixed path.</b> {@code onnxruntime.native.path} does
  * not avoid the directory: the loader creates it, and extracts the providers
- * library into it, before and regardless of that property. Redirecting
+ * library into it, before and regardless of that property (nexus-8ool4: {@link OrtNativeDir} sets
+ * the property so the 16 MB libraries are no longer extracted per start, leaving this directory
+ * empty; the directory itself is still created). Redirecting
  * {@code java.io.tmpdir} relocates one directory per start without removing it,
  * changes the temp location for every other user of it in the process, and
  * {@code TempFileHelper} reads the property once at class initialisation. The

@@ -5,8 +5,10 @@ Imports and runs ``nexus.mcp.core:main``, the same entry point the
 Claude Code plugin invokes via the ``nx-mcp`` console script. Before
 handing off, performs a best-effort stale-install check: if the
 locally installed ``conexus`` package is older than the latest on
-PyPI, emit a one-line warning to stderr naming the GitHub release URL
-to re-download.
+PyPI, emit a warning to stderr. The .mcpb does not update itself, so the
+warning points at the recommended Desktop route (the conexus plugin from the
+Hellblazer/nexus marketplace) and keeps the manual re-download URL as the
+fallback.
 
 The check is intentionally non-fatal — network failures, timeouts,
 or PyPI being unreachable do not block server startup. Opt out
@@ -15,8 +17,11 @@ environment.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 _RELEASE_URL = "https://github.com/Hellblazer/nexus/releases/latest"
@@ -57,10 +62,6 @@ def _check_stale_install() -> None:
         return  # editable / unusual install layout; skip silently
 
     try:
-        import json
-        import urllib.error
-        import urllib.request
-
         req = urllib.request.Request(
             _PYPI_URL,
             headers={"User-Agent": f"conexus-mcpb/{installed}"},
@@ -75,8 +76,16 @@ def _check_stale_install() -> None:
 
     msg = (
         f"[conexus-mcpb] installed conexus={installed}, latest on PyPI={latest}. "
-        f"Re-download the .mcpb from {_RELEASE_URL} and re-install in Claude "
-        "Desktop to upgrade. (Set NX_MCPB_SKIP_UPDATE_CHECK=1 to silence.)"
+        "This .mcpb extension does not update itself. The recommended Desktop "
+        "route is the conexus plugin: it runs the nx you have installed, so "
+        "`nx self install` updates Nexus for it. In Claude Desktop open "
+        "Customize -> Plugins, add the marketplace Hellblazer/nexus (if you "
+        "added it before, remove it and add it again, because the plugin copy "
+        "does not follow new releases), install conexus, say \"Set up Nexus\", "
+        "then quit Claude Desktop fully and open it again. Afterwards remove "
+        "the Conexus extension (Settings -> Connectors) so two servers do not "
+        f"run. To stay on the .mcpb, re-download it from {_RELEASE_URL} "
+        "and re-install it. (Set NX_MCPB_SKIP_UPDATE_CHECK=1 to silence.)"
     )
     print(msg, file=sys.stderr, flush=True)
 

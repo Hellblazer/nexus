@@ -196,8 +196,7 @@ def read_mcp_connect_marker(session_id: str, config_dir: Path) -> bool:
 def clear_mcp_connect_marker(session_id: str, config_dir: Path) -> None:
     """Remove *session_id*'s marker if THIS process published it, best-effort.
 
-    Owner-scoped, unlike :func:`nexus.db.t1.clear_t1_session_lease`'s
-    unconditional teardown unlink, because "nothing else will ever
+    Owner-scoped, unlike an unconditional teardown unlink, because "nothing else will ever
     republish this session id's marker" is false here: on a ``/mcp``
     reconnect the successor ``nx-mcp`` publishes under the SAME session id
     while this one is still tearing down, and an unconditional unlink would

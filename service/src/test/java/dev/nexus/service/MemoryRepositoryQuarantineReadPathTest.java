@@ -189,6 +189,11 @@ class MemoryRepositoryQuarantineReadPathTest {
                 calls(new Object[] {T, Q, TAG})),
             Map.entry("getAll[class java.lang.String, class java.lang.String]",
                 calls(new Object[] {T, QP})),
+            // nexus-pxp44: the empty kind set is the unfiltered branch; the
+            // filtered branch is pinned by name below (the probe title matches
+            // no kind).
+            Map.entry("getAll[class java.lang.String, class java.lang.String, interface java.util.Set]",
+                calls(new Object[] {T, QP, java.util.Set.of()})),
             // idleDays -1: cutoff is tomorrow, so every row counts as stale.
             Map.entry("flagStaleMemories[class java.lang.String, class java.lang.String, int]",
                 calls(new Object[] {T, QP, -1}))
@@ -275,6 +280,26 @@ class MemoryRepositoryQuarantineReadPathTest {
 
         assertThat(repo.countEntries(tenant, project, null)).isEqualTo(1);
         assertThat(repo.listEntries(tenant, project, null, null)).hasSize(1);
+    }
+
+    @Test
+    void getAll_withTitleKinds_excludesAQuarantinedRow() {
+        // Tested by name (nexus-pxp44): the walk's probe title matches no kind,
+        // so it can only exercise the empty-set branch of getAll.
+        String tenant = "readpath-kinds-tenant";
+        String project = "readpath-kinds-proj";
+        repo.importRow(tenant, project, "RDR-1", "live status", "t", null, null,
+            30, OffsetDateTime.now(ZoneOffset.UTC), 0, null);
+        long cold = repo.importRow(tenant, project, "RDR-2-gate-latest", "cold gate", "t", null, null,
+            1, OffsetDateTime.now(ZoneOffset.UTC).minusDays(30), 0, null);
+        var kinds = java.util.Set.of(MemoryRepository.TitleKind.RDR_STATUS,
+            MemoryRepository.TitleKind.GATE_LATEST);
+        assertThat(repo.getAll(tenant, project, kinds)).hasSize(2);
+
+        assertThat(repo.expire(tenant).quarantinedIds()).containsExactly(cold);
+
+        assertThat(repo.getAll(tenant, project, kinds)).extracting(MemoryRecord::getTitle)
+            .containsExactly("RDR-1");
     }
 
     @Test

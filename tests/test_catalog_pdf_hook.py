@@ -8,6 +8,8 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents, only_document
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):

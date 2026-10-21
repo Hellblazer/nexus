@@ -2,12 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import java.util.HexFormat;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -15,19 +11,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLWarning;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -67,12 +57,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * DROPs the {@code NOT NULL} constraint back off (test-only relaxation),
  * seeds NULL-{@code source_collection} rows, then re-executes the changeset's
  * OWN {@code <sql>} text — read directly out of the changelog XML at test
- * time via {@link #extractChangesetSql} rather than duplicated inline —
+ * time via {@link PgContainerHelper#replayChangeset} rather than duplicated inline —
  * so there is no second copy of the SQL to drift out of sync with the
  * migration file. The extracted text is executed via a plain JDBC
- * {@link Statement#execute(String)} (not Liquibase), which lets this test
+ * {@code Statement.execute} (not Liquibase), which lets this test
  * additionally capture the changeset's {@code RAISE NOTICE} counts off the
- * driver's {@link SQLWarning} chain — direct proof of the bead's "BOTH
+ * driver's {@code SQLWarning} chain — direct proof of the bead's "BOTH
  * delete counts reported" requirement that the rehearsal leg's own comment
  * documents as unavailable to it (no warning listener on Liquibase's
  * internal migration connection).
@@ -90,21 +80,25 @@ class Taxonomy010BackfillDirectIntegrationTest {
     private static final String CHANGESET_ID = "taxonomy-010-1";
     private static final String TENANT = "p3b-direct";
 
+    // Walk-point shape of nexus.topic_assignments: this test relaxes source_collection to nullable and
+    // doc_id to TEXT (the generated TOPIC_ASSIGNMENTS has bytea doc_id), so it reads the table by name.
+    private static final org.jooq.Table<?> TA = DSL.table(DSL.name("nexus", "topic_assignments"));
+    private static final org.jooq.Field<String> TA_TENANT = DSL.field(DSL.name("nexus", "topic_assignments", "tenant_id"), String.class);
+    private static final org.jooq.Field<String> TA_DOC_ID = DSL.field(DSL.name("nexus", "topic_assignments", "doc_id"), String.class);
+    private static final org.jooq.Field<String> TA_SOURCE_COLLECTION =
+        DSL.field(DSL.name("nexus", "topic_assignments", "source_collection"), String.class);
+
     PostgreSQLContainer<?> pg;
 
     @BeforeAll
     void startAll() throws Exception {
-        // Dedicated, not shared: this test DROPs then re-applies a NOT NULL
-        // constraint on nexus.topic_assignments.source_collection, a global
-        // schema mutation that must not leak into any other test class's
-        // shared-cluster assumptions (PgContainerHelper.start()'s own
-        // javadoc names exactly this class of test as required to opt out).
-        pg = PgContainerHelper.startDedicated();
+        // Its own database (a template clone): this test DROPs then re-applies a NOT NULL
+        // constraint on nexus.topic_assignments.source_collection. The mutation is
+        // database-local, so no other class sees it (nexus-7xfh7: this used to boot a
+        // container of its own on the strength of a rule the per-class clone made stale).
+        pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 
@@ -124,45 +118,42 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // full migration; SET NOT NULL is already in place. Relax it back
             // off so this test can seed NULL-source_collection input, exactly
             // the pre-remediation shape the real migration walk saw.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments ALTER COLUMN source_collection DROP NOT NULL");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).alterColumn(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).dropNotNull()
+                .execute();
             // RDR-194 P3c (nexus-tk070.p3c): startAll()'s full migration now
             // ALSO runs taxonomy-011-1, converting doc_id to bytea. This test
-            // replays taxonomy-010-1's OWN <sql> text unmodified (extractChangesetSql,
+            // replays taxonomy-010-1's OWN <sql> text unmodified (PgContainerHelper.replayChangeset,
             // see class javadoc) -- that text was written for a TEXT-typed doc_id
             // (`ta.doc_id ~ '^[0-9a-f]{64}$'`, `encode(c.chash,'hex') = ta.doc_id`)
             // and would fail to typecheck against bytea (`~` is not defined for
             // bytea; the TEXT/bytea equality would not typecheck either). Same
             // test-only relaxation technique as source_collection above: revert
-            // doc_id to TEXT for the scope of this dedicated, throwaway container
+            // doc_id to TEXT for the scope of this throwaway database
             // so the changeset's own SQL runs exactly as authored.
             //
             // RDR-194 critical fix round (2026-08-17, nexus-i3k3e/Sig-2):
             // startAll()'s full migration now ALSO runs taxonomy-011-8,
             // which Liquibase-owns a LIVE nexus.diag_chash_conformance view
-            // depending on doc_id. The ALTER below would now hit the exact
+            // depending on doc_id. The doc_id ALTER below (revertTopicAssignmentsDocIdToText) would now hit the exact
             // "cannot alter type of a column used by a view or rule" error
             // taxonomy-011-1's own forward pass exists to dodge -- drop the
             // view first (same test-only-relaxation shape as the two
             // statements above; a real migration walk never does this,
             // taxonomy-011-8 recreates it going forward every boot).
-            su.createStatement().execute(
-                "DROP VIEW IF EXISTS nexus.diag_chash_conformance");
+            DSL.using(su, SQLDialect.POSTGRES).dropViewIfExists(DSL.name("nexus", "diag_chash_conformance")).execute();
             // RDR-194 P3d (nexus-tk070.p3d): startAll()'s full migration now ALSO
             // runs taxonomy-012, which ADDs topic_assignments_chunk_fk -- a
             // composite FK whose (source_collection, doc_id) leg targets
-            // nexus.chunks(collection, chash), bytea. The ALTER below would now
+            // nexus.chunks(collection, chash), bytea. The doc_id ALTER below (revertTopicAssignmentsDocIdToText) would now
             // hit "foreign key constraint ... cannot be implemented" (a bytea-vs-
             // TEXT type mismatch on the referencing column) the moment doc_id
             // stops being bytea -- same test-only-relaxation shape as the view
-            // drop directly above: this dedicated, throwaway container never
+            // drop directly above: this throwaway database never
             // re-adds the constraint, because this test replays taxonomy-010-1
             // alone (never touches taxonomy-011/012's own logic) and the whole
             // container is stopped in @AfterAll.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
+            PgContainerHelper.revertTopicAssignmentsDocIdToText(su);
 
             // RDR-225: a collection holds one embedding model, so one width. code__x holds the 384-wide chunks
             // below and code__y the 768-wide one; the ambiguous chash is one chunk in each of the two.
@@ -204,24 +195,17 @@ class Taxonomy010BackfillDirectIntegrationTest {
             String legacyNonNullChash = "d".repeat(32);
             seedTopicAssignment(su, TENANT, legacyNonNullChash, topicId, "code__x");
 
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND source_collection IS NULL"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_SOURCE_COLLECTION.isNull()))
                 .as("ground truth before re-running taxonomy-010-1's SQL: the three "
                     + "NULL-source_collection seeded rows (unique/ambiguous/unresolvable) "
                     + "— the fourth (legacyNonNullChash) is deliberately NOT NULL")
                 .isEqualTo(3);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = '" + TENANT + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT)))
                 .as("ground truth before re-running taxonomy-010-1's SQL: four rows total")
                 .isEqualTo(4);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
-            List<String> notices;
-            try (Statement st = su.createStatement()) {
-                st.execute(sql);
-                notices = collectNotices(st.getWarnings());
-            }
+            List<String> notices = PgContainerHelper.replayChangeset(su, CHANGELOG_FILE, CHANGESET_ID);
 
             // ── BOTH delete counts (plus the backfill count), read directly
             // off the driver's SQLWarning chain -- the RAISE NOTICE proof the
@@ -245,43 +229,32 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
             // ── Row-state ground truth: exactly the unique-resolution row
             // survives, backfilled with its ONE real collection. ──
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT)))
                 .as("exactly one of the four seeded rows survives")
                 .isEqualTo(1);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + uniqueChash
-                + "' AND source_collection = 'code__x'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(uniqueChash),
+                    TA_SOURCE_COLLECTION.eq("code__x")))
                 .as("the surviving row must be the unique-resolution one, backfilled to its "
                     + "real collection -- not merely non-NULL")
                 .isEqualTo(1);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + ambiguousChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(ambiguousChash)))
                 .as("the ambiguous row must be gone")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + unresolvableChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(unresolvableChash)))
                 .as("the unresolvable row must be gone")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + legacyNonNullChash + "'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.eq(legacyNonNullChash)))
                 .as("RDR-194 critical fix round (nexus-i3k3e): the shape-invalid row must be "
                     + "gone DESPITE its non-NULL source_collection -- direct proof the "
                     + "2026-08-17 fix's shape branch is unconditional on source_collection, "
                     + "not the pre-fix behavior that would have left this row behind")
                 .isEqualTo(0);
-            assertThat(count(su,
-                "SELECT count(*) FROM information_schema.columns "
-                + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
-                + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
+            var sourceCollection = PgCatalogProbes.columnInfo(ctx, "nexus", "topic_assignments", "source_collection");
+            assertThat(sourceCollection).as("source_collection column must exist").isNotNull();
+            assertThat(sourceCollection.nullable())
                 .as("SET NOT NULL must have re-applied cleanly -- only reachable if the DML "
                     + "ahead of it left no NULL row for this tenant behind")
-                .isEqualTo(1);
+                .isFalse();
             // ── The guard taxonomy-011-1 runs next in the real changelog walk
             // (this test replays taxonomy-010-1 alone, not the full walk) --
             // direct proof this tenant's surviving rows would now PASS that
@@ -289,9 +262,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // wedge: before the fix, this count would have been 1 (the
             // legacyNonNullChash row survives), which is exactly what would
             // have RAISE EXCEPTIONed taxonomy-011-1's guard on the cloud walk.
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.topic_assignments "
-                + "WHERE tenant_id = '" + TENANT + "' AND doc_id !~ '^[0-9a-f]{64}$'"))
+            assertThat(ctx.fetchCount(TA, TA_TENANT.eq(TENANT), TA_DOC_ID.notLikeRegex("^[0-9a-f]{64}$")))
                 .as("taxonomy-011-1's own guard predicate must find zero non-canonical "
                     + "doc_id rows for this tenant after taxonomy-010-1's fixed DELETE -- "
                     + "the direct nexus-i3k3e wedge-closure proof")
@@ -301,54 +272,6 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Deliberately NOT recursive ({@code getElementsByTagNameNS} would also
-     * pull in the {@code <rollback>} element's own nested {@code <sql>} children,
-     * since both are descendants of {@code <changeSet>}) -- only direct children
-     * are the changeset's FORWARD SQL.
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        Document doc;
-        try (var in = Taxonomy010BackfillDirectIntegrationTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            Element cs = (Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    Node n = children.item(j);
-                    if (n.getNodeType() == Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
-    }
-
-    private static List<String> collectNotices(SQLWarning first) {
-        List<String> out = new ArrayList<>();
-        SQLWarning w = first;
-        while (w != null) {
-            out.add(w.getMessage());
-            w = w.getNextWarning();
-        }
-        return out;
-    }
-
     private static void registerCollection(Connection c, String tenant, String name, String model) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection.
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name, model);
@@ -356,29 +279,24 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
     private static long seedTopic(Connection c, String tenant, String collection, String label)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-            + "VALUES (?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, label);
-            ps.setString(3, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, label)
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, embedding_model) "
-            + "VALUES (?, ?, ?, 'direct-test-seed', 'bge-base-en-v15-768')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.executeUpdate();
-        }
+        DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TA_DOC_ID, docId)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+            .execute();
     }
 
     /**
@@ -392,42 +310,28 @@ class Taxonomy010BackfillDirectIntegrationTest {
     private static void seedTopicAssignment(
             Connection c, String tenant, String docId, long topicId, String sourceCollection)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments "
-            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
-            + "VALUES (?, ?, ?, 'direct-test-seed', ?, 'bge-base-en-v15-768')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.setString(4, sourceCollection);
-            ps.executeUpdate();
-        }
+        DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TA_DOC_ID, docId)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+            .execute();
     }
 
     /** A fresh {@code nexus.chunks} row -- already bytea, no legacy-width CHECK. */
     private static void seedChunk(Connection c, String tenant, String collection, String chashHex, int dim)
             throws Exception {
-        String embeddingCol = "embedding_" + dim;
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol
-            + ") VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections "
-            + "WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector) "
-            + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setString(3, chashHex);
-            ps.setString(4, tenant);
-            ps.setString(5, collection);
-            ps.setString(6, "direct test chunk " + chashHex.substring(0, 8));
-            ps.setString(7, "[" + "0,".repeat(dim - 1) + "0]");
-            ps.executeUpdate();
-        }
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .set(CHUNKS.CHUNK_TEXT, "direct test chunk " + chashHex.substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 }

@@ -30,6 +30,7 @@ from typing import Callable
 import httpx
 import structlog
 
+from nexus._log_safe_url import log_endpoint, require_no_userinfo, scrub_transport_error
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _log = structlog.get_logger(__name__)
@@ -150,14 +151,14 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     opaque 401 later. The unauthenticated ``/version`` probe itself does not need
     the token; ``require_token=False`` supports probe-only callers.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    base = (get_credential("service_url") or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+    base = get_service_url() or DEFAULT_MANAGED_SERVICE_URL
     token = (get_credential("service_token") or "").strip() or None
     if require_token and not token:
         raise ManagedServiceIncompatible(
             "cloud mode is configured but NX_SERVICE_TOKEN is not set — the "
-            f"managed service at {base} requires a bearer token for /v1/* calls. "
+            f"managed service at {log_endpoint(base)} requires a bearer token for /v1/* calls. "
             "Set it with `nx config set` or export NX_SERVICE_TOKEN=<token> "
             "(and NX_SERVICE_URL to override the default managed endpoint)."
         )
@@ -187,8 +188,12 @@ def probe_managed_service(
     """
     if base_url is None:
         base_url, _ = resolve_managed_endpoint(require_token=False)
-    base_url = base_url.rstrip("/")
+    base_url = require_no_userinfo(
+        base_url.rstrip("/"), source="the managed service URL",
+        repair="pass a URL without user:password@ (or fix NX_SERVICE_URL / `nx config set service_url`)",
+    )
     url = f"{base_url}/version"
+    shown = log_endpoint(base_url)
 
     if http_get is None:
         def http_get(u: str, t: float) -> httpx.Response:
@@ -199,16 +204,17 @@ def probe_managed_service(
     except (httpx.TransportError, httpx.TimeoutException) as exc:
         # Reachability failure: connect / TLS / DNS / read / timeout. Any other
         # exception (a programming error, a bad injected callable) propagates.
-        _log.debug("managed_service_unreachable", url=url, error=str(exc))
+        reason = scrub_transport_error(exc, base_url)
+        _log.debug("managed_service_unreachable", endpoint=shown, error=reason)
         raise ManagedServiceUnreachable(
-            f"managed nexus service at {base_url} is unreachable "
-            f"({type(exc).__name__}: {exc}). Check connectivity, or set "
+            f"managed nexus service at {shown} is unreachable "
+            f"({type(exc).__name__}: {reason}). Check connectivity, or set "
             "NX_SERVICE_URL to point at a reachable managed endpoint."
         ) from exc
 
     if resp.status_code != 200:
         raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} answered /version with HTTP "
+            f"managed nexus service at {shown} answered /version with HTTP "
             f"{resp.status_code} (expected 200). The endpoint may not be a nexus "
             "managed service, or it is unhealthy — check NX_SERVICE_URL and the "
             "service status page."
@@ -218,7 +224,7 @@ def probe_managed_service(
         body = resp.json()
     except Exception as exc:
         raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} returned a non-JSON /version "
+            f"managed nexus service at {shown} returned a non-JSON /version "
             f"body — not a nexus managed service? ({exc})"
         ) from exc
 
@@ -235,7 +241,7 @@ def probe_managed_service(
     if parsed is None:
         floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
         raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} reported no usable "
+            f"managed nexus service at {shown} reported no usable "
             f"release_version on /version (got {release_raw!r}) — a "
             f"dev/unstamped or pre-release engine is older than the minimum "
             f"this client supports (v{floor}). Confirm NX_SERVICE_URL points "
@@ -244,7 +250,7 @@ def probe_managed_service(
     if parsed < REQUIRED_ENGINE_VERSION:
         floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
         raise ManagedServiceIncompatible(
-            f"managed nexus service at {base_url} is release_version "
+            f"managed nexus service at {shown} is release_version "
             f"{release_version!r}, below the minimum this client supports "
             f"(v{floor}). Upgrade the managed service, or upgrade/downgrade "
             "the nx client to match.",

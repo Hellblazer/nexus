@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): VACUUM ${schema}.${table}.
+    jOOQ's open-source DSL has no VACUUM. Run through PgContainerHelper#vacuumTable, which checks both names (plain
+    identifiers). runInTransaction="false": PostgreSQL refuses VACUUM inside a transaction block. runAlways;
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vacuum-table" author="nexus-cbo4a" runAlways="true" runInTransaction="false">
+        <sql>VACUUM ${schema}.${table}</sql>
+    </changeSet>
+</databaseChangeLog>

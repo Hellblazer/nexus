@@ -1,0 +1,652 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.db;
+
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Record;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.jooq.types.DayToSecond;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.sql.DataSource;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+
+/**
+ * RDR-222 Phase 1 (bead nexus-yye8l.2): request identity for a mutating engine route, kept in
+ * {@code nexus.request_ledger} ({@code vectors-033-request-ledger.xml}).
+ *
+ * <p>A keyed route runs three steps. {@link #claim} records the attempt in its own short
+ * transaction, committed before the work starts, so {@link #status} can say {@code in_flight}
+ * while the work runs. The work then runs in one transaction that ends with
+ * {@link #commitMarker}, so the mutation and the stored response commit or roll back together.
+ * An exception before that commit calls {@link #failMarker}; an exception after it (writing the
+ * response to a client the edge already cut) does not, so a committed request never reads
+ * {@code rolled_back}.
+ *
+ * <p>Each attempt holds the row through a random {@code holder} nonce and a lease. A resend finds
+ * the row and replays it ({@code committed}), waits ({@code in_flight}, lease live), or takes it
+ * over ({@code in_flight} with the lease expired, or {@code failed}). Both markers match on the
+ * nonce, so an attempt that lost its row to a takeover can neither commit nor fail it, and the
+ * commit marker also requires a live lease, so an attempt whose lease ran out cannot commit late.
+ *
+ * <p>Every time comparison and stamp uses {@code clock_timestamp()}, the wall clock at the
+ * statement, never {@code now()}, which is the transaction's start (nexus-icdmw item 3).
+ *
+ * <p><b>What {@code rolled_back} promises (nexus-yye8l.19).</b> The commit marker checks the lease at its UPDATE,
+ * not at its COMMIT, so a marker transaction that stalls between the two holds the row, uncommitted, past the
+ * lease while a plain SELECT still sees the old expired {@code in_flight} version. Every read of an expired
+ * {@code in_flight} row therefore probes the row lock ({@code FOR UPDATE SKIP LOCKED}, see {@code read()}): a
+ * locked row is reported {@code in_flight}, and a row nothing holds can no longer be committed by the attempt
+ * that held it (its lease is gone). So once {@code rolled_back} is reported, that attempt cannot commit through
+ * the claim path. It is not terminal for the key: a same-key resend can still take the key over and commit.
+ *
+ * <p>Residual: a {@code status()} read can, in a window narrower than one statement, report
+ * {@code rolled_back} for a marker whose UPDATE had already scanned the row (PostgreSQL does not re-check the
+ * lease qual after a lock-only wait). The claim path stays safe, because the takeover re-checks holder and state
+ * and matches nothing against a row the marker has committed. A concurrent probe that sees another's lock answers
+ * {@code in_flight}, the safe direction; the client polls again.
+ *
+ * <p>A failure marker that is skipped or abandoned (the pool was exhausted, or the engine died) leaves the row
+ * {@code in_flight}; the lease expiry then turns it into {@code rolled_back}, which is the RDR's backstop.
+ */
+public final class RequestLedger {
+
+    private static final Logger log = LoggerFactory.getLogger(RequestLedger.class);
+
+    /** Slack beyond the two pool waits, for the claim, the marker and clock skew between them. */
+    static final long LEASE_SLACK_MS = 10_000L;
+
+    static final String IN_FLIGHT = "in_flight";
+    static final String COMMITTED = "committed";
+    static final String FAILED = "failed";
+
+    /** The retention setting: days a finished (or lease-expired) row is kept. */
+    public static final String RETENTION_ENV = "NX_REQUEST_LEDGER_RETENTION_DAYS";
+
+    /** Retention when {@link #RETENTION_ENV} is unset or invalid (Sam, 2026-10-17). */
+    public static final int DEFAULT_RETENTION_DAYS = 7;
+
+    /** The most days {@link #RETENTION_ENV} may ask for (ten years); a larger value is a typo, not a policy. */
+    public static final int MAX_RETENTION_DAYS = 3650;
+
+    private static final int SHA256_BYTES = 32;
+    private static final int MAX_CLAIM_ROUNDS = 3;
+
+    /** SQLSTATE {@code lock_not_available}: what PostgreSQL raises when {@code lock_timeout} trips. */
+    private static final String LOCK_NOT_AVAILABLE = "55P03";
+
+    /**
+     * Bound, in milliseconds, on every lock wait inside {@link #claim} (nexus-yye8l.22), set with
+     * {@code lock_timeout} on each claim transaction. The claim's {@code INSERT ... ON CONFLICT DO NOTHING}
+     * waits on the lock of a marker transaction that updated the same key and has not yet committed, and
+     * the takeover UPDATE waits the same way. A marker that stalls between its UPDATE and its COMMIT would
+     * otherwise hold the resend's admission permit and connection for as long as the stall lasts. 2 s is the
+     * lock wait the bounded sweep forms already run under (RDR-222, "bounded forms run under lock_timeout
+     * 2000"); a healthy marker commits in milliseconds, so a resend that waits this long has found a stall.
+     * The trip is not an answer by itself: the stalled marker belongs to a live attempt that may still commit,
+     * so the claim reads the row once, without waiting, and answers what it would answer for any row it reads
+     * ({@link InFlight} for the held row, {@link Replay} or {@link KeyReused} if it settled meanwhile). Only a
+     * row that is absent or open to takeover is {@link ClaimContendedException}. A fixed constant, not an
+     * environment setting: it bounds a wait whose healthy value is milliseconds, and it is unrelated to the
+     * lease, which the claim stamps from the database clock at the statement.
+     */
+    static final int CLAIM_LOCK_TIMEOUT_MS = 2_000;
+
+    /** The outcome of {@link #claim}. */
+    public sealed interface Claim permits Claimed, Replay, InFlight, KeyReused {
+    }
+
+    /** This attempt holds the row: run the work, then {@link #commitMarker} with {@code nonce}. */
+    public record Claimed(UUID requestId, UUID nonce, boolean takeover) implements Claim {
+    }
+
+    /** The key already committed: answer with the stored status and body; the work does not run. */
+    public record Replay(UUID requestId, int status, String responseJson) implements Claim {
+    }
+
+    /**
+     * Another attempt holds the key: the handler answers 409. {@code observedAt} is the database's own clock
+     * at the read, so {@code Retry-After} is {@code leaseUntil - observedAt} with no JVM clock in the sum
+     * (nexus-yye8l.20). A row an in-flight marker transaction holds past its lease reads as in flight too
+     * (nexus-yye8l.19), with {@code leaseUntil} already behind {@code observedAt}.
+     */
+    public record InFlight(UUID requestId, String route, OffsetDateTime startedAt, OffsetDateTime leaseUntil,
+                           OffsetDateTime observedAt) implements Claim {
+    }
+
+    /**
+     * {@link #claim} could not settle the key in {@link #MAX_CLAIM_ROUNDS} rounds: other attempts kept
+     * taking or purging the row between this one's read and its write. Nothing was written for this attempt, so
+     * it is safe to resend with the same key; the handler answers 503 with {@code Retry-After}, not the 422 an
+     * {@link IllegalStateException} would get from the shared ladder (nexus-yye8l.20). It is also what a claim
+     * answers when its lock wait exceeded {@link #CLAIM_LOCK_TIMEOUT_MS} and the row it then reads is absent or
+     * open to takeover (nexus-yye8l.22); that wait wrote nothing either. A lock wait that trips on a row another
+     * attempt holds is {@link InFlight}, not this.
+     */
+    public static final class ClaimContendedException extends RuntimeException {
+        public ClaimContendedException(String message) {
+            super(message);
+        }
+
+        public ClaimContendedException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /** The points in {@link #claim}'s round at which a test can interleave another attempt. */
+    public enum ClaimPhase { AFTER_INSERT_CONFLICT, BEFORE_TAKEOVER }
+
+    /** The key was first used for a different route or body: the handler answers 422. */
+    public record KeyReused(UUID requestId, String storedRoute) implements Claim {
+    }
+
+    /** What {@code GET /v1/requests/<id>} reports. */
+    public enum StatusKind { COMMITTED, IN_FLIGHT, ROLLED_BACK, UNKNOWN }
+
+    /**
+     * One status reading. {@code COMMITTED} carries the stored response; {@code IN_FLIGHT} the
+     * start and lease; {@code ROLLED_BACK} (an expired lease or a failure marker) and
+     * {@code UNKNOWN} (no row for this tenant) carry what the row has, or nulls.
+     */
+    public record Status(StatusKind kind, String route, OffsetDateTime startedAt, OffsetDateTime leaseUntil,
+                         OffsetDateTime finishedAt, Integer responseStatus, String responseJson) {
+        static final Status UNKNOWN = new Status(StatusKind.UNKNOWN, null, null, null, null, null, null);
+    }
+
+    /**
+     * The commit marker matched no row: the attempt's lease expired or another attempt took the
+     * row over. Thrown inside the mutation's transaction, so the mutation rolls back with it.
+     */
+    public static final class LedgerMarkerLost extends RuntimeException {
+        public LedgerMarkerLost(String message) {
+            super(message);
+        }
+    }
+
+    private final TenantScope scope;
+    private final long connectionTimeoutMs;
+
+    /** Test seam: called with the phase and the round number; never set by production code. */
+    private volatile BiConsumer<ClaimPhase, Integer> claimPhaseHookForTests;
+
+    public void setClaimPhaseHookForTests(BiConsumer<ClaimPhase, Integer> hook) {
+        this.claimPhaseHookForTests = hook;
+    }
+
+    private void phase(ClaimPhase phase, int round) {
+        BiConsumer<ClaimPhase, Integer> hook = claimPhaseHookForTests;
+        if (hook != null) {
+            hook.accept(phase, round);
+        }
+    }
+
+    /**
+     * @param scope      the tenant gateway every ledger read and write goes through
+     * @param dataSource the pool behind {@code scope}; its connection timeout sizes the lease
+     *                   margin, read the way {@link TenantScope} reads it
+     */
+    public RequestLedger(TenantScope scope, DataSource dataSource) {
+        this.scope = scope;
+        this.connectionTimeoutMs = TenantScope.connectionTimeoutMs(dataSource);
+    }
+
+    /**
+     * The lease for an attempt bounded by {@code attemptBoundMs} (nexus-zxgld gap 2): the bound,
+     * plus two pool waits ({@link TenantScope#withTenant} first waits up to the connection
+     * timeout for an admission permit, then {@code getConnection} can wait the same again), plus
+     * {@link #LEASE_SLACK_MS}. A keyed sweep on the default pool: 25 s + 2 x 30 s + 10 s = 95 s.
+     */
+    public long leaseMs(long attemptBoundMs) {
+        return attemptBoundMs + 2 * connectionTimeoutMs + LEASE_SLACK_MS;
+    }
+
+    /**
+     * Claim {@code requestId} for one attempt, in a transaction of its own that commits before
+     * this returns.
+     *
+     * @param bodySha256     SHA-256 of the request body, exactly 32 bytes
+     * @param attemptBoundMs the attempt's statement bound; the lease is {@link #leaseMs} of it
+     */
+    public Claim claim(String tenant, UUID requestId, String route, byte[] bodySha256, long attemptBoundMs) {
+        if (requestId == null) {
+            throw new IllegalArgumentException("requestId must not be null");
+        }
+        if (route == null || route.isBlank()) {
+            throw new IllegalArgumentException("route must not be null or blank");
+        }
+        if (bodySha256 == null || bodySha256.length != SHA256_BYTES) {
+            throw new IllegalArgumentException("bodySha256 must be " + SHA256_BYTES + " bytes");
+        }
+        Field<OffsetDateTime> leaseUntil = leaseUntil(leaseMs(attemptBoundMs));
+
+        // A row can vanish between the insert's conflict and the read (the retention arm), and a
+        // takeover can lose to another attempt; each re-runs the round, which then classifies the
+        // row as it now stands. Three rounds cover both.
+        for (int round = 0; round < MAX_CLAIM_ROUNDS; round++) {
+            UUID nonce = UUID.randomUUID();
+            int inserted;
+            try {
+                inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.TENANT_ID, tenant)
+                    .set(REQUEST_LEDGER.REQUEST_ID, requestId)
+                    .set(REQUEST_LEDGER.ROUTE, route)
+                    .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
+                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                    .set(REQUEST_LEDGER.HOLDER, nonce)
+                    .set(REQUEST_LEDGER.STARTED_AT, clock())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                    .onConflictDoNothing()
+                    .execute());
+            } catch (ClaimLockTimeout timeout) {
+                return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
+            }
+            if (inserted == 1) {
+                return new Claimed(requestId, nonce, false);
+            }
+
+            phase(ClaimPhase.AFTER_INSERT_CONFLICT, round);
+            LedgerRow row = read(tenant, requestId);
+            if (row == null) {
+                continue;
+            }
+            Claim settled = classify(tenant, requestId, route, bodySha256, row);
+            if (settled != null) {
+                return settled;
+            }
+
+            // Takeover (nexus-zxgld gap 1): the failure marker leaves holder NULL, so the guard is
+            // IS NOT DISTINCT FROM; an equality guard would never match a failed row.
+            phase(ClaimPhase.BEFORE_TAKEOVER, round);
+            int taken;
+            try {
+                taken = withClaimLockBound(tenant, requestId, ctx -> ctx.update(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.HOLDER, nonce)
+                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                    .set(REQUEST_LEDGER.STARTED_AT, clock())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                    .setNull(REQUEST_LEDGER.FINISHED_AT)
+                    .setNull(REQUEST_LEDGER.RESPONSE_STATUS)
+                    .where(key(tenant, requestId))
+                    .and(REQUEST_LEDGER.HOLDER.isNotDistinctFrom(row.holder()))
+                    .and(REQUEST_LEDGER.STATE.eq(row.state()))
+                    .execute());
+            } catch (ClaimLockTimeout timeout) {
+                return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
+            }
+            if (taken == 1) {
+                RequestLedgerActivity.recordTakeover();
+                log.info("event=request_ledger_takeover tenant={} request_id={} route={} prior_state={}",
+                    tenant, requestId, route, row.state());
+                return new Claimed(requestId, nonce, true);
+            }
+        }
+        throw new ClaimContendedException(
+            "request_ledger claim did not settle in " + MAX_CLAIM_ROUNDS + " rounds: tenant=" + tenant
+                + " request_id=" + requestId);
+    }
+
+    /**
+     * What a row this claim has read means for {@code requestId}, or null when the row is open to takeover (a
+     * {@code failed} row, or an {@code in_flight} row whose lease is gone and that nothing holds): {@link KeyReused}
+     * when route or body differ, {@link Replay} when committed, {@link InFlight} when held or live.
+     */
+    private Claim classify(String tenant, UUID requestId, String route, byte[] bodySha256, LedgerRow row) {
+        if (!row.route().equals(route) || !Arrays.equals(row.bodySha256(), bodySha256)) {
+            RequestLedgerActivity.recordKeyReused();
+            log.info("event=request_ledger_key_reused tenant={} request_id={} route={} stored_route={}",
+                tenant, requestId, route, row.route());
+            return new KeyReused(requestId, row.route());
+        }
+        if (COMMITTED.equals(row.state())) {
+            RequestLedgerActivity.recordReplay();
+            log.info("event=request_ledger_replay tenant={} request_id={} route={} status={}",
+                tenant, requestId, route, row.responseStatus());
+            return new Replay(requestId, row.responseStatus() == null ? 200 : row.responseStatus(),
+                row.responseJson());
+        }
+        if (IN_FLIGHT.equals(row.state()) && row.live()) {
+            RequestLedgerActivity.recordInFlight();
+            log.info("event=request_ledger_in_flight tenant={} request_id={} route={} lease_until={}",
+                tenant, requestId, route, row.leaseUntil());
+            return new InFlight(requestId, row.route(), row.startedAt(), row.leaseUntil(), row.dbNow());
+        }
+        return null;
+    }
+
+    /**
+     * A claim statement tripped {@code lock_timeout} (nexus-yye8l.22): another transaction holds the key's row
+     * uncommitted, normally the commit marker of the key's own live attempt. The claim wrote nothing, so it
+     * reads the row once (no lock wait: a plain SELECT, then {@code FOR UPDATE SKIP LOCKED}, see {@code read()})
+     * and answers as it answers for any row it reads: {@link InFlight} for a held row, so the client polls the
+     * ledger and gets the attempt's outcome instead of a failure for a sweep that may still commit; {@link Replay}
+     * or {@link KeyReused} if the row settled in the meantime. A row that is absent (an uncommitted first insert
+     * of the same key) or open to takeover (a failure marker or another claim holds it) is
+     * {@link ClaimContendedException}: nothing ran, and the same key can be resent.
+     */
+    private Claim settleAfterLockTimeout(String tenant, UUID requestId, String route, byte[] bodySha256,
+                                         ClaimLockTimeout timeout) {
+        LedgerRow row = read(tenant, requestId);
+        Claim settled = row == null ? null : classify(tenant, requestId, route, bodySha256, row);
+        if (settled != null) {
+            log.info("event=request_ledger_claim_lock_timeout_settled tenant={} request_id={} outcome={}",
+                tenant, requestId, settled.getClass().getSimpleName());
+            return settled;
+        }
+        throw new ClaimContendedException("request_ledger claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS
+            + " ms and the row is " + (row == null ? "absent" : "open to takeover") + ": tenant=" + tenant
+            + " request_id=" + requestId, timeout.getCause());
+    }
+
+    /** A claim statement's {@code lock_timeout} tripped; {@link #claim} settles it by reading the row. */
+    private static final class ClaimLockTimeout extends RuntimeException {
+        ClaimLockTimeout(Throwable cause) {
+            super("claim lock wait exceeded " + CLAIM_LOCK_TIMEOUT_MS + " ms", cause);
+        }
+    }
+
+    /**
+     * Run one claim statement in its own tenant transaction under {@code lock_timeout} =
+     * {@link #CLAIM_LOCK_TIMEOUT_MS}, sent in the same round trip as the tenant stamp. A lock wait that trips
+     * (SQLSTATE 55P03) is a {@link ClaimLockTimeout}: the statement was the claim's only write and it did not
+     * happen. Any other failure propagates unchanged.
+     */
+    private <T> T withClaimLockBound(String tenant, UUID requestId, Function<DSLContext, T> work) {
+        try {
+            return scope.withTenant(tenant, batch -> PgSession.setLockTimeout(batch, CLAIM_LOCK_TIMEOUT_MS), work);
+        } catch (RuntimeException e) {
+            if (isLockNotAvailable(e)) {
+                log.warn("event=request_ledger_claim_lock_timeout tenant={} request_id={} lock_timeout_ms={}",
+                    tenant, requestId, CLAIM_LOCK_TIMEOUT_MS);
+                throw new ClaimLockTimeout(e);
+            }
+            throw e;
+        }
+    }
+
+    private static boolean isLockNotAvailable(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && LOCK_NOT_AVAILABLE.equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * What {@link #claim} would answer for a key whose row is already {@code committed}, without claiming
+     * anything: {@link Replay} when the route and body match, {@link KeyReused} when they do not. Null when there
+     * is no row or it is not committed. Writes nothing, so a request that cannot run (its collection is gone) can
+     * still be answered from the ledger without leaving a row behind for a key that never ran.
+     */
+    public Claim peekCommitted(String tenant, UUID requestId, String route, byte[] bodySha256) {
+        LedgerRow row = read(tenant, requestId);
+        if (row == null || !COMMITTED.equals(row.state())) {
+            return null;
+        }
+        if (!row.route().equals(route) || !Arrays.equals(row.bodySha256(), bodySha256)) {
+            RequestLedgerActivity.recordKeyReused();
+            log.info("event=request_ledger_key_reused tenant={} request_id={} route={} stored_route={}",
+                tenant, requestId, route, row.route());
+            return new KeyReused(requestId, row.route());
+        }
+        RequestLedgerActivity.recordReplay();
+        log.info("event=request_ledger_replay tenant={} request_id={} route={} status={}",
+            tenant, requestId, route, row.responseStatus());
+        return new Replay(requestId, row.responseStatus() == null ? 200 : row.responseStatus(), row.responseJson());
+    }
+
+    /**
+     * Mark the attempt committed, inside the mutation's own transaction ({@code dsl}), after the
+     * mutation's SQL. Throws {@link LedgerMarkerLost} when the attempt no longer holds a live lease
+     * on the row, so the mutation rolls back with it.
+     */
+    public void commitMarker(DSLContext dsl, String tenant, UUID requestId, UUID nonce, int status,
+                             String responseJson) {
+        int updated = dsl.update(REQUEST_LEDGER)
+            .set(REQUEST_LEDGER.STATE, COMMITTED)
+            .setNull(REQUEST_LEDGER.HOLDER)
+            .set(REQUEST_LEDGER.FINISHED_AT, clock())
+            .set(REQUEST_LEDGER.RESPONSE_STATUS, status)
+            .set(REQUEST_LEDGER.RESPONSE, responseJson == null ? null : JSONB.valueOf(responseJson))
+            .where(key(tenant, requestId))
+            .and(REQUEST_LEDGER.HOLDER.eq(nonce))
+            .and(REQUEST_LEDGER.LEASE_UNTIL.gt(clock()))
+            .execute();
+        if (updated != 1) {
+            throw new LedgerMarkerLost("request_ledger commit marker lost: tenant=" + tenant
+                + " request_id=" + requestId + " (lease expired or taken over)");
+        }
+    }
+
+    /**
+     * Mark the attempt failed, best effort, in a transaction of its own. A failure here is logged
+     * at WARN and never thrown: if the engine dies instead, the lease expiry covers it. Matches
+     * only this attempt's in-flight row, so it cannot touch a committed row or a newer holder's.
+     */
+    public void failMarker(String tenant, UUID requestId, UUID nonce, int status) {
+        try {
+            scope.withTenant(tenant, ctx -> ctx.update(REQUEST_LEDGER)
+                .set(REQUEST_LEDGER.STATE, FAILED)
+                .setNull(REQUEST_LEDGER.HOLDER)
+                .set(REQUEST_LEDGER.FINISHED_AT, clock())
+                .set(REQUEST_LEDGER.RESPONSE_STATUS, status)
+                .where(key(tenant, requestId))
+                .and(REQUEST_LEDGER.HOLDER.eq(nonce))
+                .and(REQUEST_LEDGER.STATE.eq(IN_FLIGHT))
+                .execute());
+        } catch (RuntimeException e) {
+            log.warn("event=request_ledger_fail_marker_failed tenant={} request_id={} reason={}",
+                tenant, requestId, e.toString());
+        }
+    }
+
+    /** The status of {@code requestId} as {@code tenant} sees it. */
+    public Status status(String tenant, UUID requestId) {
+        LedgerRow row = read(tenant, requestId);
+        if (row == null) {
+            return Status.UNKNOWN;
+        }
+        StatusKind kind;
+        if (COMMITTED.equals(row.state())) {
+            kind = StatusKind.COMMITTED;
+        } else if (IN_FLIGHT.equals(row.state()) && row.live()) {
+            kind = StatusKind.IN_FLIGHT;
+        } else {
+            kind = StatusKind.ROLLED_BACK;
+        }
+        return new Status(kind, row.route(), row.startedAt(), row.leaseUntil(), row.finishedAt(),
+            row.responseStatus(), row.responseJson());
+    }
+
+    // ── retention (nexus-yye8l.3) ────────────────────────────────────────────
+
+    /** One tenant's retention pass: rows deleted, and whether the pass failed (then {@code deleted} is 0). */
+    public record RetentionPass(String tenant, int deleted, boolean failed) {
+    }
+
+    /**
+     * Retention in days from {@link #RETENTION_ENV}, read through {@code env}. Unset or blank is
+     * {@link #DEFAULT_RETENTION_DAYS}. A value that is not a positive integer, or exceeds
+     * {@link #MAX_RETENTION_DAYS}, also falls back to the default, with exactly one WARN line.
+     */
+    public static int resolveRetentionDays(Function<String, String> env) {
+        String raw = env.apply(RETENTION_ENV);
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_RETENTION_DAYS;
+        }
+        try {
+            int days = Integer.parseInt(raw.strip());
+            if (days > 0 && days <= MAX_RETENTION_DAYS) {
+                return days;
+            }
+        } catch (NumberFormatException e) {
+            // falls through to the single WARN below
+        }
+        log.warn("event=request_ledger_retention_invalid setting={} value={} using_days={}",
+            RETENTION_ENV, raw, DEFAULT_RETENTION_DAYS);
+        return DEFAULT_RETENTION_DAYS;
+    }
+
+    /**
+     * Delete {@code tenant}'s old rows in one transaction and return the count: a {@code committed}
+     * or {@code failed} row finished before {@code cutoff}, or an {@code in_flight} row whose lease
+     * ran out before {@code cutoff}. A live lease is later than any cutoff taken from the past, so a
+     * live {@code in_flight} row never matches, whatever its {@code started_at}. A row whose lease
+     * is NULL does not match either (NULL is not less than anything).
+     *
+     * <p>The tenant filter is explicit as well as enforced by RLS, as in {@link #key}.
+     */
+    public int retain(String tenant, OffsetDateTime cutoff) {
+        return retain(tenant, cutoff, SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /**
+     * As {@link #retain(String, OffsetDateTime)}, with the DELETE bounded by {@code statementBound}
+     * ({@code SET LOCAL statement_timeout}, plus the matching network bound): the retention arm shares
+     * the engine's single sweep thread, so a DELETE stuck behind a lock would otherwise stall every
+     * other scheduled task for as long as the lock lasts.
+     */
+    public int retain(String tenant, OffsetDateTime cutoff, Duration statementBound) {
+        return scope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementBound);
+            return ctx.deleteFrom(REQUEST_LEDGER)
+                .where(REQUEST_LEDGER.TENANT_ID.eq(tenant))
+                .and(REQUEST_LEDGER.STATE.in(COMMITTED, FAILED).and(REQUEST_LEDGER.FINISHED_AT.lt(cutoff))
+                    .or(REQUEST_LEDGER.STATE.eq(IN_FLIGHT).and(REQUEST_LEDGER.LEASE_UNTIL.lt(cutoff))))
+                .execute();
+        });
+    }
+
+    /**
+     * One {@link #retain} pass per tenant, each logged at INFO. A tenant's failure is logged at WARN
+     * and the next tenant still runs. The caller supplies the tenant list because the ledger is
+     * FORCE RLS: a tenant cannot be enumerated from the table itself.
+     */
+    public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff) {
+        return retainAll(tenants, cutoff, SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /** As {@link #retainAll(List, OffsetDateTime)}, with each tenant's DELETE bounded by {@code statementBound}. */
+    public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff, Duration statementBound) {
+        List<RetentionPass> passes = new ArrayList<>(tenants.size());
+        for (String tenant : tenants) {
+            try {
+                int deleted = retain(tenant, cutoff, statementBound);
+                log.info("event=request_ledger_retention tenant={} deleted={}", tenant, deleted);
+                passes.add(new RetentionPass(tenant, deleted, false));
+            } catch (RuntimeException e) {
+                log.warn("event=request_ledger_retention_tenant_failed tenant={} reason={}", tenant, e.toString());
+                passes.add(new RetentionPass(tenant, 0, true));
+            }
+        }
+        return passes;
+    }
+
+    // ── internals ────────────────────────────────────────────────────────────
+
+    /**
+     * One row as read. {@code leaseLive} and {@code dbNow} are the database's own reading at the SELECT.
+     * {@code held} is true when the row is {@code in_flight} with an expired lease but another transaction
+     * holds its row lock (see {@code read()}).
+     */
+    private record LedgerRow(String route, byte[] bodySha256, String state, UUID holder, OffsetDateTime startedAt,
+                             OffsetDateTime leaseUntil, OffsetDateTime finishedAt, Integer responseStatus,
+                             String responseJson, boolean leaseLive, OffsetDateTime dbNow, boolean held) {
+
+        /** The lease is live, or a transaction that matched while it was live may still commit. */
+        boolean live() {
+            return leaseLive || held;
+        }
+
+        boolean expiredInFlight() {
+            return IN_FLIGHT.equals(state) && !leaseLive;
+        }
+
+        LedgerRow asHeld() {
+            return new LedgerRow(route, bodySha256, state, holder, startedAt, leaseUntil, finishedAt,
+                responseStatus, responseJson, leaseLive, dbNow, true);
+        }
+    }
+
+    private static final Field<Boolean> LEASE_LIVE = DSL.field(REQUEST_LEDGER.LEASE_UNTIL.gt(clock()))
+        .as("lease_live");
+    private static final Field<OffsetDateTime> DB_NOW = clock().as("db_now");
+
+    private static final List<Field<?>> ROW_COLUMNS = List.of(
+        REQUEST_LEDGER.ROUTE, REQUEST_LEDGER.BODY_SHA256, REQUEST_LEDGER.STATE, REQUEST_LEDGER.HOLDER,
+        REQUEST_LEDGER.STARTED_AT, REQUEST_LEDGER.LEASE_UNTIL, REQUEST_LEDGER.FINISHED_AT,
+        REQUEST_LEDGER.RESPONSE_STATUS, REQUEST_LEDGER.RESPONSE, LEASE_LIVE, DB_NOW);
+
+    private static LedgerRow toRow(Record r) {
+        return new LedgerRow(
+            r.get(REQUEST_LEDGER.ROUTE), r.get(REQUEST_LEDGER.BODY_SHA256), r.get(REQUEST_LEDGER.STATE),
+            r.get(REQUEST_LEDGER.HOLDER), r.get(REQUEST_LEDGER.STARTED_AT),
+            r.get(REQUEST_LEDGER.LEASE_UNTIL), r.get(REQUEST_LEDGER.FINISHED_AT),
+            r.get(REQUEST_LEDGER.RESPONSE_STATUS),
+            r.get(REQUEST_LEDGER.RESPONSE) == null ? null : r.get(REQUEST_LEDGER.RESPONSE).data(),
+            Boolean.TRUE.equals(r.get(LEASE_LIVE)), r.get(DB_NOW), false);
+    }
+
+    /**
+     * Read the row for {@code requestId}, in one transaction, or null when there is none.
+     *
+     * <p>An {@code in_flight} row with an expired lease gets a lock probe (nexus-yye8l.19). The commit marker
+     * checks the lease at its UPDATE, not at its COMMIT, so a marker transaction that stalls past the lease holds
+     * the row, uncommitted, while a plain SELECT sees the old expired {@code in_flight} version: the old code
+     * answered {@code rolled_back} there and then {@code committed}. The probe is {@code SELECT ... FOR UPDATE
+     * SKIP LOCKED} of the same row. If it gets the row, nothing holds it, and since no marker can match an
+     * expired lease any more, that attempt cannot commit; the probe's own row is what is returned, so a marker
+     * that committed in between reads {@code committed}. If it gets nothing, the row is locked (or gone): a
+     * plain re-read tells which, and a locked row is reported with {@code held}, i.e. in flight.
+     *
+     * <p>The probe takes the row lock for the rest of this short transaction, so a concurrent takeover waits
+     * for it, never the other way round; a second concurrent probe sees the lock and answers in flight, the safe
+     * direction (the caller polls again).
+     */
+    private LedgerRow read(String tenant, UUID requestId) {
+        return scope.withTenant(tenant, ctx -> {
+            LedgerRow row = ctx.select(ROW_COLUMNS).from(REQUEST_LEDGER).where(key(tenant, requestId))
+                .fetchOptional(RequestLedger::toRow).orElse(null);
+            if (row == null || !row.expiredInFlight()) {
+                return row;
+            }
+            LedgerRow probed = ctx.select(ROW_COLUMNS).from(REQUEST_LEDGER).where(key(tenant, requestId))
+                .forUpdate().skipLocked()
+                .fetchOptional(RequestLedger::toRow).orElse(null);
+            if (probed != null) {
+                return probed;
+            }
+            LedgerRow again = ctx.select(ROW_COLUMNS).from(REQUEST_LEDGER).where(key(tenant, requestId))
+                .fetchOptional(RequestLedger::toRow).orElse(null);
+            return again != null && again.expiredInFlight() ? again.asHeld() : again;
+        });
+    }
+
+    /** The tenant filter is explicit as well as enforced by RLS: a superuser pool bypasses RLS. */
+    private static Condition key(String tenant, UUID requestId) {
+        return REQUEST_LEDGER.TENANT_ID.eq(tenant).and(REQUEST_LEDGER.REQUEST_ID.eq(requestId));
+    }
+
+    private static Field<OffsetDateTime> clock() {
+        return DSL.function("clock_timestamp", SQLDataType.TIMESTAMPWITHTIMEZONE);
+    }
+
+    private static Field<OffsetDateTime> leaseUntil(long leaseMs) {
+        return clock().plus(DayToSecond.valueOf(Duration.ofMillis(leaseMs)));
+    }
+}

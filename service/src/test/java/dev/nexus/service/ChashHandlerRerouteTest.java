@@ -1,9 +1,10 @@
 package dev.nexus.service;
 
+import java.util.HexFormat;
+import java.time.OffsetDateTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.vectors.DimTables;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -17,10 +18,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -91,9 +92,9 @@ class ChashHandlerRerouteTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COLL_384, MODEL_384);
             PgContainerHelper.insertCollection(ctx, TENANT, COLL_768, MODEL_768);
-            chunk(su, 384, COLL_384, MULTI,    "2026-07-02 08:00:01+00");
-            chunk(su, 768, COLL_768, MULTI,    "2026-07-02 08:00:02+00");
-            chunk(su, 768, COLL_768, REF_ONLY, "2026-07-02 08:00:03+00");
+            chunk(su, 384, COLL_384, MULTI,    OffsetDateTime.parse("2026-07-02T08:00:01Z"));
+            chunk(su, 768, COLL_768, MULTI,    OffsetDateTime.parse("2026-07-02T08:00:02Z"));
+            chunk(su, 768, COLL_768, REF_ONLY, OffsetDateTime.parse("2026-07-02T08:00:03Z"));
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -257,7 +258,7 @@ class ChashHandlerRerouteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-src", MODEL_384);
-            chunk(su, 384, "wire-ren-src", renamed, "2026-07-02 08:00:04+00");
+            chunk(su, 384, "wire-ren-src", renamed, OffsetDateTime.parse("2026-07-02T08:00:04Z"));
             // RDR-204 Phase 1 (bead nexus-ft04v.7): /rename_collection no longer
             // auto-registers a not-yet-seen destination name (the stub-insert
             // that used to do it is retired) -- register the rename TARGET too,
@@ -302,29 +303,25 @@ class ChashHandlerRerouteTest {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void chunk(Connection su, int dim, String collection, Chash chash,
-                       String createdAt) throws Exception {
-        StringBuilder vec = new StringBuilder("'[1");
-        for (int i = 1; i < dim; i++) vec.append(",0");
-        vec.append("]'");
+                       OffsetDateTime createdAt) throws Exception {
         // RDR-191 Phase 4 (repoint-batch lane F1): nexus.chunks_<dim> unified
         // into nexus.chunks -- table name is now fixed, dim selects the
         // target embedding_<dim> column instead.
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) VALUES " +
-            "('" + TENANT + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), '" +
-            (dim == 384 ? MODEL_384 : MODEL_768) + "', " +
-            "'wire chunk " + chash.toHex().substring(0, 8) + "', " + vec + "::nexus.vector, " +
-            "TIMESTAMPTZ '" + createdAt + "')");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash.toHex()))
+            .set(CHUNKS.EMBEDDING_MODEL, dim == 384 ? MODEL_384 : MODEL_768)
+            .set(CHUNKS.CHUNK_TEXT, "wire chunk " + chash.toHex().substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
+            .set(CHUNKS.CREATED_AT, createdAt)
+            .execute();
     }
 
     /** Total chunk rows in the unified table — the no-op invariant. */
     private long chunkRowCount() throws Exception {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME)) {
-            rs.next();
-            return rs.getLong(1);
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS);
         }
     }
 

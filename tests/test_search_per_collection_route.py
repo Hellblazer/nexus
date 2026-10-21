@@ -1115,6 +1115,160 @@ class TestLexicalLeg:
         assert engine.route_calls()[0]["thresholds"] == {cols[0]: 0.5, cols[1]: 0.5}
 
 
+# ── nexus-079ly: raw and dropped are the engine's facts, kept is explicit ────
+
+
+class _CapturedTelemetry:
+    def __init__(self) -> None:
+        self.rows: list[tuple] = []
+
+    def log_search_batch(self, rows):
+        self.rows.extend(rows)
+
+
+def _shrink_limit(monkeypatch, limit: int) -> None:
+    """The route's limit is never below 300 through the public sizes; shrink it."""
+    monkeypatch.setattr(
+        se, "_per_collection_request_sizes", lambda n, mult, *, rerank: (10, limit),
+    )
+
+
+class TestDiagnosticsAreEngineFactsPlusExplicitKept:
+    """``per_collection`` raw/dropped (and the minimum distances) stay exactly
+    what the engine reported for each collection, whatever the lexical leg
+    returns; ``kept`` is the number of rows the collection contributes to the
+    returned result set, after the global limit cut and the lexical union. The
+    telemetry row carries ``kept``, never ``raw - dropped``."""
+
+    def test_a_dropped_vector_row_the_lexical_leg_returns_again(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        engine = _FakeEngine(monkeypatch, {cols[0]: [("near", 0.1), ("far", 0.9)]})
+        engine.lexical_rows = [
+            {"id": "far", "content": "t", "distance": 0.9, "collection": cols[0]},
+        ]
+        diags: list[SearchDiagnostics] = []
+        telemetry = _CapturedTelemetry()
+        results = _search(engine, cols, threshold_override=0.5, lexical=True,
+                          diagnostics_out=diags, telemetry=telemetry)
+
+        assert sorted(r.id for r in results) == ["far", "near"]
+        # The engine's own stat: 2 raw, "far" dropped. The lexical copy adds no
+        # raw and removes no drop; it only counts toward kept.
+        assert diags[0].per_collection[cols[0]] == (2, 1, 0.5, 0.9)
+        assert diags[0].kept == {cols[0]: 2}
+        assert (diags[0].total_raw, diags[0].total_dropped) == (2, 1)
+        assert [(r[3], r[4], r[5]) for r in telemetry.rows] == [(2, 2, 0.1)]
+
+    def test_a_lexical_only_row_past_the_threshold_adds_to_kept_only(self, monkeypatch):
+        # The case the dropped-copy heuristic got wrong: the engine dropped
+        # "far" (D>0) and the lexical leg brings a DIFFERENT row, also past the
+        # threshold, that the vector leg never returned.
+        cols = _cols("code", _BGE, 1)
+        engine = _FakeEngine(monkeypatch, {cols[0]: [("near", 0.1), ("far", 0.9)]})
+        engine.lexical_rows = [
+            {"id": "lex-far", "content": "t", "distance": 0.95, "collection": cols[0]},
+        ]
+        diags: list[SearchDiagnostics] = []
+        telemetry = _CapturedTelemetry()
+        results = _search(engine, cols, threshold_override=0.5, lexical=True,
+                          diagnostics_out=diags, telemetry=telemetry)
+
+        assert sorted(r.id for r in results) == ["lex-far", "near"]
+        assert diags[0].per_collection[cols[0]] == (2, 1, 0.5, 0.9)
+        assert diags[0].kept == {cols[0]: 2}
+        assert [(r[3], r[4], r[5]) for r in telemetry.rows] == [(2, 2, 0.1)]
+
+    def test_a_lexical_only_row_in_a_collection_the_engine_returned_nothing_for(
+        self, monkeypatch,
+    ):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {cols[0]: [("near", 0.1)]})
+        engine.lexical_rows = [
+            {"id": "lex-only", "content": "t", "distance": 0.3, "collection": cols[1]},
+            # a kept vector row: the vector copy wins and is not counted again
+            {"id": "near", "content": "t", "distance": 0.1, "collection": cols[0]},
+        ]
+        diags: list[SearchDiagnostics] = []
+        telemetry = _CapturedTelemetry()
+        _search(engine, cols, threshold_override=0.5, lexical=True,
+                diagnostics_out=diags, telemetry=telemetry)
+
+        assert diags[0].per_collection[cols[0]] == (1, 0, 0.5, None)
+        assert diags[0].per_collection[cols[1]] == (0, 0, 0.5, None)
+        assert diags[0].kept == {cols[0]: 1, cols[1]: 1}
+        # raw 0 keeps top_distance NULL (RDR-087), kept is the lexical row
+        assert sorted((r[2], r[3], r[4], r[5]) for r in telemetry.rows) == [
+            (cols[0], 1, 1, 0.1), (cols[1], 0, 1, None),
+        ]
+
+    def test_the_limit_cut_with_a_threshold(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        data = {cols[0]: [("a", 0.1), ("b", 0.2), ("c", 0.3), ("far", 0.9)]}
+        engine = _FakeEngine(monkeypatch, data)
+        _shrink_limit(monkeypatch, 2)
+        diags: list[SearchDiagnostics] = []
+        telemetry = _CapturedTelemetry()
+        results = _search(engine, cols, threshold_override=0.5,
+                          diagnostics_out=diags, telemetry=telemetry)
+
+        assert [r.id for r in results] == ["a", "b"]
+        # 4 raw, "far" dropped by the threshold, "c" cut by limit: 2 returned.
+        assert diags[0].per_collection[cols[0]] == (4, 1, 0.5, 0.9)
+        assert diags[0].kept == {cols[0]: 2}
+        assert [(r[3], r[4]) for r in telemetry.rows] == [(4, 2)]
+
+    def test_the_limit_cut_without_a_threshold(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        engine = _FakeEngine(monkeypatch, {cols[0]: _rows("r", 5, 0.1)})
+        _shrink_limit(monkeypatch, 2)
+        diags: list[SearchDiagnostics] = []
+        results = _search(engine, cols, diagnostics_out=diags)
+
+        assert len(results) == 2
+        assert diags[0].per_collection[cols[0]][:2] == (5, 0)
+        assert diags[0].kept == {cols[0]: 2}
+
+    def test_a_collection_cut_entirely_by_the_limit(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {
+            cols[0]: [("a1", 0.1), ("a2", 0.2)],
+            cols[1]: [("b1", 0.5), ("b2", 0.6)],
+        })
+        _shrink_limit(monkeypatch, 2)
+        diags: list[SearchDiagnostics] = []
+        telemetry = _CapturedTelemetry()
+        results = _search(engine, cols, diagnostics_out=diags, telemetry=telemetry)
+
+        assert sorted(r.id for r in results) == ["a1", "a2"]
+        assert diags[0].per_collection[cols[1]] == (2, 0, float("inf"), None)
+        assert diags[0].kept == {cols[0]: 2, cols[1]: 0}
+        # raw unchanged and top_distance still the engine's: consistent with
+        # raw > 0, so the collection is not dropped from median_top_distance.
+        by_col = {r[2]: r for r in telemetry.rows}
+        assert (by_col[cols[1]][3], by_col[cols[1]][4], by_col[cols[1]][5]) == (2, 0, 0.5)
+        # nothing was dropped by a threshold, so the silent-zero hint stays quiet
+        assert diags[0].worst_offender() is None
+
+
+class TestSearchDiagnosticsKept:
+    def test_kept_for_falls_back_to_raw_minus_dropped_for_a_hand_built_struct(self):
+        diag = SearchDiagnostics(per_collection={"c": (5, 2, 0.5, 0.7)})
+        assert diag.kept_for("c") == 3
+
+    def test_kept_for_prefers_the_explicit_figure(self):
+        diag = SearchDiagnostics(per_collection={"c": (5, 5, 0.5, 0.7)}, kept={"c": 1})
+        assert diag.kept_for("c") == 1
+
+    def test_worst_offender_requires_the_collection_to_have_contributed_nothing(self):
+        every_dropped = {"c": (3, 3, 0.5, 0.7)}
+        assert SearchDiagnostics(per_collection=every_dropped).worst_offender() == (
+            "c", 0.5, 0.7,
+        )
+        # all vector candidates dropped, yet a lexical row was returned
+        rescued = SearchDiagnostics(per_collection=every_dropped, kept={"c": 1})
+        assert rescued.worst_offender() is None
+
+
 # ── nexus-tao37: content_chars rides the request only when asked for ─────────
 
 

@@ -100,6 +100,18 @@ public final class CrossEncoderReranker implements Reranker {
         return "ms-marco-minilm-l6-v2";
     }
 
+    /**
+     * File presence, read live (nexus-yuh4a): true once the session is loaded, else true only while
+     * BOTH the model and the tokenizer are regular files on disk now. Two stats, no ONNX runtime, so a
+     * status poll is cheap. It says the files are there, not that a rerank would succeed: files that are
+     * present but cannot be loaded still read true.
+     */
+    @Override
+    public boolean available() {
+        return initialized
+                || (Files.isRegularFile(Path.of(modelPath)) && Files.isRegularFile(Path.of(tokenizerPath)));
+    }
+
     @Override
     public List<Scored> rerank(String query, List<String> documents, Integer topK) {
         if (query == null || query.isBlank()) {
@@ -139,9 +151,8 @@ public final class CrossEncoderReranker implements Reranker {
                 if (!Files.isRegularFile(Path.of(req[0]))) {
                     throw new RerankUpstreamException(
                             "local cross-encoder unavailable: " + req[1] + " not found at " + req[0]
-                            + ". Provision the ms-marco-MiniLM-L-6-v2 artifacts via `nx init` /"
-                            + " `nx upgrade` (RDR-188 P1.3), or set -Dnexus.crossencoder.modelPath"
-                            + " / -Dnexus.crossencoder.tokenizerPath.");
+                            + ". Provision the ms-marco-MiniLM-L-6-v2 artifacts via `"
+                            + BootPlan.PROVISION_COMMAND + "` (RDR-188 P1.3), then restart the engine.");
                 }
             }
             // nexus-o5xyx.1: this init runs on a request thread, so a SIGTERM can land in
@@ -167,12 +178,8 @@ public final class CrossEncoderReranker implements Reranker {
                 }
                 OrtEnvironment env = OrtEnvironment.getEnvironment();
                 sess = env.createSession(modelPath, sessionOpts);
-                tok = HuggingFaceTokenizer.builder()
-                        .optTokenizerPath(Path.of(tokenizerPath))
-                        .optMaxLength(MAX_SEQ_LEN)
-                        .optTruncation(true)
-                        .optPadding(false)   // padded per batch in scoreBatch()
-                        .build();
+                // nexus-17jvq: through LocalTokenizers, never the DJL builder directly. Padded per batch in scoreBatch().
+                tok = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
                 this.ortEnv = env;
                 this.session = sess;
                 this.tokenizer = tok;
@@ -185,7 +192,8 @@ public final class CrossEncoderReranker implements Reranker {
                 if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
                 throw new RerankUpstreamException(
                         "local cross-encoder failed to initialise from " + modelPath + ": "
-                        + e.getMessage() + ". Re-provision via `nx init` (the artifact may be"
+                        + e.getMessage() + ". Re-provision via `" + BootPlan.PROVISION_COMMAND
+                        + "` (the artifact may be"
                         + " truncated or a fused export onnxruntime-java cannot run).", e);
             } finally {
                 initScope.close();

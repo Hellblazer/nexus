@@ -308,6 +308,7 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
     assert settled.ok is True, settled.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_real_sweep_carries_the_setup_row_and_settles_it_after_every_row_is_known(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -461,3 +462,40 @@ def test_the_row_is_absent_from_the_fresh_install_mvv_allowlist() -> None:
     match = re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
     assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
     assert "Plugin setup" not in match.group(1)
+
+
+# -- nexus-36qyh: the row and the script's view read a git-only record the same way -----------------
+
+_GIT_ROW_BATTERY: list[Any] = [
+    ["✗ git: not found on PATH"],
+    ["[✗] git: not found on PATH"],
+    ["  ✗ git"],
+    ["✗ git: a", "[✗] git: b"],
+    ["✗ git: a", "✗ Schema: behind"],
+    ["✗ git hooks (stanza drift): x"],
+    ["[✗] git hooks (malformed stanza): y"],
+    ["✗ gitea: unreachable"],
+    ["⚠ git: not found on PATH"],
+    ["✗ git: x"] * 19,
+    ["✗ git: x"] * 20,
+    [],
+    "✗ git: a",
+    None,
+    [1, "✗ git: a"],
+]
+
+
+@pytest.mark.parametrize("rows", _GIT_ROW_BATTERY, ids=[str(i) for i in range(len(_GIT_ROW_BATTERY))])
+def test_the_row_and_the_script_agree_on_which_records_are_git_only(rows: Any) -> None:
+    """``health._setup_only_git_failed`` is a copy of the script's ``only_git_failed`` (the CLI cannot import
+    the plugin's script); the two are compared on rows that include the git hooks labels, which are real
+    failures, and on the list cap."""
+    from nexus.health import _setup_only_git_failed
+
+    assert _setup_only_git_failed(rows) is _load_setup_script().only_git_failed(rows), rows
+
+
+def test_the_row_names_the_scripts_cap_on_recorded_rows() -> None:
+    from nexus.health import _SETUP_DOCTOR_ROWS_MAX
+
+    assert _SETUP_DOCTOR_ROWS_MAX == _load_setup_script()._DOCTOR_ROWS_MAX

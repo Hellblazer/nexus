@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 from nexus.health import _check_engine_reaper
+import pytest
 
 _FETCH = "nexus.db.http_engine_status.fetch_engine_status"
 NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC)
@@ -271,6 +272,7 @@ def test_a_status_passed_in_is_used_and_nothing_is_fetched() -> None:
         assert r.ok is True and "not applicable" in r.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_default_sweep_makes_one_status_request_for_every_row_that_reads_it(monkeypatch) -> None:
     from click.testing import CliRunner
 

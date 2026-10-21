@@ -195,6 +195,7 @@ def _fake_writer() -> MagicMock:
     return writer
 
 
+@pytest.mark.t2_tenant
 def test_registers_once_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr(
@@ -248,6 +249,7 @@ def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retryi
     writer.register_collection.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_registrar_receives_the_derived_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -264,6 +266,7 @@ def test_registrar_receives_the_derived_kwargs(
     writer.register_collection.assert_called_once_with(name, **expected)
 
 
+@pytest.mark.t2_tenant
 def test_409_is_treated_as_already_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +289,7 @@ def test_409_is_treated_as_already_registered(
     writer.close.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_non_409_http_error_propagates_and_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -322,6 +326,7 @@ class _ScopedFakeRegistrar:
         return self._writer
 
 
+@pytest.mark.t2_tenant
 def test_two_registrar_scopes_for_the_same_name_each_call_their_own_registrar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,6 +365,7 @@ def test_two_registrar_scopes_for_the_same_name_each_call_their_own_registrar(
     assert name not in corpus._REGISTERED_COLLECTIONS
 
 
+@pytest.mark.t2_tenant
 def test_writer_is_closed_even_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -377,6 +383,7 @@ def test_writer_is_closed_even_on_failure(
     writer.close.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_default_registrar_is_make_catalog_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -407,6 +414,7 @@ def _http_422(body_text: str) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(body_text, request=MagicMock(), response=response)
 
 
+@pytest.mark.t2_tenant
 def test_normal_path_registers_once_and_writes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -425,6 +433,7 @@ def test_normal_path_registers_once_and_writes_once(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_stale_registration_422_retries_once_after_re_registering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,6 +464,7 @@ def test_stale_registration_422_retries_once_after_re_registering(
     assert name in corpus._REGISTERED_COLLECTIONS
 
 
+@pytest.mark.t2_tenant
 def test_second_failure_after_retry_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -473,6 +483,7 @@ def test_second_failure_after_retry_propagates(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_a_different_422_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -495,6 +506,7 @@ def test_a_different_422_is_never_retried(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_a_non_http_error_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -512,6 +524,7 @@ def test_a_non_http_error_is_never_retried(
     write_fn.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_the_retry_detector_keys_on_the_reason_code_for_the_httpx_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -533,6 +546,7 @@ def test_the_retry_detector_keys_on_the_reason_code_for_the_httpx_family(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_a_422_with_another_reason_is_never_retried_even_if_it_says_not_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,6 +596,7 @@ class _FakeVectorServiceError(RuntimeError):
         self.code = code
 
 
+@pytest.mark.t2_tenant
 def test_vector_service_error_shaped_422_is_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -612,6 +627,7 @@ def test_vector_service_error_shaped_422_is_retried(
     assert write_fn.call_count == 2
 
 
+@pytest.mark.t2_tenant
 def test_vector_service_error_shaped_non_422_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -782,6 +798,153 @@ class TestRegistrationSeamProfileCheck:
         writer.register_collection.assert_not_called()
 
 
+class TestRegistrationSeamExistingRowSkipsProfileComparison:
+    """RDR-210 P1.4 (nexus-no5rm, Gap 9). Under a dual engine whose profile
+    says Voyage, a write to an EXISTING bge collection must not be refused:
+    the engine never re-points an existing row (CatalogRepository.upsertCollection
+    existing-row branch; pinned in CatalogRepositoryTest), so the client's
+    profile comparison applies to new names only. Neutral bge tokens are
+    used for the row and the intent; the profile row is the off-profile
+    side."""
+
+    _BGE = "bge-base-en-v15-768"
+
+    def _writer_with_row(self, row: dict | None) -> MagicMock:
+        writer = _fake_writer()
+        writer.get_collection.return_value = row
+        return writer
+
+    def _local_bge_intent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._BGE)
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
+
+    def test_a_write_to_an_existing_bge_row_passes_under_a_voyage_profile(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
+        name = f"docs__seam-existing-row__{self._BGE}__v1"
+        writer = self._writer_with_row(
+            {"name": name, "embedding_model": self._BGE, "superseded_by": ""},
+        )
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_called_once_with(
+            name, content_type="docs", owner_id="seam-existing-row",
+            embedding_model=self._BGE, model_version="v1",
+        )
+        assert name in corpus._REGISTERED_COLLECTIONS
+
+    def test_registering_a_new_bge_name_under_a_voyage_profile_is_still_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
+        name = f"docs__seam-new-name__{self._BGE}__v1"
+        writer = self._writer_with_row(None)
+
+        with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.get_collection.assert_called_once_with(name)
+        writer.register_collection.assert_not_called()
+        assert name not in corpus._REGISTERED_COLLECTIONS
+
+    def test_an_existing_row_of_another_model_does_not_excuse_the_mismatch(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only a row holding the intent's OWN model skips the comparison; a
+        row on a third model leaves the refusal in place."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
+        name = f"docs__seam-other-model__{self._BGE}__v1"
+        writer = self._writer_with_row(
+            {"name": name, "embedding_model": "minilm-l6-v2-384", "superseded_by": ""},
+        )
+
+        with pytest.raises(EmbeddingProfileMismatchError):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_not_called()
+
+    def test_explicit_kwargs_on_an_existing_same_model_row_pass_too(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit-kwargs callers (backfill, rename) skip the superseded read,
+        so the row is read only when the profile disagrees."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
+        name = f"docs__seam-explicit__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-explicit",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        existing = self._writer_with_row({"name": name, "embedding_model": self._BGE})
+
+        ensure_collection_registered(name, registrar=lambda: existing, kwargs=override)
+
+        existing.register_collection.assert_called_once_with(name, **override)
+
+        corpus._REGISTERED_COLLECTIONS.clear()
+        absent = self._writer_with_row(None)
+        with pytest.raises(EmbeddingProfileMismatchError):
+            ensure_collection_registered(name, registrar=lambda: absent, kwargs=override)
+        absent.register_collection.assert_not_called()
+
+    def test_the_skip_on_the_explicit_path_never_revives_a_superseded_name(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A superseded same-model off-profile row passes the model check; the skip
+        must still refuse it, or the upsert would clear superseded_by."""
+        from nexus.corpus import SupersededCollectionWriteError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
+        name = f"docs__seam-superseded__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-superseded",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        retired = self._writer_with_row(
+            {"name": name, "embedding_model": self._BGE, "superseded_by": "docs__seam-superseded__model-ctx__v1"},
+        )
+
+        with pytest.raises(SupersededCollectionWriteError):
+            ensure_collection_registered(name, registrar=lambda: retired, kwargs=override)
+
+        retired.register_collection.assert_not_called()
+        assert name not in corpus._REGISTERED_COLLECTIONS
+
+    def test_an_agreeing_profile_reads_no_row_on_the_explicit_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The extra read is paid only on disagreement."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": self._BGE})
+        name = f"docs__seam-agree__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-agree",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        writer = self._writer_with_row(None)
+
+        ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
+
+        writer.get_collection.assert_not_called()
+        writer.register_collection.assert_called_once_with(name, **override)
+
+
 class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): ``kwargs``
     bypasses ``collection_registration_kwargs``'s generic name-derivation
@@ -793,6 +956,7 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     engine's GC function registers it from the origin's row on first
     insert; see ``indexer._prune_collection_serverside``.)"""
 
+    @pytest.mark.t2_tenant
     def test_explicit_kwargs_bypasses_name_derivation(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -852,6 +1016,7 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
 
         writer.register_collection.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_a_non_canonical_content_type_without_override_raises_under_cloud_mode(
         self, cloud_mode: None,
     ) -> None:

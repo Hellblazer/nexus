@@ -1,0 +1,44 @@
+{
+ "boot": {
+  "total": 3,
+  "toplevel": 3,
+  "nested": 0,
+  "by_kind": {
+   "create_table": 0,
+   "create_index": 0,
+   "drop": 0,
+   "alter": 0,
+   "other": 3
+  }
+ },
+ "migration": {
+  "total": 9,
+  "toplevel": 7,
+  "nested": 2,
+  "by_kind": {
+   "create_table": 2,
+   "create_index": 2,
+   "drop": 2,
+   "alter": 1,
+   "other": 2
+  }
+ },
+ "tests": {
+  "total": 17,
+  "toplevel": 9,
+  "nested": 8,
+  "by_kind": {
+   "create_table": 3,
+   "create_index": 3,
+   "drop": 2,
+   "alter": 2,
+   "other": 7
+  }
+ },
+ "wal": {
+  "migration_bytes": 1000,
+  "tests_bytes": 4500,
+  "total_bytes": 5500,
+  "dbsize_growth_bytes": 3400
+ }
+}

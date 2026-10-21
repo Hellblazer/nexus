@@ -109,6 +109,7 @@ def _linking_lines(phases: list[str]) -> list[str]:
     return [m for m in phases if m.startswith("Catalog linking")]
 
 
+@pytest.mark.t2_tenant
 class TestLinkingSubPhases:
     def test_pairs_in_order_with_measured_durations_and_no_phantom_pdf(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
@@ -177,6 +178,7 @@ class TestLinkingSubPhases:
 
 
 class TestGeneratorFailureClosesItsPhase:
+    @pytest.mark.t2_tenant
     def test_raising_generator_emits_failed_marker_not_done(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
     ) -> None:
@@ -244,6 +246,7 @@ class TestIncrementalGeneratorApplies:
         assert applies("rdr-dependency", None, {"code"}) is True
 
 
+@pytest.mark.t2_tenant
 class TestRdrDependencyGeneratorRegistration:
     """Reviewer critique [24072] CRITICAL: the generator must be REGISTERED
     at ``_catalog_hook``'s linking loop, not just reachable by calling it
@@ -338,6 +341,7 @@ class TestChangedRdrIsRelinked:
         monkeypatch.setattr(link_generator, "bind_rdr_dependency_generator", bind)
         return seeds
 
+    @pytest.mark.t2_tenant
     def test_content_change_refeeds_the_rdr_and_a_head_bump_does_not(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
     ) -> None:

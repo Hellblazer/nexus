@@ -130,6 +130,7 @@ def test_a_collection_without_topics_is_skipped(t2_service_env) -> None:
     assert result.has_taxonomy is False and result.found == 0 and result.skipped_reason == ""
 
 
+@pytest.mark.t2_tenant
 def test_an_engine_without_the_route_is_a_named_skip(monkeypatch) -> None:
     def _404(*a, **kw):
         req = httpx.Request("POST", "http://engine/v1/taxonomy/assignments/unassigned")
@@ -172,6 +173,7 @@ def test_cli_drain_requires_exactly_one_scope(flag) -> None:
     assert out.exit_code == 2, out.output
 
 
+@pytest.mark.t2_tenant
 def test_index_drain_is_quiet_when_nothing_is_unassigned(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", lambda name, **kw: DrainResult(name, True))
@@ -179,6 +181,7 @@ def test_index_drain_is_quiet_when_nothing_is_unassigned(monkeypatch, capsys) ->
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.t2_tenant
 def test_index_drain_reports_work_and_survives_a_failure(monkeypatch, capsys) -> None:
 
     def _drain(name, **kw):
@@ -285,6 +288,7 @@ def test_index_repo_passes_when_the_drain_assigns_everything(tmp_path, monkeypat
     assert "2 of 2 unassigned chunk(s) assigned, 0 lost" in out.output
 
 
+@pytest.mark.t2_tenant
 def test_index_drain_says_once_that_the_engine_has_no_route(monkeypatch, capsys) -> None:
     calls: list[str] = []
 
@@ -337,6 +341,7 @@ def test_acknowledge_rejects_a_non_chash() -> None:
     assert out.exit_code == 2 and "not a 64-hex chunk chash" in out.output
 
 
+@pytest.mark.t2_tenant
 def test_the_drain_line_names_acknowledged_skips(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         mcp_infra, "drain_unassigned_chunks",

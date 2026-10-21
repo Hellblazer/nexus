@@ -49,7 +49,7 @@ class Hygiene008GcBoundedRegistrationDataCorrectionTest {
 
     @Test
     void correctsSiblingsTheBoundedSweepMisregistered() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene008_test";
             final String pass = "nexus_admin_hygiene008_test_pass";

@@ -357,7 +357,8 @@ def test_shell_line_numbers_after_a_continuation_are_physical() -> None:
 def test_with_error_file_injects_before_jar_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv(fx.TMP_ORIG_ENV, str(tmp_path))
+    monkeypatch.delenv(fx.TMP_SESSION_ENV, raising=False)  # a grant run sets it: no tmpdir flag here
     flag = f"-XX:ErrorFile={tmp_path}/hs_err_%p.log"
     cmd = ["/usr/bin/java", "-Xmx1g", "-jar", "a.jar"]
     out = fx.with_error_file(cmd)
@@ -373,7 +374,8 @@ def test_with_error_file_injects_before_jar_and_is_idempotent(
 def test_spawn_service_hands_popen_the_injected_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv(fx.TMP_ORIG_ENV, str(tmp_path))
+    monkeypatch.delenv(fx.TMP_SESSION_ENV, raising=False)  # a grant run sets it: no tmpdir flag here
     seen: dict = {}
 
     class _Popen:
@@ -383,6 +385,36 @@ def test_spawn_service_hands_popen_the_injected_argv(
     setattr_in(monkeypatch, "tests.db._service_fixture", "subprocess.Popen", _Popen)
     _proc, log = fx.spawn_service(["/usr/bin/java", "-jar", "a.jar"], {}, log_dir=tmp_path / "l")
     assert seen["argv"] == [
-        "/usr/bin/java", f"-XX:ErrorFile={tmp_path}/hs_err_%p.log", "-jar", "a.jar",
+        "/usr/bin/java", f"-XX:ErrorFile={tmp_path}/hs_err_%p.log",
+        f"-Xmx{fx.SUBSTRATE_ENGINE_HEAP}",
+        f"-XX:ActiveProcessorCount={fx.SUBSTRATE_ENGINE_CPUS}", "-jar", "a.jar",
     ]
     assert log.parent == tmp_path / "l"
+
+
+# ── The report goes to the ORIGINAL tempdir (nexus-kyujr) ────────────────────
+
+
+def test_the_hs_err_report_goes_to_the_original_tempdir_not_the_runs_tmpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside a lab-run grant ``TMPDIR`` is a per-run tmpfs directory deleted at the end of the
+    run; a crash report written there would be gone before anyone looked."""
+    orig, run_t = tmp_path / "orig", tmp_path / "run" / "t"
+    orig.mkdir()
+    run_t.mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(run_t))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() re-reads TMPDIR
+    monkeypatch.setenv(fx.TMP_ORIG_ENV, str(orig))
+    assert tempfile.gettempdir() == str(run_t)
+    assert fx.jvm_error_file_arg() == f"-XX:ErrorFile={orig}/hs_err_%p.log"
+    assert fx.with_error_file(["java", "-jar", "a.jar"])[1] == f"-XX:ErrorFile={orig}/hs_err_%p.log"
+    assert fx.jar_argv("java", "a.jar")[1] == f"-XX:ErrorFile={orig}/hs_err_%p.log"
+
+
+def test_without_a_moved_tempdir_the_report_goes_to_the_tempdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(fx.TMP_ORIG_ENV, raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert fx.jvm_error_file_arg() == f"-XX:ErrorFile={tmp_path}/hs_err_%p.log"

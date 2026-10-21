@@ -369,11 +369,11 @@ class TestGeneratedUnitCarriesExplicitConfigDir:
     """nexus-cd1k0.19 review round 2, finding 4: a unit generated FROM THIS
     POINT ON must carry an explicit --config-dir <resolved absolute path>
     in its argv, never rely on storage_service_stack_matcher's
-    flagless-matches-default fallback — that fallback exists only for
-    units installed BEFORE this fix. Closes the false-positive surface a
-    live, env-scoped `nx daemon service start`/`stop` invocation
-    (upgrade_finish.py's bare CLI calls; e2e sandbox scripts) otherwise
-    has against the matcher's default-dir target."""
+    bare-start branch (decided by the environment check) — that branch
+    exists only for units installed BEFORE this fix. Closes the
+    false-positive surface a live, env-scoped `nx daemon service
+    start`/`stop` invocation (upgrade_finish.py's bare CLI calls; e2e
+    sandbox scripts) otherwise has against the environment check."""
 
     def test_rendered_service_plist_carries_config_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

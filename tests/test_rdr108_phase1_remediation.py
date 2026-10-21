@@ -37,6 +37,8 @@ from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

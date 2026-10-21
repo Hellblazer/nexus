@@ -8,6 +8,9 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from nexus.commands.index import index, _discover_taxonomy
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:

@@ -72,6 +72,14 @@ def _no_taxonomy():
     return None
 
 
+def _no_t1_session():
+    """Stand-in for ``_get_t1()``: a T1 with no session id, so
+    ``_search_render`` skips its best-effort search-trace record
+    (RDR-061 E2). Unstubbed, a bare process mints a CLI-dedicated T1
+    session, which needs a tenant (nexus-j23ni opt-in default)."""
+    return SimpleNamespace(session_id=""), False
+
+
 class TestSearchCrossCorpusNoneContentBoundary:
     """The real parsing boundary: ``search_engine.py``'s ``SearchResult``
     construction from the raw engine-shaped dict must never propagate a
@@ -127,7 +135,8 @@ class TestMcpRenderNoneContentSafety:
         with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: [refonly]), \
              patch("nexus.config.load_config", return_value=_NO_CONTRADICTION_CFG), \
              patch("nexus.mcp.core._search_taxonomy", _no_taxonomy), \
-             patch("nexus.mcp.core._get_catalog", return_value=None):
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
+             patch("nexus.mcp.core._get_t1", _no_t1_session):
             out = _search_render(query="anything", corpus="knowledge__refonly")
         assert isinstance(out, str)
         assert not out.startswith("Error:")

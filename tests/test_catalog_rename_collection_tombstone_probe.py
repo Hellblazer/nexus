@@ -23,6 +23,8 @@ from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog
 
+pytestmark = pytest.mark.t2_tenant
+
 STATS_PATH = "/v1/vectors/stats"
 COLLECTIONS_PATH = "/v1/vectors/collections"
 

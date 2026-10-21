@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 8: production-shaped ownership of an already-migrated product schema, in Liquibase XML
+    instead of Java SQL strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's
+    open-source DSL has no OWNER TO and no GRANT ON SCHEMA.
+
+    Catalog013RlsReplayTest's step 3, the same technique db.changelog-test-diag-view-foreign-owned.xml uses on
+    an empty database: after the superuser walked the master changelog, ${role} (NOSUPERUSER NOBYPASSRLS, made
+    by PgContainerHelper#createLoginRole) gets USAGE and CREATE on nexus, t1 and public and takes OWNERSHIP of
+    every nexus/t1 table and sequence, so the next walk runs as the table owner production's nexus_admin is.
+    The loop reads pg_tables/pg_sequences only. Run through PgContainerHelper#handProductSchemaTo, which
+    validates ${role}; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="product-schema-owner" author="nexus-cbo4a" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO ${role};
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('nexus', 't1') LOOP
+        EXECUTE format('ALTER TABLE %I.%I OWNER TO ${role}', r.schemaname, r.tablename);
+    END LOOP;
+    FOR r IN SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname IN ('nexus', 't1') LOOP
+        EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO ${role}', r.schemaname, r.sequencename);
+    END LOOP;
+END
+$$;
+        </sql>
+    </changeSet>
+</databaseChangeLog>

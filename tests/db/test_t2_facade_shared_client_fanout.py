@@ -36,6 +36,8 @@ import pytest
 
 from nexus.db.storage_mode import T2_FACADE_STORES
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Wrap ``httpx.Client.__init__`` to COUNT constructions without

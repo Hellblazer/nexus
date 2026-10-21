@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.catalog.link_generator import _pdf_content_hash
 from nexus.corpus import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
 
@@ -694,24 +695,39 @@ def link_by_content_hash(
     t3_db,
     collection: str,
 ) -> tuple[int, int, int]:
-    """For each existing catalog Document with non-empty ``head_hash``,
-    find T3 chunks in ``collection`` whose ``content_hash`` matches and
-    append manifest rows.
+    """For each existing catalog Document with a file-content hash, find
+    T3 chunks in ``collection`` whose ``content_hash`` matches and append
+    manifest rows.
 
     Returns ``(linked_chunks, linked_docs, unmatched_chunks)``.
 
     Used when T3 chunks lack ``title`` metadata but have
-    ``content_hash`` (PDF-shaped chunks), and the catalog has
-    Documents with ``head_hash`` populated. The two hashes are the
-    same content-addressed identity so matching is exact.
+    ``content_hash`` (PDF-shaped chunks). The Document side is
+    ``index_content_hash``, else ``meta.content_hash``
+    (``link_generator._pdf_content_hash``), the same file-bytes hash the
+    chunks carry, so matching is exact. ``head_hash`` is never the key:
+    for repo rows it is the indexing commit (nexus-lhmu1, as nexus-utkop).
+    A hash two Documents share names no single Document, so its chunks
+    stay unmatched rather than join an arbitrary one.
     """
     # nexus-2hgxb: same public-read port as link_by_title above.
     entries = catalog.list_by_collection(collection, limit=1_000_000)
-    by_head: dict[str, str] = {
-        e.head_hash: str(e.tumbler) for e in entries if e.head_hash
-    }
-    if not by_head:
+    tumblers_by_hash: dict[str, list[str]] = defaultdict(list)
+    for e in entries:
+        if content_key := _pdf_content_hash(e):
+            tumblers_by_hash[content_key].append(str(e.tumbler))
+    if not tumblers_by_hash:
         return 0, 0, 0
+    by_content: dict[str, str] = {}
+    for content_key, tumblers in tumblers_by_hash.items():
+        if len(tumblers) == 1:
+            by_content[content_key] = tumblers[0]
+        else:
+            _log.warning(
+                "orphan_backfill_content_hash_ambiguous",
+                collection=collection, content_hash=content_key[:16],
+                tumblers=tumblers,
+            )
 
     # nexus-at2ff: was ``t3_db._client.get_collection`` — production make_t3()
     # returns HttpVectorClient, which has no ``_client`` (only the T3Database
@@ -735,7 +751,7 @@ def link_by_content_hash(
             content_hash = str(meta.get("content_hash") or "")
             chash = str(meta.get("chunk_text_hash") or cid)  # RDR-180: cid IS the full chash
             chunk_index = int(meta.get("chunk_index", 0) or 0)
-            if content_hash and content_hash in by_head:
+            if content_hash and content_hash in by_content:
                 by_hash[content_hash].append(ChunkRef(
                     cid=cid, chash=chash, chunk_index=chunk_index,
                 ))
@@ -746,7 +762,7 @@ def link_by_content_hash(
     linked_chunks = 0
     linked_docs = 0
     for content_hash, chunks in by_hash.items():
-        tumbler = by_head[content_hash]
+        tumbler = by_content[content_hash]
         existing = catalog.get_manifest(tumbler)
         start_pos = len(existing)
         # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).

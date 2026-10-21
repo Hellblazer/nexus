@@ -3,7 +3,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -17,7 +19,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +39,13 @@ class ServiceIntegrationTest {
 
     static final String TOKEN = "test-token-secret-0123456789abcdef";
 
+    // nexus_test.rls_probe is a harness-only table (db.changelog-test-rls-probe-harness.xml)
+    // with no generated jOOQ class, so it is referenced by qualified name.
+    private static final Table<?> RLS_PROBE = DSL.table(DSL.name("nexus_test", "rls_probe"));
+    private static final Field<String> PROBE_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> PROBE_KEY = DSL.field(DSL.name("key"), String.class);
+    private static final Field<String> PROBE_PAYLOAD = DSL.field(DSL.name("payload"), String.class);
+
     PostgreSQLContainer<?> pg;
     NexusService service;
     HttpClient http;
@@ -47,10 +55,11 @@ class ServiceIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         // Start embedded postgres on a free port.
-        // nexus-yhmav opt-out: this "skeleton" harness deliberately does NOT run the
-        // master changelog (see bootstrapTestSchema below) -- a shared, already-fully-
-        // migrated-to-HEAD cluster would silently contradict that hermeticity premise.
-        pg = PgContainerHelper.startDedicated();
+        // nexus-yhmav / nexus-7xfh7: this "skeleton" harness deliberately does NOT run the
+        // master changelog (see bootstrapTestSchema below), so it takes an EMPTY database, not a
+        // clone of the migrated template that would silently contradict that hermeticity premise.
+        // Its one role (svc_test) is created IF NOT EXISTS under a name only this class uses.
+        pg = PgContainerHelper.startEmptyDatabase();
 
         // Bootstrap: create service role and RLS schema for test 4. The superuser pool is
         // transient (setup only); close it so it does not leak (review nexus-22man).
@@ -96,15 +105,21 @@ class ServiceIntegrationTest {
     // ─── Test 2: auth 401 matrix ──────────────────────────────────────────────
 
     @Test
-    void version_reportsAppVersion_andExplicitSchemaError_withoutJournal() throws Exception {
-        // nexus-pebfx.4: this harness bootstraps schema manually (no Liquibase),
-        // so /version must report app_version AND an explicit schema_error —
-        // never silently omit the schema fields.
+    void version_reportsAppVersion_andExplicitSchemaError_withoutPublicJournal() throws Exception {
+        // nexus-pebfx.4: this harness never runs the product master changelog and keeps its
+        // own Liquibase journal in nexus_test, so there is no public.databasechangelog and
+        // /version must report app_version AND an explicit schema_error — never silently
+        // omit the schema fields.
         var resp = get("/version", null);
         org.assertj.core.api.Assertions.assertThat(resp.statusCode()).isEqualTo(200);
         org.assertj.core.api.Assertions.assertThat(resp.body())
             .contains("\"app_version\"")
-            .contains("\"schema_error\"");
+            .contains("\"schema_error\"")
+            // The journal-less premise itself: the error is the missing public.databasechangelog,
+            // not a permission error on a journal that exists (installRlsProbeHarness keeps its own
+            // Liquibase journal in nexus_test for exactly this).
+            .contains("databasechangelog")
+            .contains("does not exist");
     }
 
     @Test
@@ -170,15 +185,13 @@ class ServiceIntegrationTest {
 
         // tenant-A sees exactly its 3 rows; must NOT see B's row
         List<String> aKeys = tenantScope.withTenant("tenant-A", ctx ->
-            ctx.fetch("SELECT key FROM nexus_test.rls_probe ORDER BY key")
-               .getValues("key", String.class));
+            ctx.select(PROBE_KEY).from(RLS_PROBE).orderBy(PROBE_KEY).fetch(PROBE_KEY));
         assertThat(aKeys).containsExactlyInAnyOrder("key-a1", "key-a2", "key-a3");
         assertThat(aKeys).doesNotContain("key-b1");  // cross-tenant negative
 
         // tenant-B sees exactly its 1 row; must NOT see any of A's rows
         List<String> bKeys = tenantScope.withTenant("tenant-B", ctx ->
-            ctx.fetch("SELECT key FROM nexus_test.rls_probe ORDER BY key")
-               .getValues("key", String.class));
+            ctx.select(PROBE_KEY).from(RLS_PROBE).orderBy(PROBE_KEY).fetch(PROBE_KEY));
         assertThat(bKeys).containsExactly("key-b1");
         assertThat(bKeys).doesNotContain("key-a1", "key-a2", "key-a3");  // cross-tenant negatives
 
@@ -194,8 +207,9 @@ class ServiceIntegrationTest {
         // withTenant work that throws → txn rolled back, no row persisted
         assertThatCode(() ->
             tenantScope.withTenant("tenant-X", ctx -> {
-                ctx.execute("INSERT INTO nexus_test.rls_probe (tenant_id, key, payload) VALUES (?, ?, ?)",
-                    "tenant-X", "key-x1", "should be rolled back");
+                ctx.insertInto(RLS_PROBE, PROBE_TENANT_ID, PROBE_KEY, PROBE_PAYLOAD)
+                    .values("tenant-X", "key-x1", "should be rolled back")
+                    .execute();
                 throw new RuntimeException("deliberate failure");
             })
         ).hasMessageContaining("deliberate failure");
@@ -204,9 +218,8 @@ class ServiceIntegrationTest {
         // see empty due to RLS even if the row was committed; superuser proves rollback.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var rs = su.createStatement().executeQuery(
-                "SELECT key FROM nexus_test.rls_probe WHERE tenant_id = 'tenant-X'");
-            assertThat(rs.next())
+            assertThat(DSL.using(su, SQLDialect.POSTGRES)
+                    .fetchExists(RLS_PROBE, PROBE_TENANT_ID.eq("tenant-X")))
                 .as("no tenant-X row should exist after rollback (verified via superuser, bypassing RLS)")
                 .isFalse();
         }
@@ -236,76 +249,13 @@ class ServiceIntegrationTest {
     }
 
     /**
-     * Create schema + RLS-enforced table + plain service role (LOGIN, no superuser, no bypassrls).
-     * Pattern mirrors S0.1 spike proof verbatim.
+     * Create the RLS-enforced probe table, the plain service role and the minimal token table
+     * (db.changelog-test-rls-probe-harness.xml). Pattern mirrors the S0.1 spike proof.
      */
-    private void bootstrapTestSchema(DataSource superDs) throws SQLException {
+    private void bootstrapTestSchema(DataSource superDs) throws Exception {
         try (Connection conn = superDs.getConnection()) {
-            conn.setAutoCommit(true);
-
-            // Service role: plain LOGIN, subject to RLS
-            conn.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='svc_test') THEN " +
-                "    CREATE ROLE svc_test LOGIN PASSWORD 'svc_test_pass'; " +
-                "  END IF; " +
-                "END $$");
-
-            // Schema + table
-            conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS nexus_test");
-            conn.createStatement().execute(
-                "CREATE TABLE IF NOT EXISTS nexus_test.rls_probe (" +
-                "  id BIGSERIAL PRIMARY KEY," +
-                "  tenant_id TEXT NOT NULL," +
-                "  key TEXT NOT NULL," +
-                "  payload TEXT" +
-                ")");
-
-            // Enable RLS with FORCE (applies even to table owner)
-            conn.createStatement().execute(
-                "ALTER TABLE nexus_test.rls_probe ENABLE ROW LEVEL SECURITY");
-            conn.createStatement().execute(
-                "ALTER TABLE nexus_test.rls_probe FORCE ROW LEVEL SECURITY");
-
-            // Policy: tenant sees only its own rows via GUC nexus.tenant
-            // Use DROP+CREATE for idempotent re-runs within a test session
-            conn.createStatement().execute(
-                "DROP POLICY IF EXISTS tenant_isolation ON nexus_test.rls_probe");
-            conn.createStatement().execute(
-                "CREATE POLICY tenant_isolation ON nexus_test.rls_probe " +
-                "  USING (tenant_id = current_setting('nexus.tenant', true)) " +
-                "  WITH CHECK (tenant_id = current_setting('nexus.tenant', true))");
-
-            // Grant to service role
-            conn.createStatement().execute(
-                "GRANT USAGE ON SCHEMA nexus_test TO svc_test");
-            conn.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus_test.rls_probe TO svc_test");
-            conn.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus_test.rls_probe_id_seq TO svc_test");
-
-            // RDR-152 bead nexus-gmiaf.32.2: this hand-rolled harness does not run the
-            // master migration, but AuthFilter now resolves bearer→tenant against
-            // nexus.service_tokens. Provide a minimal credential table (shape mirrors
-            // service-tokens-001-baseline.xml; NO RLS — read pre-tenant-context), grant
-            // svc_test SELECT, and seed the test TOKEN as a wildcard bootstrap row so
-            // /v1/_whoami auth resolves the X-Nexus-Tenant header (auth_matrix).
-            conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS nexus");
-            conn.createStatement().execute(
-                "CREATE TABLE IF NOT EXISTS nexus.service_tokens ("
-                + "  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT,"
-                + "  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                + "  expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ,"
-                // nexus-868dq: TokenStore now SELECTs scope on every lookup; a
-                // scope-less table aborts auth mid-request. Mirrors service-tokens-003.
-                + "  scope TEXT NOT NULL DEFAULT 'tenant')");
-            conn.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO svc_test");
-            conn.createStatement().execute(
-                "GRANT SELECT ON nexus.service_tokens TO svc_test");
-            conn.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
-                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
-                + "', 'test-tenant', 'test-bound') ON CONFLICT (token_hash) DO NOTHING");
+            PgContainerHelper.installRlsProbeHarness(
+                conn, dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN));
         }
     }
 
@@ -327,7 +277,8 @@ class ServiceIntegrationTest {
     private void stampAndInsert(Connection conn, String tenant, String key, String payload) {
         PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, true);
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-        ctx.execute("INSERT INTO nexus_test.rls_probe (tenant_id, key, payload) VALUES (?, ?, ?)",
-            tenant, key, payload);
+        ctx.insertInto(RLS_PROBE, PROBE_TENANT_ID, PROBE_KEY, PROBE_PAYLOAD)
+            .values(tenant, key, payload)
+            .execute();
     }
 }

@@ -25,6 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "subagent_start.py"
@@ -255,6 +256,7 @@ def test_sn_subagent_start_script_exists() -> None:
     assert _SN_SCRIPT.exists(), _SN_SCRIPT
 
 
+@pytest.mark.t2_tenant
 def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
     conexus_ctx = _run_conexus(home=tmp_path / "home")
     _assert_seeds_reached(conexus_ctx)
@@ -272,6 +274,7 @@ def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
     assert sn_bytes > 100, "sn subagent_start.py produced suspiciously little content"
 
 
+@pytest.mark.t2_tenant
 def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> None:
     """nexus-cnzei.6 fix round (critic Critical 1): a worktree dispatch is
     a real, named, larger case (injection audit: ~12KB vs ~10KB) that the

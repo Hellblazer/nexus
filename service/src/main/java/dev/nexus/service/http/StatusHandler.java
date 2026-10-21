@@ -89,20 +89,25 @@ import java.util.function.Supplier;
  * to know which posture it is reading.
  *
  * <p>{@code local_embed_activity} is the ORIGINAL (deliverable 2) field:
- * {@code null} in cloud/voyage mode or when no local admission-gate-wired
+ * {@code null} when bge is not built (Voyage-only) or when no local admission-gate-wired
  * embedder is supplied — never a fabricated value. Kept unchanged for any
  * caller already reading it.
  *
  * <p>{@code embedder_activity} (bead nexus-s71lr pass 3, ADDITIVE — see the
  * updated docs/wire-contract-pending.md entry) is a map keyed by each
  * embedder's own {@link dev.nexus.service.vectors.Embedder#modelToken()},
- * covering EVERY embedder {@code embedderRouter} dispatches to — local mode's
- * bge768 (redundant with {@code local_embed_activity} but included for
- * uniformity) AND, the majority posture this pass closes, cloud mode's
- * voyage-code-3 / voyage-context-3 / voyage-3. An embedder that does not
- * track activity (the MiniLM ONNX fallback, test fakes) is simply absent
+ * covering EVERY embedder {@code embedderRouter} dispatches to — bge768 when
+ * built (redundant with {@code local_embed_activity} but included for
+ * uniformity) AND, the majority posture this pass closes, the Voyage family's
+ * voyage-code-3 / voyage-context-3 / voyage-3 when a key is present. An embedder that does not
+ * track activity (the MiniLM parity-test embedder, test fakes) is simply absent
  * from the map, never reported with a fabricated value. Empty {@code {}}
  * when {@code embedderRouter} is null or reports nothing.
+ *
+ * <p>{@code embedding_profile}, {@code reranker} and {@code embedding_degraded} (RDR-210 Phase 2 Step 4,
+ * bead nexus-un7vj, ADDITIVE, after {@code embedder_activity}; see {@link EmbedPosture}) say which family
+ * new collections get, which reranker serves search, and what a choice the boot cannot serve is missing.
+ * Omitted when no posture is bound. {@code local_embed_activity} is non-null whenever bge is built.
  */
 public final class StatusHandler implements HttpHandler {
 
@@ -113,6 +118,35 @@ public final class StatusHandler implements HttpHandler {
     private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
     private final Supplier<Boolean> chunksTenantIsolationIntact; // nullable — key omitted
     private final Supplier<PerCollectionIndexes> perCollectionIndexes; // nullable — key omitted
+    private final Supplier<ChunksLeafBloat> chunksLeafBloat;           // nullable — key omitted
+
+    private volatile Supplier<EmbedPosture> embedPosture;              // nullable — keys omitted
+
+    /**
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: bind the boot posture ({@link EmbedPosture}:
+     * {@code embedding_profile}, {@code reranker}, {@code embedding_degraded}). Unbound, or a supplier that
+     * returns null, omits the three keys; a client reads that as "cannot tell". A setter, not another
+     * constructor tier, because the handler is built before the posture exists.
+     */
+    public StatusHandler embedPosture(Supplier<EmbedPosture> embedPosture) {
+        this.embedPosture = embedPosture;
+        return this;
+    }
+
+    private volatile boolean testTenantResetRoute;
+
+    /**
+     * Bead nexus-0bl77, [additive]: whether this engine registered the test-only
+     * {@code POST /v1/_test/tenant-reset} route ({@code NX_TEST_TENANT_RESET_ROUTE=1}). Reported as
+     * {@code test_tenant_reset_route}, always present, so the cloud client-path gate can assert it is {@code false}
+     * there (an engine older than the route omits the key; the gate treats absent and {@code false} alike). It is
+     * on this route and not on {@code /version} because the conexus image smoke fails on any {@code /version} key
+     * outside the public contract, and this route carries no such allowlist.
+     */
+    public StatusHandler testTenantResetRoute(boolean enabled) {
+        this.testTenantResetRoute = enabled;
+        return this;
+    }
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -127,9 +161,9 @@ public final class StatusHandler implements HttpHandler {
      *                                    Null -> "unknown" mode, empty activity map.
      * @param localEmbedActivitySupplier reads the live snapshot from the
      *                                    process's {@code Bge768Embedder}
-     *                                    (local mode only) for the ORIGINAL
+     *                                    (only when bge is built) for the ORIGINAL
      *                                    {@code local_embed_activity} field.
-     *                                    Null in cloud/voyage mode, where there
+     *                                    Null on the Voyage-only shape, where there
      *                                    is no local embedder to read from ->
      *                                    {@code local_embed_activity} is
      *                                    omitted as JSON {@code null}, never
@@ -254,7 +288,8 @@ public final class StatusHandler implements HttpHandler {
      *
      * <ul>
      *   <li>the READ half's last catalog read, global (the same on every engine, up to when each last read):
-     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code last_read_at}, and {@code expired}, true when
+     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code reindex_leftover} (nexus-rn1yd), {@code last_read_at},
+     *       and {@code expired}, true when
      *       the set is older than three sweep periods plus the read bound and so is answering as empty;</li>
      *   <li>{@code this_engine}, the DDL half of THIS process only.</li>
      * </ul>
@@ -263,15 +298,19 @@ public final class StatusHandler implements HttpHandler {
      *
      * @param valid      parsed {@code pci_} indexes with {@code indisvalid} true at the last read
      * @param invalid    parsed indexes with {@code indisvalid} false (a failed or in-flight build)
-     * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule
+     * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule, EXCLUDING the
+     *                   {@code reindexLeftover} ones
+     * @param reindexLeftover invalid REINDEX CONCURRENTLY leftovers ({@code _ccnew}/{@code _ccold}) of a builder
+     *                   index, which the reconciler drops; counted apart from {@code unparsed}, never in both
      * @param lastReadAt when the last successful read finished; null before the first
      * @param expired    the set is older than {@code 3 * period + readBound} and the router ignores it
      * @param thisEngine this process's DDL half
      * @param sweepSeconds the period of the DDL passes ({@code NX_SEARCH_PCI_SWEEP_SECONDS}); a client reads it to
      *                   judge how old {@code last_ddl_pass_at} may be before it is a stall
      */
-    public record PerCollectionIndexes(int valid, int invalid, int unparsed, java.time.Instant lastReadAt,
-                                       boolean expired, ThisEngine thisEngine, long sweepSeconds) {
+    public record PerCollectionIndexes(int valid, int invalid, int unparsed, int reindexLeftover,
+                                       java.time.Instant lastReadAt, boolean expired, ThisEngine thisEngine,
+                                       long sweepSeconds) {
 
         /**
          * @param builderState  {@code ok}, {@code auth_failed}, {@code no_privilege}, {@code off} or {@code standby}
@@ -297,8 +336,8 @@ public final class StatusHandler implements HttpHandler {
         /** The object as the sweep's last read and the reconciler's status say it. */
         public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
-            return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(), sweep.lastReadAt(),
-                sweep.expired(),
+            return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(),
+                sweep.reindexLeftover(), sweep.lastReadAt(), sweep.expired(),
                 new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
                     ddl.passStartedAt(), ddl.passInProgress()),
                 ddl.sweepSeconds());
@@ -319,6 +358,87 @@ public final class StatusHandler implements HttpHandler {
             Supplier<ReaperStatus> reaperStatus,
             Supplier<Boolean> chunksTenantIsolationIntact,
             Supplier<PerCollectionIndexes> perCollectionIndexes) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, reaperStatus,
+            chunksTenantIsolationIntact, perCollectionIndexes, null);
+    }
+
+    /**
+     * What the leaf bloat view reports on this route (nexus-dxsjc, HNSW maintenance policy nexus-4lnn1 R4,
+     * [additive]): the {@code chunks_leaf_bloat} object. Served from {@link dev.nexus.service.vectors.LeafBloatSweep}'s
+     * cache; the route runs no catalog query (RDR-227).
+     *
+     * <p><b>Aggregates only.</b> This route is unauthenticated, and a cloud engine has a leaf per tenant per model,
+     * so the object carries COUNTS over every leaf and nothing per leaf: no leaf name (it carries a hash of the
+     * tenant), no per-leaf row count, no per-leaf {@code pci_} index. That is Sam's ruling of 2026-10-19. The engine
+     * still computes the per-leaf state (the pinned and starved rules need it) and names a leaf in its log
+     * ({@code event=chunks_leaf_bloat_leaf}, which is not public). Naming leaves over HTTP waits for an
+     * authenticated admin read.
+     *
+     * <p><b>Overdue, not a fraction.</b> A leaf is overdue when {@code dead_rows > overdue_base_rows +
+     * overdue_scale_factor x rows}, rows being the larger of {@code live + dead} and {@code pg_class.reltuples}:
+     * autovacuum's own trigger (1000 + 0.05 x rows, vectors-034) with the scale doubled. An overdue leaf is {@code waiting} (no vacuum finished since, for less than
+     * {@code overdue_warn_after_seconds}), {@code pinned} (a vacuum finished since the leaf became overdue and the
+     * dead rows remain) or {@code starved} (overdue that long with no vacuum finished). {@code overdue} counts the
+     * leaves in any of the three states.
+     *
+     * @param lastReadAt         when the last successful read finished; null before the first
+     * @param expired            the view is older than three sweep periods plus the read bound; the counts are the
+     *                           last read's and must not be trusted as current
+     * @param sweepSeconds       the read period ({@code NX_SEARCH_PCI_SWEEP_SECONDS}), to judge how old a read may be
+     * @param everRead           a read has succeeded since the engine started
+     * @param consecutiveFailures failed reads since the last successful one (or since boot when none has succeeded)
+     * @param leavesTotal        leaves the last read saw
+     * @param policyUnset        leaves missing at least one of the four autovacuum parameters
+     * @param autovacuumDisabled leaves with {@code autovacuum_enabled} off
+     * @param overdue            leaves overdue on the last read, in any state
+     * @param pinned             leaves in state {@code pinned}
+     * @param starved            leaves in state {@code starved}
+     * @param maxOverdueForSeconds the longest any leaf has been overdue, in whole seconds; 0 when none is
+     */
+    public record ChunksLeafBloat(java.time.Instant lastReadAt, boolean expired, long sweepSeconds, boolean everRead,
+                                  int consecutiveFailures, int leavesTotal, int policyUnset, int autovacuumDisabled,
+                                  int overdue, int pinned, int starved, long maxOverdueForSeconds) {
+
+        /** The object as the sweep's last read says it: counts over every leaf, no leaf named. */
+        public static ChunksLeafBloat of(dev.nexus.service.vectors.LeafBloatSweep.Status sweep, long sweepSeconds) {
+            var all = sweep.leaves();
+            int unset = 0;
+            int disabled = 0;
+            int overdue = 0;
+            int pinned = 0;
+            int starved = 0;
+            long longest = 0;
+            for (var l : all) {
+                unset += l.leaf().policySet() ? 0 : 1;
+                disabled += l.leaf().autovacuumEnabled() ? 0 : 1;
+                if (l.overdue()) {
+                    overdue++;
+                    longest = Math.max(longest, l.overdueForSeconds());
+                }
+                var state = l.state();
+                pinned += state == dev.nexus.service.vectors.LeafBloatSweep.OverdueState.PINNED ? 1 : 0;
+                starved += state == dev.nexus.service.vectors.LeafBloatSweep.OverdueState.STARVED ? 1 : 0;
+            }
+            return new ChunksLeafBloat(sweep.lastReadAt(), sweep.expired(), sweepSeconds, sweep.everRead(),
+                sweep.consecutiveFailures(), all.size(), unset, disabled, overdue, pinned, starved, longest);
+        }
+    }
+
+    /**
+     * @param chunksLeafBloat nexus-dxsjc ([additive]): the {@code chunks_leaf_bloat} object. A null supplier omits the
+     *                     key (an engine, or a wiring, that predates it); a supplier that returns null omits it too
+     *                     (the sweep is not built yet). A client reads a missing key as "cannot tell".
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus,
+            Supplier<Boolean> chunksTenantIsolationIntact,
+            Supplier<PerCollectionIndexes> perCollectionIndexes,
+            Supplier<ChunksLeafBloat> chunksLeafBloat) {
+        this.chunksLeafBloat = chunksLeafBloat;
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
@@ -359,6 +479,14 @@ public final class StatusHandler implements HttpHandler {
         }
         body.append('}');
 
+        // RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: the profile, the reranker and the degraded-boot
+        // description, the same three keys /version reports.
+        Supplier<EmbedPosture> postureSource = embedPosture;
+        EmbedPosture posture = postureSource != null ? postureSource.get() : null;
+        if (posture != null) {
+            posture.appendFields(body);
+        }
+
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
         // counter, not per-embedder — see this class's own javadoc. Counts raced embeds of
         // COMMITTED writes only, from both feeders (RacedEmbedActivity): a rolled-back or
@@ -370,6 +498,15 @@ public final class StatusHandler implements HttpHandler {
         // raced-embed counter above.
         body.append(",\"supplied_vector_mismatches_total\":").append(SuppliedVectorMismatchActivity.total());
 
+        // RDR-222 Phase 1 (bead nexus-yye8l.4), [additive]: the four RequestLedger claim
+        // outcomes since boot, same shape as the raced-embed counter. No ledger row count: this
+        // route is unauthenticated and the ledger is FORCE RLS.
+        var ledger = dev.nexus.service.db.RequestLedgerActivity.snapshot();
+        body.append(",\"request_ledger_replays_total\":").append(ledger.replays());
+        body.append(",\"request_ledger_in_flight_total\":").append(ledger.inFlight());
+        body.append(",\"request_ledger_key_reused_total\":").append(ledger.keyReused());
+        body.append(",\"request_ledger_takeovers_total\":").append(ledger.takeovers());
+
         // RDR-223 Phase 3 Step 2 (bead nexus-z0o2p.24), [additive]: requests the ownerless-write
         // check refused (enforce) or let through and counted (log-only), since boot, plus the mode
         // this process runs. A log-only run's reader asks "did anything write ownerless?" here.
@@ -379,6 +516,9 @@ public final class StatusHandler implements HttpHandler {
             body.append(",\"ownerless_write_mode\":")
                 .append(HttpUtil.jsonString(ownerlessWritePolicy.mode().wire()));
         }
+
+        // nexus-0bl77, [additive]: always present; true only when the test-only tenant reset route is registered.
+        body.append(",\"test_tenant_reset_route\":").append(testTenantResetRoute);
 
         // RDR-192 Phase 3 gate S5 (bead nexus-wbfpw.56), [additive]: the engine reaper's liveness. Absent key =
         // an engine (or wiring) that predates it; {"enabled":false} = no reaper in this process.
@@ -421,6 +561,15 @@ public final class StatusHandler implements HttpHandler {
             }
         }
 
+        // nexus-dxsjc (nexus-4lnn1 R4), [additive]: aggregate bloat of nexus.chunks leaves, from
+        // the sweep's cache. Absent = an engine that predates it, or a sweep not built yet.
+        if (chunksLeafBloat != null) {
+            ChunksLeafBloat b = chunksLeafBloat.get();
+            if (b != null) {
+                appendChunksLeafBloat(body, b);
+            }
+        }
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -446,6 +595,7 @@ public final class StatusHandler implements HttpHandler {
         body.append(",\"per_collection_indexes\":{\"valid\":").append(p.valid())
             .append(",\"invalid\":").append(p.invalid())
             .append(",\"unparsed\":").append(p.unparsed())
+            .append(",\"reindex_leftover\":").append(p.reindexLeftover())
             .append(",\"last_read_at\":");
         appendSeconds(body, p.lastReadAt());
         body.append(",\"expired\":").append(p.expired())
@@ -460,6 +610,30 @@ public final class StatusHandler implements HttpHandler {
         appendSeconds(body, p.thisEngine().passStartedAt());
         body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
         body.append("}}");
+    }
+
+    private static void appendChunksLeafBloat(StringBuilder body, ChunksLeafBloat b) {
+        body.append(",\"chunks_leaf_bloat\":{\"last_read_at\":");
+        appendSeconds(body, b.lastReadAt());
+        body.append(",\"expired\":").append(b.expired())
+            .append(",\"sweep_seconds\":").append(b.sweepSeconds())
+            .append(",\"ever_read\":").append(b.everRead())
+            .append(",\"consecutive_failures\":").append(b.consecutiveFailures())
+            .append(",\"overdue_base_rows\":")
+            .append(dev.nexus.service.vectors.LeafBloatCatalog.OVERDUE_BASE_ROWS)
+            .append(",\"overdue_scale_factor\":")
+            .append(java.math.BigDecimal.valueOf(dev.nexus.service.vectors.LeafBloatCatalog.OVERDUE_SCALE_FACTOR)
+                .setScale(2, java.math.RoundingMode.HALF_UP).toPlainString())
+            .append(",\"overdue_warn_after_seconds\":")
+            .append(dev.nexus.service.vectors.LeafBloatSweep.OVERDUE_WARN_AFTER.toSeconds())
+            .append(",\"leaves_total\":").append(b.leavesTotal())
+            .append(",\"policy_unset\":").append(b.policyUnset())
+            .append(",\"autovacuum_disabled\":").append(b.autovacuumDisabled())
+            .append(",\"overdue\":").append(b.overdue())
+            .append(",\"pinned\":").append(b.pinned())
+            .append(",\"starved\":").append(b.starved())
+            .append(",\"max_overdue_for_seconds\":").append(b.maxOverdueForSeconds())
+            .append('}');
     }
 
     /** A time in whole seconds, as the reaper's are, or JSON null. */

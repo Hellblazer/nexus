@@ -31,6 +31,7 @@ from nexus.health import (
     _resolve_mcp_binary,
 )
 from tests._module_seam import setattr_in
+import pytest
 
 
 def _write_fake_binary(path: Path, script: str) -> None:
@@ -484,6 +485,7 @@ class TestDoctorCliMcpEntryPointComposition:
     Neither proves the two compose — a REAL crashing binary reaching a
     REAL `nx doctor` CLI invocation end to end."""
 
+    @pytest.mark.t2_tenant
     def test_real_crashing_binary_surfaces_as_doctor_exit_1(
         self, tmp_path: Path, monkeypatch
     ) -> None:

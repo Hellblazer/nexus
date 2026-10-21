@@ -2,6 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import java.util.HexFormat;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -17,7 +22,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +36,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -204,8 +212,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
             // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.assign_from_chashes_" + DIM + "(text, text[], boolean, text, text)", SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -524,21 +531,22 @@ class TopicsDocCountDeadlockConcurrencyTest {
             try (Connection conn = svcDs.getConnection()) {
                 conn.setAutoCommit(false);
                 PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
-                StringBuilder sql = new StringBuilder(
-                    "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) VALUES ");
-                for (int i = 0; i < sorted.size(); i++) {
-                    if (i > 0) sql.append(", ");
-                    sql.append("(?, decode(?, 'hex'), ?, 'centroid', ?, ?)");
+                // The multi-row INSERT is a typed jOOQ statement, rendered with `?` bind markers and bound by hand
+                // below, so it is still PREPARED BEFORE the barrier and EXECUTED AFTER it (jOOQ never executes
+                // it: ctx.render only builds the text). doc_id binds the decoded bytes directly (the old text did
+                // decode(?, 'hex') server side); 'centroid' stays a literal in the statement.
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+                var rows = ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
+                for (ChashTopic ct : sorted) {
+                    rows = rows.values(DSL.val(TENANT), DSL.val(HexFormat.of().parseHex(ct.chashHex())),
+                        DSL.val(ct.topicId()), DSL.inline("centroid"), DSL.val(collection), DSL.val(MODEL));
                 }
-                try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                try (PreparedStatement ps = conn.prepareStatement(ctx.render(rows))) {
                     int p = 1;
-                    for (ChashTopic ct : sorted) {
-                        ps.setString(p++, TENANT);
-                        ps.setString(p++, ct.chashHex());
-                        ps.setLong(p++, ct.topicId());
-                        ps.setString(p++, collection);
-                        ps.setString(p++, MODEL);
+                    for (Object bind : rows.getBindValues()) {
+                        ps.setObject(p++, bind);
                     }
                     barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
                     ps.execute();
@@ -586,54 +594,24 @@ class TopicsDocCountDeadlockConcurrencyTest {
     private void downgradeTriggerToPreFixBody() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("""
-                CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
-                    RETURNS TRIGGER
-                    LANGUAGE plpgsql
-                    SECURITY INVOKER
-                AS $fn$
-                BEGIN
-                    UPDATE nexus.topics t
-                       SET doc_count = (
-                           SELECT COUNT(*)
-                             FROM nexus.topic_assignments ta
-                            WHERE ta.topic_id = t.id
-                              AND ta.tenant_id = t.tenant_id
-                       )
-                      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
-                     WHERE t.id = a.topic_id
-                       AND t.tenant_id = a.tenant_id;
-                    RETURN NULL;
-                END;
-                $fn$;
-                """);
-            su.createStatement().execute("""
-                CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
-                    RETURNS TRIGGER
-                    LANGUAGE plpgsql
-                    SECURITY INVOKER
-                AS $fn$
-                BEGIN
-                    UPDATE nexus.topics t
-                       SET doc_count = (
-                           SELECT COUNT(*)
-                             FROM nexus.topic_assignments ta
-                            WHERE ta.topic_id = t.id
-                              AND ta.tenant_id = t.tenant_id
-                       )
-                      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
-                     WHERE t.id = a.topic_id
-                       AND t.tenant_id = a.tenant_id;
-                    RETURN NULL;
-                END;
-                $fn$;
-                """);
+            // The pre-fix bodies ARE the product's taxonomy-003-1/-2 text (byte-identical to the hand copies this
+            // replaced, checked 2026-10-19 after stripping the XML indentation): replayed, not copied.
+            // The RED premise is the UNORDERED body: if the changeset ever gained ORDER BY / FOR UPDATE, this
+            // replay would stop reproducing the deadlock and the test would go quietly green.
+            for (String id : List.of("taxonomy-003-1", "taxonomy-003-2")) {
+                assertThat(PgContainerHelper.changesetForwardText(PRE_FIX_TRIGGER_CHANGELOG, id).toUpperCase())
+                    .as("%s must still be the unordered pre-fix body", id)
+                    .doesNotContain("ORDER BY")
+                    .doesNotContain("FOR UPDATE");
+            }
+            PgContainerHelper.replayChangeset(su, PRE_FIX_TRIGGER_CHANGELOG, "taxonomy-003-1");
+            PgContainerHelper.replayChangeset(su, PRE_FIX_TRIGGER_CHANGELOG, "taxonomy-003-2");
         }
     }
 
     /**
      * Restores the REAL, live taxonomy-013 fixed bodies by extracting them DIRECTLY
-     * from the changelog resource (via {@link #extractChangesetSql}) rather than a
+     * from the changelog resource (via {@link PgContainerHelper#replayChangeset}) rather than a
      * hand-copied literal — single source of truth, zero drift risk between this test
      * and the changeset it validates.
      */
@@ -648,105 +626,62 @@ class TopicsDocCountDeadlockConcurrencyTest {
         // (tenantScope.withTenant sets nexus.tenant correctly), and rawInsertTask's raw
         // connection explicitly sets it too (PgContainerHelper#setTenant) -- the guard
         // never fires for either.
-        String insSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-017-1");
-        String delSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-017-2");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(insSql);
-            su.createStatement().execute(delSql);
+            PgContainerHelper.replayChangeset(su, LIVE_TRIGGER_CHANGELOG, "taxonomy-017-1");
+            PgContainerHelper.replayChangeset(su, LIVE_TRIGGER_CHANGELOG, "taxonomy-017-2");
         }
     }
 
-    /** Extracts the "up" {@code <sql>} body text (the child directly under
-     *  {@code <changeSet id="...">}, NOT the one nested inside its {@code <rollback>})
-     *  for the given changeSet id from taxonomy-013-doc-count-lock-order.xml. */
+    /** Changelog holding the PRE-FIX (first) trigger generation, which the RED arm reinstalls. */
+    private static final String PRE_FIX_TRIGGER_CHANGELOG = "db/changelog/taxonomy-003-doc-count-trigger.xml";
+
     /** Changelog holding the LIVE trigger generation (see restoreFixedTriggerBody). */
     private static final String LIVE_TRIGGER_CHANGELOG =
         "db/changelog/taxonomy-017-doc-count-posture-tripwire.xml";
 
-    private static String extractChangesetSql(String changelogResource, String changeSetId) throws Exception {
-        var dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
-        dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        var db = dbf.newDocumentBuilder();
-        org.w3c.dom.Document doc;
-        try (var in = TopicsDocCountDeadlockConcurrencyTest.class.getClassLoader()
-                .getResourceAsStream(changelogResource)) {
-            assertThat(in).as(changelogResource + " must be on the test classpath").isNotNull();
-            doc = db.parse(in);
-        }
-        var changeSets = doc.getElementsByTagName("changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            var cs = (org.w3c.dom.Element) changeSets.item(i);
-            if (!changeSetId.equals(cs.getAttribute("id"))) continue;
-            var children = cs.getChildNodes();
-            for (int j = 0; j < children.getLength(); j++) {
-                var node = children.item(j);
-                if (node instanceof org.w3c.dom.Element el && "sql".equals(el.getTagName())) {
-                    return el.getTextContent();
-                }
-            }
-        }
-        throw new IllegalStateException("changeSet " + changeSetId + " not found or has no direct <sql> child");
-    }
-
     // ── fixtures ────────────────────────────────────────────────────────────────
 
     private void seedCentroid(Connection su, String collection, long topicId, float[] emb) throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.taxonomy_centroids"
-                // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
-                // nexus-tk070.p6a follow-on) -- no assertion in this class
-                // reads the label value.
-                + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + DIM
-                + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setLong(3, topicId);
-            ps.setString(4, "seed-centroid-label");
-            ps.setString(5, MODEL);
-            ps.setString(6, vectorLiteral(emb));
-            ps.executeUpdate();
-        }
+        // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
+        // nexus-tk070.p6a follow-on) -- no assertion in this class
+        // reads the label value.
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
+            .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT)
+            .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+            .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
+            .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
+            .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)
+            .set(VectorSeeds.centroidEmbedding(DIM), Vector.of(emb))
+            .execute();
     }
 
     private void seedChunk(Connection su, String collection, String hexChashValue, float[] emb) throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks"
-                + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, hexChashValue);
-            ps.setString(4, MODEL);
-            ps.setString(5, "seed text " + hexChashValue);
-            ps.setString(6, vectorLiteral(emb));
-            ps.executeUpdate();
-        }
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
+            .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+            .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
+            .set(VectorSeeds.chunkEmbedding(DIM), Vector.of(emb))
+            .execute();
     }
 
     private int docCount(long topicId) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT doc_count FROM nexus.topics WHERE tenant_id = ? AND id = ?")) {
-            ps.setString(1, TENANT);
-            ps.setLong(2, topicId);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("topic %d must exist", topicId).isTrue();
-                return rs.getInt(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            Integer count = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPICS.DOC_COUNT).from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.ID.eq(topicId)))
+                .fetchOne(TOPICS.DOC_COUNT);
+            assertThat(count).as("topic %d must exist", topicId).isNotNull();
+            return count;
         }
     }
 
     private int actualAssignmentCount(long topicId) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id = ? AND topic_id = ?")) {
-            ps.setString(1, TENANT);
-            ps.setLong(2, topicId);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getInt(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(TOPIC_ASSIGNMENTS,
+                TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)));
         }
     }
 
@@ -764,14 +699,5 @@ class TopicsDocCountDeadlockConcurrencyTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
     }
 }

@@ -79,6 +79,9 @@ $cred = New-Object PSCredential($GuestUser, $sec)
 # A failed open is retried every 10 s for 2 minutes while the guest is Running; a guest that is not Running
 # stops the script at once. After a failure, the guest's failed sign-ins (events 4625 and 4776) from a minute
 # before the first one are printed.
+# It then sets NX_NO_TELEMETRY=1 in the guest, in the session and Machine-wide: a restored guest is a fresh
+# install, and every run used to send conexus an install ping (nexus-ca5rw). The scheduled-task payloads
+# set it too, since an Interactive task joins a signed-in session whose environment predates this.
 # Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
 function Open-GuestSession($Name) {
     $since = $null
@@ -104,6 +107,9 @@ function Open-GuestSession($Name) {
         Write-Host "guest failed sign-ins since $($since.ToUniversalTime().ToString('HH:mm:ss')): $($ev.Count)"
         foreach ($e in $ev) { Write-Host "  $e" }
     }
+    Invoke-Command -Session $sess {
+        [Environment]::SetEnvironmentVariable('NX_NO_TELEMETRY', '1', 'Machine'); $env:NX_NO_TELEMETRY = '1'
+    } | Out-Null
     $sess
 }
 $t0 = Get-Date
@@ -157,7 +163,9 @@ try {
                 # the DLL runs of 2026-10-14 needed: the engine's tokenizer library, which it extracts under
                 # .cache\nexus\djl, ONNX Runtime, which it extracts to %TEMP%\onnxruntime-java<digits> at every start
                 # (blocked under the enforced rules; the audit run did not record it), and Defender's scanning DLL,
-                # which Defender loads into every process.
+                # which Defender loads into every process. An engine after the one carrying nexus-8ool4 loads ONNX
+                # Runtime from .cache\nexus\ort_native instead (covered by the first rule); keep the Temp rule for
+                # the earlier engines this driver still installs.
                 $dllExtra = @('.cache\nexus\*', 'AppData\Local\Temp\onnxruntime-java*')
                 $dll = '<RuleCollection Type="Dll" EnforcementMode="' + $(if ($appLocker -eq 'allow-dll') { 'Enabled' } else { 'AuditOnly' }) + '">' +
                     (& $path 'fe64f59f-6fca-45e5-a731-0f6715327c38' 'Program Files DLLs' $everyone '%PROGRAMFILES%\*') +

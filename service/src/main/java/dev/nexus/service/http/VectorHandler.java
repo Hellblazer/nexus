@@ -35,6 +35,7 @@ import java.util.Map;
  * <pre>
  *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
  *   POST /v1/vectors/upsert-reference-only  410 Gone (retired, RDR-223 Phase 3 Step 2, nexus-z0o2p.24)
+ *   POST /v1/vectors/store-put               410 Gone (retired, nexus-nt76j)
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
@@ -42,7 +43,6 @@ import java.util.Map;
  *   POST /v1/vectors/search-topic-scoped     combined topic-scoped query (chunk-level) — RDR-156 P4
  *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
  *   POST /v1/vectors/search-aspect-scoped    combined aspect-filtered query (vector rank + document_aspects predicate) — RDR-156 D5
- *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check);
  *                                    include_non_live=true returns ids+metadata physically stored, ignoring
  *                                    live(c) (RDR-192 Step 5 amendment, nexus-wbfpw.10)
@@ -150,6 +150,8 @@ public final class VectorHandler implements HttpHandler {
     private final PgVectorRepository  pgRepo;
     private final RerankStage         rerankStage;
     private final OwnerlessWritePolicy ownerlessWritePolicy;
+    /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
+    private final KeyedSweep keyedSweep;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -180,20 +182,44 @@ public final class VectorHandler implements HttpHandler {
     /**
      * Full wiring plus the ownerless-write policy (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
      *
-     * @param ownerlessWritePolicy what {@code upsert-chunks} and {@code store-put} do with a chash that
+     * @param ownerlessWritePolicy what {@code upsert-chunks} does with a chash that
      *                             has no live manifest row: refuse it (the default) or log and count it
      */
     public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
                          dev.nexus.service.vectors.Reranker reranker,
                          OwnerlessWritePolicy ownerlessWritePolicy) {
+        this(embedderRouter, pgRepo, reranker, ownerlessWritePolicy, null);
+    }
+
+    /**
+     * Full wiring plus the request ledger (RDR-222 Phase 1, nexus-yye8l.5).
+     *
+     * @param requestLedger the ledger the three bounded sweep forms record an {@code Idempotency-Key} in
+     *                      (may be null: a keyed request is then refused {@code idempotency_key_unsupported})
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy,
+                         dev.nexus.service.db.RequestLedger requestLedger) {
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
         this.rerankStage    = new RerankStage(reranker);
         this.ownerlessWritePolicy = ownerlessWritePolicy;
+        this.keyedSweep     = requestLedger == null ? null : new KeyedSweep(requestLedger);
     }
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
+        try {
+            dispatch(exchange);
+        } finally {
+            // A keyed sweep arms a before-send hook that HttpUtil.send fires; if the handler returned without
+            // sending (it always sends today), drop it rather than let it sit in the registry.
+            HttpUtil.discardBeforeSend(exchange);
+        }
+    }
+
+    private void dispatch(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
         // Strip prefix /v1/vectors → /upsert-chunks, /search, etc.
         String op = path.replaceFirst("^/v1/vectors", "");
@@ -203,6 +229,7 @@ public final class VectorHandler implements HttpHandler {
             switch (op) {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
                 case "/upsert-reference-only" -> handleUpsertReferenceOnlyGone(exchange); // RDR-223 P3.2: retired
+                case "/store-put"     -> handleStorePutGone(exchange);   // nexus-nt76j: retired
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/search-per-collection" -> handleSearchPerCollection(exchange, method);  // nexus-tu8wp.1
@@ -211,7 +238,6 @@ public final class VectorHandler implements HttpHandler {
                 case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
                 case "/search-graph-hop"       -> handleSearchGraphHop(exchange, method);        // RDR-156 P4 (houg9)
                 case "/search-aspect-scoped"   -> handleSearchAspectScoped(exchange, method);    // RDR-156 D5 (ubnwk)
-                case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/get-all-metadata" -> handleGetAllMetadata(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
@@ -236,7 +262,7 @@ public final class VectorHandler implements HttpHandler {
         } catch (dev.nexus.service.vectors.UpstreamAuthException e) {
             // nexus-pmhpc: upstream (Voyage) rejected OUR credentials — an
             // operator/config problem on every embedding-bearing route
-            // (store-put, search, query, hybrid). 502 Bad Gateway with the
+            // (search, query, hybrid, upsert-chunks). 502 Bad Gateway with the
             // actionable detail, never an opaque 500.
             log.error("event=vector_upstream_auth_failed op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 502, json(Map.of("error", e.getMessage())));
@@ -359,6 +385,20 @@ public final class VectorHandler implements HttpHandler {
                 "nothing_moved", !e.somethingMoved(),
                 "audit_ids", e.auditIds(),
                 "moved_chashes", e.movedChashes())));
+        } catch (dev.nexus.service.db.RequestLedger.ClaimContendedException e) {
+            // nexus-yye8l.20: the request ledger could not settle the key in its bounded claim rounds, because
+            // other attempts kept taking or purging the row between this one's read and write. Nothing was
+            // written for this attempt, so a resend with the same key is safe: 503, inside the client's gateway
+            // retry codes, not the 422 ("do not resend") the IllegalStateException arm gave it before.
+            // nexus-yye8l.22: also a claim whose lock wait tripped lock_timeout and whose follow-up read found the
+            // row absent or open to takeover; nothing was written either. A trip on a row another attempt holds
+            // (a marker transaction stalled between its UPDATE and its COMMIT) never reaches here: the ledger
+            // answers InFlight for it, which KeyedSweep sends as the 409 the client polls on.
+            log.warn("event=request_ledger_claim_contended op={} error={}", op, e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Integer.toString(KeyedSweep.CLAIM_CONTENDED_RETRY_AFTER_SECONDS));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                "error", KeyedSweep.CLAIM_CONTENDED_ERROR,
+                "retry_after_seconds", KeyedSweep.CLAIM_CONTENDED_RETRY_AFTER_SECONDS)));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -547,6 +587,22 @@ public final class VectorHandler implements HttpHandler {
             "error", "POST /v1/vectors/upsert-reference-only is retired: it wrote chunks no document owns. "
                 + "Write chunks and their manifest rows together through POST /v1/catalog/manifest/write_many "
                 + "and POST /v1/catalog/manifest/append")));
+    }
+
+    /**
+     * POST /v1/vectors/store-put: RETIRED (nexus-nt76j).
+     *
+     * <p>The single-chunk put had no caller left once RDR-223 Phase 3.3 moved every note writer onto
+     * the combined chunk-plus-owner write, and the engine already refused its ownerless writes. No
+     * client from v7.68.0 on sends it; an older one does, so the answer is 410 Gone with the fix named,
+     * as {@link #handleUpsertReferenceOnlyGone} answers its retired route, not the default arm's bare 404.
+     */
+    private void handleStorePutGone(HttpExchange ex) throws IOException {
+        HttpUtil.send(ex, 410, json(Map.of(
+            "error", "POST /v1/vectors/store-put is retired: the single-chunk put wrote chunks no document owns. "
+                + "Upgrade conexus (v7.68.0 or later writes chunks and their manifest rows together through "
+                + "POST /v1/catalog/manifest/write_many and POST /v1/catalog/manifest/append) and restart "
+                + "long-lived nx-mcp and Claude Code sessions so they stop running the old client")));
     }
 
     /**
@@ -942,42 +998,6 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /**
-     * POST /v1/vectors/store-put
-     *
-     * <p>Request:
-     * <pre>
-     * {
-     *   "collection": "knowledge__...",
-     *   "doc_id":     "sha256hex...",   // chunk ID
-     *   "content":    "chunk text",
-     *   "metadata":   {...}              // optional
-     * }
-     * </pre>
-     *
-     * <p>Response 200: {"id": "..."}
-     */
-    private void handleStorePut(HttpExchange ex, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var repo   = requirePgRepo(ex);
-        var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
-        String collection  = requireString(body, "collection");
-        String docId       = requireString(body, "doc_id");
-        // RDR-223 P3.2: a non-canonical id is a 400 BEFORE the repository resolves the collection or
-        // asks about ownership, as on upsert-chunks (the id IS the chash).
-        dev.nexus.service.db.Chash.requireCanonical(docId, "doc_id");
-        String content     = requireString(body, "content");
-        Map<String, Object> metadata = optMap(body, "metadata");
-        if (metadata == null) metadata = Map.of();
-
-        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata,
-                ownershipGuard(ex, "store-put"));
-        // Emit token count from the doc-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, putResult.tokens());
-        HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));
-    }
-
-    /**
      * POST /v1/vectors/get
      *
      * <p>Incremental-sync staleness check for the Python {@code _ServiceCollectionStub}
@@ -1329,7 +1349,12 @@ public final class VectorHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
+        // RDR-222 Phase 1: an Idempotency-Key the engine cannot use is a 400 and nothing runs, never an ignored
+        // key (an ignored key reads `unknown` on the status route, and a polling client would resend into a
+        // second execution). The shape is judged below, once the body says whether it is a keyed form.
+        KeyedRequest keyed = keyedRequest(ex);
+        byte[] raw = readBodyBytes(ex);
+        Map<String, Object> body = parseBody(raw);
         String collection           = requireString(body, "collection");
         String quarantineCollection = requireString(body, "quarantine_collection");
         String quarantinedAt        = requireString(body, "quarantined_at");
@@ -1358,38 +1383,166 @@ public final class VectorHandler implements HttpHandler {
         // path below; the response still echoes {"given": false} so a client can tell this engine knows the field.
         FloorRequest floor = resolveFloor(body);
         if (floor.given()) {
+            if (keyed != null) {
+                // The keyed floored form is the bounded one (222-research-14): a floor with no row_limit is not.
+                if (rowLimit <= 0) { refuseKey(ex, "idempotency_key_unsupported"); }
+                final int limit = rowLimit;
+                final int dim = keyedDim(ex, keyed, repo, tenant, collection, QUARANTINE_ROUTE, raw);
+                this.<PgVectorRepository.QuarantineFlooredOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
+                    dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
+                    marker -> repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
+                        sampleLimit, limit, floor.fraction(), floor.minChunks(), floor.force(), dim, marker),
+                    out -> flooredQuarantineBody(out, limit, floor));
+                return;
+            }
             var out = repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
                 sampleLimit, rowLimit > 0 ? rowLimit : null, floor.fraction(), floor.minChunks(), floor.force());
-            var resp = new java.util.LinkedHashMap<String, Object>();
-            resp.put("moved", out.moved());
-            resp.put("sample", out.sample());
-            if (rowLimit > 0) {
-                resp.put("remaining", out.remaining());
-                resp.put("row_limit", rowLimit);
-            }
-            resp.put("refused", out.refused());
-            if (out.reapableCount() != null) resp.put("reapable_count", out.reapableCount());
-            if (out.totalCount() != null) resp.put("total_count", out.totalCount());
-            resp.put("floor", floor.echo());
-            HttpUtil.send(ex, 200, json(resp));
+            HttpUtil.send(ex, 200, json(flooredQuarantineBody(out, rowLimit, floor)));
             return;
         }
 
         if (rowLimit > 0) {
+            if (keyed != null) {
+                final int limit = rowLimit;
+                final int dim = keyedDim(ex, keyed, repo, tenant, collection, QUARANTINE_ROUTE, raw);
+                this.<PgVectorRepository.QuarantineBoundedOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
+                    dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
+                    marker -> repo.quarantineOrphansBounded(
+                        tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, limit, dim, marker),
+                    out -> boundedQuarantineBody(out, limit, floor));
+                return;
+            }
             var bounded = repo.quarantineOrphansBounded(
                 tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit);
-            HttpUtil.send(ex, 200, json(Map.of(
-                "moved", bounded.moved(),
-                "sample", bounded.sample(),
-                "remaining", bounded.remaining(),
-                "row_limit", rowLimit,
-                "floor", floor.echo())));
+            HttpUtil.send(ex, 200, json(boundedQuarantineBody(bounded, rowLimit, floor)));
             return;
         }
 
+        if (keyed != null) {
+            // The unbounded form: no key can be honoured.
+            refuseKey(ex, "idempotency_key_unsupported");
+        }
         var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
         HttpUtil.send(ex, 200, json(Map.of(
             "moved", outcome.moved(), "sample", outcome.sample(), "floor", floor.echo())));
+    }
+
+    static final String QUARANTINE_ROUTE = "/v1/vectors/gc/quarantine-orphans";
+    static final String RESTORE_ROUTE = "/v1/vectors/gc/restore-rereferenced";
+    static final String EXPIRE_ROUTE = "/v1/vectors/gc/expire-quarantine";
+
+    /**
+     * The most distinct chashes one bounded expire page takes: {@code gc_audit}'s chash ceiling, equal to the
+     * clamp inside {@code nexus.gc_expire_quarantine_bounded} (vectors-035), so the response echoes the
+     * {@code row_limit} the function applied. Pinned by {@code VectorHandlerRowLimitRoutingTest} and the
+     * function's own clamp test.
+     */
+    static final int GC_EXPIRE_ROW_LIMIT_MAX = 5_000;
+
+    /**
+     * The body of the bounded, floor-less quarantine form. One function for the keyed and the unkeyed call, so
+     * a replayed body and a first body come from the same builder and the unkeyed body is unchanged.
+     */
+    static Map<String, Object> boundedQuarantineBody(PgVectorRepository.QuarantineBoundedOutcome bounded,
+                                                     int rowLimit, FloorRequest floor) {
+        return Map.of(
+            "moved", bounded.moved(),
+            "sample", bounded.sample(),
+            "remaining", bounded.remaining(),
+            "row_limit", rowLimit,
+            "floor", floor.echo());
+    }
+
+    /** The body of the floored quarantine form, bounded when {@code rowLimit > 0}. */
+    static Map<String, Object> flooredQuarantineBody(PgVectorRepository.QuarantineFlooredOutcome out,
+                                                     int rowLimit, FloorRequest floor) {
+        var resp = new java.util.LinkedHashMap<String, Object>();
+        resp.put("moved", out.moved());
+        resp.put("sample", out.sample());
+        if (rowLimit > 0) {
+            resp.put("remaining", out.remaining());
+            resp.put("row_limit", rowLimit);
+        }
+        resp.put("refused", out.refused());
+        if (out.reapableCount() != null) resp.put("reapable_count", out.reapableCount());
+        if (out.totalCount() != null) resp.put("total_count", out.totalCount());
+        resp.put("floor", floor.echo());
+        return resp;
+    }
+
+    /** The body of the bounded restore form. */
+    static Map<String, Object> boundedRestoreBody(PgVectorRepository.RestoreBoundedOutcome bounded, int rowLimit) {
+        return Map.of(
+            "restored", bounded.restored(),
+            "remaining", bounded.remaining(),
+            "row_limit", rowLimit);
+    }
+
+    /**
+     * The body of the bounded expire form. {@code refused} is {@code null} when the page did not count it
+     * ({@code count_refused} false and no floor scan); the map is insertion-ordered and null-tolerant, so a
+     * first body, a replayed body and the stored copy are one shape.
+     */
+    static Map<String, Object> boundedExpireBody(PgVectorRepository.ExpireBoundedOutcome out, int rowLimit) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("expired", out.expired());
+        body.put("refused", out.refused());
+        body.put("more", out.more());
+        body.put("row_limit", rowLimit);
+        body.put("floor_refused", out.floorRefused());
+        return body;
+    }
+
+    // The keyed forms resolve their collection's dimension BEFORE keyedSweep.run claims a ledger row: an unknown
+    // collection then fails exactly as the unkeyed call does (422 unregistered_collection, no row), and a cold
+    // CollectionRegistry cache is not a second withTenant inside the 95 s lease the claim sized for one.
+
+    /**
+     * The collection's dimension for a keyed form, resolved before the claim. When the collection is not registered
+     * the request cannot run; if its key already COMMITTED (the collection was removed since), the stored response
+     * is replayed as a claim would have, otherwise the error propagates to the ladder as it does unkeyed.
+     */
+    private int keyedDim(HttpExchange ex, KeyedRequest keyed, PgVectorRepository repo, String tenant,
+                         String collection, String route, byte[] raw) throws IOException {
+        try {
+            return repo.dimForCollection(tenant, collection);
+        } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
+            if (keyedSweep.answerCommitted(ex, tenant, keyed.id(), keyed.header(), route, raw)) {
+                throw new SkipHandlerException();
+            }
+            throw e;
+        }
+    }
+
+    /** A keyed request: its header value as sent and the UUID it parsed to. */
+    private record KeyedRequest(String header, java.util.UUID id) {}
+
+    /**
+     * The request's {@code Idempotency-Key}, or null when it carries none. A present key that is not a canonical
+     * UUID is a 400 {@code idempotency_key_malformed}: no ledger row, no work. A key on an engine built without a
+     * ledger is {@code idempotency_key_unsupported}, as on any shape the engine cannot key.
+     */
+    private KeyedRequest keyedRequest(HttpExchange ex) throws IOException {
+        String header = ex.getRequestHeaders().getFirst(KeyedSweep.KEY_HEADER);
+        if (header == null) return null;
+        java.util.UUID id = KeyedSweep.parseKey(header);
+        if (id == null) refuseKey(ex, "idempotency_key_malformed");
+        if (keyedSweep == null) refuseKey(ex, "idempotency_key_unsupported");
+        return new KeyedRequest(header, id);
+    }
+
+    /** Answer 400 {@code code} and stop the handler. */
+    private void refuseKey(HttpExchange ex, String code) throws IOException {
+        KeyedSweep.refuse(ex, code);
+        throw new SkipHandlerException();
+    }
+
+    private <O> void runKeyed(HttpExchange ex, KeyedRequest keyed, String tenant, String route, byte[] raw,
+                              long attemptBoundMs, boolean quarantineForm,
+                              java.util.function.Function<PgVectorRepository.LedgerMarker<O>, O> sweep,
+                              java.util.function.Function<O, Map<String, Object>> bodyOf) throws IOException {
+        keyedSweep.run(ex, tenant, keyed.id(), keyed.header(), route, raw, attemptBoundMs, quarantineForm,
+            sweep, bodyOf);
     }
 
     /** The default {@code floor_min_chunks} when a request sends only {@code floor_fraction}: the GC family's 100. */
@@ -1458,9 +1611,11 @@ public final class VectorHandler implements HttpHandler {
     /**
      * {@code row_limit} routing for {@code handleGcQuarantineOrphans} (nexus-a6mon,
      * code-review finding on a990fe8f1): ABSENT means the unbounded sweep (0);
-     * PRESENT must be a positive integer, and a present zero or negative value
-     * is a 400, never silently the unbounded transaction the bound exists to
-     * prevent. The first cut folded "present but non-positive" into "absent",
+     * PRESENT must be an integral number from 1 to {@code Integer.MAX_VALUE}, and a
+     * present zero or negative value is a 400, never silently the unbounded transaction
+     * the bound exists to prevent; so is a fractional value or one past the int range
+     * (RDR-222 A1 review fold-in, nexus-1579m: they had been truncated and wrapped).
+     * The first cut folded "present but non-positive" into "absent",
      * so the SQL function's own refusal was unreachable through the route.
      * Pinned by {@code VectorHandlerRowLimitRoutingTest}.
      */
@@ -1473,13 +1628,22 @@ public final class VectorHandler implements HttpHandler {
             throw new IllegalArgumentException(
                 "row_limit must be a positive integer, got: " + raw);
         }
-        int rowLimit = n.intValue();
-        if (rowLimit <= 0) {
+        // The bound is a safety bound, so a malformed one is a 400, never a different one: intValue() truncated
+        // 1.5 to 1 and wrapped 4294967297 to 1 (the same guard resolveFloor keeps for floor_min_chunks).
+        double d = n.doubleValue();
+        if (Double.isNaN(d) || d != Math.rint(d)) {
             throw new IllegalArgumentException(
-                "row_limit must be >= 1 when present (omit it for the unbounded sweep), got: "
-                + rowLimit);
+                "row_limit must be a positive integer, got: " + raw);
         }
-        return rowLimit;
+        if (d < 1) {
+            throw new IllegalArgumentException(
+                "row_limit must be >= 1 when present (omit it for the unbounded sweep), got: " + raw);
+        }
+        if (d > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                "row_limit must be <= " + Integer.MAX_VALUE + ", got: " + raw);
+        }
+        return n.intValue();
     }
 
     /**
@@ -1529,7 +1693,9 @@ public final class VectorHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
+        KeyedRequest keyed = keyedRequest(ex);   // RDR-222 Phase 1, as handleGcQuarantineOrphans
+        byte[] raw = readBodyBytes(ex);
+        Map<String, Object> body = parseBody(raw);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
 
@@ -1539,12 +1705,23 @@ public final class VectorHandler implements HttpHandler {
         // before, so no released client changes behaviour.
         int rowLimit = resolveRowLimit(body);
         if (rowLimit > 0) {
+            if (keyed != null) {
+                // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
+                final int limit = rowLimit;
+                final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, RESTORE_ROUTE, raw);
+                this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
+                    dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
+                    marker -> repo.restoreRereferencedBounded(
+                        tenant, quarantineCollection, originCollection, limit, dim, marker),
+                    out -> boundedRestoreBody(out, limit));
+                return;
+            }
             var bounded = repo.restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit);
-            HttpUtil.send(ex, 200, json(Map.of(
-                "restored", bounded.restored(),
-                "remaining", bounded.remaining(),
-                "row_limit", rowLimit)));
+            HttpUtil.send(ex, 200, json(boundedRestoreBody(bounded, rowLimit)));
             return;
+        }
+        if (keyed != null) {
+            refuseKey(ex, "idempotency_key_unsupported");
         }
 
         long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
@@ -1569,6 +1746,12 @@ public final class VectorHandler implements HttpHandler {
      * floor (see catalog-023 changelog): {@code refused &gt; 0} means the
      * floor fired and nothing was deleted this call.
      *
+     * <p>RDR-222 Amendment A1 (nexus-1579m): an optional {@code row_limit} (a positive integer; 400
+     * otherwise) selects the BOUNDED form, one page of at most that many chashes (clamped to 5,000), with an
+     * optional {@code count_refused} (default true). Its response is {"expired": N, "refused": M|null,
+     * "more": bool, "row_limit": L, "floor_refused": bool}, and it accepts an {@code Idempotency-Key}; a key
+     * on the unbounded form is 400 {@code idempotency_key_unsupported}.
+     *
      * <p>Since vectors-026 this route expires only the rows a CLIENT moved: chunks the engine
      * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
      * {@code force}, and the floor counts only the untagged rows. The engine expires its own
@@ -1578,13 +1761,39 @@ public final class VectorHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
+        KeyedRequest keyed = keyedRequest(ex);   // RDR-222 Amendment A1, as handleGcRestoreRereferenced
+        byte[] raw = readBodyBytes(ex);
+        Map<String, Object> body = parseBody(raw);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
         String cutoff                = requireString(body, "cutoff");
         double floorFraction        = optDouble(body, "floor_fraction", 0.5);
         int floorMinChunks          = optInt(body, "floor_min_chunks", 50);
         boolean force                = optBool(body, "force", false);
+
+        // An optional `row_limit` selects the BOUNDED expire, as on restore-rereferenced: absent is the
+        // unbounded form exactly as before, present must be a positive integer.
+        int rowLimit = resolveRowLimit(body);
+        if (rowLimit > 0) {
+            final int limit = Math.min(rowLimit, GC_EXPIRE_ROW_LIMIT_MAX);
+            final boolean countRefused = optBool(body, "count_refused", true);
+            if (keyed != null) {
+                final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, EXPIRE_ROUTE, raw);
+                this.<PgVectorRepository.ExpireBoundedOutcome>runKeyed(ex, keyed, tenant, EXPIRE_ROUTE, raw,
+                    dev.nexus.service.db.PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
+                    marker -> repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
+                        cutoff, floorFraction, floorMinChunks, force, limit, countRefused, dim, marker),
+                    out -> boundedExpireBody(out, limit));
+                return;
+            }
+            var bounded = repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
+                cutoff, floorFraction, floorMinChunks, force, limit, countRefused);
+            HttpUtil.send(ex, 200, json(boundedExpireBody(bounded, limit)));
+            return;
+        }
+        if (keyed != null) {
+            refuseKey(ex, "idempotency_key_unsupported");
+        }
 
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
@@ -2196,11 +2405,19 @@ public final class VectorHandler implements HttpHandler {
     // ── Request parsing helpers ───────────────────────────────────────────────
 
     private Map<String, Object> readBody(HttpExchange ex) throws IOException {
+        return parseBody(readBodyBytes(ex));
+    }
+
+    /** The request body exactly as received; the keyed sweep forms hash these bytes (RDR-222 Phase 1). */
+    private byte[] readBodyBytes(HttpExchange ex) throws IOException {
         try (InputStream is = ex.getRequestBody()) {
-            byte[] bytes = is.readAllBytes();
-            if (bytes.length == 0) return Map.of();
-            return MAPPER.readValue(bytes, MAP_TYPE);
+            return is.readAllBytes();
         }
+    }
+
+    private Map<String, Object> parseBody(byte[] bytes) throws IOException {
+        if (bytes.length == 0) return Map.of();
+        return MAPPER.readValue(bytes, MAP_TYPE);
     }
 
     private String requireString(Map<String, Object> body, String key) {

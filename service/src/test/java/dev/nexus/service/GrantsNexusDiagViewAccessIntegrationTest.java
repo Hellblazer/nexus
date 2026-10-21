@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -15,13 +16,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * bead nexus-lhuhe (P1) — the privilege-proof companion to
@@ -89,44 +93,6 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class GrantsNexusDiagViewAccessIntegrationTest {
 
-    // nexus-cbo4a batch 13 group F: kept raw verbatim (byte-for-byte identical to the
-    // same-named method in every other grants/ladder test file, batch 7/12 precedent) --
-    // CREATE EXTENSION / ALTER EXTENSION SET SCHEMA and a SECURITY DEFINER plpgsql
-    // function body have no typed jOOQ DSL form, and this exact copy is reused
-    // tree-wide for diff parity.
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        exec(su, "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        exec(su,
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-        exec(su,
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-            + "  END IF; "
-            + "END; "
-            + "$unrelofunc$");
-        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
 
 
     private static final String ADMIN_ROLE = "nexus_admin_diagview_replay";
@@ -150,7 +116,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
 
     @Test
     void nexusDiagCanSelectTheDiagViewAndEveryUnderlyingTable() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -199,7 +165,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             .as("NEXUS_DIAG_READABLE_TABLES must be non-empty or this test guards nothing")
             .isNotEmpty();
 
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -238,7 +204,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
      */
     @Test
     void nexusDiagCanSelectTupleTables() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -263,6 +229,69 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     }
 
     /**
+     * RDR-222 Phase 1 (bead nexus-yye8l.1, Sam's ruling 2026-10-18): after a full
+     * production-shaped walk, nexus_svc holds SELECT, INSERT, UPDATE and DELETE on
+     * {@code nexus.request_ledger} (from the grants-nexus-svc-1 loop and its default
+     * privileges, with no per-table edit), and nexus_diag holds NOTHING on it. The
+     * ledger's {@code response} column stores sweep samples carrying document titles
+     * and nexus_diag bypasses RLS, so a diag grant would expose titles across tenants.
+     */
+    @Test
+    void requestLedger_svcHasDml_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("request_ledger is deliberately not diag-readable (nexus-yye8l.1)")
+            .doesNotContain("request_ledger");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                UUID key = UUID.randomUUID();
+                OffsetDateTime now = OffsetDateTime.now();
+                scope.withTenant("ledger-grants", ctx -> ctx.insertInto(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.TENANT_ID, "ledger-grants")
+                    .set(REQUEST_LEDGER.REQUEST_ID, key)
+                    .set(REQUEST_LEDGER.ROUTE, "/v1/vectors/gc/quarantine-orphans")
+                    .set(REQUEST_LEDGER.BODY_SHA256, new byte[32])
+                    .set(REQUEST_LEDGER.STATE, "in_flight")
+                    .set(REQUEST_LEDGER.HOLDER, UUID.randomUUID())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, now.plusSeconds(95))
+                    .set(REQUEST_LEDGER.STARTED_AT, now)
+                    .execute());
+                int updated = scope.withTenant("ledger-grants", ctx -> ctx.update(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.STATE, "committed")
+                    .setNull(REQUEST_LEDGER.HOLDER)
+                    .set(REQUEST_LEDGER.FINISHED_AT, now)
+                    .where(REQUEST_LEDGER.REQUEST_ID.eq(key))
+                    .execute());
+                assertThat(updated).as("nexus_svc UPDATE").isEqualTo(1);
+                String state = scope.withTenant("ledger-grants", ctx -> ctx.select(REQUEST_LEDGER.STATE)
+                    .from(REQUEST_LEDGER).where(REQUEST_LEDGER.REQUEST_ID.eq(key))
+                    .fetchOne(REQUEST_LEDGER.STATE));
+                assertThat(state).as("nexus_svc SELECT").isEqualTo("committed");
+                int deleted = scope.withTenant("ledger-grants", ctx -> ctx.deleteFrom(REQUEST_LEDGER)
+                    .where(REQUEST_LEDGER.REQUEST_ID.eq(key)).execute());
+                assertThat(deleted).as("nexus_svc DELETE").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger"))
+                    .as("nexus_diag must hold no SELECT on nexus.request_ledger")
+                    .hasMessageContaining("permission denied for table request_ledger");
+            }
+        }
+    }
+
+    /**
      * Canonical two-phase provisioning split (mirrors
      * GrantsSvcForeignOwnedRelationTest / SchemaMigratorIntegrationTest): a plain
      * non-superuser admin role owns every schema object it creates, matching production.
@@ -274,34 +303,16 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     private static void provisionAndMigrate(PostgreSQLContainer<?> pg, Connection su) throws Exception {
         su.setAutoCommit(true);
 
-        // CREATE ROLE / role-membership GRANT / database- and schema-level GRANT all
-        // have no typed jOOQ DSL form (see GrantsSvcForeignOwnedRelationTest's own
-        // inline reasons for the derivation); raw.
-        exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-        exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
-        exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-        exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-        // nexus_svc is superuser-created too (matches dbaBootstrap /
-        // GrantsSvcForeignOwnedRelationTest) -- role-001-nexus-svc.xml's
-        // own CREATE ROLE is a clean-skip when it already exists; the
-        // admin role here never gets CREATEROLE, matching production.
-        exec(su, "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
-            + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-        // javadoc for the full derivation -- creates the extensions directly as
-        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-        // 001's guard to call mid-walk, since this walk resumes through both
-        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-        // as a NOSUPERUSER role.
-        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
+        // The admin and nexus_svc roles (both superuser-created, as in production: role-001's own
+        // CREATE ROLE is a clean-skip when nexus_svc exists and the admin role never gets
+        // CREATEROLE), the CREATE grants, pg_monitor WITH ADMIN OPTION, the extensions and the
+        // relocation helpers come from db.changelog-test-nonsuper-owner.xml via
+        // PgContainerHelper#bootstrapNonSuperuserOwner.
+        PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
 
         // nexus_diag is superuser-created in production (BYPASSRLS
         // requires superuser, nexus-vounk) — never by Liquibase.
-        exec(su, "CREATE ROLE " + DIAG_ROLE + " LOGIN PASSWORD '" + DIAG_PASS
-            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+        PgContainerHelper.createLoginRole(su, DIAG_ROLE, DIAG_PASS, true);
 
         liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
         liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
@@ -332,11 +343,5 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             .selectCount()
             .from(DSL.table(DSL.name(schema, table)))
             .fetchOne(0, Long.class);
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
     }
 }

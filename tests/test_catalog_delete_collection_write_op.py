@@ -49,7 +49,8 @@ def test_delete_collection_sends_keep_quarantine_only_when_true() -> None:
     posted: list[tuple[str, dict]] = []
 
     class _Stub:
-        def _post(self, path, body):
+        def _post(self, path, body, **kwargs):
+            assert kwargs == {"idempotent": False}  # nexus-oq5gd
             posted.append((path, body))
             return {"deleted": {"chunks": 1}}
 

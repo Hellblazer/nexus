@@ -10,12 +10,6 @@ import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -79,12 +73,7 @@ class ReferenceOnlyChunkReadPathTest {
         ds = new HikariDataSource(cfg);
 
         try (Connection conn = ds.getConnection()) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-            try (Liquibase lb = new Liquibase("db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db)) {
-                lb.update(new Contexts());
-            }
+            PgContainerHelper.applyProductSchema(conn);
         }
 
         // Register TENANT so TenantScope can resolve RLS. Literal (fake) hash, not a

@@ -52,8 +52,10 @@ on:
     paths: *surface
 
 concurrency:
+  # One run at a time on develop, the newest push waiting; other refs cancel
+  # superseded runs (Sam, 2026-10-18, nexus-1wf1s), as ci.yml.
   group: plugin-drift-ledger-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
   ledger:

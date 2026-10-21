@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
+
 import pytest
 
 from nexus.health import (
@@ -531,6 +533,7 @@ def test_vector_service_transport_failure_still_reports_unreachable(
     assert "authentication" not in line.detail.lower()
 
 
+@pytest.mark.t2_tenant
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:
     """RDR-144 P5a integration: when the user chose bge-768 but the [local]
     extra is missing (EF resolves to 384), `_check_t3_local` emits the
@@ -563,6 +566,7 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     assert "bge-768" in joined and "384" in joined
 
 
+@pytest.mark.t2_tenant
 def test_check_t3_local_suppresses_advisory_in_service_mode(tmp_path, monkeypatch) -> None:
     """nexus-ybw87: a --service install (pg_credentials present) embeds T3
     server-side in the Java service, so the PYTHON local-embedder advisory is
@@ -684,6 +688,7 @@ class TestManagedServiceProbeCheck:
         assert len(res) == 1 and res[0].ok is True
         assert "1.0-SNAPSHOT" in res[0].detail
 
+    @pytest.mark.t2_tenant
     def test_incompatible_is_soft_warn(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_URL", "https://x")
         from nexus.db import managed_endpoint as me
@@ -697,6 +702,7 @@ class TestManagedServiceProbeCheck:
         assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
         assert "0.9.0" in res[0].detail
 
+    @pytest.mark.t2_tenant
     def test_unreachable_is_soft_warn_not_double_fatal(self, monkeypatch):
         # reachability fatal is _check_vector_service's domain — stay soft here
         monkeypatch.setenv("NX_SERVICE_URL", "https://x")
@@ -710,6 +716,7 @@ class TestManagedServiceProbeCheck:
         assert len(res) == 1 and res[0].ok is False and res[0].warn is True and res[0].fatal is False
 
 
+@pytest.mark.t2_tenant
 def test_run_health_checks_survives_unresolvable_catalog_endpoint(monkeypatch, tmp_path) -> None:
     """nexus-<bead> regression: run_health_checks()'s OWN make_catalog_reader()
     call (feeding _check_catalog, distinct from _check_git_hooks' already-
@@ -766,7 +773,7 @@ def test_check_dimension_orphans_names_collection_and_suggests_prune(
         monkeypatch,
         mismatches=[{
             "name": orphan, "declared_model": "minilm-l6-v2-384",
-            "declared_dim": 384, "active_dim": 1024, "count": 1,
+            "declared_dim": 384, "served_models": ["bge-base-en-v15-768"], "count": 1,
         }],
     )
     results = health._check_dimension_orphans()
@@ -774,7 +781,7 @@ def test_check_dimension_orphans_names_collection_and_suggests_prune(
     r = results[0]
     assert r.ok is False and r.warn is True, "orphans are a soft warn, never fatal"
     assert orphan in r.detail
-    assert "384" in r.detail and "1024" in r.detail
+    assert "384" in r.detail and "not served" in r.detail
     assert any("nx collection prune" in s for s in r.fix_suggestions)
 
 
@@ -1085,3 +1092,164 @@ def test_embedding_profile_missing_voyage_key_is_red_with_its_own_text(monkeypat
     )
     r = _by_label(health._check_embedding_profile(), "Embedding profile vs client intent")
     assert _is_red(r) and "requires a Voyage API key" in r.detail
+
+
+# ── nexus-pbway: any engine startup error, from the log of the launch kind ───
+
+_ENGINE_ERR = (
+    "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
+    'event=pg_session_env_invalid error="X must be in 60..3600, got: 10"'
+)
+
+
+def _down(*a, **kw):
+    raise RuntimeError("connection refused")
+
+
+def _write_engine_log(config_dir, stem: str, content: str, mtime: float | None = None):
+    logs_dir = config_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"{stem}.log"
+    path.write_text(content)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_unreachable_engine_surfaces_a_non_liquibase_startup_error(
+    monkeypatch, tmp_path
+) -> None:
+    """An engine that exited on an out-of-range env value shows its own error
+    line in the doctor detail, not a bare 'not reachable'."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_native", _ENGINE_ERR + "\n")
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert "not reachable" in line.detail
+    assert "pg_session_env_invalid" in line.detail
+    assert "must be in 60..3600" in line.detail
+
+
+def test_unreachable_jar_launch_reads_the_jar_log(monkeypatch, tmp_path) -> None:
+    """A jar launch writes storage_service_jar.log only; the native log is absent."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n")
+
+    line = _check_vector_service()
+    assert "pg_session_env_invalid" in line.detail
+
+
+def test_the_newer_engine_log_wins_over_a_stale_one(monkeypatch, tmp_path) -> None:
+    """An older native log left by an earlier install must not mask the jar
+    launch that just failed (and the reverse)."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        _ENGINE_ERR.replace("pg_session_env_invalid", "stale_native_error") + "\n",
+        mtime=1_000_000,
+    )
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n", mtime=2_000_000)
+
+    line = _check_vector_service()
+    assert "pg_session_env_invalid" in line.detail
+    assert "stale_native_error" not in line.detail
+
+
+def test_the_liquibase_advisory_is_kept_for_the_jar_log(monkeypatch, tmp_path) -> None:
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_jar", _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert "catalog-013-2" in line.detail
+    assert 'constraint "chunks_384_chash_len_check"' in line.detail
+
+
+def test_a_log_with_no_error_stays_a_bare_not_reachable(monkeypatch, tmp_path) -> None:
+    """A routine INFO tail (a clean stop) is not an error and is not reported as one."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(
+        tmp_path, "storage_service_jar",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n",
+    )
+
+    assert _check_vector_service().detail == "not reachable"
+
+
+def _unreachable_detail(monkeypatch, tmp_path) -> str:
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    return _check_vector_service().detail
+
+
+def test_an_old_error_followed_by_a_clean_stop_is_not_a_boot_failure(monkeypatch, tmp_path) -> None:
+    """The engine ran, logged a request ERROR, and stopped cleanly months later: the log's last output is
+    not an error, so the August ERROR is not why it is down (nexus-pbway critique)."""
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-08-01 02:10:03,114 ERROR [http-1] d.n.service.Api - event=request_failed error=\"boom\"\n"
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n",
+    )
+    assert _unreachable_detail(monkeypatch, tmp_path) == "not reachable"
+
+
+def test_a_plain_text_shutdown_tail_is_not_a_boot_failure(monkeypatch, tmp_path) -> None:
+    """A tail outside the logback format that is no fatal output ('Shutting down...') is not a reason, with
+    or without an older ERROR before it."""
+    for earlier in ("", "2026-08-01 02:10:03,114 ERROR [http-1] d.n.service.Api - event=request_failed\n"):
+        sub = tmp_path / ("with-error" if earlier else "bare")
+        sub.mkdir()
+        _write_engine_log(
+            sub, "storage_service_native",
+            earlier + "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - stopping\nShutting down...\n",
+        )
+        assert _unreachable_detail(monkeypatch, sub) == "not reachable", earlier
+
+
+def test_a_final_fatal_line_outside_the_logback_format_is_reported(monkeypatch, tmp_path) -> None:
+    """An engine that dies before logback is up prints a bare exception: that is the reason."""
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - starting\n"
+        "Exception in thread \"main\" java.lang.IllegalStateException: no pg\n\tat d.n.Main.main(Main.java:9)\n",
+    )
+    detail = _unreachable_detail(monkeypatch, tmp_path)
+    assert "not reachable" in detail and "IllegalStateException: no pg" in detail
+
+
+def test_the_newer_jar_log_does_not_hide_behind_a_stale_native_failure(monkeypatch, tmp_path) -> None:
+    """The reverse of the stale-native case: the jar log is the stale one, and the newer native log is clean."""
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n", mtime=1_000_000)
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n", mtime=2_000_000,
+    )
+    assert _unreachable_detail(monkeypatch, tmp_path) == "not reachable"
+
+
+def test_the_newer_native_log_is_the_one_reported(monkeypatch, tmp_path) -> None:
+    _write_engine_log(
+        tmp_path, "storage_service_jar",
+        _ENGINE_ERR.replace("pg_session_env_invalid", "stale_jar_error") + "\n", mtime=1_000_000,
+    )
+    _write_engine_log(tmp_path, "storage_service_native", _ENGINE_ERR + "\n", mtime=2_000_000)
+    detail = _unreachable_detail(monkeypatch, tmp_path)
+    assert "pg_session_env_invalid" in detail and "stale_jar_error" not in detail

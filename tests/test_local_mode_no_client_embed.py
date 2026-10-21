@@ -42,6 +42,7 @@ def test_opted_out_backend_keeps_the_client_embedder(monkeypatch: pytest.MonkeyP
     assert select_local_mode_embed_fn(ef) is ef
 
 
+@pytest.mark.t2_tenant
 def test_index_rdr_in_local_service_mode_passes_no_embed_fn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

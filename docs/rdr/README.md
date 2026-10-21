@@ -228,7 +228,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Closed | 2026-09-12 |
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Closed | 2026-09-14 |
 | [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |
-| [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Draft | 2026-09-15 |
+| [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Accepted | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
 | [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
 | [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) | Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim | Architecture | Closed | 2026-09-17 |
@@ -239,13 +239,15 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Accepted | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
-| [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Draft | 2026-09-27 |
+| [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Accepted | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
 | [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Accepted | 2026-10-05 |
 | [RDR-226](rdr-226-one-statement-per-leaf-search.md) | Per-Collection Search in One Statement per Leaf | Architecture | Abandoned | 2026-10-08 |
 | [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Closed | 2026-10-09 |
-| [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Accepted | 2026-10-12 |
+| [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |
+| [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
+| [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

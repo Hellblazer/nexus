@@ -68,9 +68,9 @@ class MemorySummariesRlsTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        // Dedicated: bootstrapAdminRole reassigns table ownership, which is global
-        // schema state and must not leak into the shared cluster.
-        pg = PgContainerHelper.startDedicated();
+        // Its own database (a template clone): bootstrapAdminRole reassigns table ownership,
+        // which is database-local (nexus-7xfh7). The roles carry names only this class uses.
+        pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }

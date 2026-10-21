@@ -130,9 +130,10 @@ class TopicsDocCountWritePathsTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        // startDedicated(), not start(): case (f) reassigns nexus.topic_assignments'
-        // ownership -- see the class javadoc's "DEDICATED container" note.
-        pg = PgContainerHelper.startDedicated();
+        // Its own database (a template clone): case (f) reassigns nexus.topic_assignments'
+        // ownership, which is database-local (nexus-7xfh7). The roles below carry names
+        // only this class uses.
+        pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);

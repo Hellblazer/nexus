@@ -13,17 +13,20 @@ def client():
     return TestClient(create_app())
 
 
+@pytest.mark.t2_tenant
 def test_health_returns_200(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
 
 
+@pytest.mark.t2_tenant
 def test_health_has_health_cards(client):
     resp = client.get("/health")
     assert "Health" in resp.text
 
 
+@pytest.mark.t2_tenant
 def test_health_refresh_endpoint(client):
     resp = client.get("/health/refresh")
     assert resp.status_code == 200

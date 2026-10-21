@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Manual recovery for stale nexus_t2_substrate_pg_* clusters left behind by
-# finished pytest sessions (nexus-ui654). A heavy multi-agent session can
-# accumulate dozens of these tmpdirs even though the processes themselves
+# finished pytest sessions (nexus-ui654), and for the integration-test clusters
+# recorded in nexus_integration_owner_<pid>.json files (nexus-942h9). A heavy
+# multi-agent session can accumulate dozens of these tmpdirs even though the processes themselves
 # DO reap on clean exit (bead REFINED PICTURE, 2026-08-09) -- the dirs are
 # debris, and ensure_engine()'s own startup sweep (nexus-lgdy1) only runs
 # the NEXT time a pytest process boots a substrate. This script runs that
@@ -12,7 +13,8 @@
 # It is a THIN WRAPPER around tests._engine_substrate.sweep_stale_substrate_
 # clusters() -- the exact dead-owner identity check ensure_engine() runs
 # automatically at the top of every _boot() -- invoked here against the
-# box's REAL tempdir root instead of a test's throwaway tmp_path. No
+# box's REAL roots (the tempdir and, on Linux, the /dev/shm root the substrate
+# puts clusters on, nexus-me3gm) instead of a test's throwaway tmp_path. No
 # separate kill/identity logic is reimplemented in bash: the Python sweep
 # already (a) writes a pidfile-equivalent sidecar per cluster recording the
 # owning pytest PID + exact cmdline, (b) refuses to touch a cluster whose
@@ -40,27 +42,33 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-echo "nexus-ui654: sweeping stale nexus_t2_substrate_pg_* clusters (real tempdir root)"
+echo "nexus-ui654: sweeping stale nexus_t2_substrate_pg_* clusters (tempdir and tmpfs roots)"
 
 uv run python - <<'PY'
 import sys
-import tempfile
 import warnings
-from pathlib import Path
 
 # Never boots anything, never used to select a T2 backend -- imported
 # purely for the sweep function and glob constant. Matches this file's own
 # fail-loud-if-unimportable contract: an ImportError here is a real
 # checkout problem, not something to swallow.
-from tests._engine_substrate import _STRAY_GLOB, sweep_stale_substrate_clusters
+from tests._engine_substrate import (
+    _OWNER_RECORD_GLOB,
+    _STRAY_GLOB,
+    substrate_pg_roots,
+    sweep_stale_substrate_clusters,
+)
 
-root = Path(tempfile.gettempdir())
-print(f"root: {root}")
+# Every root a cluster may live under: the tempdir plus the tmpfs root
+# (nexus-me3gm; an existing tmpfs root is swept even under NX_TEST_PG_ROOT).
+for root in substrate_pg_roots():
+    print(f"root: {root}")
 print(f"pattern: {_STRAY_GLOB}")
+print(f"pattern: {_OWNER_RECORD_GLOB} (integration clusters, nexus-942h9)")
 
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
-    result = sweep_stale_substrate_clusters(tmp_root=root)
+    result = sweep_stale_substrate_clusters()
 
 for w in caught:
     print(f"  {w.category.__name__}: {w.message}")

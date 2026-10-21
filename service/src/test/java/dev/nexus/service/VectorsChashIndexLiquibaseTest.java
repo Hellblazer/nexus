@@ -14,7 +14,6 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -157,20 +156,16 @@ class VectorsChashIndexLiquibaseTest {
 
     private void insertChunk(Connection su, int dim, String collection, String chashHex)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") VALUES " +
-            "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-            + "' AND name = '" + collection + "'), " +
-            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::nexus.vector)" +
-            " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-    }
-
-    private static String zeroVec(int dim) {
-        StringBuilder sb = new StringBuilder("'[1");
-        for (int i = 1; i < dim; i++) sb.append(",0");
-        return sb.append("]'").toString();
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, TENANT)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+            .set(CHUNKS.CHUNK_TEXT, "chunk " + chashHex.substring(0, 8))
+            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
+            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+            .execute();
     }
 
     private void runLiquibaseUpdate() throws Exception {
@@ -229,7 +224,7 @@ class VectorsChashIndexLiquibaseTest {
         // SAME single index serves every embedding column — the contract is
         // dim-agnostic now.
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SET enable_seqscan = off");
+            PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
             String indexName = "idx_chunks_tenant_chash";
             for (int dim : DIMS) {
                 Condition cond = CHUNKS.field("tenant_id", String.class).eq(TENANT)
@@ -257,16 +252,13 @@ class VectorsChashIndexLiquibaseTest {
         // dim-agnostic contract holds for every embedding column.
         try (Connection su = pg.createConnection("")) {
             for (int dim : DIMS) {
-                List<String> collections = new ArrayList<>();
-                try (ResultSet rs = su.createStatement().executeQuery(
-                        "SELECT collection FROM nexus.chunks " +
-                        "WHERE tenant_id = '" + TENANT + "' " +
-                        "  AND chash = decode('" + sharedChashForDim(dim) + "', 'hex') " +
-                        "ORDER BY collection")) {
-                    while (rs.next()) {
-                        collections.add(rs.getString(1));
-                    }
-                }
+                List<String> collections = DSL.using(su, SQLDialect.POSTGRES)
+                    .select(CHUNKS.COLLECTION)
+                    .from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT),
+                           CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(sharedChashForDim(dim))))
+                    .orderBy(CHUNKS.COLLECTION)
+                    .fetch(CHUNKS.COLLECTION);
                 assertThat(collections)
                     .as("chash-only probe (dim %d row) on nexus.chunks must return both collections", dim)
                     .containsExactly(collB(dim), collA(dim));
@@ -294,6 +286,6 @@ class VectorsChashIndexLiquibaseTest {
     private static String explain(Connection c,
             java.util.function.Function<DSLContext, ? extends org.jooq.Query> queryBuilder) {
         DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
-        return ctx.explain(queryBuilder.apply(ctx)).plan();
+        return PgContainerHelper.explainPlan(ctx, queryBuilder.apply(ctx));
     }
 }

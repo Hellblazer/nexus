@@ -473,9 +473,12 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     it the project reads as empty for this run, lands in :data:`_T2_LATE` so
     :func:`run` can say so, and is logged as ``rdr_hook_t2_late`` with the
     time it had taken, so the rate of degraded sessions is countable from
-    ``hook.log`` instead of from transcripts. The fetch is the whole project
-    because the engine has no narrower read: ``/v1/memory/list`` carries no
-    content and ``/v1/memory/all`` no title filter (nexus-pxp44)."""
+    ``hook.log`` instead of from transcripts. The fetch is the two row kinds
+    the loaders read (status and ``*-gate-latest``), not the project:
+    ``/v1/memory/all`` filters by title kind (nexus-pxp44), and the store
+    cuts the rows to the same kinds client-side, so an older engine yields
+    the same rows. The loaders' own title tests are a second guard, not the
+    first cut."""
     if repo_name in _T2_ROWS_CACHE:
         return _T2_ROWS_CACHE[repo_name]
     rows: list[dict] = []
@@ -512,12 +515,14 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     record ([26115] #4, nexus-nc08w.1)."""
     seen: dict[str, set[str]] = {}
     try:
+        from nexus.db.t2_reads import rdr_status_number  # noqa: PLC0415 — deferred: only a real T2 lookup pays for the nexus.db import; the one status-title definition, shared with the client-side cut (nexus-pxp44)
+
         for entry in _fetch_rdr_rows(repo_name):
             title = entry.get("title", "")
-            m = re.match(r"^(?:RDR-)?(\d+)$", title)
-            if not m:
+            number = rdr_status_number(title)
+            if number is None:
                 continue  # gate-latest, research, etc.
-            key = str(int(m.group(1)))
+            key = str(int(number))
             content = entry.get("content", "")
             for line in content.splitlines():
                 stripped = line.strip()

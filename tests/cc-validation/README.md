@@ -26,6 +26,9 @@ silently nullified scenarios for an hour-plus at least once.
 | `can't find pane: cc-val`, suite aborts mid-run | bare `tmux` instead of `_tmux` (wrong socket) | [tmux isolation](#tmux-isolation) |
 | Hook "runs" but writes nothing | PreToolUse hooks don't inherit harness env | [Hooks](#hooks) |
 | New `nx` subcommand: `No such command` | cc-val uses on-PATH `nx`, not repo source | [on-PATH nx](#on-path-nx) |
+| A scenario that installs the real plugin by writing `installed_plugins.json` sees no plugin hooks, agents or servers | Claude Code 2.1.302: `claude plugin list` reports `failed to load: Marketplace nexus-plugins not found`; never write one: call `cc_plugin_require` (runner.sh), which installs through a local-directory marketplace and fails the scenario unless `claude plugin list` shows the plugin enabled at its declared version | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
+| A scenario asserts a plugin hook ran and the transcript shows nothing | the transcript records a hook only when its stdout or stderr is non-empty; read the debug log with `cc_hook_ran` / `cc_mcp_hook_ran` | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
+| A probe passes the moment the prompt is sent | the pane shows the prompt, so a marker or reply token written whole in the prompt matches the grep; spell it in two pieces to be joined | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
 
 ## Auth
 
@@ -308,20 +311,62 @@ the entire MCP stack broken. Two rules came out of the rework:
 
 Reworked for validity 2026-05-31: 05, 06, 07, 09, 10, 11, 14a, 14b, 16, 18, 19A,
 23. Verified valid as-is: 01, 17 (explicit-token),
-02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (09/10's branch-1 token
+02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (nexus-qsmc5 found 01-04, 11, 15, 17,
+21, 24 and 25 were NOT valid: a token or marker written whole in the prompt or command
+body, or a verdict read off the pane; and 05-07 ran under the bypass flag. Reworked.) (09/10's branch-1 token
 grep used to match the user's own turn-1 prompt in scrollback — fixed by
 requiring a compound `INHERIT-SEEN:<token>` / `ENVV-SEEN:<token>` that only the
 fork can emit.)
 
-## Known real findings (NOT harness bugs — do not mask)
+## Known real findings (NOT harness bugs) and dated observations
 
-The harness correctly surfaces these. A green here would be the bug:
+The harness surfaces these. They are two kinds, and only the first kind is a stable
+finding.
 
-- **06** — infix wildcard `mcp__plugin_*__*` MATCHES across the `__` boundary
-  (contradicts the older `-p` finding).
-- **07** — under `skipDangerousModePermissionPrompt` the PermissionRequest gate
-  is bypassed entirely (tool auto-runs both with and without an allow rule, the
-  hook never fires) — so a PermissionRequest auto-approver is redundant.
+### Observations that change with the Claude Code version
+
+Scenarios 06 and 07 ask permission questions whose answers have flipped across Claude
+Code releases (and between a bypass-flag launch and an enforced one). Each is an
+OBSERVATION of one build, recorded with its date, never a fact about the product.
+Re-measure on every pin bump (see "Bumping the Claude Code pin"); nothing may be
+deleted, or relied on, on the strength of what is written here.
+
+- **06** — does the allow rule `mcp__plugin_*__*` match a tool named
+  `mcp__plugin_xxx_yyy__record`? Observed on 2.1.302 on 2026-10-18: it did not match;
+  the call stopped at a permission prompt exactly as a non-matching rule's call does, in
+  the same mode, with the tool not run. The 2026-05-31 entry ("MATCHES") was read under
+  `--dangerously-skip-permissions`, where every call runs, and was no reading. This has
+  flipped across Claude Code versions; re-measure on every pin bump.
+- **07** — with `permissions.allow` holding `mcp__stub__*`, does the PermissionRequest
+  hook for that tool still fire? Observed on 2.1.302 on 2026-10-18: it did not fire and
+  the tool ran; with no allow rule the hook fired and its `allow` ran the tool. The
+  earlier entry ("under `skipDangerousModePermissionPrompt` the gate is bypassed
+  entirely, so a PermissionRequest auto-approver is redundant") was also read under the
+  bypass flag; `skipDangerousModePermissionPrompt` only skips the startup dialog. This has
+  flipped across Claude Code versions; re-measure on every pin bump. The auto-approver
+  (the `nx_hook_shim` auto-approve verb, registered on PreToolUse and PermissionRequest)
+  stays as a hedge whichever way this lands.
+
+Both verdict lines say `observed on Claude Code <version>`, report what they saw without
+asserting a direction, and compare it with `docs/tables/cc-version-answers.toml` (a
+checked RDR-201 table; `lib/version_answers.py` reads it): the recorded answer for that
+version passes; a different answer FAILS "answer changed since <version>"; a version with
+no row prints `INFO: record this version's answer` and passes. The control legs (a rule
+that cannot match must stop at a prompt; sub-run B must reach a gate) still FAIL a session
+that does not enforce permissions.
+
+### Bumping the Claude Code pin
+
+`ARG CLAUDE_CODE_VERSION` in `container/Dockerfile` pins the build. A bump re-runs
+scenarios 06 and 07 and updates `docs/tables/cc-version-answers.toml` (add the new
+version's rows, or read why a recorded answer changed before touching it). A bump with no
+re-run leaves the table silent about the new build, so 06 and 07 are what announce it:
+an unrecorded version prints the INFO line, a recorded one whose answer flipped FAILS, and so does a
+run that cannot read its Claude Code version at all ("unknown").
+Run them on every bump.
+
+### Findings that are not version-sensitive
+
 - **11** — inline-agent `mcpServers` ARE scoped to the subagent (confirmed), the
   documented behavior ("the subagent gets the tools; the parent conversation does
   not"). The inline server spawns at subagent dispatch (stub startup markers show
@@ -334,10 +379,15 @@ The harness correctly surfaces these. A green here would be the bug:
   `$TEST_HOME/.mcp.json` in `reset_scenario_state`; 11 then reports SCOPED even
   when run right after stub-using scenarios. (An even earlier "not scoped" claim
   was a separate artifact of the bare-`python3` crash + model self-report.)
-- **14b** — plugin-shipped agents CANNOT declare `mcpServers` (CC blocks
-  `hooks`/`mcpServers`/`permissionMode` on plugin agents for security), AND in
-  this harness the plugin agent isn't even registered by the manual install.
-  Doubly unsupported → SKIP, not a finding about loading.
+- **14b** — plugin-shipped agents and `mcpServers`. Claude Code's docs say `hooks`,
+  `mcpServers` and `permissionMode` are not supported on plugin-shipped agents. Since
+  nexus-spwp2 the fake plugin is really installed (`cc_plugin_require`), so the agent is
+  registered; since nexus-qsmc5 the verdict rests on the stub's own `process_launched`
+  marker (did Claude Code spawn the server for the plugin agent), not on the deferred
+  tool's schema. It PASSes when the stub was spawned, or when it was not and 14a (the
+  positive control: the same stub, project-level agent) shows the stub loads here; it SKIPs
+  only when `agent14b` did not run or the control did not load. Like 06/07 this is a
+  reading of one build.
 
 ## Root causes resolved 2026-05-31 (recorded so they are not re-derived)
 
@@ -406,14 +456,193 @@ desktop backends). Two of its patterns are already ported; two remain.
 - **Capture the pane ID (`%N`) and target it** instead of `-t <session>`, so
   later splits/active-pane shifts can't misdirect keystrokes.
 
+## Headless hook `ask` (nexus-mcfaj), measured on chas
+
+`hook-ask-headless/` is a sibling harness (like `connection-race-ladder/`) for
+what a PreToolUse `permissionDecision: "ask"` does when no human can answer:
+real `claude -p` sessions in the `nexus-cc-val` container on chas, never on
+the laptop. `hook-ask-headless/run.sh` stages the harness, runs the matrix under
+`claude_credentials.py run --remote chas-test -- lab-run -c lab-s -- ...`, and
+`summarize.py` prints one verdict per run (`RAN`, `DENIED`, `HUNG`,
+`NOT-EXERCISED`). Result at Claude Code 2.1.302: an ask is a DENY in default,
+`dontAsk` and `auto` mode and for a background subagent; nothing hung; the
+auto-mode classifier never approved past it. The reason travels back to the
+model in the tool result. Recorded runs: `hook-ask-headless/evidence/`. The
+table and its limits live in `ask_envelope`'s docstring
+(`conexus/hooks/scripts/routing/_lib.py`).
+
+Two traps this harness hit, for the next probe of its kind: an untrusted
+workspace silently ignores the project's `permissions.allow` entries (pre-seed
+`hasTrustDialogAccepted` for the cwd), and a read-only probe command such as
+`echo` is auto-allowed in every mode, so it cannot show that an ask changed
+anything (use `touch` plus an allow rule).
+
+## Installing a plugin in a scenario
+
+(nexus-spwp2.) A scenario that needs a plugin loaded calls the shared helpers in
+`runner.sh`; it never writes `installed_plugins.json` or `enabledPlugins` itself
+(`tests/test_cc_validation_plugin_install.py` fails the build on either).
+
+```bash
+cat > "$TEST_HOME/.claude/settings.json" <<EOF ... EOF       # settings FIRST: the install merges enabledPlugins into them
+if cc_plugin_require "$REPO_ROOT/conexus" conexus nexus-plugins; then
+    claude_start                                              # adds --debug-file when a plugin is installed
+    ...probe...
+    cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID"               # command hook: debug log says it finished with status 0
+    cc_mcp_hook_ran "$CC_PLUGIN_ID" "hook_subagent_start"     # mcp_tool hook: THAT plugin's call, and no mcp_tool hook error
+    cc_hook_context_injected "SubagentStart" "subagent_start.py"   # Claude Code accepted non-empty additionalContext from it
+    claude_exit
+fi
+cc_plugin_uninstall_all                                       # keeps evidence, restores the empty registry
+```
+
+`cc_plugin_require` copies the plugin tree into a synthesized local-directory
+marketplace, runs `claude plugin marketplace add` and `claude plugin install
+--scope user`, and passes only when `claude plugin list` shows
+`<plugin>@<marketplace>` enabled at the version its `plugin.json` declares. When
+it does not, the scenario FAILS (never skips) and the list and install output are
+printed. `cc_plugin_install` is the same without the `fail`, for scenario 32,
+which routes a not-loaded plugin into its own verdict ladder. One plugin per
+scenario part: an install replaces all plugin state.
+
+Evidence (plugin list/install output, debug log, settings, registry, transcripts)
+goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
+
+Census (2026-10-17, 30 scenarios): plugin-dependent were 12, 13b, 14b, 18 and 32;
+the other 25 install nothing. The container carries what a loaded plugin needs:
+the Nexus CLI built from the staged source tree, not fetched from PyPI by version
+(`nx-mcp`, `nx-hook`; without it the plugin loads and then its `mcp_tool` hooks
+fail with "Nexus is not installed"),
+the `sn` plugin tree, and the `mcp` package for the stub server.
+
+**Probes must not match their own prompt.** The pane shows the prompt, and the
+subagent sees it too, so a marker or reply token written whole in the prompt
+satisfies the grep at once. Scenarios 01-04, 11, 12, 13, 15, 17 and 18 (and the
+slash-command bodies of 21, 24 and 25) spell tokens and probe phrases as pieces
+("the word FOUND immediately followed by -13B") and grep the joined form;
+`tests/test_cc_validation_plugin_install.py` (`PROBES`) fails if any of their
+prompts, or for 17/21/24/25 their skill or command bodies, holds a probe whole. A
+fixed phrase can still be answered from the prompt, so scenario 12 asks for the
+per-dispatch `Claimant id` the hook emits and compares the subagent's reply with
+the id in the debug log. The reply is read from the subagent's own transcript
+(`cc_subagent_replies`; the main session's own is `cc_session_replies`), never the
+pane: the main agent paraphrases the reply, redacts agent ids and may dispute it,
+and the pane also prints a hook's own output (seen live). Scenario 17 reads what the
+subagents DID, not what they wrote (`cc_nested_dispatch_facts`, `lib/agent_facts.py`):
+CAN needs a Task/Agent call whose result came back without `is_error` AND the nested
+token in a transcript that made no such call (the leaf agent's, never the fork's);
+CANNOT needs a `ToolSearch` call and no Task/Agent call in the fork's transcript. The token
+must sit in the transcript of the agent the dispatch STARTED, by id: the Agent result names it
+(`agentId: <id>`) and the leaf's transcript is `agent-<id>.jsonl`; a token in any other
+transcript, or a result that names no agent, fails (nexus-ijate). Every result observed
+on chas so far is the async shape that names the id; a sync or a fork-type result (a fork's
+"Fork started" names none) would read as a false red until a live run shows its shape. Scenarios
+01 and 15 (plain stdout) read the subagent's answer AND the debug log, which must agree
+(`cc_injection_reading`, `lib/debug_log.py`): NONE passes only with the hook's
+finished-with-status-0 line and no accepted `additionalContext`, VISIBLE only with both; 15
+withholds the marker's last three characters from its prompt, as 01-04 do. 15e is the negative
+control (a hook that never runs must not read as NONE); 15f is the positive control (nexus-ijate):
+a hook that injects JSON `additionalContext` must read VISIBLE, so the VISIBLE branch has a live
+leg (15a-d all read NONE). Run it with `container/run.sh --scenario 15` on chas. Scenarios 21, 24
+and 25 read the expanded slash command out of the main session's transcript
+(`cc_session_user_text`, `cc_command_render_check`): the user turn Claude Code sent to the
+model must carry the injection's own output, whatever the model then says about it; 21b is
+the negative control (an injection that prints nothing must FAIL the same check).
+`reset_scenario_state` and scenario 14's parts clear the transcripts (`cc_reset_transcripts`)
+so one scenario never reads another's. Scenario 18 gates on the size of the context the
+plugin's hook delivered (`cc_hook_context_is_whole`: the debug log's
+`provided additionalContext (N chars)` must equal the lengths of the two section
+files), because the reply tokens cannot tell a partial delivery from a whole one.
+`cc_hook_context_injected` and `cc_hook_context_chars` are scoped to a plugin id.
+
+**Permission scenarios launch enforced (05-07).** `claude_start` passes
+`--dangerously-skip-permissions`, under which every call runs whatever
+`settings.json` says. A scenario about the permission system launches with
+`claude_start_enforced` (no bypass flag) and carries a control in the same mode:
+05 and 06 run a leg whose allow rule does not match the tool, which must stop at a
+"Do you want to proceed?" prompt without running it (`cc_allow_rule_verdict`); 07's
+no-allow sub-run must reach the PermissionRequest hook or the prompt
+(`cc_preempt_verdict`). A control that does not prompt fails the scenario: the
+session is not enforcing permissions. The census test fails for any scenario that
+pins `defaultMode` default/auto/plan and still launches through `claude_start`.
+
+**Scenario 14 waits for the agent, and reads the spawn.** `claude_wait` watches only
+the main session's spinner and the main agent does not spin while a subagent
+works, so 14 used to read its files, and end the session, mid-task (the agents'
+transcripts ended "[Request interrupted by user]"). It now waits for each agent's
+own `14X_DONE` reply. Scenario 14b no longer depends on whether the agent loaded
+and called the deferred tool: it passes on the stub's own `process_launched` marker
+(Claude Code spawned the server for the plugin agent), or, with no spawn, on
+14a's positive control that the same stub loads project-level; otherwise SKIP.
+
+## Running in a container (and scenario 32's positive control)
+
+Claude Code runs only in a container on a Linux test host (chas), never on a
+laptop. `container/run.sh` stages the tracked harness plus the conexus plugin
+of the tree (and says which staged files are untracked or differ from HEAD), builds a toolchain image (Claude Code, tmux, uv), and runs a
+scenario inside it; `runner.sh` detects `NX_CC_VAL_IN_CONTAINER=1` and takes
+the token from the container's environment instead of the keychain.
+
+```bash
+python3 tests/e2e/lib/claude_credentials.py run --remote chas-test -- \
+    ~/src/nexus-wt/<ref>/tests/cc-validation/container/run.sh --scenario 32
+```
+
+The helper sends the automation token over the ssh channel's stdin and the
+script passes it to `docker run` as a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Do not
+put the script behind `lab-run`: the container is a child of dockerd, not of the
+wrapped command, so the wrapper's cgroup grant neither caps nor even sees it
+(`docker run` therefore carries its own `--memory 4g --cpus 2 --pids-limit`),
+and the token reaches chas only over the ssh channel's stdin, which a wrapper in
+between would not hand on. The image pins Claude Code (`ARG
+CLAUDE_CODE_VERSION` in the Dockerfile, updater off); `run.sh` passes the pin to
+the scenario, which refuses a verdict on any other build, and `claude --version`
+is written into each evidence directory. Evidence (hook log, pane, transcripts, per
+session) lands in `$NX_CC_VAL_EVIDENCE` (default `$TMPDIR/cc-val-evidence-<stamp>`).
+
+**Scenario 32 has a positive control** (nexus-ueztp). It runs two sessions: 32a
+installs the current plugin and passes when the permission prompt reaches the
+pane; 32b installs the conexus plugin of git tag `v7.64.1` (the
+GHSA-mc84-6gjq-vm2p plugin, whose routing guards emit a blanket `allow`),
+extracted with `git archive` and version-checked, and is DECLARED to fail that
+same check: it passes only when the prompt is skipped, the command runs, and
+the old scripts' own stdout carries the `permissionDecision`. A control that
+shows the prompt anyway is a finding, not a flake: it means the real
+`hooks.json` entries do not govern the call here, so 32a's pass proves
+nothing. `tests/test_cc_validation_scenario32_control.py` pins the wiring.
+
+Two traps the first container runs found, both now handled in the scenario:
+the hand-written `installed_plugins.json` did not load the plugin (see the
+triage table), and in `defaultMode: auto` the classifier approves the harmless
+`echo` itself so neither plugin shows a prompt. Sessions run in `defaultMode:
+default`; `--s32-mode auto` restores the old mode, where 32b reports NOT
+INFORMATIVE. 32b also requires Claude Code's own transcript to show the
+v7.64.1 `hooks.json` entries emitting `permissionDecision: allow` (the allow
+shape, not any decision).
+
+**Proof the guards ran.** The transcript records a hook only when its stdout or
+stderr is non-empty, so the current plugin's silent guards leave no record
+there (a first run read that absence as ambiguous; a diagnosis run on 2026-10-17
+showed the hooks do run, `uv` included). Each session therefore runs with
+`claude --debug-file`, which logs every hook, and the scenario requires both
+real guards to show there as finished under the plugin, plus a marker hook
+appended to the same `PreToolUse`/`Bash` matcher group of the installed copy.
+Missing either, a wrong Claude Code build, or an unloaded plugin each fail the
+leg whatever the prompt did. The ladder is `_s32_verdict`; its truth table is
+driven from `tests/test_cc_validation_scenario32_control.py`.
+
 ## Layout
 
 ```
 runner.sh                       # setup (isolated HOME, tmux server under run --), scenario loop
 scenarios/NN_*.sh               # one scenario each; source lib.sh helpers
+container/                      # Dockerfile + run.sh: how Claude Code runs (chas, in docker)
 fixtures/stub_server.py         # FastMCP stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
 ../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)
+lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07
+                                # table), agent_facts.py (17), debug_log.py (01, 15)
+../../docs/tables/cc-version-answers.toml  # the version -> observed answer table for 06/07
 ```
 
 Companion gist (older notes): `4a7d73baa4409e02af7af222023b8b9d`.

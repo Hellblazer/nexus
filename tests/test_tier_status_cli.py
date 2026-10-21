@@ -82,6 +82,7 @@ def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestDefaultSession:
+    @pytest.mark.t2_tenant
     def test_default_uses_env_session_id(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -116,14 +117,27 @@ class TestDefaultSession:
         # Ensure no session resolvable.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         import nexus.commands.tier_status as ts_mod
-        monkeypatch.setattr(ts_mod, "read_claude_session_id", lambda: None)
+        monkeypatch.setattr(ts_mod, "resolve_active_session_id", lambda: None)
 
         result = CliRunner().invoke(tier_status_cmd, [])
         assert result.exit_code == 1
         assert "No current session resolvable" in result.output
 
+    def test_default_session_prefers_claude_code_session_id_over_the_file(
+        self, monkeypatch, tmp_path,
+    ):
+        """nexus-d8yul: the default session follows resolve_active_session_id."""
+        from nexus.commands.tier_status import _resolve_session
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "current_session").write_text("last-claude-session")
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-claude-session")
+        assert _resolve_session(None) == "this-claude-session"
+
 
 class TestExplicitFlags:
+    @pytest.mark.t2_tenant
     def test_session_flag_overrides_env(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -143,6 +157,7 @@ class TestExplicitFlags:
         assert "plan" in result.output
         assert "noise" not in result.output
 
+    @pytest.mark.t2_tenant
     def test_last_n_aggregates_recent_sessions(self, isolated_t2: Path) -> None:
         from nexus.commands.tier_status import tier_status_cmd
         _seed_t2(isolated_t2, [
@@ -156,6 +171,7 @@ class TestExplicitFlags:
         assert "last 3 session(s)" in result.output
         assert "total: 3" in result.output
 
+    @pytest.mark.t2_tenant
     def test_json_output_is_valid_and_complete(self, isolated_t2: Path) -> None:
         from nexus.commands.tier_status import tier_status_cmd
         _seed_t2(isolated_t2, [
@@ -186,6 +202,7 @@ class TestExplicitFlags:
 
 
 class TestEmptyOrMissing:
+    @pytest.mark.t2_tenant
     def test_empty_session_prints_no_writes(
         self, isolated_t2: Path,
     ) -> None:
@@ -279,6 +296,7 @@ class TestServiceModeReadParity:
                     "NX_SERVICE_HOST", "NX_SERVICE_PORT"):
             monkeypatch.delenv(var, raising=False)
 
+    @pytest.mark.t2_tenant
     def test_tier_status_service_mode_reports_service_backed(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -295,6 +313,7 @@ class TestServiceModeReadParity:
         assert "service-backed" in result.output
         assert "total: 1" not in result.output  # did not read the local row
 
+    @pytest.mark.t2_tenant
     def test_tier_status_service_mode_json(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -434,6 +453,43 @@ class TestServiceModeReadParity:
         assert "WARNING: zero tier writes" in result.output
         assert "nx tier-status --session sess-A" in result.output
 
+    def test_doctor_tier_discipline_resolves_claude_code_session_id_before_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: tier_writes rows are keyed by resolve_active_session_id,
+        so the check must ask for the same session. Under concurrent Claude
+        windows the file holds another window's id; the old
+        NX_SESSION_ID-then-file chain queried that one."""
+        import click as _click
+        from click.testing import CliRunner as _CR
+
+        import nexus.commands.doctor as doc
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "current_session").write_text("other-window-in-file")
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-windows-session")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        asked: list[str | None] = []
+
+        class _RecordingStore:
+            def query_tier_writes(self, *, session_id=None, **_kw):
+                asked.append(session_id)
+                return [("memory_put", "T2", "developer", "nexus", 1)]
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _RecordingStore(),
+        )
+
+        @_click.command()
+        def _wrap() -> None:
+            doc._run_check_tier_discipline()
+
+        result = _CR().invoke(_wrap, [])
+        assert result.exit_code == 0, result.output
+        assert asked == ["this-windows-session"]
+
     def test_tier_status_service_read_404_names_engine_skew(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -485,6 +541,7 @@ class TestServiceModeReadParity:
         assert "HTTP 500" in result.output
         assert "investigate the engine" in result.output
 
+    @pytest.mark.t2_tenant
     def test_doctor_tier_discipline_service_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

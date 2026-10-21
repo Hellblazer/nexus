@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Callable
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
 
 _log = structlog.get_logger(__name__)
+
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
 
 #: Credential-bearing phrases a service error body may echo back. The value
 #: after the key word is replaced, whatever its shape, so a rotated token or
@@ -407,7 +411,30 @@ _SAC_GUIDE = (
 )
 
 
-def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[HealthResult]:
+_UNPROBED = object()
+
+
+def _probe_smart_app_control_enforcement() -> bool | None:
+    """True/False/None: does Windows block an unsigned program here. Runs the
+    real bundle binary when one is installed, else the unsigned stand-in
+    (nexus-gdqca)."""
+    from nexus import _smart_app_control as sac  # noqa: PLC0415 — Windows row only
+
+    try:
+        from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred, heavy import
+
+        return sac.bundle_binary_blocked(str(discover_pg_binaries().pg_ctl))
+    except Exception:  # noqa: BLE001 — no bundle yet: fall back to the stand-in
+        return sac.execution_blocked()
+
+
+def _check_smart_app_control(
+    *,
+    local: bool,
+    state: str | None = None,
+    blocked: object = _UNPROBED,
+    probe: Callable[[], bool | None] | None = None,
+) -> list[HealthResult]:
     """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows,
     and none on a Windows that has no Smart App Control (no policy value).
 
@@ -426,6 +453,18 @@ def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[H
     if current == sac.OFF:
         return [HealthResult(label=label, ok=True, detail="off")]
     if current == sac.ON:
+        if local:
+            if blocked is _UNPROBED:
+                blocked = (probe or _probe_smart_app_control_enforcement)()
+            if blocked is False:
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        "on by the registry, but an unsigned program ran: nothing is "
+                        "blocked now. Windows can start enforcing; see the guide"
+                    ),
+                    fix_suggestions=[f"see {_SAC_GUIDE}"],
+                )]
         detail = (
             "on: Windows blocks the unsigned PostgreSQL bundle and the unsigned "
             "Python uv installs, so the local stack cannot run"
@@ -944,7 +983,9 @@ def local_embedder_advisory(
     return None
 
 
-def _check_t3_local() -> list[HealthResult]:
+def _check_t3_local(collections: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """``collections``: the collection listing ``run_health_checks`` already fetched (``None`` when that fetch
+    raised), so one ``nx doctor`` run lists the collections once (nexus-qqoak). Left unset, this fetches its own."""
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
     # RDR-155 P4a.2 (nexus-1k8s1): the nexus-service serves T3 in local mode
@@ -1012,7 +1053,12 @@ def _check_t3_local() -> list[HealthResult]:
         # collections" here, NOT as a failure. That is intentional: the fatal
         # vector-service reachability probe (_check_vector_service) fires
         # separately and is the failure surface; this check is informational.
-        cols = make_t3().list_collections()
+        if collections is _ENGINE_STATUS_UNSET:
+            cols = make_t3().list_collections()
+        elif isinstance(collections, list):
+            cols = collections
+        else:
+            raise RuntimeError("the collection listing could not be fetched")
         col_count = len(cols)
         results.append(HealthResult(
             label="T3 collections", ok=True,
@@ -1204,16 +1250,46 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
 
 
 def _boot_failure_advisory() -> str | None:
-    """Soft wrapper: resolve the local service log path and tail-parse it.
+    """Soft wrapper: read the engine's own log and say why it refused to start.
 
-    Guards cloud-mode / no-local-service installs (no log path exists) and
-    any resolution failure — degrades to ``None`` silently, never raises.
+    The engine writes ``storage_service_native.log`` (production artifact) or
+    ``storage_service_jar.log`` (a jar launch, dev and test). With the engine
+    down there is no lease naming the launch kind, so the newer of the two
+    files is the one the last launch wrote. A Liquibase changeset failure keeps
+    its dedicated advisory; any other startup error (for instance
+    ``event=pg_session_env_invalid``) is the engine's own last error line, but
+    only when that is the log's final output
+    (:func:`nexus.daemon.storage_service_daemon.engine_boot_failure_reason`):
+    an old ERROR followed by a clean stop is not why the engine is down.
+
+    Guards cloud-mode / no-local-service installs (no log exists) and any
+    resolution failure — degrades to ``None`` silently, never raises.
     """
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — failure path only
+            ENGINE_LOG_STEMS,
+            engine_boot_failure_reason,
+        )
 
-        log_path = nexus_config_dir() / "logs" / "storage_service_native.log"
+        logs_dir = nexus_config_dir() / "logs"
+        candidates: list[tuple[float, Path]] = []
+        for stem in ENGINE_LOG_STEMS:
+            path = logs_dir / f"{stem}.log"
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        if not candidates:
+            return None
+        log_path = max(candidates, key=lambda c: c[0])[1]
+
         detail = _last_boot_failure_detail(log_path)
+        if detail is None:
+            # Only the engine's FINAL output is a reason: an old ERROR followed
+            # by a clean stop, or a plain-text "Shutting down...", is not why it
+            # is unreachable now.
+            detail = engine_boot_failure_reason(log_path)
     except Exception:  # noqa: BLE001 — best-effort: must never crash the reachability probe
         return None
     if detail is None:
@@ -1288,11 +1364,14 @@ def _check_vector_service() -> HealthResult:
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,
-        # instead of leaving the operator to spelunk storage_service_native.log
-        # by hand. Strictly best-effort/soft: any failure here degrades
-        # silently back to the bare "not reachable" message. Only reached for
-        # transport failures now, so a boot advisory can never be scraped from
-        # a stale log while the service is actually up and answering.
+        # instead of leaving the operator to spelunk the engine log by hand.
+        # Strictly best-effort/soft: any failure here degrades silently back
+        # to the bare "not reachable" message. Only reached for transport
+        # failures, so a service that answers never gets an advisory. The log
+        # of a service that is down can be old: a Liquibase failure is read
+        # from anywhere in its tail, but any other error is reported only when
+        # it is the log's final output (nexus-pbway), so a stopped engine whose
+        # log ends in a clean shutdown stays a bare "not reachable".
         detail = "not reachable"
         boot_advisory = _boot_failure_advisory()
         if boot_advisory:
@@ -1325,13 +1404,21 @@ def _check_managed_service_probe() -> list[HealthResult]:
     warn only — reachability fatals are ``_check_vector_service``'s domain, so this
     surfaces the version/remedy signal without a duplicate fatal on a down service.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     # env (NX_SERVICE_URL) FIRST, then config.yml — so a greenfield user who set
     # the endpoint with `nx config set service_url` (no shell export) still gets
     # the probe (RDR-166 nexus-v3p0x). Empty in BOTH → no explicit managed
     # endpoint, never default-probe the public one.
-    base = (get_credential("service_url") or "").strip()
+    try:
+        base = get_service_url()
+    except ServiceUrlUserinfoError as exc:
+        return [HealthResult(
+            label="Managed/remote service (version)", ok=False, detail=str(exc),
+            fix_suggestions=["Remove the user:password@ part of service_url "
+                             "(`nx config set service_url <url>`, or fix NX_SERVICE_URL)."],
+        )]
     if not base:
         return []
 
@@ -1367,7 +1454,7 @@ def _check_managed_service_probe() -> list[HealthResult]:
     return [HealthResult(
         label="Managed/remote service (version)",
         ok=True,
-        detail=f"{caps.base_url} — release_version {caps.release_version} (app_version {caps.app_version})",
+        detail=f"{log_endpoint(caps.base_url)} — release_version {caps.release_version} (app_version {caps.app_version})",
     )]
 
 
@@ -1406,13 +1493,20 @@ def _check_t3_cloud() -> list[HealthResult]:
 def _check_tools() -> list[HealthResult]:
     results: list[HealthResult] = []
 
-    # git
+    # git: a warning when absent, never a failure (nexus-36qyh). Nothing that
+    # serves search needs it; it is for indexing repositories and for Claude
+    # Code's plugin marketplace. A Claude Desktop-only user has no git, and a
+    # failing row ended the setup verify step (the exit code of this sweep) in
+    # doctor-failed on a box whose service, logon task and search all worked.
     git_path = shutil.which("git")
     r = HealthResult(
         label="git",
         ok=bool(git_path),
-        detail=git_path or "not found on PATH",
-        fatal=True,
+        detail=git_path or (
+            "not found on PATH — needed only for indexing repositories "
+            "and Claude Code's plugin marketplace"
+        ),
+        warn=not git_path,
     )
     if not git_path:
         # Windows: Git for Windows' installer always asks for elevation, through
@@ -2379,7 +2473,7 @@ def _check_orphan_t1_lease() -> list[HealthResult]:
 
     Unlike the retired check, THIS one actually reaps: nothing else sweeps
     an expired ``t1_session_lease.*`` file after an ungraceful owner death
-    (only clean teardown -- ``clear_t1_session_lease`` -- removes one), so
+    (only clean teardown -- ``end_owned_t1_session_lease`` -- removes one), so
     without this check stale lease files accumulate forever. A lease past
     its ``expires_at`` (plus the reader's freshness margin) is unlinked
     here, not merely reported.
@@ -3483,9 +3577,7 @@ def _check_mint_token() -> list[HealthResult]:
             detail=f"mint_token is configured but the engine endpoint is not resolvable: {exc}",
         )]
 
-    import urllib.parse  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
-
-    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    host = log_endpoint(base_url)
     tenant = "default"
     # critic S3 (nexus-ssqk9, residue class nexus-lgiqw): the PROCESS-WIDE
     # singleton, never a throwaway DataTokenManager() -- constructing a
@@ -3547,10 +3639,18 @@ def _check_static_service_token() -> list[HealthResult]:
     commands are unaffected) and a failure on an unarmed one (every command
     sends it); a probe that cannot complete is a warning, never a pass.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     label = "Static service_token"
-    url = (get_credential("service_url") or "").strip().rstrip("/")
+    try:
+        url = get_service_url()
+    except ServiceUrlUserinfoError as exc:
+        return [HealthResult(
+            label=label, ok=False, detail=str(exc),
+            fix_suggestions=["Remove the user:password@ part of service_url "
+                             "(`nx config set service_url <url>`, or fix NX_SERVICE_URL)."],
+        )]
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
@@ -3560,11 +3660,9 @@ def _check_static_service_token() -> list[HealthResult]:
                              detail="not applicable — no static service_token configured")]
 
     import hashlib  # noqa: PLC0415 — branch-local
-    import urllib.parse  # noqa: PLC0415 — branch-local
-
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
 
-    host = urllib.parse.urlsplit(url).netloc or url
+    host = log_endpoint(url)
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:
@@ -3699,6 +3797,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.pdf_pipeline",
     "nexus.plans",
     "nexus.relevance_log",
+    # nexus.request_ledger: RDR-222 Phase 1 (nexus-yye8l.1, vectors-033-
+    # request-ledger.xml), the per-request idempotency ledger for mutating
+    # engine routes; ENABLE + FORCE + tenant_isolation.
+    "nexus.request_ledger",
     "nexus.retention_markers",
     # nexus.routing_events: nexus-gjv9b PART 2 (telemetry-011-routing-
     # events.xml), replacing routing_log.jsonl. Append-only event log, same
@@ -4057,10 +4159,6 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
 
 _OWNERLESS_WRITES_LABEL = "Ownerless writes"
 
-#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
-_ENGINE_STATUS_UNSET: object = object()
-
-
 def _status_int(value: object) -> int:
     """A counter from the engine's status body as an int; anything else is 0."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
@@ -4070,7 +4168,7 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
 
     The engine refuses (``enforce``) or counts (``log-only``) a write to
-    ``/v1/vectors/upsert-chunks`` or ``/v1/vectors/store-put`` whose chash no
+    ``/v1/vectors/upsert-chunks`` (or the since-retired ``/v1/vectors/store-put``) whose chash no
     live manifest row owns. Only a client released before the RDR-223 Phase 2
     migration writes that way, so a non-zero counter means some machine that
     writes to this engine runs old code: not yet upgraded, or upgraded but a
@@ -4428,7 +4526,8 @@ def _check_per_collection_indexes(
     """nexus-43ulx.24 (RDR-227 Day 2): are the per-collection partial HNSW indexes being built and usable?
 
     Reads the ``per_collection_indexes`` object of ``GET /v1/status`` (nexus-43ulx.23): the read half's global
-    ``valid`` / ``invalid`` / ``unparsed`` counts, and in ``this_engine`` what this engine's builder is doing
+    ``valid`` / ``invalid`` / ``unparsed`` / ``reindex_leftover`` counts, and in ``this_engine`` what this engine's
+    builder is doing
     (``builder_state``, ``failing``, ``last_ddl_pass_at``). The same status body serves the Engine reaper row, so a
     local and a managed engine are judged the same way (HTTP only).
 
@@ -4449,6 +4548,10 @@ def _check_per_collection_indexes(
       completes no pass and would otherwise read green). The period is the engine's ``sweep_seconds`` (600 when an
       older engine does not report it). A holder that has never completed a pass warns on the same threshold, read
       from the engine's ``process_start_time``.
+    * warn, too: ``reindex_leftover`` > 0 (nexus-rn1yd: an invalid ``_ccnew``/``_ccold`` index a failed REINDEX
+      CONCURRENTLY left behind) while ``builder_state`` is ``off``, because nothing will drop it. ``auth_failed`` and
+      ``no_privilege`` already fail and carry the count. On ``ok`` the next pass drops it and on ``standby`` a peer
+      does, so the count is shown and never a warning there.
     * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with none of those; ``off`` passes with a note that
       builds are disabled by ``NX_SEARCH_PCI=0``.
 
@@ -4501,10 +4604,12 @@ def _check_per_collection_indexes(
     now = now or datetime.now(UTC)
     valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))
     unparsed, failing = _status_int(pci.get("unparsed")), _status_int(this_engine.get("failing"))
+    leftover = _status_int(pci.get("reindex_leftover"))
     last_ddl = _instant(this_engine.get("last_ddl_pass_at"))
     ddl_note = ("no DDL pass yet" if last_ddl is None
                 else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
-    counts = f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+    counts = (f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+              + (f", {leftover} reindex leftover" if leftover else ""))
     expired = pci.get("expired") is True
     building_now = _status_int(this_engine.get("building")) == 1
     pass_in_flight = this_engine.get("pass_in_progress") is True
@@ -4556,10 +4661,16 @@ def _check_per_collection_indexes(
             stalled = uptime is not None and uptime > stall_seconds
             stall_note = ("no DDL pass has completed" if uptime is None
                           else f"no DDL pass has completed in the {_span(uptime)} since the engine started")
-    if expired or warn_invalid or failing or stuck or stalled:
+    # A leftover only matters here when nothing will drop it: the builder is off (auth_failed/no_privilege returned
+    # above with the count in `counts`; ok and standby drop it on a later pass).
+    warn_leftover = leftover if state == "off" else 0
+    if expired or warn_invalid or failing or stuck or stalled or warn_leftover:
         parts = ["router index set expired (no successful catalog read for three sweep periods; every statement "
                  "walks at the serving ef_search until a read succeeds)"] if expired else []
         parts += [f"{n} {what}" for n, what in ((warn_invalid, "invalid"), (failing, "failing")) if n]
+        if warn_leftover:
+            parts.append(f"{warn_leftover} reindex leftover (an invalid _ccnew/_ccold index a failed REINDEX "
+                         "CONCURRENTLY left behind; the builder is off, so nothing drops it)")
         if stuck:
             parts.append(f"a DDL pass has been in flight for {_span(pass_age)}, more than "
                          f"{_span(_PCI_PASS_STUCK_SECONDS)} (hung, or a very long first pass)")
@@ -4575,6 +4686,9 @@ def _check_per_collection_indexes(
                 "event=pci_sweep_set_expired marks a frozen set) and the builder's own lines for the collection "
                 "that fails; event=pci_reconcile_pass shows whether passes complete (ran_to_end, skipped_leaves, "
                 "max_count_ms against the 30 s count timeout)",
+                *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
+                   "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
+                  if warn_leftover else []),
                 "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
             ],
         )]
@@ -4583,6 +4697,376 @@ def _check_per_collection_indexes(
         return [HealthResult(label=label, ok=True,
                              detail=f"{counts}; a peer engine holds the builder lock (standby){note}")]
     return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
+
+
+_LEAF_BLOAT_LABEL = "Chunks leaf bloat"
+
+#: The engine log event that names a leaf with its problem, dead rows and live rows (one WARN per leaf per change).
+_LEAF_BLOAT_LOG_EVENT = "event=chunks_leaf_bloat_leaf"
+
+
+def _compact_span(seconds: float) -> str:
+    """A duration in whole seconds as ``1h 30m``, ``45m`` or ``20s``; a float from the status JSON is truncated, so
+    it never reads ``1.0h 30.0m``."""
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        hours, rest = divmod(seconds, 3600)
+        minutes = rest // 60
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+_RERANKER_LABEL = "Reranker"
+
+
+def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-yuh4a (RDR-210 P3.1): are the engine's reranker model files present?
+
+    ``GET /v1/status`` names the CHOSEN reranker in ``reranker`` even when its model files are absent and every rerank
+    degrades, so the name does not say whether search is reranked. ``reranker_available`` is the engine's answer on
+    whether the reranker's model files are present, read live from the files on every response. It reports files on
+    disk, not that a rerank would succeed (present-but-unloadable files read true, and so does the Voyage reranker).
+    The value is a bare boolean; the engine puts no path in it.
+
+    * warn: ``reranker_available`` is false (searches are served without rerank, with a degraded-rerank field).
+    * warn: the key is present but not a boolean (never read as available).
+    * not applicable (ok): the engine cannot be reached, or an older engine does not report the key, which is
+      "cannot tell", not "available".
+    """
+    label = _RERANKER_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_reranker_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    if status is None:
+        return [HealthResult(label=label, ok=True, detail="not applicable: the engine's status endpoint could not be read")]
+    if "reranker_available" not in status:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: this engine's status does not report whether its reranker is available "
+            "(an older engine, or one that is still starting)"))]
+    available = status.get("reranker_available")
+    if not isinstance(available, bool):
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"the engine's reranker_available could not be read (not a boolean; got {repr(available)[:40]})",
+            fix_suggestions=["Check that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+    name = status.get("reranker")
+    name = name if isinstance(name, str) and name else None
+    if available:
+        return [HealthResult(label=label, ok=True, detail=f"{name or 'the reranker'}: model files are present")]
+    which = f"the reranker ({name}): model files are absent" if name else "no reranker is configured"
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=f"{which}, so searches are served without rerank",
+        fix_suggestions=["Run `nx init --service` to provision the cross-encoder model files; the engine reads this "
+                         "row's value from those files"],
+    )]
+
+
+def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
+
+    Reads the ``chunks_leaf_bloat`` object of ``GET /v1/status``, which the engine fills from a background read of the
+    LEAVES (the partitioned parent holds no tuples and is never autovacuumed, so a probe of ``relname = 'chunks'``
+    reports no bloat for a table that has some). The same status body serves the other engine rows, so a local and a
+    managed engine are judged the same way (HTTP only; this is not the local-only psql tuples-bloat row).
+
+    The object is AGGREGATES ONLY (Sam's ruling, 2026-10-19): the route is unauthenticated, so it carries counts over
+    every leaf and names none. The row therefore says how many leaves are in trouble and where the names are: the
+    engine log, ``event=chunks_leaf_bloat_leaf``.
+
+    A leaf is OVERDUE when its dead rows pass ``overdue_base_rows`` + ``overdue_scale_factor`` of its rows (1000 + 10%; rows is the larger of
+    the statistics' live + dead and the planner's ``reltuples``, the figure autovacuum scales by):
+    autovacuum's own trigger (1000 + 5%, vectors-034) with the scale doubled, so a small leaf at a high dead fraction,
+    which autovacuum correctly leaves alone, is not overdue. The engine classifies each overdue leaf from the clock and
+    the leaf's vacuum count; this row reads the counts, it does not redo the arithmetic.
+
+    * warn: a leaf ``pinned`` (a vacuum finished since it went overdue and the dead rows are still there) or
+      ``starved`` (overdue for ``overdue_warn_after_seconds`` with no vacuum finished). The advice follows the case.
+      A ``waiting`` leaf (overdue, no vacuum yet, not for long) passes with a note: the dead-tuple count is an estimate
+      and a leaf mid-vacuum shows it until the vacuum ends.
+    * warn, separately: a leaf missing any of the four autovacuum settings (a leaf the ``vectors-034-2`` self-heal
+      skipped) or with ``autovacuum_enabled`` off. Either reads red for a different cause than bloat, so each is
+      counted on its own.
+    * warn: the engine's view is ``expired`` (no successful read for three sweep periods): the counts are the
+      last read's and the row says so.
+    * warn: the engine's reads have failed and none has ever succeeded (``ever_read`` false with
+      ``consecutive_failures`` above 0): nothing is checking for bloat.
+
+    Not applicable (ok, no warning) when the engine cannot be reached, does not report the object (an older engine, or
+    one still starting) or reports no leaves with no failed read (a box with nothing yet to read). A present object
+    that cannot be read warns, as the Per-collection indexes row does.
+    """
+    label = _LEAF_BLOAT_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_chunks_leaf_bloat_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if status is None:
+        return _na("the engine's status endpoint could not be read")
+    bloat = status.get("chunks_leaf_bloat")
+    if bloat is None:
+        return _na("this engine's status does not include the chunks leaf bloat object (an older engine, or one "
+                   "that is still starting)")
+
+    def _unreadable(why: str) -> list[HealthResult]:
+        return [HealthResult(
+            label=label, ok=False, warn=True, detail=why,
+            fix_suggestions=["The engine reports a chunks_leaf_bloat object this client does not understand: check "
+                             "that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+
+    leaves_total = bloat.get("leaves_total") if isinstance(bloat, dict) else None
+    if not isinstance(leaves_total, int) or isinstance(leaves_total, bool) or leaves_total < 0:
+        return _unreadable("the engine's chunks_leaf_bloat object could not be read "
+                           f"(leaves_total missing or not a count; got {repr(bloat)[:80]})")
+    total = leaves_total
+    failures = _status_int(bloat.get("consecutive_failures"))
+    if total == 0:
+        if bloat.get("ever_read") is False and failures > 0:
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(f"the engine's leaf bloat read has failed {failures} time{'s' if failures != 1 else ''} since "
+                        "it started and none has succeeded, so nothing is checking the leaves of nexus.chunks for bloat"),
+                fix_suggestions=["Read the engine log for event=chunks_leaf_bloat_read_failed: it names the error "
+                                 "(a statement timeout, a permission on pg_stat_user_tables or pg_index, or the "
+                                 "database unreachable)"],
+            )]
+        return _na("the engine reports no leaves of nexus.chunks yet (nothing has been read)")
+
+    base = _status_int(bloat.get("overdue_base_rows")) or 1000
+    scale = bloat.get("overdue_scale_factor")
+    scale = float(scale) if isinstance(scale, (int, float)) and not isinstance(scale, bool) else 0.10
+    warn_after = _status_int(bloat.get("overdue_warn_after_seconds"))
+    longest = _status_int(bloat.get("max_overdue_for_seconds"))
+    rule = f"dead rows above {base:,} + {scale:.0%} of the leaf's rows"
+
+    def _count(n: int) -> str:
+        return f"{n} leaf" if n == 1 else f"{n} leaves"
+
+    n_pinned = _status_int(bloat.get("pinned"))
+    n_starved = _status_int(bloat.get("starved"))
+    n_overdue = max(_status_int(bloat.get("overdue")), n_pinned + n_starved)
+    n_waiting = n_overdue - n_pinned - n_starved
+    n_persistent = n_pinned + n_starved
+    n_unset = _status_int(bloat.get("policy_unset"))
+    n_disabled = _status_int(bloat.get("autovacuum_disabled"))
+    expired = bloat.get("expired") is True
+
+    summary = f"{_count(total)}, {n_overdue} overdue" if n_overdue else f"{_count(total)}, none overdue"
+
+    if expired or n_persistent or n_unset or n_disabled:
+        parts: list[str] = []
+        if expired:
+            parts.append("the engine's leaf view is expired (no successful read for three sweep periods), so the "
+                         "figures here are the last read's and may be stale")
+        if n_persistent:
+            kinds = []
+            if n_pinned:
+                kinds.append(f"{n_pinned} pinned (a vacuum finished since the leaf went overdue and the dead rows "
+                             "are still there)")
+            if n_starved:
+                after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
+                kinds.append(f"{n_starved} starved (overdue{after} with no vacuum finished)")
+            parts.append(f"dead rows have not come down on {_count(n_persistent)} (overdue = {rule}): "
+                         f"{', '.join(kinds)}; the longest has been overdue {_compact_span(longest)}")
+        if n_unset:
+            parts.append(f"{_count(n_unset)} without all four autovacuum settings (vectors-034)")
+        if n_disabled:
+            parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
+        starved_after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "
+                    f"log ({_LEAF_BLOAT_LOG_EVENT})"),
+            fix_suggestions=[
+                f"Read the engine log for {_LEAF_BLOAT_LOG_EVENT}: one WARN per leaf names it with its problem, dead "
+                "rows and live rows (the status route is unauthenticated, so it names no leaf)",
+                *(["A vacuum finished and a leaf is still overdue, so something holds the dead rows back: look for a "
+                   "long-running or idle-in-transaction session, an unconsumed replication slot or a prepared "
+                   "transaction (pg_stat_activity, pg_replication_slots, pg_prepared_xacts); VACUUM (VERBOSE) on the "
+                   "leaf reports what it could not remove"] if n_pinned else []),
+                *([f"No vacuum has finished on a leaf that stayed overdue{starved_after}: check that autovacuum is on "
+                   "(SHOW autovacuum; the leaf's autovacuum_enabled), whether its workers are busy "
+                   "(pg_stat_progress_vacuum, autovacuum_max_workers) and the cost throttle "
+                   "(autovacuum_vacuum_cost_limit); a manual VACUUM on the leaf clears it"] if n_starved else []),
+                *(["Restart the engine: its migration self-heal (vectors-034-2) sets the four autovacuum settings "
+                   "on every leaf it can lock and own at each boot, and the engine logs "
+                   "event=chunks_leaf_autovacuum_checked naming any it could not"] if n_unset else []),
+                *(["autovacuum_enabled=false is kept on purpose by the self-heal; as the owner of each leaf named in "
+                   "the log, reset that storage parameter on it: RESET (autovacuum_enabled)"] if n_disabled else []),
+                "docs/architecture.md: the nexus.chunks leaf autovacuum policy",
+            ],
+        )]
+    note = ""
+    if n_waiting:
+        until = f", or after {_compact_span(warn_after)} without one" if warn_after else ""
+        note = (f"; {_count(n_waiting)} overdue and waiting for a vacuum (the longest for {_compact_span(longest)}); the row "
+                f"warns if a vacuum finishes and a leaf is still overdue{until}")
+    if failures:
+        note += (f"; the last {failures} read{'s' if failures != 1 else ''} failed, so these figures are from the last "
+                 "good read")
+    return [HealthResult(label=label, ok=True, detail=f"{summary}{note}")]
+
+
+_PROSE_INDEX_LABEL = "Prose collections at the index threshold"
+
+#: The engine's ``NX_SEARCH_EXACT_MAX_ROWS`` default. The setting lives in the engine's environment and the status
+#: body does not carry it, so this is the one client-side mirror of ``PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS``;
+#: ``tests/test_doctor_prose_index_recall_row.py`` reads the Java source and fails if the two drift. It equals
+#: ``NX_SEARCH_PCI_BUILD_MIN_ROWS`` (B), the row count at which a collection becomes a candidate for its own HNSW
+#: index (RDR-227).
+DEFAULT_SEARCH_EXACT_MAX_ROWS = 20_000
+
+#: Content types whose chunks are prose: ``docs``, ``rdr`` and ``knowledge``. ``code`` is left out because RDR-227
+#: measured it above B at recall 1.0, on ``voyage-code-3`` only. ``knowledge`` is included by analogy, not by
+#: measurement: it shares ``voyage-context-3`` with ``docs`` and ``rdr``, which were measured; no ``knowledge``
+#: collection was. Including it is the safe side.
+_PROSE_CONTENT_TYPES = frozenset({"docs", "rdr", "knowledge"})
+
+#: The one embedding model the prose recall was measured on (docs__1-2 at 10,308 rows, rdr__1-79 at 14,300).
+_PROSE_MEASURED_MODEL = "voyage-context-3"
+
+#: How many collections the warning names before it says "and N more".
+_PROSE_INDEX_NAMED_MAX = 5
+
+
+def _prose_index_threshold() -> int:
+    """The row count above which the router sends a collection to its own index: ``NX_SEARCH_EXACT_MAX_ROWS``
+    from this process's environment, else the engine default. Unset, blank, not an integer, out of the engine's
+    range (0..1000000), or ``0`` (the router is off, which says nothing about where the index starts) all read as
+    the default."""
+    raw = os.environ.get("NX_SEARCH_EXACT_MAX_ROWS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SEARCH_EXACT_MAX_ROWS
+    return value if 0 < value <= 1_000_000 else DEFAULT_SEARCH_EXACT_MAX_ROWS
+
+
+def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-qqoak (RDR-227 residual): is a prose collection large enough to be routed to its own HNSW index?
+
+    The router runs a statement exact when the collection holds at most ``NX_SEARCH_EXACT_MAX_ROWS`` (T) rows
+    (default 20,000) and sends it to the collection's own partial HNSW index above T, once the builder has made one
+    (``NX_SEARCH_PCI_BUILD_MIN_ROWS``, ``NX_SEARCH_PCI``). For prose on ``voyage-context-3`` that index's recall
+    was measured at 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) at 10,308 and 14,300 rows, under the
+    RDR's 0.99 target, and not at all above 20,000 rows (T2 ``nexus_rdr/227-research-12``; RDR-227 Phase 2b,
+    "Prose"). Nothing measured it on any other model. Today no prose collection is that large. This row warns when
+    one is, naming each collection with its row count and embedding model.
+
+    The warning says only what the evidence supports for each collection's model: the measurement is quoted for
+    ``voyage-context-3`` and every other model is "unmeasured". Its only remedy is to measure: this row cannot see
+    the engine's ``NX_SEARCH_EXACT_MAX_ROWS`` (the doctor reads its own shell), so a hint to raise it would leave
+    the warning on after the operator did. ``knowledge`` collections are included by analogy and the text says so.
+
+    The ``GET /v1/status`` ``per_collection_indexes`` object carries counts only, no names, content types or row
+    counts, so the row reads the collection listing (``collections``: the one ``run_health_checks`` already fetched,
+    ``None`` when that fetch raised; left unset, the row fetches its own). It compares the PHYSICAL row count
+    (``stored_count``, else ``count``), the number the router counts, and skips every collection that is not live
+    (:func:`nexus.db.http_vector_client.is_live_collection_row`: a ``lifecycle_state`` present and not ``live``, or
+    a rename tombstone).
+
+    Not applicable (ok, no warning) when the listing cannot be read or is empty: ``list_collections`` returns ``[]``
+    on a transport failure, and a box with no collections has nothing to measure. A prose collection at or below
+    the threshold (the router runs it exact), and a ``code__*`` collection at any size, pass.
+    """
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred to avoid circular import
+
+    label = _PROSE_INDEX_LABEL
+    rows: list | None
+    if collections is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+            rows = make_t3().list_collections()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_prose_index_recall_listing_failed", error=str(exc))
+            rows = None
+    else:
+        rows = collections if isinstance(collections, list) else None
+    if not rows:
+        return [HealthResult(label=label, ok=True, detail="not applicable: no collection listing to read")]
+
+    threshold = _prose_index_threshold()
+    over: list[tuple[str, int, str, str]] = []  # name, rows, content type, embedding model ("" when unknown)
+    unclassified = 0
+    for row in rows:
+        name = row.get("name") if isinstance(row, dict) else None
+        if not isinstance(name, str):
+            unclassified += 1
+            continue
+        if not is_live_collection_row(row):
+            continue  # a quarantined, dormant or disputed collection, or a rename tombstone: not a search target
+        # The catalog row's content type is the authority (RDR-204); the name is never parsed (the collection-name
+        # parse census counts every such site). A chunk-holding collection with no catalog row is counted and said.
+        kind = row.get("content_type")
+        if not isinstance(kind, str) or not kind:
+            unclassified += 1
+            continue
+        if kind not in _PROSE_CONTENT_TYPES:
+            continue
+        stored = row.get("stored_count")
+        n = _status_int(stored if isinstance(stored, int) and not isinstance(stored, bool) else row.get("count"))
+        if n > threshold:
+            model = row.get("embedding_model")
+            over.append((name, n, kind, model if isinstance(model, str) else ""))
+    skipped = (f"; {unclassified} of {len(rows)} collections have no catalog content type and were not checked"
+               if unclassified else "")
+    if unclassified == len(rows):
+        return [HealthResult(label=label, ok=True, detail="not applicable: the collection listing carries no "
+                             "content types (an older engine, or no catalog rows)")]
+    if not over:
+        return [HealthResult(label=label, ok=True,
+                             detail=f"no prose collection has more than {threshold:,} rows{skipped}")]
+    over.sort(key=lambda item: (-item[1], item[0]))
+    named = ", ".join(f"{name} ({n:,} rows, {model or 'embedding model not in the listing'})"
+                      for name, n, _kind, model in over[:_PROSE_INDEX_NAMED_MAX])
+    if len(over) > _PROSE_INDEX_NAMED_MAX:
+        named += f", and {len(over) - _PROSE_INDEX_NAMED_MAX} more"
+    models = sorted({model for _name, _n, _kind, model in over})
+    evidence: list[str] = []
+    if _PROSE_MEASURED_MODEL in models:
+        evidence.append(
+            f"on {_PROSE_MEASURED_MODEL} that index measured 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) "
+            "at 10,308 and 14,300 rows, under the 0.99 target, and was never measured above 20,000 rows")
+        if any(kind == "knowledge" and model == _PROSE_MEASURED_MODEL for _name, _n, kind, model in over):
+            evidence.append("knowledge collections were not themselves measured (docs and rdr collections on the "
+                            "same model were)")
+    for m in models:
+        if m != _PROSE_MEASURED_MODEL:
+            evidence.append(f"recall on {m or 'a collection whose embedding model is not in the listing'} is unmeasured")
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"{named}: above {threshold:,} rows, the threshold read from this shell's NX_SEARCH_EXACT_MAX_ROWS "
+                "(default 20,000; the engine's own value is not visible to nx doctor). A collection above the "
+                "threshold is routed to its own HNSW index once one is built (NX_SEARCH_PCI_BUILD_MIN_ROWS, "
+                f"NX_SEARCH_PCI). Evidence: {'; '.join(evidence)}{skipped}"),
+        fix_suggestions=[
+            "Measure the recall of each named collection's own HNSW index (RDR-227 Gap 1): for k of 40, 60, 80, 100 "
+            "and 120, compare the index's top-k with an exact top-k, on query vectors written for the collection's "
+            "own topics (not random vectors); the target is 0.99 or better at every k",
+        ],
+    )]
 
 
 def _check_t2_launchagent_stray() -> list[HealthResult]:
@@ -4756,7 +5240,23 @@ _SETUP_STALE_SECONDS = 60.0
 _SETUP_STATES = ("running", "done", "doctor-failed", "failed", "unsupported")
 _SETUP_TEXT_CHARS = 300
 _SETUP_DOCTOR_ROWS = 3
+#: The script's ``_DOCTOR_ROWS_MAX``: a record holding that many rows may have been cut.
+_SETUP_DOCTOR_ROWS_MAX = 20
+#: The script's ``_GIT_ROW``: a failing row of the check labelled exactly ``git`` (nexus-36qyh). A missing
+#: git is a warning now, but a setup run recorded by a CLI from before that change is ``doctor-failed`` over
+#: it alone, and the script's ``status_view`` reads that record as ``done``; this row must say the same.
+#: ``tests/test_doctor_setup_row.py`` compares the two on every fixture case and on a battery of rows.
+_SETUP_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
 _SETUP_UNREADABLE = object()
+
+
+def _setup_only_git_failed(rows: object) -> bool:
+    """Whether a ``doctor-failed`` record's rows name the git check and nothing else: the script's
+    ``only_git_failed``. An empty list, a list at the cap and anything not a list of strings are not."""
+    return (
+        isinstance(rows, list) and 0 < len(rows) < _SETUP_DOCTOR_ROWS_MAX
+        and all(isinstance(row, str) and _SETUP_GIT_ROW.match(row.strip()) for row in rows)
+    )
 
 
 def _setup_text(value: object, limit: int = _SETUP_TEXT_CHARS) -> str:
@@ -4905,6 +5405,8 @@ def _setup_row(setup: Path) -> HealthResult:
             )
         return HealthResult(label=_SETUP_LABEL, ok=True, detail="not applicable: no plugin setup has run on this machine")
     state = status["state"]
+    if state == "doctor-failed" and _setup_only_git_failed(status.get("doctor_failing")):
+        state = "done"  # the script's view reads this record the same way (nexus-36qyh)
     mode = _setup_text(status.get("mode", "unknown"), 40)
     stage = _setup_text(status.get("stage", "unknown"), 40)
     again = f"call the `setup` tool again with mode {mode}"
@@ -8164,18 +8666,19 @@ def _check_pending_rungs() -> list[HealthResult]:
 
 
 def _check_dimension_orphans() -> list[HealthResult]:
-    """Name T3 collections whose declared embedding dim no longer matches
-    the active serving embedder, and suggest the remedy (GH #1113 /
-    nexus-9tsdf AC2).
+    """Name T3 collections whose model the engine does not serve, and
+    suggest the remedy (GH #1113 / nexus-9tsdf AC2).
 
-    Such a collection (e.g. a minilm-l6-v2-384 leftover after the active
-    embedder moved to 1024d voyage) can never be searched — every
-    cross-corpus search skips it. Reuses the SAME finder ``nx collection
+    A collection is listed only when its model is in neither the engine's
+    ``embedding_models`` nor the Voyage model set (RDR-210 Technical Design
+    10), so a served collection is never named. Such a collection (e.g. a
+    minilm-l6-v2-384 leftover after the engine moved to bge-768) can never be
+    searched — every cross-corpus search skips it. Reuses the SAME finder ``nx collection
     prune`` lists from, so doctor and the remedy command can never
     disagree about what counts as an orphan. Degrades to a skip — never a
-    crash, and never a guess: an unresolved active-embedder probe reports
-    "skipped" rather than risk telling the operator to delete healthy
-    collections.
+    crash, and never a guess: an engine whose ``/version`` carries no
+    ``embedding_models`` reports "cannot verify" rather than risk telling the
+    operator to delete healthy collections.
     """
     label = "T3 dimension orphans"
     try:
@@ -8200,7 +8703,7 @@ def _check_dimension_orphans() -> list[HealthResult]:
         )]
 
     names = "; ".join(
-        f"{m['name']} ({m['declared_dim']}d vs active {m['active_dim']}d, "
+        f"{m['name']} ({m['declared_model']}, {m['declared_dim']}d, not served, "
         f"{m['count']} chunk(s))"
         for m in mismatches
     )
@@ -8209,8 +8712,8 @@ def _check_dimension_orphans() -> list[HealthResult]:
         ok=False,
         warn=True,
         detail=(
-            f"{len(mismatches)} collection(s) unsearchable under the active "
-            f"embedder ({active_label}): {names}"
+            f"{len(mismatches)} collection(s) unsearchable on the active "
+            f"engine ({active_label}): {names}"
         ),
         fix_suggestions=[
             "nx collection prune          (list them)",
@@ -10698,9 +11201,18 @@ def run_health_checks(
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 
+    # nexus-qqoak: one collection listing per run, shared by the T3 collection count and the prose-index row. None
+    # means the fetch raised; each row then degrades as it did when it fetched for itself.
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        _collections: list | None = make_t3().list_collections()
+    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+        _log.debug("doctor_collection_listing_failed", error=str(exc))
+        _collections = None
+
     _local = is_local_mode()
     if _local:
-        results.extend(_check_t3_local())
+        results.extend(_check_t3_local(_collections))
         results.extend(_check_service_bge_model())
         results.extend(_check_service_crossencoder_model())
     else:
@@ -10811,6 +11323,9 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
+    results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
+    results.extend(_check_reranker(engine_status))  # nexus-yuh4a
+    results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())

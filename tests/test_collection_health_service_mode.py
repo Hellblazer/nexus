@@ -25,6 +25,7 @@ import pytest
 # ── Catalog (SQLite) tests ────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestCatalogCollectionHealthMeta:
     """collection_health_meta semantics against the ACTIVE catalog.
 

@@ -1,0 +1,87 @@
+# What one test run may write, in bytes and in DDL statements (nexus-sz651, epic nexus-aca0q).
+#
+# THE PRIMARY GATED SIGNAL IS DDL PER TEST: an exact count, identical on macOS and Linux for the same tests
+# (31881 on both), and the lever that explains the writes. The metrics named `*wal_bytes*` are WAL bytes the
+# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java). WAL is a CHURN
+# PROXY, not a disk meter: the clusters sit on tmpfs on Linux with headroom, so that WAL lands in memory and
+# does NOT reach the NVMe. It is also relative and a lower bound (fsync and full_page_writes are off, the
+# Python substrate runs wal_level=minimal), host-dependent (the same tests wrote about 1.8x more on Linux
+# than on the laptop) and not comparable between Python and Java. NOT MEASURED: the job workspace/checkout,
+# target/, .venv, jar builds, journald, anything before pytest starts, and the docker-run and e2e shell
+# clusters. The labrun NVMe sampler is the source of truth
+# for bytes written to disk, with the device delta (`cgroup_io` wbytes, which `ddl_ratchet.py fan-in` sums and
+# prints; informational, never gated). The `*ddl*` metrics are the DDL
+# statement counts that explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are
+# reduce-only: lower one in the commit that lowers the number, raising one needs a reviewed reason in that
+# commit's message. A ceiling is only as good as its measurement: see "HOW THE PYTHON NUMBERS WERE
+# OBTAINED" below for which of them are measurements and which are estimates.
+#
+# Every metric is INTENSIVE, so it does not move with how the work is split across shards or forks:
+#   python_unit    the gate (once armed, see below) is `ddl_ratchet.py fan-in`, which sums every shard's report and judges the whole
+#                  run: bytes and DDL per test over all tests, and the migration's bytes and DDL per booted
+#                  xdist worker (each worker boots and migrates its own cluster). None of the four moves with
+#                  the shard split, with -n, or with a worker that never booted a substrate. One shard's
+#                  `check` compares the same four against these same numbers and is ADVISORY (a shard's mix
+#                  is not the run's), so it never fails a job.
+#   java_*         one mvn run of one suite: the migration's bytes and DDL per fork (each fork migrates
+#                  one template), and the rest (clones, dedicated containers, the tests' own work) as totals
+#
+# Tolerance bands: a bytes metric passes up to ceiling * (1 + bytes_tolerance), a DDL metric up to
+# ceiling * (1 + ddl_tolerance), and `<metric>_tolerance` overrides either for one metric.
+#
+# THE PYTHON GATE IS ARMED (2026-10-20): `[python_unit] measured_on` names the CI runs the ceilings came from,
+# and tests/scripts/test_ddl_ratchet_wiring.py requires the CI fan-in to enforce while it is set. A fan-in
+# whose shards ran hosted (fork PR, NX_CI_POOL=off) passes --bytes-advisory: it prints a WAL breach without
+# failing (WAL is host-dependent, these were measured on the pool) and still gates the DDL metrics.
+# Re-measuring: take the fan-in lines from develop's pytest-gate logs and set every python ceiling from them in one
+# commit, naming the runs in measured_on and below.
+# Once armed, a commit that adds a Liquibase changeset bumps migration_ddl_per_worker (tolerance 0) in the
+# same commit (tests/AGENTS.md says how; the failure message repeats it).
+#
+# HOW THE PYTHON NUMBERS WERE OBTAINED (armed 2026-10-20, nexus-ekp7w): three Linux CI fan-ins on develop with
+# the tenant pool on (its default since b5077eb4f), pool lab-6c18g, 6 shards x 4 workers, runs 39402256114
+# (7e245451d), 39403221114 (15f3dbd3b) and 39405019761 (0e3d81da9; its gate was red on an unrelated doc
+# citation after six green shards, so its six shard reports were fanned in by hand):
+#   wal_bytes_per_test               18438 / 18446 / 18426        ceiling 18450 (max, rounded up; band 0.10)
+#   ddl_per_test                     1.01278 / 1.01278 / 1.01252  ceiling 1.013 (band 0.05: the test set moves)
+#   migration_wal_bytes_per_worker   11037903 / 11037883 / 11037899 ceiling 11038000. RAISED from 11010048:
+#                                    that was a chas hand run, not CI; the enforcing platform measures 0.25% more.
+#   migration_ddl_per_worker         2101 on all three, tolerance 0 (the changelog's own count)
+# tests 30663-30671, workers_booted 24, total_ddl 81479 on all three. Pool-off runs (e615ca68e, 51e9a4ae3,
+# 07ca0baf1) measured 232k WAL and 18.75 DDL per test: a pool that stopped leasing fails this gate.
+#
+# "measure" means no measurement exists yet. The check then prints the numbers it just measured and exits
+# 11 (not 0), and a ceiling nobody set must not pass a run. The Java sections are still "measure": their
+# CI steps are --advisory until the Java DDL cut (nexus-0ty8z) lands, because a ceiling set before it
+# would be set at the number that cut removes. Set all four of a Java section together, from one run,
+# and drop --advisory from its step in service-ci.yml in the same commit (a lint checks they agree).
+
+[python_unit]
+measured_on = "CI 39402256114 (7e245451d), 39403221114 (15f3dbd3b), 39405019761 (0e3d81da9)"
+bytes_tolerance = 0.10
+ddl_tolerance = 0.05
+wal_bytes_per_test = 18450
+ddl_per_test = 1.013
+migration_wal_bytes_per_worker = 11038000
+# 2101 -> 2103 (2026-10-21): 62949fa41 (nexus-1579m, bounded expire-quarantine) added a Liquibase changeset
+# without the bump; CI 39617797428 at f9e267297 counted 2103 on every worker.
+# 2103 -> 2105 (2026-10-21): vectors-036-1 (nexus-3wh8d.22, drop of the retired pre-walk tables) adds two DDL
+# statements to a fresh migration; measured by a scoped substrate run of this tree (ddl: migration=2105).
+migration_ddl_per_worker = 2105
+migration_ddl_per_worker_tolerance = 0.0
+
+[java_main]
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+migration_wal_bytes_per_fork = "measure"
+migration_ddl_per_fork = "measure"
+other_wal_bytes = "measure"
+other_ddl = "measure"
+
+[java_integration]
+bytes_tolerance = 0.05
+ddl_tolerance = 0.0
+migration_wal_bytes_per_fork = "measure"
+migration_ddl_per_fork = "measure"
+other_wal_bytes = "measure"
+other_ddl = "measure"

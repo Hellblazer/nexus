@@ -317,6 +317,7 @@ def _invoke_repo(runner, args, mock_reg, index_return=None):
     return result, mock_idx
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_chunk_flush_failures_exit_nonzero(runner, repo_dir, mock_reg):
     """The core GH #1432 assertion: every file's chunk flush failed (0
     chunks landed) -- the CLI must exit non-zero AND print a plain-STDOUT
@@ -336,6 +337,7 @@ def test_index_repo_chunk_flush_failures_exit_nonzero(runner, repo_dir, mock_reg
     assert "Done." in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_partial_chunk_flush_failure_exit_nonzero(runner, repo_dir, mock_reg):
     """Partial failure (1 of many files) is still a non-zero exit -- see
     the module docstring's stated partial-vs-total decision."""
@@ -347,6 +349,7 @@ def test_index_repo_partial_chunk_flush_failure_exit_nonzero(runner, repo_dir, m
     assert "1" in result.stdout, result.stdout
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_no_chunk_flush_failures_exit_zero(runner, repo_dir, mock_reg):
     """Regression: the new stats key must not itself flip a clean run
     non-zero."""
@@ -357,6 +360,7 @@ def test_index_repo_no_chunk_flush_failures_exit_zero(runner, repo_dir, mock_reg
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_chunk_flush_failed_key_absent_exit_zero(runner, repo_dir, mock_reg):
     """Backward compat: an older/mocked index_repository return dict with
     no ``chunk_flush_failed_files`` key at all must not be treated as a
@@ -368,6 +372,7 @@ def test_index_repo_chunk_flush_failed_key_absent_exit_zero(runner, repo_dir, mo
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_deferred_files_are_named_and_fail_the_run(runner, repo_dir, mock_reg):
     """RDR-223 P2.4 review (nexus-z0o2p.14): a file deferred on a transient
     write error wrote nothing this run. The summary must print the count and
@@ -387,6 +392,7 @@ def test_index_repo_deferred_files_are_named_and_fail_the_run(runner, repo_dir, 
     assert "Done." in result.output          # the rest of the run still completed
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_many_deferred_files_are_truncated_to_ten_paths(runner, repo_dir, mock_reg):
     paths = [f"f{i}.py" for i in range(13)]
     result, _ = _invoke_repo(
@@ -400,6 +406,7 @@ def test_index_repo_many_deferred_files_are_truncated_to_ten_paths(runner, repo_
     assert "and 3 more" in result.stdout, result.stdout
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_deferred_and_chunk_flush_failures_both_print(runner, repo_dir, mock_reg):
     result, _ = _invoke_repo(
         runner, [str(repo_dir)], mock_reg,
@@ -411,6 +418,7 @@ def test_index_repo_deferred_and_chunk_flush_failures_both_print(runner, repo_di
     assert re.search(r"1/\d+ file\(s\) failed to flush chunk uploads", result.stdout), result.stdout
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_throttled_files_are_named_with_retry_after_and_fail_the_run(runner, repo_dir, mock_reg):
     """nexus-eoido: files the service throttled are reported AS throttled (not as a failed flush),
     with their paths and the Retry-After, and the run still exits non-zero."""
@@ -431,6 +439,7 @@ def test_index_repo_throttled_files_are_named_with_retry_after_and_fail_the_run(
     assert "Done." in result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_throttled_paths_are_truncated_to_ten(runner, repo_dir, mock_reg):
     paths = [f"f{i}.py" for i in range(13)]
     result, _ = _invoke_repo(
@@ -442,6 +451,7 @@ def test_index_repo_throttled_paths_are_truncated_to_ten(runner, repo_dir, mock_
     assert "and 3 more" in result.stdout, result.stdout
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_open_throttle_breaker_is_the_one_clear_error_message(runner, repo_dir, mock_reg):
     """nexus-eoido: when the breaker cut the run short the exit message names the throttle and the
     breaker, ahead of a per-file failure that also happened this run."""
@@ -461,6 +471,7 @@ def test_index_repo_open_throttle_breaker_is_the_one_clear_error_message(runner,
     assert re.search(r"1/\d+ file\(s\) failed to flush chunk uploads", result.stdout), result.stdout
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_no_throttled_files_exit_zero(runner, repo_dir, mock_reg):
     result, _ = _invoke_repo(
         runner, [str(repo_dir)], mock_reg,
@@ -475,6 +486,7 @@ _DEFERRED = {"transient_upsert_deferred_files": 2, "transient_upsert_deferred_pa
 _DEFERRED_LINE = r"2/\d+ file\(s\) deferred on a transient write error"
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_deferral_warning_prints_with_a_taxonomy_failure(runner, repo_dir, mock_reg):
     """A run with deferred files AND lost taxonomy assignments prints both warning lines; the
     deferral raise used to sit before the taxonomy block, so only the deferral printed."""
@@ -492,6 +504,7 @@ def test_index_repo_deferral_warning_prints_with_a_taxonomy_failure(runner, repo
     assert "(nexus-7lw6a)" not in error_line, error_line
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_deferral_warning_prints_before_an_earlier_failure_raises(runner, repo_dir, mock_reg):
     """The quality-gate and systemic-extraction raises sit above the deferral block; the deferral
     warning line still reaches the operator, who would otherwise re-run blind."""
@@ -508,6 +521,7 @@ def test_index_repo_deferral_warning_prints_before_an_earlier_failure_raises(run
         assert result.output.count("Error:") == 1, result.output
 
 
+@pytest.mark.t2_tenant
 def test_index_repo_no_deferred_files_exit_zero(runner, repo_dir, mock_reg):
     result, _ = _invoke_repo(
         runner, [str(repo_dir)], mock_reg,

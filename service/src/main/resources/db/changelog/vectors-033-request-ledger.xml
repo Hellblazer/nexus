@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-222 Phase 1 (nexus-yye8l.1): nexus.request_ledger, the per-request
+    record behind the Idempotency-Key on mutating engine routes. A client that
+    loses the response to a keyed request polls GET /v1/requests/<id> and reads
+    in_flight, committed (with the stored response) or failed, instead of
+    re-sending a sweep it cannot tell ran.
+
+    One row per (tenant_id, request_id). body_sha256 fingerprints the request
+    body so a key reused with a different body is refused. holder is the
+    per-attempt nonce that owns an in_flight row until lease_until; it is NULL
+    once the row is terminal. response is the bounded summary the route
+    returned.
+
+    No doc_id column: the RDR table lists one for Phase 3, which is closed and
+    never reads the ledger (nexus-icdmw item 2).
+
+    Indexes: (tenant_id, state, lease_until) serves live-lease reads and the
+    expired in_flight retention delete; (tenant_id, finished_at) serves the
+    terminal-row retention delete (nexus-icdmw item 3).
+
+    RLS: the gc_audit shape (catalog-018-2). Grants: nexus_svc DML comes from
+    the runAlways grants-nexus-svc.xml loop and its default privileges, with no
+    edit there. nexus_diag gets NO grant, deliberately (Sam, 2026-10-18):
+    response holds sweep samples with document titles and nexus_diag bypasses
+    RLS, so the table stays off CatalogRepository.NEXUS_DIAG_READABLE_TABLES.
+    Diagnosis goes through GET /v1/requests/<id> with the tenant's token.
+
+    DDL only, no row DML, so this changeset needs no rehearsal seed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-033-1" author="nexus-yye8l.1">
+        <comment>Create request_ledger table (RDR-222 request identity)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.request_ledger (
+    tenant_id        TEXT        NOT NULL,
+    request_id       UUID        NOT NULL,
+    route            TEXT        NOT NULL,
+    body_sha256      BYTEA       NOT NULL,
+    state            TEXT        NOT NULL,
+    holder           UUID,
+    lease_until      TIMESTAMPTZ,
+    started_at       TIMESTAMPTZ NOT NULL,
+    finished_at      TIMESTAMPTZ,
+    response_status  INTEGER,
+    response         JSONB,
+    CONSTRAINT request_ledger_pk PRIMARY KEY (tenant_id, request_id),
+    CONSTRAINT request_ledger_body_sha256_len CHECK (octet_length(body_sha256) = 32),
+    CONSTRAINT request_ledger_state_check CHECK (state IN ('in_flight', 'committed', 'failed'))
+);
+
+-- Live-lease reads and the expired in_flight retention delete.
+CREATE INDEX idx_request_ledger_lease ON nexus.request_ledger (tenant_id, state, lease_until);
+-- The terminal-row retention delete.
+CREATE INDEX idx_request_ledger_finished ON nexus.request_ledger (tenant_id, finished_at);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.request_ledger CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-033-2" author="nexus-yye8l.1">
+        <comment>RLS on request_ledger</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.request_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.request_ledger FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.request_ledger
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.request_ledger;
+            ALTER TABLE nexus.request_ledger NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.request_ledger DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

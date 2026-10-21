@@ -23,6 +23,8 @@ from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
+pytestmark = pytest.mark.t2_tenant
+
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
     "hook_event_name": "SubagentStart",

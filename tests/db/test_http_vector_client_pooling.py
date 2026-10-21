@@ -35,6 +35,14 @@ from tests._module_seam import module_time
 class _CountingServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # socketserver's default listen backlog is 5, and the concurrency tests
+    # here connect 8 to 20 sockets at once. When the accept queue is full
+    # (a loaded box accepts slowly) macOS resets the surplus connects, and
+    # the client sees ECONNRESET on a FRESH connection, which the pool
+    # rightly does not retry. That is the test server's undersize, not a
+    # pool defect (nexus-ys8a4: 27/40 failures at 8-wide before, 0/120
+    # after).
+    request_queue_size = 128
 
     def __init__(self, handler_cls):
         self.accepted = 0

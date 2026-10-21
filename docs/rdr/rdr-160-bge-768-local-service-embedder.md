@@ -72,7 +72,20 @@ forced re-embed for every future local user.
    (voyage-code-3 for `code__`, voyage-context-3 for `docs__`/`rdr__`/
    `knowledge__`) and refuses bge collections; keyless boots this RDR's
    bge-768-only behavior unchanged. The carve-out was decided 2026-06-15 (Sam),
-   the same day as this RDR, and is bounded to the embedding and rerank API.
+   the same day as this RDR, and is bounded to the embedding and rerank API,
+   stated as an allowlist (nexus-qfy01): the local engine connects only to the
+   Voyage API (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and
+   `VoyageReranker`, and only when keyed, optionally through the operator's proxy
+   (`EgressProxy`); and to its database, a LOCAL Postgres at `NX_DB_URL`, over
+   JDBC. Nothing else is intended. Two tests check the list and neither proves it.
+   `EgressGuardCensus` scans `service/src/main/java` for ten named outbound
+   constructs against an allowlist with an exact site count per file.
+   `EgressRuntimeWitnessTest` builds the tokenizer, the bge embedder and the
+   cross-encoder in a JVM whose URL-stream factory refuses every non-`file`,
+   non-`jar` stream. Not covered: `java.net.http` use inside a dependency; raw
+   sockets, DNS or JNI inside a dependency (DJL's Rust tokenizers library does
+   network I/O a URL factory cannot see); and the GraalVM native image the engine
+   ships as (the witness runs on a JVM).
    Sam requires local mode to support both embedders at once (2026-09-15);
    today's engine serves one per boot, and RDR-210 tracks the dual-mode engine
    that would let this item and the next both hold simultaneously.

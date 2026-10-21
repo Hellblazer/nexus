@@ -13,6 +13,15 @@ from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 
+def _t3_double() -> MagicMock:
+    """``MagicMock(spec=HttpVectorClient)`` plus a ``put``: ``HttpVectorClient.put`` is retired
+    (nexus-nt76j), but the note-write double (``tests/_note_write_double.py``) lands a note in the
+    mocked T3 through ``t3.put``, as ``T3Database.put`` does, so the double carries one."""
+    db = MagicMock(spec=HttpVectorClient)
+    db.put = MagicMock(name="put")
+    return db
+
+
 def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
@@ -96,7 +105,7 @@ def mock_store(env_creds):
     # here — the real _t3() would hand back an HttpVectorClient, not a
     # T3Database. spec= it so a method missing from HttpVectorClient
     # (e.g. the gc/_dir class of bug) fails the mocked test too.
-    db = MagicMock(spec=HttpVectorClient)
+    db = _t3_double()
     with patch("nexus.commands.store._t3", return_value=db):
         yield db
 
@@ -147,6 +156,7 @@ def _store_entry(id="aabbccdd1234", title="doc.md", tags="", ttl_days=0,
 # Chroma/Voyage creds. The no-creds victim scenario is pinned end-to-end in
 # tests/test_c7aj3_service_mode_cred_gates.py.
 
+@pytest.mark.t2_tenant
 def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("CHROMA_API_KEY", "ck")
     monkeypatch.setenv("VOYAGE_API_KEY", "vk")
@@ -156,7 +166,7 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     src.write_text("content")
     _seed_for_store_put("content")
     with patch("nexus.commands.store._t3") as mt3:
-        db = MagicMock(spec=HttpVectorClient)
+        db = _t3_double()
         db.__enter__ = MagicMock(return_value=db)
         db.__exit__ = MagicMock(return_value=False)
         db.put.return_value = "doc-id-1"
@@ -191,6 +201,7 @@ def _chash_of(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+@pytest.mark.t2_tenant
 def test_store_put_stdin_with_title_succeeds(runner, mock_store, monkeypatch):
     _route_note_writes(monkeypatch, mock_store)
     _seed_for_store_put("content here")
@@ -203,6 +214,7 @@ def test_store_put_stdin_with_title_succeeds(runner, mock_store, monkeypatch):
     assert kw["content"] == "content here"
 
 
+@pytest.mark.t2_tenant
 def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path, monkeypatch):
     src = tmp_path / "analysis.md"
     src.write_text("finding: important")
@@ -255,6 +267,7 @@ def test_store_put_oversized_content_shows_clean_error(runner, mock_store, tmp_p
     mock_store.put.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("exc_cls_name", ["EmbeddingProfileMismatchError", "LocalVoyageCredentialMissingError"])
 def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tmp_path, exc_cls_name, monkeypatch):
     """7.38.0 shakeout (2026-09-09): the registration seam's refusals (a
@@ -339,6 +352,7 @@ def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store,
 # `nx index rdr` / `nx index pdf --dir` / `nx store import`.
 
 
+@pytest.mark.t2_tenant
 def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_path, monkeypatch):
     import time
     import nexus.commands.index as index_mod
@@ -377,6 +391,7 @@ def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_p
     assert "elapsed)" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, monkeypatch):
     # RDR-192 Step 3a: see the sibling test above for why real registration
     # + a manifest FK seed replaces the old blank-catalog_doc_id shortcut.
@@ -394,6 +409,7 @@ def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, 
     assert "still running" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_store_put_heartbeat_disarmed_on_exception(runner, mock_store, tmp_path, monkeypatch):
     import threading
     import time
@@ -479,6 +495,7 @@ def test_store_expire_reports_count(runner, mock_store):
 
 # ── nx collection ────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_collection_list_empty(runner, mock_collection):
     mock_collection.list_collections.return_value = []
     result = runner.invoke(main, ["collection", "list"])
@@ -486,6 +503,7 @@ def test_collection_list_empty(runner, mock_collection):
     assert "No collections" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_collection_list_shows_names_and_counts(runner, mock_collection):
     mock_collection.list_collections.return_value = [
         {"name": "code__myrepo", "count": 42}, {"name": "knowledge__sec", "count": 7}]
@@ -495,6 +513,7 @@ def test_collection_list_shows_names_and_counts(runner, mock_collection):
         assert text in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("subcmd,args", [("info", ["no-such-collection"]), ("verify", ["missing"])])
 def test_collection_not_found(runner, mock_collection, subcmd, args):
     mock_collection.list_collections.return_value = []
@@ -517,6 +536,7 @@ def test_search_no_matching_corpus(runner, mock_search):
     assert "no matching collections" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 def test_search_no_results(runner, mock_search):
     mock_search.list_collections.return_value = [_stats("knowledge__sec", 5)]
     mock_search.search.return_value = []
@@ -525,6 +545,7 @@ def test_search_no_results(runner, mock_search):
     assert "No results" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_search_displays_results(runner, mock_search):
     mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = [
@@ -535,6 +556,7 @@ def test_search_displays_results(runner, mock_search):
     assert "security finding here" in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("content_flag,content_text,expect_indented", [
     (True, "UNIQUE_CHUNK_BODY", True),
     (False, "Unique chunk text that only appears when content flag is set.", False),
@@ -551,6 +573,7 @@ def test_search_content_flag_presence(runner, mock_search, content_flag, content
     assert bool(indented) == expect_indented
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("text,expect_ellipsis,max_len", [
     ("A" * 300, True, 210), ("Short enough.", False, None)])
 def test_search_content_flag_truncation(runner, mock_search, text, expect_ellipsis, max_len):
@@ -569,6 +592,7 @@ def test_search_content_flag_truncation(runner, mock_search, text, expect_ellips
 
 # ── [path] positional argument ───────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_search_path_scopes_where_filter(runner, mock_search, tmp_path):
     mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = []
@@ -580,6 +604,7 @@ def test_search_path_scopes_where_filter(runner, mock_search, tmp_path):
     assert "$startswith" not in str(mock_search.search.call_args.kwargs.get("where"))
 
 
+@pytest.mark.t2_tenant
 def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path):
     mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     src_dir = tmp_path / "src"
@@ -602,6 +627,7 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
     assert "outside src" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_search_no_path_returns_all(runner, mock_search):
     mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = [_search_result(content="result one")]
@@ -616,6 +642,7 @@ def test_search_no_path_returns_all(runner, mock_search):
 
 # ── nx store delete ──────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("found,exit_ok,expect_text", [(True, True, "Deleted"), (False, False, "not found")])
 def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
     # nexus-c53hy: delete_cmd now does a collection-scoped existence check
@@ -630,6 +657,7 @@ def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
     assert expect_text in result.output
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("ids,exit_ok,expect_text", [
     (["id1", "id2"], True, "Deleted 2"), ([], False, "not found")])
 def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
@@ -649,6 +677,7 @@ def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
     assert expect_text in result.output or "No entries" in result.output
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_by_title_reports_actual_deleted_count_on_partial_anti_join(
     runner, real_http_vector_client, monkeypatch,
 ):
@@ -680,6 +709,7 @@ def test_store_delete_by_title_reports_actual_deleted_count_on_partial_anti_join
     assert "Deleted 3" not in result.output
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_by_title_with_every_chunk_kept_exits_nonzero(
     runner, real_http_vector_client, monkeypatch,
 ):
@@ -728,6 +758,7 @@ def real_http_vector_client(monkeypatch):
     reset_http_vector_client_for_tests()
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_by_title_service_mode_real_client(runner, real_http_vector_client, monkeypatch):
     """End-to-end: title resolves to 2 chunk ids and both get deleted,
     routed entirely through the real HttpVectorClient (no mocked T3)."""
@@ -755,6 +786,7 @@ def test_store_delete_by_title_service_mode_real_client(runner, real_http_vector
     assert delete_calls[0][1]["ids"] == ["id1", "id2"]
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_by_title_not_found_service_mode_clean_error(runner, real_http_vector_client, monkeypatch):
     """Title-not-found must be a clean ClickException, never a traceback."""
     monkeypatch.setattr(
@@ -780,6 +812,7 @@ def test_store_delete_missing_collection_rejected(runner, env_creds):
 
 # ── nx store get ─────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_store_get_happy(runner, mock_store):
     mock_store.get_by_id.return_value = {
         "id": "abcdef1234567890", "content": "Important knowledge content here",
@@ -797,6 +830,7 @@ def test_store_get_not_found(runner, mock_store):
     assert "not found" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 def test_store_get_json_output(runner, mock_store):
     mock_store.get_by_id.return_value = {
         "id": "abcdef1234567890", "content": "test content",
@@ -808,6 +842,7 @@ def test_store_get_json_output(runner, mock_store):
     assert data["content"] == "test content"
 
 
+@pytest.mark.t2_tenant
 def test_store_get_custom_collection(runner, mock_store):
     mock_store.get_by_id.return_value = {"id": "abc123", "content": "x", "title": "t"}
     runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])

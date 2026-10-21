@@ -1,41 +1,71 @@
 #!/usr/bin/env bash
 # Scenario 05 — suffix wildcard mcp__server__* should grant permission interactively.
+#
+# nexus-qsmc5: this scenario pins defaultMode "default" and used to launch through
+# claude_start, which passes --dangerously-skip-permissions, so "the tool ran"
+# proved nothing about the rule. It now launches with claude_start_enforced (no
+# bypass flag) and runs two legs in the same mode:
+#   control  allow = ["mcp__other__*"]  (matches nothing): the call must stop at
+#            a permission prompt and the tool must NOT run. That is the proof
+#            permissions are enforced in these sessions.
+#   allowed  allow = ["mcp__stub__*"]: the tool must run with no prompt pending.
+# cc_allow_rule_verdict (runner.sh) fails the scenario unless both hold; its lines say
+# which Claude Code build they were observed on. Each leg's evidence (stub log, pane tail,
+# transcripts, settings) and the verdict lines are kept (cc_keep_evidence, cc_note).
 
-scenario "05 perms_wildcard_suffix: mcp__stub__* should auto-allow"
+scenario "05 perms_wildcard_suffix: mcp__stub__* should auto-allow (permissions enforced, control prompts)"
 
-cat > "$TEST_HOME/.claude/settings.json" <<EOF
-{
-  "skipDangerousModePermissionPrompt": true,
-  "permissions": { "allow": ["mcp__stub__*"], "defaultMode": "default" }
-}
-EOF
-cat > "$TEST_HOME/.mcp.json" <<EOF
+cat > "$TEST_HOME/.mcp.json" <<EOT
 { "mcpServers": {
     "stub": { "type": "stdio", "command": "python3",
               "args": ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"],
               "env": { "STUB_LOG": "$STUB_LOG" } }
 } }
-EOF
+EOT
 send_keys "cd $TEST_HOME" Enter
 sleep 0.3
 
-claude_start
-# Deferred-tool warmup (see README "Deferred MCP tools"): force schema load before
-# the measured call so it doesn't race discovery (the scenario-16 root cause).
-claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
-claude_wait 30
-claude_prompt "Call mcp__stub__record with payload='suffix-wildcard-test'. Reply DONE when complete."
-claude_wait 90
+# _s05_leg <allow-rule> <payload> <expect-prompt 0|1> <evidence-label>: one enforced session.
+# Sets LEG_PROMPT (a permission prompt was pending when the call settled) and
+# LEG_RAN (the stub logged the call).
+_s05_leg() {
+    local rule="$1" payload="$2" expect_prompt="$3" label="$4"
+    cat > "$TEST_HOME/.claude/settings.json" <<EOT
+{
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": { "allow": ["$rule"], "defaultMode": "default" }
+}
+EOT
+    : > "$STUB_LOG"
+    cc_reset_transcripts
+    claude_start_enforced
+    # Deferred-tool warmup (see README "Deferred MCP tools"): force schema load before
+    # the measured call so it doesn't race discovery (the scenario-16 root cause).
+    claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+    claude_wait 30
+    claude_prompt "Call mcp__stub__record with payload='${payload}'. Reply DONE when complete."
+    if [[ "$expect_prompt" == "1" ]]; then
+        cc_wait_permission_prompt 90 || true
+    else
+        claude_wait 90
+    fi
+    LEG_PROMPT=0; LEG_RAN=0
+    cc_permission_prompt_up && LEG_PROMPT=1
+    [[ -s "$STUB_LOG" ]] && grep -q "$payload" "$STUB_LOG" && LEG_RAN=1
+    if [[ $LEG_PROMPT -eq 0 && $LEG_RAN -eq 0 ]]; then
+        capture -30 | sed 's/^/    | /'
+    fi
+    cc_save_pane 60
+    cc_keep_evidence "$label"
+    cc_dismiss_permission_prompt
+    claude_exit
+}
 
-if [[ -s "$STUB_LOG" ]] && grep -q "suffix-wildcard-test" "$STUB_LOG"; then
-    pass "suffix wildcard granted permission, tool ran (stub log entry present)"
-else
-    fail "tool did NOT run — wildcard may not have granted permission"
-    [[ -s "$STUB_LOG" ]] && cat "$STUB_LOG" | sed 's/^/    | /'
-    capture -30 | sed 's/^/    | /'
-fi
+_s05_leg "mcp__stub__*" "suffix-wildcard-test" 0 "05-allowed"
+ALLOWED_PROMPT=$LEG_PROMPT; ALLOWED_RAN=$LEG_RAN
+_s05_leg "mcp__other__*" "suffix-control-test" 1 "05-control"
+cc_allow_rule_verdict "05" "mcp__stub__*" "$LEG_PROMPT" "$LEG_RAN" "$ALLOWED_RAN" "$ALLOWED_PROMPT"
 
-claude_exit
 send_keys "cd $REPO_ROOT" Enter
 sleep 0.3
 scenario_end

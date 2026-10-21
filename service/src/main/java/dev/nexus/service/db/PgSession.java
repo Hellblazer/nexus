@@ -471,6 +471,13 @@ public final class PgSession {
     }
 
     /**
+     * The text the quarantine SQL functions put in the 55P03 message they raise when the RDR-191 sweep gate wait
+     * times out (as opposed to a row-lock timeout, which carries no such text). {@code ChunkReaper} and the keyed
+     * sweep routes (RDR-222 Phase 1) tell the two apart by it.
+     */
+    public static final String SWEEP_GATE_MESSAGE_MARKER = "RDR-191 sweep gate";
+
+    /**
      * Bounds for one bounded quarantine batch ({@code gc_quarantine_orphans_bounded},
      * nexus-a6mon). The function body's own {@code set_config('statement_timeout',
      * '25000', true)} is INERT for the statement running it: Postgres arms
@@ -505,6 +512,15 @@ public final class PgSession {
         setStatementAndLockBounds(ctx, DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
                                   DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
     }
+
+    /**
+     * Bounds for one bounded expiry page ({@code gc_expire_quarantine_bounded}, RDR-222 Amendment A1,
+     * nexus-1579m), the same pair as the restore's and set as their own statements before the call for the
+     * identical reason: the function body's own {@code set_config('statement_timeout', ...)} is inert for the
+     * statement already running it. The 25 s includes the sweep gate wait.
+     */
+    public static final int DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS = 25_000;
+    public static final int DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS = 2_000;
 
     /**
      * Bound every later statement in this transaction to {@code statementTimeoutMs}
@@ -1214,6 +1230,11 @@ public final class PgSession {
     /** A new, empty batch on {@code ctx}'s transaction. */
     public static GucBatch gucBatch(DSLContext ctx) {
         return new GucBatch(ctx);
+    }
+
+    /** Bound every lock wait in the borrow's transaction to {@code timeoutMs} (SQLSTATE 55P03 when it trips). */
+    public static void setLockTimeout(GucBatch batch, int timeoutMs) {
+        batch.set("lock_timeout", Integer.toString(timeoutMs));
     }
 
     /** {@link #setSearchStatementTimeout(DSLContext, int)} for a batch. */

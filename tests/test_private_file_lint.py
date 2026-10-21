@@ -45,9 +45,8 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/config.py", "_config_write_lock"): 1,
     ("src/nexus/daemon/service_registry.py", "_open"): 1,  # the election flock
     ("src/nexus/daemon/storage_service_daemon.py", "start"): 1,
-    ("src/nexus/db/data_token.py", "_mint_guarded"): 1,
-    ("src/nexus/db/t1.py", "_lock_guarded_mint_or_borrow"): 1,
-    ("src/nexus/db/t1.py", "clear_t1_session_lease_if_matches"): 1,
+    ("src/nexus/db/data_token.py", "_open_mint_lock"): 2,  # O_EXCL create, then reuse open
+    ("src/nexus/db/t1.py", "_acquire_t1_mint_lock"): 1,  # the T1 mint flock (nexus-g5mir)
     ("src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py", "_cross_process_lock"): 1,
     # PID files and a restart-timestamp sentinel.
     ("src/nexus/_mineru_spawn.py", "_write_pid_file"): 1,
@@ -59,6 +58,12 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     # Handoff markers: a new session id, a pid and a timestamp.
     ("src/nexus/daemon/t1_handoff.py", "write_handoff_marker"): 1,
     ("src/nexus/daemon/t1_handoff.py", "write_handoff_marker_if_absent"): 1,
+    # A per-call state snapshot, the queued findings and coverage markers (nexus-i93tz): key names
+    # (a URL-bearing subsection only as a hash), 16-hex hashes of values, and display values only
+    # for non-secret sections with URL userinfo, query and fragment removed. The snapshot is
+    # deleted by the Post hook that reads it; 0o600 because the hashes of undisplayed values are
+    # still not for other users.
+    ("conexus/hooks/scripts/routing/subagent_git_integrity_check.py", "_write_private"): 1,
 }
 
 #: Non-vacuity floor: files the sweep must read.

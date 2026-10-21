@@ -180,6 +180,7 @@ class TestRetiredRepairVerbsRefuse:
         assert verb in aspects_group.commands
 
 
+@pytest.mark.t2_tenant
 class TestRequeueFailed:
     """`nx aspects requeue-failed` bulk-recovers terminal-failed queue rows.
 

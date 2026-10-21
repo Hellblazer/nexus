@@ -338,6 +338,7 @@ class TestServiceModeDrain:
 
 
 class TestStopSignal:
+    @pytest.mark.t2_tenant
     def test_stop_claiming_on_running_worker_causes_exit(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
@@ -376,6 +377,7 @@ class TestStopSignal:
 # -- drain() ------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 class TestDrain:
     def test_drain_on_empty_queue_is_noop(
         self, queue_path: Path, locks_dir: Path
@@ -481,6 +483,7 @@ class TestDrain:
 # -- worker stop + drain integration ------------------------------------------
 
 
+@pytest.mark.t2_tenant
 class TestWorkerDrainIntegration:
     def test_drain_worker_stops_worker_and_waits(
         self, queue_path: Path, locks_dir: Path
@@ -613,6 +616,7 @@ class TestWorkerDrainIntegration:
 
 
 class TestThreadJoinTimeoutWarning:
+    @pytest.mark.t2_tenant
     def test_join_timeout_emits_warning_log(
         self, queue_path: Path, locks_dir: Path, capsys
     ) -> None:

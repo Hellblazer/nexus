@@ -118,6 +118,50 @@ class TestHappyPath:
         assert _remote_tip(origin) == a
 
 
+class TestBatchingHint:
+    """nexus-cvtxu (Sam, 2026-10-21): a push inside NX_PUSH_BATCH_MINUTES of this
+    worktree's previous push prints PUSH_BATCH_HINT on stderr. Never a refusal, and
+    stdout keeps its one-line PUSH_OK contract."""
+
+    def _stamp(self, work: Path) -> Path:
+        return Path(_git("rev-parse", "--absolute-git-dir", cwd=work)) / "nexus-last-develop-push"
+
+    def test_a_first_push_gets_no_hint_and_leaves_a_stamp(self, repos) -> None:
+        _origin, work = repos
+        sha = _commit(work, "one")
+        proc = _run(work, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_BATCH_HINT" not in proc.stderr
+        assert self._stamp(work).read_text().strip().isdigit()
+
+    def test_a_second_push_inside_the_window_is_hinted_and_still_pushes(self, repos) -> None:
+        origin, work = repos
+        assert _run(work, _commit(work, "one")).returncode == 0
+        sha = _commit(work, "two")
+        proc = _run(work, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+        assert proc.stdout.strip().splitlines()[-1].startswith("PUSH_OK n=1")
+        assert "PUSH_BATCH_HINT" not in proc.stdout
+        assert "PUSH_BATCH_HINT this worktree pushed to develop 0 min ago" in proc.stderr
+
+    def test_a_push_after_the_window_gets_no_hint(self, repos) -> None:
+        _origin, work = repos
+        assert _run(work, _commit(work, "one")).returncode == 0
+        self._stamp(work).write_text("1000\n")  # long before any window
+        proc = _run(work, _commit(work, "two"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_BATCH_HINT" not in proc.stderr
+
+    @pytest.mark.parametrize("value", ["0", "not-a-number"])
+    def test_zero_turns_it_off_and_garbage_falls_back_without_failing(self, repos, value: str) -> None:
+        _origin, work = repos
+        assert _run(work, _commit(work, "one")).returncode == 0
+        proc = _run(work, _commit(work, "two"), env={"NX_PUSH_BATCH_MINUTES": value})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert ("PUSH_BATCH_HINT" in proc.stderr) == (value != "0")
+
+
 class TestDetachedSource:
     def test_head_of_a_detached_worktree_pushes_without_touching_the_local_branch(self, repos, tmp_path) -> None:
         origin, work = repos

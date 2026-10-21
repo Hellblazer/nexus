@@ -664,6 +664,7 @@ def generate_links_cmd(
         generate_prose_filepath_links,
         generate_rdr_filepath_links,
         load_existing_link_keys,
+        prune_stale_same_as_links,
     )
     from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
@@ -693,6 +694,16 @@ def generate_links_cmd(
         existing = load_existing_link_keys(cat)
         click.echo(f"Existing links in catalog: {len(existing)}")
         click.echo("DRY RUN — nothing is written.\n")
+        retracted_total = 0
+        if pdf:
+            # nexus-h0uy7: the write pass prunes stale same-as links before linking.
+            prune_recorder = DryRunLinkWriter()
+            prune_stale_same_as_links(cat, writer=prune_recorder)
+            retracted = prune_recorder.retracted
+            retracted_total = len(retracted)
+            click.echo(f"  pdf-corpus: would retract {retracted_total} stale same-as link(s)")
+            for r in retracted[:sample]:
+                click.echo(f"      - {r.from_tumbler} -> {r.to_tumbler} ({r.link_type})")
         grand = 0
         for name, fn in selected:
             recorder = DryRunLinkWriter(existing=existing)
@@ -725,11 +736,17 @@ def generate_links_cmd(
             if len(proposals) > sample:
                 click.echo(f"      … {len(proposals) - sample} more not shown")
         click.echo(f"\nTotal links that WOULD be created: {grand}")
-        click.echo(f"Catalog link count would go {len(existing)} -> {len(existing) + grand}")
+        click.echo(
+            f"Catalog link count would go {len(existing)} -> "
+            f"{len(existing) + grand - retracted_total}"
+        )
         return
 
     writer = _cat_cmd._get_catalog_writer()
     try:
+        if pdf:
+            retracted = prune_stale_same_as_links(cat, writer=writer)
+            click.echo(f"pdf-corpus stale same-as links retracted: {len(retracted)}")
         total = 0
         for name, fn in selected:
             count = fn(cat, writer=writer)

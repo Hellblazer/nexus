@@ -20,6 +20,146 @@ of 32 and passes, so the cap does nothing on a quiet machine and binds only
 when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
 out. Diagnose with `ipcs -m` before suspecting the code.
 
+**`-n` is also capped to the run's memory grant** (nexus-vo9qn,
+`tests/_xdist_cap.py`): workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 3264
+MiB (about 3.2 GiB). That is the measured per-worker peak of a FULL Python suite
+(engine JVM + Postgres cluster + the cluster's tmpfs pages, charged to the
+grant): lab-l, 16 workers peaked 47,795 MiB of the 49,152 MiB grant, 1,357 MiB
+from exit 137 (2026-10-21, labrun sampler). So `-n auto` runs 15 on lab-l and 5 on lab-m; the clamp prints its
+reason. Nothing applies without a
+visible limit (a laptop). `NX_XDIST_NO_CAP=1` opts out of both caps. The cost on
+lab-m is real: `-n auto` goes from 8 workers to 5 (37% less parallelism, a longer
+wall clock), because 8 at 14.5 of 16 GB left no room for the run to stay on tmpfs.
+Both caps rewrite xdist's `option.tx` as well as `numprocesses`
+(`set_worker_count`): xdist builds `tx` before conftest loads, so setting the
+count alone prints "clamped" and still spawns every worker (the SysV cap was inert
+this way until nexus-vo9qn; `TestClampsReallyReduceWorkers` runs real xdist).
+
+**Where substrate clusters live** (nexus-me3gm, nexus-vo9qn): on Linux with
+`/dev/shm` mounted tmpfs, writable and with 3 GiB free (and 3 GiB of cgroup memory
+headroom), each worker's Postgres cluster is created under
+`/dev/shm/nexus-test-pg-<uid>` with `pg_wal` capped at 64 MB and dynamic shared
+memory kept inside the cluster dir; otherwise (macOS, no tmpfs, low room) it stays
+under the tempdir, and a Linux fallback warns with its reason. **The choice is made
+once per run, never per cluster**: the xdist controller takes it before it spawns
+workers (a serial run, at its first cluster) and persists it in
+`NX_TEST_PG_ROOT_SESSION`, which every worker inherits. A run that chose tmpfs
+therefore never drifts to ext4 as the grant's memory fills (tmpfs pages are charged
+to it; that drift wrote 3.9 GB to the NVMe in 4 minutes on lab-l). A cluster start
+that finds under 512 MiB of tmpfs space or cgroup headroom (droppable page cache
+counted as room) waits up to 45 s for it to recover, then raises
+`SubstrateRootExhausted`; a start within 120 s of such a raise in the same process
+looks once and raises at once instead of waiting again (nexus-gsjzh) (see "If `SubstrateRootExhausted` trips" below). The start
+decision uses the same page-cache-credited headroom, so a grant warmed by a build or
+`uv sync` still picks tmpfs; `nexus_t2_substrate.root_decision_headroom` logs the raw
+and the credited figure. Every cluster start
+logs `nexus_t2_substrate.cluster_root` (root, `on=tmpfs|disk`, and the refusal reason;
+a disk start with a reason is a warning), and the pytest summary ends with
+`clusters on tmpfs N, on disk M`. `NX_TEST_PG_ROOT=<dir>` picks a root,
+`NX_TEST_PG_ROOT=default` forces the tempdir for new clusters. The stray-cluster
+sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too,
+so a crash-orphaned cluster in RAM is reaped. A nested pytest whose test globs
+its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`. A test that
+drives the decision itself starts from a cleared `NX_TEST_PG_ROOT_SESSION`
+(`tests/test_engine_substrate_pg_root.py` has the fixture).
+
+**Where pytest's basetemp and `TMPDIR` live** (nexus-kyujr, `tests/_tmp_root.py`). One
+CI-shaped shard wrote 442 MiB to chas's NVMe and 227 MB of that was `tmp_path` data
+under `~/tmp/pytest-of-<user>`, which pytest keeps for the last three runs. Inside a
+lab-run grant (`LAB_CPUS` set; a CI job on the pool has it too) on Linux, with `/dev/shm`
+a writable tmpfs **not mounted `noexec`**, 3 GiB free and 3 GiB of cgroup headroom (the
+cluster root's floors), the controller creates
+`/dev/shm/nexus-tmp-<uid>/r<random>/{t,p,owner.json}` (0700, a sibling of
+`nexus-test-pg-<uid>`) before it spawns workers, runs one real script from it, and sets
+`TMPDIR=<run>/t` and `PYTEST_DEBUG_TEMPROOT=<run>/p`. `tempfile`, `tmp_path`, every child
+process, the fenced home and the cluster-log file follow; workers and nested pytest runs
+find `NX_TEST_TMP_SESSION` and decide nothing. The engine JVM follows too: the JDK ignores
+`TMPDIR` on Linux, so every substrate engine launch gets `-Djava.io.tmpdir=<TMPDIR>`
+(`with_substrate_sizing` in `tests/db/_service_fixture.py`; netty and JNA extract natives
+there on each boot). That is safe for the engine's uid probe, which reads `/proc/self/status`
+first and only elsewhere makes one file in that directory. The original tempdir stays in
+`NX_TEST_TMP_ORIG` and is what four things use: the boot-slot directory (a per-run slot
+directory would split the cross-run boot cap), the stray-cluster sweep's disk root, a crashing
+JVM's hs_err report (`-XX:ErrorFile`, `jvm_error_file_arg`: evidence must outlive the run dir),
+and any cluster whose root decided on DISK (`pg_cluster_parent()` is None means the original
+tempdir, never the run's tmpfs). The start-of-run daemon drain also scans the original
+tempdir's `pytest-of-<user>`, so what a disk-mode or killed run stranded there is still reaped.
+What does NOT follow: the ONNX native cache (`NX_ORT_NATIVE_DIR`, pinned to the real home on
+purpose).
+A test that hands a child process its own `TMPDIR` builds the child's env with
+`tests._tmp_root.child_env_with_tmpdir(os.environ, <dir>)`, never a hand-written
+`{k: v ... if k != "NX_TEST_TMP_ORIG"}`: inside a grant the outer run's `NX_TEST_TMP_ORIG`
+wins over `TMPDIR`, and the filter is the part everyone forgets because a laptop never has the
+variable (a lint in `tests/test_tmp_root.py` rejects the pasted copy). A test that pins
+"follows `NX_TEST_TMP_ORIG`" or "drops it" sets it to a tmp_path decoy with `monkeypatch`
+instead of relying on the ambient environment, so reverting the fix fails off a grant too. The summary ends with one line,
+`nexus test tmp: basetemp and TMPDIR on tmpfs <run>, N MiB at the end of the run, removed at
+exit; nx-* reports are copied to <dir>`, or `... on disk <tempdir> because: <reason>`
+(not inside a grant, not Linux, noexec, low room, ...; a Linux grant that could not use
+tmpfs also warns). Settings: `NX_TEST_TMP_ROOT=default` keeps the old behaviour;
+`NX_TEST_TMP_ROOT=<dir>` uses `<dir>/{t,p}` and keeps it after the run (inspecting a
+failure); `NX_TEST_PG_ROOT=default` also keeps the tempdir; an explicit `--basetemp` wins for
+the basetemp. **The run dir is removed at the end of the run** (`pytest_unconfigure`, after
+the terminal summary), not retained: pytest's own keep-3 retention only ever sees the one
+numbered dir inside the private run dir, so it never keeps a previous run on tmpfs. The DDL
+counter and the storage-touch guard write their `nx-*` reports into the controller basetemp
+by default, after the session finishes, so just before the removal the basetemp's top-level
+`nx-*` files are copied to `<original tempdir>/nexus-test-reports-<uid>/<run>` (newest three
+kept); `NX_DDL_REPORT_DIR` / `NX_STORAGE_TOUCH_REPORT_DIR` still put them where you choose, and the
+DDL and storage-touch summary lines print the copy's path, not the tmpfs one. **A run that exits
+non-zero also keeps its failure evidence** in `<report home>/failed/`: the per-test engine logs
+(`nexus-svc-*`; the session engine's `engine.log` is removed with its cluster and is not kept), the `tmp_path` trees of the failed tests (matched by name from the failed node
+ids, controller and xdist workers), up to 256 MiB, and `SUMMARY.txt` naming what was kept and what
+the cap skipped; `NX_KEEP_FENCED_HOME=1` also copies the fenced home there, uncapped. The summary
+line says so for a failed run. A passing run keeps only the reports. SIGKILL or SIGTERM of the
+controller keeps nothing (the next run sweeps its dir). A
+killed run leaves one `r*` dir, which the next grant run removes at its start: the owner record
+(pid plus `/proc` start time) says the controller is gone, or a record-less dir is older than
+10 minutes; the dir's `p` tree is first handed to the same scoped daemon reaper the
+start-of-run drain uses, and nothing outside the per-uid root or owned by another user is
+touched. A fixture must not assume hard links to the checkout (tmpfs cannot): the
+plugin-install fixture clones with `--shared` for this reason (a plain clone copied the 1.3 GB
+object store per worker). `tests/test_tmp_root.py` drives the decision with injected inputs and
+runs real nested pytests (serial, xdist, SIGKILL) against `NX_TEST_TMP_SHM_DIR`, a directory
+standing in for `/dev/shm` that is treated as exec-capable tmpfs on any platform.
+
+**If `SubstrateRootExhausted` trips** (nexus-vo9qn). It means this run chose tmpfs
+for its clusters and, after 45 s of re-reading (or at once, within 120 s of an
+earlier trip in that process), a start still saw under 512 MiB
+(the floor) of tmpfs space or cgroup memory headroom. It is a capacity statement,
+not a code failure: do not rerun hoping it passes.
+- Read the cause: the exception names it (`... MiB free` or `the cgroup has N MiB
+  of memory headroom left`); the pytest summary line says `clusters on tmpfs N, on
+  disk M`; the `nexus_t2_substrate.cluster_root` and `root_decision_headroom`
+  events (info level, so rerun with `--log-level=INFO`) give each start's root and
+  the headroom the decision saw.
+- Remedies, in order: (1) fewer workers or a larger `lab-run` class: `-n` =
+  headroom / 3.2 GiB (a 16 GB grant carries 5), which is also what the memory cap
+  computes unless `NX_XDIST_NO_CAP=1` overrode it; (2) `NX_TEST_PG_ROOT=<dir>`
+  puts every cluster under a directory you choose (a disk you accept writing to);
+  (3) `NX_TEST_PG_ROOT=default` puts every cluster back on the tempdir, which is
+  the NVMe writes this mechanism exists to remove (3.9 GB in 4 minutes on lab-l),
+  so use it for a one-off, never in a CI wrapper.
+
+The `-m integration` fixtures that boot their own cluster (nexus-942h9) use the
+same root and conf: `pg_data_tempdir(prefix)` creates the dir through the root
+chooser and records it in `<root>/nexus_integration_owner_<pid>.json` (with the
+engine JVM, via `spawn_service`), and the fixture appends
+`integration_pg_conf(pgdata)` to `postgresql.conf` (fsync, synchronous_commit and
+full_page_writes off; on tmpfs also the 64 MB WAL cap and mmap DSM). The sweep
+reaps a record whose owner is dead, and runs once before a process's first
+integration cluster. A new fixture must append the conf
+(`tests/test_integration_pg_cluster.py` has a census). A fixture that needs
+durability semantics passes `parent_dir=` to stay on disk; none does today.
+
+Out of scope of that routing (still write PG to disk; census and fix tracked in
+nexus-szyun): the `tmp_path_factory` initdb creators `tests/db/test_svc_monitor_role_live.py`,
+`tests/db/test_nexus_diag_role.py` and `tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py`,
+and the two `docker run postgres` tests `tests/db/test_write_seam_gate_integration.py` and
+`tests/db/test_http_combined_query_integration.py`. The cluster prefix may reach 26 chars
+(`nexus_recovery_inttest_pg_`); `integration_cluster_dir` refuses a path whose
+socket would pass `sun_path`.
+
 **The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
 `_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
 A missing or stale service jar, or a PG bundle for the pinned engine tag that is
@@ -37,7 +177,7 @@ on. A test that spawns a child pytest and wants the preflight to run must clear
 `NX_SUITE_LEASE_HELD_BY` and give the child its own `NX_BUILD_LEASE_ROOT`
 (`tests/test_substrate_preflight.py` does).
 
-`-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `pytest (lint markers)` job rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
+`-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `test-lint` job (two hosted groups, `pytest (lint markers, group N/2)`) rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
 
 `-m integration` is also deselected by default. CI's `pytest (integration, affected)` job runs, on every push and PR, the integration files the change touched or that directly import a `src/nexus` module it changed (`scripts/select_affected_integration_tests.py`), with a per-file non-vacuity check (`scripts/assert_integration_affected_ran.py`). Transitive imports and `service/` changes select nothing by themselves; the nightly local-service gate runs the whole family, the release battery runs it per release, and the CA-3 and write-seam jobs run their own files. A new integration test FILE therefore runs in CI on the push that adds it; a new test inside an existing file runs too, but a skip in it is visible only in the job's `-rs` output, not as a failure. If the job reports that a file skipped every test, give the job the missing prerequisite, or list the file in `ALL_SKIP_ALLOWED` with its reason (a runner limit, or a bead for a test no gate arms).
 
@@ -183,11 +323,311 @@ stamping. After **any** pull/rebase that touches `service/`, rebuild with
 client probe hard-rejects it). Symptom of forgetting: the entire suite errors
 instantly at setup (thousands of `E`s in seconds).
 
+## The tenant is opt-in (nexus-j23ni, 2026-10)
+
+A test gets a minted tenant (and the engine behind it) only when it asks: a
+`t2_tenant` / `t2_service_env` parameter, or `@pytest.mark.t2_tenant` on the test,
+its class or its module (`pytestmark = pytest.mark.t2_tenant`). A test that asks for
+nothing mints nothing: `NX_SERVICE_URL`/`NX_SERVICE_TOKEN` are unset, `NX_LOCAL=1`,
+and no T1 session exists. Each tenant is about 112 DDL statements, so an unneeded one
+is the cost this removes.
+
+**A test that reaches storage without a tenant fails at teardown, naming itself**
+(`tests/_storage_touch_guard.py`, fail mode by default), even when the code under test
+catches the error and carries on. Fix it with the mark, or with
+`@pytest.mark.expects_unresolvable_endpoint` when raising `ServiceEndpointUnresolvableError`
+is the point (a resolver-subject test; it is reported stale when it never does). Put the
+mark on the TEST, not only on a fixture parameter: `def test_x(db, t2_service_env)` still
+touches storage in `db` before the tenant exists, and only the mark makes the autouse pin run first.
+A thread or child that touches storage after its test finished prints a yellow late-touch
+warning naming that test and does not change the exit status of a scoped run (whether it lands is
+thread timing); a run that set `NX_STORAGE_TOUCH_SWEEP=1` (below) fails on it. Join it inside the test.
+A thread-pool worker (`ThreadPoolExecutor`, `multiprocessing.pool.ThreadPool`) outlives the test that
+created it, so its touch is charged to the test that was running, never to the creator. A pool worker
+that touches while no test is running is a late touch, owned by the test that created the worker
+(`<no test running>` when it was created outside any test); it is never dropped.
+
+Tests marked `integration`, `slow` or `lint` keep a tenant per test: the default selection
+deselects them, so no census has said which of them touch storage.
+
+- `NX_TEST_T2_SUBSTRATE=per-test` (older spelling `engine`) is the escape hatch: a tenant
+  for every test, the guard off. Kept for one release; `none` still provisions nothing.
+- `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
+  `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
+  some touch event, and Python children that were spawned reached the shim: `children_seen` must be
+  non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet below;
+  set it on a full-suite run, not a scoped one. A run that pytest-split is splitting (`--splits`: a CI
+  shard, whatever its size) or that collects at least `SWEEP_AUTO_FLOOR` (4000,
+  `tests/_storage_touch_guard.py`) tests asks them by itself, so a CI shard needs no variable; the
+  docs-readers leg (1561, not split) and any one-directory run do not;
+  `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic run is advisory**: whatever the
+  shape checks or the late-touch check find is a yellow warning with the test names (and a `warnings`
+  entry in the report), never a `vacuity` entry, so it cannot change the exit status; its report still
+  says `sweep: true` so the fan-in accepts it. Only an explicit `NX_STORAGE_TOUCH_SWEEP=1` run fails on
+  them, late touch included (a full run had 5 late child touches on 2026-10-19). A scoped run whose
+  Python children never reached the shim prints a yellow warning instead of a verdict.
+- **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
+  tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
+  `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in
+  `tests/storage_touch_ceiling.toml`. Check it with `python -m tests._storage_touch_fan_in
+  <dir holding the reports> --suite python_unit --shards 6` (`--suite docs_readers --shards 1` for that
+  leg). The module is standard library only, because the CI gate runner has no pytest; a test holds
+  that. It exits 1 over the ceiling, when the directory does not hold exactly `--shards` reports (a
+  missing shard would under-count and pass), on a report from a non-sweep run, and on a repeated run id. A session never gates on its share: it sees only its file neighbourhood of the suite, so
+  `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
+  Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
+  prints the number to commit. **No CI leg runs the fan-in yet, and both ceilings are still `"measure"`**:
+  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_GUARD_MODE=report` supplies the number
+  (in fail mode that run exits non-zero on the known late child touches). A split shard's report is
+  already a whole-run one; the docs-readers leg still needs the variable exported. Marks only get added, so when the count rises, drop marks a test
+  no longer needs before raising the ceiling.
+- A guard test that asserts a nested session or child process FAILED goes through
+  `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
+  (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
+  `sweep=True` a body with no provisioned test fails on 'vacuous sweep: provisioned=0' whatever the rule
+  under test did (nexus-j002k). A blank reason is refused (`"" in out` is always true). A lint in that
+  file enforces it over the four guard test files: an equality to any exit code but 0 and the usage
+  error 4, truthiness, `!=`, ordering and `in` are flagged, however the status is spelled (`.ret`,
+  `.returncode`, a name bound to one, `bool()` / `int()` of one, inside a nested boolean expression).
+- **Seeding the marks from a census:** run the whole suite as `NX_STORAGE_TOUCH_GUARD_MODE=report
+  NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_REPORT_DIR=<dir>`, then
+  `uv run python scripts/annotate_t2_tenant.py <dir>` (a dry run) and `--apply`. It marks a module
+  when 90% of its otherwise-tenantless tests need one, a class when all of them do, else the test,
+  and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
+  environment fails with a `KeyError` the guard cannot see).
+
+## The per-worker tenant pool (nexus-fpwj1, `NX_TEST_TENANT_POOL`, default ON since nexus-7zloy)
+
+By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdist worker (`tests/_tenant_pool.py`)
+instead of minting and dropping one per test. While the pool is on, the substrate engine boots with
+`NX_TEST_TENANT_RESET_ROUTE=1`, `NX_SEARCH_PCI=0` and `NX_REAPER_ENABLED=false`; the reaper's first pass (60 s after
+boot) writes `nexus.gc_audit` rows per tenant, and one landing between a lease's wipe and its census failed the census.
+`NX_TEST_TENANT_POOL=0` turns the pool off, and the engine is then exactly the one develop boots; unset and `1` are on,
+and any other value is on too. Measured on 13 storage-touching files at `-n 4` (767 tests): DDL 41,968 -> 576, WAL
+268 MB -> 15 MB, 373 leases on 4 mints, 0 retired. The default-flip A/B on chas (3+3 interleaved full runs, 16
+workers): wall off 1125/1097/1091 s vs on 1109/1084/1095 s, suite `io_wbytes` 817 MB -> 9.4 MB, DDL 574,525 ->
+30,287, test WAL 6.6 GB -> 0.5 GB. A test that needs per-collection index builds or the engine reaper to run belongs
+under `@pytest.mark.fresh_tenant` plus its own engine, or under `NX_TEST_TENANT_POOL=0`; none does today.
+
+A lease ends with four steps, in this order: (1) one psql transaction deletes the tenant's rows from every tenant-keyed
+relation (derived from the catalog at call time; token rows included; DML only, no DDL, no `TRUNCATE`); (2) `POST
+/v1/_test/tenant-reset` evicts every JVM cache keyed by the tenant (nexus-0bl77; the route answers 503 while per-collection index builds, which
+are DDL, are on, and the engine's default for an unset `NX_SEARCH_PCI` is on, hence the pool-on flags above); (3) a
+census proves zero rows in at least 40 relations including a required set, and zero `pci_` indexes. It runs AFTER the
+wipe in the same teardown, so it proves the wipe completed and the tenant was quiet through the teardown window; it
+cannot see rows a test left before the wipe, because the wipe deletes them; (4) `POST /v1/tenants/create` for the same name
+re-issues a bearer, so the old one answers 401 and the Python `(url, token)`-keyed slots rebuild by construction. ANY
+failure of a step (a leak verdict, an httpx error, a psql timeout, a bad re-issue reply) retires the tenant (counted; the
+next lease mints a fresh one) and errors the test whose teardown failed, naming the cause; a body's own exception is
+never replaced. A lease also STARTS with a census, before the test body: a row there was committed after the previous
+lease's teardown census, and the NEW test's setup errors naming the previous lease's test as the likely leaker, then the
+tenant is retired. One lease at a time is enforced: re-entry raises `TenantLeaseBusyError`. Python caches keyed by
+collection name (`search_engine._poisoned_collections`, `aspect_extractor._ENGINE_ASPECTS_ENABLED_CACHE`, the vector
+client singleton and lease cache) are cleared on every lease.
+
+- **Opt out with `@pytest.mark.fresh_tenant`** a test that mints or drops tenants, rotates or revokes the tenant's own
+  token, or needs a tenant whose partition leaves have never held data. The tenant it gets is the old per-test mint.
+- A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A
+  writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so
+  it shows up, if at all, only as an unexplained failure in that test (a stray row the test never reads changes nothing visible). The A/B found one such writer, the engine reaper (now off in the pool's engine, above);
+  fix the writer, never the census.
+- The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W leaf_dead_tup=D
+  leaf_live_tup=L leaf_bytes=B`; the last three are `pg_stat` dead/live tuples and bytes over the pool tenants' chunk
+  leaves at the end of the session (the stat counters lag, so dead is a floor): what thousands of delete-only resets
+  leave behind. A pool tenant that is not empty at the end, or tenant tests that took no lease, fail the run.
+  `tests/test_tenant_pool.py` drives each behaviour against the real engine, each with a control that skips the
+  eviction (or the lease-start census) and must show the stale state. It needs the pool's engine, so its engine-backed
+  tests skip under `NX_TEST_TENANT_POOL=0`; there `tests/test_tenant_pool_end_to_end.py` runs the file in a child with
+  the pool on (must run at least one test, pass all, skip none). That file also runs the real conftest with the flag unset and with
+  `0`, and asserts the engine posture of each (pool on: reset route on, PCI builder off, reaper off; `0`: none of those).
+
+## Bytes written and DDL per run (nexus-sz651)
+
+The primary gated signal is the **DDL count per test** (exact, the same on every host, and the lever that
+explains the writes); the WAL bytes are a churn proxy for disk thrashing, not a disk meter. Every run with the engine substrate prints
+`ddl: migration=<n> tests=<n> per_test=<x> wal: migration=<size> tests=<size> per_test=<size>
+[io_wbytes=<size>] | <n> uncounted cluster start sites (static tree census) + <m> product-provisioning commands (sh_nx_init, counted apart)` in the terminal summary and writes `nx-ddl-report.json`
+(under `NX_DDL_REPORT_DIR`, else the controller's basetemp; a worker's own file is under
+`<basetemp>/popen-gwN`). WAL bytes are `pg_current_wal_insert_lsn()` differences between the probe's
+`start`, `ready` and `end` marks (insert, not the write pointer `pg_current_wal_lsn()`, which lags
+by megabytes under `synchronous_commit=off`), so `migration` is the engine's boot and `tests` is
+everything the tests caused. **WAL is a relative, lower-bound churn proxy, not what a disk-backed
+cluster would write, and on Linux it lands on tmpfs and never reaches the NVMe**: the clusters run `fsync=off` and `full_page_writes=off` (no full-page images),
+the Python substrate also `wal_level=minimal` (WAL-skipped bulk operations log nothing), so Python
+and Java WAL are not comparable with each other. Clusters sit on tmpfs on Linux with headroom, else
+the tempdir. `io_wbytes` is the job cgroup's `io.stat` `wbytes` over the pytest window where
+readable (Linux, cgroup v2); it is informational, not ratcheted (the fan-in sums it over the shards and
+prints it), and means something only when the run owns its cgroup. **Not measured**: the job workspace and checkout, `target/`, `.venv`, jar
+builds, journald, anything before pytest starts, and the docker-run and e2e shell clusters. The
+labrun NVMe sampler is the source of truth for bytes written to disk. There is no per-test WAL figure
+in Python (an LSN read at every test boundary is a round trip per test); the per-test number is the
+tests' bytes over the test count. `tests/_ddl_counter.py` explains the DDL signals
+(`log_statement=ddl` for client statements, an event trigger for the DDL a function runs through
+`EXECUTE`, which is every tenant mint and drop) and the counting rule. The probe's own install is
+the `boot` bucket and is never counted. The Java twin is `DdlLogParser`/`DdlCounts` (per-fork files
+in `service/target/ddl-counts/`, named by suite and run; per class bytes where the class is known).
+The Java counter's DDL log never goes through Docker's log driver (json-file logs sit under
+`/var/lib/docker` on the host disk: with the log on stderr the main suite wrote 1.63 GB against 0.48 GB
+without the counter). The engine test containers run `logging_collector=on` and write one unrotated
+file, `PgContainerHelper.SERVER_LOG_FILE` (`<PGDATA>/nx-log/postgresql.log`, on the data directory's
+tmpfs), and everything that reads the server log (`DdlCounts`, the `auto_explain` readers) calls
+`PgContainerHelper.serverLog(container)`, which `cat`s that file; `container.getLogs()` is Docker's log and
+holds only the postmaster's first lines. Because the collector also takes the "ready to accept connections"
+line off Docker's log, the container waits on a `pg_isready -h 127.0.0.1` TCP probe (60 s a start attempt).
+`PgServerLogTest` pins all three. A `docker exec` that never returns (seen once on colima, cause not
+established) is abandoned after 60 s and retried, 3 tries; each abandon is a WARN
+(`event=server_log_read_abandoned`) naming `owner` (the class that BOOTED the container; `unknown` for a
+handle) and `reader` (the test class on the calling thread; `unknown` for a read from the JVM-exit hook, whose thread has no test frame). That bounds the caller. What becomes of the stuck
+exec depends on where it hangs, and which one happened on colima is not established: if it is parked in
+docker-java's `awaitCompletion` waiting for its stream, `Future.cancel(true)` wakes it and its `finally`
+closes the stream; if the hang is inside the synchronous execCreate/inspect HTTP call, the reader thread stays
+blocked until the JVM exits. A start whose wait times out logs the last 50 lines of the log file at ERROR
+(Testcontainers' own dump is Docker's log and lacks them). That tail is readable only while the container is
+still up (a slow initdb, a hung probe): a postmaster that died takes PID 1, the tmpfs and the file with it, and
+the line then reads `(server log unreadable: ...)`. The JVM-exit hook reads the still-live containers under
+one 15 s budget, inside surefire's 30 s `forkedProcessExitTimeoutInSeconds` (not set in `service/pom.xml`) so
+the `log_errors` mark of an abandoned read is flushed before the fork is halted; a read slower than 15 s is
+cut and counted as a log error, so the ratchet refuses that run (conservative, by design). A test must not
+call `getLogs()` on a Postgres container; `PgContainerTmpfsGateTest` fails the build if one does.
+
+The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so how the work is split does
+not move them: bytes and DDL per test and the migration's bytes and DDL per booted worker (Python); the
+migration's bytes and DDL per fork plus the totals of everything else (Java).
+**The Python gate is the fan-in over the whole run** (nexus-ekp7w, nexus-2rhif):
+`scripts/ddl_ratchet.py fan-in --suite python_unit --shards N [--advisory] --report <every shard's report>` sums the
+shards and judges those four numbers over the sum, so it does not flap with which tests the split gave a
+shard, with `-n` (a pool shard runs 4 workers, a hosted one 1) or with a shard whose workers never booted
+the substrate (it boots lazily; such a shard still writes its report, with `workers_booted: 0`).
+`check --suite python_unit --report <one shard's report> --advisory` prints the same comparison for one
+shard and always exits 0. In `ci.yml` each 3.12 `test` shard exports `NX_DDL_REPORT_DIR`, runs the advisory
+check and uploads the report (kept 7 days); `pytest-gate` downloads all of them and runs the fan-in after
+its verdict step. The Java steps of
+`service-ci.yml` pass `-Dnexus.ddl.run=<run id>-<suite>` to mvn and the same id to `check --run`, so the
+persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
+exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and
+`tests/scripts/test_ddl_ratchet_wiring.py` fails the commit that sets them and leaves the flag on.
+**The Python fan-in is armed** (2026-10-20, nexus-ekp7w): its ceilings come from three Linux CI fan-ins on
+the pool with the tenant pool on (the run ids are in `tests/ddl_ceiling.toml`), `[python_unit] measured_on`
+is the marker, and the wiring lint requires the fan-in to enforce and none of its steps (nor each shard's
+advisory check and report upload) to be `continue-on-error` while the marker is set. One exception by
+runner: when the shards ran hosted (a fork PR, or `NX_CI_POOL=off`) the fan-in passes `--bytes-advisory`,
+which prints a WAL breach without failing, because WAL per test is host-dependent and the ceilings were
+measured on the pool; the DDL metrics are exact counts and gate everywhere. The flag's condition is the
+`test` job's `runs-on` condition, and the lint keeps them equal. Disarming (dropping the marker) needs the
+advisory wiring back in the same commit.
+**Once armed, a commit that adds a Liquibase changeset bumps `migration_ddl_per_worker` in the same commit**
+(its tolerance is 0, because the migration's DDL count is the changelog's own; the failure message says
+the same). Raising any ceiling needs the reason in that commit's message.
+Bytes carry a tolerance band (`bytes_tolerance`), WAL varying a little; a `"measure"` ceiling makes the check
+exit 11 and print the numbers to commit. Java runs are told apart by `-Dnexus.ddl.suite=main|integration`
+(the pom sets it; CI passes it) and the run id (`-Dnexus.ddl.run`, default the Maven build timestamp).
+Exit codes: 0 ok, 10 above a ceiling, 11 a ceiling unset, 12 not comparable (argparse is 2, a crash 1).
+12 includes a measured 0 on a booted cluster (the counter saw nothing) and `workers_lost > 0`: an xdist
+worker killed before its `sessionfinish` leaves no file, so the controller counts the node going down
+without a report and the report says so, where file recovery covers only a worker that wrote its file and
+did not hand it over.
+
+The counter turns fully off for a same-sha A/B (nexus-3cwsw): `-Dnexus.ddl.count=false` for Java,
+`NX_DDL_COUNT=0` for pytest (default on; any other value fails loud). Off adds none of the counter's
+settings to a container or cluster (no `log_statement`, collector, probe, event trigger, marks, WAL
+reads), uses the library's default ready wait, and writes no count file or report; on Java the server
+log is then Docker's log again, so `PgContainerHelper.serverLog` falls back to `getLogs()`.
+`DdlCountSwitchTest` pins the off recipe (command line, probe copy, ready wait), an off container's boot,
+the empty-database probe, and that an off run leaves `DdlCounts`' live set and totals exactly as they were
+after `register`, `noteDatabase`, `noteRelease`, `record` and `flush` (`stateForTest` reads them back; each
+guard was removed once and the test failed). Two things carry no guard of their own and are not pinned
+separately: `markEnd` (only `record` reaches it) and `FailFastPostgreSQLContainer.start()` (its `register`
+call checks the switch). `test_ddl_counter.py` pins the Python half (an AST check that every probe use in
+the substrate sits under `ddl_count_enabled()`). A ratchet run has nothing to read from an off run, by design.
+A Java test that asserts on a counter-only surface (the collector file, the probe, marks, WAL reads, the
+parser on a live log) starts with `assumeTrue(DdlCounts.enabled(), ...)` so an off run is green with those
+skipped; `tests/test_java_counter_tests_assume_lint.py` (lint) fails when such a `@Test` lacks it. The scan is
+textual and keyed on a list of surface names in that file, so a test that reaches the counter through a name
+not on the list is not caught: extend the list when a new counter-only surface appears.
+
+**Same-sha A/B (nexus-3cwsw).** Is the counter what writes to the host disk? Measure it with the sampler,
+`scripts/diag/container_io_sampler.sh` (no root; its header states what the numbers are not). Run on chas
+when the pool is quiet: the daemon and device deltas are host-wide, so a CI job running beside the arm
+lands in them. Take an idle window first (`scripts/diag/container_io_sampler.sh -i 5 -- sleep 600`), then
+the arms in the order on, off, off, on (two off runs give the noise floor). Each arm gets its own run id,
+exported, because the container filter is the run-id label and an unset id would match every nexus test
+container with an empty id (the sampler refuses an empty filter value):
+
+```bash
+# arm "on"; for "off" use a different id and -Dnexus.ddl.count=false
+export NX_TEST_RUN_ID=3cwsw-on-$(date +%s)
+scripts/diag/container_io_sampler.sh -i 1 -f "label=dev.nexus.test.run=$NX_TEST_RUN_ID" -- \
+  scripts/mvnw-leased.sh --lab-run lab-xl -Dnexus.ddl.count=true test
+# the second suite, same arm and id scheme: add -Dgroups=integration
+```
+
+The sampler exits 3 (and warns) when `-f` matched no container, so a wrong id cannot pass as a measurement.
+An off run writes no count files, so do not run the ratchet on it; an on run's files in
+`service/target/ddl-counts/` persist into the next arm unless the directory is cleared or the ratchet gets
+`--run`. What to read in the report: `containers seen` (a lower bound; `docker events --filter
+label=dev.nexus.test.run=$NX_TEST_RUN_ID --filter event=start` counts every start); the daemon rows
+(dockerd, containerd, systemd-journal) and the json-log total, each on minus off, against the idle window
+and the off/off spread; the device row and `unattributed = device - attributed`, because cgroup `wbytes`
+omit the filesystem's journal and metadata and writeback charged to no sampled cgroup, so the sampled sum
+can sit far below the device; the `docker (driver, logging driver, debug, cgroup version)` line, which must
+match across arms. Measured on chas (2026-10-19, Java main, two arms each): the counter costs nothing
+measurable. Per-container sum 64-72 KiB in every arm, 17-18 containers a run. containerd 49/47 MiB on vs
+45/46 off; dockerd 18/16 on vs 27/27 off (on is lower: Docker's json log shrinks from 4.2 MB to 30 KB, sized every tick; the sampler now sizes an unreadable log through `docker logs` every 30 s, so set `NX_IO_SAMPLER_LOGS_EVERY=1` to compare arms on log bytes);
+systemd-journald 662/436 on vs 690/407 off, host noise that does not follow the counter, written against
+about 2 MB of journal entries (ssh login and veth/network churn, present at idle), so journald's own write
+amplification dominates. The lab owner's nvme0n1 sampler gave 0.84 / 0.66 / 0.51 / 0.52 GB for on / off /
+off / on, so the on arms sit at both ends of the off spread. That refutes the hypothesis the bead opened on,
+that copying the probe script into each container was the writer: a run starts only 17-18 containers, their
+sum is 64-72 KiB, and containerd writes the same on and off. The writer was journald itself; the lab owner
+moved it to RAM on 2026-10-19 (Storage=volatile), so a later A/B should show a near-zero journald row. The
+switch stays so that any later change to the counter can be A/B'd at the same sha. Diagnosing a stall: `BOUNDS THAT EXPIRED` in the report lists the docker calls and the loop that
+were cut off.
+
+Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
+`pg_ctl_start` / `initdb` / `docker_run` (postgres image) sites a static scan of the Python in `tests/`
+and `scripts/` finds, the `pg_ctl start` / `initdb` / `docker run` commands in `tests/e2e/**/*.sh` (`sh_*` kinds,
+keyed by file and kind with a per-file count), and the jOOQ code generator. The `nx init` commands in those scripts
+are product provisioning, not a cluster a test started: they sit in their own `[provisioning]` table and print as a
+separate `+ <m> product-provisioning commands` figure, never folded into the start-site number. Not scanned, so the
+list is not every start site: shell outside `tests/e2e`, among it files that do start clusters
+(`scripts/liquibase_bundle_smoke.sh`, `service/native-smoke.sh`, `tests/containers/fanout.sh`, `tests/cc-validation/*`),
+e2e clusters started by anything but a literal `nx init`, and a `docker run` whose argv or image is not a literal
+(`tests/_ddl_cluster_sites.py` lists the limits).
+The terminal line prints the total as `<n> uncounted cluster start sites (static tree census)`: a
+census of call sites, not clusters (one Python cluster usually counts twice: its `<module>::initdb` and its
+`pg_instance::pg_ctl_start`), the same on every run whichever tests ran, unweighted by size.
+`tests/test_ddl_uncounted_clusters_lint.py` keeps the list equal to the scan, so a new start site
+must be read through the counter or listed on purpose.
+
+The Java report has five buckets: `boot` (before the container's `start` mark; the probe's install),
+`shared_migration` (the per-fork template), `shared_tests` (clones, the tests' own DDL, and each fork's owner-template build, about 2.3k statements, attributed to the first class in that fork that takes an owner clone),
+`shared_empty` (everything logged against a database from `startEmptyDatabase`, the
+migration-process classes' own walks; nexus-7xfh7) and `dedicated` (a container of its own). A
+`template0` database has no event trigger, so `acquireEmptyDatabase` installs the probe into each one
+inside a `DO` block, which the count does not see.
+
+Which Java test classes may build their own schema is a checked table, not a habit
+(nexus-0ty8z). A schema-only class takes a clone of the migrated template: `PgContainerHelper.start()`,
+or `startMigratedByOwner()` for production's ownership shape (a non-superuser owner of every relation,
+cloned from a second template built once per fork). A class that calls `startEmptyDatabase`,
+`startDedicated` or `newContainer` is listed in
+`service/src/test/resources/db-start-classification.tsv` with a kind and a reason, and
+`DbStartClassificationGateTest` fails on an unlisted caller, a stale row or a kind that does not fit the
+call (a direct call or a method reference). The gate checks that a row exists and that its kind is in the
+vocabulary allowed for that call; a kind is a label and a reason is free text, neither is checked against what
+the class does, so the table forces a decision and a place to review it, not a proof of it. The first
+`PgContainerHelper.applyProductSchema` on a clone made by `start()` is a no-op, because the template already
+holds the walk, its runAlways grants and the `nexus_test` objects; a second call, an empty database, an
+owner-template clone or `-Dnexus.test.pg.shared=false` runs the changelog. The skip is "first call per clone",
+not "nothing touched yet": a class that changes the clone and then calls `applyProductSchema` to heal it is
+skipped on that call. `PristineCloneSkipTest` pins the premise (a pristine clone's catalog equals the same
+clone after a real second apply) and the edges.
+
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
-The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and
-`/upsert-reference-only` whose chashes have no live manifest row in the
-collection. A test that needs such a chunk (an orphan on purpose: the RDR-192
+The engine refuses a write to `/v1/vectors/upsert-chunks` whose chashes have no live
+manifest row in the collection (`/store-put` and `/upsert-reference-only` are retired
+and answer 410 Gone). A test that needs such a chunk (an orphan on purpose: the RDR-192
 census, reaper and gc tests, the `nx store import` tests; or the chunk that must
 exist before its manifest row because `fk_catalog_chunks_chunk` wants it first)
 builds it with `tests/_chunk_seed.py::seed_chunks_direct`, never with
@@ -238,8 +678,8 @@ parses blank as log-only), so `tests/_engine_substrate.py` goes through `_pin_ow
 
 The suite provisions its own PostgreSQL bundle and the engine's ONNX models
 on first use, each once per box under a cross-process lock: the PG bundle
-under `$XDG_CACHE_HOME/nexus-test-substrate/<tag>/` (`~/.cache/...` when
-`XDG_CACHE_HOME` is unset), the models under the engine's onnx_models root
+under `$NX_TEST_SUBSTRATE_CACHE/<tag>/` (the HOME fence pins it to the real
+cache; else `$XDG_CACHE_HOME/nexus-test-substrate`, else `~/.cache/...`), the models under the engine's onnx_models root
 (`$NX_ONNX_MODEL_DIR`, else `~/.cache/nexus/onnx_models`). A box that is
 offline on its first run gets one exit-75 line at session start naming the
 pinned engine tag, not a wall of setup errors (see the substrate preflight

@@ -5,7 +5,7 @@ import unittest.mock
 import warnings
 
 import pytest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import structlog
@@ -13,6 +13,8 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
+
+from tests import _storage_touch_guard
 
 # nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
 # built-in sandbox-subprocess testing plugin) for
@@ -32,7 +34,14 @@ from nexus.db.t3 import T3Database
 # neither of which exists there, and its ACTIVE gate is false off macOS anyway.
 import sys as _sys  # noqa: E402
 
-pytest_plugins = ["pytester", "tests._env_restore"]
+# tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
+# guard; active in the default substrate (optin), inert under none and per-test.
+# tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
+# tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
+pytest_plugins = [
+    "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
+    "tests._shard_collection_plugin",
+]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
 
@@ -89,7 +98,11 @@ def pytest_configure(config):
     here rather than in a ``-p`` plugin because xdist resolves ``-n auto`` to
     an integer in ``pytest_cmdline_main`` and builds its session in a
     ``trylast`` ``pytest_configure``, so this sees a resolved number and
-    still lands before the workers are spawned. ``NX_XDIST_NO_CAP=1`` opts
+    still lands before the workers are spawned. xdist also derives
+    ``option.tx`` (what the scheduler really spawns) from that number in
+    ``pytest_cmdline_main``, so the clamp rewrites both
+    (``tests/_xdist_cap.set_worker_count``); changing ``numprocesses`` alone
+    left every clamp inert (nexus-vo9qn). ``NX_XDIST_NO_CAP=1`` opts
     out; see ``tests/_xdist_cap.py``.
 
     Default run: WARNING level — quiet, no clutter.
@@ -99,7 +112,14 @@ def pytest_configure(config):
         uv run pytest                          # quiet (WARNING)
         uv run pytest --log-level=DEBUG        # full debug output
     """
+    # nexus-kyujr: basetemp and TMPDIR on tmpfs inside a lab-run grant, decided once
+    # by the controller BEFORE it spawns workers (they inherit the environment).
+    # First, so everything below (the cluster log, the fenced home) follows TMPDIR.
+    from tests._tmp_root import TmpRootPlugin  # noqa: PLC0415 — configure-time only
+
+    config.pluginmanager.register(TmpRootPlugin(drain=_drain_stale_tmp_run), "nexus-tmp-root")
     _clamp_xdist_workers(config)
+    _begin_pg_root_session(config)
 
     try:
         level_str = (config.getoption("log_level") or "WARNING").upper()
@@ -245,10 +265,34 @@ _RETIRED_T2_SUBSTRATES: dict[str, str] = {
 }
 
 
+#: Markers whose tests the storage-touch census never ran: the default addopts
+#: deselect them (``-m 'not integration and not slow and not lint'``), so no
+#: census says which of them touch storage. They keep a tenant per test, as the
+#: whole suite did before the opt-in default, until a census taken with
+#: ``-m integration`` / ``-m slow`` / ``-m lint`` marks them
+#: (``scripts/annotate_t2_tenant.py``) and this carve-out is deleted
+#: (nexus-j23ni). ``lint`` is here although its main CI job runs under
+#: ``NX_TEST_T2_SUBSTRATE=none``: the ``test-docs-readers`` job
+#: (``-o addopts=""``) and a local ``pytest -m lint`` run lint-marked tests under
+#: the default env, and no census covered them. The cost is nil where the
+#: default addopts apply, because they deselect the marker. Every marker the
+#: addopts deselect must be listed
+#: (``test_every_marker_the_default_addopts_deselect_is_uncensused``).
+_UNCENSUSED_MARKERS: tuple[str, ...] = ("integration", "slow", "lint")
+
+
 def _selected_t2_substrate_boots_engine() -> bool:
-    """True when the session's ``NX_TEST_T2_SUBSTRATE`` leads
-    ``_pin_t2_substrate`` to provision the engine: anything except ``none``
-    (provision nothing) and a retired value (refused by name)."""
+    """True when the session's ``NX_TEST_T2_SUBSTRATE`` can lead to the engine
+    being provisioned: anything except ``none`` (provision nothing) and a
+    retired value (refused by name).
+
+    ``optin`` (nexus-j23ni; the default since the flip, and what an unset
+    variable means) is deliberately true: only tests that ask for the
+    ``t2_tenant`` tenant boot the engine, but which ones is not known until
+    they run, and a session that boots even once spends the machine-wide
+    shared-memory budget the suite lease and the preflight protect. So the
+    lease is taken and the preflight runs exactly as for ``per-test``.
+    """
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
 
@@ -297,6 +341,7 @@ def _take_suite_lease() -> None:
         if held is not None:
             wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
             if wait == 0 and not _suite_lease_unguarded():
+                _suite_lease.record_refusal()  # nexus-jqk5c: this exit never reaches acquire, which logs the rest
                 pytest.exit(
                     "suite lease: refusing to start — another substrate-heavy "
                     f"run holds this box ({held}). Two at once exhaust the "
@@ -310,6 +355,7 @@ def _take_suite_lease() -> None:
         _suite_lease_release = _suite_lease.acquire(
             _suite_lease_label(),
             wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
+            unguarded=_suite_lease_unguarded(),  # nexus-jqk5c: marks a bypassed refusal in the events log
         )
         if _suite_lease_release is None:
             # Held past the wait, or another run took it between the check
@@ -375,10 +421,12 @@ def _gate_on_build_lease() -> None:
     """Refuse the whole session ONCE while a service build holds the lease,
     or wait for it when asked (nexus-pv93h).
 
-    The lease is shared by every worktree of this repo (nexus-g6xpa), so
-    while ANY Maven run on the box holds it, ``_boot()`` refuses per test:
-    a full run beside a scoped engine run reported 1216 setup errors
-    (2026-09-07), all one fact. Deciding at session start, on the xdist
+    The lease is shared by every worktree of this repo (nexus-g6xpa), but
+    only a build in THIS checkout counts: the lease names the checkout that
+    took it, and a build elsewhere never rewrites this jar (nexus-qt6q7;
+    ``build_in_progress_reason``). While one holds it, ``_boot()`` refuses
+    per test: a full run beside a scoped engine run reported 1216 setup
+    errors (2026-09-07), all one fact. Deciding at session start, on the xdist
     controller (workers spawn after this returns), turns that into one
     line and exit 75 — or, with ``NX_BUILD_LEASE_WAIT=<seconds>``, into a
     wait that starts the suite when the holder is gone. ``_boot()``'s own
@@ -476,7 +524,8 @@ _is_controller_or_serial: bool = False
 
 
 def _clamp_xdist_workers(config) -> None:
-    """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)."""
+    """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)
+    and inside the run's memory grant (nexus-vo9qn)."""
     try:
         requested = getattr(config.option, "numprocesses", None)
     except Exception:  # noqa: BLE001 — never let the cap break collection
@@ -485,18 +534,75 @@ def _clamp_xdist_workers(config) -> None:
         # "auto"/"logical" unresolved (xdist absent), or no -n at all.
         return
     try:
-        from tests._xdist_cap import clamp_numprocesses, effective_cap
+        from tests._xdist_cap import (
+            clamp_numprocesses,
+            effective_cap,
+            effective_memory_cap,
+            memory_clamp_note,
+            set_worker_count,
+        )
 
         cap = effective_cap()
-        if cap is None:
-            return
-        value, note = clamp_numprocesses(requested=requested, cap=cap)
-        if note is not None:
-            config.option.numprocesses = value
-            # Printed, not logged: the operator needs to see this before a
-            # 15-minute run, and log level here is not yet configured.
-            print(f"\n[nexus] {note}\n")
+        if cap is not None:
+            value, note = clamp_numprocesses(requested=requested, cap=cap)
+            if note is not None:
+                set_worker_count(config.option, value)
+                requested = value
+                # Printed, not logged: the operator needs to see this before a
+                # 15-minute run, and log level here is not yet configured.
+                print(f"\n[nexus] {note}\n")
+        mem_cap = effective_memory_cap()
+        if mem_cap is not None and requested > mem_cap:
+            set_worker_count(config.option, mem_cap)
+            print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        return
+
+
+def _begin_pg_root_session(config) -> None:
+    """The xdist CONTROLLER takes the tmpfs-vs-disk decision for every cluster in
+    the run before it spawns workers, so no worker decides on its own as memory
+    fills (nexus-vo9qn). A serial run decides lazily at its first cluster."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        if (getattr(config.option, "numprocesses", None) or 0) <= 0:
+            return
+        from tests._engine_substrate import begin_pg_root_session
+
+        begin_pg_root_session()
+    except ValueError:
+        raise  # an over-long NX_TEST_PG_ROOT is a loud, pre-run failure
+    except Exception as exc:  # noqa: BLE001 — never leave workers to decide alone
+        from tests._engine_substrate import persist_controller_failure
+
+        persist_controller_failure(exc)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """One line answering "where did this run's clusters go" (nexus-vo9qn)."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        from tests._engine_substrate import pg_root_run_summary
+
+        line = pg_root_run_summary(finish=True)
+    except Exception:  # noqa: BLE001 — a summary line never fails a run
+        return
+    if line:
+        terminalreporter.write_line(line)
+
+
+def pytest_unconfigure(config):
+    """Clear the cluster-root session this process opened, so a second
+    ``pytest.main`` in the same process decides afresh (nexus-t71bk)."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        from tests._engine_substrate import end_pg_root_session
+
+        end_pg_root_session()
+    except Exception:  # noqa: BLE001 — cleanup never fails a run
         return
 
 
@@ -526,7 +632,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
-    global _real_autostart_baseline, _real_manager_baseline
+    global _real_config_dir_baseline_dir, _real_autostart_baseline, _real_manager_baseline
     global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     # BEFORE the fence below replaces them: the guard's read-only manager probe
@@ -554,9 +660,13 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial and not os.environ.get("NX_NO_HOME_FENCE"):
         import tempfile  # noqa: PLC0415 — session-start only
 
-        from tests._fence_home import install_fence  # noqa: PLC0415 — test-only helper
+        from tests._fence_home import REAL_HOME_ENV, install_fence  # noqa: PLC0415 — test-only helper
 
-        install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
+        # Only the session that fences makes a home. A CHILD session inherits
+        # NX_REAL_HOME, install_fence no-ops, and a mkdtemp here would leave an
+        # empty nx-suite-home-* behind every child (nexus-ld3aa confirmation).
+        if not os.environ.get(REAL_HOME_ENV):
+            install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
     _capture_session_homes()
 
     # A test that moves HOME again (tests/test_scratch.py's t1 fixture sets HOME
@@ -573,6 +683,15 @@ def pytest_sessionstart(session):
         os.environ.setdefault(
             CACHE_DIR_ENV, str(Path(_real_home) / ".cache" / "chroma" / "onnx_models"),
         )
+        # nexus-8ool4: every engine JVM a test starts unpacks ONNX Runtime's ~16 MB native
+        # libraries into onnxruntime-java<random> under /tmp unless the engine has a native
+        # cache, and a killed one never deletes it. The engine extracts once into
+        # NX_ORT_NATIVE_DIR (default HOME/.cache/nexus/ort_native). The fence no longer
+        # mirrors ~/.cache (nexus-ld3aa), so install_fence pins it from the real home
+        # (fence_cache_env); this setdefault covers NX_NO_HOME_FENCE runs and a test that
+        # moves HOME. An empty value counts as unset; an explicit outer value wins.
+        if not os.environ.get("NX_ORT_NATIVE_DIR", "").strip():
+            os.environ["NX_ORT_NATIVE_DIR"] = str(Path(_real_home) / ".cache" / "nexus" / "ort_native")
 
     if _is_controller_or_serial:
         # Snapshotting here (before any worker is spawned -- xdist spawns
@@ -581,6 +700,7 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _real_config_dir_baseline_dir = _real_config_dir_for_guard()
         _real_autostart_baseline = _snapshot_real_autostart_units()
         _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
@@ -658,6 +778,13 @@ def pytest_sessionfinish(session, exitstatus):
     _check_mandatory_pin_non_vacuity(session)
     _check_real_config_dir_mutations(session)
     _check_real_autostart_unit_mutations(session)
+    # LAST: the guards above read NX_REAL_HOME, not the fenced home, but nothing
+    # should find the home gone mid-finish. Controller/serial only: the fence was
+    # installed there and workers only inherit it (nexus-7df8e).
+    if _is_controller_or_serial:
+        from tests._fence_home import remove_fenced_home  # noqa: PLC0415 — test-only helper
+
+        remove_fenced_home(int(session.exitstatus))
 
 
 # ── real-config-dir mutation guard (nexus-pfuns, 2026-08-20) ────────────────
@@ -735,6 +862,11 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     # session on the box, the real one for a session without NEXUS_CONFIG_DIR
     # (see the cli_lockstep_marker allowlist entry).
     "lockstep.log",
+    # hooks/rdr_verb._log_resolution_error: one line per RDR-hook resolution
+    # failure, opened "a" by the live hook of any session on the box without
+    # NEXUS_CONFIG_DIR. A peer session in a repo whose rdr collection is
+    # unregistered appended one every prompt (nexus-ys8a4, 2026-10-17).
+    "rdr_hook.log",
 })
 
 #: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --
@@ -967,6 +1099,34 @@ def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
 
 
 _real_config_dir_baseline: dict[str, tuple[int, int]] = {}
+#: The directory the baseline above was scanned from, so the finish-time scan
+#: can tell a leaked HOME or seam value from a real mutation (nexus-ys8a4).
+_real_config_dir_baseline_dir: Path | None = None
+
+
+def _end_snapshot_unusable_reason(
+    start_dir: Path | None,
+    end_dir: Path,
+    baseline: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+) -> str | None:
+    """Why the finish-time snapshot cannot be diffed against the baseline, or
+    None when it can. Either case used to surface as every baseline file
+    REMOVED (1788 of them on a 2026-09-29 serial run, all still present)."""
+    if start_dir is not None and end_dir != start_dir:
+        return (
+            f"it scanned {start_dir} at session start and {end_dir} at session end, "
+            f"so a test left HOME or {_REAL_CONFIG_DIR_ENV_OVERRIDE} pointing elsewhere"
+        )
+    watched = [rel for rel in baseline if not _is_allowlisted_config_dir_path(rel)]
+    if watched and not after:
+        return (
+            f"{end_dir} held {len(watched)} watched file(s) at session start "
+            f"({', '.join(sorted(watched)[:10])}{' ...' if len(watched) > 10 else ''}) and reads "
+            f"empty or missing at session end; check it by hand, since an intact directory means "
+            f"the scan could not read it"
+        )
+    return None
 
 #: nexus-b2eaw: this pytest session's own conexus package version, resolved
 #: once at session start (mirrors ``_real_config_dir_baseline``'s
@@ -1441,6 +1601,13 @@ def _check_real_config_dir_mutations(session) -> None:
     if not _is_controller_or_serial:
         return
     after = _snapshot_real_config_dir()
+    unusable = _end_snapshot_unusable_reason(
+        _real_config_dir_baseline_dir, _real_config_dir_for_guard(), _real_config_dir_baseline, after,
+    )
+    if unusable is not None:
+        session.exitstatus = 1
+        print(f"\n\nFAIL: nexus-pfuns real-config-dir mutation guard cannot compare: {unusable}.\n")
+        return
     changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
     if not changed:
         return
@@ -2294,6 +2461,19 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _mcp_server_process_flag_does_not_leak(monkeypatch):
+    """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
+    ``session.mark_mcp_server_process()``, and a couple of tests run a
+    ``main()`` in-process. Left set, the flag would make every later test in
+    the worker lose the ``current_session`` fallback whenever the environment
+    carries no Claude Code marker (CI has none), and fail for a reason far from
+    its cause. monkeypatch restores the value after each test."""
+    import nexus.session as session
+
+    monkeypatch.setattr(session, "_mcp_server_process", False)
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_restart_taxonomy_deferral(monkeypatch):
     """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
     /version reports ``process_uptime_seconds`` under a threshold. The
@@ -2598,7 +2778,18 @@ def _isolate_t1_sessions(
     """
     if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
         return
+    if _storage_touch_guard.optin_selected():
+        # nexus-j23ni: the T1 session rides the tenant, so it is minted by the
+        # ``t2_tenant`` fixture, for the tests that ask for one.
+        return
+    _mint_t1_session_env(monkeypatch)
 
+
+def _mint_t1_session_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mint this test's PG-backed T1 session and inject it as
+    ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID``. Needs a tenant already bound to
+    the env: ``_isolate_t1_sessions`` calls it under the default substrate,
+    ``t2_tenant`` under ``optin``."""
     from uuid import uuid4
 
     from nexus.db.t1 import mint_t1_session_token
@@ -2637,10 +2828,81 @@ def t2_service_env(request: pytest.FixtureRequest,
     dropped (``minted_test_tenant``, RDR-225), so a worker's PG does not
     grow by about 50 relations per test.
 
-    The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
-    test. Still requestable directly by tests that want the tenant name.
+    ``NX_TEST_T2_SUBSTRATE=per-test`` (the escape hatch) has ``_pin_t2_substrate``
+    pull this fixture in for every test. Requestable directly by tests that want
+    the tenant name.
+
+    Under the default substrate, ``optin`` (nexus-j23ni), it is an alias for
+    ``t2_tenant``: the tenant, the test's T1 session and the shared posture
+    pin, so a test that asks for ``t2_service_env`` directly (137 files do)
+    gets the same environment as one that asks for ``t2_tenant``, T1 included.
     """
-    from tests._engine_substrate import ensure_engine, minted_test_tenant
+    if _storage_touch_guard.optin_selected():
+        yield request.getfixturevalue("t2_tenant")
+        return
+    with _engine_tenant_env(monkeypatch, pin_local=True, request=request) as tenant:
+        yield tenant
+
+
+@pytest.fixture
+def t2_tenant(request: pytest.FixtureRequest,
+              monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """The opt-in tenant (nexus-j23ni): what a test that touches storage asks
+    for, by parameter or by ``pytest.mark.t2_tenant`` (module ``pytestmark``
+    or per test). Yields the tenant name.
+
+    Under the default substrate (``optin``) it is a thin wrapper over the same
+    machinery as ``t2_service_env``: the minted tenant, plus this test's T1
+    session, and not ``NX_LOCAL`` (``_pin_local_posture_optin`` owns that).
+    Under ``per-test`` ``_pin_t2_substrate`` already provisions every test, so
+    this just hands back that tenant.
+    """
+    if not _storage_touch_guard.optin_selected():
+        yield request.getfixturevalue("t2_service_env")
+        return
+    with _engine_tenant_env(monkeypatch, pin_local=False, request=request) as tenant:
+        _mint_t1_session_env(monkeypatch)
+        yield tenant
+
+
+@pytest.fixture(autouse=True)
+def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the default substrate (``optin``), hold the suite's local posture for
+    EVERY test, not just the ones with a tenant (nexus-j23ni).
+
+    ``t2_service_env`` pins ``NX_LOCAL=1`` because ``NX_SERVICE_URL`` flips
+    ``config.is_local_mode()`` to cloud (nexus-aqbrk, below). With the tenant
+    opt-in, a fake-server test that sets ``NX_SERVICE_URL`` itself would flip
+    to cloud posture because no tenant fixture ran to pin it. ``cloud_mode`` is
+    not autouse, so its ``NX_LOCAL=0`` still lands later and wins. Also drops an
+    ambient ``NX_STORAGE_BACKEND``, which the tenant fixture otherwise
+    overrides; ``_pin_t2_substrate`` depends on this fixture so the drop runs
+    BEFORE a marker-requested tenant sets ``service``, not after. Nothing under
+    ``per-test`` and ``none``.
+    """
+    if not _storage_touch_guard.optin_selected():
+        return
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+
+
+@contextlib.contextmanager
+def _engine_tenant_env(
+    monkeypatch: pytest.MonkeyPatch, *, pin_local: bool,
+    request: pytest.FixtureRequest | None = None,
+) -> Iterator[str]:
+    """Point this test's env at the session engine with a freshly minted
+    tenant; yields the tenant name. The body of ``t2_service_env`` and, under
+    ``NX_TEST_T2_SUBSTRATE=optin``, of ``t2_tenant``.
+
+    ``pin_local`` sets ``NX_LOCAL=1`` (the ORTHOGONALITY PIN below). ``optin``
+    sets it for every test from the autouse ``_pin_local_posture_optin``
+    instead, so a tenant fixture requested after ``cloud_mode`` cannot
+    overwrite that fixture's ``NX_LOCAL=0``. The enclosed span is the guard's
+    "tenant active" window (``tests/_storage_touch_guard.py``).
+    """
+    from tests._engine_substrate import ensure_engine
+    from tests._tenant_pool import tenant_lease
     from tests.db._service_fixture import jar_freshness_skip_reason
 
     # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
@@ -2658,7 +2920,7 @@ def t2_service_env(request: pytest.FixtureRequest,
                     "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
 
     state = ensure_engine()
-    with minted_test_tenant(state) as (tenant, token):
+    with tenant_lease(state, request) as (tenant, token), _storage_touch_guard.tenant_active():
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -2685,7 +2947,8 @@ def t2_service_env(request: pytest.FixtureRequest,
         # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
         # setenv lands later on the same monkeypatch — the same ordering contract
         # documented on ``_isolate_service_endpoint_env`` below.
-        monkeypatch.setenv("NX_LOCAL", "1")
+        if pin_local:
+            monkeypatch.setenv("NX_LOCAL", "1")
         yield tenant
 
 
@@ -2856,14 +3119,22 @@ def _exempt_pytest_from_production_write_guard() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
-    """Route every test to the session's T2 substrate — the ENGINE.
+def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: None) -> None:
+    """Route the tests that need one to the session's T2 substrate — the ENGINE.
 
-    Every test gets the session PG+JAR with a freshly minted tenant, exactly
-    what the ``t2_service_env`` opt-in fixture provides. This is what the
-    product actually ships on; ``storage_backend_for`` has defaulted to
-    ``service`` since the T2 cutover, so the suite agrees with the shipping
-    default instead of contradicting it.
+    THE DEFAULT IS OPT-IN (nexus-j23ni, flipped 2026-10): a test gets the
+    session PG+JAR with a freshly minted tenant (what ``t2_service_env`` /
+    ``t2_tenant`` provide) only when it carries ``pytest.mark.t2_tenant`` (a
+    module ``pytestmark`` included) or requests one of those fixtures; every
+    other test mints nothing, and the storage-touch guard
+    (``tests/_storage_touch_guard.py``, fail mode) fails one that reaches
+    storage without a tenant, naming it. ``NX_TEST_T2_SUBSTRATE=per-test`` is
+    the escape hatch back to a tenant for EVERY test, for one release.
+    ``scripts/annotate_t2_tenant.py`` regenerates the marks from a census.
+
+    The substrate is what the product actually ships on;
+    ``storage_backend_for`` has defaulted to ``service`` since the T2 cutover,
+    so the suite agrees with the shipping default instead of contradicting it.
 
     THE SQLITE LEG IS GONE (nexus-i711w Stage 1b, 2026-07-28). Until now
     ``NX_TEST_T2_SUBSTRATE=sqlite`` opted out to the local SQLite stores, and
@@ -2919,6 +3190,18 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
         return
     if selected in _RETIRED_T2_SUBSTRATES:
         raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
+    if _storage_touch_guard.optin_selected():
+        # nexus-j23ni, the default since the flip: mint only for a test that
+        # carries the marker (module ``pytestmark`` included); one that
+        # requests ``t2_tenant`` by parameter gets it from that request. The
+        # storage-touch guard (fail mode) names a test that reaches storage
+        # with neither. ``NX_TEST_T2_SUBSTRATE=per-test`` mints for every test.
+        if (
+            request.node.get_closest_marker("t2_tenant") is not None
+            or any(request.node.get_closest_marker(m) is not None for m in _UNCENSUSED_MARKERS)
+        ):
+            request.getfixturevalue("t2_tenant")
+        return
     request.getfixturevalue("t2_service_env")
 
 
@@ -2978,6 +3261,12 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     import nexus.mcp_infra as mcp_infra
 
     before = mcp_infra._t3_instance
+    # The T1 twin (nexus-kt6kj): ``get_t1()`` memoises an HttpScratchStore bound to the
+    # endpoint and session the first caller saw, so one test's store served a later
+    # test's scratch put after that endpoint was gone ("connect failed on /v1/t1/put":
+    # tests/db/test_t1_cli_dedicated_session.py then tests/test_tier_writes.py, one
+    # process). Restored unconditionally; every inject_t1 site is function-scoped.
+    t1_before = (mcp_infra._t1_instance, mcp_infra._t1_isolated)
     # Bind the REAL invalidator now: a test may monkeypatch the module
     # attribute (some assert it is never called on a cache hit), and this
     # fixture's teardown can run before monkeypatch's undo.
@@ -2991,6 +3280,9 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     # worker (tests/test_catalog_cli.py::TestVerifyCommand, five reds under
     # -n 8, green alone). Drop it after every test, unconditionally: the
     # next reader refetches, exactly as a fresh process would.
+    if mcp_infra._t1_instance is not t1_before[0] or mcp_infra._t1_isolated is not t1_before[1]:
+        with mcp_infra._t1_lock:
+            mcp_infra._t1_instance, mcp_infra._t1_isolated = t1_before
     invalidate_rows()
     after = mcp_infra._t3_instance
     if after is before:
@@ -3069,6 +3361,19 @@ def _isolate_plugin_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.fixture(autouse=True)
+def _isolate_lease_events_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lease-contention log (nexus-jqk5c) at a per-test tmp file.
+
+    ``tests/_suite_lease.py`` and ``scripts/lib/build-lease.sh`` append a line per
+    contended lease event to a per-user, per-host log under the user's state dir. A test that
+    contends a tmp-root lease, or a child process it spawns, would otherwise write
+    into the real one and show labrun contention that never happened. The session's
+    own lease (taken before any fixture runs) is real and logs to the real path.
+    """
+    monkeypatch.setenv("NX_LEASE_EVENTS_LOG", str(tmp_path / "lease-events.log"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 
@@ -3141,15 +3446,19 @@ def _fence_beads_prime_user_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     """Fence ``nexus.beads_prime``'s user-level PRIME.md path to a per-test
     tmp dir for EVERY test (nexus-cnzei.8 CRE fix round, ship-blocker).
 
-    This module's own ``install_fence`` (``tests/_fence_home.py``, wired at
-    ``pytest_sessionstart`` above) shadows only ``.config/nexus`` -- every
-    OTHER top-level HOME entry (``Library`` on macOS, every other
-    ``.config/<x>`` on Linux) is symlinked straight through to the REAL
-    filesystem. ``nexus.beads_prime.user_prime_path()`` resolves to exactly
-    one of those un-shadowed locations by construction
+    HISTORY (nexus-ld3aa): this fixture was written when ``install_fence``
+    (``tests/_fence_home.py``, wired at ``pytest_sessionstart`` above) shadowed
+    only ``.config/nexus`` and symlinked every OTHER top-level HOME entry
+    (``Library`` on macOS, every other ``.config/<x>`` on Linux) straight
+    through to the REAL filesystem. The fence is now inverted: the test home
+    starts empty and links through only ``.m2/repository .m2/wrapper
+    .testcontainers.properties``, so the locations below are absent under it
+    and this fixture is the second layer, kept because it also covers a run
+    under ``NX_NO_HOME_FENCE``.
+    ``nexus.beads_prime.user_prime_path()`` resolves to one of the locations the
+    old fence left reachable by construction
     (``~/Library/Application Support/beads/PRIME.md`` on macOS,
-    ``~/.config/beads/PRIME.md`` on Linux) -- the fence's one shadow never
-    covers it. A test that invokes ``nx init``/``nx upgrade`` (directly or
+    ``~/.config/beads/PRIME.md`` on Linux). A test that invokes ``nx init``/``nx upgrade`` (directly or
     via ``CliRunner``) with no per-test stub, on a box with ``bd`` on
     ``PATH``, writes for real into the operator's machine-wide beads
     PRIME.md. Confirmed: ``tests/test_init_service_binary.py`` did exactly
@@ -3228,6 +3537,15 @@ def _mineru_machine_probes_read_nothing(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(health, "process_cwd_state", lambda *a, **k: None)
     monkeypatch.setattr(health, "process_cwd_path", lambda *a, **k: None)
     monkeypatch.setattr(health, "semaphores_exhausted", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _sigterm_left_as_found(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Name a test that leaves SIGTERM ignored or blocked, and put it back (tests/_sigterm_guard.py)."""
+    from tests._sigterm_guard import term_left_as_found
+
+    with term_left_as_found(request.node.nodeid):
+        yield
 
 
 # NO _reap_spawned_daemons fixture: it SIGTERMed any T2/T3 daemon a test had
@@ -3717,6 +4035,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_legacy_two_segment_target_exempt_from_dims_check",
     "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_assume_model_still_enforces_model_mismatch_gate",
     "tests/test_exporter.py::TestImportFlagsCLI::test_assume_model_flag_wired_through",
+    # Reason class "real-value interlock" (RDR-210 P1.5, nexus-hf29s): these two
+    # tests assert the scoring table's REAL entries for the real model tokens
+    # (voyage-code-3 at 1.0, voyage-context-3 at 0.45/0.65, and that a listed model
+    # never logs as unlisted). A neutral token is by definition an unlisted model,
+    # so swapping the literal would make the test assert the opposite thing.
+    "tests/test_hf29s_cross_family_ranking.py::test_bge_factor_is_the_measured_ratio_within_1e_6",
+    "tests/test_hf29s_cross_family_ranking.py::test_a_listed_model_does_not_log_as_unlisted",
 })
 
 
@@ -4226,6 +4551,15 @@ def _ps_all() -> list[tuple[int, str]]:
 _ps_aspect_workers = _ps_all
 
 
+def _drain_stale_tmp_run(pytest_root: Path, *, _kill=None) -> None:
+    """The start-of-run drain for a crashed run's private pytest tree
+    (``tests/_tmp_root.py``, nexus-kyujr): its basetemp is no sibling of ours, so
+    :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``.
+    *_kill* is the reaper's test seam (``(pid, signal_name)``)."""
+    snapshot = _ps_all()
+    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
+
+
 def _matches_class(cmd: str, label: str) -> bool:
     """Is *cmd* an instance of the *label* process class?
 
@@ -4366,31 +4700,80 @@ def reap_leaked_aspect_workers(
     ]
 
 
-def stale_pytest_roots(basetemp: Path) -> list[Path]:
-    """Sibling pytest session dirs from OTHER runs, newest-first.
+def _pytest_root_is_live(root: Path) -> bool:
+    """True when *root*'s ``.lock`` names a process that is still running.
+
+    pytest writes ``<root>/.lock`` holding the creating pid (the xdist
+    controller under ``-n``; workers' basetemps nest inside it) and removes it
+    at exit, so a missing lock is a finished run and a lock naming a dead pid is
+    a killed one. Both are stale. A recycled pid reads as live and leaves a
+    stale root unreaped this time, which is the safe direction.
+    """
+    try:
+        pid = int((root / ".lock").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        # OverflowError: a garbage lock naming a pid too large for the
+        # syscall. Escaping here would empty the whole scan, not skip a root.
+        return False
+    return True
+
+
+def stale_pytest_roots(basetemp: Path, *, extra_tempdirs: Sequence[Path] = ()) -> list[Path]:
+    """Sibling pytest session dirs from OTHER, finished runs, newest-first.
 
     pytest lays sessions out as ``<tmp>/pytest-of-<user>/pytest-<n>``. The
     current session's own dir is excluded -- reaping it would kill the run in
-    progress.
+    progress -- and so is every sibling whose run is still going (2026-10-17):
+    several scoped runs at once is normal, and reaping a live
+    sibling's root SIGTERMs that run's test daemons mid-test. The
+    ``pytest-current`` symlink is skipped; it aliases a numbered root.
 
-    Assumes ONE pytest run at a time on a box, which is this project's standing
-    rule (feedback_no_parallel_tests). A second concurrent run's daemons would
-    be reaped by this. That is why every reap is PRINTED rather than silent.
+    Under xdist a worker's basetemp is ``pytest-<n>/gw<k>``, one level below
+    its session root, so the root is taken from the parent there; without that
+    the scan found no ``pytest-of-`` parent and returned nothing on every
+    worker, and the drain never ran under ``-n``.
+
+    *extra_tempdirs* (nexus-kyujr): other tempdirs whose ``pytest-of-<user>`` is
+    scanned the same way. Inside a lab-run grant the current basetemp is in the
+    run's private tmpfs directory, which has no siblings, so a run that fell back to
+    disk (or was killed before the move existed) leaves its stranded daemons under
+    the ORIGINAL tempdir's ``pytest-of-<user>`` where only this argument reaches them.
     """
     try:
-        parent = Path(basetemp).resolve().parent
         current = Path(basetemp).resolve()
+        parent = current.parent
+        if parent.name.startswith("pytest-") and not parent.name.startswith("pytest-of-"):
+            current, parent = parent, parent.parent
     except Exception:  # noqa: BLE001 -- probe
         return []
     if not parent.is_dir() or not parent.name.startswith("pytest-of-"):
         return []
-    try:
-        sibs = [
-            d for d in parent.iterdir()
-            if d.is_dir() and d.name.startswith("pytest-") and d.resolve() != current
-        ]
-    except Exception:  # noqa: BLE001 -- probe
-        return []
+    parents = [parent]
+    for extra in extra_tempdirs:
+        candidate = Path(extra) / parent.name
+        try:
+            if candidate.is_dir() and candidate.resolve() != parent.resolve():
+                parents.append(candidate)
+        except OSError:
+            continue
+    sibs: list[Path] = []
+    for scan in parents:
+        try:
+            sibs.extend(
+                d for d in scan.iterdir()
+                if d.is_dir() and not d.is_symlink() and d.name.startswith("pytest-")
+                and d.resolve() != current and not _pytest_root_is_live(d)
+            )
+        except Exception:  # noqa: BLE001 -- probe
+            continue
     return sorted(sibs, key=lambda d: d.name, reverse=True)
 
 
@@ -4411,7 +4794,8 @@ def _reap_leaked_test_daemons(tmp_path_factory):
     # and there were 21 stale roots on the dev box when this landed -- 21 process
     # listings before the first test runs. The snapshot going stale mid-scan is
     # harmless: killing an already-exited pid raises, and that is caught.
-    stale_roots = stale_pytest_roots(basetemp)
+    orig_tmp = os.environ.get("NX_TEST_TMP_ORIG")  # tests/_tmp_root.py moved TMPDIR (nexus-kyujr)
+    stale_roots = stale_pytest_roots(basetemp, extra_tempdirs=[Path(orig_tmp)] if orig_tmp else [])
     drained: list[tuple[str, int]] = []
     if stale_roots:
         try:

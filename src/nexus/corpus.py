@@ -417,8 +417,8 @@ def _write_intent_embedding_model(content_type: str) -> str:
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
-        from nexus.config import local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-        if local_embed_model_is_voyage():
+        from nexus.config import local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+        if local_embed_profile() == "voyage":
             from nexus.config import get_credential, local_embed_model_choice  # noqa: PLC0415 — circular-dep avoidance (config)
             if not get_credential("voyage_api_key"):
                 raise LocalVoyageCredentialMissingError(
@@ -542,8 +542,8 @@ def _promoted_model_token_for_read(content_type: str) -> str:
     :class:`EmbeddingProfileEmptyError` for what must stay a pure,
     offline candidate-name construction.
     """
-    from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-    if is_local_mode() and local_embed_model_is_voyage():
+    from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_profile() == "voyage":
         return canonical_embedding_model(content_type)
     return _write_intent_embedding_model(content_type)
 
@@ -685,8 +685,8 @@ def resolve_write_embedding_model(
                                  see nexus-ddmfg)
     ==========================  ==============================================
     """
-    from nexus.config import get_credential, is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-    if is_local_mode() and local_embed_model_is_voyage():
+    from nexus.config import get_credential, is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_profile() == "voyage":
         key_present = bool(get_credential("voyage_api_key"))
         if not key_present and collection_exists is not None:
             found = _probe_local_token_collections(collection_exists)
@@ -1456,8 +1456,7 @@ def t3_collection_name(
             # regardless of what local.embed_model CURRENTLY says.
             # Bounded (LOCAL_EMBEDDING_MODELS is a 2-entry frozenset) and
             # scoped tightly to the voyage-switch scenario (never fires
-            # for a plain bge<->minilm install, which keeps its own
-            # deliberate `nx init` migration UX unchanged).
+            # for a plain bge<->minilm install).
             #
             # TRUTH TABLE (mode: local + local.embed_model voyage-shaped;
             # all other modes/configs never reach this line — full table
@@ -1485,8 +1484,8 @@ def t3_collection_name(
                 candidate = f"{ct}__{owner_segment}__{local_token}__v1"
                 return candidate != promoted and t3.collection_exists(candidate)  # type: ignore[attr-defined]
 
-            from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-            if is_local_mode() and local_embed_model_is_voyage():
+            from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+            if is_local_mode() and local_embed_profile() == "voyage":
                 if not for_write:
                     found_token = _probe_local_token_collections(_bge_candidate_exists)
                     if found_token is not None:
@@ -1814,6 +1813,11 @@ def _superseded_successor(row: object) -> str:
     return successor if isinstance(successor, str) else ""
 
 
+def _row_holds_model(row: object, model: str) -> bool:
+    """True when a ``/collections/get`` row exists and records *model*."""
+    return isinstance(row, dict) and row.get("embedding_model") == model
+
+
 def _row_from_client(client: object, name: str) -> object:
     """*name*'s catalog row via *client*. A scoped registrar hands back a full
     catalog client; the ambient writer is a write-only proxy whose
@@ -1940,7 +1944,7 @@ def ensure_collection_registered(
     RDR-204 Phase 1 client half (nexus-f5wwx). Call this from every
     write path that used to rely on the engine's now-retired
     auto-registration on first write: the T3 chunk write path
-    (``HttpVectorClient.put`` / ``.upsert_chunks``, which covers
+    (``HttpVectorClient.upsert_chunks``, which covers
     ``nx store put``, MCP ``store_put``, the indexer, ``nx index md``/
     ``pdf``/``rdr``, ``nx dt import`` and ``nx memory promote`` in one
     place), the aspects store (``HttpDocumentAspectsStore.upsert``),
@@ -1995,7 +1999,11 @@ def ensure_collection_registered(
     same check there broke 155 unit tests that reach it with only the
     db/T3 layer mocked — a network call in that chokepoint was wrong,
     not under-fixtured). Profile disagrees -> :class:`EmbeddingProfileMismatchError`
-    naming the restart, registration refused before the wire call. No
+    naming the restart, registration refused before the wire call --
+    unless the collection's row ALREADY EXISTS holding the same model
+    (RDR-210 Gap 9, nexus-no5rm): the profile governs new names only,
+    the engine never re-points an existing row, so a write to an existing
+    bge collection under a Voyage-profile dual engine passes. No
     profile row for this content_type yet -> proceeds with intent
     unchanged (the bootstrap case: this registration is what seeds the
     row every later comparison reads, verified against
@@ -2016,7 +2024,7 @@ def ensure_collection_registered(
 
     - T3 chunk writes / aspects / taxonomy persist/rebuild/import
       (:func:`write_with_registration_retry`, this function's own
-      primary caller — ``HttpVectorClient.put``/``.upsert_chunks``,
+      primary caller — ``HttpVectorClient.upsert_chunks``,
       ``HttpDocumentAspectsStore.upsert``, ``HttpTaxonomyStore``'s
       ``assign_topic``/``persist_discovered_topics``/
       ``persist_rebuild_topics``/``import_topic``/``import_topic_link``/
@@ -2105,19 +2113,37 @@ def ensure_collection_registered(
             # closed, like the retry path): one failed GET followed by a good
             # POST would otherwise revive the tombstone.
             writer = registrar() if implicit else None
+            existing_row: object = None
             try:
                 import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
                 if writer is not None:
-                    cold_successor = _superseded_successor(_row_from_client(writer, name))
+                    existing_row = _row_from_client(writer, name)
+                    cold_successor = _superseded_successor(existing_row)
                     if cold_successor:
                         raise SupersededCollectionWriteError(name, cold_successor)
                 if kwargs is None:
                     kwargs = collection_registration_kwargs(name)
                 profile_model = _profile_model_for_content_type(kwargs["content_type"])
                 if profile_model is not None and profile_model != kwargs["embedding_model"]:
-                    raise EmbeddingProfileMismatchError(
-                        kwargs["content_type"], kwargs["embedding_model"], profile_model,
-                    )
+                    # RDR-210 Gap 9 (nexus-no5rm): the profile governs NEW names
+                    # only. The engine never re-points an existing row
+                    # (CatalogRepository.upsertCollection), so a name whose row
+                    # already holds this model is not off-profile for a write.
+                    # An explicit-kwargs caller has not read the row yet; it
+                    # pays that read only here, on a disagreement.
+                    if writer is None:
+                        writer = registrar()
+                        existing_row = _row_from_client(writer, name)
+                    if not _row_holds_model(existing_row, kwargs["embedding_model"]):
+                        raise EmbeddingProfileMismatchError(
+                            kwargs["content_type"], kwargs["embedding_model"], profile_model,
+                        )
+                    # The skip must not revive a retired name: an explicit-kwargs
+                    # caller never ran the superseded read the implicit path did, and
+                    # the upsert below would clear superseded_by.
+                    skip_successor = _superseded_successor(existing_row)
+                    if skip_successor:
+                        raise SupersededCollectionWriteError(name, skip_successor)
                 if writer is None:
                     writer = registrar()
                 try:

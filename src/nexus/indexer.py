@@ -29,7 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
-from nexus.corpus import index_model_for_collection
+from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -2030,6 +2030,37 @@ def _catalog_hook(
     return file_to_doc_id
 
 
+def _relink_changed_pdfs(fence_run_state: dict) -> None:
+    """nexus-h0uy7: same-as maintenance for the documents this run changed.
+
+    The Pass-1 link generators see only NEWLY registered documents, and they
+    run before any producer's ``begin_index_run`` stamps the new
+    ``index_content_hash``, so a PDF re-indexed with new bytes kept its old
+    same-as link. This runs after ``_run_index`` returns, scoped to the
+    ``needs_fence`` set (new or content-changed documents), when those keys
+    are current. Fail-open: a link-maintenance failure never fails the run.
+    """
+    changed = set(fence_run_state.get("needs_fence") or {})
+    if not changed:
+        return
+    try:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+        from nexus.catalog.link_generator import relink_changed_pdfs  # noqa: PLC0415 — deferred import; test patch target
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return
+        writer = make_catalog_writer()
+        try:
+            retracted, created = relink_changed_pdfs(cat, writer=writer, changed=changed)
+        finally:
+            writer.close()
+        if retracted or created:
+            _log.info("pdf_same_as_relinked", retracted=retracted, created=created)
+    except Exception as exc:  # noqa: BLE001 — link maintenance must never mask the run's own outcome
+        _log.warning("pdf_same_as_relink_failed", error=str(exc), doc_count=len(changed))
+
+
 def _reconcile_needs_fence(fence_run_state: dict) -> None:
     """nexus-hg2dw: run-exit reconciliation for the registration-time
     fence above. Called unconditionally from ``index_repository``'s
@@ -2451,6 +2482,7 @@ def index_repository(
                 stats: dict[str, int] = {}
             else:
                 stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                _relink_changed_pdfs(_fence_run_state)
                 # nexus-6m9zy.6 (#12): owners.head_hash is the BASE the
                 # NEXT --since-head run diffs from. Advancing it past a
                 # commit that changed a file this run deferred (transient
@@ -4133,6 +4165,13 @@ def _prune_collection_serverside(
     # the restore window that nothing owns. NX_GC_FLOOR_FRACTION / NX_GC_FORCE govern
     # the MOVE (here and in `nx t3 gc`) and not this expiry; the engine reaper's move
     # carries NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
+    # RDR-222 Amendment A1 (nexus-1579m): the expiry is a bounded, keyed drain run NON-strict, which never
+    # raises a page outcome (a failed or unsettled page is a warning naming its request key), so every
+    # sibling's expiry runs; `nx t3 gc` runs the same drain strict. Two carve-outs still propagate: a
+    # response-shape defect (ValueError, re-raised below, ends the whole prune pass) and
+    # ProductionWriteGuardError (a stop-and-verify refusal; the loop's catch-all logs it and moves to the
+    # next collection, so it ends this collection's siblings only). A 200 whose body does not parse, or is
+    # not UTF-8, is neither: the client polls the ledger for it.
     expired = expire_quarantine_across_serverside(
         db, siblings, collection_name, cutoff, best_effort=True,
     )
@@ -5360,6 +5399,23 @@ def _run_index(
         if _migrate_writer is not None:
             _migrate_writer.close()
 
+    if _local_mode:
+        # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk
+        # is the model that EMBEDDED it. In local mode that is the model the
+        # engine embeds with, which it routes by the registry row's
+        # embedding_model (EmbedderRouter.resolveEmbedderStrict) -- not the
+        # Python EF's: without the ``[local]`` extra the EF falls back to
+        # MiniLM while a bge-768 collection is written. This indexer registers
+        # the row with the name's own token (the registration loop below), so
+        # the token is what the engine uses. Resolved here, after the
+        # legacy-name migration, so it follows the final names. A
+        # non-conformant (legacy) name carries no token, so it keeps the
+        # Python EF's name.
+        if is_conformant_collection_name(code_collection):
+            code_model = index_model_for_collection(code_collection)
+        if is_conformant_collection_name(docs_collection):
+            docs_model = index_model_for_collection(docs_collection)
+
     # nexus-27u7: defer T3 collection creation to the per-content-type
     # branches that actually have files. Pre-fix the indexer
     # unconditionally created both ``code__`` and ``docs__`` collections
@@ -6519,10 +6575,19 @@ def _run_index(
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()
 
+    # nexus-s80u9: the rdr collection's own model token labels its chunks, as
+    # the docs collection's does its own; a name that carries no token (legacy)
+    # keeps the docs label it always had.
+    rdr_model = (
+        index_model_for_collection(rdr_col_name)
+        if rdr_col_name is not None and is_conformant_collection_name(rdr_col_name)
+        else docs_model
+    )
+
     def _index_one_rdr(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
         return _contain_transient_upsert(lambda: _index_prose_file(
-            file, repo, rdr_col_name, docs_model, rdr_col, db,
+            file, repo, rdr_col_name, rdr_model, rdr_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,

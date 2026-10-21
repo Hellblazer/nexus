@@ -26,6 +26,8 @@ from __future__ import annotations
 import httpx
 import structlog
 
+from nexus._log_safe_url import scrub_transport_error
+
 _log = structlog.get_logger(__name__)
 
 
@@ -72,7 +74,7 @@ def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — fail-closed: a transport blip or a pre-nexus-s71lr engine (404) is "unprobeable"
-        _log.debug("engine_status_probe_failed", error=str(exc))
+        _log.debug("engine_status_probe_failed", error=scrub_transport_error(exc, base_url))
         return None
 
     if not isinstance(body, dict):

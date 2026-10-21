@@ -1,92 +1,54 @@
 #!/usr/bin/env bash
-# Mirror a HOME, shadowing exactly one path (nexus-pfuns follow-up).
+# Shadow a HOME: an empty directory plus a short allowlist of toolchain caches
+# (nexus-ld3aa; supersedes the nexus-pfuns mirror-everything design).
 #
 # Sourced by tests/e2e/local-service-gate.sh and exercised directly by
 # tests/test_gate_fences_the_real_config_dir.py. It lives here rather than
 # inline in the gate so the TEST DRIVES THE REAL IMPLEMENTATION instead of a
 # copy of it — a fence verified against a reimplementation is not verified.
 #
-# WHY A DENYLIST. The first attempt symlinked a hand-picked set
-# (.cache/.local/.claude) into a fresh HOME and broke on the second thing it
-# touched: the Maven jar rebuild died because ~/.testcontainers.properties
-# (carrying testcontainers.ryuk.disabled=true) and ~/.docker (holding the
-# socket at ~/.docker/run/docker.sock) were absent, so testcontainers fell back
-# to its ryuk-enabled default and could not reach the daemon. The set of
-# "things $HOME is for" cannot be completed by enumeration. So: mirror
-# everything, shadow one path.
+# WHY SHADOW-EVERYTHING. The fence used to symlink every entry of the real home
+# and shadow a denylist. The failure modes are asymmetric: a path the fence
+# fails to mirror breaks LOUDLY on the first run (2026-08-24: the Maven jar
+# rebuild died because ~/.testcontainers.properties and ~/.docker were absent),
+# while a path it mirrors by mistake fails SILENTLY and destructively
+# (2026-09-12 a test overwrote the operator's global identity file; 2026-09-30 a
+# test replaced a live nexus-service autostart unit on qwentescence). A denylist
+# is never finished: a dotfile the operator installs next week is mirrored by
+# default. So the home starts EMPTY and only FENCE_MIRRORED_ENTRIES are linked
+# through, each a read-mostly toolchain cache measured as needed. Anything else
+# a leg needs it is given explicitly (an env pin: fence_uv_env, fence_cache_env;
+# or a fixture file), never by widening the mirror. No credential store is
+# mirrored BY NAME (.ssh .aws .gnupg .kube .netrc .npmrc .gitconfig .claude
+# .config/gh .config/op ... are never in the list). That is a claim about
+# top-level names, not content, so nexus-u73rf (DECIDED, Sam, 2026-10-17) narrowed
+# the two entries that could hold one: .m2 is linked as .m2/repository and
+# .m2/wrapper only (settings.xml holds server passwords), and .docker is not
+# linked at all (config.json holds registry auths; DOCKER_HOST and
+# TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE pass through). A JVM still reads the real
+# settings.xml through its own user.home, which ignores $HOME.
 
-# Shadows applied whatever the caller names (twin of ALWAYS_SHADOWS in
-# tests/_fence_home.py, kept in step by tests/test_fence_home_twins_agree.py).
-#   autostart units (nexus-q81g7): a mirrored ~/.config/systemd/user or
-#     ~/Library/LaunchAgents lets the upgrade-finish convergence path rewrite
-#     and re-activate the operator's REAL unit against the real service manager
-#     (destroyed qwentescence's unit 2026-09-30);
-#   interim writers: ~/.local/state, ~/.claude/agents, ~/.claude/projects;
-#   credential stores, never mirrored: .aws .gnupg .kube .ssh (whole) and
-#     .config/gh .config/op.
-# A shadow is <top>/<leaf> or a bare <top>.
-FENCE_ALWAYS_SHADOWS=(
-    ".config/systemd" "Library/LaunchAgents"
-    ".local/state" ".claude/agents" ".claude/projects"
-    ".aws" ".gnupg" ".kube" ".ssh" ".config/gh" ".config/op"
+# The only paths of the real home linked into a fenced home (relative to it; a
+# nested entry gets a real parent directory holding just the link). Twin of
+# MIRRORED_ENTRIES in tests/_fence_home.py, kept in step by
+# tests/test_fence_home_twins_agree.py. An entry the real home lacks is skipped.
+FENCE_MIRRORED_ENTRIES=(
+    ".m2/repository" ".m2/wrapper" ".testcontainers.properties"
 )
 
-# fence_home <real_home> <gate_home> [shadow_relpath]
+# fence_home <real_home> <gate_home>
 #
-# Symlinks every top-level entry of <real_home> into <gate_home>, except the
-# first component of each shadow. A bare <top> shadow becomes an empty real
-# directory; for <top>/<leaf> the <top> is recreated as a real directory whose
-# own entries are symlinked through except the shadowed leaves, which become
-# fresh empty directories. The shadows are <shadow_relpath> (default
-# .config/nexus) plus FENCE_ALWAYS_SHADOWS.
+# Creates <gate_home> empty, then symlinks each FENCE_MIRRORED_ENTRIES entry that
+# exists in <real_home> into it. Nothing else of the real home is visible from
+# the result.
 fence_home() {
-    local real_home="$1" gate_home="$2" shadow="${3:-.config/nexus}"
-    local -a shadows=("$shadow" "${FENCE_ALWAYS_SHADOWS[@]}")
-    local rel top entry base is_top is_leaf
-
+    local real_home="$1" gate_home="$2" name
     mkdir -p "$gate_home"
-    for rel in "${shadows[@]}"; do
-        mkdir -p "$gate_home/${rel%%/*}"
-    done
-
-    local had_dotglob had_nullglob
-    shopt -q dotglob && had_dotglob=1 || had_dotglob=0
-    shopt -q nullglob && had_nullglob=1 || had_nullglob=0
-    shopt -s dotglob nullglob
-
-    for entry in "$real_home"/*; do
-        base="$(basename "$entry")"
-        is_top=0
-        for rel in "${shadows[@]}"; do
-            [ "$base" = "${rel%%/*}" ] && is_top=1
-        done
-        [ "$is_top" = "1" ] && continue
-        ln -sfn "$entry" "$gate_home/$base"
-    done
-
-    # Only <top>/<leaf> shadows mirror entries through; a bare <top> stays empty.
-    for top in $(for rel in "${shadows[@]}"; do
-                     # The leading "(" keeps macOS /bin/bash 3.2 from closing the $( ) at the pattern's ")".
-                     case "$rel" in (*/*) echo "${rel%%/*}" ;; esac
-                 done | sort -u); do
-        for entry in "$real_home/$top"/*; do
-            base="$(basename "$entry")"
-            is_leaf=0
-            for rel in "${shadows[@]}"; do
-                if [ "${rel%%/*}" = "$top" ] && [ "${rel#*/}" = "$base" ]; then
-                    is_leaf=1
-                fi
-            done
-            [ "$is_leaf" = "1" ] && continue
-            ln -sfn "$entry" "$gate_home/$top/$base"
-        done
-    done
-
-    [ "$had_dotglob" = "1" ] || shopt -u dotglob
-    [ "$had_nullglob" = "1" ] || shopt -u nullglob
-
-    for rel in "${shadows[@]}"; do
-        mkdir -p "$gate_home/$rel"
+    for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do
+        if [ -e "$real_home/$name" ] || [ -L "$real_home/$name" ]; then
+            mkdir -p "$(dirname "$gate_home/$name")"
+            ln -sfn "$real_home/$name" "$gate_home/$name"
+        fi
     done
 }
 
@@ -119,19 +81,81 @@ fence_home_env() {
 # the fenced one. Call it after HOME is exported. Twin of fence_uv_env in
 # tests/_fence_home.py. An explicit outer value wins.
 #
-# UV_PYTHON_INSTALL_DIR (nexus-t0pke): ~/.local is a real directory in the
-# mirror (.local/state is shadowed), so uv finds its managed Pythons at
-# <gate_home>/.local/share/uv/python, a path that runs through a symlink in the
-# scratch dir. A `uv run` in a checkout with no .venv (a fresh worktree) builds
-# .venv on that path: bin/python and pyvenv.cfg `home =` point into the scratch
-# dir. The gate deletes the scratch dir on exit and the checkout's .venv
-# dangles; a later `uv build` under that VIRTUAL_ENV fails with a broken
+# UV_PYTHON_INSTALL_DIR (nexus-t0pke): the fenced home has no ~/.local, so
+# without the pin uv looks for managed Pythons under the scratch dir. A `uv run`
+# in a checkout with no .venv (a fresh worktree) would build .venv on that
+# path; the gate deletes the scratch dir on exit and the checkout's .venv
+# dangles, and a later `uv build` under that VIRTUAL_ENV fails with a broken
 # interpreter path. Pinned here, the venv records the real path.
 #
-# UV_CACHE_DIR: uv resolves its cache off HOME at process start; pinned so the
-# mirror is not the only thing between the gate and a cold resolve.
+# UV_CACHE_DIR: uv resolves its cache off HOME at process start; pinned so a
+# cold resolve is not the price of the fence.
 fence_uv_env() {
     local real_home="$1"
     export UV_CACHE_DIR="${UV_CACHE_DIR:-$real_home/.cache/uv}"
     export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${XDG_DATA_HOME:-$real_home/.local/share}/uv/python}"
+}
+
+# fence_cache_env <real_home>
+#
+# Pin the HOME-derived caches the empty fenced home would leave cold. The old
+# whole-.cache mirror shared all of these; the inverted fence shares exactly the
+# ones named here, by env, never by mirroring .cache (which holds far more than
+# caches). An explicit outer value wins and an EMPTY one counts as unset. The
+# pins are EXPORTED, so a nested fence (the Python twin inside this gate, whose
+# "real home" is the empty gate home) keeps the outer value. Twin of
+# fence_cache_env in tests/_fence_home.py; read that docstring for each key.
+#
+#   NX_ONNX_MODEL_DIR, NX_MINILM_CACHE_DIR, NX_ORT_NATIVE_DIR: model and native roots.
+#   HF_HUB_CACHE: the HuggingFace hub cache. NOT HF_HOME, the parent of token.
+#     <HF_HOME>/hub when the operator set HF_HOME, else
+#     <XDG_CACHE_HOME>/huggingface/hub, else <real>/.cache/huggingface/hub.
+#   NX_TEST_SUBSTRATE_CACHE: the engine-substrate cache root, read first by
+#     tests/db/_service_fixture.py substrate_cache_root(). NOT XDG_CACHE_HOME,
+#     which would re-expose all of .cache.
+fence_cache_env() {
+    local real_home="$1" cache_home hf_home
+    export NX_ONNX_MODEL_DIR="${NX_ONNX_MODEL_DIR:-$real_home/.cache/nexus/onnx_models}"
+    export NX_MINILM_CACHE_DIR="${NX_MINILM_CACHE_DIR:-$real_home/.cache/chroma/onnx_models}"
+    export NX_ORT_NATIVE_DIR="${NX_ORT_NATIVE_DIR:-$real_home/.cache/nexus/ort_native}"
+    cache_home="${XDG_CACHE_HOME:-$real_home/.cache}"
+    hf_home="${HF_HOME:-$cache_home/huggingface}"
+    export HF_HUB_CACHE="${HF_HUB_CACHE:-$hf_home/hub}"
+    export NX_TEST_SUBSTRATE_CACHE="${NX_TEST_SUBSTRATE_CACHE:-$cache_home/nexus-test-substrate}"
+}
+
+# fence_keep_home <exitstatus>
+#
+# True (0) when a fenced home must be KEPT: only after a FAILED run, and only
+# when NX_KEEP_FENCED_HOME is set (nexus-7df8e). Twin of the keep rule in
+# remove_fenced_home in tests/_fence_home.py.
+fence_keep_home() {
+    [ -n "${NX_KEEP_FENCED_HOME:-}" ] && [ "${1:-0}" != "0" ]
+}
+
+# fence_remove_home <gate_home> <exitstatus>
+#
+# Remove the fenced home at the end of a run (nexus-7df8e). Returns 0 when it is
+# gone, 1 when it was kept or refused. Refuses unless <gate_home> is the
+# NX_FENCED_HOME this tree exported AND has the gate's own shape: an absolute
+# path ending in nx-local-service-gate.<x>/home, the scratch dir the gate makes
+# with mktemp. The env var alone is not enough (a caller controls it; the Python
+# twin's prefix check is the model). The mirror links are removed as links first,
+# so nothing can follow one into the operator's real .m2/repository.
+fence_remove_home() {
+    local gate_home="$1" status="${2:-0}" name scratch
+    [ -n "$gate_home" ] && [ -d "$gate_home" ] && [ ! -L "$gate_home" ] || return 1
+    case "$gate_home" in /*) ;; *) return 1 ;; esac
+    [ "${gate_home##*/}" = "home" ] || return 1
+    scratch="${gate_home%/*}"
+    case "${scratch##*/}" in nx-local-service-gate.?*) ;; *) return 1 ;; esac
+    [ "$gate_home" = "${NX_FENCED_HOME:-}" ] || return 1
+    fence_keep_home "$status" && return 1
+    for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do
+        if [ -L "$gate_home/$name" ]; then
+            rm -f "$gate_home/$name" || return 1
+        fi
+    done
+    rm -rf "$gate_home"
+    [ ! -e "$gate_home" ]
 }

@@ -68,12 +68,17 @@
 # --cache on (the default; nexus-bpzt7) saves what every restored guest would
 # download again: the restore step turns Windows Update off in the guest for that
 # boot, step 01c copies the host's C:\build\guest\cache (a uv cache archive, a
-# Claude Code binary, and nx init's two ONNX models when they were cached for
-# this version) into the installing account, and step 07 refills that cache
-# after the run. uv still resolves against PyPI and the Claude Code binary is
-# used only when its sha256 is the latest release's, so the install runs the
-# published path; the nexus engine and PostgreSQL bundle are downloaded and
-# checked by nx init as usual. Measured on Home: 2.46 GB per cycle before the
+# Claude Code binary, nx init's two ONNX models when they were cached for
+# this version, and the install step's own downloads: uv's zip, PortableGit or
+# Git's installer, and the Python archive, each under its own version) into the
+# installing account, and step 07 refills that cache after the run. The Claude
+# Code binary, uv's zip, PortableGit and the Git installer are used only when
+# their sha256 is the one the upstream publishes for that version, and anything
+# else is downloaded as before (the Python archive must match the sha256
+# sidecar written when it was harvested). uv still resolves conexus against
+# PyPI and only the files come from the cache, so the install runs the published
+# path; the nexus engine and PostgreSQL bundle are downloaded and checked by nx
+# init as usual. Measured on Home: 2.46 GB per cycle before the
 # cache (2026-10-15), 1.30 GB with it before the models were cached (2026-10-16,
 # at the host's Default Switch). --cache off downloads everything
 # and leaves Windows Update alone, for a run whose subject is the download path.
@@ -236,7 +241,7 @@ restore_cache=yes
 [[ "$cache" == on ]] || restore_cache=no
 cache_key="$version"
 cache_note="--cache off: everything downloaded fresh"
-[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, uv's files and Claude Code from the host cache when it held them (01c-seed.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
+[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, the uv package cache, Claude Code, uv itself, PortableGit and Python from the host cache when it held them and their sha256 matched, and winget's Git replaced by a direct silent run of the cached Git installer when its sha256 matches winget's (01c-seed.txt, 02-install.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
 [[ -z "$wheel_sha" ]] || cache_key="w-${wheel_sha:0:16}"
 
 RUN="nxg-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -432,6 +437,11 @@ on_exit() {
     exit "$rc"
 }
 trap on_exit EXIT
+# INT and HUP cleanup apply only when the signal was not ignored at launch: bash cannot
+# trap a signal that was ignored on entry. A backgrounded launch (cmd & from a
+# non-interactive shell) inherits SIGINT=SIG_IGN and a nohup launch inherits
+# SIGHUP=SIG_IGN, so that signal then does nothing here; TERM always runs the cleanup
+# (nexus-frfeh, nexus-ys8a4).
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP

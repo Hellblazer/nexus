@@ -116,6 +116,13 @@ def _save(**credentials: str) -> None:
         set_credential(key, value)
 
 
+def _save_raw(**credentials: str) -> None:
+    """Write ``config.yml`` directly. ``set_credential`` refuses a URL with userinfo
+    (nexus-ujbf8), and a hand-edited file is the case the agreement must hold for."""
+    body = "credentials:\n" + "".join(f"  {key}: {value}\n" for key, value in credentials.items())
+    (_config() / "config.yml").write_text(body, encoding="utf-8")
+
+
 def _env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -149,6 +156,13 @@ CASES: list[tuple[str, Case, bool]] = [
     ("saved url, token only in the lease of a stopped service", lambda m: (_save(service_url="https://svc.example"), _lease(ttl=10.0, clock=100.0)), False),
     ("saved url is a slash, live lease", lambda m: (_save(service_url="/"), _lease()), True),
     ("saved token without a url", lambda m: _save(service_token="t"), False),
+    # -- a service_url carrying user:password@ is refused by the CLI (nexus-ujbf8), so it is not usable --
+    ("env url with userinfo, env token", lambda m: _env(m, NX_SERVICE_URL="https://user:pw@svc.example", NX_SERVICE_TOKEN="t"), False),
+    ("env url with userinfo, live lease", lambda m: (_env(m, NX_SERVICE_URL="https://user:pw@svc.example"), _lease()), False),
+    ("env url with a '#' in the userinfo, env token", lambda m: _env(m, NX_SERVICE_URL="https://user:pw#x@svc.example", NX_SERVICE_TOKEN="t"), False),
+    ("saved url with userinfo, saved token", lambda m: _save_raw(service_url="https://user:pw@svc.example", service_token="t"), False),
+    ("saved url with userinfo, mint token", lambda m: _save_raw(service_url="https://user:pw@svc.example", mint_token="m"), False),
+    ("env url wins over a saved url with userinfo", lambda m: (_env(m, NX_SERVICE_URL="https://svc.example", NX_SERVICE_TOKEN="t"), _save_raw(service_url="https://user:pw@other.example")), True),
     # -- leg 3: NX_SERVICE_HOST / NX_SERVICE_PORT --
     ("host, port, token in env", lambda m: _env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123", NX_SERVICE_TOKEN="t"), True),
     ("host and port, no token", lambda m: _env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123"), False),
@@ -246,6 +260,7 @@ GRACE_CASES: list[tuple[str, GraceCase, bool]] = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(("setup", "usable"), [(c[1], c[2]) for c in GRACE_CASES], ids=[c[0] for c in GRACE_CASES])
 def test_a_lease_past_its_ttl_is_judged_the_same_when_the_port_answers(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, notice: ModuleType,
@@ -291,6 +306,7 @@ def test_the_owner_check_wants_a_positive_integer_pid(endpoint: ModuleType) -> N
     assert endpoint._stale_owner_alive({**base}, 25.0, 10.0) is False, "no payload at all"
 
 
+@pytest.mark.t2_tenant
 def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType,
 ) -> None:
@@ -308,6 +324,7 @@ def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
     assert setup_tools.usable_service() is False
 
 
+@pytest.mark.t2_tenant
 def test_the_setup_process_does_not_share_the_wedged_owner_difference(
     monkeypatch: pytest.MonkeyPatch, nx_setup: ModuleType,
 ) -> None:
@@ -367,6 +384,7 @@ CASES += [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize(("setup", "usable"), [(c[1], c[2]) for c in CASES], ids=[c[0] for c in CASES])
 def test_the_plugin_and_the_real_server_give_the_same_answer(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, notice: ModuleType,
@@ -389,6 +407,7 @@ def test_the_case_table_covers_each_leg_and_none() -> None:
     assert len({c[0] for c in CASES}) == len(CASES)
 
 
+@pytest.mark.t2_tenant
 def test_the_old_resolver_still_disagrees_on_a_saved_address_with_no_token(
     monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType,
 ) -> None:

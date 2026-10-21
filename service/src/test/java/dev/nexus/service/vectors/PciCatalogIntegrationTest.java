@@ -31,7 +31,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -125,22 +128,26 @@ class PciCatalogIntegrationTest {
         };
     }
 
-    /** The DDL for a per-collection index the way the builder will write it. */
-    static String createIndexDdl(String concurrently, String index, String model, String tenant, String predicate) {
-        return "CREATE INDEX " + concurrently + index + " ON nexus." + leafName(model, tenant)
-            + " USING hnsw (" + column(model) + " nexus.vector_cosine_ops) WHERE " + predicate;
+    /** One fixture step as the superuser who owns the leaves. */
+    @FunctionalInterface
+    interface SuStep {
+        void run(Connection su) throws Exception;
     }
 
-    /** Run one DDL statement as the superuser who owns the leaves. */
-    void ddl(String statement) throws Exception {
+    void asSuperuser(SuStep step) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, statement);
+            step.run(su);
         }
     }
 
+    /** A partial HNSW index named {@code index} on the (model, tenant) leaf, for {@code collection}. */
+    void hnswFor(String index, String model, String tenant, String collection) throws Exception {
+        asSuperuser(su -> PgContainerHelper.createLeafHnswIndex(su, "nexus", leafName(model, tenant), index,
+            column(model), collection));
+    }
+
     void buildIndex(String model, String tenant, String collection) throws Exception {
-        ddl(createIndexDdl("", PciCatalog.indexName(model, tenant, collection), model, tenant,
-            "collection = " + lit(collection)));
+        hnswFor(PciCatalog.indexName(model, tenant, collection), model, tenant, collection);
     }
 
     PciCatalog.Leaf leaf(PciCatalog.Snapshot snap, String model, String tenant) {
@@ -231,9 +238,11 @@ class PciCatalogIntegrationTest {
         PciCatalog.Snapshot before = catalog.read();
         String compound = "pci_" + "0".repeat(23) + "1";
         String noPredicate = "pci_" + "0".repeat(23) + "2";
-        ddl(createIndexDdl("", compound, M1024, T1, "collection = 'a-x' AND tenant_id = 'whatever'"));
-        ddl("CREATE INDEX " + noPredicate + " ON nexus." + leafName(M1024, T1) + " USING hnsw ("
-            + column(M1024) + " nexus.vector_cosine_ops)");
+        asSuperuser(su -> {
+            PgContainerHelper.createLeafHnswIndexCollectionAndTenant(su, "nexus", leafName(M1024, T1), compound,
+                column(M1024), "a-x", "whatever");
+            PgContainerHelper.createHnswIndex(su, "nexus", leafName(M1024, T1), noPredicate, column(M1024));
+        });
 
         PciCatalog.Snapshot snap = catalog.read();
 
@@ -256,8 +265,8 @@ class PciCatalogIntegrationTest {
         String collection = "code__pcicat-badname__voyage-code-3__v1";
         String operatorMade = "pci_foo";
         String reindexLeftover = PciCatalog.indexName(M1024, T1, collection) + "_ccnew";
-        ddl(createIndexDdl("", operatorMade, M1024, T1, "collection = " + lit(collection)));
-        ddl(createIndexDdl("", reindexLeftover, M1024, T1, "collection = " + lit(collection)));
+        hnswFor(operatorMade, M1024, T1, collection);
+        hnswFor(reindexLeftover, M1024, T1, collection);
 
         PciCatalog.Snapshot snap = catalog.read();
 
@@ -274,12 +283,66 @@ class PciCatalogIntegrationTest {
     }
 
     @Test
+    void anInvalidReindexLeftover_isALeftoverOfItsCollection_neverParsed_neverRouted_andCountedApart() throws Exception {
+        PciCatalog.Snapshot before = catalog.read();
+        String collection = "code__pcicat-leftover__voyage-code-3__v1";
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        String ccnew = base + "_ccnew";
+        String ccold = base + "_ccold1";
+        String validCcnew = PciCatalog.indexName(M1024, T1, collection + "-b") + "_ccnew";
+        buildIndex(M1024, T1, collection);
+        hnswFor(ccnew, M1024, T1, collection);
+        hnswFor(ccold, M1024, T1, collection);
+        hnswFor(validCcnew, M1024, T1, collection + "-b");
+        // What an interrupted REINDEX INDEX CONCURRENTLY leaves behind: a pending index with indisvalid false.
+        for (String leftover : List.of(ccnew, ccold)) {
+            asSuperuser(su -> PgContainerHelper.markIndexInvalid(su, "nexus", leftover));
+        }
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        for (String leftover : List.of(ccnew, ccold)) {
+            assertThat(index(leaf(snap, M1024, T1), leftover)).as(leftover).hasValueSatisfying(i -> {
+                assertThat(i.valid()).isFalse();
+                assertThat(i.leftover()).isTrue();
+                assertThat(i.leftoverOf()).isEqualTo(collection);
+                assertThat(i.parsed()).as("not parsed in the routing sense").isFalse();
+                assertThat(i.collection()).isNull();
+            });
+        }
+        assertThat(index(leaf(snap, M1024, T1), validCcnew)).as("a VALID _ccnew is untouched").hasValueSatisfying(i -> {
+            assertThat(i.leftover()).isFalse();
+            assertThat(i.parsed()).isFalse();
+        });
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(before.reindexLeftoverCount() + 2);
+        assertThat(snap.unparsedCount()).as("a valid _ccnew is unparsed; a leftover is not counted twice")
+            .isEqualTo(before.unparsedCount() + 1);
+        assertThat(snap.invalidCount()).isEqualTo(before.invalidCount());
+        assertThat(snap.validCount()).isEqualTo(before.validCount() + 1);
+        assertThat(snap.hasValidIndex(M1024, T1, collection)).as("the base index still routes").isTrue();
+
+        // With standard_conforming_strings off nothing can be attributed, leftovers included.
+        try (Connection c = svcDs.getConnection()) {
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            setStandardConformingStrings(ctx, "off");
+            PciCatalog.Snapshot off;
+            try {
+                off = catalog.read(ctx);
+            } finally {
+                setStandardConformingStrings(ctx, "on");
+            }
+            assertThat(off.reindexLeftoverCount()).isZero();
+            assertThat(index(leaf(off, M1024, T1), ccnew)).hasValueSatisfying(i -> assertThat(i.leftover()).isFalse());
+        }
+    }
+
+    @Test
     void aCorrectlyNamedIndexThatIsNotHnsw_isUnparsedEvenWithAParseablePredicate() throws Exception {
         PciCatalog.Snapshot before = catalog.read();
         String collection = "code__pcicat-btree__voyage-code-3__v1";
         String name = PciCatalog.indexName(M1024, T1, collection);
-        ddl("CREATE INDEX " + name + " ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = "
-            + lit(collection));
+        asSuperuser(su -> PgContainerHelper.createBtreeIndexWhereEquals(su, "nexus", leafName(M1024, T1), name,
+            "collection", collection));
 
         PciCatalog.Snapshot snap = catalog.read();
 
@@ -322,7 +385,8 @@ class PciCatalogIntegrationTest {
             assertThat(off.validCount()).isZero();
             assertThat(off.invalidCount()).isZero();
             assertThat(off.unparsedCount()).as("the same indexes, all unparsed")
-                .isEqualTo(on.validCount() + on.invalidCount() + on.unparsedCount());
+                .isEqualTo(on.validCount() + on.invalidCount() + on.unparsedCount() + on.reindexLeftoverCount());
+            assertThat(off.reindexLeftoverCount()).as("scs off: a leftover cannot be attributed either").isZero();
             assertThat(off.hasValidIndex(M384, T2, "knowledge__scs-off__minilm-l6-v2-384__v1")).isFalse();
         }
     }
@@ -355,12 +419,17 @@ class PciCatalogIntegrationTest {
 
     @Test
     void indexesWithoutThePrefix_orOutsideTheChunksLeaves_areNotReported() throws Exception {
-        ddl("CREATE INDEX not_a_pci_index ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = 'zzz'");
-        ddl("CREATE INDEX pci_on_the_wrong_table ON nexus.catalog_collections (name) WHERE name = 'zzz'");
+        asSuperuser(su -> {
+            PgContainerHelper.createBtreeIndexWhereEquals(su, "nexus", leafName(M1024, T1), "not_a_pci_index",
+                "collection", "zzz");
+            PgContainerHelper.createBtreeIndexWhereEquals(su, "nexus", "catalog_collections",
+                "pci_on_the_wrong_table", "name", "zzz");
+        });
         // 'pci_' as a LIKE pattern reads the underscore as any one character, so a LIKE filter would admit this
         // leaf index; the reader's filter is a literal prefix.
         String lookalike = "pcix_" + "0".repeat(23);
-        ddl("CREATE INDEX " + lookalike + " ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = 'zzz'");
+        asSuperuser(su -> PgContainerHelper.createBtreeIndexWhereEquals(su, "nexus", leafName(M1024, T1), lookalike,
+            "collection", "zzz"));
 
         PciCatalog.Snapshot snap = catalog.read();
 
@@ -395,8 +464,8 @@ class PciCatalogIntegrationTest {
                 .execute();
             CompletableFuture<Void> build = CompletableFuture.runAsync(() -> {
                 try (Connection c = pg.createConnection("?ApplicationName=" + appName)) {
-                    PgContainerHelper.runSuperuserDdlOutsideTransaction(c,
-                        createIndexDdl("CONCURRENTLY ", name, M1024, T1, "collection = " + lit(collection)));
+                    PgContainerHelper.createLeafHnswIndexConcurrently(c, "nexus", leafName(M1024, T1), name,
+                        column(M1024), collection);
                 } catch (Exception e) {
                     throw new IllegalStateException(e);
                 }
@@ -424,7 +493,7 @@ class PciCatalogIntegrationTest {
                 assertThat(build).isCompletedExceptionally();
                 // The terminated run left the helper's Liquibase lock held; clear it so a later run is not blocked.
                 try (Connection su = pg.createConnection("")) {
-                    PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+                    PgContainerHelper.clearConcurrentIndexBuildLock(su);
                 }
             } finally {
                 blocker.rollback();
@@ -443,9 +512,8 @@ class PciCatalogIntegrationTest {
         // ... and the no-transaction helper runs again once its lock row is clear (bounded: a held lock blocks it).
         CompletableFuture.runAsync(() -> {
             try (Connection c = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdlOutsideTransaction(c,
-                    createIndexDdl("CONCURRENTLY ", PciCatalog.indexName(M1024, T2, collection), M1024, T2,
-                        "collection = " + lit(collection)));
+                PgContainerHelper.createLeafHnswIndexConcurrently(c, "nexus", leafName(M1024, T2),
+                    PciCatalog.indexName(M1024, T2, collection), column(M1024), collection);
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
@@ -457,42 +525,52 @@ class PciCatalogIntegrationTest {
 
     /**
      * The read touches {@code pg_catalog.pg_am}; a superuser holding ACCESS EXCLUSIVE on it makes the statement wait.
-     * The holder is one Liquibase test changeset (one transaction) that takes the lock and then sleeps 8 s, so the lock
-     * is held for a known window. With the bound the read ends at the statement timeout (SQLSTATE 57014) well inside
-     * that window; unbounded, it would return only after the holder let go.
+     * The holder is one transaction that takes the lock (nexus_test.lock_table), counts down a latch, and then sleeps
+     * 8 s, so the lock is held for a known window. With the bound the read ends at the statement timeout (SQLSTATE
+     * 57014) well inside that window; unbounded, it would return only after the holder let go.
+     *
+     * <p>nexus-td7yu: no connection may be opened while the lock is held, because backend startup reads pg_am and
+     * blocks on it until the holder commits (measured on pgvector:pg17, warm relcache init file or not; a connection
+     * opened before the lock is unaffected). The test used to poll pg_stat_activity from a monitor connection opened
+     * after starting the holder; when the holder's LOCK won that race the monitor's connect hung for the whole 8 s
+     * and the test failed with "the holder ended before the read began" (develop 123b2d088). The latch replaces the
+     * monitor. Both pool connections are open before the lock (a warm-up read on the 30 s bound, then a wait for
+     * the pool to fill), so the bounded read reuses one, and the holder and the read get their own threads: on the
+     * common pool of a 2-vCPU host (parallelism 1) the read would queue behind the sleeping holder.
      */
     @Test
     void aReadBlockedByALock_failsAtTheStatementBound_whileTheLockIsStillHeld() throws Exception {
         PciCatalog bounded = new PciCatalog(svcDs, Duration.ofMillis(500));
         assertThat(bounded.readBound()).isEqualTo(Duration.ofMillis(500));
-        var activityPid = DSL.field(DSL.name("pid"), Integer.class);
-        var activityWait = DSL.field(DSL.name("wait_event"), String.class);
-        var activityQuery = DSL.field(DSL.name("query"), String.class);
-        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+        assertThat(catalog.read().leaves()).as("warm the pool before the lock").isNotEmpty();
+        await("both pool connections to be open", () -> svcDs.getHikariPoolMXBean().getTotalConnections() == 2);
 
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        CountDownLatch locked = new CountDownLatch(1);
         CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su,
-                    "LOCK TABLE pg_catalog.pg_am IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(8)");
+                su.setAutoCommit(false);
+                PgContainerHelper.lockTable(su, DSL.table(DSL.name("pg_catalog", "pg_am")),
+                    PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+                locked.countDown();
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_sleep", Object.class, DSL.inline(8))).fetch();
+                su.commit();
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
-        });
-        try (Connection monitor = pg.createConnection("")) {
-            monitor.setAutoCommit(true);
-            DSLContext asSuperuser = DSL.using(monitor, SQLDialect.POSTGRES);
-            await("the holder to sleep while holding the lock", () -> {
+        }, threads);
+        try {
+            await("the holder to take the lock", () -> {
                 if (holder.isDone()) {
                     holder.join();   // surfaces the holder's failure instead of timing out
                     throw new AssertionError("the holder ended before the read began");
                 }
-                return asSuperuser.fetchCount(activity,
-                    activityWait.eq("PgSleep").and(activityQuery.like("%pg_sleep(8)%"))
-                        .and(activityPid.ne(DSL.function("pg_backend_pid", Integer.class)))) > 0;
+                return locked.getCount() == 0;
             });
 
             long began = System.nanoTime();
-            CompletableFuture<PciCatalog.Snapshot> read = CompletableFuture.supplyAsync(bounded::read);
+            CompletableFuture<PciCatalog.Snapshot> read = CompletableFuture.supplyAsync(bounded::read, threads);
 
             assertThatThrownBy(() -> read.get(30, TimeUnit.SECONDS))
                 .as("the read must end while the lock is held, not wait for its release")
@@ -504,7 +582,11 @@ class PciCatalogIntegrationTest {
             assertThat(holder).as("the lock was still held when the read gave up").isNotDone();
             assertThat(tookMs).as("it waited out the bound, not less").isGreaterThanOrEqualTo(400);
         } finally {
-            holder.get(60, TimeUnit.SECONDS);
+            try {
+                holder.get(60, TimeUnit.SECONDS);
+            } finally {
+                threads.shutdownNow();
+            }
         }
 
         assertThat(catalog.read().leaves()).as("the pool is healthy and the lock is gone").isNotEmpty();

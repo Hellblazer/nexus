@@ -59,9 +59,14 @@ def _run_guard(cwd: Path, log: Path) -> tuple[int, str]:
     line with a marker echo lets the test observe whether control REACHED the
     dispatch, without spawning an indexer.
     """
-    body = _STANZA.replace(
-        'nx index repo "$REPO_TOP" --on-locked=skip', 'echo REACHED_DISPATCH #'
-    )
+    # The needle must be the stanza's CURRENT dispatch line. It once lagged the
+    # stanza (`--since-head` was added to the stanza only), so the replace was a
+    # silent no-op and every run launched a REAL detached `nx index repo` on the
+    # temp repo, which outlived the test and touched storage after it finished
+    # (the storage-touch guard's late-child finding, nexus-j23ni).
+    dispatch = 'nx index repo "$REPO_TOP" --since-head --on-locked=skip'
+    assert dispatch in _STANZA, "the stanza's dispatch line changed: update this stub"
+    body = _STANZA.replace(dispatch, 'echo REACHED_DISPATCH #')
     script = cwd / "hook.sh"
     script.write_text("#!/bin/sh\n" + body + "\n")
     script.chmod(0o755)

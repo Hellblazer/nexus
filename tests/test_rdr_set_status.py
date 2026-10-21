@@ -260,6 +260,7 @@ _EDGE_CASES = [
 ]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("case", [pytest.param(c, id=c["name"]) for c in _EDGE_CASES])
 def test_set_status_edge(tmp_path, monkeypatch, case):
     name, num = case["name"], case["num"]
@@ -325,6 +326,7 @@ def test_set_status_edge(tmp_path, monkeypatch, case):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_present_but_blank_closed_date_is_filled(tmp_path):
     """nexus-re3nm: same for a blank ``closed_date:`` on a close flip."""
     rdr_dir = _rdr_dir(tmp_path)
@@ -344,6 +346,7 @@ def test_present_but_blank_closed_date_is_filled(tmp_path):
     assert "accepted_date: 2026-06-22" in text
 
 
+@pytest.mark.t2_tenant
 def test_command_works_with_no_docs_tables_dir_at_all(tmp_path):
     """The lifecycle table is PACKAGED (src/nexus/tables/), never read from a
     repo-relative docs/tables/ path — the command must work identically in a
@@ -360,6 +363,7 @@ def test_command_works_with_no_docs_tables_dir_at_all(tmp_path):
     assert not (tmp_path / "docs" / "tables").exists()
 
 
+@pytest.mark.t2_tenant
 def test_body_with_horizontal_rule_is_preserved(tmp_path):
     """A '---' inside the body must not be mistaken for the frontmatter fence."""
     rdr_dir = _rdr_dir(tmp_path)
@@ -479,6 +483,7 @@ def test_unparsable_table_exits_2_no_fallback(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_readme_decorated_cell_leading_word_detected(tmp_path):
     """A decorated README cell (e.g. 'Accepted (foo)') is still detected by
     its leading word, case-insensitive — the table's status domain is a
@@ -810,6 +815,7 @@ def test_target_status_to_event_excludes_resume():
     assert "resume" not in mapping.values()
 
 
+@pytest.mark.t2_tenant
 def test_set_status_event_resolution_follows_table_not_hardcoded_literal(
     tmp_path, monkeypatch
 ):
@@ -901,6 +907,7 @@ class _FakeT2ReadWriteClient(_FakeT2Client):
         self._entries[(project, title)] = {"title": title, "content": content, "tags": tags}
 
 
+@pytest.mark.t2_tenant
 def test_rerun_completes_the_t2_mirror_the_first_run_could_not(tmp_path, monkeypatch):
     """P1: with T2 unreachable the first run flips the file and exits 0 with
     a note; the re-run used to say 'already deferred (no-op)' before any T2
@@ -1024,6 +1031,7 @@ def test_mirror_rewrites_every_t2_title_shape(tmp_path, monkeypatch):
     assert entries[(project, "RDR-122")]["content"].startswith("status: closed"), res.output
 
 
+@pytest.mark.t2_tenant
 def test_flip_rewrites_every_t2_title_shape(tmp_path, monkeypatch):
     rdr_dir = _rdr_dir(tmp_path)
     _write_rdr(rdr_dir, 210, "accepted")
@@ -1086,6 +1094,7 @@ def test_rerun_mirror_writes_the_files_own_date_not_today(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_deferred_to_draft_stamps_resumed_date(tmp_path):
     """The only flip TO draft the table admits is resume; the stamp is what
     the accept guard compares the gate record's date against."""
@@ -1115,6 +1124,7 @@ def test_accept_is_refused_when_the_gate_record_predates_the_resume(tmp_path, mo
     assert "resumed" in res.output and "re-gate" in res.output, res.output
 
 
+@pytest.mark.t2_tenant
 def test_accept_is_refused_for_a_regated_record_without_a_fix_check(tmp_path, monkeypatch):
     """The gate preamble prints "accept refuses this record" for a re-gated
     record with no fix_check; the guard now does refuse it, and admits the
@@ -1156,6 +1166,7 @@ def test_accept_is_refused_for_an_under_dispatched_fix_check(tmp_path, monkeypat
     assert "dispatch" in res.output, res.output
 
 
+@pytest.mark.t2_tenant
 def test_readme_row_with_an_escaped_pipe_keeps_its_title(tmp_path):
     """nexus-u1jxt.10: rows were split on every ``|``, so ``\\|`` in a title
     shifted the Status index and the status landed in the title."""
@@ -1184,6 +1195,7 @@ def test_crlf_file_keeps_crlf_fence_lines_through_the_rewriter():
     assert "status: accepted\r\n" in out and "accepted_date: 2026-09-17\r\n" in out
 
 
+@pytest.mark.t2_tenant
 def test_reaccept_after_resume_stamps_the_new_accepted_date_on_the_file(tmp_path, monkeypatch):
     """nexus-u1jxt.10 (Sam, 2026-09-18): accepted -> deferred -> draft ->
     accepted kept the file's old accepted_date while T2 took the new one.

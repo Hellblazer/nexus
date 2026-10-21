@@ -152,8 +152,8 @@ def test_retryable_string_fallback_requires_a_status_token_not_a_substring(
 
 
 @pytest.mark.parametrize("status,expected", [
-    (429, True), (404, False), (500, False), (502, True), (503, True), (504, True),
-], ids=["429", "404", "500", "502", "503", "504"])
+    (429, True), (403, False), (404, False), (500, False), (502, True), (503, True), (504, True),
+], ids=["429", "403", "404", "500", "502", "503", "504"])
 def test_retryable_real_vector_service_error_shape(status: int, expected: bool) -> None:
     # nexus-cy9u7 CRITICAL-1: this is the REAL production shape — a
     # VectorServiceError chained from urllib.error.HTTPError — the
@@ -322,6 +322,7 @@ def test_search_retries_on_503(t3_mock) -> None:
     assert len(db.search("query text", ["code__myrepo"])) == 1
 
 
+@pytest.mark.t2_tenant
 def test_write_batch_retries_on_504(t3_mock) -> None:
     db, _ = t3_mock
     mock_col = MagicMock()
@@ -832,6 +833,7 @@ def upsert_server():
     httpd.server_close()
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_429_retry_after_then_success_real_server(
     upsert_server, monkeypatch,
 ) -> None:
@@ -865,6 +867,7 @@ def test_upsert_chunks_429_retry_after_then_success_real_server(
     mock_sleep.assert_called_once_with(2.0)  # Retry-After honoured, no real sleep
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_504_no_retry_after_escalating_default_real_server(
     upsert_server, monkeypatch,
 ) -> None:
@@ -918,6 +921,7 @@ def test_upsert_chunks_504_no_retry_after_escalating_default_real_server(
     assert mock_sleep.call_args_list == [call(floor), call(floor), call(floor), call(2.0)]
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_500_not_retried_real_server(upsert_server, monkeypatch) -> None:
     from nexus.db import http_vector_client as hvc
 
@@ -973,6 +977,7 @@ class _SyncFakeClock:
         assert ok, f"expected {count} waiters, only {self._waiting} arrived within {timeout}s"
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_concurrent_second_call_waits_for_shared_pause(
     upsert_server, monkeypatch,
 ) -> None:

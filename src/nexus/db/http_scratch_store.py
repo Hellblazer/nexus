@@ -45,6 +45,8 @@ from typing import Any, TYPE_CHECKING
 import httpx
 import structlog
 
+from nexus._log_safe_url import log_endpoint
+
 if TYPE_CHECKING:  # nexus-b8a5a: return-shape parity — the annotation was
     # `object` while this method's own docstring said PromotionReport.
     from nexus.types import PromotionReport
@@ -235,7 +237,7 @@ class HttpScratchStore:
         self._recovery_futile_at: float | None = None
         _log.info(
             "http_scratch_store.init",
-            base_url=self._base_url,
+            base_url=log_endpoint(self._base_url),  # host[:port]: a service_url can carry user:password@ (nexus-q26w1)
             tenant=tenant,
             session_id=self._session_id,
         )
@@ -448,7 +450,7 @@ class HttpScratchStore:
         if recovered is None:
             return False
         new_url, new_token = recovered
-        _log.warning("http_scratch_store.rebind", old=self._base_url, new=new_url)
+        _log.warning("http_scratch_store.rebind", old=log_endpoint(self._base_url), new=log_endpoint(new_url))
         self._base_url = new_url
         if new_token:
             self._headers["Authorization"] = f"Bearer {new_token}"

@@ -333,6 +333,7 @@ def test_lookup_existing_doc_id_returns_empty_when_catalog_is_none(tmp_path):
     assert _lookup_existing_doc_id(None, "/some/file.pdf", "any-corpus") == ""
 
 
+@pytest.mark.t2_tenant
 def test_lookup_existing_doc_id_finds_registered_entry(tmp_path):
     """When the catalog already registered *file_path* under *corpus*'s
     owner, the helper returns the tumbler stringified as the doc_id."""
@@ -351,6 +352,7 @@ def test_lookup_existing_doc_id_finds_registered_entry(tmp_path):
     assert result == str(doc)
 
 
+@pytest.mark.t2_tenant
 def test_identity_where_prefers_content_hash_post_phase_3(tmp_path, monkeypatch):
     """RDR-108 Phase 3: ``doc_id`` was retired from chunk metadata.
     ``_identity_where`` no longer keys on doc_id (the catalog manifest
@@ -425,6 +427,7 @@ class TestIndexMarkdownUnchunkableGuard:
             index_markdown(sample_md, corpus="test")
         mock_register.assert_called_once()
 
+    @pytest.mark.t2_tenant
     def test_zero_byte_file_never_registers_a_catalog_document(
         self, tmp_path,
     ):
@@ -464,6 +467,7 @@ class TestIndexPdfUnchunkableGuard:
                 index_pdf(p, corpus="test")
         mock_register.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_zero_byte_pdf_never_registers_a_catalog_document(
         self, tmp_path,
     ):
@@ -480,6 +484,7 @@ class TestIndexPdfUnchunkableGuard:
             index_pdf(p, corpus="rqsh1-round3-zero-byte-pdf")
         assert documents_by_file_path(str(p.resolve())) == []
 
+    @pytest.mark.t2_tenant
     def test_real_pdf_still_registers(self, sample_pdf, monkeypatch, mock_t3, voyage_client):
         """A real (non-empty) PDF must still register normally --
         proves the zero-byte guard doesn't over-fire on legitimate
@@ -540,6 +545,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
                 )
         mock_hook.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_dry_run_real_engine_leaves_doc_count_unchanged(
         self, sample_pdf, throwaway_t3,
     ):
@@ -598,6 +604,7 @@ def _refusal(doc_id: str):
         doc_id=doc_id, referenced=0, present=0, missing=0, chunk_count=1)
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfFreshMintRollback:
     def test_index_run_verify_refused_keeps_a_freshly_minted_doc(
         self, sample_pdf, mock_t3, monkeypatch, owner_write,
@@ -860,6 +867,7 @@ class _Killed(BaseException):
     """A hook that dies with the process: a BaseException, so no ``except Exception`` sees it."""
 
 
+@pytest.mark.t2_tenant
 class TestTheStampComesLast:
     """RDR-223 decision D2 (2026-09-30): every non-streaming writer path sends the completion stamp
     AFTER the post-store hooks (``fire_batch`` / ``fire_document``), as the streaming pipeline does.
@@ -948,6 +956,7 @@ class TestTheStampComesLast:
         assert rerun[0] == "write" and rerun[-1] == "complete" and "batch-hook" in rerun, rerun
 
 
+@pytest.mark.t2_tenant
 class TestIndexPdfPreFenceVectorFailure:
     """nexus-t952k half 2: a vector-store failure between pre-flight
     registration and the first possible ``_fence_begin`` must mark the row
@@ -1020,6 +1029,7 @@ class TestIndexDocumentPreFenceVectorFailure:
     ``index_pdf``, which registers inline) — this function's own
     incremental staleness read carries the identical pre-fence gap."""
 
+    @pytest.mark.t2_tenant
     def test_incremental_check_failure_marks_index_state_failed_end_to_end(
         self, sample_md, mock_t3, empty_col,
     ):
@@ -1040,6 +1050,7 @@ class TestIndexDocumentPreFenceVectorFailure:
 
 
 class TestBatchIndexMarkdownsUnchunkableFiles:
+    @pytest.mark.t2_tenant
     def test_zero_byte_file_marked_failed_and_never_registers(
         self, tmp_path,
     ):
@@ -1073,6 +1084,7 @@ class TestBatchIndexMarkdownsUnchunkableFiles:
         assert documents_by_file_path(str(empty.resolve())) == []
 
 
+@pytest.mark.t2_tenant
 class TestCatalogMarkdownHookEphemeralPathGuard:
     """nexus-u8n4r: ``_catalog_markdown_hook`` refuses a brand-new
     registration when the stored ``file_path`` (absolute here, since no
@@ -1243,6 +1255,7 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
         assert documents_by_file_path(str(primary_mirror)) == []
 
 
+@pytest.mark.t2_tenant
 class TestMarkdownCatalogHookPhysicalCollectionRepointLogging:
     """nexus-t952k half 2: mirror of
     tests/test_catalog_pdf_hook.py::TestPdfCatalogHookPhysicalCollectionRepointLogging
@@ -1294,6 +1307,7 @@ class TestMarkdownCatalogHookPhysicalCollectionRepointLogging:
         assert events == [], f"same-collection re-index must log nothing, got {logs}"
 
 
+@pytest.mark.t2_tenant
 def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     tmp_path, monkeypatch,
 ):
@@ -1347,6 +1361,7 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     assert results[str(good)] == "indexed"
 
 
+@pytest.mark.t2_tenant
 def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     sample_md, tmp_path, monkeypatch, owner_write,
 ):
@@ -1499,6 +1514,7 @@ def test_make_local_embed_fn_returns_consistent_model_name():
     )
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("indexer,fixture_name", [
     ("pdf", "sample_pdf"),
     ("markdown", "sample_md"),
@@ -1559,6 +1575,7 @@ def _registered_before(path, corpus: str, content_type: str) -> None:
     _register_or_lookup_doc_id(path, corpus, content_type=content_type, physical_collection="")
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     _registered_before(sample_pdf, "mybook", "paper")
@@ -1577,6 +1594,7 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     ext_cls.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_never_skips_a_document_this_call_minted(sample_pdf, monkeypatch, cloud_mode):
     """nexus-o19i0, the PDF sibling: T3 holds this content hash (a
     byte-identical PDF at another path put it there) and the catalog has
@@ -1599,6 +1617,7 @@ def test_index_pdf_never_skips_a_document_this_call_minted(sample_pdf, monkeypat
     ext_cls.assert_called()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voyage_client, owner_write):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
@@ -1711,6 +1730,7 @@ def test_preflight_register_failure_feeds_identity_drop_collector(
     )
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_small_doc_prune_deleted_as_dead_code(
     sample_pdf, monkeypatch, voyage_client,
 ) -> None:
@@ -1793,6 +1813,7 @@ def test_index_pdf_small_doc_prune_deleted_as_dead_code(
         )
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_fires_document_hook_exactly_once(
     sample_pdf, monkeypatch, mock_t3, voyage_client,
     cloud_mode,
@@ -1903,6 +1924,7 @@ _BASE_REQUIRED_FIELDS = {
 _PDF_EXTRA_FIELDS: set[str] = set()
 
 
+@pytest.mark.t2_tenant
 def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_client, owner_write):
     set_credentials(monkeypatch)
     captured = owner_write.metadatas
@@ -1919,6 +1941,7 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_c
     assert not missing, f"Missing metadata fields: {missing}"
 
 
+@pytest.mark.t2_tenant
 def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch, owner_write):
     set_credentials(monkeypatch)
     mock_t3 = MagicMock()
@@ -1975,6 +1998,7 @@ def test_sha256_does_not_call_read_bytes(tmp_path: Path):
     assert opened
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("indexer,expected_type", [("pdf", "pdf"), ("markdown", "markdown")])
 def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client, owner_write):
     set_credentials(monkeypatch)
@@ -2017,6 +2041,7 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
         assert "extraction_method" not in captured[0]
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("has_fm,fm_text,body,expected_start,expected_end", [
     (True, "---\ntitle: Test\n---\n", "# Hello\n\nWorld content.", 20, 43),
     (False, "", "# Hello\n\nWorld.", 5, 15),
@@ -2061,6 +2086,7 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
 # surviving proof that server-side CCE embedding is correct.
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch, owner_write):
     # nexus-sghyo (2026-08-06): CCE embedding is entirely server-side now
     # (no client-side Voyage mock needed) — the assertion is that docs__
@@ -2085,6 +2111,7 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch, owner_w
     mock_col.upsert.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("stored_model,expected_result", [
     ("voyage-code-3", 2),
     ("voyage-context-3", 0),
@@ -2156,6 +2183,7 @@ def test_batch_index_marks_failed_on_error(kind, tmp_path):
 # ``_CCE_*`` constants — no surviving subject.
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
 def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, cloud_mode, owner_write):
     set_credentials(monkeypatch)
@@ -2197,6 +2225,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
     mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     _registered_before(sample_pdf, "mybook", "paper")
@@ -2228,6 +2257,7 @@ def _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode):
     return mock_t3
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monkeypatch, cloud_mode, owner_write):
     """--force --re-embed reaches the combined chunk+owner write as
     force_re_embed=True (index_pdf's small-document all-at-once path)."""
@@ -2249,6 +2279,7 @@ def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monke
     assert owner_write.calls[-1]["force_re_embed"] is True
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, monkeypatch, cloud_mode, owner_write):
     """--force alone (force_re_embed defaults False) must NOT set
     force_re_embed=True on the write — the whole point of this bead."""
@@ -2270,6 +2301,7 @@ def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, m
     assert owner_write.calls[-1]["force_re_embed"] is False
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch, cloud_mode, owner_write):
     """--force --re-embed reaches the combined chunk+owner write as
     force_re_embed=True via _index_document (index_markdown's only
@@ -2292,6 +2324,7 @@ def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch
     assert owner_write.calls[-1]["force_re_embed"] is True
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_force_without_re_embed_forwards_false(sample_md, monkeypatch, cloud_mode, owner_write):
     """--force alone (force_re_embed defaults False) must NOT set
     force_re_embed=True on the server call."""
@@ -2371,6 +2404,7 @@ def test_batch_index_on_file_none_safe(kind, tmp_path):
         batch_fn([f], corpus="test")  # no on_file -- must not raise
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_return_metadata_false_returns_int(sample_pdf, monkeypatch, mock_t3, voyage_client):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
@@ -2379,6 +2413,7 @@ def test_index_pdf_return_metadata_false_returns_int(sample_pdf, monkeypatch, mo
     assert isinstance(result, int) and result == 1
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch, mock_t3, voyage_client):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
@@ -2400,6 +2435,7 @@ def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch, mo
     assert isinstance(result["title"], str)
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, monkeypatch, cloud_mode):
     # ``t3=`` is LOAD-BEARING, not decoration (nexus-c7l4n). Since RDR-152
     # Seam B, ``index_pdf`` resolves a None *t3* through
@@ -2438,6 +2474,7 @@ def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, m
     assert isinstance(result, dict) and result["chunks"] == 0 and result["pages"] == []
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch, mock_t3, voyage_client):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
@@ -2446,6 +2483,7 @@ def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch
     assert isinstance(result["chunks"], int) and isinstance(result["sections"], int)
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     _registered_before(sample_md, "test", "prose")
@@ -2469,6 +2507,7 @@ def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_m
 # still covered by test_index_threads_on_progress below.
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
 def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, mock_t3, voyage_client):
     """nexus-sghyo (2026-08-06): the single-flush (small-doc) path's
@@ -2502,6 +2541,7 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
     assert result == 1
 
 
+@pytest.mark.t2_tenant
 def test_stale_chunk_pruning_deleted_as_dead_code(sample_md, monkeypatch, voyage_client, cloud_mode):
     """nexus-tbkk1: ``_index_document``'s stale-chunk prune block
     (formerly triggered after the incremental-staleness check, via
@@ -2608,6 +2648,7 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode, owner_write):
     return _Setup()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_indexes_all_chunks(incr_setup):
     n = incr_setup.threshold + 10
     result, _ = incr_setup.run(n)
@@ -2619,6 +2660,7 @@ def test_index_pdf_incremental_indexes_all_chunks(incr_setup):
     assert call["batch_size"] == _INCREMENTAL_BATCH_SIZE
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_makes_no_chunk_upsert(incr_setup):
     """The chunks and their owner rows are one write; the path uploads no chunk on its own."""
     n = incr_setup.threshold + 10
@@ -2627,6 +2669,7 @@ def test_index_pdf_incremental_makes_no_chunk_upsert(incr_setup):
     t3.update_chunks.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_force_re_embed_true_forwards_true(incr_setup):
     """--force --re-embed reaches the writer as force_re_embed=True (_index_pdf_incremental)."""
     n = incr_setup.threshold + 10
@@ -2635,6 +2678,7 @@ def test_index_pdf_incremental_force_re_embed_true_forwards_true(incr_setup):
     assert [c["force_re_embed"] for c in incr_setup.owner_write.calls] == [True]
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_force_without_re_embed_forwards_false(incr_setup):
     """--force alone (force_re_embed defaults False) must NOT set force_re_embed=True."""
     n = incr_setup.threshold + 10
@@ -2660,6 +2704,7 @@ def _leave_old_checkpoint(incr_setup, *, chunks_upserted: int, total_chunks: int
     }))
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_does_not_resume_from_a_checkpoint(incr_setup):
     """RDR-223: the writer keeps no state across processes, so a run has no resume point (a resumed
     write would replace the manifest with only the tail it sends). Every run sends the whole
@@ -2675,6 +2720,7 @@ def test_index_pdf_incremental_does_not_resume_from_a_checkpoint(incr_setup):
     assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
     """nexus-tbkk1: ``_index_pdf_incremental``'s stale-chunk prune block
     (formerly gated on ``_identity_where``'s ``source_path`` fallback,
@@ -2720,6 +2766,7 @@ def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
     mock_col.delete.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_small_doc_uses_original_path(incr_setup):
     result, t3 = incr_setup.run(5)
     assert result == 5
@@ -2728,6 +2775,7 @@ def test_index_pdf_small_doc_uses_original_path(incr_setup):
     t3.upsert_chunks_with_embeddings.assert_not_called()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_writes_no_checkpoint(incr_setup):
     from nexus.checkpoint import checkpoint_path
     from nexus.doc_indexer import _INCREMENTAL_BATCH_SIZE
@@ -2738,6 +2786,7 @@ def test_index_pdf_incremental_writes_no_checkpoint(incr_setup):
     assert not incr_setup.dir.exists() or not list(incr_setup.dir.iterdir())
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_stale_checkpoint_deleted(incr_setup):
     from nexus.checkpoint import checkpoint_path
     n = incr_setup.threshold + 10
@@ -2749,6 +2798,7 @@ def test_index_pdf_incremental_stale_checkpoint_deleted(incr_setup):
     assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_progress_fires(incr_setup):
     n = incr_setup.threshold + 10
     progress: list[tuple] = []
@@ -2783,6 +2833,7 @@ def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(in
     assert sum(sizes) == n and max(sizes) <= _INCREMENTAL_BATCH_SIZE
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_incremental_without_catalog_identity_writes_nothing(incr_setup, monkeypatch):
     from nexus.errors import CatalogIdentityMissingError
     monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", lambda *a, **kw: "")
@@ -2798,6 +2849,7 @@ def test_index_pdf_incremental_without_catalog_identity_writes_nothing(incr_setu
 # fallback`` parallel-CCE machinery — no surviving subject.
 
 
+@pytest.mark.t2_tenant
 class TestStreamingRouting:
     def test_streaming_never_forces_batch_path(self, tmp_path):
         pdf = tmp_path / "small.pdf"
@@ -2964,6 +3016,7 @@ class TestStreamingReturnMetadata:
             result = index_pdf(pdf, "test", streaming="always", return_metadata=True)
         return result, mock_vwr
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_reflects_pipeline_chunks_no_catalog(self, tmp_path):
         """RED against pre-fix code (source_path where-clause always
         matches zero rows -> pages/title/author silently empty despite
@@ -2996,6 +3049,7 @@ class TestStreamingReturnMetadata:
         assert meta_read_calls, "expected a limit=300 metadata-read call"
         assert meta_read_calls[0].kwargs["where"] == {"content_hash": "abc123"}
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_uses_manifest_when_doc_id_known(self, tmp_path):
         """doc_id present (the catalog-registered common case): the
         metadata read must go through _metadata_for_doc_id (manifest-
@@ -3031,6 +3085,7 @@ class TestStreamingReturnMetadata:
         meta_read_calls = [c for c in mock_vwr.call_args_list if c.kwargs.get("limit") == 300]
         assert not meta_read_calls, "manifest-scoped path must not fall through to the where-clause query"
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_manifest_scoping_avoids_content_hash_collision(self, tmp_path):
         """CRITICAL-2 regression (substantive-critic, 2026-08-05): two
         catalog documents in the same collection share this run's
@@ -3057,6 +3112,7 @@ class TestStreamingReturnMetadata:
         # if it had, title would be "Sibling Paper" / pages would include 9.
         assert "Sibling Paper" not in str(result)
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_empty_when_pipeline_wrote_nothing(self, tmp_path):
         """Kill control: a legitimate zero-chunk run (e.g. skipped as
         already-complete) must still return the all-empty dict, not raise --
@@ -3066,6 +3122,7 @@ class TestStreamingReturnMetadata:
         # a fake pipeline reports none, so pages_with_text is None (unverified).
         assert result == {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": None}
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_fail_loud_on_inconsistent_empty_read_no_catalog(self, tmp_path):
         """FAIL LOUD (no-catalog branch): the pipeline reports chunks
         written (count > 0) but the (correctly content_hash-keyed)
@@ -3077,6 +3134,7 @@ class TestStreamingReturnMetadata:
         with pytest.raises(IndexingError):
             self._run(tmp_path, pipeline_count=5, populated_metadatas=[], doc_id="")
 
+    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_fail_loud_on_inconsistent_empty_read_with_doc_id(self, tmp_path):
         """FAIL LOUD (manifest branch): doc_id known, but
         _metadata_for_doc_id finds nothing despite count > 0 -- same
@@ -3247,6 +3305,7 @@ def _real_engine_t3(owner_write):
     return HttpVectorClient()
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_does_not_emit_source_path(
     sample_pdf, tmp_path, monkeypatch, owner_write,
 ):
@@ -3276,6 +3335,7 @@ def test_index_pdf_does_not_emit_source_path(
     )
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_does_not_emit_source_path(
     sample_md, tmp_path, monkeypatch, owner_write,
 ):
@@ -3302,6 +3362,7 @@ def test_index_markdown_does_not_emit_source_path(
     )
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_writes_doc_id_when_catalog_initialized(
     sample_pdf, tmp_path, monkeypatch, owner_write,
 ):
@@ -3332,6 +3393,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
         )
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_writes_doc_id_when_catalog_initialized(
     sample_md, tmp_path, monkeypatch, owner_write,
 ):
@@ -3359,6 +3421,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
         assert cat.get_manifest(str(entry.tumbler))
 
 
+@pytest.mark.t2_tenant
 def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     tmp_path, monkeypatch, owner_write,
 ):
@@ -3399,6 +3462,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
         assert cat.get_manifest(str(entry.tumbler))
 
 
+@pytest.mark.t2_tenant
 def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     sample_md, tmp_path, monkeypatch, owner_write,
 ):
@@ -3439,6 +3503,7 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     )
 
 
+@pytest.mark.t2_tenant
 def test_frontmatter_title_year_reach_catalog_despite_preflight(
     tmp_path, monkeypatch, owner_write,
 ):
@@ -3469,6 +3534,7 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
     assert year == 2026
 
 
+@pytest.mark.t2_tenant
 def test_curated_title_survives_reindex(tmp_path, monkeypatch, owner_write):
     """The stem-guard: a curated (non-stem) catalog title must NEVER be
     clobbered by a re-index — backfill applies only to the stem default."""

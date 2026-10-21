@@ -11,7 +11,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -88,59 +90,49 @@ class ExtensionBootstrapSiteConformanceTest {
     /**
      * (filename) TEST-resource changelogs ({@code src/test/resources/db/changelog-test}) sanctioned to carry
      * a real {@code CREATE EXTENSION}: the XML form of the superuser-connection DBA pre-step that {@link
-     * #SANCTIONED_JAVA_FILES} sanctions as Java strings. Never a product changeset, never run by a
+     * #SANCTIONED_JAVA_FILES} once sanctioned as Java strings (eleven fixtures, now folded onto this
+     * changelog). Never a product changeset, never run by a
      * production walk, and kept separate from {@link #SANCTIONED_FILES} so the product allowlist stays at
      * its one entry.
      *
      * <p><b>db.changelog-test-nonsuper-owner.xml</b> (nexus-wbfpw.48): provisions a NOSUPERUSER schema owner
-     * for a dedicated container and so must install {@code vector}/{@code pg_trgm} as the superuser first,
-     * exactly as {@code SchemaMigratorIntegrationTest#bootstrap} does by hand (that class is in
-     * {@link #SANCTIONED_JAVA_FILES}). It is run only through {@code
-     * PgContainerHelper#bootstrapNonSuperuserOwner}.
+     * for a dedicated container and so must install {@code vector}/{@code pg_trgm} as the superuser first.
+     * It is run only through {@code PgContainerHelper#bootstrapNonSuperuserOwner}, by every fresh-walk
+     * fixture that used to spell the same statements out by hand.
+     *
+     * <p><b>db.changelog-test-extension-plpgsql-check.xml</b> (nexus-cbo4a batch 11): {@code CREATE EXTENSION
+     * plpgsql_check} for {@code PlpgsqlCheckGateTest}, run on its superuser connection through {@code
+     * PgContainerHelper#createPlpgsqlCheckExtension} after the walk, in a container built from an image that
+     * ships the extension. A third-party analysis extension, not vector or pg_trgm, so no relocation applies.
+     * It used to be a Java string passed to the deleted string-DDL helper.
      */
-    private static final Set<String> SANCTIONED_TEST_CHANGELOGS = Set.of("db.changelog-test-nonsuper-owner.xml");
+    private static final Set<String> SANCTIONED_TEST_CHANGELOGS =
+        Set.of("db.changelog-test-nonsuper-owner.xml", "db.changelog-test-extension-plpgsql-check.xml");
 
     /**
      * (filename) Java test fixtures sanctioned to carry a literal {@code
-     * CREATE EXTENSION IF NOT EXISTS vector}/{@code pg_trgm} string. Two
-     * shapes:
+     * CREATE EXTENSION IF NOT EXISTS vector}/{@code pg_trgm} string.
      *
-     * <p>Eleven of them model the production DBA / client-provisioning
-     * pre-step under a superuser connection so their own {@code
-     * SchemaMigrator}/Liquibase walk (run as a NOSUPERUSER migrating role,
-     * mirroring production) has the extensions already present — see {@code
-     * SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk}'s
-     * javadoc for the full derivation of why these specific files need this
-     * (every OTHER test either never runs Liquibase at all, or runs it via
-     * {@code PgContainerHelper#applyProductSchema}/{@code #start()}, whose
-     * shared, already-migrated cluster needs no separate extension bootstrap
-     * since {@code vectors-001-baseline.xml}'s own {@code vectors-001-1}
-     * already created it there).
+     * <p>Eleven fixtures used to be here, each carrying its own copy of the
+     * superuser-side bootstrap (the extensions, schema {@code nexus} owned by the
+     * migrating role, and the SECURITY DEFINER relocation helpers search-path-001
+     * calls mid-walk) so their NOSUPERUSER {@code SchemaMigrator}/Liquibase walk
+     * found the extensions already present. They now all run
+     * {@code db.changelog-test-nonsuper-owner.xml} through {@code
+     * PgContainerHelper#bootstrapNonSuperuserOwner} (nexus-cbo4a), which is the one
+     * test-side site, sanctioned in {@link #SANCTIONED_TEST_CHANGELOGS}. Every OTHER
+     * test either never runs Liquibase at all or runs it via {@code
+     * PgContainerHelper#applyProductSchema}/{@code #start()}, whose shared,
+     * already-migrated cluster needs no separate extension bootstrap since
+     * {@code vectors-001-baseline.xml}'s own {@code vectors-001-1} already created it.
      *
-     * <p>{@code PgSessionEfSearchReadbackIntegrationTest} is the twelfth,
-     * different shape: it never runs Liquibase itself at all (it drives
-     * {@code PgSession#setHnswEfSearch} directly against a shared, already-
-     * migrated {@code PgContainerHelper#start()} cluster), and its bare
-     * {@code CREATE EXTENSION IF NOT EXISTS vector} is a purely DEFENSIVE,
-     * idempotent no-op (the shared cluster's own bootstrap already created
-     * and relocated the extension) that predates this batch — kept as
-     * belt-and-braces so the test does not depend on load ordering relative
-     * to whichever other test class happens to migrate the shared cluster
-     * first within a given surefire fork.
+     * <p>{@code PgSessionEfSearchReadbackIntegrationTest} was the last entry: a bare
+     * {@code CREATE EXTENSION IF NOT EXISTS vector} that was a purely defensive, idempotent no-op
+     * (the cloned, already-migrated cluster of {@code PgContainerHelper#start()} has the extension
+     * from {@code vectors-001-1}). nexus-cbo4a batch 7 removed it with the rest of that test's SQL
+     * strings, so the allowlist is empty; the scan above still fails any new literal.
      */
-    private static final Set<String> SANCTIONED_JAVA_FILES = Set.of(
-        "PgSessionEfSearchReadbackIntegrationTest.java",
-        "AspectDocIdBackfillTest.java",
-        "GrantsNexusDiagViewAccessIntegrationTest.java",
-        "GrantsPgMonitorTest.java",
-        "GrantsSvcForeignOwnedRelationTest.java",
-        "Hygiene001NotNullMigrationRlsTest.java",
-        "SchemaMigratorIntegrationTest.java",
-        "SchemaRollbackRoundTripIntegrationTest.java",
-        "SchemaUpgradeRehearsalIntegrationTest.java",
-        "VectorsRepointFunctionsIntegrationTest.java",
-        "VectorsUnifyCentroidsIntegrationTest.java",
-        "VectorsUnifyChunksIntegrationTest.java");
+    private static final Set<String> SANCTIONED_JAVA_FILES = Set.of();
 
     @Test
     void createExtensionAppearsOnlyAtSanctionedBootstrapSites() throws IOException, URISyntaxException {
@@ -184,6 +176,7 @@ class ExtensionBootstrapSiteConformanceTest {
     @Test
     void createExtensionInJavaSourcesOnlyAtSanctionedFixtures() throws IOException {
         List<String> violations = new ArrayList<>();
+        Map<String, Integer> scanned = new HashMap<>();
 
         // This class's OWN filename is excluded: its positive-case synthetic
         // fixtures (javaStringLiteral_withCreateExtension_flags) deliberately
@@ -205,9 +198,15 @@ class ExtensionBootstrapSiteConformanceTest {
                     }
                     violations.addAll(
                         scanJavaForCreateExtension(filename, Files.readString(file)));
+                    scanned.merge(srcRoot, 1, Integer::sum);
                 }
             }
         }
+
+        // With SANCTIONED_JAVA_FILES empty (nexus-cbo4a batch 7) nothing else shows the walk
+        // reached the tree; a wrong root would otherwise pass with zero files scanned.
+        assertThat(scanned.getOrDefault("main", 0)).as("Java files scanned under src/main/java").isGreaterThan(100);
+        assertThat(scanned.getOrDefault("test", 0)).as("Java files scanned under src/test/java").isGreaterThan(300);
 
         assertThat(violations)
             .as("CREATE EXTENSION string literal in a Java source file outside "

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT ON TABLES TO ${role}, in Liquibase
+    XML instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's
+    open-source DSL has no ALTER DEFAULT PRIVILEGES.
+
+    The default ACL the retired grants-nexus-diag-3 left on schema staging: StagingSchemaDropLiquibaseTest sets
+    it up to prove the drop takes it away with the schema. Run through
+    PgContainerHelper#grantSchemaDefaultSelectAcl; runAlways, bookkeeping in its own table. ${schema} and
+    ${role} are fixed test literals, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="schema-default-select-acl" author="nexus-cbo4a" runAlways="true">
+        <sql>ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT ON TABLES TO ${role}</sql>
+    </changeSet>
+</databaseChangeLog>

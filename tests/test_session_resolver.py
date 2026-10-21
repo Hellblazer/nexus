@@ -171,6 +171,7 @@ class TestSessionCollisionRegression:
     from the now-clobbered file.
     """
 
+    @pytest.mark.t2_tenant
     def test_two_session_starts_race_the_flat_file_first_session_still_wins(
         self, tmp_path, monkeypatch
     ):
@@ -308,3 +309,257 @@ class TestRecordTierWriteRoutesThroughHelper:
         assert observed.get("session_id") == "unknown"
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-xs7fp: the flat-file tier belongs to Claude Code hosts, for an MCP server
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: What a process started by Claude Code carries (measured on live nx-mcp
+#: children of the CLI, nexus-xs7fp): every Claude Code subprocess has these.
+_CLAUDE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")
+
+
+def _foreign_host_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The environment a Cursor / Codex / Gemini host gives nx-mcp: no
+    session id of any kind and no Claude Code marker, with a Claude
+    session's pointer file sitting in the machine-wide config dir."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    for name in _CLAUDE_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+    _write_current_session(tmp_path, "last-claude-session")
+
+
+def _as_mcp_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus.session as session
+
+    monkeypatch.setattr(session, "_mcp_server_process", True)
+
+
+class TestFlatFileFallbackIsClaudeOnlyForTheMcpServer:
+    def test_a_non_claude_host_does_not_get_the_files_session(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+
+        assert resolve_active_session_id() is None
+
+    def test_a_claude_code_child_still_gets_the_files_session(self, tmp_path, monkeypatch):
+        """A Claude Code child with neither session env var (an older Claude
+        Code, or a launch path that drops it) still falls back to the file."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_the_entrypoint_marker_alone_also_counts(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_a_blank_marker_is_not_a_marker(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDECODE", "  ")
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "")
+
+        assert resolve_active_session_id() is None
+
+    def test_a_named_session_still_wins_on_a_non_claude_host(self, tmp_path, monkeypatch):
+        """The workaround the docs used to prescribe keeps working: tiers 1-3
+        are untouched, only tier 4 is gated."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("NX_SESSION_ID", "named-by-the-host")
+        assert resolve_active_session_id() == "named-by-the-host"
+
+        monkeypatch.delenv("NX_SESSION_ID")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "harness-id")
+        assert resolve_active_session_id() == "harness-id"
+
+    def test_a_bare_cli_with_no_marker_keeps_the_file(self, tmp_path, monkeypatch):
+        """Only the MCP server process is gated. `nx scratch` run from a plain
+        terminal beside a Claude session (and a hook, a doctor run) has no
+        marker and still resolves through the file, as documented."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_the_t1_routing_of_a_non_claude_host_has_no_session_to_mint(self, tmp_path, monkeypatch):
+        """What the MCP lifespan consumes: no session id, so it takes the
+        existing fail-loud 'T1 unavailable this process' branch instead of
+        minting or borrowing the Claude session's scope."""
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id is None
+
+    def test_marking_the_process_turns_the_gate_on(self, monkeypatch):
+        import nexus.session as session
+
+        monkeypatch.setattr(session, "_mcp_server_process", False)
+        session.mark_mcp_server_process()
+
+        assert session._mcp_server_process is True
+
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_both_server_entry_points_mark_the_process(self, module_name):
+        """Source-level pin, as the spawn-tripwire test does: nothing but
+        ``main()`` runs only in a real server process, and a gate nobody
+        switches on protects nothing."""
+        import ast
+        import importlib
+        import inspect
+
+        main = importlib.import_module(module_name).main
+        tree = ast.parse(inspect.getsource(main).lstrip())
+        called = {
+            c.func.id for c in ast.walk(tree)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        assert "mark_mcp_server_process" in called, f"{module_name}.main() does not mark the process"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-xs7fp review: order, not presence, and the operator-facing message
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Calls main() may make before it marks the process. isolate_stdin only moves
+#: the stdio protocol off fd 0 and never resolves a session.
+_ALLOWED_BEFORE_MARK = {"isolate_stdin"}
+
+
+def _call_name(call: "ast.Call") -> str:
+    import ast
+
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else "?"
+
+
+def _main_marking_problems(main_source: str) -> list[str]:
+    """Problems with where main() marks the process: not an unconditional
+    top-level statement of main(), or any call ahead of it other than the
+    allowed ones (so a session resolution could run unmarked)."""
+    import ast
+
+    fn = ast.parse(main_source).body[0]
+    mark_index = next(
+        (
+            i
+            for i, stmt in enumerate(fn.body)
+            if isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and _call_name(stmt.value) == "mark_mcp_server_process"
+        ),
+        None,
+    )
+    if mark_index is None:
+        return ["mark_mcp_server_process() is not an unconditional top-level statement of main()"]
+    problems = []
+    for stmt in fn.body[:mark_index]:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _call_name(node) not in _ALLOWED_BEFORE_MARK:
+                problems.append(f"{_call_name(node)}() runs before the process is marked")
+    return problems
+
+
+def _module_level_resolver_calls(module_source: str) -> list[str]:
+    """Calls to a session reader at import time (outside any def): they would
+    run before main() can mark the process."""
+    import ast
+
+    readers = {"resolve_active_session_id", "read_claude_session_id"}
+    found = []
+    for stmt in ast.parse(module_source).body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _call_name(node) in readers:
+                found.append(_call_name(node))
+    return found
+
+
+class TestTheProcessIsMarkedBeforeAnySessionIsResolved:
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_main_marks_the_process_before_anything_else_runs(self, module_name):
+        import importlib
+        import inspect
+
+        main = importlib.import_module(module_name).main
+        assert _main_marking_problems(inspect.getsource(main).lstrip()) == []
+
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_no_session_is_resolved_at_import_time(self, module_name):
+        import importlib
+        import inspect
+
+        module = importlib.import_module(module_name)
+        assert _module_level_resolver_calls(inspect.getsource(module)) == []
+
+    def test_the_ordering_check_can_fail(self):
+        """The check itself, against sources that are wrong in each way."""
+        late = (
+            "def main():\n"
+            "    resolve_active_session_id()\n"
+            "    mark_mcp_server_process()\n"
+        )
+        conditional = (
+            "def main():\n"
+            "    if x:\n"
+            "        mark_mcp_server_process()\n"
+        )
+        missing = "def main():\n    isolate_stdin()\n"
+        fine = (
+            "def main():\n"
+            "    isolate_stdin()\n"
+            "    mark_mcp_server_process()\n"
+            "    resolve_active_session_id()\n"
+        )
+        assert _main_marking_problems(late) == ["resolve_active_session_id() runs before the process is marked"]
+        assert _main_marking_problems(conditional) != []
+        assert _main_marking_problems(missing) != []
+        assert _main_marking_problems(fine) == []
+        assert _module_level_resolver_calls("x = resolve_active_session_id()\n") == ["resolve_active_session_id"]
+        assert _module_level_resolver_calls("def f():\n    resolve_active_session_id()\n") == []
+
+
+class TestTheUnavailableMessageNamesTheRemedy:
+    def _message(self) -> str:
+        from nexus.mcp.core import T1UnavailableThisProcessError, _raise_t1_unavailable_this_process
+
+        with pytest.raises(T1UnavailableThisProcessError) as exc:
+            _raise_t1_unavailable_this_process()
+        return str(exc.value)
+
+    def test_it_names_nx_session_id_as_the_remedy(self):
+        msg = self._message()
+        remedy = msg.split("Remedy:", 1)[1]
+        assert "NX_SESSION_ID" in remedy
+
+    def test_it_says_the_flat_file_is_deliberately_skipped(self):
+        assert "current_session" in self._message().split("Remedy:", 1)[0]
+
+    def test_it_no_longer_sends_a_desktop_user_to_a_claude_code_session(self):
+        assert "Claude Code session" not in self._message().split("Remedy:", 1)[1]

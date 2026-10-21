@@ -355,6 +355,51 @@ class TestRetrievalQualityProbe:
         assert results[0].raw_count == 4
         assert results[0].kept_count == 0
 
+    @staticmethod
+    def _probe_with_kept(per_col_row: tuple, kept: dict[str, int]):
+        """Run the probe on one collection whose diagnostics carry an explicit
+        ``kept`` (nexus-079ly): ``per_col_row`` is the engine's
+        ``(raw, dropped, threshold, top_distance)``."""
+        from nexus.doctor_search import run_retrieval_quality_probe
+        from nexus.search_engine import SearchDiagnostics
+
+        def _fn(query, collections, n_results, t3, *, diagnostics_out=None, **_):
+            diagnostics_out.append(
+                SearchDiagnostics(per_collection={"c": per_col_row}, kept=kept)
+            )
+            return []
+
+        return run_retrieval_quality_probe(
+            t3=None,
+            collections=["c"],
+            search_fn=_fn,
+            model_for=lambda col: "m",
+            metadata_fn=lambda col: {"embedding_model": "m"},
+        )[0]
+
+    def test_matched_when_the_explicit_kept_is_positive_though_every_row_was_dropped(
+        self,
+    ) -> None:
+        """raw == dropped (the old ``raw - dropped`` read 0 = threshold_drop)
+        but a lexical row rescued the collection: kept 1."""
+        r = self._probe_with_kept((3, 3, 0.45, 0.6), {"c": 1})
+        assert r.outcome == "matched"
+        assert r.kept_count == 1
+
+    def test_matched_not_empty_when_only_a_lexical_row_contributed(self) -> None:
+        """raw 0 (the engine's vector leg found nothing) with kept 1 from the
+        lexical leg is a hit, not an empty collection."""
+        r = self._probe_with_kept((0, 0, 0.45, None), {"c": 1})
+        assert r.outcome == "matched"
+        assert r.kept_count == 1
+
+    def test_a_pool_cut_with_no_threshold_drop_is_not_a_threshold_drop(self) -> None:
+        """raw 3, dropped 0, kept 0: the pool limit cut the rows; no threshold
+        claim may be made."""
+        r = self._probe_with_kept((3, 0, 0.45, None), {"c": 0})
+        assert r.outcome != "threshold_drop"
+        assert r.outcome == "matched"
+
     def test_model_drift_when_metadata_disagrees(self) -> None:
         """Registered embedding_model doesn't match expected for prefix."""
         from nexus.doctor_search import run_retrieval_quality_probe
@@ -472,6 +517,11 @@ COLS = ["code__a__model-code__v1", "rdr__a__model-ctx__v1"]
 
 
 class _ChunkT3:
+    # Truthy `_voyage_client` is the attribute gate `_voyage_thresholds_active`
+    # keeps for fakes: this stand-in is a Voyage-serving handle, so the probe's
+    # default thresholds apply to it (nexus-ndr0t).
+    _voyage_client = object()
+
     def __init__(self, n_chunks: int = 3):
         self.n_chunks = n_chunks
 
@@ -672,3 +722,122 @@ def test_a_close_self_hit_is_excluded_by_id_when_real_neighbours_are_far() -> No
     t3 = _ChunkT3()
     rows = _probe(t3, _neighbour_search(lambda c: 0.7, self_distance=0.1), **_default(t3))
     assert {r.outcome for r in rows.values()} == {"threshold_drop"}
+
+
+# ── per-collection threshold rule in the probe (nexus-ndr0t) ─────────────────
+
+LEGACY = "docs__legacyowner"                   # no model token: family unknown
+VOYAGE_DOCS = "docs__owner__voyage-context-3__v1"
+_THRESHOLDS_CFG = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
+
+
+class _ModeT3(_ChunkT3):
+    """A fake T3 handle that reports an embedder family (or raises)."""
+
+    def __init__(self, mode, *, raises: bool = False):
+        super().__init__()
+        self._mode = mode
+        self._raises = raises
+
+    def embedding_mode(self):
+        if self._raises:
+            raise RuntimeError("GET /version unreachable")
+        return self._mode
+
+
+def _http_mode_t3(mode, *, raises: bool = False):
+    """A real-typed HttpVectorClient (no ``_voyage_client`` attribute), so the
+    probe is gated by the SERVER-reported family, as search is."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    class _HttpModeT3(_ChunkT3, HttpVectorClient):
+        _voyage_client = None
+
+        def __init__(self):
+            _ChunkT3.__init__(self)
+
+        def embedding_mode(self):
+            if raises:
+                raise RuntimeError("GET /version unreachable")
+            return mode
+
+    return _HttpModeT3()
+
+
+def _probe_default_threshold(monkeypatch, t3, col):
+    """The probe with `threshold_for=None` and every sample's nearest real
+    neighbour at 0.80, so the threshold alone decides the outcome."""
+    from nexus.doctor_search import _default_probe_for, run_retrieval_quality_probe
+
+    monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: _THRESHOLDS_CFG)
+    (row,) = run_retrieval_quality_probe(
+        t3=t3, collections=[col],
+        search_fn=_neighbour_search(lambda c: 0.80),
+        model_for=lambda c: "", metadata_fn=lambda c: {},
+        probe_for=lambda c: _default_probe_for(t3, c),
+        threshold_for=None,
+    )
+    return row
+
+
+def test_the_probe_gives_a_model_less_name_no_threshold_on_a_dual_engine(monkeypatch) -> None:
+    """Search applies no threshold to a model-less name on a dual engine, so
+    the probe must not judge it by the 0.65 prefix value (median 0.80)."""
+    row = _probe_default_threshold(monkeypatch, _ModeT3("dual"), LEGACY)
+    assert row.threshold is None
+    assert row.outcome == "matched"
+    assert row.nearest_distance == pytest.approx(0.80)
+
+
+def test_the_probe_keeps_the_prefix_threshold_for_a_model_less_name_on_a_voyage_engine(
+    monkeypatch,
+) -> None:
+    row = _probe_default_threshold(monkeypatch, _ModeT3("voyage"), LEGACY)
+    assert row.threshold == pytest.approx(0.65)
+    assert row.outcome == "threshold_drop"
+
+
+def test_the_probe_still_filters_a_named_voyage_collection_on_a_dual_engine(monkeypatch) -> None:
+    row = _probe_default_threshold(monkeypatch, _ModeT3("dual"), VOYAGE_DOCS)
+    assert row.threshold == pytest.approx(0.65)
+    assert row.outcome == "threshold_drop"
+
+
+@pytest.mark.parametrize(
+    "mode, col, threshold",
+    [
+        ("voyage", LEGACY, 0.65),
+        ("voyage", VOYAGE_DOCS, 0.65),
+        ("dual", LEGACY, None),
+        ("dual", VOYAGE_DOCS, 0.65),
+        ("onnx-local", LEGACY, None),       # search applies no thresholds here
+        ("onnx-local", VOYAGE_DOCS, None),
+        (None, LEGACY, None),               # mode unknown: search applies none
+        (None, VOYAGE_DOCS, None),
+    ],
+)
+def test_the_probe_follows_the_search_gate_on_a_real_typed_handle(
+    monkeypatch, mode, col, threshold,
+) -> None:
+    """Search gates every threshold on `_voyage_thresholds_active`; the probe
+    must not judge a collection by a threshold search would not apply."""
+    t3 = _http_mode_t3(mode)
+    row = _probe_default_threshold(monkeypatch, t3, col)
+    assert row.threshold == (pytest.approx(threshold) if threshold is not None else None)
+    assert row.outcome == ("matched" if threshold is None else "threshold_drop")
+
+
+@pytest.mark.parametrize(
+    "t3_factory",
+    [
+        lambda: _ModeT3("dual", raises=True),       # raises inside _engine_is_dual
+        lambda: _http_mode_t3("dual", raises=True),  # raises inside the search gate
+    ],
+    ids=["fake-voyage-client", "http-client"],
+)
+def test_an_embedding_mode_that_raises_reads_error_and_does_not_propagate(
+    monkeypatch, t3_factory,
+) -> None:
+    row = _probe_default_threshold(monkeypatch, t3_factory(), LEGACY)
+    assert row.outcome == "error"
+    assert "GET /version unreachable" in (row.error or "")

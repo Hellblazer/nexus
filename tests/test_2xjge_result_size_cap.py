@@ -112,6 +112,7 @@ def _fake_t2_ctx(tmp_path):
     return _ctx
 
 
+@pytest.mark.t2_tenant
 class TestNxAnswerResultCap:
     """Mirrors tests/test_nx_answer_plan_choice.py's scaffold: a single
     above-floor match, plan_run mocked to return an oversized final step

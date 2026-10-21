@@ -57,6 +57,7 @@ def test_hybrid_score_weights(vector_norm: float, frecency_norm: float, expected
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_hybrid_no_code_corpus_warning():
     """apply_hybrid_scoring records that no code__ collection is in scope.
 
@@ -1043,6 +1044,7 @@ class TestPerCollectionErrorIsolation:
         with pytest.raises(VectorServiceError, match="all 1 collections failed"):
             search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
 
+    @pytest.mark.t2_tenant
     def test_all_collections_dimension_mismatched_raises_named_error_not_generic(self):
         """fix round 2, point 2: the SAME all-failed shape, but with the
         dimension-mismatch class's canned message (the default
@@ -1174,6 +1176,7 @@ class TestDimensionMismatchLoggingQuieted:
         assert matches
         assert matches[0]["log_level"] == "warning"
 
+    @pytest.mark.t2_tenant
     def test_all_targeted_collections_dimension_mismatched_raises_named_error(self):
         """fix round 2, point 2: when the dimension-mismatch class consumes
         EVERY targeted collection (not a fraction), the call raises
@@ -1468,6 +1471,7 @@ class TestThresholdGateServiceMode:
         monkeypatch.setattr(client.__class__, "supports_per_collection_search", False)
         return client
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize(
         "mode, set_irrelevant_voyage_key, expected_ids",
         [
@@ -2289,6 +2293,194 @@ class TestApplyRankingBoosts:
         ]
         out = apply_ranking_boosts(results, hybrid=True)
         assert out[0].hybrid_score == pytest.approx(1.0)
+
+
+# ── Boost window (nexus-cbg2s) ───────────────────────────────
+#
+# The hybrid score min-max normalises distance and frecency over the pool, so
+# a deeper fetch of the same query moved every score and swapped near ties on
+# a page whose nearest rows had not changed (the 2026-10-09 k sweep: the
+# top-30 by raw distance identical at k=40..300, the boosted page not). With
+# ``window=`` the boosts normalise over a fixed nearest window instead.
+
+
+class TestBoostWindow:
+    @pytest.fixture(autouse=True)
+    def _stub_collection_rows(self, monkeypatch):
+        from tests.conftest import catalog_row_for_collection_name
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_collection_row",
+            lambda name: catalog_row_for_collection_name(name),
+        )
+
+    @staticmethod
+    def _scored(out):
+        return [(r.id, r.hybrid_score) for r in out]
+
+    def test_window_size_is_max_30_or_three_pages(self):
+        from nexus.search_engine import boost_window_size
+
+        assert [boost_window_size(n) for n in (1, 10, 11, 15, 30, 100)] == [30, 30, 33, 45, 90, 300]
+
+    def test_control_unwindowed_page_moves_with_pool_depth(self):
+        """Without a window the top-10 page differs between pool depths. If
+        this stops holding the fixture has lost its sensitivity and the
+        independence pins below would pass vacuously."""
+        from tests._boost_window_pool import DEPTHS, pool
+
+        pages = {
+            d: self._scored(apply_ranking_boosts(pool(d), hybrid=True)[:10]) for d in DEPTHS
+        }
+        assert len({tuple(p) for p in pages.values()}) > 1, pages
+
+    @pytest.mark.parametrize("page_size", [10, 15, 40])
+    def test_windowed_head_is_identical_at_every_depth_above_the_window(self, page_size):
+        """Two pools sharing their nearest ``window`` rows and differing in
+        depth beyond them give the same boosted rows, order and scores."""
+        from nexus.search_engine import boost_window_size
+        from tests._boost_window_pool import DEPTHS, pool
+
+        window = boost_window_size(page_size)
+        deep = [d for d in DEPTHS if d >= window]
+        assert len(deep) >= 2, "fixture must reach past the window twice"
+        heads = {
+            d: self._scored(apply_ranking_boosts(pool(d), hybrid=True, window=window)[:window])
+            for d in deep
+        }
+        first = heads[deep[0]]
+        assert len(first) == window
+        for d, head in heads.items():
+            assert head == first, d  # exact: same rows, same arithmetic
+
+    def test_window_head_equals_a_pool_of_exactly_the_window(self):
+        """The head of a deep pool IS the result for a pool of just the window."""
+        from tests._boost_window_pool import pool
+
+        deep = apply_ranking_boosts(pool(300), hybrid=True, window=30)[:30]
+        shallow = apply_ranking_boosts(pool(30), hybrid=True, window=30)
+        assert self._scored(deep) == self._scored(shallow)
+
+    def test_pool_smaller_than_the_window_is_the_unwindowed_result(self):
+        from tests._boost_window_pool import pool
+
+        assert self._scored(apply_ranking_boosts(pool(12), hybrid=True, window=30)) == \
+            self._scored(apply_ranking_boosts(pool(12), hybrid=True))
+
+    def test_tail_follows_in_raw_distance_order_on_the_window_scale(self):
+        from tests._boost_window_pool import pool
+
+        out = apply_ranking_boosts(pool(120), hybrid=True, window=30)
+        head, tail = out[:30], out[30:]
+        assert len(tail) == 90
+        assert [r.distance for r in tail] == sorted(r.distance for r in tail)
+        assert min(r.distance for r in tail) >= max(r.distance for r in head)
+        assert all(0.0 <= r.hybrid_score <= 1.0 for r in tail)
+        # scoring the tail must not move a window row
+        assert self._scored(head) == self._scored(
+            apply_ranking_boosts(pool(30), hybrid=True, window=30)
+        )
+
+    def test_tail_may_hold_a_collection_the_window_lacks(self):
+        from tests._boost_window_pool import pool
+
+        rows = pool(30) + [
+            SearchResult(id="docs-far", content="x", distance=0.95, collection="docs__d",
+                         metadata={})
+        ]
+        out = apply_ranking_boosts(rows, hybrid=True, window=30)
+        assert out[-1].id == "docs-far"
+        assert 0.0 <= out[-1].hybrid_score <= 1.0
+
+    def test_ties_at_the_window_edge_do_not_depend_on_arrival_order(self):
+        """Five rows tied on distance straddle the window edge; which ones are
+        in the window must not depend on the order they arrived in."""
+        import random
+
+        base = [
+            SearchResult(id=f"n{i:02d}", content="x", distance=0.10 + 0.001 * i,
+                         collection="code__test", metadata={"frecency_score": float(i)})
+            for i in range(8)
+        ]
+        tied = [
+            SearchResult(id=f"t{i}", content="x", distance=0.30, collection="code__test",
+                         metadata={"frecency_score": float(10 * i)})
+            for i in range(5)
+        ]
+        far = [
+            SearchResult(id=f"f{i:02d}", content="x", distance=0.50 + 0.01 * i,
+                         collection="code__test", metadata={"frecency_score": 1.0})
+            for i in range(10)
+        ]
+        outs = []
+        for seed in (1, 2, 3):
+            rows = [
+                SearchResult(id=r.id, content=r.content, distance=r.distance,
+                             collection=r.collection, metadata=dict(r.metadata))
+                for r in base + tied + far
+            ]
+            random.Random(seed).shuffle(rows)
+            # window of 10 cuts the tied group (8 nearer rows + 2 of 5 ties)
+            outs.append(self._scored(apply_ranking_boosts(rows, hybrid=True, window=10)))
+        assert outs[0] == outs[1] == outs[2]
+        assert {i for i, _ in outs[0][:10]} == {f"n{i:02d}" for i in range(8)} | {"t0", "t1"}
+
+    def test_mixed_model_window_is_cut_on_the_calibrated_scale(self, monkeypatch):
+        """Two embedding models in one pool: prose distances run wider than code's, so
+        a prose row at raw 0.40 is a better match than a code row at 0.30 once
+        calibrated. A window cut on RAW distance would hold 30 code rows and no prose
+        at all, and the page would lose rows today's shows; cut on the calibrated
+        scale, the page equals the unwindowed deep-pool page at every depth."""
+        from nexus.corpus import voyage_model_for_collection
+
+        # The cloud prefix map gives code__ and knowledge__ their two distinct models.
+        monkeypatch.setattr(
+            "nexus.corpus.embedding_model_for_collection_calibrated",
+            voyage_model_for_collection,
+        )
+
+        def pool_k(k):  # per-collection k, as the engine route serves it
+            code = [SearchResult(id=f"c{i:03d}", content="x", distance=0.30 + 0.002 * i,
+                                 collection="code__test", metadata={}) for i in range(k)]
+            prose = [SearchResult(id=f"k{i:03d}", content="x", distance=0.40 + 0.002 * i,
+                                  collection="knowledge__test", metadata={}) for i in range(k)]
+            return code + prose
+
+        today = [r.id for r in apply_ranking_boosts(pool_k(150), hybrid=False)[:10]]
+        assert any(i.startswith("k") for i in today), "fixture must put prose rows on the page"
+        for k in (30, 40, 60, 150):
+            windowed = apply_ranking_boosts(pool_k(k), hybrid=False, window=30)
+            assert [r.id for r in windowed[:10]] == today, k
+        # The raw-distance cut this replaces would have kept no prose in the window.
+        raw_cut = sorted(pool_k(150), key=lambda r: r.distance)[:30]
+        assert not [r for r in raw_cut if r.id.startswith("k")]
+
+    def test_cap_with_window_keeps_window_overflow_ahead_of_the_tail(self):
+        def r(i, f):
+            return SearchResult(id=i, content="x", distance=0.1, collection="code__t",
+                                metadata={"source_path": f})
+
+        rows = [r("a1", "A"), r("a2", "A"), r("a3", "A"), r("b1", "B"), r("c1", "C")]
+        assert [x.id for x in apply_file_diversity_cap(rows)] == ["a1", "a2", "b1", "c1", "a3"]
+        assert [x.id for x in apply_file_diversity_cap(rows, window=4)] == \
+            ["a1", "a2", "b1", "a3", "c1"]
+        # window at or beyond the list is the plain cap
+        assert [x.id for x in apply_file_diversity_cap(rows, window=5)] == \
+            [x.id for x in apply_file_diversity_cap(rows)]
+
+    def test_capped_page_is_independent_of_depth_above_the_window(self):
+        """The cap is part of what a page is: a deeper pool must not slip a
+        row from beyond the window into the page ahead of window overflow."""
+        from tests._boost_window_pool import pool
+
+        def page(depth):
+            rows = pool(depth)
+            for r in rows:  # 4 chunks per file inside the window, so the cap bites
+                r.metadata["source_path"] = f"src/f{int(r.id[3:]) // 4}.py"
+            ranked = apply_ranking_boosts(rows, hybrid=True, window=30)
+            return self._scored(apply_file_diversity_cap(ranked, window=30)[:10])
+
+        assert page(40) == page(120) == page(300)
 
 
 # ── apply_file_diversity_cap (RDR-006 supersession, nexus-0bmhd) ────────────

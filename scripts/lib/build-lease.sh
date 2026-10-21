@@ -52,9 +52,11 @@
 # source or depend on tests/e2e/lib/lock.sh: that lib lives under tests/ and
 # a production script (scripts/build-gate-jar.sh, scripts/mvnw-leased.sh)
 # must not reach into test-only machinery for something it needs at build
-# time. The lease directory holds four flat files: `pid` (holder pid),
+# time. The lease directory holds five flat files: `pid` (holder pid),
 # `ts` (ISO-8601 UTC acquire time), `label` (holder identity — $NX_AGENT or
-# $USER), `command` (the acquiring command line, best-effort).
+# $USER), `command` (the acquiring command line, best-effort), and `worktree`
+# (the physical path of the checkout whose scripts took the lease, so a reader
+# in ANOTHER worktree knows the build does not rewrite its jar; nexus-qt6q7).
 #
 # ACQUIRE-PATH ATOMICITY — AND A PITFALL THIS FILE HAD TO UN-LEARN THE HARD
 # WAY. The first cut of this lib tried to gate BOTH the fresh-acquire and
@@ -123,13 +125,33 @@
 #       every 5s, one "waiting" line on stderr at the first refusal and one
 #       per minute after) instead of refused; rc 75 only once max-seconds
 #       have elapsed with the lease still held. max-seconds 0 is a single
-#       attempt (the old refuse-immediately behaviour). Filesystem errors
+#       attempt per HOLDER (the old refuse-immediately behaviour); losing a
+#       stale-reclaim race is not a holder and is retried up to 5 times, 1s
+#       apart, whatever max-seconds is (nexus-t6t9f). Filesystem errors
 #       (rc 74) are never retried.
 #   build_lease_release <name>
 #       Release the lease. Only the holding pid may
 #       release; releasing a lease this process does not hold (never
 #       acquired, already released, or held by someone else) is a silent
 #       no-op — safe to call unconditionally from an EXIT trap.
+#
+# CONTENTION TELEMETRY (nexus-jqk5c). Every CONTENDED event appends one
+# key=value line to a per-user, per-host log, so a lease wait that today scrolls
+# past on stderr can be measured afterwards: $NX_LEASE_EVENTS_LOG, default
+# ${XDG_STATE_HOME:-$HOME/.local/state}/nexus/lease-events.log (the suite lease,
+# tests/_suite_lease.py, writes the same file, `lease=suite`). The default path is
+# under the CALLING USER's home, so two users on one box write two files; a
+# measurement that must see both sets NX_LEASE_EVENTS_LOG to one shared path, and a
+# file this writer creates is group-writable (umask 002) so users of one group can
+# append to it (an existing file's mode is never changed). Fields, in order:
+# ts (ISO-8601 UTC), lease (service|suite), name, host, pid, waited_s, outcome
+# (acquired_after_wait | refused | stale_reclaimed | gave_up), then holder_pid and
+# holder_label when known. refused is a live holder met with no wait budget
+# (build_lease_acquire, or build_lease_acquire_wait 0); gave_up is a wait that ran
+# out. An immediate, uncontended acquire writes NOTHING: the log records contention
+# only. Best-effort: a failure to create the directory or append is silent and
+# changes neither the return code nor stderr. build_lease_acquire_wait's own 5 s
+# polls log nothing; the wait logs its one outcome.
 #
 # TRAP USAGE (callers MUST do this immediately after a successful acquire):
 #   build_lease_acquire service || exit $?
@@ -167,6 +189,54 @@ _build_lease_dir() {
 
 _build_lease_ts() {
     date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# _build_lease_kv_quote <value> — a log value: bare when it has no space, quote or
+# backslash, else double-quoted with those escaped; newlines become spaces.
+_build_lease_kv_quote() {
+    local v="${1//$'\n'/ }"
+    v="${v//$'\r'/ }"
+    if [[ -z "$v" || "$v" == *[[:space:]\"\\]* ]]; then
+        v="${v//\\/\\\\}"
+        v="${v//\"/\\\"}"
+        printf '"%s"' "$v"
+    else
+        printf '%s' "$v"
+    fi
+}
+
+# _build_lease_log_event <name> <outcome> <waited_s> [holder_pid] [holder_label]
+# — append ONE line to the per-user, per-host lease-events log (see CONTENTION
+# TELEMETRY). The lease field is `suite` for the lease named suite (the pytest
+# suite's, taken through build_lease_acquire by tests/e2e/macos-guest/host.sh) and
+# `service` for every other.
+# Always returns 0 and prints nothing: the telemetry must never change a caller.
+_build_lease_log_event() {
+    local name="$1" outcome="$2" waited="${3:-0}" hpid="${4:-}" hlabel="${5:-}"
+    local log="${NX_LEASE_EVENTS_LOG:-}" state host line kind=service
+    [[ "$name" == suite ]] && kind=suite
+    if [[ -z "$log" ]]; then
+        state="${XDG_STATE_HOME:-${HOME:+$HOME/.local/state}}"
+        [[ -n "$state" ]] || return 0
+        log="$state/nexus/lease-events.log"
+    fi
+    host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
+    line="ts=$(_build_lease_ts) lease=$kind name=$(_build_lease_kv_quote "$name") host=${host:-unknown} pid=$$ waited_s=$waited outcome=$outcome"
+    [[ "$hpid" =~ ^[0-9]+$ ]] && line+=" holder_pid=$hpid"
+    [[ -n "$hlabel" && "$hlabel" != unknown ]] && line+=" holder_label=$(_build_lease_kv_quote "$hlabel")"
+    # One printf, one O_APPEND write: concurrent writers do not interleave lines.
+    # umask 002 in a subshell: a file this creates is 0664 (a shared path works for a
+    # group); an existing file keeps its mode, and the caller's umask is untouched.
+    { mkdir -p "$(dirname "$log")" && ( umask 002; printf '%s\n' "$line" >> "$log" ); } 2>/dev/null || true
+    return 0
+}
+
+# _build_lease_log_held_event <name> <outcome> <waited_s> — as above, naming the
+# lease's CURRENT holder as the lease directory records it.
+_build_lease_log_held_event() {
+    local name="$1" outcome="$2" waited="${3:-0}" dir
+    dir="$(_build_lease_dir "$name")"
+    _build_lease_log_event "$name" "$outcome" "$waited" "$(cat "$dir/pid" 2>/dev/null || true)" "$(cat "$dir/label" 2>/dev/null || true)"
 }
 
 # Seconds a pid-less lease directory counts as "being populated" (held)
@@ -270,7 +340,7 @@ _build_lease_group_alive() {
 }
 
 # _build_lease_populate <dir> <holder-label> <command-line> — fill an
-# already-`mkdir`'d (freshly claimed) lease dir with the four flat files.
+# already-`mkdir`'d (freshly claimed) lease dir with the flat files.
 # No `pgid` file is written here — see build_lease_track_pid, called
 # separately once (if ever) the real build child exists.
 #
@@ -279,6 +349,7 @@ _build_lease_group_alive() {
 # EVERYWHERE below).
 _build_lease_populate() {
     local dir="$1" holder_label="$2" command_line="$3"
+    (CDPATH='' cd "$(_build_lease_repo_root)" && pwd -P) > "$dir/worktree" 2>/dev/null || true
     _build_lease_ts > "$dir/ts"
     printf '%s\n' "$holder_label" > "$dir/label"
     printf '%s\n' "$command_line" > "$dir/command"
@@ -303,6 +374,14 @@ _build_lease_claim() {
     mkdir "$dir" && (set -C; printf '%s\n' "$$" > "$dir/pid") 2>/dev/null
 }
 
+# The phrase build_lease_acquire's two "lost the race" refusals carry, and the
+# number of immediate retries build_lease_acquire_wait gives one (nexus-t6t9f).
+# A lost race is not a held lease: the winner of a reclaim is a moment from
+# holding it and the lease may be free again right after, so a caller that waits
+# 0 s (a hand run inside a lab-run grant) must not read it as "held, give up".
+_BUILD_LEASE_LOST_RACE="lost the race"
+_BUILD_LEASE_RACE_RETRIES=5
+
 # build_lease_track_pid <name> <pgid> — record the process-group id of the
 # REAL build process (e.g. a `./mvnw ... &` launched under `set -m` job
 # control, whose pgid equals its own pid as the new group's leader) into an
@@ -322,6 +401,24 @@ build_lease_track_pid() {
     existing_pid="$(cat "$dir/pid" 2>/dev/null || true)"
     [[ "$existing_pid" == "$$" ]] || return 0
     printf '%s\n' "$pgid" > "$dir/pgid"
+    return 0
+}
+
+# build_lease_untrack_pid <name> — forget the tracked process group, so the
+# lease's liveness is the holder's own pid again. A wrapper calls it once the
+# build it tracked has exited and it still has work to do under the lease (a
+# cache store, a file restore): the pgid file otherwise keeps naming the dead
+# group, and build_lease_acquire reads the pgid FIRST, so a waiting peer would
+# reclaim the lease as stale while the holder is alive (nexus-t6t9f). Same
+# ownership guard as build_lease_track_pid.
+build_lease_untrack_pid() {
+    local name="${1:?build_lease_untrack_pid: usage: build_lease_untrack_pid <name>}"
+    local dir existing_pid
+    dir="$(_build_lease_dir "$name")"
+    [[ -d "$dir" ]] || return 0
+    existing_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    [[ "$existing_pid" == "$$" ]] || return 0
+    rm -f "$dir/pgid"
     return 0
 }
 
@@ -381,6 +478,7 @@ build_lease_acquire() {
         local who="pid ${existing_pid:-<being populated>}"
         [[ -n "$existing_pgid" ]] && who="pid $existing_pid or its process group $existing_pgid"
         echo "build_lease_acquire: REFUSED — service build lease '$name' is held by $who (label=$existing_label, acquired=$existing_ts, command: $existing_cmd). Wait for it to finish, or run \`build_lease_release $name\` if that pid is dead." >&2
+        [[ "${_BUILD_LEASE_POLLING:-0}" == 1 ]] || _build_lease_log_event "$name" refused 0 "$existing_pid" "$existing_label"
         return 75
     fi
 
@@ -393,20 +491,24 @@ build_lease_acquire() {
     echo "build_lease_acquire: WARNING — reclaiming stale build lease '$name' (previous holder pid=${existing_pid:-unknown}${existing_pgid:+, process group $existing_pgid}, label=${existing_label}, acquired=${existing_ts} is not alive); it never released cleanly." >&2
     local capture="${dir}.reclaim.$$.$RANDOM"
     if ! mv "$dir" "$capture" 2>/dev/null; then
-        echo "build_lease_acquire: REFUSED — lost the race reclaiming stale build lease '$name'; another process is already reclaiming it. Retry." >&2
+        echo "build_lease_acquire: REFUSED — $_BUILD_LEASE_LOST_RACE reclaiming stale build lease '$name'; another process is already reclaiming it. Retry." >&2
+        # The dead holder we read is no longer the lease's holder: name whoever the directory records now.
+        [[ "${_BUILD_LEASE_POLLING:-0}" == 1 ]] || _build_lease_log_held_event "$name" refused 0
         return 75
     fi
     rm -rf "$capture" 2>/dev/null
 
     if mkdir_err="$(_build_lease_claim "$dir" 2>&1)"; then
         _build_lease_populate "$dir" "$holder_label" "$command_line"
+        _build_lease_log_event "$name" stale_reclaimed "${_BUILD_LEASE_WAITED:-0}" "$existing_pid" "$existing_label"
         return 0
     fi
     if [[ ! -d "$dir" ]]; then
         echo "build_lease_acquire: ERROR — could not re-create build lease '$name' at $dir after reclaiming it, and not because someone else claimed it first: $mkdir_err. This looks like a filesystem or permission problem, not lock contention." >&2
         return 74
     fi
-    echo "build_lease_acquire: REFUSED — lost the race re-creating build lease '$name' after reclaiming it; another process claimed it first. Retry." >&2
+    echo "build_lease_acquire: REFUSED — $_BUILD_LEASE_LOST_RACE re-creating build lease '$name' after reclaiming it; another process claimed it first. Retry." >&2
+    [[ "${_BUILD_LEASE_POLLING:-0}" == 1 ]] || _build_lease_log_held_event "$name" refused 0
     return 75
 }
 
@@ -416,17 +518,24 @@ build_lease_acquire_wait() {
     local max="${2:?build_lease_acquire_wait: usage: build_lease_acquire_wait <name> <max-seconds> [command args]}"
     shift 2 || true
     [[ "$max" =~ ^[0-9]+$ ]] || { echo "build_lease_acquire_wait: max-seconds must be a non-negative integer, got '$max'" >&2; return 64; }
-    local waited=0 rc err announced=0
+    local waited=0 rc err announced=0 races=0 seen_pid="" seen_label=""
+    # Dynamically scoped into build_lease_acquire (and its $(...) subshell): the
+    # 5 s polls log no refusal, and a stale reclaim reports the wait so far.
+    local _BUILD_LEASE_POLLING=1 _BUILD_LEASE_WAITED=0
     while :; do
         # `|| rc=$?`: callers run under `set -e` (both wrapper scripts), and
         # a bare failing command substitution in an assignment would exit
         # the caller before the retry loop ever ran.
         rc=0
+        _BUILD_LEASE_WAITED=$waited
         err="$(build_lease_acquire "$name" "$@" 2>&1)" || rc=$?
         if [[ $rc -eq 0 ]]; then
             [[ -n "$err" ]] && printf '%s\n' "$err" >&2   # a stale-reclaim WARNING, never swallowed
             if [[ $announced -eq 1 ]]; then
                 echo "build_lease_acquire_wait: acquired build lease '$name' after ${waited}s." >&2
+                # A wait that ended in a stale reclaim already logged stale_reclaimed, with the
+                # wait in its waited_s: one line per wait, so a sum of waited_s counts it once.
+                [[ "$err" == *"reclaiming stale"* ]] || _build_lease_log_event "$name" acquired_after_wait "$waited" "$seen_pid" "$seen_label"
             fi
             return 0
         fi
@@ -434,18 +543,65 @@ build_lease_acquire_wait() {
             printf '%s\n' "$err" >&2
             return $rc
         fi
+        # A lost reclaim race is retried at once, within a small bound and
+        # without spending the wait: it is contention for a lease that is free
+        # or about to be, not a live holder to wait out.
+        if [[ "$err" == *"$_BUILD_LEASE_LOST_RACE"* ]] && (( races < _BUILD_LEASE_RACE_RETRIES )); then
+            races=$((races + 1))
+            sleep 1
+            continue
+        fi
         if (( waited >= max )); then
             printf '%s\n' "$err" >&2
             echo "build_lease_acquire_wait: gave up on build lease '$name' after ${waited}s (NX_BUILD_LEASE_WAIT)." >&2
+            # max 0 is a refusal (no wait budget was given); a spent budget is a give-up.
+            if (( max == 0 )); then
+                _build_lease_log_held_event "$name" refused "$waited"
+            else
+                _build_lease_log_held_event "$name" gave_up "$waited"
+            fi
             return 75
         fi
         if [[ $announced -eq 0 ]] || (( waited % 60 == 0 )); then
             echo "build_lease_acquire_wait: build lease '$name' is held — waiting (${waited}s of ${max}s). $err" >&2
             announced=1
         fi
+        seen_pid="$(cat "$(_build_lease_dir "$name")/pid" 2>/dev/null || true)"
+        seen_label="$(cat "$(_build_lease_dir "$name")/label" 2>/dev/null || true)"
         sleep 5
         waited=$((waited + 5))
     done
+}
+
+# build_lease_hand_run_in_grant — true for a hand run inside a lab-run grant:
+# LAB_CPUS is set (every grant exports it) and this is not a GitHub Actions job.
+# A CI job on the pool also has LAB_CPUS, and waiting its turn there is how the
+# scheduler serialises builds that share a lease root, so CI keeps its wait.
+build_lease_hand_run_in_grant() {
+    [[ -n "${LAB_CPUS:-}" && "${GITHUB_ACTIONS:-}" != "true" ]]
+}
+
+# build_lease_caller_wait — the wait bound a caller should pass to
+# build_lease_acquire_wait: NX_BUILD_LEASE_WAIT (default 3600), but 0 for a hand
+# run inside a lab-run grant (nexus-dfg0q, Sam 2026-10-19: refuse at once).
+# Waiting there holds the grant's cores while another build runs, and mixed with
+# callers that take the lease before their grant, the two lock orders can wedge
+# a full pool until the wait expires.
+build_lease_caller_wait() {
+    if build_lease_hand_run_in_grant; then
+        echo 0
+    else
+        echo "${NX_BUILD_LEASE_WAIT:-3600}"
+    fi
+}
+
+# build_lease_grant_refusal_hint <script> [<what to run instead>] — one stderr
+# line saying why a hand run inside a grant refused instead of waiting, and what
+# to run instead (default: run it again outside lab-run once the holder is done).
+build_lease_grant_refusal_hint() {
+    build_lease_hand_run_in_grant || return 0
+    local instead="${2:-run $1 again outside lab-run once the holder is done}"
+    echo "$1: refusing to wait for the build lease inside a lab-run grant: waiting would hold the grant's cores while another build runs (nexus-dfg0q). Instead: $instead." >&2
 }
 
 # build_lease_release <name>

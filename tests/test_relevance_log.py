@@ -58,6 +58,7 @@ def t2():
         yield db
 
 
+@pytest.mark.t2_tenant
 def test_log_relevance_inserts_row(t2):
     """log_relevance() inserts a row and returns its id."""
     row_id = t2.log_relevance(
@@ -74,6 +75,7 @@ def test_log_relevance_inserts_row(t2):
     ]
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_no_filter(t2):
     """get_relevance_log() returns all rows when no filter given."""
     t2.log_relevance("q1", _cid("c1"), "stored")
@@ -83,6 +85,7 @@ def test_get_relevance_log_no_filter(t2):
     assert {r["action"] for r in rows} == {"stored", "linked"}
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_filter_by_query(t2):
     """get_relevance_log() filters by query."""
     t2.log_relevance("q1", _cid("c1"), "stored")
@@ -92,6 +95,7 @@ def test_get_relevance_log_filter_by_query(t2):
     assert rows[0]["chunk_id"] == _cid("c1")
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_filter_by_chunk(t2):
     t2.log_relevance("q1", _cid("c1"), "stored")
     t2.log_relevance("q2", _cid("c1"), "linked")
@@ -99,6 +103,7 @@ def test_get_relevance_log_filter_by_chunk(t2):
     assert len(rows) == 2
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_filter_by_action(t2):
     t2.log_relevance("q1", _cid("c1"), "stored")
     t2.log_relevance("q2", _cid("c2"), "linked")
@@ -107,6 +112,7 @@ def test_get_relevance_log_filter_by_action(t2):
     assert rows[0]["query"] == "q1"
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_ordered_most_recent_first(t2):
     """get_relevance_log() returns rows ordered most-recent first."""
     t2.log_relevance("q1", _cid("c1"), "stored")
@@ -207,6 +213,7 @@ def t1():
     reset_singletons()
 
 
+@pytest.mark.t2_tenant
 def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch):
     """After a search, calling store_put logs (query, chunk_id, 'stored') triples."""
     from nexus.mcp.core import store_put
@@ -243,6 +250,7 @@ def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch)
     assert chunks == {_cid("chunk-1"), _cid("chunk-2")}
 
 
+@pytest.mark.t2_tenant
 def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
     """store_put with no recent searches doesn't log anything."""
     from nexus.mcp.core import store_put
@@ -266,6 +274,7 @@ def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
     assert rows == []
 
 
+@pytest.mark.t2_tenant
 def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     """Multiple search traces — store_put only correlates with the newest one."""
     from nexus.mcp.core import store_put
@@ -298,6 +307,7 @@ def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     assert {r["chunk_id"] for r in rows} == {_cid("c-new-1"), _cid("c-new-2")}
 
 
+@pytest.mark.t2_tenant
 def test_get_relevance_log_filter_by_session(t2):
     """get_relevance_log() filters by session_id."""
     t2.log_relevance("q1", _cid("c1"), "stored", session_id="sess-a")
@@ -307,6 +317,7 @@ def test_get_relevance_log_filter_by_session(t2):
     assert rows[0]["query"] == "q1"
 
 
+@pytest.mark.t2_tenant
 def test_log_relevance_batch(t2):
     """log_relevance_batch inserts multiple rows in one transaction."""
     rows = [
@@ -320,6 +331,7 @@ def test_log_relevance_batch(t2):
     assert len(all_rows) == 3
 
 
+@pytest.mark.t2_tenant
 def test_log_relevance_batch_empty_is_noop(t2):
     """Empty batch returns 0 and writes nothing."""
     assert t2.log_relevance_batch([]) == 0
@@ -347,6 +359,7 @@ def test_t1_public_session_id_property(t1):
     assert t1.session_id == "test-session-e2"
 
 
+@pytest.mark.t2_tenant
 def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeypatch):
     """catalog_link logs relevance when target collection matches a recent search chunk."""
     from nexus.mcp.catalog import catalog_link
@@ -388,6 +401,7 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
     assert rows[0]["query"] == "ml concepts"
 
 
+@pytest.mark.t2_tenant
 def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch):
     """catalog_link does NOT log when no trace chunks match the target collection."""
     from nexus.mcp.catalog import catalog_link

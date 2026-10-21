@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): an HNSW index whose predicate is a compound: collection = '${collection}' AND tenant_id = '${tenant}'.
+    The deliberately unparsable shape PciCatalogIntegrationTest feeds the catalog reader (a predicate that is more
+    than one collection equality). Run through PgContainerHelper#createLeafHnswIndexCollectionAndTenant, which
+    validates the identifiers and escapes both literals; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index-collection-tenant" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE INDEX ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection = '${collection}' AND tenant_id = '${tenant}'</sql>
+    </changeSet>
+</databaseChangeLog>

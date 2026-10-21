@@ -259,6 +259,7 @@ def test_force_bypasses_staleness_prose_file(tmp_path: Path) -> None:
 
 # ── test: force=True bypasses staleness for PDF files ─────────────────────────
 
+@pytest.mark.t2_tenant
 def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
     """force=True causes _index_pdf_file to re-embed even when hash matches.
 

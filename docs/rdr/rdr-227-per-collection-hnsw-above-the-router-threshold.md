@@ -535,12 +535,28 @@ walk at `ef_search = 1000`.
   the builder makes), whose access method is `hnsw`, whose predicate is exactly
   `(collection = '<name>'::text)` and whose leaf and parent bounds are
   single-value LIST bounds counts as one of its own. Every other index whose name
-  starts with `pci_` (an operator-made `pci_foo`, a `REINDEX CONCURRENTLY`
-  leftover `pci_<hash>_ccnew`, a non-`hnsw` index, a hand-edited predicate, a
+  starts with `pci_` (an operator-made `pci_foo`, a valid `REINDEX CONCURRENTLY`
+  product `pci_<hash>_ccnew`, a non-`hnsw` index, a hand-edited predicate, a
   PostgreSQL that deparses differently) is **unparsed**: counted in the status
   object, never routed to, never built over, never dropped. This extends Sam's
   decision 4 (`nexus_rdr/227-planner-decisions-confirmed`) and replaces the earlier
-  text that treated an operator-made `pci_` index like the builder's own.
+  text that treated an operator-made `pci_` index like the builder's own. One
+  carve-out (Sam, 2026-10-18, `nexus_rdr/227-decision-4-amendment-reindex-leftovers`,
+  nexus-rn1yd): an index named `^pci_[0-9a-f]{24}_cc(new|old)[0-9]*$` that is
+  `hnsw`, passes every other condition above and has `indisvalid` false is a
+  **`REINDEX CONCURRENTLY` leftover** of a builder index. The reconciler drops it
+  (`DROP INDEX CONCURRENTLY IF EXISTS`, the drop's existing 5 s lock timeout, reason
+  `reindex_leftover`) with no check of `pg_stat_progress_create_index`: a reindex
+  still running holds `ShareUpdateExclusiveLock` on the leaf, the drop times out
+  against it, and the next pass judges again. Because the snapshot can be a pass
+  old, the drop re-reads `pg_index.indisvalid` for that name on its own session
+  immediately before the `DROP` and skips it, logging `pci_drop_skipped_stale` (the
+  session) and `pci_index_drop_stale` (the reconciler) and not `pci_index_dropped`,
+  when the index is valid now or gone. A leftover is still not one of the
+  builder's own for routing: never routed to, never counted against
+  `NX_SEARCH_PCI_MAX_PER_LEAF`, never taken as "this collection has an index", and
+  counted by the status object in `reindex_leftover` instead of `unparsed`. A valid
+  `_ccnew` or `_ccold` is never touched.
 - **Index name.** `pci_` plus the first 24 hex digits of the SHA-256 of model,
   tenant and collection joined by a NUL byte.
 
@@ -902,7 +918,7 @@ kept in separate places so no reader takes one for the other:
 
 ```json
 "per_collection_indexes": {
-  "valid": 4, "invalid": 0, "unparsed": 0,
+  "valid": 4, "invalid": 0, "unparsed": 0, "reindex_leftover": 0,
   "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
   "this_engine": {
     "builder_state": "ok", "building": 0, "failing": 0,
@@ -928,7 +944,9 @@ A standby engine, and an engine whose admin credentials were refused, read:
 
 - *Global* (the read half's last read; the same on every engine, up to when each
   last read): `valid`; `invalid` (a failed or in-flight build); `unparsed`
-  (Schema: counted, never routed, built or dropped); `last_read_at` (null before
+  (Schema: counted, never routed, built or dropped); `reindex_leftover` (invalid
+  `_ccnew`/`_ccold` leftovers the reconciler drops, nexus-rn1yd; not also in
+  `unparsed`); `last_read_at` (null before
   the first read); and `expired`, true when the set is older than three periods
   plus the read bound and the router is answering as empty, so an operator can
   see a frozen set. The counts stay the last read's while `expired`.
@@ -958,7 +976,7 @@ A standby engine, and an engine whose admin credentials were refused, read:
 The counts are global, not per tenant, like the existing `reaper` object on the
 same unauthenticated route. The object is additive and goes in the wire ledger;
 a client against an engine that predates it finds no key and reports
-not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed=`,
+not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed= reindex_leftover=`,
 and `event=pci_sweep_set_changed added_count= removed_count= added= removed=` when
 the router's set changed between two reads (`leaf:collection:index` entries, cut at
 20 with the exact counts; the first read after a boot lists what the boot found, and
@@ -1284,3 +1302,6 @@ Phase 2a's measured default search shows those exact arms still set the floor
   resolved. No change to the frontmatter; the lifecycle move is separate.
 - 2026-10-12: Close critique round 2 (T2 `nexus_rdr/227-close-critique-2026-10-12-r2`: partial, 0 critical, 1 significant). The prose exception is corrected: it holds only while no prose collection is at or above B, and a prose collection reaching B is the trigger for the Gap 1 recall check. Three stale pointers and one unstruck sentence fixed.
 - 2026-10-12: Closed as Implemented on Sam's decision, with the round-2 close critique at partial and its one finding corrected (T2 `nexus_rdr/227-close-override-2026-10-12`). Gap 3 stays open under the deferred bead nexus-43ulx.26; the prose threshold watch is bead nexus-qqoak. Post-mortem: `docs/rdr/post-mortem/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.
+- 2026-10-18: Decision 4 carve-out for `REINDEX CONCURRENTLY` leftovers (Sam,
+  `nexus_rdr/227-decision-4-amendment-reindex-leftovers`, bead nexus-rn1yd): the
+  Schema paragraph and the status object above carry it.

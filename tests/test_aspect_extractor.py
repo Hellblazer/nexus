@@ -131,6 +131,7 @@ class TestCollectionRouting:
         assert select_config("code__nexus") is None
         assert select_config("taxonomy__centroids") is None
 
+    @pytest.mark.t2_tenant
     def test_docs_prefix_returns_none_revert_of_377(self) -> None:
         """nexus-z70w: revert of #377. docs__<repo> collections are
         populated by ``nx index repo``, which sweeps ANY prose file:
@@ -1605,6 +1606,7 @@ class TestEligibleExtractorNamesMatchesTheRealRoutingTable:
 
         assert set(registered_prefixes()) == {"knowledge__", "rdr__"}
 
+    @pytest.mark.t2_tenant
     def test_unregistered_prefix_returns_none_and_empty(self):
         from nexus.aspect_extractor import eligible_extractor_names, select_config
 
@@ -1771,12 +1773,14 @@ class TestDocsOptIn:
             lambda *a, **k: {"aspects": {"docs_collections": value}},
         )
 
+    @pytest.mark.t2_tenant
     def test_default_config_opts_nothing_in(self, monkeypatch) -> None:
         from nexus.aspect_extractor import select_config
 
         self._config(monkeypatch, [])
         assert select_config("docs__1-29") is None
 
+    @pytest.mark.t2_tenant
     def test_a_matching_glob_routes_to_general_prose(self, monkeypatch) -> None:
         from nexus.aspect_extractor import eligible_extractor_names, select_config
 
@@ -1786,6 +1790,7 @@ class TestDocsOptIn:
         assert eligible_extractor_names("docs__1-29") == ["general-prose-v1"]
         assert select_config("docs__1-41") is None
 
+    @pytest.mark.t2_tenant
     def test_a_comma_separated_string_is_accepted(self, monkeypatch) -> None:
         from nexus.aspect_extractor import select_config
 
@@ -1814,6 +1819,7 @@ class TestDocsOptIn:
         # Outside docs__, the file type never gates extraction.
         assert extraction_applies_to_source("knowledge__x", source_path) is True
 
+    @pytest.mark.t2_tenant
     def test_the_enqueue_hook_skips_a_non_prose_file_in_an_opted_in_collection(self, monkeypatch) -> None:
         import nexus.aspect_worker as aw
 
@@ -2032,6 +2038,7 @@ class TestDocsOptInEngineAttribute:
         assert calls["n"] == 2, "the failed read must not have been cached"
 
 
+@pytest.mark.t2_tenant
 def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -> None:
     """nexus-kk4ut code review: select_config runs on the aspect worker's
     batch path outside any row handler, so a malformed config.yml must not

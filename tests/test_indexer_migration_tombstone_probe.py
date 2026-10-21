@@ -40,7 +40,7 @@ from nexus.db.storage_mode import StorageBackend
 from nexus.registry import RepoRegistry
 from tests._catalog_fixture_ops import ActiveCatalog
 
-pytestmark = pytest.mark.usefixtures("cloud_mode")
+pytestmark = [pytest.mark.usefixtures("cloud_mode"), pytest.mark.t2_tenant]
 
 STATS_PATH = "/v1/vectors/stats"
 COLLECTIONS_PATH = "/v1/vectors/collections"

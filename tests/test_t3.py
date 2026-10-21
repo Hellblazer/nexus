@@ -783,6 +783,7 @@ def test_put_under_cap_still_succeeds(mock_db):
     mock_col.upsert.assert_called_once()
 
 
+@pytest.mark.t2_tenant
 def test_write_batch_indexer_path_still_drops_oversized(mock_db):
     """Indexer callers do not pass ``fail_on_oversized=True``; the
     pipeline should keep running (drop-and-warn) because a chunker
@@ -985,6 +986,7 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db, monkeypatch):
     assert written["frecency_score"] == 0.42
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_uses_correct_embedding_fn(mock_db):
     db, mock_col, mock_client = mock_db
     db.upsert_chunks(collection="docs__corpus", ids=["d1"], documents=["some text"], metadatas=[{"source_path": "doc.pdf"}])
@@ -1220,6 +1222,7 @@ def test_collection_missing_raises_keyerror(mock_chromadb, method):
 # ── upsert_chunks_with_embeddings ───────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_with_embeddings_stores(mock_db):
     db, mock_col, _ = mock_db
     embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
@@ -1245,6 +1248,7 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     )
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_with_embeddings_force_re_embed_is_local_noop(mock_db):
     """RDR-181 §Approach step 3: force_re_embed is accepted for signature
     parity with HttpVectorClient (indexer call sites are duck-typed across
@@ -1267,6 +1271,7 @@ def test_upsert_chunks_with_embeddings_force_re_embed_is_local_noop(mock_db):
     )
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_with_embeddings_dedupes_duplicate_ids(mock_db):
     """RDR-108 D1 (nexus-1ljk): under content-derived natural IDs,
     identical chunk text in the same batch produces duplicate IDs.
@@ -1294,6 +1299,7 @@ def test_upsert_chunks_with_embeddings_dedupes_duplicate_ids(mock_db):
     assert call_kwargs["embeddings"] == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_with_embeddings_no_dedup_when_unique(mock_db):
     """No collapse when all ids are distinct: the dedup path is a
     no-op and the batch passes through unchanged."""
@@ -1314,6 +1320,7 @@ def test_upsert_chunks_with_embeddings_no_dedup_when_unique(mock_db):
     assert call_kwargs["embeddings"] == embeddings
 
 
+@pytest.mark.t2_tenant
 def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
     db, mock_col, mock_client = mock_db
     db.upsert_chunks_with_embeddings(
@@ -1577,6 +1584,7 @@ def test_existing_ids_pagination_respects_300_cap(local_t3: T3Database):
     assert "nonexistent11111" not in found
 
 
+@pytest.mark.t2_tenant
 def test_partial_update_keeps_a_key_sent_at_its_empty_default() -> None:
     """nexus-w94eo: normalize() drops extraction_method="" and
     quality_gate_overridden=False, but a caller sending them on a partial

@@ -299,14 +299,14 @@ class TestBootSemaphoreDirIsPerUser:
         assert d.name.startswith("nexus_t2_substrate_boot_locks") and "1001" in d.name
 
     def test_the_real_default_is_the_running_users_directory(self) -> None:
-        import tempfile
-        from pathlib import Path
-
         from nexus.daemon.service_registry import service_identity
         from tests import _engine_substrate as sub
 
+        # The ORIGINAL tempdir: inside a lab-run grant tests/_tmp_root.py moves TMPDIR
+        # to a per-run directory, and a per-run slot directory would split the
+        # cross-run cap (nexus-kyujr).
         assert sub._BOOT_SEMAPHORE_DIR == sub._boot_semaphore_dir(
-            Path(tempfile.gettempdir()), uid=service_identity(),
+            sub._original_tempdir(), uid=service_identity(),
         )
 
     def test_a_second_users_directory_is_never_the_first_users(self, tmp_path, monkeypatch) -> None:

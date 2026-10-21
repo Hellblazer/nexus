@@ -10,7 +10,6 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -20,7 +19,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.*;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -108,10 +109,12 @@ class AspectRepositoryTest {
                     "coalesce-doc-1", "coalesce-doc-2",
                     // nexus-nj4ch enqueueMany batch tests
                     "many-doc-a")) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
-                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Test fixture: " + tumbler)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                    .execute();
             }
 
             // RDR-204 Phase 1 (bead nexus-ft04v.7): document_aspects_collection_fk /
@@ -524,10 +527,8 @@ class AspectRepositoryTest {
         assertThatCode(() -> {
             try (var conn = svcDs.getConnection()) {
                 conn.setAutoCommit(true);
-                var rs = conn.createStatement().executeQuery(
-                    "SELECT count(*) FROM nexus.document_aspects WHERE collection='failclosed-coll'");
-                rs.next();
-                int cnt = rs.getInt(1);
+                int cnt = DSL.using(conn, SQLDialect.POSTGRES)
+                    .fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.COLLECTION.eq("failclosed-coll"));
                 // If RLS fail-closed: count is 0 (empty result). If broken: count > 0.
                 assertThat(cnt)
                     .as("unset GUC must result in 0 visible rows (fail-closed RLS)")
@@ -1105,11 +1106,12 @@ class AspectRepositoryTest {
         repo.importQueueRow(tenant, seed);
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT enqueued_at FROM nexus.aspect_extraction_queue "
-                + "WHERE tenant_id = '" + tenant + "' AND source_path = '" + path + "'");
-            assertThat(rs.next()).as("queue row must exist").isTrue();
-            var enqueuedAt = rs.getObject("enqueued_at", java.time.OffsetDateTime.class).toInstant();
+            var stored = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT).from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(path)))
+                .fetchAny(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT);
+            assertThat(stored).as("queue row must exist").isNotNull();
+            var enqueuedAt = stored.toInstant();
             assertThat(enqueuedAt)
                 .as("LEAST(enqueued_at) must keep the EARLIER 2025 timestamp, not the later 2026 re-import")
                 .isEqualTo(java.time.OffsetDateTime.parse(early).toInstant());
@@ -1409,14 +1411,12 @@ class AspectRepositoryTest {
     private void registerFixtureDoc(String tenant, String tumbler) throws SQLException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, tumbler);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "hygiene-001 test fixture")
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
         }
     }
 
@@ -1425,30 +1425,24 @@ class AspectRepositoryTest {
             throws SQLException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                    "UPDATE nexus.aspect_extraction_queue SET next_retry_at = ? "
-                    + "WHERE tenant_id = ? AND source_path = ?")) {
-                ps.setObject(1, ts);
-                ps.setString(2, tenant);
-                ps.setString(3, sourcePath);
-                int n = ps.executeUpdate();
-                assertThat(n).as("setNextRetryAt must update exactly one row").isEqualTo(1);
-            }
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT, ts)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .execute();
+            assertThat(n).as("setNextRetryAt must update exactly one row").isEqualTo(1);
         }
     }
 
     /** Read next_retry_at for a specific row via a superuser connection (bypasses RLS). */
     private OffsetDateTime readNextRetryAt(String tenant, String sourcePath) throws SQLException {
         try (Connection su = pg.createConnection("")) {
-            try (var ps = su.prepareStatement(
-                    "SELECT next_retry_at FROM nexus.aspect_extraction_queue "
-                    + "WHERE tenant_id = ? AND source_path = ?")) {
-                ps.setString(1, tenant);
-                ps.setString(2, sourcePath);
-                ResultSet rs = ps.executeQuery();
-                assertThat(rs.next()).as("row must exist for readNextRetryAt").isTrue();
-                return rs.getObject("next_retry_at", OffsetDateTime.class);
-            }
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT).from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .fetch();
+            assertThat(rows).as("row must exist for readNextRetryAt").isNotEmpty();
+            return rows.get(0).get(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT);
         }
     }
 

@@ -349,6 +349,7 @@ def _put_id(content: str, collection: str = "fixture-subject", title: str = "t")
 
 # ── Search ───────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_search_returns_results(t3):
     t3.put(
         collection="knowledge__test__voyage-context-3__v1",
@@ -420,6 +421,7 @@ class TestNexusHmxiRoundTripGrandfathering:
         assert not sresult.startswith("Error:")
         assert "art-overview" in sresult or "art-followup" in sresult
 
+    @pytest.mark.t2_tenant
     def test_no_legacy_collection_promotes_to_conformant(self, t3, monkeypatch):
         """No pre-existing collection; ``store_put`` auto-promotes to
         conformant.
@@ -479,6 +481,7 @@ class TestNexusHmxiRoundTripGrandfathering:
         assert "greenfield-doc" in listing
 
 
+@pytest.mark.t2_tenant
 def test_search_no_results(t3):
     result = _search_render(query="nonexistent topic", corpus="knowledge__empty")
     assert not result.startswith("Error:")
@@ -538,6 +541,7 @@ _DIVERGENT_RESULTS = [
 ]
 
 
+@pytest.mark.t2_tenant
 def test_search_ranks_by_hybrid_score_not_raw_distance():
     """MCP ``search()`` must rank via hybrid_score (frecency-boosted), not
     raw distance. Raw-distance order would be low/mid/high; hybrid scoring
@@ -581,6 +585,7 @@ def test_query_ranks_documents_by_hybrid_score_not_raw_distance():
     assert out["ids"][0] == "mid_dist_high_frecency"
 
 
+@pytest.mark.t2_tenant
 def test_search_and_cli_helper_rank_identically():
     """Parity: the same corpus+query, scored by the same shared
     search_engine.apply_ranking_boosts() the CLI (search_cmd.py) calls,
@@ -613,6 +618,85 @@ def test_search_and_cli_helper_rank_identically():
     assert mcp_out["ids"] == cli_order
 
 
+def _strip_pool_count(text: str) -> str:
+    """The page text minus its footer: ``of N`` counts the rows the pool held, which
+    legitimately grows with the fetch depth (nexus-cbg2s keeps it that way)."""
+    return "\n".join(ln for ln in text.splitlines() if not ln.startswith("--- showing"))
+
+
+@pytest.mark.t2_tenant
+@pytest.mark.parametrize("limit", [10, 15])
+def test_search_page_and_scores_do_not_depend_on_pool_depth(limit):
+    """nexus-cbg2s: the same query fetched at depth 40, 60, 80, 120 and 300 renders the
+    SAME page, ``s=`` included. The boosts used to be normalised over the whole pool, so
+    a deeper fetch swapped near ties on a page whose nearest rows had not changed
+    (nexus-ann50's k sweep: top-30 identical at every k, the boosted page not)."""
+    from nexus.mcp import core as mcp_core
+    from nexus.search_engine import boost_window_size
+    from tests._boost_window_pool import DEPTHS, pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    pages: dict[int, str] = {}
+    structured: dict[int, tuple] = {}
+    # The guarantee holds for pools at least as deep as the window (30 at limit 10,
+    # 45 at limit 15); a shallower pool IS the whole window and ranks as one.
+    for depth in (d for d in DEPTHS if d >= boost_window_size(limit)):
+        mcp_core._reset_page_cache_for_tests()
+        with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            pages[depth] = _strip_pool_count(_search_render(
+                query="boost window pin", corpus="code__test", cluster_by="", limit=limit))
+            mcp_core._reset_page_cache_for_tests()
+            out = _search_render(
+                query="boost window pin", corpus="code__test", cluster_by="",
+                limit=limit, structured=True)
+        structured[depth] = (out["ids"], out["hybrid_scores"])
+    assert len(pages) >= 3
+    assert all(" s=" in p for p in pages.values()), "the page must show s= or the pin proves nothing"
+    assert len({p for p in pages.values()}) == 1, {d: p[:300] for d, p in pages.items()}
+    assert len({repr(v) for v in structured.values()}) == 1
+
+
+@pytest.mark.t2_tenant
+def test_search_pool_count_still_follows_the_fetch_depth():
+    """nexus-cbg2s leaves ``of N`` alone: it is the number of rows the pool held, so it
+    differs with the fetch depth while the page above it does not."""
+    from nexus.mcp import core as mcp_core
+    from tests._boost_window_pool import pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    footers = []
+    for depth in (40, 120):
+        mcp_core._reset_page_cache_for_tests()
+        with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            text = _search_render(query="boost window count", corpus="code__test", cluster_by="")
+        footers.append([ln for ln in text.splitlines() if ln.startswith("--- showing")][0])
+    assert footers[0].endswith("of 40. next: offset=10"), footers
+    assert footers[1].endswith("of 120. next: offset=10"), footers
+
+
+@pytest.mark.t2_tenant
+def test_search_page_turns_past_the_window_continue_the_same_ordering():
+    """Pages 1-3 are cut from the boost window, page 4 from the tail behind it: no row is
+    repeated or skipped at the seam, at either fetch depth."""
+    from nexus.mcp import core as mcp_core
+    from tests._boost_window_pool import pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    for depth in (120, 300):
+        seen: list[str] = []
+        for offset in (0, 10, 20, 30, 40):
+            mcp_core._reset_page_cache_for_tests()
+            with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+                 patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+                out = _search_render(query="boost window seam", corpus="code__test",
+                                     cluster_by="", limit=10, offset=offset, structured=True)
+            seen.extend(out["ids"])
+        assert len(seen) == 50 and len(set(seen)) == 50, depth
+
+
+@pytest.mark.t2_tenant
 def test_cluster_by_semantic_discards_the_boosted_order():
     """critique 2026-08-19 (both reviewers): ``cluster_by="semantic"``
     computes the hybrid/bib boost (real cost: catalog lookup, tuning
@@ -670,6 +754,7 @@ def _other_result(i: int) -> SearchResult:
                          metadata={"source_path": f"other{i}.py"})
 
 
+@pytest.mark.t2_tenant
 def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     """8 chunks from one dominant file + 10 distinct other files (the
     mandatory domination-check shape). Two `_search_render` calls with
@@ -706,6 +791,7 @@ def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     )
 
 
+@pytest.mark.t2_tenant
 def test_clustered_mode_skips_the_diversity_cap():
     """cluster_by="semantic" preserves the cluster-grouped display order
     contiguously for the text renderer — the diversity cap is skipped
@@ -741,6 +827,7 @@ def test_clustered_mode_skips_the_diversity_cap():
 
 # ── Store ────────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_store_put(t3, local_mode_write):
     _seed_for_store_put("test content", "fixture-subject")
     result = store_put(content="test content", collection="fixture-subject", title="test-doc")
@@ -756,6 +843,7 @@ def test_store_put(t3, local_mode_write):
     assert row.get("embedding_model") == "bge-base-en-v15-768"
 
 
+@pytest.mark.t2_tenant
 def test_store_list(t3):
     store_put(content="listed entry", collection="fixture-subject", title="list-test")
     result = store_list(collection="fixture-subject")
@@ -763,6 +851,7 @@ def test_store_list(t3):
     assert "entries" in result.lower() or "list-test" in result
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("content, collection, title, expect_in", [
     pytest.param("full document text here", "fixture-subject", "get-test",
                  ["full document text here"], id="full-content"),
@@ -779,6 +868,7 @@ def test_store_get_round_trip(t3, local_mode_write, content, collection, title, 
         assert text in result
 
 
+@pytest.mark.t2_tenant
 def test_store_get_not_found(t3):
     result = store_get(doc_id="nonexistent-id-12345", collection="fixture-subject")
     assert not result.startswith("Error:")
@@ -790,12 +880,14 @@ def test_store_get_empty_doc_id(t3):
     assert result.startswith("Error:")
 
 
+@pytest.mark.t2_tenant
 def test_store_get_no_ansi(t3, local_mode_write):
     doc_id = _put_id("ansi check content", title="ansi-get-test")
     result = store_get(doc_id=doc_id, collection="fixture-subject")
     assert not ANSI_RE.search(result), f"ANSI codes found in: {result[:100]}"
 
 
+@pytest.mark.t2_tenant
 def test_store_get_by_title_fallback(t3, local_mode_write):
     """store_get accepts an exact title when the input doesn't look like a
     16-char content hash — fixed in 4.9.6 follow-up (was silent Not found)."""
@@ -805,6 +897,7 @@ def test_store_get_by_title_fallback(t3, local_mode_write):
     assert "findable by title" in result
 
 
+@pytest.mark.t2_tenant
 def test_store_get_unknown_title_actionable_error(t3):
     """The Not-found message hints at the hash-vs-title distinction."""
     result = store_get(doc_id="totally-not-a-real-title", collection="fixture-subject")
@@ -812,6 +905,7 @@ def test_store_get_unknown_title_actionable_error(t3):
     assert "content-hash" in result.lower() or "title" in result.lower()
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_chunk_count_numeric(t3):
     """--docs=true derives chunk count from the dedup pass; previously
     showed `?` for every entry because metadata didn't carry chunk_count."""
@@ -826,6 +920,7 @@ def _docs_rows_for(result: str, title: str) -> list[str]:
     return [line for line in result.splitlines() if title in line]
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_write):
     """A note long enough to split is ONE document, not one row per piece.
 
@@ -860,6 +955,7 @@ def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_writ
     )
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mode_write):
     """nexus-sis0m.5: identical text in one collection is one T3 row by
     design, so two titled notes with the same content share their chunk.
@@ -875,6 +971,7 @@ def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mo
     assert "(2 documents, 1 chunks)" in result, result
 
 
+@pytest.mark.t2_tenant
 def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_mode_write):
     """nexus-sis0m.5: a chunk row carries its last writer's title, so a hit
     or a get by id named only the second of two notes with the same text.
@@ -896,6 +993,7 @@ def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_m
     assert "title-a · title-b" in line, hits
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write):
     """A chunk with no manifest row is never merged into a neighbour.
 
@@ -912,6 +1010,7 @@ def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mo
     assert len(_docs_rows_for(result, "solo-b")) == 1
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_write, monkeypatch):
     """A degraded grouping is announced, never silent (nexus-39upx hazard 4).
 
@@ -935,17 +1034,20 @@ def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_
 
 # ── Memory ───────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_memory_put(t2_path):
     result = memory_put(content="test memory", project="testproj", title="finding.md")
     assert "Stored:" in result
     assert "testproj/finding.md" in result
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_by_title(t2_path):
     memory_put(content="retrievable content", project="testproj", title="doc.md")
     assert "retrievable content" in memory_get(project="testproj", title="doc.md")
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_shows_permanent_for_an_omitted_ttl(t2_path):
     """nexus-473mx (Sam, 2026-09-12): omitting ttl stores a PERMANENT row,
     and memory_get is the surface that says so.
@@ -959,6 +1061,7 @@ def test_memory_get_shows_permanent_for_an_omitted_ttl(t2_path):
     assert "TTL: permanent" in memory_get(project="ttlproj", title="default.md")
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_shows_the_days_for_an_explicit_ttl(t2_path):
     """The other half of the reversal: a caller who ASKS for a clock still
     gets it, and memory_get still renders the days. Without this, the test
@@ -967,6 +1070,7 @@ def test_memory_get_shows_the_days_for_an_explicit_ttl(t2_path):
     assert "TTL: 30 days" in memory_get(project="ttlproj", title="clocked.md")
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_shows_permanent_for_explicit_none_ttl(t2_path):
     """An explicit ttl=None still yields a permanent row — unchanged by
     nexus-473mx, which only moved what SILENCE means."""
@@ -974,6 +1078,7 @@ def test_memory_get_shows_permanent_for_explicit_none_ttl(t2_path):
     assert "TTL: permanent" in memory_get(project="ttlproj", title="perm.md")
 
 
+@pytest.mark.t2_tenant
 def test_memory_get_empty_title_lists(t2_path):
     memory_put(content="entry1", project="listproj", title="a.md")
     memory_put(content="entry2", project="listproj", title="b.md")
@@ -981,6 +1086,7 @@ def test_memory_get_empty_title_lists(t2_path):
     assert "2 entries" in result and "a.md" in result and "b.md" in result
 
 
+@pytest.mark.t2_tenant
 def test_memory_search(t2_path):
     memory_put(content="chromadb vector embeddings", project="testproj", title="vectors.md")
     assert "vector" in memory_search(query="chromadb").lower()
@@ -988,28 +1094,33 @@ def test_memory_search(t2_path):
 
 # ── Scratch ──────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_scratch_put(t1):
     result = scratch(action="put", content="scratch note")
     assert "Stored:" in result
     assert len(result.split("Stored:")[1].strip()) > 0
 
 
+@pytest.mark.t2_tenant
 def test_scratch_search(t1):
     scratch(action="put", content="semantic search hypothesis")
     result = scratch(action="search", query="semantic search")
     assert "semantic" in result.lower() or "hypothesis" in result.lower()
 
 
+@pytest.mark.t2_tenant
 def test_scratch_list(t1):
     scratch(action="put", content="listed scratch item")
     assert "listed scratch" in scratch(action="list")
 
 
+@pytest.mark.t2_tenant
 def test_scratch_manage_flag(t1):
     doc_id = scratch(action="put", content="flaggable entry").split("Stored:")[1].strip()
     assert "Flagged:" in scratch_manage(action="flag", entry_id=doc_id)
 
 
+@pytest.mark.t2_tenant
 def test_scratch_manage_promote(t1, t2_path):
     doc_id = scratch(action="put", content="promotable content").split("Stored:")[1].strip()
     result = scratch_manage(action="promote", entry_id=doc_id, project="promo", title="promoted.md")
@@ -1033,6 +1144,7 @@ def test_store_put_empty_content(t3):
     assert result.startswith("Error:") and "content" in result.lower()
 
 
+@pytest.mark.t2_tenant
 def test_store_put_category_persisted_in_metadata(t3):
     """RDR-103 Phase 3b: ``store_put(..., category=X)`` stamps the
     ``category`` field on the chunk metadata so post-mortems can be
@@ -1055,6 +1167,7 @@ def test_store_put_category_persisted_in_metadata(t3):
     assert rows["metadatas"][0]["category"] == "rdr_postmortem"
 
 
+@pytest.mark.t2_tenant
 def test_store_put_category_default_empty(t3):
     """When ``category`` is not passed, the stored chunk metadata
     treats it as empty so a category-filtered ``where`` query (e.g.
@@ -1079,6 +1192,7 @@ def test_memory_put_empty_content(t2_path):
     assert result.startswith("Error:") and "content" in result.lower()
 
 
+@pytest.mark.t2_tenant
 def test_no_ansi_in_output(t1, t3, t2_path):
     results = [
         scratch(action="put", content="ansi test"),
@@ -1094,6 +1208,7 @@ def test_no_ansi_in_output(t1, t3, t2_path):
         assert not ANSI_RE.search(r), f"ANSI codes found in: {r[:100]}"
 
 
+@pytest.mark.t2_tenant
 def test_t1_isolated_prefix(t1_isolated):
     assert "[T1 isolated]" in scratch(action="put", content="isolated test")
     assert "[T1 isolated]" in scratch(action="list")
@@ -1178,6 +1293,27 @@ def test_fanout_floor_excludes_thin_collection_beside_healthy_sibling():
     assert len(captured) == 1
     assert "code__healthy" in captured[0]
     assert "code__thin" not in captured[0]
+
+
+def test_reset_singletons_drops_a_cached_search_page():
+    """The search page cache (nexus.mcp.core) does not outlive reset_singletons(): a page an
+    earlier test cached for the same query and target otherwise answers the next test's search
+    without calling the engine (develop CI 38952af7f, shard 6, the test below got 0 calls)."""
+    from nexus import mcp_infra
+    from nexus.mcp import core as mcp_core
+
+    _mock_t3([{"name": "knowledge__notes", "count": 1}])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="knowledge")
+        assert len(captured) == 1
+        _search_render("test query", corpus="knowledge")
+        assert len(captured) == 1, "the second identical search is served from the page cache"
+        mcp_infra.reset_singletons()
+        _mock_t3([{"name": "knowledge__notes", "count": 1}])
+        _search_render("test query", corpus="knowledge")
+    assert len(captured) == 2, "after the reset the search reaches the engine again"
+    assert mcp_core._page_cache_get(("absent",), 1) is None
 
 
 def test_fanout_floor_keeps_single_tiny_collection_under_prefix():
@@ -1340,6 +1476,7 @@ def test_fanout_floor_negative_count_sentinel_fails_open():
 # the fan-out floor skipped, the same way _no_results_message already
 # names backend-failed collections (nexus-pebfx.8).
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_exclusion_visible_in_search_hit_footer():
     from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
@@ -1356,6 +1493,7 @@ def test_fanout_floor_exclusion_visible_in_search_hit_footer():
     assert "[excluded below fan-out floor: code__thin]" in out
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_exclusion_visible_on_zero_hit():
     from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
@@ -1368,6 +1506,7 @@ def test_fanout_floor_exclusion_visible_on_zero_hit():
     assert "[excluded below fan-out floor: code__thin]" in out
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_no_footer_when_nothing_excluded():
     _mock_t3([{"name": "knowledge__notes", "count": 1}])
     fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
@@ -1379,6 +1518,7 @@ def test_fanout_floor_no_footer_when_nothing_excluded():
     assert "excluded below fan-out floor" not in out
 
 
+@pytest.mark.t2_tenant
 def test_fanout_floor_exclusion_visible_in_query_footer():
     """``query()`` shares the same visibility fix as ``search()``."""
     from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
@@ -1651,6 +1791,7 @@ def _fresh_page_cache(monkeypatch):
     mcp_core._reset_page_cache_for_tests()
 
 
+@pytest.mark.t2_tenant
 def test_page_turn_serves_from_lookahead_without_reembedding(monkeypatch):
     """nexus-e4srp: page 1 over-fetches a lookahead window; page 2 of the SAME
     retrieval identity serves from it — ONE engine call (one server-side query
@@ -1677,6 +1818,7 @@ def test_page_turn_serves_from_lookahead_without_reembedding(monkeypatch):
     assert "r0" in page1 and "r2" in page2 and "r0" not in page2
 
 
+@pytest.mark.t2_tenant
 def test_page_cache_misses_on_different_query(monkeypatch):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
@@ -1695,6 +1837,7 @@ def test_page_cache_misses_on_different_query(monkeypatch):
     assert calls == ["first", "second"]
 
 
+@pytest.mark.t2_tenant
 def test_page_cache_expires_on_ttl(monkeypatch):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
@@ -1717,6 +1860,7 @@ def test_page_cache_expires_on_ttl(monkeypatch):
     assert len(calls) == 2, "an expired cache entry must refetch"
 
 
+@pytest.mark.t2_tenant
 def test_page_beyond_lookahead_refetches_wider(monkeypatch):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
@@ -1736,6 +1880,7 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
     assert len(calls) == 2
     assert calls[1] >= 22  # refetched wide enough for the requested window
 
+@pytest.mark.t2_tenant
 def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     """Batch-f1655f55 critique fold: a write inside the TTL window must not
     leave a same-identity page burst serving pre-write results — store_put
@@ -1779,6 +1924,7 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     )
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
@@ -1806,6 +1952,7 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
 
 
+@pytest.mark.t2_tenant
 def test_store_put_invalidates_collections_cache(t3, monkeypatch):
     """Cache-coherence review finding (Important, code-review-nexus-
     rbhci-516701aa3): unlike ``_page_cache``, ``_collections_cache``
@@ -1826,6 +1973,7 @@ def test_store_put_invalidates_collections_cache(t3, monkeypatch):
     )
 
 
+@pytest.mark.t2_tenant
 def test_store_delete_invalidates_collections_cache(t3, monkeypatch, local_mode_write):
     """Same cache-coherence review finding as the store_put test above,
     for the delete path."""
@@ -1876,6 +2024,7 @@ def test_cached_zero_hit_preserves_threshold_diag(monkeypatch):
     )
 
 
+@pytest.mark.t2_tenant
 def test_search_pagination_first_page(t3):
     coll = "knowledge__pag__voyage-context-3__v1"
     for i in range(5):
@@ -1884,6 +2033,7 @@ def test_search_pagination_first_page(t3):
     assert "showing 1-2" in result and "offset=2" in result
 
 
+@pytest.mark.t2_tenant
 def test_search_pagination_pages_differ(t3):
     coll = "knowledge__pag2__voyage-context-3__v1"
     for i in range(6):
@@ -1896,18 +2046,21 @@ def test_search_pagination_pages_differ(t3):
     assert p1.isdisjoint(p2), f"Pages overlap: {p1 & p2}"
 
 
+@pytest.mark.t2_tenant
 def test_search_pagination_last_page(t3):
     coll = "knowledge__pag3__voyage-context-3__v1"
     t3.put(collection=coll, content="only document about finality", title="solo")
     assert "(end)" in _search_render(query="finality", corpus=coll, limit=10, offset=0)
 
 
+@pytest.mark.t2_tenant
 def test_search_pagination_offset_beyond_end(t3):
     coll = "knowledge__pag4__voyage-context-3__v1"
     t3.put(collection=coll, content="small collection", title="one")
     assert "No results at offset 100" in _search_render(query="small", corpus=coll, limit=10, offset=100)
 
 
+@pytest.mark.t2_tenant
 def test_store_list_pagination(t3):
     for i in range(5):
         store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
@@ -1916,6 +2069,7 @@ def test_store_list_pagination(t3):
     assert "showing 3-4; 5 stored" in store_list(collection="knowledge__pagtest", limit=2, offset=2)
 
 
+@pytest.mark.t2_tenant
 def test_store_list_pagination_offset_beyond_end(t3):
     store_put(content="solo entry", collection="knowledge__pagend", title="one")
     assert "No entries at offset 100" in store_list(collection="knowledge__pagend", limit=10, offset=100)
@@ -1925,6 +2079,7 @@ def test_store_list_collection_not_found(t3):
     assert "Collection not found" in store_list(collection="knowledge__doesnotexist", limit=10)
 
 
+@pytest.mark.t2_tenant
 def test_memory_search_pagination(t2_path):
     for i in range(5):
         memory_put(content=f"finding about pagination topic {i}", project="testproj", title=f"page{i}.md")
@@ -1933,6 +2088,7 @@ def test_memory_search_pagination(t2_path):
     assert "showing 3-4 of 5" in memory_search(query="pagination", limit=2, offset=2)
 
 
+@pytest.mark.t2_tenant
 def test_memory_search_pagination_offset_beyond_end(t2_path):
     memory_put(content="solitary finding about offsets", project="testproj", title="solo.md")
     assert "No results at offset 100" in memory_search(query="offsets", limit=10, offset=100)
@@ -1950,6 +2106,7 @@ def test_memory_search_pagination_offset_beyond_end(t2_path):
 # far-under-cap result is untouched -- byte-identical to every other
 # assertion in this file that already exercises these tools' normal path.
 
+@pytest.mark.t2_tenant
 def test_search_caps_oversized_result(monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -1967,6 +2124,7 @@ def test_search_caps_oversized_result(monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_search_under_cap_is_unaffected():
     _mock_t3([{"name": "code__test", "count": 1}])
     with patch("nexus.search_engine.search_cross_corpus",
@@ -1986,6 +2144,7 @@ def test_search_under_cap_is_unaffected():
 # ``CallToolResult`` is returned either way (no FastMCP ToolManager/transport
 # needed to observe ``.content`` / ``.structuredContent``).
 
+@pytest.mark.t2_tenant
 def test_search_default_mode_returns_calltoolresult_with_structured_content():
     _mock_t3([{"name": "code__test", "count": 1}])
     with patch("nexus.search_engine.search_cross_corpus",
@@ -2023,6 +2182,7 @@ def test_search_default_mode_returns_calltoolresult_with_structured_content():
     assert data["truncated_chars"] == 0
 
 
+@pytest.mark.t2_tenant
 def test_search_structured_content_carries_the_render_text():
     """structuredContent must be SELF-SUFFICIENT (nexus-6jlki follow-up).
 
@@ -2064,6 +2224,7 @@ def test_search_structured_content_carries_the_render_text():
     assert "vector database internals" in result.structuredContent["text"]
 
 
+@pytest.mark.t2_tenant
 def test_search_structured_true_wire_call_unchanged():
     """``structured=True`` over the wire is untouched: bare dict, no
     CallToolResult, no new keys — the plan-runner in-process contract."""
@@ -2082,6 +2243,7 @@ def test_search_structured_true_wire_call_unchanged():
     assert "truncated_chars" not in result
 
 
+@pytest.mark.t2_tenant
 def test_search_structured_tumblers_carry_the_attached_doc_id():
     """nexus-kkqv7: every structured row's tumbler was "" because the
     envelope read metadata["tumbler"] while search_cross_corpus attaches the
@@ -2112,6 +2274,7 @@ def test_search_structured_tumblers_carry_the_attached_doc_id():
     assert result["tumblers"] == ["1.1.4830"]
 
 
+@pytest.mark.t2_tenant
 def test_search_structured_partial_mismatch_carries_warnings_key():
     """nexus-vply6 fix round 2, point 2: a call that DID return results
     but also skipped a collection (the SAME SearchDiagnostics.
@@ -2158,6 +2321,7 @@ def test_search_structured_partial_mismatch_carries_warnings_key():
     assert "knowledge__seam" in rendered
 
 
+@pytest.mark.t2_tenant
 def test_search_structured_content_reflects_text_truncation(monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2222,6 +2386,7 @@ def test_scoped_search_tools_cap_oversized_results(monkeypatch):
         assert "[search_graph_hop: result capped at 100 chars" in out
 
 
+@pytest.mark.t2_tenant
 def test_query_caps_oversized_result(monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2240,6 +2405,7 @@ def test_query_caps_oversized_result(monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_query_under_cap_is_unaffected():
     _mock_t3([{"name": "code__test", "count": 1}])
     with patch("nexus.search_engine.search_cross_corpus",
@@ -2251,6 +2417,7 @@ def test_query_under_cap_is_unaffected():
     assert "result capped" not in out
 
 
+@pytest.mark.t2_tenant
 def test_store_list_caps_oversized_result(t3, monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2262,12 +2429,14 @@ def test_store_list_caps_oversized_result(t3, monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_store_list_under_cap_is_unaffected(t3):
     store_put(content="solo entry", collection="knowledge__nocapstore", title="one")
     out = store_list(collection="knowledge__nocapstore", limit=10)
     assert "result capped" not in out
 
 
+@pytest.mark.t2_tenant
 def test_store_list_docs_caps_oversized_result(t3, monkeypatch):
     # docs=True EXPLICITLY ignores limit/offset and scans the full
     # collection (nexus-2xjge audit's clearest unbounded case).
@@ -2280,6 +2449,7 @@ def test_store_list_docs_caps_oversized_result(t3, monkeypatch):
     assert "[store_list: result capped at 100 chars" in out
 
 
+@pytest.mark.t2_tenant
 def test_memory_search_caps_oversized_result(t2_path, monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2291,12 +2461,14 @@ def test_memory_search_caps_oversized_result(t2_path, monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_memory_search_under_cap_is_unaffected(t2_path):
     memory_put(content="a small finding", project="nocapproj", title="one.md")
     out = memory_search(query="small", limit=10)
     assert "result capped" not in out
 
 
+@pytest.mark.t2_tenant
 def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2312,6 +2484,7 @@ def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_plan_search_under_cap_is_unaffected(t2_path):
     plan_save(
         query="a small plan", plan_json='{"steps": []}',
@@ -2321,6 +2494,7 @@ def test_plan_search_under_cap_is_unaffected(t2_path):
     assert "result capped" not in out
 
 
+@pytest.mark.t2_tenant
 def test_scratch_search_caps_oversized_result(t1, monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2332,12 +2506,14 @@ def test_scratch_search_caps_oversized_result(t1, monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_scratch_search_under_cap_is_unaffected(t1):
     scratch(action="put", content="a small note")
     out = scratch(action="search", query="small")
     assert "result capped" not in out
 
 
+@pytest.mark.t2_tenant
 def test_scratch_list_caps_oversized_result(t1, monkeypatch):
     from nexus.mcp import core as mcp_core
 
@@ -2349,6 +2525,7 @@ def test_scratch_list_caps_oversized_result(t1, monkeypatch):
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
+@pytest.mark.t2_tenant
 def test_scratch_list_under_cap_is_unaffected(t1):
     scratch(action="put", content="a small listed item")
     out = scratch(action="list")
@@ -2357,6 +2534,7 @@ def test_scratch_list_under_cap_is_unaffected(t1):
 
 # ── Plans ────────────────────────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_plan_save_and_search(t2_path):
     result = plan_save(
         query="compare error handling",
@@ -2368,6 +2546,7 @@ def test_plan_save_and_search(t2_path):
     assert "compare error handling" in plan_search(query="error handling", project="testproj")
 
 
+@pytest.mark.t2_tenant
 def test_plan_save_refuses_verbless(t2_path):
     # nexus-fiovt: the MCP plan_save tool must refuse a verb-less write — the
     # source of the NULL-verb pollution (implementation plans keyed by task
@@ -2383,10 +2562,12 @@ def test_plan_save_refuses_verbless(t2_path):
     assert "No matching plans" in plan_search(query="RDR-999 phased execution", project="testproj")
 
 
+@pytest.mark.t2_tenant
 def test_plan_search_empty(t2_path):
     assert "No matching plans" in plan_search(query="nonexistent")
 
 
+@pytest.mark.t2_tenant
 def test_plan_delete_round_trip(t2_path):
     # nexus-v92zj: plan_save's destructive counterpart — a throwaway probe
     # entry must be removable via MCP without direct DB access.
@@ -2404,6 +2585,7 @@ def test_plan_delete_round_trip(t2_path):
     assert "No matching plans" in plan_search(query="shakeout probe", project="testproj")
 
 
+@pytest.mark.t2_tenant
 def test_plan_delete_not_found(t2_path):
     assert "Not found: plan id 999999" in plan_delete(plan_id=999999)
 
@@ -2437,6 +2619,7 @@ def catalog_with_docs():
 
 
 class TestQueryCatalogRouting:
+    @pytest.mark.t2_tenant
     def test_backward_compat(self, t3):
         t3.put(
             collection="knowledge__test__voyage-context-3__v1",
@@ -2444,6 +2627,7 @@ class TestQueryCatalogRouting:
         )
         assert not query(question="vector database", corpus="knowledge__test").startswith("Error:")
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("kwargs, collection, content, expect_in", [
         pytest.param({"author": "Vaswani"}, "knowledge__papers__voyage-context-3__v1",
                      "transformer attention mechanism",
@@ -2475,6 +2659,7 @@ class TestQueryCatalogRouting:
         monkeypatch.setattr(mod, "_get_catalog", lambda: None)
         assert "catalog not initialized" in query(question="test", author="someone").lower()
 
+    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("kwargs", [
         pytest.param({"author": "NonexistentAuthor"}, id="author-no-match"),
         pytest.param({"subtree": "9.9"}, id="subtree-empty"),
@@ -2518,11 +2703,13 @@ def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):
         return _search_render("test query", corpus=corpus, cluster_by=cluster_by)
 
 
+@pytest.mark.t2_tenant
 def test_cluster_labels_in_output():
     output = _search_clustered(_make_clustered_results())
     assert "HNSW Robustness" in output and "Result Clustering" in output
 
 
+@pytest.mark.t2_tenant
 def test_cluster_order_preserved():
     output = _search_clustered(_make_clustered_results())
     positions = [output.find(s) for s in (
@@ -2530,6 +2717,7 @@ def test_cluster_order_preserved():
     assert positions == sorted(positions) and all(p >= 0 for p in positions)
 
 
+@pytest.mark.t2_tenant
 def test_flat_search_no_cluster_headers():
     results = [SearchResult(id="r1", content="some result", distance=0.3,
                             collection="knowledge__papers", metadata={"title": "Paper"})]
@@ -2804,6 +2992,7 @@ def test_store_put_refuses_a_placeholder_collection() -> None:
 # ── nexus-onn7s: annotated context block on the text renders ────────────────
 
 
+@pytest.mark.t2_tenant
 def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     from nexus.context_annotations import READER_INSTRUCTION
 
@@ -2822,6 +3011,7 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
 
 # ── RDR-204 Phase 3 funnel (nexus-ft04v.21): _resolve_corpus_target ─────────
 
+@pytest.mark.t2_tenant
 def test_resolve_corpus_target_funnel_pinned(monkeypatch):
     """The two raw sites in ``_resolve_corpus_target`` (the ``corpus ==
     "all"`` prefix-collection loop's ``n.split("__", 1)[0]``, and the
@@ -2864,6 +3054,7 @@ def test_search_error_is_marked_in_structured_content():
     assert result.structuredContent["ids"] == []
 
 
+@pytest.mark.t2_tenant
 def test_lexical_search_asks_for_the_rerank_and_orders_by_it():
     """nexus-zdzm5 (surface A A2, RDR-217): MCP search never requested the
     server rerank, so a lexical row (vector distance usually the worst in the
@@ -2892,6 +3083,7 @@ def test_lexical_search_asks_for_the_rerank_and_orders_by_it():
     assert result["ids"] == ["lexical-far", "scored-mid", "vector-near"]
 
 
+@pytest.mark.t2_tenant
 def test_a_non_lexical_search_does_not_ask_for_the_rerank():
     t3 = _mock_t3([{"name": "code__test", "count": 1}])
     t3.supports_server_rerank = True
@@ -2908,6 +3100,7 @@ def test_a_non_lexical_search_does_not_ask_for_the_rerank():
     assert seen["rerank"] is False
 
 
+@pytest.mark.t2_tenant
 def test_semantic_clustering_keeps_the_lexical_rerank_order():
     """Review finding on a463fa4ce: cluster_by="semantic" restored the
     pre-rerank cluster order after the rerank, putting a lexical row back
@@ -2933,6 +3126,7 @@ def test_semantic_clustering_keeps_the_lexical_rerank_order():
     assert result["ids"] == ["lexical-b", "near-a", "near-a2"]
 
 
+@pytest.mark.t2_tenant
 def test_topic_grouped_clusters_stay_contiguous_under_the_lexical_rerank():
     """Review finding on 312751471: topic grouping labels rows _topic_label,
     not _cluster_label; keying on _cluster_label alone collapsed every row
@@ -2968,6 +3162,7 @@ def test_the_page_cache_returns_the_note_of_the_entry_it_returns():
     assert _core._page_cache_get(("k2",), 5) == (["s"], [], None)
 
 
+@pytest.mark.t2_tenant
 def test_a_topic_grouped_text_render_prints_the_topic_headers():
     """Critique of 29fab0df4/634cc2b66: the text header read only
     _cluster_label, so topic-grouped results printed no headers."""

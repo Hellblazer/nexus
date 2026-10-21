@@ -1,0 +1,95 @@
+# Postgres cluster start sites the DDL/bytes counter does not read (nexus-sz651, epic nexus-aca0q).
+#
+# tests/_ddl_cluster_sites.py explains what a site is and what the scan covers. The terminal line prints the
+# sum of [uncounted] as `N uncounted cluster start sites (static tree census)`, then the sum of [provisioning]
+# as `+ M product-provisioning commands (sh_nx_init, counted apart)`: an `nx init` provisions the product's own
+# cluster, so it is never added into N. Both are call sites, not clusters: one Python cluster usually counts
+# twice (its <module>::initdb and its pg_instance::pg_ctl_start). Shell sites are keyed by file and kind, with the
+# per-file count. tests/test_ddl_uncounted_clusters_lint.py fails when this file and the tree differ, in either
+# direction.
+#
+# Scanned: tests/**/*.py and scripts/**/*.py (pg_ctl_start, initdb, docker_run of a postgres/pgvector image),
+# tests/e2e/**/*.sh (sh_pg_ctl_start, sh_initdb, sh_docker_run, sh_nx_init) and the jOOQ code generator's runner.
+# NOT scanned, so this is not every start site: shell outside tests/e2e, among it files that do start clusters:
+#   - scripts/liquibase_bundle_smoke.sh (provisions a bundle cluster with pg_provision.provision())
+#   - service/native-smoke.sh (docker run of pgvector/pgvector:pg17)
+#   - tests/containers/fanout.sh (docker run of the pytest shard images, whose Python clusters are census sites once per run)
+#   - tests/cc-validation/* (docker run of an image whose Claude Code session starts the product service; no literal start)
+# also e2e clusters started by anything but a literal `nx init` (nx start, wrapper scripts), and a docker run
+# whose argv or image is not a literal. Regenerate with
+#   uv run python -m tests._ddl_cluster_sites --write
+# and review the diff: a new line is a start site whose cluster the counter cannot see.
+
+[counted]
+sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
+
+[uncounted]
+"service/src/build/java/dev/nexus/build/PgContainerRecipe.java::PostgreSQLContainer" = 1
+"tests/_engine_substrate.py::throwaway_pg_cluster::pg_ctl_start" = 1
+"tests/benchmarks/test_retrieval_drift_gate.py::<module>::initdb" = 1
+"tests/benchmarks/test_retrieval_drift_gate.py::pg_instance::pg_ctl_start" = 1
+"tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py::<module>::initdb" = 1
+"tests/db/test_5xn3k_runfence_gate.py::<module>::initdb" = 1
+"tests/db/test_5xn3k_runfence_gate.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_catalog_consumer_qnp5s_integration.py::<module>::initdb" = 1
+"tests/db/test_catalog_consumer_qnp5s_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_collection_health_dsu5z_integration.py::<module>::initdb" = 1
+"tests/db/test_collection_health_dsu5z_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_coverage_3cwnx_integration.py::<module>::initdb" = 1
+"tests/db/test_coverage_3cwnx_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_data_token_mint_e2e.py::<module>::initdb" = 1
+"tests/db/test_data_token_mint_e2e.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_embed_parity.py::<module>::initdb" = 1
+"tests/db/test_embed_parity.py::_provision_pg::pg_ctl_start" = 1
+"tests/db/test_frecency_enehl_integration.py::<module>::initdb" = 1
+"tests/db/test_frecency_enehl_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_health_service_integration.py::<module>::initdb" = 1
+"tests/db/test_health_service_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_aspects_stores_integration.py::<module>::initdb" = 1
+"tests/db/test_http_aspects_stores_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_catalog_integration.py::<module>::initdb" = 1
+"tests/db/test_http_catalog_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_chash_integration.py::<module>::initdb" = 1
+"tests/db/test_http_chash_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_combined_query_integration.py::pg_instance::docker_run" = 1
+"tests/db/test_http_memory_store_integration.py::<module>::initdb" = 1
+"tests/db/test_http_memory_store_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_plan_library_integration.py::<module>::initdb" = 1
+"tests/db/test_http_plan_library_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_scratch_store_integration.py::<module>::initdb" = 1
+"tests/db/test_http_scratch_store_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_taxonomy_store_integration.py::<module>::initdb" = 1
+"tests/db/test_http_taxonomy_store_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_http_telemetry_store_integration.py::<module>::initdb" = 1
+"tests/db/test_http_telemetry_store_integration.py::pg_service::pg_ctl_start" = 1
+"tests/db/test_indexer_seam_b_integration.py::<module>::initdb" = 1
+"tests/db/test_indexer_seam_b_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_l9hd8_aspect_sql_service_integration.py::<module>::initdb" = 1
+"tests/db/test_l9hd8_aspect_sql_service_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_mvv_memory_service.py::<module>::initdb" = 1
+"tests/db/test_mvv_memory_service.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_nexus_diag_role.py::<module>::initdb" = 1
+"tests/db/test_no_host_pg_fallback.py::test_the_two_sanctioned_legs_still_work::initdb" = 1
+"tests/db/test_pg_bundle_relocation.py::_relocated_root::initdb" = 1
+"tests/db/test_pg_provision.py::<module>::initdb" = 1
+"tests/db/test_pg_provision_binary_discovery.py::test_bundle_under_config_dir_resolved_without_nexus_pg_bin::initdb" = 1
+"tests/db/test_pg_provision_ca3_bundle.py::_bundle_root::initdb" = 1
+"tests/db/test_pg_scram_auth.py::<module>::initdb" = 1
+"tests/db/test_recovery_bundle_integration.py::<module>::initdb" = 1
+"tests/db/test_recovery_bundle_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/db/test_svc_monitor_role_live.py::<module>::initdb" = 1
+"tests/db/test_write_seam_gate_integration.py::pg_instance::docker_run" = 1
+"tests/db/test_xnz0o_commands_integration.py::<module>::initdb" = 1
+"tests/db/test_xnz0o_commands_integration.py::pg_instance::pg_ctl_start" = 1
+"tests/e2e/gc-ab/run-ab.sh::sh_docker_run" = 1
+"tests/test_init_pg_bundle_acquire.py::test_pinned_tag_downloads_extracts_selects::initdb" = 1
+"tests/test_pg_ctl_start.py::test_a_failed_start_raises_with_what_pg_ctl_said::pg_ctl_start" = 2
+"tests/test_pg_ctl_start.py::test_pg_ctl_start_returns_while_the_postmaster_still_holds_its_handles::pg_ctl_start" = 1
+
+[provisioning]
+"tests/e2e/benchmark-corpus.sh::sh_nx_init" = 1
+"tests/e2e/fresh-install-mvv.sh::sh_nx_init" = 1
+"tests/e2e/hook-surface-shakeout/shakeout_in_container.sh::sh_nx_init" = 1
+"tests/e2e/local-service-gate.sh::sh_nx_init" = 1
+"tests/e2e/migration-rehearsal/rehearse_acquire.sh::sh_nx_init" = 1
+"tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh::sh_nx_init" = 2

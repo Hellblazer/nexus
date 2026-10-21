@@ -41,15 +41,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * empty database (see {@link SharedCluster}), so shape/seed assertions
  * against it are also a live proof that this bead's changesets walk clean
  * from empty. {@link #catalogCollections_gainsNullableDimensionAndLifecycleStateColumns()}
- * (originally the fourth shared-cluster test) moved to its OWN dedicated
- * container migrated only up to hygiene-002-1 (nexus-ft04v.4/.5, the
+ * (originally the fourth shared-cluster test) moved to its OWN empty
+ * database migrated only up to hygiene-002-1 (nexus-ft04v.4/.5, the
  * walk-and-constrain changeset that lands immediately after this bead's own
  * four): once hygiene-002-1 exists, the shared cluster's lifecycle_state is
  * genuinely NOT NULL by the time it is fully migrated, so nullability can
  * only be observed at the exact point this bead's own changesets leave it.
  *
  * <p>{@link #changesetsWalkOverAPopulatedStore_preExistingRowSurvives_reRunIsNoOp()}
- * uses a genuinely DEDICATED container ({@link PgContainerHelper#startDedicated()})
+ * uses a genuinely EMPTY database ({@link PgContainerHelper#startEmptyDatabase()})
  * to prove the properties a shared-cluster read cannot: (1) catalog-036's own
  * four changesets are pure ADD COLUMN even with a real, pre-existing
  * {@code catalog_collections} row already present (the populated-store case
@@ -171,7 +171,7 @@ class Catalog036EmbeddingProfileSchemaLiquibaseTest {
      */
     @Test
     void catalogCollections_gainsNullableDimensionAndLifecycleStateColumns() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 migrateUpTo(su, "hygiene-002-1");
@@ -201,14 +201,14 @@ class Catalog036EmbeddingProfileSchemaLiquibaseTest {
         }
     }
 
-    // ── Test 5: populated store, walk-from-empty, and re-run no-op (dedicated container) ──
+    // ── Test 5: populated store, walk-from-empty, and re-run no-op (empty database) ──
 
     @Test
     void changesetsWalkOverAPopulatedStore_preExistingRowSurvives_reRunIsNoOp() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             // Phase 1: migrate up to (NOT including) catalog-036-1 on a
-            // GENUINELY fresh, dedicated database -- this IS the walk-from-
+            // GENUINELY empty database -- this IS the walk-from-
             // empty proof for every changeset that precedes this bead's own,
             // and sets up the pre-existing row below to predate this bead's
             // changesets entirely (Hygiene001NotNullMigrationRlsTest's idiom).

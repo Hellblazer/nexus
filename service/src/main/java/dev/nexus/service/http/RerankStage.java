@@ -101,8 +101,7 @@ final class RerankStage {
             return envelope(rows, false, null, null);
         }
         if (reranker == null) {
-            return degrade(rows, topK, "no reranker configured: the engine has neither Voyage"
-                    + " credentials nor a local cross-encoder for this deployment");
+            return degrade(rows, topK, "no reranker configured");
         }
 
         // Exclude textless rows (reference-only chunks): docIndexToRowIndex maps
@@ -139,6 +138,17 @@ final class RerankStage {
         } catch (RerankUpstreamException | UpstreamAuthException e) {
             log.warn("event=rerank_degraded reason=upstream_failure error=\"{}\"", e.getMessage());
             return degrade(rows, topK, e.getMessage());
+        } catch (LinkageError e) {
+            // nexus-lt84r: "cannot load" covers a native-load failure. A local reranker whose ONNX Runtime
+            // native library will not load throws UnsatisfiedLinkError, or NoClassDefFoundError once the
+            // class's static initialiser has failed. Both are Errors, not Exceptions, so they bypassed the
+            // two arms above and became a 500 instead of a loud degrade. The rows still serve in distance
+            // order, and nothing is sent to another provider in its place.
+            log.warn("event=rerank_degraded reason=native_load_failed error=\"{}: {}\"",
+                     e.getClass().getSimpleName(), e.getMessage());
+            return degrade(rows, topK, "the local reranker cannot load its native runtime ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + "); re-provision with `"
+                    + dev.nexus.service.vectors.BootPlan.PROVISION_COMMAND + "` or check the engine's native library path");
         }
 
         boolean[] taken = new boolean[rows.size()];

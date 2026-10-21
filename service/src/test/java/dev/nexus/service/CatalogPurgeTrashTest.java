@@ -9,6 +9,7 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -21,12 +22,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -134,8 +137,7 @@ class CatalogPurgeTrashTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // purge_trash(interval) EXECUTE is not part of bootstrapServiceRole's
             // fixed grant set (nexus-cbo4a batch 1a) -- kept as an explicit grant.
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.purge_trash(interval)", SVC_ROLE);
         }
 
         var cfg = new HikariConfig();
@@ -155,21 +157,26 @@ class CatalogPurgeTrashTest {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_FRESH_TOMB + "', 'Fresh Tomb', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_AGED_TOMB + "', 'Aged Tomb', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertDocument(seed, DOC_LIVE, "Live");
+            insertDocument(seed, DOC_FRESH_TOMB, "Fresh Tomb");
+            insertDocument(seed, DOC_AGED_TOMB, "Aged Tomb");
             // nexus-tk070.p1 (RDR-194 § D2): one catalog_links row per tombstone
             // class, DOC_LIVE as the FROM side, so purge_trash's Step 4 physical
             // delete of DOC_AGED_TOMB exercises fk_catalog_links_to_document's
             // cascade (execute_... below), while DOC_FRESH_TOMB's link — still
             // inside the grace window, never physically deleted by this fixture —
             // stays a live pin that the link never disappears out from under.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_AGED_TOMB + "', 'relates', 'test', NOW()), "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_FRESH_TOMB + "', 'relates', 'test', NOW())");
+            for (String to : List.of(DOC_AGED_TOMB, DOC_FRESH_TOMB)) {
+                seed.insertInto(CATALOG_LINKS)
+                    .set(CATALOG_LINKS.TENANT_ID, TENANT)
+                    .set(CATALOG_LINKS.FROM_TUMBLER, DOC_LIVE)
+                    .set(CATALOG_LINKS.TO_TUMBLER, to)
+                    .set(CATALOG_LINKS.LINK_TYPE, "relates")
+                    .set(CATALOG_LINKS.CREATED_BY, "test")
+                    .set(CATALOG_LINKS.CREATED_AT, DSL.currentOffsetDateTime())
+                    .execute();
+            }
         }
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
@@ -197,9 +204,12 @@ class CatalogPurgeTrashTest {
         // FRESH's tombstone stays at "just now".
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + DOC_AGED_TOMB + "'");
+            // A Java-clock value, as in the cross-collection fixture below; the 60-day margin against the
+            // 30-day older_than threshold leaves no room for JVM/Postgres clock drift to matter.
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_AGED_TOMB)))
+                .execute();
         }
     }
 
@@ -220,17 +230,24 @@ class CatalogPurgeTrashTest {
      * fixture below needs a manifest row stamped with a collection OTHER than the
      * shared {@link #COLLECTION} constant. */
     private static void insertManifestRow(Connection su, String docId, String chashHex, String collection) throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, ?)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, docId);
-            ps.setString(3, chashHex);
-            ps.setString(4, collection);
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
             // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
-            ps.setString(5, MODEL);
-            ps.execute();
-        }
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+            .execute();
+    }
+
+    private static void insertDocument(DSLContext seed, String tumbler, String title) {
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .execute();
     }
 
     /** RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks --
@@ -239,14 +256,9 @@ class CatalogPurgeTrashTest {
      *  guard keeps this helper correct if that ever changes). */
     private long chunks384Count(String chashHex) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND chash = decode(?, 'hex') "
-                + "AND embedding_384 IS NOT NULL");
-            ps.setString(1, TENANT);
-            ps.setString(2, chashHex);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashHex)),
+                CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
@@ -272,34 +284,23 @@ class CatalogPurgeTrashTest {
      *  the mechanical before/after diff a preview count is checked against. */
     private long totalChunks384Rows() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND embedding_384 IS NOT NULL");
-            ps.setString(1, TENANT);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
     private long countManifestRows(String chashHex) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = ? AND chash = decode(?, 'hex')");
-            ps.setString(1, TENANT);
-            ps.setString(2, chashHex);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashHex)));
         }
     }
 
     private boolean documentExists(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, tumbler);
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT), CATALOG_DOCUMENTS.TUMBLER.eq(tumbler));
         }
     }
 
@@ -309,22 +310,27 @@ class CatalogPurgeTrashTest {
      *  fk_catalog_links_to_document, with no explicit Java or plpgsql step required. */
     private boolean linkToExists(String toTumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.catalog_links WHERE tenant_id = ? AND to_tumbler = ?");
-            ps.setString(1, TENANT);
-            ps.setString(2, toTumbler);
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_LINKS,
+                CATALOG_LINKS.TENANT_ID.eq(TENANT), CATALOG_LINKS.TO_TUMBLER.eq(toTumbler));
         }
+    }
+
+    /** Sets one tombstone's {@code deleted_at} to {@code deletedAt}. */
+    private static void backdate(DSLContext dsl, String tumbler, OffsetDateTime deletedAt) {
+        dsl.update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .execute();
     }
 
     /** Server-captured {@code NOW()} (nexus-ff85q precedent: pin against a SQL-side
      *  instant, never a Java-clock read) — the reference point the boundary test
-     *  backdates {@code deleted_at} relative to. */
+     *  backdates {@code deleted_at} relative to. The 60-day fixtures above may use the
+     *  Java clock only because their margin dwarfs any drift; a boundary never does. */
     private java.time.OffsetDateTime capturedNow() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery("SELECT NOW()");
-            rs.next();
-            return rs.getObject(1, java.time.OffsetDateTime.class);
+            return DSL.using(su, SQLDialect.POSTGRES).select(DSL.currentOffsetDateTime())
+                .fetchOne(0, java.time.OffsetDateTime.class);
         }
     }
 
@@ -466,11 +472,10 @@ class CatalogPurgeTrashTest {
         // Fresh, self-contained fixture: three docs, own chashes.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_AT + "', 'Boundary At', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_INSIDE + "', 'Boundary Inside', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_OUTSIDE + "', 'Boundary Outside', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertDocument(seed, DOC_BOUNDARY_AT, "Boundary At");
+            insertDocument(seed, DOC_BOUNDARY_INSIDE, "Boundary Inside");
+            insertDocument(seed, DOC_BOUNDARY_OUTSIDE, "Boundary Outside");
         }
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk vectors to land BEFORE the manifest rows below.
@@ -508,18 +513,10 @@ class CatalogPurgeTrashTest {
         java.time.OffsetDateTime tRef = capturedNow();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "UPDATE nexus.catalog_documents SET deleted_at = ? WHERE tenant_id = ? AND tumbler = ?");
-            ps.setObject(1, tRef.minusDays(olderThanDays));
-            ps.setString(2, TENANT);
-            ps.setString(3, DOC_BOUNDARY_AT);
-            ps.executeUpdate();
-            ps.setObject(1, tRef.minusDays(olderThanDays).plusSeconds(30));
-            ps.setString(3, DOC_BOUNDARY_INSIDE);
-            ps.executeUpdate();
-            ps.setObject(1, tRef.minusDays(olderThanDays).minusSeconds(30));
-            ps.setString(3, DOC_BOUNDARY_OUTSIDE);
-            ps.executeUpdate();
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            backdate(dsl, DOC_BOUNDARY_AT, tRef.minusDays(olderThanDays));
+            backdate(dsl, DOC_BOUNDARY_INSIDE, tRef.minusDays(olderThanDays).plusSeconds(30));
+            backdate(dsl, DOC_BOUNDARY_OUTSIDE, tRef.minusDays(olderThanDays).minusSeconds(30));
         }
 
         // nexus-erwvd parity setup: preview immediately before execute, on this exact

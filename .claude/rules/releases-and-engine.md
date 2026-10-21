@@ -39,7 +39,7 @@ Full text: [plugin-release-channel](docs/agents/plugin-release-channel.md). Plug
 **Authority and the full incident archive: [engine-service-release](docs/agents/engine-service-release.md)** (moved verbatim; it is not a summary). Invoke the `engine-release` skill as the executable checklist.
 
 - The Java engine-service binary is cut by an `engine-service-vX.Y.Z` tag, separate from the PyPI release and not gated by it. **Prep is AI, the tag push is human (Sam).** Version is tag-stamped; there is no manifest to bump.
-- Build or test the engine only through `scripts/mvnw-leased.sh`, never a bare `./mvnw`/`mvn` (one builder at a time).
+- Build or test the engine only through `scripts/mvnw-leased.sh`, never a bare `./mvnw`/`mvn` (one builder at a time). On a lab pool host pass `--lab-run <class>` rather than wrapping it in `lab-run`: the lease comes before the grant, so a build waiting its turn holds no cores (nexus-iqmih).
 - **ONE engine identity per release:** bump `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py` unconditionally to the engine the release was built and gated with. It also derives `PINNED_SERVICE_TAG`. Local-mode installs get only what that constant names.
 - **Paired release:** cut the engine tag FIRST (a tag cut is never blocked); the client release bumps the pin in the same release; the deploy fires before or at client-tag push, never "eventually". `scripts/check_engine_release_floor.py --client-precondition engine-service-vX.Y.Z` gates the DEPLOY, never the tag cut.
 - Deploy and cloud-gate are conexus-side: surface "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Sam, never as autonomous.

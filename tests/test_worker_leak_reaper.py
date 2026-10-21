@@ -28,6 +28,9 @@ about. These tests exist mostly to hold that boundary.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from tests.conftest import reap_leaked_aspect_workers
@@ -252,6 +255,78 @@ class TestStaleRootDiscovery:
 
     def test_survives_a_missing_root(self, tmp_path: Path) -> None:
         assert stale_pytest_roots(tmp_path / "nope" / "pytest-1") == []
+
+    def test_a_concurrent_live_run_is_not_stale(self, tmp_path: Path) -> None:
+        """Several scoped runs at once is normal. A sibling whose ``.lock``
+        names a running pid is a live run: reaping it SIGTERMs that run's test
+        daemons mid-test. A lock naming a dead pid (a killed run) and a missing
+        lock (pytest removes it at exit) are both stale."""
+        dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                              capture_output=True, text=True, check=True)
+        dead_pid = int(dead.stdout.strip())
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-5", "pytest-6", "pytest-7", "pytest-8"):
+            (root / name).mkdir()
+        (root / "pytest-6" / ".lock").write_text(str(dead_pid))
+        (root / "pytest-7" / ".lock").write_text(str(os.getpid()))
+        (root / "pytest-current").symlink_to(root / "pytest-6")
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-8")]
+        assert found == ["pytest-6", "pytest-5"], found
+
+    def test_an_xdist_worker_basetemp_scans_its_session_roots_siblings(
+        self, tmp_path: Path,
+    ) -> None:
+        """Under ``-n`` a worker's basetemp is ``pytest-<n>/gw<k>``. The scan
+        must climb to the session root, exclude it, and see its siblings; it
+        used to return nothing on every worker."""
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-3", "pytest-4"):
+            (root / name).mkdir()
+        (root / "pytest-4" / "gw0").mkdir()
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-4" / "gw0")]
+        assert found == ["pytest-3"], found
+
+    def test_the_original_tempdirs_roots_are_drained_when_the_basetemp_is_in_a_private_run_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-kyujr: inside a lab-run grant the basetemp is in the run's private
+        tmpfs directory and has no siblings, so what an earlier disk-mode or killed
+        run stranded under the ORIGINAL tempdir's ``pytest-of-<user>`` is reachable
+        only through ``extra_tempdirs``. A live run there is still spared."""
+        run_root = tmp_path / "run" / "p" / "pytest-of-dev"
+        orig_root = tmp_path / "orig" / "pytest-of-dev"
+        for r, names in ((run_root, ("pytest-0",)), (orig_root, ("pytest-4", "pytest-5", "pytest-6"))):
+            r.mkdir(parents=True)
+            for n in names:
+                (r / n).mkdir()
+        (orig_root / "pytest-5" / ".lock").write_text(str(os.getpid()))  # a live concurrent run
+        current = run_root / "pytest-0"
+
+        assert stale_pytest_roots(current) == [], "without the original tempdir nothing is reachable"
+        found = stale_pytest_roots(current, extra_tempdirs=[tmp_path / "orig"])
+        assert found == [orig_root / "pytest-6", orig_root / "pytest-4"], found
+        assert stale_pytest_roots(current, extra_tempdirs=[tmp_path / "nowhere"]) == []
+
+    def test_the_session_drain_passes_the_original_tempdir(self) -> None:
+        src = Path(stale_pytest_roots.__code__.co_filename).read_text()
+        assert 'os.environ.get("NX_TEST_TMP_ORIG")' in src
+        assert "stale_pytest_roots(basetemp, extra_tempdirs=" in src
+
+    def test_a_garbage_lock_skips_one_root_not_the_whole_scan(self, tmp_path: Path) -> None:
+        """A lock naming a pid too large for kill() raises OverflowError, which
+        must read as "not live" for that root rather than empty the scan."""
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-1", "pytest-2", "pytest-3"):
+            (root / name).mkdir()
+        (root / "pytest-2" / ".lock").write_text("99999999999999999999")
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-3")]
+        assert found == ["pytest-2", "pytest-1"], found
 
 
 class TestPathsWithSpaces:

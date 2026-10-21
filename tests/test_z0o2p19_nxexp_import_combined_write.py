@@ -37,12 +37,22 @@ import nexus.db.http_vector_client as hvc
 import nexus.exporter as exporter_mod
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
+from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import index_model_for_collection
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
 from nexus.errors import BatchWriteFailedError, NexusError
-from nexus.exporter import _file_sha256, export_collection, import_collection
+from nexus.exporter import (
+    _document_completion_hash,
+    _file_sha256,
+    _locate_owner_group,
+    _note_source_evidence,
+    _resolve_export_owners,
+    _whole_source,
+    export_collection,
+    import_collection,
+)
 from tests._chunk_seed import seed_chunks_direct
 
 _MODEL = "bge-base-en-v15-768"
@@ -388,7 +398,7 @@ def test_only_a_document_this_file_left_unfinished_is_resumed_any_other_that_own
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll(f"resume-{state}-{int(hash_is_file)}")
     uri = f"file:///z0o2p19/{dst}/resume.py"
@@ -607,7 +617,7 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll("overwrite")
     uri_y = f"file:///z0o2p19/{dst}/y.py"
@@ -739,7 +749,7 @@ def test_gate_xr789_shaped_import_owns_chunks_already_stored_ownerless_across_se
     complete, and the stored vectors are untouched (skip-existing sends no payload)."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = f"code__z0o2p19slug-2ad2825c__{_MODEL}__v1"
     cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL)
@@ -814,7 +824,7 @@ def test_a_kept_document_is_described_by_what_it_is_not_always_as_a_different_ch
     by the same rule as a finished one, but it is not "a document with a different chunk list": it is
     unfinished. The message says so and what the user can do."""
     client = HttpVectorClient(tenant=t2_service_env)
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     dst = _coll(f"keptmsg-{state}")
     f = tmp_path / "keptmsg.nxexp"
     doc, records = _a_dead_run_left(cat, dst, "keptmsg", state, "another-exports-hash")
@@ -852,7 +862,7 @@ def test_two_owner_groups_that_resolve_to_one_document_are_one_document_with_the
     the second group's rows would flip a complete document to failed."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst, src = _coll("twogroups"), _coll("twogroups-src")
     uri_a = f"file:///z0o2p19/{src}/two.py"
@@ -967,7 +977,7 @@ def test_the_snapshot_minus_written_sweep_list_runs_through_trailing_sweeps_agai
     Every other piece is pinned by a fake or by a Java test; this drives the composition end to end."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll("trailsweep")
     uri = f"file:///z0o2p19/{dst}/big.py"
@@ -1150,3 +1160,234 @@ def test_a_document_that_already_existed_is_never_removed(
         import_collection(db=client, input_path=f, target_collection=dst)
     assert minted == [], "non-vacuity: this run registered nothing"
     assert sorted(_documents_present(reader, expected)) == sorted(expected)
+
+
+# ── nexus-8hhbk: an imported document is stamped with its own content hash ──
+
+
+def _pdf_bundle(path: Path, collection: str, docs: list[tuple[str, str | None]]) -> None:
+    """One record per document: ``(source name, the source file's content_hash or None)``."""
+    rng = np.random.default_rng(88)
+    records = []
+    for name, content_hash in docs:
+        text = f"8hhbk {name} body"
+        meta = {"chunk_text_hash": _chash(text), "source_path": f"/8hhbk/{name}.pdf"}
+        if content_hash is not None:
+            meta["content_hash"] = content_hash
+        records.append({
+            "id": _chash(text), "document": text, "metadata": meta,
+            "embedding": rng.standard_normal(_DIM).astype(np.float32).tobytes(),
+            "owner": {"source_uri": f"file:///8hhbk/{collection}/{name}.pdf", "title": name,
+                      "content_type": "pdf", "position": 0},
+        })
+    _write_nxexp(path, collection, records)
+
+
+def test_the_completion_hash_is_unique_to_the_file_and_the_document() -> None:
+    h = _document_completion_hash("F" * 64, "1.1.1")
+    assert len(h) == 64 and h != "F" * 64
+    assert _document_completion_hash("F" * 64, "1.1.1") == h            # a re-import stamps the same
+    assert _document_completion_hash("F" * 64, "1.1.2") != h
+    assert _document_completion_hash("E" * 64, "1.1.1") != h
+
+
+def test_an_imported_bundles_pdfs_get_keys_of_their_own_and_are_not_joined_as_same_as(
+    t2_service_env, tmp_path,
+) -> None:
+    """The bundle's sha256 was stamped as every document's index_content_hash, so after nexus-utkop
+    (same-as keyed on it) every pdf of one bundle would join. Three PDFs, two of them carrying the
+    SAME chunk content_hash (which the import must not trust as a document key), come out with three
+    different keys, none the bundle's and none a chunk's, and the linker joins none."""
+    from nexus.catalog.link_generator import generate_pdf_corpus_links  # noqa: PLC0415 — this test only
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    dst = "docs__z0o2p19-8hhbk__bge-base-en-v15-768__v1"
+    f = tmp_path / "pdfs.nxexp"
+    ha = _chash("8hhbk file a")
+    _pdf_bundle(f, dst, [("a", ha), ("b", ha), ("c", None)])
+
+    result = import_collection(db=client, input_path=f, target_collection=dst)
+    assert result["imported_count"] == 3, result
+
+    entries = {n: reader.by_source_uri(f"file:///8hhbk/{dst}/{n}.pdf") for n in "abc"}
+    assert all(e is not None and e.index_state == "complete" for e in entries.values()), entries
+    keys = {n: e.index_content_hash for n, e in entries.items()}
+    assert len(set(keys.values())) == 3, keys
+    assert not set(keys.values()) & {ha, _file_sha256(f)}, keys
+    tumblers = {str(e.tumbler) for e in entries.values()}
+    writer = make_catalog_writer()
+    try:
+        generate_pdf_corpus_links(reader, writer=writer)
+    finally:
+        writer.close()
+    joined = [
+        lnk for t in tumblers for lnk in reader.link_query(from_t=t, link_type="same-as")
+        if str(lnk.to_tumbler) in tumblers
+    ]
+    assert joined == [], joined
+
+
+# ── nexus-mjikf: a whole imported document keeps its source's own content key ──
+
+
+_KA = "ab" * 32
+
+
+def test_the_source_key_is_used_only_for_a_whole_document_of_one_group() -> None:
+    unique = _document_completion_hash("F" * 64, "1.1.1")
+    whole = [(_KA, 3)]
+    assert _document_completion_hash("F" * 64, "1.1.1", whole, 3) == _KA
+    assert _document_completion_hash("F" * 64, "1.1.1", [("not-a-digest", 3)], 3) == unique
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA.upper(), 3)], 3) == unique
+    assert _document_completion_hash("F" * 64, "1.1.1", [(12345, 3)], 3) == unique  # type: ignore[list-item]
+    assert _document_completion_hash("F" * 64, "1.1.1", whole, 2) == unique          # a row short
+    assert _document_completion_hash("F" * 64, "1.1.1", [None], 3) == unique         # poisoned group
+    assert _document_completion_hash("F" * 64, "1.1.1", [("", 3)], 3) == unique      # source not complete
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA, None)], 3) == unique      # an old bundle
+    assert _document_completion_hash("F" * 64, "1.1.1", whole + whole, 6) == unique  # two groups
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA, True)], 1) == unique
+
+
+def test_a_group_whose_records_disagree_on_the_source_pair_is_poisoned() -> None:
+    groups: dict[str, dict] = {}
+    o = {"source_uri": "file:///x.pdf", "title": "x", "content_type": "pdf"}
+    _locate_owner_group(groups, {**o, "position": 0, "index_content_hash": _KA, "manifest_rows": 2},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] == (_KA, 2)
+    _locate_owner_group(groups, {**o, "position": 1, "index_content_hash": _KA, "manifest_rows": 3},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] is None
+    _locate_owner_group(groups, {**o, "position": 2, "index_content_hash": _KA, "manifest_rows": 2},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] is None, "a poisoned group never recovers"
+    old_bundle: dict[str, dict] = {}
+    _locate_owner_group(old_bundle, {**o, "position": 0}, fallback_source_uri="", fallback_title="",
+                        fallback_content_type="pdf", target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert old_bundle["file:///x.pdf"]["source"] == ("", None)
+
+
+def _group_of(pairs_and_hashes: list[tuple[int, str | None]], key: str = _KA, rows: int = 2) -> dict:
+    """One owner group built record by record the way the prepass builds it."""
+    groups: dict[str, dict] = {}
+    o = {"source_uri": "file:///w.pdf", "title": "w", "content_type": "pdf",
+         "index_content_hash": key, "manifest_rows": rows}
+    for position, content_hash in pairs_and_hashes:
+        group, pos = _locate_owner_group(
+            groups, {**o, "position": position}, fallback_source_uri="", fallback_title="",
+            fallback_content_type="pdf", target_collection="docs__t__bge-base-en-v15-768__v1")
+        meta = {} if content_hash is None else {"content_hash": content_hash}
+        _note_source_evidence(group, meta, pos)
+    return groups["file:///w.pdf"]
+
+
+def test_a_source_key_counts_only_when_a_chunk_witnesses_it_and_every_position_is_held_once() -> None:
+    assert _whole_source(_group_of([(0, _KA), (1, _KA)])) == (_KA, 2)
+    assert _whole_source(_group_of([(0, _KA), (1, None)])) == (_KA, 2)           # one witness is enough
+    # A release before nexus-8hhbk stamped the bundle sha256 on every document: no chunk carries it.
+    assert _whole_source(_group_of([(0, "ee" * 32), (1, "ee" * 32)])) is None
+    assert _whole_source(_group_of([(0, None), (1, None)])) is None
+    assert _whole_source(_group_of([(0, _KA), (0, _KA)])) is None                # a record read twice
+    assert _whole_source(_group_of([(0, _KA), (2, _KA)])) is None                # a position missing
+    assert _whole_source(_group_of([(0, _KA)])) is None                          # a row short
+    huge = _group_of([(0, _KA)], rows=10**12)                                      # never built as a range
+    assert _whole_source(huge) is None
+    unusable = _group_of([(0, None), (1, None)], key="")                           # an incomplete source
+    assert "positions" not in unusable
+
+
+class _StubOwnerReader:
+    """The three batched reads _resolve_export_owners makes, over two documents sharing chunk c2."""
+
+    def __init__(self, state_a: str | None) -> None:
+        self._state_a = state_a
+
+    def docs_for_chashes(self, chashes):
+        return {"c1": ["1.1.1"], "c2": ["1.1.1", "1.1.2"], "c3": ["1.1.2"]}
+
+    def get_manifests(self, tumblers):
+        row = lambda c, p: type("Row", (), {"chash": c, "position": p})()  # noqa: E731
+        return {"1.1.1": [row("c1", 0), row("c2", 1)], "1.1.2": [row("c3", 0), row("c2", 1), row("c2", 2)]}
+
+    def resolve_many(self, tumblers):
+        mk = lambda t, k, st: type("E", (), {  # noqa: E731
+            "physical_collection": "docs__s", "source_uri": f"file:///{t}", "title": t,
+            "content_type": "pdf", "index_content_hash": k, "index_state": st})()
+        return {"1.1.1": mk("1.1.1", _KA, self._state_a), "1.1.2": mk("1.1.2", "cd" * 32, "complete")}
+
+
+@pytest.mark.parametrize("state_a,key_a", [("complete", _KA), ("indexing", ""), ("failed", ""), (None, "")])
+def test_export_writes_the_owners_key_only_when_complete_and_its_manifest_rows(state_a, key_a) -> None:
+    owners = _resolve_export_owners(_StubOwnerReader(state_a), ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == key_a and owners["c1"]["manifest_rows"] == 2
+    assert owners["c2"]["source_uri"] == "file:///1.1.1"          # the lower tumbler owns the shared chunk
+    assert owners["c3"]["index_content_hash"] == "cd" * 32 and owners["c3"]["manifest_rows"] == 3
+
+
+def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
+    """A natively indexed, complete pdf document owning *texts* at positions 0..n-1."""
+    uri = f"file:///mjikf/{coll}/{name}.pdf"
+    doc = str(cat.register(owner=owner, title=name, content_type="pdf", physical_collection=coll,
+                           source_uri=uri))
+    chashes = [_chash(t) for t in texts]
+    cat.write_manifest_many(
+        [(doc, [{"chash": c, "position": i} for i, c in enumerate(chashes)])], collection=coll,
+        chunks=[{"chash": c, "text": t, "metadata": {"content_hash": key}, "embedding": _vec(700 + i).tolist()}
+                for i, (c, t) in enumerate(zip(chashes, texts))],
+        embedding_model=_MODEL)
+    cat.begin_index_run(doc, key, "native-run", coll)
+    cat.complete_index_run(doc, key, len(chashes))
+    return doc
+
+
+def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_truncated_one_does_not(
+    t2_service_env, tmp_path,
+) -> None:
+    from nexus.catalog.link_generator import generate_pdf_corpus_links  # noqa: PLC0415 — this test only
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    cat = make_catalog_writer()
+    try:
+        owner = cat.register_owner("knowledge", "curator")
+        src = "docs__mjikf-src__bge-base-en-v15-768__v1"
+        dst = "docs__mjikf-dst__bge-base-en-v15-768__v1"
+        ka, kb = _chash("mjikf bytes of a"), _chash("mjikf bytes of b")
+        shared = "mjikf a boilerplate page"
+        a = _native_pdf(cat, owner, src, "a", ka, ["mjikf a page 1", shared, "mjikf a page 3"])
+        b = _native_pdf(cat, owner, src, "b", kb, ["mjikf b page 1", shared])
+        assert Tumbler.parse(a).segments < Tumbler.parse(b).segments    # a owns the shared chunk on export
+        native_copy = _native_pdf(cat, owner, dst, "a-native", ka, ["mjikf a page 1", shared, "mjikf a page 3"])
+
+        f = tmp_path / "src.nxexp"
+        export_collection(db=client, collection_name=src, output_path=f)
+        result = import_collection(db=client, input_path=f, target_collection=dst)
+        assert result["imported_count"] >= 4, result
+
+        # source_uri is tenant-unique, so the import resolves to the source documents themselves only
+        # when they live in the target; here they live in src, so the import COPIED them.
+        copies = [e for e in reader.all_documents(content_type="pdf") if e.physical_collection == dst]
+        by_title = {e.title: e for e in copies}
+        assert by_title["a"].index_content_hash == ka, by_title["a"]
+        assert by_title["b"].index_content_hash not in (kb, ka), by_title["b"]   # truncated: unique key
+
+        writer = make_catalog_writer()
+        try:
+            generate_pdf_corpus_links(reader, writer=writer)
+        finally:
+            writer.close()
+        # same-as links every member of a key group to its lowest tumbler (the source a here), so the
+        # imported copy and the native copy are joined through that anchor: one component.
+        imported_a = str(by_title["a"].tumbler)
+        anchor_of = {
+            t: {str(lnk.to_tumbler) for lnk in reader.link_query(from_t=t, link_type="same-as")}
+            for t in (imported_a, native_copy)
+        }
+        assert anchor_of[imported_a] and anchor_of[imported_a] == anchor_of[native_copy] == {a}, anchor_of
+        b_links = reader.link_query(from_t=str(by_title["b"].tumbler), link_type="same-as")
+        assert b_links == [], b_links
+    finally:
+        cat.close()

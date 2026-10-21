@@ -905,6 +905,11 @@ def main():
 
     _stdin_isolation = isolate_stdin()
 
+    # nexus-xs7fp: this process is an MCP server; see core.main().
+    from nexus.session import mark_mcp_server_process  # noqa: PLC0415 — entry-point only
+
+    mark_mcp_server_process()
+
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in
     # between — the finish trigger must fire here too. Report-safe: the MCP

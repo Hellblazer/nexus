@@ -24,7 +24,7 @@ import uuid
 
 import pytest
 
-from nexus import mcp_infra
+from nexus import _locking, mcp_infra
 from nexus.config import nexus_config_dir
 from nexus.db import t1 as t1_mod
 from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER, HttpScratchStore
@@ -36,6 +36,8 @@ from nexus.db.t1 import (
 )
 from nexus.db.t2.http_token_store import HttpTokenStore
 from nexus.mcp import core
+
+pytestmark = pytest.mark.t2_tenant
 
 
 @pytest.fixture(autouse=True)
@@ -478,7 +480,7 @@ def _revoke(sid: str) -> None:
 def test_a_deferred_mint_borrower_exit_leaves_the_owners_pad_token_and_lease(owner, monkeypatch) -> None:
     sid, owner_token, cfg = owner
     HttpScratchStore().put("the live owner's row")
-    t1_mod.clear_t1_session_lease(sid, cfg)  # nobody owns a lease at startup
+    t1_mod.end_owned_t1_session_lease(sid, cfg, set(), lambda: None)  # nobody owns a lease at startup
     _resolve_as(monkeypatch, sid)
 
     def _down(session_id, *, context=""):
@@ -764,6 +766,143 @@ def test_a_displaced_owners_exit_revokes_and_clears_nothing_of_its_successors(ow
 
     assert read_t1_session_lease(sid, cfg) == successor
     HttpScratchStore(session_id=sid, _session_token=successor).list_entries()  # still resolves
+
+
+def test_a_successor_minting_during_the_owners_teardown_keeps_its_lease_and_token(owner, monkeypatch) -> None:
+    """nexus-g5mir: the successor starts its mint right after the owner's
+    teardown has read the lease (it named the owner's own token). It waits
+    on the mint lock until the owner has cleared and revoked, then mints on
+    a clean slate. Before the fix it took the lock at once, minted in that
+    gap, and the owner's unlink and revoke-by-id destroyed its lease and
+    token. The hook waits for the successor to either take the lock (then
+    lets its mint finish, so the old code fails every time) or block on it."""
+    sid, own_token, cfg = owner
+    core._OWNED_T1_SESSION["session_id"] = sid
+    core._note_t1_minted(sid, own_token)
+    real_read = t1_mod.read_t1_session_lease
+    real_lock = _locking.lock_fd
+    got: list[tuple[str, bool, float | None]] = []
+    successor: list[threading.Thread] = []
+    reached_lock = threading.Event()
+    took_lock = threading.Event()
+
+    def _lock(fd, *, blocking):
+        if successor and threading.current_thread() is successor[0]:
+            reached_lock.set()
+            real_lock(fd, blocking=blocking)
+            took_lock.set()
+            return
+        real_lock(fd, blocking=blocking)
+
+    def _read_then_successor_mints(session_id, config_dir):
+        published = real_read(session_id, config_dir)
+        if not successor:
+            thread = threading.Thread(
+                target=lambda: got.append(_lock_guarded_mint_or_borrow(sid, cfg, stale_token=own_token)),
+            )
+            successor.append(thread)
+            thread.start()
+            assert reached_lock.wait(10)
+            if took_lock.wait(0.5):
+                thread.join(30)  # unlocked teardown: the successor mints in the gap
+        return published
+
+    monkeypatch.setattr(_locking, "lock_fd", _lock)
+    monkeypatch.setattr(t1_mod, "read_t1_session_lease", _read_then_successor_mints)
+    core._t1_session_shutdown()
+    successor[0].join(30)
+
+    assert not successor[0].is_alive()
+    (token, minted, _ttl) = got[0]
+    assert minted and token != own_token
+    assert real_read(sid, cfg) == token
+    HttpScratchStore(session_id=sid, _session_token=token).list_entries()  # still resolves
+
+
+def _hold_mint_lock(sid: str, cfg) -> tuple[threading.Event, threading.Thread]:
+    """Another process's mint in flight: hold the session's mint lock until
+    the returned event is set."""
+    locked = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        fd = t1_mod._acquire_t1_mint_lock(sid, cfg, deadline=None)
+        locked.set()
+        release.wait(10)
+        _locking.unlock_fd(fd)
+        os.close(fd)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert locked.wait(5)
+    return release, holder
+
+
+def test_teardown_leaves_everything_to_a_holder_that_keeps_the_mint_lock(owner) -> None:
+    """A holder past the bounded poll is almost certainly a successor
+    minting: teardown returns within the poll and touches neither the lease
+    nor the token (a revoke by id would kill the successor's new token)."""
+    sid, own_token, cfg = owner
+    revoked: list[str] = []
+    release, holder = _hold_mint_lock(sid, cfg)
+    try:
+        started = time.monotonic()
+        outcome = t1_mod.end_owned_t1_session_lease(
+            sid, cfg, {own_token}, lambda: revoked.append(sid), lock_wait_s=0.1,
+        )
+        assert time.monotonic() - started < 2.0
+        assert t1_mod._t1_session_mint_lock_path(sid, cfg).exists()  # never unlinked under a holder
+    finally:
+        release.set()
+        holder.join(10)
+
+    assert outcome == t1_mod.T1TeardownOutcome.LEFT_TO_HOLDER
+    assert revoked == []
+    assert read_t1_session_lease(sid, cfg) == own_token
+
+
+def test_teardown_compares_unlocked_when_the_mint_lock_cannot_be_taken(owner, monkeypatch) -> None:
+    """A lock file that cannot be opened is not contention: the owner still
+    ends its own session, unlocked, as before the fix."""
+    sid, own_token, cfg = owner
+    revoked: list[str] = []
+
+    def _broken(*_a, **_k):
+        raise OSError("no locks here")
+
+    monkeypatch.setattr(t1_mod, "_acquire_t1_mint_lock", _broken)
+    outcome = t1_mod.end_owned_t1_session_lease(sid, cfg, {own_token}, lambda: revoked.append(sid))
+
+    assert outcome == t1_mod.T1TeardownOutcome.ENDED_UNLOCKED
+    assert revoked == [sid]
+    assert read_t1_session_lease(sid, cfg) is None
+
+
+def test_a_waiter_on_an_unlinked_mint_lock_relocks_the_live_file(tmp_path) -> None:
+    """The owner unlinks the lock file after releasing it. A waiter queued
+    on the old inode must not keep that lock while a newcomer locks a fresh
+    file at the same path: it retries on the path and returns the live one."""
+    sid = str(uuid.uuid4())
+    path = t1_mod._t1_session_mint_lock_path(sid, tmp_path)
+    first = t1_mod._acquire_t1_mint_lock(sid, tmp_path, deadline=None)
+    got: list[int] = []
+    waiter = threading.Thread(target=lambda: got.append(t1_mod._acquire_t1_mint_lock(sid, tmp_path, deadline=None)))
+    waiter.start()
+    time.sleep(0.2)  # let it queue on the first inode
+    path.unlink()
+    _locking.unlock_fd(first)
+    os.close(first)
+    waiter.join(10)
+
+    (fd,) = got
+    try:
+        held, named = os.fstat(fd), os.stat(path)
+        assert (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+        newcomer = t1_mod._acquire_t1_mint_lock(sid, tmp_path, deadline=time.monotonic() + 0.1)
+        assert newcomer is None  # the live file is the one the waiter holds
+    finally:
+        _locking.unlock_fd(fd)
+        os.close(fd)
 
 
 # ── item 6: the failed-mint cooldown is per session ─────────────────────────

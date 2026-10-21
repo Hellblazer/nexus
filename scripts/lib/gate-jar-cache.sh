@@ -10,14 +10,40 @@
 # Maven args, so it is cached on exactly that key and rebuilt only on a miss
 # — "never rebuild deterministic artifacts", applied to the dev box.
 #
-# KEY. `gate_jar_cache_key <repo> <release_version> <mvn-args>` stages the
-# service/ directory of the WORKING TREE into a throwaway copy of the
-# checkout's index (`git add -A -- service` under GIT_INDEX_FILE) and takes
-# the resulting subtree hash: tracked, modified, and untracked-but-not-
-# ignored files all count; service/target and service/.build-lease do not
-# (gitignored). That hash, the release_version and the args are sha256'd
-# into the key. Two worktrees with identical service/ content share a key
-# regardless of which commits they sit on.
+# KEY. `gate_jar_cache_key <repo> <release_version> <mvn-args>` keys on what
+# the jar is BUILT FROM and nothing else (nexus-fkhd3): service/pom.xml,
+# service/src/main/**, service/src/build/** (the jOOQ codegen runner and its
+# generator files, nexus-aca0q.3: they decide the generated classes in the jar),
+# service/mvnw and service/.mvn/** (GATE_JAR_KEY_PATHS).
+# `-DskipTests` leaves tests out of the jar, so a src/test edit, a README, a
+# deploy script or a smoke probe cannot change a byte of it; keying on the
+# whole service/ subtree (the first version) missed on every test-only commit
+# and paid a ~350 MB jOOQ-codegen rebuild each time. Those paths of the
+# WORKING TREE are staged into a throwaway copy of the checkout's index
+# (`git add -A -- <paths>` under GIT_INDEX_FILE) and the staged
+# `ls-files -s` listing (mode, blob hash, path) is hashed: tracked, modified,
+# and untracked-but-not-ignored files all count; service/target and
+# service/.build-lease do not (gitignored). That hash, the release_version
+# and the args are sha256'd into the key. Two worktrees with identical build
+# inputs share a key regardless of which commits they sit on.
+#
+# tests/db/_service_fixture.py's jar freshness check (_SERVICE_SRC_DIRS =
+# src/main/java + src/main/resources/db/changelog) already ignores src/test,
+# so a test-only change marks the jar neither stale there nor a miss here.
+#
+# The jOOQ generated sources inside that build are cached separately, keyed
+# on the codegen input hash, by service/pom.xml (jooq-inputs step,
+# nexus-fkhd3): a gate-jar MISS caused by a src/main edit that leaves the
+# changelog alone restores them instead of booting the codegen container.
+# gate_jar_cache_prune_jooq below trims that cache; the pom writes it. Only
+# build-gate-jar.sh calls either prune, after a build that missed, so a
+# mvnw-leased.sh-only workflow adds entries and never trims them.
+#
+# BEST-EFFORT. Both caches are an optimisation and never fail the build: a root
+# that cannot be created or written is warned about and skipped (store returns
+# 0), an entry that cannot be read whole is a miss (and is discarded), and a
+# prune renames an entry aside before it deletes it so a reader that is copying
+# it sees it vanish whole.
 #
 # LOCATION. $NX_GATE_JAR_CACHE if set to a directory; "off" disables both
 # lookup and store; else <git common dir>/nexus-gate-jar-cache (shared by
@@ -34,19 +60,61 @@
 # key stages the file with those two lines blanked (the release_version is
 # a separate key component already).
 #
-# A hit is verified before use: the cached jar must open as a zip and carry
-# META-INF/MANIFEST.MF (the same completeness test
-# tests/db/_service_fixture.py applies), else it is a miss and the entry is
-# discarded.
+# BYTES WRITTEN (nexus-k6zxp). The jar is ~131 MB and a full copy per run was
+# most of the disk traffic of a miss/hit/hit sequence on a shared NVMe. So the
+# entry's jar is LINKED, not copied: a store links the freshly built jar into
+# the entry, a hit links the entry's jar into service/target (ln, else
+# cp --reflink=auto, else cp -c, else plain cp when the filesystems differ).
+# A target that already holds the key's jar (recorded in
+# service/target/.gate-jar-key and verified against the entry: same inode, else
+# byte-equal) is not touched at all, only its marker is refreshed. A link
+# shares the inode, so two guards keep a build from rewriting the cache entry
+# through it: the entry's jar is made read-only, and every builder this repo
+# owns (build-gate-jar.sh, mvnw-leased.sh, and the two lease-holding bare mvnw
+# callers tests/e2e/local-service-gate.sh and tests/e2e/gc-ab/run-ab.sh, which
+# bare_mvnw_lint_test.sh pins) unlinks a shared target jar first --
+# maven-jar-plugin with forceCreation rewrites the jar IN PLACE (measured
+# 2026-10-19: it truncated the linked entry to the thin jar, and fails on a
+# read-only one, so the unlink is required, not a nicety). A store whose entry
+# already verifies (jar a zip, build_ref non-empty) writes nothing.
 #
-# `git write-tree` writes real loose objects into the repo's object store
-# on every key computation (the staged blobs and trees). They are ordinary
-# unreachable objects; `git gc` / `git prune` reap them on the usual
-# schedule. Documented so nobody mistakes them for corruption.
+# A hit is verified before use: the cached jar must open as a zip, carry
+# META-INF/MANIFEST.MF (the same completeness test
+# tests/db/_service_fixture.py applies), and, when the entry records a
+# build_ref, carry the same build_ref in its embedded
+# META-INF/nexus/release.properties; otherwise it is a miss and the entry is
+# discarded. The last check catches a jar that was rewritten through a link by
+# a writer the unshare discipline does not cover (root in a container, sudo):
+# it is still a valid zip, but it is not the jar the entry's build_ref names.
+#
+# FRESHNESS IS PER WORKTREE. A linked jar shares one inode, hence one mtime,
+# across every worktree on the key, so install never touches the jar: another
+# worktree's hit would make this one's stale jar look newer than its edited
+# sources. The per-worktree signal is the key marker service/target/
+# .gate-jar-key, written (or re-written) on every install and every store, and
+# tests/db/_service_fixture.py reads max(jar mtime, marker mtime). The marker
+# says "at this time the jar was verified to be the one for this tree's build
+# inputs"; the jar's own mtime wins when something rewrote the jar later.
+#
+# WHAT A HIT STILL WRITES. No jar bytes. It stages the key paths into an EMPTY
+# throwaway index (a few KB) to compute the key, rewrites that index once more
+# (update-index --cacheinfo for the normalized release.properties), and writes
+# the 41-byte marker. The index starts empty on purpose: the key must hash file
+# CONTENTS, never trust git's cached stat (see gate_jar_cache_key).
+#
+# `git add` writes the staged blobs into the repo's object store as ordinary
+# unreachable loose objects on a key computation; `git gc` / `git prune` reap
+# them on the usual schedule. Documented so nobody mistakes them for corruption.
 
 set -u -o pipefail
 
 GATE_JAR_CACHE_KEEP="${GATE_JAR_CACHE_KEEP:-5}"
+JOOQ_CACHE_KEEP="${JOOQ_CACHE_KEEP:-6}"
+
+# What the stamped jar is a pure function of (see KEY above). Relative to the
+# repo root; a path absent from both the working tree and the index is skipped
+# so a fixture or a trimmed checkout without, say, service/.mvn still keys.
+GATE_JAR_KEY_PATHS=(service/pom.xml service/src/main service/src/build service/mvnw service/.mvn)
 
 gate_jar_cache_root() {
     local repo="${1:?gate_jar_cache_root: usage: gate_jar_cache_root <repo>}"
@@ -68,14 +136,28 @@ gate_jar_cache_key() {
     local repo="${1:?gate_jar_cache_key: usage: gate_jar_cache_key <repo> <release_version> <mvn-args>}"
     local ver="${2:?gate_jar_cache_key: release_version required}"
     local args="${3:-}"
-    local idx tree subtree
+    local idx listing p
+    local -a paths=()
+    for p in "${GATE_JAR_KEY_PATHS[@]}"; do
+        # On disk only: the index starts empty, so a tracked path deleted from the
+        # worktree has nothing to stage and simply stays out of the key.
+        if [[ -e "$repo/$p" ]]; then
+            paths+=("$p")
+        fi
+    done
+    [[ ${#paths[@]} -gt 0 ]] || { echo "gate_jar_cache_key: none of ${GATE_JAR_KEY_PATHS[*]} exist in $repo" >&2; return 1; }
     idx="$(mktemp "${TMPDIR:-/tmp}/gate-jar-index.XXXXXX")"
-    # Start from the checkout's own index so `add -A` only re-hashes what
-    # changed; a missing index (fresh clone) just makes it slower.
-    cp "$(git -C "$repo" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || true
-    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- service >/dev/null 2>&1; then
+    # An EMPTY index (git creates the file), never a copy of the checkout's:
+    # from a copy, `add -A` skips any entry whose cached stat still matches, so
+    # a same-size edit in the same second as the last index write, or one whose
+    # mtime was restored (touch -r, rsync -t, a cache restore), kept its old blob
+    # and the key went stale, i.e. a wrong cached jar could be reused (CI:
+    # ".mvn edit did not move the key", -Xmx1g -> -Xmx2g). Hashing every key path
+    # costs tens of ms (~370 files, ~9 MB); their blobs mostly exist already.
+    rm -f "$idx"
+    if ! GIT_INDEX_FILE="$idx" git -C "$repo" add -A -- "${paths[@]}" >/dev/null 2>&1; then
         rm -f "$idx"
-        echo "gate_jar_cache_key: could not stage service/ into a throwaway index" >&2
+        echo "gate_jar_cache_key: could not stage ${paths[*]} into a throwaway index" >&2
         return 1
     fi
     # Normalize the stamp lines (see header) if release.properties is staged.
@@ -85,24 +167,129 @@ gate_jar_cache_key() {
         GIT_INDEX_FILE="$idx" git -C "$repo" update-index --cacheinfo "100644,$blob,$props" >/dev/null 2>&1 || {
             rm -f "$idx"; echo "gate_jar_cache_key: could not normalize $props in the throwaway index" >&2; return 1; }
     fi
-    tree="$(GIT_INDEX_FILE="$idx" git -C "$repo" write-tree 2>/dev/null)"
+    # The staged listing of exactly the key paths: mode, blob hash, stage, path,
+    # hashed verbatim (a field split would cut a path at its first space and
+    # leave a rename inside a spaced directory invisible to the key). No tree
+    # object is written, so a key computation leaves only the blobs `add` hashed.
+    listing="$(GIT_INDEX_FILE="$idx" git -C "$repo" ls-files -s -- "${paths[@]}" 2>/dev/null)"
     rm -f "$idx"
-    [[ -n "$tree" ]] || { echo "gate_jar_cache_key: write-tree failed" >&2; return 1; }
-    subtree="$(git -C "$repo" rev-parse --verify --quiet "$tree:service" 2>/dev/null)" || {
-        echo "gate_jar_cache_key: no service/ subtree in $repo" >&2
-        return 1
-    }
-    printf 'service=%s release_version=%s args=%s\n' "$subtree" "$ver" "$args" | shasum -a 256 | cut -c1-40
+    [[ -n "$listing" ]] || { echo "gate_jar_cache_key: nothing staged from ${paths[*]} in $repo" >&2; return 1; }
+    printf 'inputs=%s\nrelease_version=%s\nargs=%s\n' "$(printf '%s\n' "$listing" | shasum -a 256 | cut -c1-64)" "$ver" "$args" | shasum -a 256 | cut -c1-40
 }
 
-_gate_jar_cache_entry_ok() {
-    local entry="$1"
-    [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
-    python3 - "$entry/jar" <<'PY' >/dev/null 2>&1
+# _gate_jar_cache_jar_ok <jar> [expected-build_ref] -- the jar opens as a zip
+# and carries a manifest; with an expected build_ref (non-empty), its embedded
+# META-INF/nexus/release.properties must name the same build_ref.
+_gate_jar_cache_jar_ok() {
+    python3 - "$1" "${2:-}" <<'PY' >/dev/null 2>&1
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as zf:
     zf.read("META-INF/MANIFEST.MF")
+    if sys.argv[2]:
+        props = zf.read("META-INF/nexus/release.properties").decode("utf-8", "replace")
+        refs = [l.split("=", 1)[1].strip() for l in props.splitlines() if l.startswith("build_ref=")]
+        if refs != [sys.argv[2]]:
+            sys.exit(1)
 PY
+}
+
+_gate_jar_cache_entry_ok() {
+    local entry="$1" ref=""
+    [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
+    ref="$(tr -d '\r\n' < "$entry/build_ref" 2>/dev/null)"
+    _gate_jar_cache_jar_ok "$entry/jar" "$ref"
+}
+
+# _gate_jar_cache_entry_complete <entry> -- entry_ok AND a non-empty build_ref:
+# what a store may leave alone. (lookup alone accepts an empty build_ref; the
+# caller's own check turns that into a rebuild, and the store then repairs it.)
+_gate_jar_cache_entry_complete() {
+    _gate_jar_cache_entry_ok "$1" && [[ -s "$1/build_ref" ]]
+}
+
+# _gate_jar_cache_place <src> <dst> -- put a copy of <src> at the NEW path <dst>
+# by the cheapest means that works: hard link, then a copy-on-write clone
+# (macOS cp -c, which fails where it cannot clone; GNU cp --reflink=auto, which
+# silently falls back to a full copy, so it is reported as clone-or-copy), then
+# a plain copy. Sets _GATE_JAR_PLACED to link|clone|clone-or-copy|copy. A clone
+# or copy is made writable (a link keeps the entry's read-only mode, shared by
+# inode).
+_GATE_JAR_PLACED=""
+_gate_jar_cache_place() {
+    local src="$1" dst="$2"
+    _GATE_JAR_PLACED=""
+    rm -f "$dst" 2>/dev/null
+    if ln "$src" "$dst" 2>/dev/null; then
+        _GATE_JAR_PLACED="link"; return 0
+    fi
+    if cp --reflink=auto "$src" "$dst" 2>/dev/null; then
+        _GATE_JAR_PLACED=clone-or-copy
+    elif [[ "$(uname -s 2>/dev/null)" == Darwin ]] && cp -c "$src" "$dst" 2>/dev/null; then
+        _GATE_JAR_PLACED=clone
+    elif cp "$src" "$dst" 2>/dev/null; then
+        _GATE_JAR_PLACED=copy
+    else
+        rm -f "$dst" 2>/dev/null
+        return 1
+    fi
+    chmod u+w "$dst" 2>/dev/null || true
+    return 0
+}
+
+# The key recorded beside the jar a build or a hit left in service/target.
+_gate_jar_cache_marker() { printf '%s/.gate-jar-key\n' "$(dirname "$1")"; }
+
+# gate_jar_cache_target_holds <key> <entry> <dest-jar> -- rc 0 when <dest-jar>
+# IS the jar of <entry>: the marker names the key and the file is the entry's
+# own inode or byte-equal to it. The marker alone is never trusted: a bare
+# mvnw run that rewrote the jar leaves it behind.
+gate_jar_cache_target_holds() {
+    local key="$1" entry="$2" dest="$3" marker
+    marker="$(_gate_jar_cache_marker "$dest")"
+    [[ -f "$dest" && -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$key" ]] || return 1
+    [[ "$dest" -ef "$entry/jar" ]] && return 0
+    cmp -s "$dest" "$entry/jar"
+}
+
+# gate_jar_cache_install <key> <entry> <dest-jar> -- make <dest-jar> the entry's
+# jar. Prints nothing; sets _GATE_JAR_PLACED to kept|link|clone|clone-or-copy|
+# copy. The new file is built beside <dest-jar> and renamed over it, so a reader
+# never sees a half-written jar. The jar itself is never touched afterwards: on
+# a link it is the entry's inode, shared with other worktrees, and its mtime is
+# not ours to move. The per-worktree freshness signal is the key marker, which
+# is (re)written on every install, kept included (see FRESHNESS above).
+gate_jar_cache_install() {
+    local key="$1" entry="$2" dest="$3" tmp marker how
+    marker="$(_gate_jar_cache_marker "$dest")"
+    if gate_jar_cache_target_holds "$key" "$entry" "$dest"; then
+        printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+        _GATE_JAR_PLACED=kept
+        return 0
+    fi
+    tmp="$(dirname "$dest")/.gate-jar.tmp.$$"
+    _gate_jar_cache_place "$entry/jar" "$tmp" || return 1
+    how="$_GATE_JAR_PLACED"
+    if ! mv -f "$tmp" "$dest" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    _GATE_JAR_PLACED="$how"
+    printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+    return 0
+}
+
+# gate_jar_cache_unshare <jar> -- unlink <jar> when another name shares its
+# inode (the cache entry, or another worktree's target), or when it is
+# read-only (the entry's mode, left on a link whose entry was pruned: the jar
+# plugin refuses to rewrite it), so a build that rewrites the jar in place
+# cannot reach the entry through it. A private writable jar is left alone. Also drops the key marker, which a rebuild outdates.
+gate_jar_cache_unshare() {
+    local jar="$1"
+    [[ -f "$jar" ]] || return 0
+    if [[ -n "$(find "$jar" -maxdepth 0 -links +1 -print 2>/dev/null)" || ! -w "$jar" ]]; then
+        rm -f "$jar" "$(_gate_jar_cache_marker "$jar")"
+    fi
+    return 0
 }
 
 # gate_jar_cache_lookup <repo> <key> — prints the entry dir on a hit (rc 0);
@@ -119,38 +306,102 @@ gate_jar_cache_lookup() {
         printf '%s\n' "$entry"
         return 0
     fi
-    echo "gate_jar_cache_lookup: discarding corrupt cache entry $entry" >&2
-    rm -rf "$entry"
+    echo "gate_jar_cache_lookup: discarding unusable cache entry $entry (not a complete jar, or its embedded build_ref differs from the entry's)" >&2
+    _gate_jar_cache_discard_incomplete "$root" "$key"   # never a complete entry a store put there meanwhile
     return 1
 }
 
 # gate_jar_cache_store <repo> <key> <jar-path> <build_ref>
+# Writes nothing when the key's entry already verifies. Otherwise the entry's
+# jar is a LINK to <jar-path> (a copy where linking fails), made read-only: the
+# caller must not rewrite <jar-path> in place afterwards without unlinking it
+# first (gate_jar_cache_unshare). On a published entry the key marker is
+# written beside <jar-path>, which is byte-identical to the entry.
 gate_jar_cache_store() {
     local repo="${1:?gate_jar_cache_store: usage: gate_jar_cache_store <repo> <key> <jar> <build_ref>}"
     local key="${2:?key required}" jar="${3:?jar required}" build_ref="${4:?build_ref required}"
     local root staging entry
     root="$(gate_jar_cache_root "$repo")" || return 0
     [[ -f "$jar" ]] || { echo "gate_jar_cache_store: no jar at $jar" >&2; return 1; }
-    mkdir -p "$root" || return 1
-    staging="$(mktemp -d "$root/.staging.XXXXXX")" || return 1
-    if ! cp "$jar" "$staging/jar" || ! printf '%s\n' "$build_ref" > "$staging/build_ref"; then
-        rm -rf "$staging"
-        return 1
-    fi
     entry="$root/$key"
-    # Publish by rename: an existing entry is moved aside first (a reader
-    # sees the old complete entry or the new complete one, never a gap or
-    # a half-copied jar), then discarded.
-    local aside="$entry.old.$$"
-    [[ -d "$entry" ]] && mv "$entry" "$aside" 2>/dev/null
-    if ! mv "$staging" "$entry"; then
-        rm -rf "$staging"
-        [[ -d "$aside" ]] && mv "$aside" "$entry" 2>/dev/null
-        return 1
+    if [[ -d "$entry" ]] && _gate_jar_cache_entry_complete "$entry"; then
+        touch "$entry" 2>/dev/null || true   # recency for pruning
+        return 0
     fi
-    rm -rf "${aside:?}"
+    # The cache is an optimisation: a root that cannot be created or written
+    # (read-only, another owner, full disk) is warned about and skipped, never
+    # a build failure -- the jar is already built and in service/target.
+    mkdir -p "$root" 2>/dev/null || { _gate_jar_cache_unwritable "$root"; return 0; }
+    staging="$(mktemp -d "$root/.staging.XXXXXX" 2>/dev/null)" || { _gate_jar_cache_unwritable "$root"; return 0; }
+    if ! _gate_jar_cache_place "$jar" "$staging/jar" || ! printf '%s\n' "$build_ref" > "$staging/build_ref" 2>/dev/null; then
+        rm -rf "$staging"
+        _gate_jar_cache_unwritable "$root"
+        return 0
+    fi
+    chmod a-w "$staging/jar" 2>/dev/null || true
+    # Publish by rename(2), which fails on an existing non-empty entry
+    # (nexus-bjavr): `mv` onto an existing directory moves staging INSIDE it,
+    # and moving an entry aside first can take out the one a concurrent store
+    # of the same key has just published. A complete entry is never moved; an
+    # incomplete one is moved aside, checked again there (a concurrent store
+    # may have replaced it in between), and the rename tried once more.
+    # A reader sees the complete entry or no entry, never a half-copied jar.
+    if ! _gate_jar_cache_rename "$staging" "$entry"; then
+        if ! _gate_jar_cache_entry_complete "$entry"; then
+            [[ -e "$entry" ]] && _gate_jar_cache_discard_incomplete "$root" "$key"
+            _gate_jar_cache_rename "$staging" "$entry" || :
+        fi
+        if [[ -d "$staging" ]]; then
+            rm -rf "$staging"
+            if _gate_jar_cache_entry_complete "$entry"; then
+                touch "$entry" 2>/dev/null || true   # a concurrent store of this key won
+                return 0
+            fi
+            _gate_jar_cache_unwritable "$root"
+            return 0
+        fi
+    fi
+    printf '%s\n' "$key" > "$(_gate_jar_cache_marker "$jar")" 2>/dev/null || true
     _gate_jar_cache_prune "$root"
     return 0
+}
+
+# _gate_jar_cache_rename <src-dir> <dst> -- rename(2) <src-dir> to <dst>. Fails
+# when <dst> is a non-empty directory or a file, where mv would move <src-dir>
+# inside it (BSD mv has no -T).
+_gate_jar_cache_rename() {
+    python3 -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2" 2>/dev/null
+}
+
+# _gate_jar_cache_discard_incomplete <root> <key> -- discard an entry judged
+# incomplete, without taking out a complete one a concurrent store put in its
+# place after that judgement: the entry is renamed aside FIRST and judged again
+# there. A complete one goes back (or, if a newer entry already took the name,
+# is dropped in its favour); an incomplete one is deleted.
+_gate_jar_cache_discard_incomplete() {
+    local root="$1" key="$2" aside
+    aside="$root/.discard.$key.$$.$RANDOM.old"
+    _gate_jar_cache_rename "$root/$key" "$aside" || return 0
+    if _gate_jar_cache_entry_complete "$aside" && _gate_jar_cache_rename "$aside" "$root/$key"; then
+        return 0
+    fi
+    rm -rf "${aside:?}"
+}
+
+_gate_jar_cache_unwritable() {
+    echo "gate jar cache not written (cannot write under $1); continuing without it" >&2
+}
+
+# _gate_jar_cache_discard <root> <name> -- take an entry out of service by
+# RENAMING it to a unique hidden *.old name, then delete that. A reader that is
+# copying the entry sees it vanish whole (its next open fails and it falls
+# through to a rebuild) instead of a tree being emptied file by file under it.
+_gate_jar_cache_discard() {
+    local root="$1" name="$2" aside
+    aside="$root/.discard.$name.$$.$RANDOM.old"
+    if mv "$root/$name" "$aside" 2>/dev/null; then
+        rm -rf "${aside:?}"
+    fi
 }
 
 _gate_jar_cache_prune() {
@@ -161,7 +412,43 @@ _gate_jar_cache_prune() {
         [[ "$d" == .staging.* || "$d" == *.old.* ]] && continue
         n=$((n + 1))
         if (( n > GATE_JAR_CACHE_KEEP )); then
-            rm -rf "${root:?}/${d:?}"
+            _gate_jar_cache_discard "$root" "$d"
         fi
     done < <(ls -t "$root" 2>/dev/null)
+    # Leftovers of a killed store or discard (hidden staging dirs, *.old asides).
+    find "$root" -maxdepth 1 \( -name '.staging.*' -o -name '*.old' -o -name '*.old.*' \) -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+}
+
+# gate_jar_cache_prune_jooq <repo> -- trim the shared cache of jOOQ generated
+# trees that service/pom.xml's jooq-inputs/jooq-stamp-* steps keep (nexus-fkhd3):
+# the newest JOOQ_CACHE_KEEP entries of each kind (main-<hash>, test-<hash>)
+# survive, by directory mtime (a restore touches the entry, so "newest" means
+# most recently used), and any .staging.* / *.old leftover of a killed publish
+# older than a day goes. Location: $NX_JOOQ_CACHE (a directory; "off" disables),
+# else <git common dir>/nexus-jooq-cache -- the same rule the pom applies.
+gate_jar_cache_prune_jooq() {
+    local repo="${1:?gate_jar_cache_prune_jooq: usage: gate_jar_cache_prune_jooq <repo>}"
+    local root common kind d n
+    case "${NX_JOOQ_CACHE:-}" in
+        off|OFF|0) return 0 ;;
+        "")
+            common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+            [[ -n "$common" ]] || return 0
+            root="$common/nexus-jooq-cache" ;;
+        *) root="$NX_JOOQ_CACHE" ;;
+    esac
+    [[ -d "$root" ]] || return 0
+    for kind in main test; do
+        n=0
+        while IFS= read -r d; do
+            [[ -n "$d" && -d "$root/$d" ]] || continue
+            [[ "$d" == .* || "$d" == *.old ]] && continue
+            n=$((n + 1))
+            if (( n > JOOQ_CACHE_KEEP )); then
+                _gate_jar_cache_discard "$root" "$d"
+            fi
+        done < <(cd "$root" && ls -t -d "$kind"-* 2>/dev/null)
+    done
+    find "$root" -maxdepth 1 \( -name '.staging.*' -o -name '*.old' \) -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+    return 0
 }

@@ -9,6 +9,9 @@ from __future__ import annotations
 # equivalent. The by_corpus read contract survives below.
 
 from tests._catalog_fixture_ops import ActiveCatalog
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 def _make_catalog() -> ActiveCatalog:

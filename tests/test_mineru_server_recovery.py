@@ -375,6 +375,13 @@ def test_a_recycled_pid_is_never_signalled_and_a_real_innocent_process_survives(
         [sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True,
     )
     try:
+        # The identity check reads the pid's command line; read in the gap between
+        # the child's fork and its exec it is empty, which classifies "unreadable" and
+        # the restart declines (release PR #1617, a loaded pool runner). Wait for exec.
+        from nexus.daemon.service_registry import process_command  # noqa: PLC0415 — test-local
+        deadline = time.monotonic() + 10
+        while "time.sleep(120)" not in process_command(innocent.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
         monkeypatch.setattr("nexus._mineru_pid.read_pid_file", lambda: {"pid": innocent.pid, "port": 8010})
         monkeypatch.setattr("nexus._mineru_pid.is_process_alive", lambda pid: pid == innocent.pid)
         monkeypatch.setattr(_mineru_spawn, "stop_server_group", _REAL_STOP_SERVER_GROUP)

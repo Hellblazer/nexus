@@ -174,6 +174,7 @@ def test_search_cross_corpus_end_to_end(local_t3: T3Database) -> None:
     assert any(uid in c for c in contents)
 
 
+@pytest.mark.t2_tenant
 def test_apply_hybrid_scoring_code_collection(local_t3: T3Database) -> None:
     """apply_hybrid_scoring applies 0.7*vector + 0.3*frecency for code__ collections."""
     from nexus.scoring import apply_hybrid_scoring
@@ -224,6 +225,7 @@ def test_format_json_is_valid_json(local_t3: T3Database) -> None:
 
 # ── CLI commands end-to-end ───────────────────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_cli_store_put_and_search(
     runner: CliRunner, fake_home: Path, local_t3: T3Database
 ) -> None:
@@ -262,6 +264,7 @@ def test_cli_store_put_and_search(
         assert uid in search_result.output
 
 
+@pytest.mark.t2_tenant
 def test_cli_search_command(
     runner: CliRunner, fake_home: Path, local_t3: T3Database
 ) -> None:
@@ -279,6 +282,7 @@ def test_cli_search_command(
     assert uid in result.output
 
 
+@pytest.mark.t2_tenant
 def test_cli_search_json_output(
     runner: CliRunner, fake_home: Path, local_t3: T3Database
 ) -> None:
@@ -305,6 +309,7 @@ def test_cli_search_json_output(
     assert any(uid in item.get("content", "") for item in parsed)
 
 
+@pytest.mark.t2_tenant
 def test_cli_search_vimgrep_output(
     runner: CliRunner, fake_home: Path, local_t3: T3Database
 ) -> None:

@@ -157,6 +157,7 @@ class TestMemoryPutTtlBoundary:
         assert result.startswith("Error:"), result
         assert "ttl=-5" in result
 
+    @pytest.mark.t2_tenant
     def test_ttl_none_is_permanent_and_not_rejected(
         self, fake_memory_store: _FakeMemoryStore,
     ) -> None:
@@ -169,6 +170,7 @@ class TestMemoryPutTtlBoundary:
         assert fake_memory_store.calls[-1]["ttl"] is None
         assert result.startswith("Stored:"), result
 
+    @pytest.mark.t2_tenant
     def test_ttl_positive_is_unaffected(
         self, fake_memory_store: _FakeMemoryStore,
     ) -> None:
@@ -179,6 +181,7 @@ class TestMemoryPutTtlBoundary:
         assert fake_memory_store.calls[-1]["ttl"] == 14
         assert result.startswith("Stored:"), result
 
+    @pytest.mark.t2_tenant
     def test_omitting_ttl_stores_a_permanent_row(
         self, fake_memory_store: _FakeMemoryStore,
     ) -> None:
@@ -207,6 +210,7 @@ class TestMemoryPutTtlBoundary:
 
         assert fake_memory_store.calls[-1]["ttl"] is None
 
+    @pytest.mark.t2_tenant
     def test_an_explicit_ttl_is_still_honoured(
         self, fake_memory_store: _FakeMemoryStore,
     ) -> None:

@@ -64,6 +64,7 @@ def _write(root: Path, rel: str, text: str = "x = 1\n") -> Path:
 # ── Stage 1: the cause of every identity-less file ──────────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestUnregisteredCauses:
     def test_main_checkout_registers_every_file(self, tmp_path: Path) -> None:
         ActiveCatalog()  # the engine catalog is live

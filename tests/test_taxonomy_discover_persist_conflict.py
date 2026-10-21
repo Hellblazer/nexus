@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
+import pytest
 
 
 def _stub_command_wiring(monkeypatch) -> None:
@@ -40,6 +41,7 @@ def _stub_command_wiring(monkeypatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
 
+@pytest.mark.t2_tenant
 def test_discover_reports_a_persist_conflict_per_collection_and_fails_the_run(monkeypatch) -> None:
     _stub_command_wiring(monkeypatch)
     monkeypatch.setattr(

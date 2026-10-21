@@ -171,6 +171,24 @@ class TestNoResultsMessage:
         )
         assert _no_results_message([diag]) == "No results."
 
+    def test_a_rescued_collection_is_not_named_as_threshold_dropped(self) -> None:
+        """nexus-079ly: raw == dropped, but a lexical row kept the collection
+        in the pool (kept 1). The message must not blame the threshold for it,
+        and the structured payload must not claim a threshold drop."""
+        from nexus.mcp.core import _no_results_message, _structured_no_results
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(
+            per_collection={"knowledge__papers": (3, 3, 0.65, 0.5515)},
+            total_dropped=3, total_raw=3,
+            kept={"knowledge__papers": 1},
+        )
+        msg = _no_results_message([diag])
+        assert msg == "No results."
+        assert "knowledge__papers" not in msg
+        assert "dropped" not in msg
+        assert _structured_no_results([diag])["threshold_dropped"] is False
+
 
 class TestStructuredNoResultsCarriesDiagnostic:
     """nexus-1obui: ``structured=True`` used to return bare empty lists on a

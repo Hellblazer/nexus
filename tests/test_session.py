@@ -138,6 +138,7 @@ class TestT1ServerNotFoundErrorGuidance:
     reconnect path is INTENTIONALLY unsupported per RDR-105 P4 (nexus-jnx7);
     this only improves the message, never adds reconnect logic."""
 
+    @pytest.mark.t2_tenant
     def test_reconnect_message_mentions_clear_or_restart(self) -> None:
         """The message raised by _reconnect is actionable: it names /clear
         or MCP server restart as the recovery step (nexus-ycwec Fix #4)."""

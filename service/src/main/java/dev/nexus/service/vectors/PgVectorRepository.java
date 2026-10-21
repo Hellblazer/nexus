@@ -42,6 +42,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE_BOUNDED;
 import static dev.nexus.service.jooq.nexus.Tables.QUARANTINE_RESTORE_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
@@ -251,6 +252,44 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Test-only seam (RDR-222 Phase 1, bead nexus-yye8l.5): invoked INSIDE the one {@code withTenant}
+     * transaction of {@link #quarantineOrphansBounded}, {@link #quarantineOrphansFloored},
+     * {@link #restoreRereferencedBounded} and {@link #expireQuarantineBounded}, after the SQL function call has
+     * returned and before the ledger marker runs, so a test can hold a sweep open (its row moves uncommitted, its ledger row still
+     * {@code in_flight}) while it reads the status route or sends a second same-key request.
+     * Default {@code null}: one null-check per sweep, nothing when unset. Never read or written by
+     * production code.
+     */
+    private volatile Runnable afterSweepSqlHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the in-transaction sweep pause hook. */
+    public void setAfterSweepSqlHookForTests(Runnable hook) {
+        this.afterSweepSqlHookForTests = hook;
+    }
+
+    private void runAfterSweepSqlHook() {
+        Runnable hook = afterSweepSqlHookForTests;
+        if (hook != null) hook.run();
+    }
+
+    /**
+     * RDR-222 Phase 1 (bead nexus-yye8l.5): runs INSIDE a sweep's one {@code withTenant} transaction, after the
+     * SQL function call, with the outcome record. A keyed request passes one that builds the response body and
+     * calls {@code RequestLedger.commitMarker(ctx, ...)}, so the mutation and the stored response commit or roll
+     * back together; an exception from it (a lost lease, {@code LedgerMarkerLost}) rolls the sweep back. An
+     * unkeyed request passes {@link #none()}.
+     */
+    @FunctionalInterface
+    public interface LedgerMarker<O> {
+        void mark(DSLContext ctx, O outcome);
+
+        /** The marker of an unkeyed call: does nothing. */
+        static <O> LedgerMarker<O> none() {
+            return (ctx, outcome) -> { };
+        }
+    }
+
+    /**
      * Test-only interleaving seam (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
      * finding 2): an optional callback invoked in {@link #upsertChunksInternal}
      * immediately after {@link #resolveNeedEmbedIdx} returns — {@code insertIdx}
@@ -345,7 +384,7 @@ public final class PgVectorRepository {
 
     /**
      * Simple constructor: no collection-aware routing (single fixed embedder - test
-     * fixtures and single-model local mode).
+     * fixtures and a single-model engine).
      *
      * @param tenantScope   the ONLY DSLContext factory - every operation runs inside
      *                      {@code withTenant(tenant, ...)}
@@ -444,7 +483,7 @@ public final class PgVectorRepository {
                                EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
                                PciPlanCheck planCheck) {
         this.tenantScope   = tenantScope;
-        this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
+        this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (default embed: its local member)
         this.queryEmbedder = queryRouter;
         this.docRouter     = docRouter;
         this.queryRouter   = queryRouter;
@@ -737,6 +776,12 @@ public final class PgVectorRepository {
 
     /** Rate limit for the refusal / would-refuse WARN line: one per (route, tenant, collection) per minute. */
     private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
+
+    /** Drops the ownerless-write log windows of {@code tenant} (bead nexus-0bl77, the test-only tenant reset
+     *  route); returns how many were removed. */
+    public int evictOwnerlessLogTenant(String tenant) {
+        return ownerlessLogLimiter.evictTenant(tenant);
+    }
 
     /**
      * The chashes of {@code distinctHex} that have a LIVE manifest row in {@code collection}: a
@@ -3321,42 +3366,6 @@ public final class PgVectorRepository {
     }
 
     /**
-     * Single-chunk put (MCP {@code store_put} path) — embed + upsert one chunk.
-     *
-     * <p>RDR-155 P4a.2 (bead nexus-1k8s1): mirrors the Chroma
-     * {@code VectorRepository.put} envelope (returns the chunk ID verbatim).
-     * Delegates to {@link #upsertChunks} so dim dispatch, router-aware embedding,
-     * and the fail-loud dimension check are identical to the batch path.
-     *
-     * @return the chunk ID, unchanged
-     */
-    public String put(String tenant, String collection, String docId,
-                      String content, Map<String, Object> metadata) {
-        putWithTokens(tenant, collection, docId, content, metadata);
-        return docId;
-    }
-
-    /**
-     * Token-aware sibling of {@link #put} (bead nexus-ehc4q).
-     * Delegates to {@link #upsertChunksWithTokens}; the token count is the
-     * embedding cost for the single chunk.
-     */
-    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
-                                          String content, Map<String, Object> metadata) {
-        return putWithTokens(tenant, collection, docId, content, metadata, null);
-    }
-
-    /** Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24); {@code null} guard is the plain put. */
-    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
-                                          String content, Map<String, Object> metadata,
-                                          OwnershipGuard guard) {
-        Tokened<Integer> result = upsertChunksWithTokens(
-            tenant, collection, List.of(docId), List.of(content),
-            List.of(metadata != null ? metadata : Map.of()), false, List.of(), guard);
-        return new Tokened<>(docId, result.tokens());
-    }
-
-    /**
      * Get chunks matching a metadata {@code where} equality filter, paginated in
      * chash order (RDR-155 P4a.2, bead nexus-1k8s1).
      *
@@ -5274,9 +5283,25 @@ FROM scope s
                                                               String quarantinedAt, int sampleLimit,
                                                               int rowLimit) {
         return quarantineOrphansBounded(tenant, collection, quarantineCollection, quarantinedAt,
+                                        sampleLimit, rowLimit, dimForCollection(tenant, collection),
+                                        LedgerMarker.none());
+    }
+
+    /**
+     * As the default-bound form, with the {@link LedgerMarker} the keyed route passes and the collection's
+     * dimension that route already resolved ({@link #dimForCollection}) before it claimed its ledger row
+     * (nexus-yye8l.5): an unknown collection must fail with today's plain error and no row, and the resolution
+     * must not be a second {@code withTenant} inside the claim's lease.
+     */
+    public QuarantineBoundedOutcome quarantineOrphansBounded(String tenant, String collection,
+                                                              String quarantineCollection,
+                                                              String quarantinedAt, int sampleLimit,
+                                                              int rowLimit, int dim,
+                                                              LedgerMarker<QuarantineBoundedOutcome> marker) {
+        return quarantineOrphansBounded(tenant, collection, quarantineCollection, quarantinedAt,
                                         sampleLimit, rowLimit,
                                         PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
-                                        PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
+                                        PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS, dim, marker);
     }
 
     /** Explicit-bound form, for tests that need a bound shorter than the default. */
@@ -5285,18 +5310,31 @@ FROM scope s
                                                               String quarantinedAt, int sampleLimit,
                                                               int rowLimit, int statementTimeoutMs,
                                                               int lockTimeoutMs) {
-        int dim = dimForCollection(tenant, collection);
-        var rec = tenantScope.withTenant(tenant, ctx -> {
+        return quarantineOrphansBounded(tenant, collection, quarantineCollection, quarantinedAt,
+                                        sampleLimit, rowLimit, statementTimeoutMs, lockTimeoutMs,
+                                        dimForCollection(tenant, collection), LedgerMarker.none());
+    }
+
+    private QuarantineBoundedOutcome quarantineOrphansBounded(String tenant, String collection,
+                                                               String quarantineCollection,
+                                                               String quarantinedAt, int sampleLimit,
+                                                               int rowLimit, int statementTimeoutMs,
+                                                               int lockTimeoutMs, int dim,
+                                                               LedgerMarker<QuarantineBoundedOutcome> marker) {
+        return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
-            return ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
+            var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit))
                .fetchOne();
+            runAfterSweepSqlHook();
+            long moved = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED);
+            long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
+            JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);
+            var outcome = new QuarantineBoundedOutcome(
+                moved, fromJsonList(sampleJson != null ? sampleJson.data() : null), remaining);
+            marker.mark(ctx, outcome);
+            return outcome;
         });
-        long moved = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED);
-        long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
-        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);
-        return new QuarantineBoundedOutcome(
-            moved, fromJsonList(sampleJson != null ? sampleJson.data() : null), remaining);
     }
 
     /**
@@ -5321,27 +5359,44 @@ FROM scope s
                                                               int sampleLimit, Integer rowLimit,
                                                               Double floorFraction, Integer floorMinChunks,
                                                               boolean force) {
-        int dim = dimForCollection(tenant, collection);
-        var rec = tenantScope.withTenant(tenant, ctx -> {
+        return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
+            rowLimit, floorFraction, floorMinChunks, force, dimForCollection(tenant, collection),
+            LedgerMarker.none());
+    }
+
+    /**
+     * As above, with the {@link LedgerMarker} the keyed route passes and the collection's dimension it already
+     * resolved before claiming its ledger row (nexus-yye8l.5); only a bounded call is keyed.
+     */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force, int dim,
+                                                              LedgerMarker<QuarantineFlooredOutcome> marker) {
+        return tenantScope.withTenant(tenant, ctx -> {
             if (rowLimit != null) {
                 PgSession.setStatementAndLockBounds(ctx,
                     PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
                     PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
             }
-            return ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
+            var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit,
                     floorFraction, floorMinChunks, force))
                .fetchOne();
+            runAfterSweepSqlHook();
+            JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);
+            Long moved = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.MOVED);
+            var outcome = new QuarantineFlooredOutcome(
+                moved == null ? 0L : moved,
+                fromJsonList(sampleJson != null ? sampleJson.data() : null),
+                rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REMAINING),
+                Boolean.TRUE.equals(rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REFUSED)),
+                rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REAPABLE_COUNT),
+                rec.get(GC_QUARANTINE_ORPHANS_FLOORED.TOTAL_COUNT));
+            marker.mark(ctx, outcome);
+            return outcome;
         });
-        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);
-        Long moved = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.MOVED);
-        return new QuarantineFlooredOutcome(
-            moved == null ? 0L : moved,
-            fromJsonList(sampleJson != null ? sampleJson.data() : null),
-            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REMAINING),
-            Boolean.TRUE.equals(rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REFUSED)),
-            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REAPABLE_COUNT),
-            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.TOTAL_COUNT));
     }
 
     public QuarantineOutcome quarantineOrphans(String tenant, String collection,
@@ -5436,24 +5491,46 @@ FROM scope s
     public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
                                                              String originCollection, int rowLimit) {
         return restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit,
+                                          dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    /**
+     * As the default-bound form, with the {@link LedgerMarker} the keyed route passes and the origin collection's
+     * dimension it already resolved before claiming its ledger row (nexus-yye8l.5).
+     */
+    public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                             String originCollection, int rowLimit, int dim,
+                                                             LedgerMarker<RestoreBoundedOutcome> marker) {
+        return restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit,
                                           PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
-                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS, dim, marker);
     }
 
     /** Explicit-bound form, for tests that need a bound shorter than the default. */
     public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
                                                              String originCollection, int rowLimit,
                                                              int statementTimeoutMs, int lockTimeoutMs) {
-        int dim = dimForCollection(tenant, originCollection);
-        var rec = tenantScope.withTenant(tenant, ctx -> {
+        return restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit,
+                                          statementTimeoutMs, lockTimeoutMs,
+                                          dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    private RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                              String originCollection, int rowLimit,
+                                                              int statementTimeoutMs, int lockTimeoutMs,
+                                                              int dim, LedgerMarker<RestoreBoundedOutcome> marker) {
+        return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
-            return ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
+            var rec = ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
                     dim, tenant, quarantineCollection, originCollection, rowLimit))
                .fetchOne();
+            runAfterSweepSqlHook();
+            long restored = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.RESTORED);
+            long remaining = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.REMAINING);
+            var outcome = new RestoreBoundedOutcome(restored, remaining);
+            marker.mark(ctx, outcome);
+            return outcome;
         });
-        long restored = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.RESTORED);
-        long remaining = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.REMAINING);
-        return new RestoreBoundedOutcome(restored, remaining);
     }
 
     /**
@@ -6059,6 +6136,80 @@ FROM scope s
                .fetchOne();
         });
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
+    }
+
+    /**
+     * One bounded expiry page (RDR-222 Amendment A1, nexus-1579m): {@code expired} is the rows this page deleted
+     * (one per model row of a chash), {@code refused} describes the sibling as of this page and is {@code null}
+     * when it was not counted ({@code countRefused} false, no floor scan), {@code more} says the page found
+     * eligible chashes past its own, and {@code floorRefused} says the floor fired and nothing was deleted.
+     * {@code refused} is a {@link Long}, never a primitive: SQL NULL must reach the response as JSON null.
+     */
+    public record ExpireBoundedOutcome(long expired, Long refused, boolean more, boolean floorRefused) {}
+
+    /**
+     * {@link #expireQuarantine} in pages: at most {@code rowLimit} (clamped to 5,000 by the function) distinct
+     * chashes per call, in chash order, one commit and one {@code gc_audit} row per call. The statement bound
+     * (25 s) and lock bound (2 s) are set HERE as their own statements before the call, for the reason
+     * {@link #quarantineOrphansBounded} gives. {@code floorFraction} 1.0 or more skips the floor scan (it can
+     * never fire), which is what both client callers send.
+     */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    /**
+     * As the default-bound form, with the {@link LedgerMarker} the keyed route passes and the origin collection's
+     * dimension it already resolved before claiming its ledger row. The marker runs in the page's own
+     * transaction, after the function call, so the page's delete and audit row roll back with a lost lease.
+     */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused, int dim,
+                                                         LedgerMarker<ExpireBoundedOutcome> marker) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                       PgSession.DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS, dim, marker);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused,
+                                                         int statementTimeoutMs, int lockTimeoutMs) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       statementTimeoutMs, lockTimeoutMs,
+                                       dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    private ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                          String originCollection, String cutoff,
+                                                          double floorFraction, int floorMinChunks, boolean force,
+                                                          int rowLimit, boolean countRefused,
+                                                          int statementTimeoutMs, int lockTimeoutMs, int dim,
+                                                          LedgerMarker<ExpireBoundedOutcome> marker) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            var rec = ctx.selectFrom(GC_EXPIRE_QUARANTINE_BOUNDED.call(
+                    dim, tenant, quarantineCollection, originCollection, cutoff,
+                    floorFraction, floorMinChunks, force, rowLimit, countRefused))
+               .fetchOne();
+            runAfterSweepSqlHook();
+            var outcome = new ExpireBoundedOutcome(
+                rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.REFUSED),
+                rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.MORE), rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.FLOOR_REFUSED));
+            marker.mark(ctx, outcome);
+            return outcome;
+        });
     }
 
     /**
@@ -6762,46 +6913,6 @@ FROM scope s
             }
             return rows;
         });
-    }
-
-    /**
-     * Fetch the {@code chunk_text} for a single {@code (tenant, collection, chash)}
-     * triple — targeted single-row lookup for the RDR-169 G3 URI-resolver path.
-     *
-     * <p>Returns {@code null} when:
-     * <ul>
-     *   <li>the row does not exist (missing chunk), or</li>
-     *   <li>{@code chunk_text} is {@code NULL} (reference-only retention, RDR-169 G1).</li>
-     * </ul>
-     *
-     * <p>Callers must distinguish "missing row" from "reference-only" at the
-     * resolver level if needed; this method treats both as "no stored text."
-     * RLS is enforced via {@link dev.nexus.service.db.TenantScope#withTenant} —
-     * cross-tenant rows are invisible.
-     *
-     * <p><b>Physical read, deliberately not live(c)</b> (RDR-192 Phase 2 gate M7,
-     * nexus-wbfpw.35). Its one caller is the {@code chroma://<collection>/<chash>} URI
-     * resolver ({@link dev.nexus.service.resolver.ChromaSchemeHandler}), and a URI
-     * that names a chash is a content-addressed permalink: it resolves whatever is
-     * stored at that (collection, chash), including a chunk live(c) hides (no owner,
-     * or owners all tombstoned). Everything that serves a chunk by search, get or list
-     * goes through {@code liveChunksCondition} or a live(c) function instead.
-     * {@code Rdr192EngineLivenessMatrixIntegrationTest#fetchChunkText_readsPhysically_regardlessOfLiveness}
-     * pins this.
-     *
-     * @param tenant     the requesting tenant principal
-     * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param chash      the chunk's natural ID (the full sha256 hexdigest, RDR-180)
-     * @return the stored {@code chunk_text}, or {@code null} if none
-     */
-    public String fetchChunkText(String tenant, String collection, String chash) {
-        int dim = dimForCollection(tenant, collection);
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chunkText()).from(ch.table())
-               .where(scope.and(ch.chash().eq(chash)))
-               .fetchOne(ch.chunkText()));
     }
 
     // -- Internal helpers -------------------------------------------------------

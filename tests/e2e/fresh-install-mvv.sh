@@ -222,7 +222,7 @@ print("FAIL|no Extractor field on the indexed chunk — extraction_method missin
 
 _self_test() {
     local failures=0 t
-    t="$(mktemp -d /tmp/fresh-install-mvv-selftest-XXXXXX)"
+    t="$(mktemp -d "${TMPDIR:-/tmp}/fresh-install-mvv-selftest-XXXXXX")"
     trap 'rm -rf "$t"' RETURN
 
     _assert_eq() {
@@ -403,7 +403,26 @@ else
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORK="$(mktemp -d /tmp/fresh-mvv-XXXXXX)"
+# nexus-0tqr7: the bulky work tree (venv, wheel, model cache, PG cluster:
+# ~2.5 GB) goes under the operator's TMPDIR, not a hardcoded /tmp (hellmini
+# points TMPDIR at /Volumes/Bulk to keep this off the internal SSD). A
+# trailing slash is stripped so a macOS-style TMPDIR=/var/folders/.../T/ does
+# not yield a // path.
+#
+# UNIX-SOCKET PATH LIMIT (macOS caps sun_path at 104 bytes): this journey
+# creates NO unix socket, so no short socket-only dir is needed. The bundled
+# Postgres runs TCP-only: _configure_cluster (src/nexus/db/pg_provision.py)
+# writes unix_socket_directories = '' and _pg_ctl_start passes no -k, and the
+# engine service speaks HTTP over 127.0.0.1. The only would-be socket path,
+# $HOME_DIR/.config/nexus/postgres/.s.PGSQL.<port>, is never opened. Its
+# length for a 60-char TMPDIR is 120 bytes (60 + /fresh-mvv-XXXXXX 17 +
+# /home 5 + /.config/nexus/postgres 23 + /.s.PGSQL.54321 15), over the limit,
+# which is why the no-socket property is pinned by
+# tests/test_fresh_install_mvv_tmpdir.py. Were a socket ever added, it must
+# live in its own short dir (not under $WORK).
+MVV_TMP="${TMPDIR:-/tmp}"
+MVV_TMP="${MVV_TMP%/}"
+WORK="$(mktemp -d "$MVV_TMP/fresh-mvv-XXXXXX")"
 HOME_DIR="$WORK/home"
 VENV="$WORK/venv"
 LOGS="$WORK/logs"
@@ -442,13 +461,63 @@ cleanup() {
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
-    if [ "$GATE_OK" = 1 ]; then
-        rm -rf "$WORK"
-    else
-        echo "FAILURE EVIDENCE PRESERVED: $LOGS (home: $HOME_DIR)" >&2
+    if [ "$GATE_OK" != 1 ]; then
+        if [ "${FRESH_MVV_KEEP_WORK:-0}" = 1 ]; then
+            # Debug knob: keep the whole multi-GB tree for post-mortem.
+            echo "FAILURE EVIDENCE PRESERVED: $LOGS (home: $HOME_DIR)" >&2
+            return 0
+        fi
+        # nexus-0tqr7: a failed run used to strand the whole ~2.5 GB tree.
+        # Keep only the small evidence: the script's own per-leg logs PLUS the
+        # service-side root causes that live under the sandbox HOME (engine
+        # logs, hs_err, the PG log). config.yml, credentials and tokens are
+        # never copied. The tree itself is removed.
+        local evidence="$MVV_TMP/${WORK##*/}-logs" kept="" cfg="$HOME_DIR/.config/nexus"
+        if [ -d "$LOGS" ] && cp -R "$LOGS" "$evidence" 2>/dev/null; then
+            kept="legs"
+            if [ -d "$cfg/logs" ] && cp -R "$cfg/logs" "$evidence/engine-logs" 2>/dev/null; then
+                kept="$kept engine-logs"
+            fi
+            if [ -f "$cfg/postgres/pg.log" ] && cp "$cfg/postgres/pg.log" "$evidence/pg.log" 2>/dev/null; then
+                kept="$kept pg.log"
+            fi
+            if [ -f "$cfg/postgres/pg_ctl.out" ] && cp "$cfg/postgres/pg_ctl.out" "$evidence/pg_ctl.out" 2>/dev/null; then
+                kept="$kept pg_ctl.out"
+            fi
+            echo "FAILURE EVIDENCE PRESERVED: $evidence (kept: $kept; work tree removed; FRESH_MVV_KEEP_WORK=1 keeps it)" >&2
+        else
+            echo "FAILURE: no logs could be preserved (work tree removed; FRESH_MVV_KEEP_WORK=1 keeps it)" >&2
+        fi
     fi
+    # The service stop above is unverified (|| true). A postmaster still
+    # running over a deleted datadir holds a SysV shm segment for good, so
+    # reap any under our WORK before the rm, as release-battery.sh does:
+    # INT (fast shutdown), a short wait, then KILL. Matches only -D under
+    # $WORK, so a peer's cluster is never touched.
+    local pids
+    pids="$(pgrep -f "postgres -D $WORK" 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+        # shellcheck disable=SC2086
+        kill -INT $pids 2>/dev/null || true
+        sleep 2
+        pids="$(pgrep -f "postgres -D $WORK" 2>/dev/null || true)"
+        # shellcheck disable=SC2086
+        [ -n "$pids" ] && kill -KILL $pids 2>/dev/null || true
+        sleep 1
+        pids="$(pgrep -f "postgres -D $WORK" 2>/dev/null || true)"
+    fi
+    if [ -n "$pids" ]; then
+        echo "WORK KEPT: $WORK (a postmaster under it survived INT and KILL; removing the tree would orphan it)" >&2
+        return 0
+    fi
+    rm -rf "$WORK" || true
 }
 trap cleanup EXIT
+# A signal must run the EXIT trap too, or an interrupted run strands $WORK.
+# Bash defers a trapped signal until the current FOREGROUND child exits, so an
+# INT/TERM during a long leg takes effect when that leg finishes.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── env allowlist: the ONLY ambient state the journey may see ───────────────
 # Deliberately absent: VOYAGE_API_KEY (r5f3c — an ambient key must not flip
@@ -1224,6 +1293,14 @@ for f in $LEGS_TO_CHECK; do
         FAIL\|*) _fail "leg log $f: ${LEG_VERDICT#FAIL|}" ;;
     esac
 done
+
+# nexus-0tqr7: measure the no-socket premise that lets $WORK sit under a long
+# TMPDIR (macOS sun_path limit, see the comment at WORK's creation). The
+# service is still up here, so a socket the journey opened would exist now.
+NO_SOCKET_CENSUS="$(find "$WORK" -type s 2>/dev/null || true)"
+if [ -n "$NO_SOCKET_CENSUS" ]; then
+    _fail "the journey created a unix socket under \$WORK, breaking the no-socket premise that lets the work tree live under a long TMPDIR (macOS 104-byte sun_path limit): ${NO_SOCKET_CENSUS%%$'\n'*}"
+fi
 
 GATE_OK=1
 # Pipe-free tail (nexus-i66g4/6zxfb/wbeyi class): take the first line via

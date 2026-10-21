@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -219,8 +220,8 @@ class TaxonomyHandlerImportRlsTest {
         // broken grant into a sibling test.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "REVOKE INSERT ON nexus.topics FROM " + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("INSERT")).on(TOPICS).from(DSL.role(SVC_ROLE)).execute();
         }
         try {
             CapturingExchange ex = importTopic(CONTESTED_ID + 500, "grant-fault");
@@ -235,8 +236,8 @@ class TaxonomyHandlerImportRlsTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "GRANT INSERT ON nexus.topics TO " + SVC_ROLE);
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("INSERT")).on(TOPICS).to(DSL.role(SVC_ROLE)).execute();
             }
         }
     }

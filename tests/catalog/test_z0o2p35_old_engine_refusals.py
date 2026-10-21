@@ -227,6 +227,7 @@ def _writer_run(cat: Any) -> None:
     w.finish()
 
 
+@pytest.mark.t2_tenant
 def test_a_snapshot_with_the_wrong_types_is_corrupt_but_one_with_no_fields_is_an_old_engine() -> None:
     _not_older(lambda: _writer_run(_SnapshotCat(prior_chashes="abc", prior_count=3)))
     _not_older(lambda: _writer_run(_SnapshotCat(prior_chashes=[], prior_count="3")))

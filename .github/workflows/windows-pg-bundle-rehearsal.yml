@@ -190,8 +190,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-pg-bundle-rehearsal
-  cancel-in-progress: true
+  # One run at a time on develop, the newest push waiting, as ci.yml (Sam,
+  # 2026-10-18, nexus-1wf1s): a running develop rehearsal finishes and the
+  # newest pending push covers the commits before it; a PR push still
+  # cancels the run it supersedes.
+  group: windows-pg-bundle-rehearsal-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
   bundle:
@@ -268,6 +272,10 @@ jobs:
     if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
       - name: Set up GraalVM 25.0.3
@@ -276,7 +284,7 @@ jobs:
           java-version: '25.0.3'
           distribution: 'graalvm'
           cache: 'maven'
-      - name: Run testcontainers jOOQ codegen
+      - name: Run jOOQ codegen
         working-directory: service
         run: ./mvnw -q generate-sources
       - name: Upload generated jOOQ sources
@@ -379,9 +387,17 @@ jobs:
       # The stop-order logic it pins is platform-independent and stays covered on POSIX, so it is
       # left out of this set rather than widening the skip ceiling, which exists to catch a suite
       # that quietly stopped running.
+      # tests/daemon/test_stop_flagless_start_real_processes.py (nexus-oacd3) is the same case: real
+      # child processes whose environment is read from /proc or KERN_PROCARGS2, 14 skips on win32.
+      # Its platform-independent siblings (the procargs parser, the fail-closed reader, the Windows
+      # no-reader contract, the owner-directory rules) are test_stop_leaves_other_dirs_flagless_start.py
+      # and stay in the set. Develop at 49149186a (run 39072125530) skipped 157; with that module run
+      # here it skipped 171 against the ceiling of 163 (run 39075798391). Without it the set is back
+      # near 157, a margin of about 6 under the ceiling. Every module ignored here must skip itself
+      # on win32 at module level (tests/test_windows_release_legs_workflow.py).
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -423,7 +439,13 @@ jobs:
       # run passed 3062, so the floor rises to 2750 (about 90%), and the cap the workflow test
       # holds is 6% of the floor (2750 * 6 // 100 = 165): 5% of any floor this run can meet is
       # under 150.
+      # Re-measured 2026-10-19 at develop 8d36c3e71 (this job, run 39307885257): 3288 passed, 164
+      # junit skips, 0 failed. The ceiling (163) had no room left: skips grew 150 -> 164 across
+      # several commits, the last four POSIX-only uninstall/rmtree mode-bit and symlink tests in
+      # tests/daemon/test_uninstall_leftovers.py (nexus-kyujr). Same rule as before: floor about 90%
+      # of the passes (2950), ceiling the measured skips plus the margin of 13 (177), which is
+      # the 6% cap the workflow test holds (2950 * 6 // 100 = 177).
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2750 --max-skipped 163 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2950 --max-skipped 177 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing

@@ -32,10 +32,25 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus._log_safe_url import log_endpoint
+
 if TYPE_CHECKING:
     from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
+
+
+class ServiceTokenUnresolvableError(RuntimeError):
+    """``service_url`` is set but no ``service_token`` resolves (env, config
+    or lease): the managed-cloud half of "endpoint not resolvable".
+
+    Deliberately NOT a :class:`ServiceEndpointUnresolvableError`: that type
+    marks the local "worth a bounded lease wait" case, and this one must
+    never be waited on (nexus-7dsgp). A named ``RuntimeError`` subclass so
+    every existing ``except RuntimeError`` still matches, and so the
+    storage-touch test guard can tell a managed-posture touch from an
+    unrelated bare ``RuntimeError`` (nexus-j23ni).
+    """
 
 
 class ServiceEndpointUnresolvableError(RuntimeError):
@@ -50,8 +65,9 @@ class ServiceEndpointUnresolvableError(RuntimeError):
     config-typo bug, not a respawn-gap symptom) and the managed-cloud
     "``service_url`` is set but no token is resolvable" case (which must
     NEVER wait, by the bead's own "never for the managed-cloud URL path"
-    contract). Both of those stay plain ``RuntimeError`` — this subclass
-    is raised ONLY at the genuine not-resolvable site. Subclassing
+    contract). The malformed port stays a plain ``RuntimeError`` and the
+    managed-cloud case is the sibling :class:`ServiceTokenUnresolvableError`
+    — this subclass is raised ONLY at the genuine not-resolvable site. Subclassing
     ``RuntimeError`` (rather than a fresh ``Exception`` subclass) means
     every existing ``except RuntimeError`` / ``pytest.raises(RuntimeError)``
     call site keeps matching unchanged; only a caller that specifically
@@ -417,6 +433,23 @@ def env_host_port_url() -> str | None:
     return f"http://{host}:{port}"
 
 
+def _supervisor_registered_for_login() -> bool:
+    """True when the storage-service autostart unit is installed for this user
+    AND bakes this client's config dir (nexus-iedjp). A unit installed for
+    another directory is not the supervisor this client is waiting on. Reads
+    the unit file only: this runs inside an error path, so it never asks
+    launchctl/systemctl (a ten-second ceiling each) and never raises. A unit
+    the manager has disabled still reads as registered; the message then keeps
+    the start hint, so the worst case is one extra retry."""
+    try:
+        from nexus.commands.daemon import _service_autostart_unit_serves  # noqa: PLC0415 — deferred: CLI module, loaded only on the failure path
+        import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import; module attribute so a setattr on nexus_config_dir reaches it
+
+        return _service_autostart_unit_serves(_config.nexus_config_dir())
+    except Exception:  # noqa: BLE001 — the unit lookup must never replace the endpoint error
+        return False
+
+
 def resolve_service_config(
     *,
     wait_budget_s: float = 0.0,
@@ -477,6 +510,20 @@ def resolve_service_config(
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
         # stranded-install detector at CLI/MCP startup.
+        if _supervisor_registered_for_login():
+            # nexus-iedjp: a unit registered to start at login that has not
+            # published its lease yet is a login race, not a service nobody
+            # started. Say so, and keep the start hint for the lease that
+            # never appears.
+            raise ServiceEndpointUnresolvableError(
+                "nexus-service endpoint is not resolvable yet (NX_STORAGE_BACKEND="
+                "service): the supervisor is registered to start at login and may "
+                "still be starting; retry in a few seconds. If it stays "
+                "unresolvable, start the supervisor with 'nx daemon service start' "
+                "(publishes the endpoint lease this client auto-discovers), or "
+                "export NX_SERVICE_PORT / NX_SERVICE_TOKEN (and optionally "
+                "NX_SERVICE_HOST) explicitly."
+            )
         raise ServiceEndpointUnresolvableError(
             "nexus-service endpoint is not resolvable (NX_STORAGE_BACKEND="
             "service): start the supervisor with 'nx daemon service start' "
@@ -513,9 +560,13 @@ def resolve_service_endpoint(
     here so a managed TLS endpoint survives end-to-end. Resolution order mirrors
     the T3 data path (:func:`nexus.db.http_vector_client._resolve_endpoint`):
 
-      1. ``service_url`` — the authoritative FULL endpoint, used VERBATIM
-         (scheme + host + port preserved). Resolved via
-         :func:`nexus.config.get_credential`, i.e. ``NX_SERVICE_URL`` env FIRST,
+      1. ``service_url`` — the authoritative FULL endpoint, used as written
+         (scheme + host + port preserved) once it passes the one check on it:
+         a URL carrying ``user:password@`` is REFUSED with
+         :class:`~nexus._log_safe_url.ServiceUrlUserinfoError` (nexus-ujbf8;
+         the engine's credential is the bearer token, and the message names
+         the source, never the URL). Resolved via
+         :func:`nexus.config.get_service_url`, i.e. ``NX_SERVICE_URL`` env FIRST,
          then the persisted ``config.yml`` credential a greenfield user set with
          ``nx config set service_url`` (RDR-166 nexus-v3p0x). This is the ONLY
          scheme source: ``https://api.conexus-nexus.com:443`` stays ``https``;
@@ -534,9 +585,9 @@ def resolve_service_endpoint(
     call. This is the bead's "never for the managed-cloud URL path" contract
     enforced structurally rather than by a caller-side guard.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    url = (get_credential("service_url") or "").strip().rstrip("/") or None
+    url = get_service_url() or None
     if url is not None:
         token = (get_credential("service_token") or "").strip() or None
         if token is None:
@@ -549,7 +600,7 @@ def resolve_service_endpoint(
             # data tokens, then send no bearer and get a named 401.
             return url, ""
         if not token:
-            raise RuntimeError(
+            raise ServiceTokenUnresolvableError(
                 "service_url is set but no service_token is resolvable (neither "
                 "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
                 "with `nx config set service_token <bearer>` (or export "
@@ -582,11 +633,12 @@ def is_endpoint_env_pinned() -> bool:
     fallback this returns ``False`` for benefits from — and needs —
     memoization.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
-    # Same normalization as resolve_service_endpoint's leg 1, so the two
-    # never disagree on a value like "/" (fix-check round 2).
-    url = (get_credential("service_url") or "").strip().rstrip("/")
+    # Same normalization (and the same userinfo refusal) as
+    # resolve_service_endpoint's leg 1, so the two never disagree on a value
+    # like "/" (fix-check round 2).
+    url = get_service_url()
     if url:
         token = (get_credential("service_token") or "").strip()
         return bool(token)
@@ -865,13 +917,13 @@ def guard_production_write(base_url: str) -> None:
         # "auditable after the fact" claim false again by construction.
         _log.warning(
             "guard_production_write.opt_in_accepted",
-            base_url=base_url,
+            base_url=log_endpoint(base_url),
             checkout_root=str(checkout_root),
             reason=reason,
         )
         return
     raise ProductionWriteGuardError(
-        f"STOP: refusing a WRITE to {base_url!r}. This process's nexus "
+        f"STOP: refusing a WRITE to {log_endpoint(base_url)!r}. This process's nexus "
         f"package resolves from a dev checkout ({checkout_root}), so this "
         "write is presumed to target the OPERATOR'S REAL, LIVE STORE — "
         "the same substrate a real install reaches — regardless of how "

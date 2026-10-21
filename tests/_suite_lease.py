@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS. The build lease (scripts/lib/build-lease.sh) already makes
 the box single-writer for Maven, and ``tests/conftest.py`` already REFUSES a
-run while a build holds it. But the suite only ever READ that lease; it took
+run while a build in its own checkout holds it (nexus-qt6q7). But the suite only ever READ that lease; it took
 none of its own. So a build blocked a suite and a suite blocked nothing --
 two full runs on one box saw each other not at all, which is the shape that
 exhausts ``kern.sysv.shmmni`` and reports thousands of setup errors that read
@@ -29,13 +29,25 @@ reclaim a dead holder safely.
 The lease root is the git COMMON dir, so every worktree of this repo shares
 one lease -- the same choice build-lease.sh made after three worktree agents
 ran three engine suites at once (nexus-g6xpa).
+
+CONTENTION TELEMETRY (nexus-jqk5c). Every CONTENDED event appends one key=value
+line to the per-user, per-host log build-lease.sh also writes (``record_event``):
+a wait that succeeded, a refusal, a give-up, a stale reclaim. The default path is
+under the user's own state dir, so each user on a box writes a file of its own; a
+measurement that must see every user's events sets ``NX_LEASE_EVENTS_LOG`` to one
+shared path, and a file this module creates is group-writable so users of one
+group can append to it. An immediate, uncontended acquire writes nothing, so the
+log is a record of contention. Best-effort: a failure to write is swallowed and
+never changes an outcome.
 """
 from __future__ import annotations
 
 import os
 import shutil
+import socket
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 #: Resource name under the shared lease root. Sibling of ``service``, which
@@ -90,6 +102,121 @@ STALE_SWEEP_AGE_SECONDS = 3600.0
 
 _STALE_PREFIX = f"{RESOURCE}.stale."
 
+#: The per-user, per-host contention log; default ``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/lease-events.log``.
+#: Tests point it at a tmp file; scripts/lib/build-lease.sh reads the same variable.
+EVENTS_LOG_ENV = "NX_LEASE_EVENTS_LOG"
+
+
+#: Mode of a log file this module creates: group-writable, so a shared path works across a group.
+EVENTS_LOG_MODE = 0o664
+
+
+def events_log_path() -> Path | None:
+    """Where contention events are appended, or ``None`` when no home can be found."""
+    explicit = os.environ.get(EVENTS_LOG_ENV, "").strip()
+    if explicit:
+        return Path(explicit)
+    state = os.environ.get("XDG_STATE_HOME", "").strip()
+    if not state:
+        home = os.environ.get("HOME", "").strip()
+        if not home:
+            return None
+        state = str(Path(home) / ".local" / "state")
+    return Path(state) / "nexus" / "lease-events.log"
+
+
+def _kv(value: object) -> str:
+    """A log value: bare unless it is empty or holds whitespace, a quote or a backslash, then double-quoted."""
+    text = " ".join(str(value).splitlines())
+    if not text or any(c.isspace() or c in '"\\' for c in text):
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return text
+
+
+def record_event(
+    name: str,
+    outcome: str,
+    waited_s: float = 0,
+    *,
+    holder_pid: int | None = None,
+    holder_label: str | None = None,
+    unguarded: bool = False,
+) -> None:
+    """Append ONE contention line to the per-user, per-host log. Never raises, never prints.
+
+    Fields, space-separated: ``ts`` (ISO-8601 UTC), ``lease=suite``, ``name``,
+    ``host``, ``pid``, ``waited_s``, ``outcome`` (``acquired_after_wait``,
+    ``refused``, ``stale_reclaimed`` or ``gave_up``), then ``holder_pid`` and
+    ``holder_label`` when known, then ``unguarded=1`` when the run went on
+    despite the refusal (``NX_SUITE_LEASE_UNGUARDED=1``: that line is a bypass,
+    not a blocked run) -- the shape build-lease.sh writes for ``lease=service``.
+    One ``os.write`` on an ``O_APPEND`` descriptor, so concurrent writers do not
+    interleave lines. A file this call creates is mode 0664 whatever the umask
+    (users of one group can share a path via ``NX_LEASE_EVENTS_LOG``); an
+    existing file's mode is never changed.
+    """
+    try:
+        path = events_log_path()
+        if path is None:
+            return
+        parts = [
+            f"ts={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            "lease=suite",
+            f"name={_kv(name)}",
+            f"host={_kv(socket.gethostname().split('.')[0] or 'unknown')}",
+            f"pid={os.getpid()}",
+            f"waited_s={int(waited_s)}",
+            f"outcome={outcome}",
+        ]
+        if holder_pid is not None:
+            parts.append(f"holder_pid={holder_pid}")
+        if holder_label:
+            parts.append(f"holder_label={_kv(holder_label)}")
+        if unguarded:
+            parts.append("unguarded=1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, EVENTS_LOG_MODE)
+            try:
+                os.fchmod(fd, EVENTS_LOG_MODE)  # the umask would otherwise drop the group bit
+            except OSError:
+                pass
+        except FileExistsError:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND)  # never chmod a file that was not ours to create
+        try:
+            os.write(fd, (" ".join(parts) + "\n").encode())
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 -- telemetry must never change what the lease does
+        pass
+
+
+def _read_label(lease: Path) -> str | None:
+    """The label the lease directory records, ``None`` when missing or unreadable."""
+    try:
+        return (lease / "label").read_text().strip() or None
+    except Exception:  # noqa: BLE001 -- best-effort
+        return None
+
+
+def _holder_fields(lease: Path) -> tuple[int | None, str | None]:
+    """The pid and label the lease directory records, each ``None`` when missing or unreadable."""
+    pid: int | None = None
+    try:
+        pid = int((lease / "pid").read_text().strip())
+    except Exception:  # noqa: BLE001 -- best-effort
+        pid = None
+    return pid, _read_label(lease)
+
+
+def record_refusal(waited_s: float = 0, lease_root: Path | None = None) -> None:
+    """Log a refusal (no wait requested), naming whoever the lease directory says holds it."""
+    try:
+        pid, label = _holder_fields(lease_path(lease_root))
+    except Exception:  # noqa: BLE001 -- best-effort
+        pid, label = None, None
+    record_event(RESOURCE, "refused", waited_s, holder_pid=pid, holder_label=label)
+
 
 def _lease_root() -> Path:
     """Shared with the build lease, resolved per call rather than at import."""
@@ -106,13 +233,15 @@ def lease_path(lease_root: Path | None = None) -> Path:
 def recovery_hint(lease_root: Path | None = None) -> str:
     """The sentence a refused run ends with: where the lease is, and how to clear one that has no live holder."""
     path = lease_path(lease_root)
-    return (
+    log = events_log_path()
+    hint = (
         f"The lease is the directory {path}. If no pytest run is live on this box, set it aside with: "
         f"mv {path} {path}.stale-$(date +%s) (works across users because the lease root is group-writable "
         f"and not sticky; rm -rf {path} works only for the user who owns it) "
         f"(a lease with a missing, empty or garbage pid is reclaimed automatically once it is {int(PIDLESS_GRACE_SECONDS)} s old; "
         f"one whose files this user cannot read is never reclaimed, so check who owns {path} before clearing it)."
     )
+    return hint + (f" Waits and refusals are logged to {log}." if log is not None else "")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -226,7 +355,7 @@ def _sweep_stale(root: Path, now: Callable[[], float]) -> None:
         return
 
 
-def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
+def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> tuple[int | None, str | None] | None:
     """Drop a lease whose holder is gone, or that never got as far as naming one.
 
     Two cases, both reclaimed by the same atomic rename:
@@ -261,8 +390,17 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
     window is the few microseconds between the read and the rename, and the
     lease is a convention between cooperating suites; accepted, not guarded
     (round-5 review L1). Removing the pid file in place would widen it.
+
+    Returns ``(pid, label)`` of the lease it set aside (each ``None`` when the
+    lease did not record one), or ``None`` when it set nothing aside; the caller
+    logs the ``stale_reclaimed`` event from it, after its own re-claim has
+    succeeded: nothing here, and nothing between the rename and that re-claim,
+    may do I/O the original code did not.
     """
     try:
+        # Read BEFORE the pid: the window the docstring accepts runs from the
+        # pid read to the rename, and this keeps it exactly as it was.
+        label = _read_label(lease)
         pid_file = lease / "pid"
         pid: int | None = None
         try:
@@ -270,12 +408,12 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
         except (FileNotFoundError, ValueError):
             pid = None  # missing, empty or garbage: a pid-less lease
         except OSError:
-            return  # unreadable (EACCES and kin): HELD, fail closed
+            return None  # unreadable (EACCES and kin): HELD, fail closed
         if pid is not None:
             if _pid_alive(pid):
-                return
+                return None
             _set_aside(lease)
-            return
+            return pid, label
         newest = lease.stat().st_mtime
         try:
             newest = max(newest, pid_file.stat().st_mtime)
@@ -283,8 +421,10 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
             pass
         if now() - newest >= PIDLESS_GRACE_SECONDS:
             _set_aside(lease)
+            return None, label
+        return None
     except Exception:  # noqa: BLE001 — losing the reclaim race is the expected case
-        return
+        return None
 
 
 def _write_shared(path: Path, text: str) -> None:
@@ -294,7 +434,7 @@ def _write_shared(path: Path, text: str) -> None:
 
 
 def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None,
-            now: Callable[[], float] = time.time):
+            now: Callable[[], float] = time.time, unguarded: bool = False):
     """Take the suite lease, or report who holds it.
 
     Returns a zero-argument release callable on success, or ``None`` when the
@@ -305,24 +445,41 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
     acquirers exactly one creates the directory and the rest see EEXIST.
 
     *now* is the clock the pid-less-lease grace and the stale-directory sweep
-    are read against; only tests pass it.
+    are read against; only tests pass it. *unguarded* only marks the refusal and
+    give-up lines (``unguarded=1``) when the caller will run on without the lease.
+
+    One wait writes at most one telemetry line, its final outcome, carrying the
+    whole wait: ``stale_reclaimed`` or ``acquired_after_wait`` once the lease is
+    held (after its files are written, so no logging sits inside a race window),
+    ``refused`` or ``gave_up`` when it is not.
     """
     root = lease_root or _lease_root()
     lease = root / RESOURCE
-    deadline = time.monotonic() + max(0, wait_seconds)
+    started = time.monotonic()
+    deadline = started + max(0, wait_seconds)
+    contended = False  # slept at least once: a wait, not an immediate acquire
+    seen: tuple[int | None, str | None] = (None, None)  # the holder last waited on
 
     _sweep_stale(root, now)
     while True:
+        gone: tuple[int | None, str | None] | None = None  # what THIS pass set aside; used only if its re-claim wins
         try:
             root.mkdir(parents=True, exist_ok=True)
             os.mkdir(lease)
         except FileExistsError:
-            _reclaim_if_dead(lease, now)
+            gone = _reclaim_if_dead(lease, now)
             try:
                 os.mkdir(lease)
             except FileExistsError:
                 if time.monotonic() >= deadline:
+                    # No wait budget is a refusal; a spent one is a give-up.
+                    holder_pid, holder_label = _holder_fields(lease)
+                    record_event(RESOURCE, "refused" if wait_seconds <= 0 else "gave_up",
+                                 time.monotonic() - started, holder_pid=holder_pid, holder_label=holder_label,
+                                 unguarded=unguarded)
                     return None
+                seen = _holder_fields(lease)
+                contended = True
                 time.sleep(1.0)
                 continue
         except Exception:  # noqa: BLE001 — an unwritable lease root must not block the suite
@@ -344,6 +501,17 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
             _write_shared(lease / "label", f"{label}\n")
         except Exception:  # noqa: BLE001
             pass
+
+        # Logged here, after the claim and the populate, never inside the
+        # reclaim window. A pass that set a corpse aside and WON the re-claim
+        # reports it (with the whole wait); otherwise a wait reports the holder
+        # it waited on.
+        if gone is not None:
+            record_event(RESOURCE, "stale_reclaimed", time.monotonic() - started,
+                         holder_pid=gone[0], holder_label=gone[1])
+        elif contended:
+            record_event(RESOURCE, "acquired_after_wait", time.monotonic() - started,
+                         holder_pid=seen[0], holder_label=seen[1])
 
         # Descendants inherit this and skip the lease entirely.
         os.environ[HELD_BY_ENV] = str(os.getpid())

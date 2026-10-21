@@ -72,6 +72,7 @@ class TestResolveServiceConfig:
         assert port == 7000
         assert token == "lease-token"
 
+    @pytest.mark.t2_tenant
     def test_fail_loud_when_neither(self):
         # No env, no lease (isolated config dir) → RuntimeError, no 8080 default.
         with pytest.raises(RuntimeError, match="not resolvable"):
@@ -151,6 +152,7 @@ class TestSchemeAwareEndpoint:
             "managed-tok",
         )
 
+    @pytest.mark.t2_tenant
     def test_service_url_set_but_no_token_fails_loud(self, monkeypatch):
         # NX_SERVICE_URL with no token (env or lease) → RuntimeError, not a
         # silent token-less request.
@@ -243,6 +245,7 @@ class TestMigrationHintOnFailure:
     state; stranded pre-PG installs are redirected by the stranded-install
     detector at startup, not from this error path."""
 
+    @pytest.mark.t2_tenant
     def test_unresolvable_endpoint_keeps_stock_message(self, monkeypatch, tmp_path):
         with pytest.raises(RuntimeError) as exc:
             resolve_service_config()

@@ -110,6 +110,7 @@ def test_builtin_templates_no_dimension_collisions() -> None:
         seen[canonical] = path.name
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
     reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",

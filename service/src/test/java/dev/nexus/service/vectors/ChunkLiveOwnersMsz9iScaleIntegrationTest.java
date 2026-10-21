@@ -8,12 +8,18 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Query;
-import org.jooq.Record;
-import org.jooq.Result;
+import org.jooq.Record1;
 import org.jooq.SQLDialect;
+import org.jooq.Select;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -40,6 +46,7 @@ import java.util.regex.Pattern;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -64,9 +71,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * fraction.
  *
  * <p><b>Controlled comparison (critique/review Significant findings on the
- * confounded round-1 latency number):</b> "before" and "after" are BOTH raw
- * SQL, through the SAME harness, with the SAME text-literal-vector-cast
- * binding -- the only thing that differs between them is the WHERE-clause
+ * confounded round-1 latency number):</b> "before" and "after" are BOTH typed
+ * jOOQ, built by the SAME {@link #knnQuery}, with the SAME VectorBinding bind of
+ * the query vector -- the only thing that differs between them is the WHERE-clause
  * predicate itself (plain_search_384's own dead-set anti-join vs. {@code
  * EXISTS(SELECT 1 FROM nexus.chunk_live_owners(...))}). Server-side EXPLAIN
  * ANALYZE execution time and client-side JDBC wall-clock are measured and
@@ -80,7 +87,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * since nexus-3wh8d.31) -- {@code PgVectorRepository#search}'s own {@code
  * PgSession.setHnswEfSearch}/{@code hnsw.iterative_scan} calls, K=10 floored
  * to {@code PgSession.DEFAULT_EF_SEARCH_FLOOR}, then 200), measured against an
- * EXACT (ORDER BY rewritten so HNSW cannot serve it, see {@link #exactForm}) oracle graded
+ * EXACT (ORDER BY rewritten so HNSW cannot serve it, see {@link #knnQuery}'s {@code exact} form) oracle graded
  * against its OWN predicate's live population. Round-3 rework added the
  * missing CONTROLS a standalone chunk_live_owners recall number cannot
  * supply on its own: an unfiltered 0%-tombstoned baseline (isolates whether
@@ -107,6 +114,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ChunkLiveOwnersMsz9iScaleIntegrationTest {
 
     private static final String TENANT = "clo-msz9i";
+    /** A bootstrapServiceRole role, not nexus_svc: only it holds USAGE on nexus_test, home of cosine_order. */
+    private static final String SVC_ROLE = "svc_clo_msz9i_scale";
+    private static final String SVC_PASS = "svc_clo_msz9i_scale_pass";
     private static final String COLLECTION = "knowledge__clo-msz9i-repro__minilm-l6-v2-384__v1";
     private static final int DIM = 384;
 
@@ -184,10 +194,13 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+        }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername("nexus_svc");
-        cfg.setPassword("nexus_svc_pass");
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(6);
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
@@ -388,98 +401,103 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return m;
     }
 
-    private static String vectorLiteral(float[] v) {
-        StringBuilder sb = new StringBuilder(v.length * 8 + 2).append('[');
-        for (int i = 0; i < v.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(v[i]);
+    // ── typed harness: SAME builder, SAME VectorBinding, only the liveness predicate differs ──
+
+    /**
+     * The liveness predicate a KNN statement carries (nexus-cbo4a batch D: typed {@link Condition}s, formerly three
+     * SQL strings and three {@code count(*)} twins). {@link #DEAD_SET_ANTI_JOIN} is today's shipped
+     * {@code plain_search_384} predicate as it stood before RDR-192 Step 5; {@link #LIVE_OWNERS} is its
+     * replacement, {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))};
+     * {@link #NONE} is the round-3 control: no liveness predicate at all, which isolates whether a measured recall
+     * drop is caused by FILTERING or is simply this fixture's HNSW approximation quality on an unfiltered search.
+     * Each applies to {@code nexus.chunks} and is used by the KNN query and by the full-population count alike, so
+     * the count that confirms two predicates agree on the live population is cut from the same Condition as the
+     * KNN it grades.
+     */
+    enum Liveness {
+        NONE,
+        DEAD_SET_ANTI_JOIN,
+        LIVE_OWNERS;
+
+        Condition condition() {
+            return switch (this) {
+                case NONE -> DSL.noCondition();
+                case DEAD_SET_ANTI_JOIN -> deadSetAntiJoin();
+                case LIVE_OWNERS -> DSL.exists(DSL.selectOne().from(
+                    CHUNK_LIVE_OWNERS.call(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)));
+            };
         }
-        return sb.append(']').toString();
     }
 
-    // ── raw SQL harness: SAME shape, SAME text-literal-vector binding, predicate differs ──
+    /** A chunk is out only when one of its manifest rows points at a tombstoned document and no manifest row
+     *  points at a live one; a chunk with no manifest row at all is never out (the manifest-less gap). */
+    private static Condition deadSetAntiJoin() {
+        CatalogDocumentChunks m = CATALOG_DOCUMENT_CHUNKS.as("m");
+        CatalogDocuments d = CATALOG_DOCUMENTS.as("d");
+        CatalogDocumentChunks m2 = CATALOG_DOCUMENT_CHUNKS.as("m2");
+        CatalogDocuments d2 = CATALOG_DOCUMENTS.as("d2");
+        return DSL.notExists(DSL.selectOne()
+            .from(m)
+            .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
+            .where(m.TENANT_ID.eq(CHUNKS.TENANT_ID))
+            .and(m.COLLECTION.eq(CHUNKS.COLLECTION))
+            .and(m.CHASH.eq(CHUNKS.CHASH))
+            .and(d.DELETED_AT.isNotNull())
+            .and(DSL.notExists(DSL.selectOne()
+                .from(m2)
+                .join(d2).on(d2.TENANT_ID.eq(m2.TENANT_ID).and(d2.TUMBLER.eq(m2.DOC_ID)))
+                .where(m2.TENANT_ID.eq(m.TENANT_ID))
+                .and(m2.COLLECTION.eq(m.COLLECTION))
+                .and(m2.CHASH.eq(m.CHASH))
+                .and(d2.DELETED_AT.isNull()))));
+    }
 
-    private static final String BEFORE_DEAD_SET_ANTI_JOIN =
-        "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-        + " AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
-        + "                   JOIN nexus.catalog_documents d"
-        + "                     ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
-        + "                  WHERE m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash"
-        + "                    AND d.deleted_at IS NOT NULL"
-        + "                    AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
-        + "                                      JOIN nexus.catalog_documents d2"
-        + "                                        ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
-        + "                                     WHERE m2.tenant_id = m.tenant_id AND m2.collection = m.collection AND m2.chash = m.chash"
-        + "                                       AND d2.deleted_at IS NULL)))"
-        + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
-        + " LIMIT ?";
+    /** {@code nexus_test.cosine_order(embedding_384, vec)}: the HNSW operator distance as a function Postgres
+     *  inlines before it matches the ORDER BY to the index (NexusTestCosineOrderInliningTest). The vector binds
+     *  through the generated VectorBinding, a text parameter cast to nexus.vector, as the old hand-written
+     *  {@code ?::nexus.vector} did. */
+    private static Field<Double> cosineOrder(float[] vec) {
+        return DSL.function(DSL.name("nexus_test", "cosine_order"), SQLDataType.DOUBLE, CHUNKS.EMBEDDING_384,
+            DSL.val(Vector.of(vec), CHUNKS.EMBEDDING_384.getDataType()));
+    }
 
-    private static final String AFTER_CHUNK_LIVE_OWNERS =
-        "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-        + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
-        + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
-        + " LIMIT ?";
+    /**
+     * The KNN statement every site runs or explains: the chunk hashes of {@link #COLLECTION} nearest {@code vec}
+     * among the chunks {@code live} admits, nearest first. {@code exact} is the oracle form: the distance becomes
+     * {@code cosine_order(..) + 0}, an expression the HNSW index cannot serve (pgvector matches only a bare
+     * operator ordering, and the inlined function is exactly that operator), so PostgreSQL must compute every
+     * candidate's true distance and sort. Round 3 replaced a session-wide {@code enable_indexscan=off} that also
+     * took the btree lookups away from chunk_live_owners' EXISTS, turning each oracle query into a per-row manifest
+     * scan (over 2 minutes each at msz9i scale; the 40-query recall loop outran surefire's 1800s fork timeout). The
+     * recall test pins that this form really leaves HNSW.
+     */
+    private static Select<Record1<byte[]>> knnQuery(DSLContext ctx, Liveness live, float[] vec, int n,
+                                                    boolean exact) {
+        Field<Double> distance = exact ? cosineOrder(vec).plus(DSL.inline(0)) : cosineOrder(vec);
+        return ctx.select(CHUNKS.CHASH)
+            .from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLLECTION))
+            .and(CHUNKS.EMBEDDING_384.isNotNull())
+            .and(live.condition())
+            .orderBy(distance.asc())
+            .limit(n);
+    }
 
-    /** Round-3 rework control (coordinator instruction after round-2 review): the SAME
-     *  KNN shape with NO liveness predicate at all -- isolates whether a measured recall
-     *  drop is caused by FILTERING, or is simply this fixture's own
-     *  HNSW approximation quality on an unfiltered search. Same 3-bind-parameter shape
-     *  (collection, vector, n) as {@link #BEFORE_DEAD_SET_ANTI_JOIN}/{@link
-     *  #AFTER_CHUNK_LIVE_OWNERS}, so it runs through the SAME {@link #runProd}/{@link
-     *  #runExact} call sites -- no new raw-SQL site for this constant. */
-    private static final String NO_PREDICATE_KNN =
-        "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-        + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
-        + " LIMIT ?";
+    private static List<String> hex(List<byte[]> chashes) {
+        return chashes.stream().map(HexFormat.of()::formatHex).toList();
+    }
 
-    /** Full-population COUNT variants of the no-predicate/before/after predicates, used
-     *  to confirm {@link #BEFORE_DEAD_SET_ANTI_JOIN} and {@link #AFTER_CHUNK_LIVE_OWNERS}
-     *  agree on the EXACT SAME live population at every tombstone fraction (round-3
-     *  rework: "confirm ... that (b) and (c) return identical live sets"), not merely the
-     *  same top-K under one probe vector. Run through the ONE new {@link #countMatching}
-     *  call site. */
-    private static final String NO_PREDICATE_COUNT =
-        "SELECT count(*) FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL";
-
-    private static final String BEFORE_COUNT =
-        "SELECT count(*) FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-        + " AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
-        + "                   JOIN nexus.catalog_documents d"
-        + "                     ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
-        + "                  WHERE m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash"
-        + "                    AND d.deleted_at IS NOT NULL"
-        + "                    AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
-        + "                                      JOIN nexus.catalog_documents d2"
-        + "                                        ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
-        + "                                     WHERE m2.tenant_id = m.tenant_id AND m2.collection = m.collection AND m2.chash = m.chash"
-        + "                                       AND d2.deleted_at IS NULL)))";
-
-    private static final String AFTER_COUNT =
-        "SELECT count(*) FROM nexus.chunks c"
-        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-        + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))";
-
-    /** Runs {@code sql} (either {@link #BEFORE_DEAD_SET_ANTI_JOIN} or {@link
-     *  #AFTER_CHUNK_LIVE_OWNERS}) with production HNSW GUCs and returns the ordered
-     *  chash-hex result list. */
-    private List<String> runProd(String sql, float[] vec, int n) {
-        return runHnsw(sql, vec, n, Profile.PROD);
+    /** Runs the KNN for {@code live} with production HNSW GUCs and returns the ordered chash-hex result list. */
+    private List<String> runProd(Liveness live, float[] vec, int n) {
+        return runHnsw(live, vec, n, Profile.PROD);
     }
 
     /** {@link #runProd} under an explicit {@link Profile}. */
-    private List<String> runHnsw(String sql, float[] vec, int n, Profile profile) {
-        Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> {
+    private List<String> runHnsw(Liveness live, float[] vec, int n, Profile profile) {
+        return tenantScope.withTenant(TENANT, ctx -> {
             applyProfile(ctx, profile);
-            return ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n);
+            return hex(knnQuery(ctx, live, vec, n, false).fetch(CHUNKS.CHASH));
         });
-        List<String> ids = new ArrayList<>(rows.size());
-        for (var rec : rows) ids.add(rec.get(0, String.class));
-        return ids;
     }
 
     private static void applyProfile(DSLContext ctx, Profile profile) {
@@ -500,65 +518,44 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         }
     }
 
-    private static final String PROD_ORDER_BY =
-        " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector";
-
-    /** The EXACT form of a KNN statement: its ORDER BY distance becomes {@code (distance)
-     *  + 0}, an expression the HNSW index cannot serve (pgvector matches only a bare
-     *  {@code column <=> constant} ordering), so PostgreSQL must compute every candidate's
-     *  true distance and sort. Round 3 replaced a session-wide {@code enable_indexscan=off}
-     *  that also took the btree lookups away from chunk_live_owners' EXISTS, turning each
-     *  oracle query into a per-row manifest scan (over 2 minutes each at msz9i scale; the
-     *  40-query recall loop outran surefire's 1800s fork timeout). The recall test pins
-     *  that this form really leaves HNSW. */
-    private static String exactForm(String knnSql) {
-        String exact = knnSql.replace(PROD_ORDER_BY,
-            " ORDER BY (c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector) + 0");
-        if (exact.equals(knnSql)) {
-            throw new IllegalArgumentException("no production ORDER BY to rewrite in:\n" + knnSql);
-        }
-        return exact;
+    /** EXACT oracle: the same statement in its exact form -- true nearest neighbors among the population its own
+     *  predicate admits, no HNSW approximation. */
+    private List<String> runExact(Liveness live, float[] vec, int n) {
+        return tenantScope.withTenant(TENANT, ctx -> hex(knnQuery(ctx, live, vec, n, true).fetch(CHUNKS.CHASH)));
     }
 
-    /** EXACT oracle: same statement in {@link #exactForm} -- true nearest neighbors among
-     *  the population its own predicate admits, no HNSW approximation. */
-    private List<String> runExact(String knnSql, float[] vec, int n) {
-        String sql = exactForm(knnSql);
-        Result<Record> rows = tenantScope.withTenant(TENANT, ctx ->
-            ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n));
-        List<String> ids = new ArrayList<>(rows.size());
-        for (var rec : rows) ids.add(rec.get(0, String.class));
-        return ids;
+    /** Full-population count of the chunks {@code live} admits -- used to confirm two predicates describe the
+     *  identical live population, not merely the same top-K under one probe vector. */
+    private long countMatching(Liveness live) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.selectCount()
+            .from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLLECTION))
+            .and(CHUNKS.EMBEDDING_384.isNotNull())
+            .and(live.condition())
+            .fetchOne(0, Long.class));
     }
 
-    /** Full-population COUNT of {@code sql} (one of the {@code *_COUNT} constants) --
-     *  used to confirm two predicates describe the identical live population, not merely
-     *  the same top-K under one probe vector. SANCTIONED RAW (nexus-wbfpw.9 round 3,
-     *  TEST-TREE RATCHET). */
-    private long countMatching(String sql) {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            Record rec = ctx.fetch(sql, COLLECTION).get(0);
-            return rec.get(0, Long.class);
-        });
-    }
-
-    /** EXPLAIN (ANALYZE, BUFFERS) of {@code sql} under production HNSW GUCs. Returns
-     *  the full plan text; {@link #parseExecutionTimeMs} extracts the server-side
-     *  execution time from it. SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET). */
-    private String explainProd(String sql, float[] vec, int n) {
-        return tenantScope.withTenant(TENANT, ctx -> {
+    /** EXPLAIN (ANALYZE, BUFFERS) of the {@link #knnQuery} for {@code live} under production HNSW GUCs: the same
+     *  typed Query object the run methods execute, explained through {@code nexus_test.explain_plan} (binds
+     *  rendered inline, every plan row). Returns the full plan text; {@link #parseExecutionTimeMs} extracts the
+     *  server-side execution time from it. */
+    /**
+     * EXPLAIN (ANALYZE, BUFFERS) of the KNN under production settings, through nexus_test.explain_plan: a custom plan
+     * for these literal values. The timed statements in runProd are bound, and after about five executions on one
+     * connection the server may switch them to a generic plan, which this does not show. For the index-served form
+     * it also pins that nexus_test.cosine_order was inlined (its name never survives into an inlined plan), so a
+     * planner change that stopped inlining it fails here rather than turning a recall row exact.
+     */
+    private String explainProd(Liveness live, boolean exact, float[] vec, int n) {
+        String plan = tenantScope.withTenant(TENANT, ctx -> {
             applyProfile(ctx, Profile.PROD);
-            // Inline concatenation (not a separately-named variable) so this raw-SQL call
-            // site starts with a literal '"', the shape RawSqlGateTest's scan anchors on --
-            // a variable named anything other than sql/SQL is invisible to that scan (its
-            // own documented KNOWN RESIDUAL), and this file's raw-SQL footprint should be
-            // honestly countable, not accidentally hidden by a naming choice.
-            Result<Record> rows = ctx.fetch("EXPLAIN (ANALYZE, BUFFERS) " + sql,
-                COLLECTION, vectorLiteral(vec), n);
-            List<String> lines = new ArrayList<>();
-            for (var rec : rows) lines.add(rec.get(0, String.class));
-            return String.join("\n", lines);
+            return PgContainerHelper.explainPlanWith(ctx, knnQuery(ctx, live, vec, n, exact),
+                PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS);
         });
+        if (!exact) {
+            assertThat(plan).as("nexus_test.cosine_order must be inlined. Plan:%n%s", plan).doesNotContain("cosine_order");
+        }
+        return plan;
     }
 
     private static final Pattern EXECUTION_TIME = Pattern.compile("Execution Time: ([0-9.]+) ms");
@@ -609,17 +606,17 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return oracleTopK.isEmpty() ? 1.0 : (double) hits / oracleTopK.size();
     }
 
-    /** Grades {@code approxSql}'s production-GUC KNN result against {@code oracleSql}'s
+    /** Grades {@code approx}'s production-GUC KNN result against {@code oracle}'s
      *  EXACT result, over {@link #RECALL_QUERY_COUNT} random query vectors. Every call
-     *  site in this file's recall test passes the SAME predicate text as both approx and
+     *  site in this file's recall test passes the SAME predicate as both approx and
      *  oracle, so each case is graded against its OWN correct answer set (round-3
      *  rework requirement: "confirm the oracle applies the SAME liveness filter as the
      *  query it grades"). */
-    private List<Double> recallSeries(String approxSql, String oracleSql, long seed) {
+    private List<Double> recallSeries(Liveness approx, Liveness oracle, long seed) {
         Random rnd = new Random(seed);
         List<float[]> queries = new ArrayList<>(RECALL_QUERY_COUNT);
         for (int q = 0; q < RECALL_QUERY_COUNT; q++) queries.add(fixtureVector(rnd));
-        return recallSeries(approxSql, oracleSql, queries);
+        return recallSeries(approx, oracle, queries);
     }
 
     /** Queries aimed INTO the deleted region: the embeddings of {@link #RECALL_QUERY_COUNT}
@@ -639,17 +636,17 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return queries;
     }
 
-    private List<Double> recallSeries(String approxSql, String oracleSql, List<float[]> queries) {
-        return recallSeries(approxSql, oracleSql, queries, Profile.PROD);
+    private List<Double> recallSeries(Liveness approx, Liveness oracle, List<float[]> queries) {
+        return recallSeries(approx, oracle, queries, Profile.PROD);
     }
 
-    private List<Double> recallSeries(String approxSql, String oracleSql, List<float[]> queries,
+    private List<Double> recallSeries(Liveness approx, Liveness oracle, List<float[]> queries,
                                       Profile profile) {
         List<Double> recalls = new ArrayList<>(queries.size());
         for (float[] vec : queries) {
-            List<String> oracle = runExact(oracleSql, vec, K);
-            List<String> approx = runHnsw(approxSql, vec, K, profile);
-            recalls.add(recallAt(approx, oracle, K));
+            List<String> exactTop = runExact(oracle, vec, K);
+            List<String> approxTop = runHnsw(approx, vec, K, profile);
+            recalls.add(recallAt(approxTop, exactTop, K));
         }
         return recalls;
     }
@@ -664,7 +661,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         Random rnd = new Random(seed);
         int dead = 0;
         for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
-            List<String> top = runExact(NO_PREDICATE_KNN, fixtureVector(rnd), K);
+            List<String> top = runExact(Liveness.NONE, fixtureVector(rnd), K);
             int[] owners = top.stream()
                 .mapToInt(h -> chunkDoc[chunkIndexByHex.get(h)])
                 .filter(doc -> doc >= 0)
@@ -697,17 +694,6 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     // ── EXPLAIN + latency sweep across msz9i's own tombstone fractions ──────
 
     /**
-     * At every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}: both queries must reach
-     * the HNSW index ({@code idx_chunks_embedding_384}), and the "after" query's plan
-     * must never contain the literal function name (the same inlining pin as
-     * ChunkLiveOwnersInlineRecallIntegrationTest, now exercised at real msz9i scale
-     * and under a real dead-row fraction, closing critique-wbfpw9's Important-2: "the
-     * 5,000-row scale fixture is 100% live; it cannot exercise the actual risk case").
-     * Server EXPLAIN ANALYZE execution time and client JDBC wall-clock p50 are
-     * measured and printed SEPARATELY for before/after at each fraction -- never
-     * compared against each other, only against their own opposite number.
-     */
-    /**
      * RDR-225: the plan names the model/tenant leaf's inherited HNSW index
      * ({@code <leaf>_embedding_384_idx}), not the parent's {@code idx_chunks_embedding_384}. The
      * pattern anchors on the scan node, so the ORDER BY key text cannot satisfy it.
@@ -718,6 +704,17 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return java.util.regex.Pattern.compile(HNSW_SCAN_PATTERN).matcher(plan).find();
     }
 
+    /**
+     * At every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}: both queries must reach
+     * the HNSW index ({@code idx_chunks_embedding_384}), and the "after" query's plan
+     * must never contain the literal function name (the same inlining pin as
+     * ChunkLiveOwnersInlineRecallIntegrationTest, now exercised at real msz9i scale
+     * and under a real dead-row fraction, closing critique-wbfpw9's Important-2: "the
+     * 5,000-row scale fixture is 100% live; it cannot exercise the actual risk case").
+     * Server EXPLAIN ANALYZE execution time and client JDBC wall-clock p50 are
+     * measured and printed SEPARATELY for before/after at each fraction -- never
+     * compared against each other, only against their own opposite number.
+     */
     @Test
     void explainAndLatency_acrossTombstoneFractions() throws Exception {
         Random rnd = new Random(20260927102L);
@@ -732,8 +729,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         for (int pct : TOMBSTONE_FRACTIONS_PCT) {
             setTombstoneFraction(pct);
 
-            String beforePlan = explainProd(BEFORE_DEAD_SET_ANTI_JOIN, probeVec, K);
-            String afterPlan = explainProd(AFTER_CHUNK_LIVE_OWNERS, probeVec, K);
+            String beforePlan = explainProd(Liveness.DEAD_SET_ANTI_JOIN, false, probeVec, K);
+            String afterPlan = explainProd(Liveness.LIVE_OWNERS, false, probeVec, K);
             double beforeServerMs = parseExecutionTimeMs(beforePlan);
             double afterServerMs = parseExecutionTimeMs(afterPlan);
 
@@ -744,13 +741,13 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
 
             // Warm-up before client wall-clock timing.
             for (int i = 0; i < 2; i++) {
-                runProd(BEFORE_DEAD_SET_ANTI_JOIN, probeVec, K);
-                runProd(AFTER_CHUNK_LIVE_OWNERS, probeVec, K);
+                runProd(Liveness.DEAD_SET_ANTI_JOIN, probeVec, K);
+                runProd(Liveness.LIVE_OWNERS, probeVec, K);
             }
             long beforeClientP50 = clientWallClockP50Ms(
-                () -> runProd(BEFORE_DEAD_SET_ANTI_JOIN, probeVec, K), LATENCY_REPS);
+                () -> runProd(Liveness.DEAD_SET_ANTI_JOIN, probeVec, K), LATENCY_REPS);
             long afterClientP50 = clientWallClockP50Ms(
-                () -> runProd(AFTER_CHUNK_LIVE_OWNERS, probeVec, K), LATENCY_REPS);
+                () -> runProd(Liveness.LIVE_OWNERS, probeVec, K), LATENCY_REPS);
 
             System.out.printf("%10d | %16.3f | %15.3f | %21d | %19d | %11b | %10b | %13b%n",
                 pct, beforeServerMs, afterServerMs, beforeClientP50, afterClientP50,
@@ -788,9 +785,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *       quality, not liveness filtering, would drive any gap in (b)/(c), so the test
      *       refuses rather than report numbers that cannot distinguish the two. (Round 3
      *       measured 0.22 here on uniform random vectors; see {@link #fixtureVector}.)</li>
-     *   <li>(b) today's SHIPPED predicate ({@link #BEFORE_DEAD_SET_ANTI_JOIN}), at
+     *   <li>(b) today's SHIPPED predicate ({@link Liveness#DEAD_SET_ANTI_JOIN}), at
      *       every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}.</li>
-     *   <li>(c) {@link #AFTER_CHUNK_LIVE_OWNERS} (this bead's replacement), at every
+     *   <li>(c) {@link Liveness#LIVE_OWNERS} (this bead's replacement), at every
      *       fraction in {@link #TOMBSTONE_FRACTIONS_PCT}.</li>
      * </ul>
      *
@@ -815,7 +812,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     @Test
     void recall_withControls_unfilteredBaseline_beforeVsAfter_acrossFractions() throws Exception {
         String maxScanTuples = tenantScope.withTenant(TENANT, ctx ->
-            ctx.fetch("SELECT current_setting('hnsw.max_scan_tuples')").get(0).get(0, String.class));
+            ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("hnsw.max_scan_tuples")))
+                .fetchOne(0, String.class));
 
         System.out.println("[nexus-wbfpw.9 RECALL CONTROLS] hnsw.max_scan_tuples=" + maxScanTuples
             + " (the connection default; production searches SET LOCAL their own budget, nexus-wbfpw.47)"
@@ -823,8 +821,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         // The oracle is only an oracle if HNSW cannot serve it. Pinned on both predicates
         // (and the unfiltered form) before any recall number is trusted.
         float[] pinVec = fixtureVector(new Random(20260927100L));
-        for (String knn : List.of(NO_PREDICATE_KNN, BEFORE_DEAD_SET_ANTI_JOIN, AFTER_CHUNK_LIVE_OWNERS)) {
-            String exactPlan = explainProd(exactForm(knn), pinVec, K);
+        for (Liveness live : Liveness.values()) {
+            String exactPlan = explainProd(live, true, pinVec, K);
             assertThat(exactPlan)
                 .as("the exact oracle must not use the HNSW index. Plan was:%n%s", exactPlan)
                 .doesNotContainPattern(HNSW_SCAN_PATTERN);
@@ -836,9 +834,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         // (deleted_at plays no role in this query at all, so the fraction is otherwise
         // moot) so the fixture is measured in its known-clean state.
         setTombstoneFraction(0);
-        List<Double> baseline = recallSeries(NO_PREDICATE_KNN, NO_PREDICATE_KNN, 20260927200L);
+        List<Double> baseline = recallSeries(Liveness.NONE, Liveness.NONE, 20260927200L);
         double baselineAvg = avg(baseline);
-        long baselineLiveCount = countMatching(NO_PREDICATE_COUNT);
+        long baselineLiveCount = countMatching(Liveness.NONE);
         System.out.printf("%-8s | %10s | %13.3f | %-30s | %d%n",
             "a-none", "0(n/a)", baselineAvg, baseline, baselineLiveCount);
         assertThat(baselineAvg)
@@ -850,13 +848,13 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         for (int pct : TOMBSTONE_FRACTIONS_PCT) {
             setTombstoneFraction(pct);
 
-            long beforeLiveCount = countMatching(BEFORE_COUNT);
-            long afterLiveCount = countMatching(AFTER_COUNT);
+            long beforeLiveCount = countMatching(Liveness.DEAD_SET_ANTI_JOIN);
+            long afterLiveCount = countMatching(Liveness.LIVE_OWNERS);
 
             List<Double> beforeRecalls = recallSeries(
-                BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, 20260927300L + pct);
+                Liveness.DEAD_SET_ANTI_JOIN, Liveness.DEAD_SET_ANTI_JOIN, 20260927300L + pct);
             List<Double> afterRecalls = recallSeries(
-                AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927400L + pct);
+                Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, 20260927400L + pct);
             double beforeAvg = avg(beforeRecalls);
             double afterAvg = avg(afterRecalls);
 
@@ -909,9 +907,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             int correlatedDead = deadNeighbourhoodQueries(20260927500L + pct);
 
             List<Double> beforeCorr = recallSeries(
-                BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, 20260927500L + pct);
+                Liveness.DEAD_SET_ANTI_JOIN, Liveness.DEAD_SET_ANTI_JOIN, 20260927500L + pct);
             List<Double> afterCorr = recallSeries(
-                AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927500L + pct);
+                Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, 20260927500L + pct);
             System.out.printf("%-8s | %10d | %13.3f | %-30s | %d/%d%n",
                 "b-corr", pct, avg(beforeCorr), beforeCorr, scatteredDead, correlatedDead);
             System.out.printf("%-8s | %10d | %13.3f | %-30s | %d/%d%n",
@@ -922,8 +920,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             // Same deletion, every query aimed at the deleted region (critique-wbfpw9-r3
             // round-4 Observation: uniform queries put 0 of 20 in the cap at 3% and 10%).
             List<float[]> inRegion = deadRegionQueries(20260927600L + pct);
-            List<Double> beforeIn = recallSeries(BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, inRegion);
-            List<Double> afterIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inRegion);
+            List<Double> beforeIn = recallSeries(Liveness.DEAD_SET_ANTI_JOIN, Liveness.DEAD_SET_ANTI_JOIN, inRegion);
+            List<Double> afterIn = recallSeries(Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, inRegion);
             System.out.printf("%-8s | %10d | %13.3f | %-30s | queries inside the deleted cap%n",
                 "b-inCap", pct, avg(beforeIn), beforeIn);
             System.out.printf("%-8s | %10d | %13.3f | %-30s | queries inside the deleted cap%n",
@@ -953,8 +951,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         List<Double> starved = new ArrayList<>(RECALL_QUERY_COUNT);
         for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
             float[] vec = fixtureVector(rnd);
-            List<String> oracle = runExact(AFTER_CHUNK_LIVE_OWNERS, vec, K);
-            List<String> approx = runHnsw(AFTER_CHUNK_LIVE_OWNERS, vec, K, Profile.STARVED);
+            List<String> oracle = runExact(Liveness.LIVE_OWNERS, vec, K);
+            List<String> approx = runHnsw(Liveness.LIVE_OWNERS, vec, K, Profile.STARVED);
             starved.add(recallAt(approx, oracle, K));
         }
         double starvedAvg = avg(starved);
@@ -987,16 +985,16 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         System.out.println("case     | tombstone% | avg_recall@10 | per_query");
         for (int pct : new int[] {95, 98, 99}) {
             setTombstoneFraction(pct, Tombstones.CORRELATED);
-            List<Double> uniform = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927700L + pct);
+            List<Double> uniform = recallSeries(Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, 20260927700L + pct);
             List<float[]> inCap = deadRegionQueries(20260927800L + pct);
-            List<Double> prodIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inCap, Profile.PROD);
+            List<Double> prodIn = recallSeries(Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, inCap, Profile.PROD);
             System.out.printf("%-8s | %10d | %13.3f | %s%n", "c-prod", pct, avg(uniform), uniform);
             System.out.printf("%-8s | %10d | %13.3f | %s (inside the deleted cap)%n", "c-inCap", pct, avg(prodIn), prodIn);
             assertLiveRecall("correlated deletion, production settings", pct, uniform);
             assertLiveRecall("correlated deletion, queries inside the deleted region, production settings", pct, prodIn);
 
             if (pct == 99) {
-                List<Double> legacyIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inCap, Profile.LEGACY);
+                List<Double> legacyIn = recallSeries(Liveness.LIVE_OWNERS, Liveness.LIVE_OWNERS, inCap, Profile.LEGACY);
                 System.out.printf("%-8s | %10d | %13.3f | %s (LEGACY settings, inside the deleted cap)%n",
                     "c-legacy", pct, avg(legacyIn), legacyIn);
                 assertThatThrownBy(() -> assertLiveRecall("legacy settings", 99, legacyIn))

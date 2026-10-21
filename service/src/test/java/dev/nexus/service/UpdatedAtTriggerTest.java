@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -13,9 +14,12 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -29,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class UpdatedAtTriggerTest {
 
     private static final String TENANT = "uat-tenant";
-    private static final String OLD_TS = "2020-01-01T00:00:00+00";
+    private static final OffsetDateTime OLD_TS = OffsetDateTime.parse("2020-01-01T00:00:00+00:00");
 
     PostgreSQLContainer<?> pg;
 
@@ -97,17 +101,25 @@ class UpdatedAtTriggerTest {
             // RDR-164 P1a: register collection 'c' (topics_collection_fk). RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "c");
-            su.createStatement().execute(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status, updated_at) "
-                + "VALUES ('" + TENANT + "', 'uat-topic', 'c', 0, now(), 'pending', '" + OLD_TS + "')");
-            su.createStatement().execute(
-                "UPDATE nexus.topics SET label = 'uat-topic-renamed' "
-                + "WHERE tenant_id = '" + TENANT + "' AND label = 'uat-topic'");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT updated_at FROM nexus.topics WHERE tenant_id = '" + TENANT + "' "
-                + "AND label = 'uat-topic-renamed'");
-            assertThat(rs.next()).isTrue();
-            var updatedAt = rs.getObject("updated_at", java.time.OffsetDateTime.class).toInstant();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(TOPICS)
+                .set(TOPICS.TENANT_ID, TENANT)
+                .set(TOPICS.LABEL, "uat-topic")
+                .set(TOPICS.COLLECTION, "c")
+                .set(TOPICS.DOC_COUNT, 0)
+                .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+                .set(TOPICS.REVIEW_STATUS, "pending")
+                .set(TOPICS.UPDATED_AT, OLD_TS)
+                .execute();
+            DSL.using(su, SQLDialect.POSTGRES).update(TOPICS)
+                .set(TOPICS.LABEL, "uat-topic-renamed")
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.LABEL.eq("uat-topic")))
+                .execute();
+            OffsetDateTime stamped = DSL.using(su, SQLDialect.POSTGRES).select(TOPICS.UPDATED_AT)
+                .from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(TENANT).and(TOPICS.LABEL.eq("uat-topic-renamed")))
+                .fetchOne(TOPICS.UPDATED_AT);
+            assertThat(stamped).isNotNull();
+            var updatedAt = stamped.toInstant();
             assertThat(updatedAt)
                 .as("BEFORE UPDATE trigger must move updated_at off the seeded 2020 value")
                 .isAfter(java.time.OffsetDateTime.parse("2020-01-02T00:00:00+00:00").toInstant());
@@ -123,24 +135,42 @@ class UpdatedAtTriggerTest {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "c");
             // hygiene-001 step 1 (nexus-tk070.p6a follow-on): doc_id/source_uri are NOT
             // NULL now -- seed a real catalog-document parent and supply both.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'uat-doc-1', 'Doc', 'c') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "uat-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "c")
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
             // nexus-cefa1.4: salient_sentences is jsonb now — bare 'before'/'after'
             // TEXT literals are no longer valid input; use quoted JSON strings.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects "
-                + "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, salient_sentences, updated_at, doc_id, source_uri) "
-                + "VALUES ('" + TENANT + "', 'c', 'p1', now(), 'v1', 'ex', '\"before\"', '" + OLD_TS + "', 'uat-doc-1', 'file:///p1')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT)
+                .set(DOCUMENT_ASPECTS.COLLECTION, "c")
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p1")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "ex")
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, JSONB.valueOf("\"before\""))
+                .set(DOCUMENT_ASPECTS.UPDATED_AT, OLD_TS)
+                .set(DOCUMENT_ASPECTS.DOC_ID, "uat-doc-1")
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p1")
+                .execute();
             // Partial UPDATE to salient_sentences (the path that bypasses extracted_at).
-            su.createStatement().execute(
-                "UPDATE nexus.document_aspects SET salient_sentences = '\"after\"' "
-                + "WHERE tenant_id = '" + TENANT + "' AND collection = 'c' AND source_path = 'p1'");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT updated_at FROM nexus.document_aspects "
-                + "WHERE tenant_id = '" + TENANT + "' AND collection = 'c' AND source_path = 'p1'");
-            assertThat(rs.next()).isTrue();
-            var updatedAt = rs.getObject("updated_at", java.time.OffsetDateTime.class).toInstant();
+            DSL.using(su, SQLDialect.POSTGRES).update(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, JSONB.valueOf("\"after\""))
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)
+                    .and(DOCUMENT_ASPECTS.COLLECTION.eq("c"))
+                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("p1")))
+                .execute();
+            OffsetDateTime stamped = DSL.using(su, SQLDialect.POSTGRES).select(DOCUMENT_ASPECTS.UPDATED_AT)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)
+                    .and(DOCUMENT_ASPECTS.COLLECTION.eq("c"))
+                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("p1")))
+                .fetchOne(DOCUMENT_ASPECTS.UPDATED_AT);
+            assertThat(stamped).isNotNull();
+            var updatedAt = stamped.toInstant();
             assertThat(updatedAt)
                 .as("partial UPDATE to salient_sentences must move updated_at")
                 .isAfter(java.time.OffsetDateTime.parse("2020-01-02T00:00:00+00:00").toInstant());

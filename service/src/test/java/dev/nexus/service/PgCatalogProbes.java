@@ -10,7 +10,9 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Typed jOOQ probes over {@code information_schema} and {@code pg_catalog} for
@@ -369,6 +371,23 @@ public final class PgCatalogProbes {
             DSL.field(DSL.name("conname"), String.class).eq(conname));
     }
 
+    /**
+     * Number of top-level, locally declared {@code pg_constraint} rows named {@code conname}, schema-agnostic.
+     * Same scope as {@link #constraintValidated}: partition clones (conparentid != 0), inherited CHECKs
+     * (conislocal false) are not counted, so the count answers
+     * "how many constraints of this name did the migration declare", never "how many partitions cloned it".
+     */
+    public static int constraintCount(DSLContext ctx, String conname) {
+        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
+        var rel = DSL.table(DSL.name("pg_catalog", "pg_class")).as("r");
+        return ctx.fetchCount(ctx.selectOne()
+            .from(con)
+            .join(rel).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
+            .where(DSL.field(DSL.name("k", "conname"), String.class).eq(conname))
+            .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
+            .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue()));
+    }
+
     /** {@code pg_constraint.convalidated} for the constraint named {@code conname}, or null. */
     public static Boolean constraintValidated(DSLContext ctx, String conname) {
         var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
@@ -382,8 +401,6 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
             // A CHECK constraint a partition inherits carries conparentid 0 too; only the declaring table's is local.
             .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue())
-            // The retired tables (chunks_retired_225, taxonomy_centroids_retired_225) keep their constraint names.
-            .and(DSL.not(DSL.field(DSL.name("r", "relname"), String.class).endsWith("_retired_225")))
             .fetchOne(DSL.field(DSL.name("k", "convalidated"), Boolean.class));
     }
 
@@ -402,12 +419,8 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("c", "conname"), String.class).eq(conname))
             .and(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
             // RDR-225: a foreign key onto a partitioned table is cloned once per partition under the same name;
-            // the caller names the top-level one (conparentid 0), and the retired tables keep their old names.
+            // the caller names the top-level one (conparentid 0).
             .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(0L))
-            .and(DSL.not(DSL.field(DSL.name("c", "conrelid"), Object.class).in(
-                DSL.select(DSL.field(DSL.name("rr", "oid"), Object.class))
-                    .from(DSL.table(DSL.name("pg_class")).as("rr"))
-                    .where(DSL.field(DSL.name("rr", "relname"), String.class).endsWith("_retired_225")))))
             .fetchOne();
         return r == null ? null : new Constraint(r.get(convalidated), r.get(condeferrable),
             r.get(condeferred), r.get(confupdtype), r.get(confdeltype));
@@ -477,6 +490,58 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("p", "proname"), String.class).eq(name))
             .limit(1)
             .fetchOne(prosecdef);
+    }
+
+    /** {@code proconfig} (empty when the routine has no SET clause) and {@code prosrc} of one routine. */
+    public record RoutineConfigAndSource(String[] proconfig, String prosrc) {
+    }
+
+    /**
+     * {@code pg_proc.proconfig} and {@code prosrc} of a single-overload routine, or null when no such
+     * routine exists. Same single-overload caveat as {@link #routineSecurityDefiner}.
+     */
+    public static RoutineConfigAndSource routineConfigAndSource(DSLContext ctx, String schema, String name) {
+        Field<String[]> proconfig = DSL.field(DSL.name("p", "proconfig"), String[].class);
+        Field<String> prosrc = DSL.field(DSL.name("p", "prosrc"), String.class);
+        Record r = ctx.select(proconfig, prosrc)
+            .from(pgProcJoined())
+            .where(routineIn(schema))
+            .and(DSL.field(DSL.name("p", "proname"), String.class).eq(name))
+            .fetchOne();
+        if (r == null) {
+            return null;
+        }
+        String[] config = r.get(proconfig);
+        return new RoutineConfigAndSource(config == null ? new String[0] : config, r.get(prosrc));
+    }
+
+    /** An operator as {@code pg_operator} names it: its symbol and the type names of its two operands. */
+    public record OperatorSignature(String name, String leftType, String rightType) {
+    }
+
+    /**
+     * {@code pg_proc.proleakproof} of the function behind each listed operator, keyed by that function's name
+     * ({@code texteq} for text {@code =}). Operand types are resolved by {@code to_regtype}, as the
+     * {@code 'text'::regtype} casts of the statement this replaces did. An operator the catalog lacks is absent
+     * from the map.
+     */
+    public static Map<String, Boolean> operatorFunctionLeakproof(DSLContext ctx, List<OperatorSignature> operators) {
+        Condition any = DSL.falseCondition();
+        for (OperatorSignature op : operators) {
+            any = any.or(DSL.field(DSL.name("o", "oprname"), String.class).eq(op.name())
+                .and(DSL.field(DSL.name("o", "oprleft")).eq(DSL.function("to_regtype", Object.class, DSL.val(op.leftType()))))
+                .and(DSL.field(DSL.name("o", "oprright")).eq(DSL.function("to_regtype", Object.class, DSL.val(op.rightType())))));
+        }
+        Field<String> proname = DSL.field(DSL.name("p", "proname"), String.class);
+        Field<Boolean> proleakproof = DSL.field(DSL.name("p", "proleakproof"), Boolean.class);
+        Map<String, Boolean> out = new LinkedHashMap<>();
+        ctx.select(proname, proleakproof)
+            .from(DSL.table(DSL.name("pg_operator")).as("o"))
+            .join(DSL.table(DSL.name("pg_proc")).as("p"))
+            .on(DSL.field(DSL.name("p", "oid")).eq(DSL.field(DSL.name("o", "oprcode"))))
+            .where(any)
+            .forEach(r -> out.put(r.get(proname), r.get(proleakproof)));
+        return out;
     }
 
     /** {@code (pg_get_function_arguments, pg_get_function_result)} of one routine. */
@@ -654,17 +719,6 @@ public final class PgCatalogProbes {
     public static boolean backendExists(DSLContext ctx, int pid) {
         return ctx.fetchExists(DSL.table(DSL.name("pg_stat_activity")),
             DSL.field(DSL.name("pid"), Integer.class).eq(pid));
-    }
-
-    /** {@code pg_terminate_backend(pid)} for every other backend on {@code datname}. */
-    public static void terminateOtherBackends(DSLContext ctx, String datname) {
-        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
-        Field<Boolean> terminate = DSL.function("pg_terminate_backend", Boolean.class, pid);
-        ctx.select(terminate)
-            .from(DSL.table(DSL.name("pg_stat_activity")))
-            .where(DSL.field(DSL.name("datname"), String.class).eq(datname))
-            .and(pid.ne(DSL.function("pg_backend_pid", Integer.class)))
-            .fetch();
     }
 
     /** Number of ungranted advisory locks cluster-wide ({@code pg_locks}). */

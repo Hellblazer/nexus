@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -137,17 +138,15 @@ class CatalogHandlerManifestEnvelopeTest {
             // RDR-225: the row carries its collection's model; this collection name is not
             // conformant, so it registers under the 768-wide fallback model.
             String model = PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                    + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setString(3, chash);
-                ps.setString(4, model);
-                ps.setString(5, "[" + "0.1,".repeat(767) + "0.1]");
-                ps.execute();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
         // RDR-191 (Hal ruling 2026-08-12): 'collection' is required, caller-
         // supplied, and stamped verbatim -- pass the SAME value the owning

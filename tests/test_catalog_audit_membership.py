@@ -32,6 +32,8 @@ from click.testing import CliRunner
 
 from nexus.commands.catalog import catalog
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch):

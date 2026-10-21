@@ -267,7 +267,14 @@ class JooqRecordReflectionFeatureTest {
     // added nexus.reaper_expire_client_quarantine, a RETURNS TABLE(expired,
     // protected_count) function, one generated Record type
     // (ReaperExpireClientQuarantineRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 113;
+    // 113 -> 114: nexus-yye8l.1 (RDR-222 Phase 1), vectors-033-request-ledger.xml
+    // added the table nexus.request_ledger, one generated Record type
+    // (RequestLedgerRecord), +1.
+    // 114 -> 115: nexus-1579m (RDR-222 Amendment A1), vectors-035-gc-expire-quarantine-bounded.xml
+    // added nexus.gc_expire_quarantine_bounded, a RETURNS TABLE(expired, refused,
+    // more, floor_refused) function, one generated Record type
+    // (GcExpireQuarantineBoundedRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 115;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

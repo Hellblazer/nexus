@@ -12,6 +12,9 @@ from nexus.catalog.link_generator import (
     generate_prose_filepath_links,
     generate_rdr_filepath_links,
 )
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 
 class TestRdrFilepathLinks:
@@ -351,9 +354,13 @@ class TestProseFilepathLinks:
 
 class TestPdfCorpusLinks:
     """generate_pdf_corpus_links closes the pdf=0% catalog auto-link
-    coverage gap by linking PDFs that share head_hash via ``same-as``.
-    Group anchors are lexicographically-first tumbler in each hash
-    group (stable across runs).
+    coverage gap by linking PDFs that share a file-content hash via
+    ``same-as``. Group anchors are lexicographically-first tumbler in
+    each hash group (stable across runs).
+
+    The key is the content hash, never ``head_hash``: for a repo-indexed
+    file ``head_hash`` is the git commit, shared by every file indexed at
+    that commit (nexus-utkop: seven distinct PDFs joined as duplicates).
     """
 
     def _make_catalog(self, tmp_path: Path) -> ActiveCatalog:
@@ -361,16 +368,43 @@ class TestPdfCorpusLinks:
         # built is gone; ActiveCatalog routes to the live catalog, no init.
         return ActiveCatalog()
 
+    def test_pdfs_sharing_a_commit_but_not_content_are_not_linked(self, tmp_path: Path) -> None:
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("repo-papers", "curator")
+        a = cat.register(
+            owner, "bloom.pdf", content_type="pdf", head_hash="aee32ea0commit",
+            meta={"content_hash": "3e397d9c"}, physical_collection="docs__1-1",
+        )
+        b = cat.register(
+            owner, "tc-sql.pdf", content_type="pdf", head_hash="aee32ea0commit",
+            meta={"content_hash": "4fe9dd09"}, physical_collection="docs__1-1",
+        )
+        assert generate_pdf_corpus_links(cat) == 0
+        assert len(cat.links_from(a)) == 0 and len(cat.links_from(b)) == 0
+
+    def test_same_content_under_different_commits_is_linked(self, tmp_path: Path) -> None:
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("papers", "curator")
+        cat.register(
+            owner, "Paper1", content_type="paper", head_hash="commit-1",
+            meta={"content_hash": "same-bytes"}, physical_collection="knowledge__delos",
+        )
+        cat.register(
+            owner, "Paper2", content_type="pdf", head_hash="commit-2",
+            meta={"content_hash": "same-bytes"}, physical_collection="knowledge__art-papers",
+        )
+        assert generate_pdf_corpus_links(cat) == 1
+
     def test_two_pdfs_with_same_hash_get_linked(self, tmp_path: Path) -> None:
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("papers", "curator")
         a = cat.register(
             owner, "Paper1", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__delos",
+            meta={"content_hash": "abc123"}, physical_collection="knowledge__delos",
         )
         b = cat.register(
             owner, "Paper2", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__art-papers",
+            meta={"content_hash": "abc123"}, physical_collection="knowledge__art-papers",
         )
 
         count = generate_pdf_corpus_links(cat)
@@ -389,7 +423,7 @@ class TestPdfCorpusLinks:
         owner = cat.register_owner("papers", "curator")
         a = cat.register(
             owner, "Unique", content_type="paper",
-            head_hash="unique-hash", physical_collection="knowledge__delos",
+            meta={"content_hash": "unique-hash"}, physical_collection="knowledge__delos",
         )
         count = generate_pdf_corpus_links(cat)
         assert count == 0
@@ -400,11 +434,11 @@ class TestPdfCorpusLinks:
         owner = cat.register_owner("papers", "curator")
         cat.register(
             owner, "P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__delos",
+            meta={"content_hash": "h1"}, physical_collection="knowledge__delos",
         )
         cat.register(
             owner, "P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__art-papers",
+            meta={"content_hash": "h1"}, physical_collection="knowledge__art-papers",
         )
         first = generate_pdf_corpus_links(cat)
         second = generate_pdf_corpus_links(cat)
@@ -412,16 +446,16 @@ class TestPdfCorpusLinks:
         # Re-running creates zero new links (link_if_absent).
         assert second == 0
 
-    def test_pdfs_without_head_hash_skipped(self, tmp_path: Path) -> None:
+    def test_pdfs_without_content_hash_skipped(self, tmp_path: Path) -> None:
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner("papers", "curator")
         cat.register(
             owner, "NoHash1", content_type="paper",
-            head_hash="", physical_collection="knowledge__delos",
+            meta={}, physical_collection="knowledge__delos",
         )
         cat.register(
             owner, "NoHash2", content_type="paper",
-            head_hash="", physical_collection="knowledge__art-papers",
+            meta={}, physical_collection="knowledge__art-papers",
         )
         count = generate_pdf_corpus_links(cat)
         assert count == 0
@@ -436,7 +470,7 @@ class TestPdfCorpusLinks:
         for i, coll in enumerate(("delos", "art-papers", "rag-papers"), start=1):
             cat.register(
                 owner, f"P{i}", content_type="paper",
-                head_hash="trio-hash",
+                meta={"content_hash": "trio-hash"},
                 physical_collection=f"knowledge__{coll}",
             )
         count = generate_pdf_corpus_links(cat)

@@ -1,0 +1,1 @@
+a_bgsub perm=- hook=ask style=bgsub rule=rule

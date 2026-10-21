@@ -4,9 +4,16 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -14,8 +21,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -24,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
@@ -1837,117 +1843,91 @@ class PgVectorRepositoryContractTest {
      * unguarded count would silently defeat the "nothing in chunks_768" assertions).
      */
     private long superuserCount(int dim, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?"
-                 + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(collection), VectorSeeds.chunkEmbedding(dim).isNotNull());
         }
     }
 
     /** Superuser fetch of one chunk's metadata as JSON text (bypasses RLS). */
     private String superuserChunkMetadataJson(int dim, String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT metadata::text FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
-                return rs.getString(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var metadataText = CHUNKS.METADATA.cast(org.jooq.impl.SQLDataType.CLOB);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(metadataText).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(metadataText);
+            assertThat(rows).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     /** Superuser fetch of one chunk's embedding as pgvector text (bypasses RLS). */
     private String superuserChunkEmbedding(int dim, String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT " + DimTables.embeddingColumn(dim) + "::text FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
+        try (Connection su = pg.createConnection("")) {
+            var embeddingText = VectorSeeds.chunkEmbedding(dim).cast(org.jooq.impl.SQLDataType.CLOB);
             // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
-                return rs.getString(1);
-            }
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(embeddingText).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(embeddingText);
+            assertThat(rows).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     /** Superuser fetch of one chunk's text (bypasses RLS). */
     private String superuserChunkText(int dim, String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
-                return rs.getString(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CHUNK_TEXT);
+            assertThat(rows).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     /** Superuser cosine distance between a stored embedding and an expected vector. */
     private double superuserCosineDistance(int dim, String collection, String chash,
                                            float[] expected) throws SQLException {
-        StringBuilder lit = new StringBuilder("[");
-        for (int i = 0; i < expected.length; i++) {
-            if (i > 0) lit.append(',');
-            lit.append(expected[i]);
-        }
-        lit.append(']');
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT " + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) ?::nexus.vector FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, lit.toString());
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
-                return rs.getDouble(1);
-            }
+        // pgvector's <=> operator is cosine_distance(vector, vector); the generated routine is the typed
+        // spelling (the extension lives in schema nexus).
+        var embedding = VectorSeeds.chunkEmbedding(dim);
+        var distance = Routines.cosineDistance1(embedding, DSL.val(Vector.of(expected), embedding));
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(distance).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(distance);
+            assertThat(rows).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     /** Superuser insert of a catalog document (bypasses catalog RLS; tenant explicit). */
     private void seedCatalogDocument(String tenant, String tumbler, String title) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tumbler);
-            ps.setString(3, title);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, title)
+                .execute();
         }
     }
 
     /** Superuser insert of a manifest row with the RDR-155 {@code collection} column set. */
     private void seedManifestRow(String tenant, String docId, int position,
                                  String chash, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_document_chunks "
-                 + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, ?, ?, ?, "
-                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setInt(3, position);
-            // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
-            ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
-            ps.setString(5, collection);
-            // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
-            ps.setString(6, tenant);
-            ps.setString(7, collection);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+                // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(seed, tenant, collection))
+                .execute();
         }
     }
 
@@ -1962,17 +1942,11 @@ class PgVectorRepositoryContractTest {
     private void seedManifestRowBypassingFk(String tenant, String docId, int position,
                                              String chash, String collection) throws SQLException {
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
         seedManifestRow(tenant, docId, position, chash, collection);
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 

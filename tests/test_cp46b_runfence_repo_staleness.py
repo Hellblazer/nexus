@@ -30,6 +30,8 @@ from nexus.registry import RepoRegistry
 from tests._catalog_fixture_ops import active_reader
 from tests.conftest import fake_credentials, make_vector_test_client
 
+pytestmark = pytest.mark.t2_tenant
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)

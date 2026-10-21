@@ -23,7 +23,9 @@ Two dispositions this verb reports, per row:
 
 * GHOSTS -- collections nothing references any more (no live row in any
   non-audit COLLECTION_SCOPED_TABLES entry). ``--apply`` physically
-  deletes the registry row.
+  deletes the registry row. A rename's retired row whose successor is
+  still registered is a live redirect, left unchanged; one whose
+  successor is gone is a ghost (nexus-s80u9).
 * DORMANT -- collections still referenced somewhere but with no
   ``collection_vector_stats`` row (nothing to embed or read).
   ``--apply`` flips ``lifecycle_state`` to ``'dormant'``; the row itself
@@ -92,6 +94,8 @@ def sweep_ghosts_cmd(apply: bool, json_out: bool) -> None:
         if status == 404:
             _raise_engine_floor(exc)
         raise
+    except httpx.TimeoutException as exc:
+        raise _cat_cmd._service_timeout_error("sweep-ghosts", exc) from exc
     finally:
         writer.close()
 

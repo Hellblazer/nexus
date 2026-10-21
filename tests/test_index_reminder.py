@@ -8,6 +8,8 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def runner() -> CliRunner:

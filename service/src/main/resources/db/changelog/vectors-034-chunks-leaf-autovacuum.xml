@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-s9wav (HNSW maintenance policy nexus-4lnn1, R1; Sam's ruling 2026-10-18, T2
+    nexus/4lnn1-decisions-2026-10-18): four autovacuum storage parameters on EVERY leaf of nexus.chunks, in
+    local and cloud mode alike.
+
+        autovacuum_vacuum_scale_factor         0.05   (default 0.2: waits for ~50k dead rows on a 250k leaf)
+        autovacuum_vacuum_threshold            1000
+        autovacuum_vacuum_insert_scale_factor  0.05   (sets the visibility map after a bulk ingest, which the
+                                                       router probe needs)
+        autovacuum_analyze_scale_factor        0.02
+
+    WHY THE LEAVES. PostgreSQL 17 does not support storage parameters on a partitioned table ("Specifying these
+    parameters for partitioned tables is not supported, but you may specify them for individual leaf
+    partitions", CREATE TABLE, Storage Parameters), and autovacuum processes leaves, never a partitioned
+    table. So the parent nexus.chunks and the model partitions (also partitioned) carry nothing; only the
+    tenant leaves (relkind r) can. The RDR-225 walk copied reloptions only for views, so anything set by hand
+    on the pre-225 table is gone. taxonomy_centroids is not touched.
+
+    WHAT IT HOLDS
+
+    vectors-034-1 (ordinary): nexus.partition_set_leaf_autovacuum(leaf), the one place the four values are
+    written, and partition_ensure_leaf redefined to call it for a leaf of nexus.chunks (a parent whose name,
+    minus a trailing _new, is chunks). Every leaf made after this changeset therefore carries the four from the
+    statement that creates it: the service_tokens trigger (create_tenant_partitions) and create_model_partition
+    both go through partition_ensure_leaf. The helper is idempotent: a leaf that already has all four values is
+    not altered.
+
+    vectors-034-2 (runAlways): the self-heal for leaves that exist already, the walk's among them. It loops over
+    every leaf of the nexus.chunks partition tree and calls the helper, so a leaf that lost a value, or was
+    made before this changeset, is repaired on the next boot. Steady state takes no lock: a leaf that already
+    carries the four is never altered. Only the FOUR values are set: a different value for one of the four
+    is overwritten on the next boot, by design (one policy for every leaf), and every OTHER reloption is kept
+    (autovacuum_enabled, autovacuum_vacuum_cost_delay and cost_limit, fillfactor). A leaf left with
+    autovacuum_enabled=false therefore still defeats the whole policy; nothing in this changeset flags it, the
+    Java post-migrate step (ChunksLeafAutovacuumCheck, event chunks_leaf_autovacuum_checked) does.
+
+    CONTENTION. ALTER TABLE ... SET (autovacuum parameter) takes SHARE UPDATE EXCLUSIVE on the leaf, which
+    conflicts with a running VACUUM, ANALYZE or CREATE INDEX CONCURRENTLY (the pci_ builder) but not with reads
+    or writes. The self-heal waits at most 5 s per leaf. A leaf it cannot lock is reported as a WARNING and left
+    for the next boot, so a long index build never holds the boot: this covers the lock timeout AND a deadlock
+    (a CREATE INDEX CONCURRENTLY holding the leaf lock waits for this transaction in WaitForOlderSnapshots while
+    this transaction waits for the leaf; the 1 s deadlock_timeout fires before the 5 s lock_timeout, and
+    deadlock_detected is caught the same way, as is a concurrent DROP of a leaf that holds it). A leaf owned by a role the migrating role is not a member of is reported the same way, unless it
+    already carries the four, in which case it is counted already correct and not reported. The final NOTICE
+    carries the counts, but Liquibase drops notices and a WARNING reaches only the server log, so the operator
+    reads the outcome from the Java post-migrate step: event=chunks_leaf_autovacuum_checked leaves=N
+    policy_unset=M autovacuum_disabled=K, at WARN naming the leaves when M or K is above 0. A self-heal that
+    finds no leaf at all is a WARNING here (and leaves=0 at WARN there); failing every boot over a performance
+    setting would be disproportionate.
+
+    COST OF THE POLICY (steady state, stated both ways). The benefit is that dead rows are reaped at 5% instead
+    of 20% and the visibility map is set after a bulk ingest. The cost: vacuum runs about 4x more often on a
+    leaf (scale factor 0.2 to 0.05), and insert-driven vacuums (insert scale 0.05) fire with no deletes at all.
+    Each HNSW VACUUM scans every HNSW index on the leaf, so one leaf's churn re-scans every pci_ index on it;
+    conexus-h2ol measured 367.6 s for a single HNSW vacuum. On the first boot every leaf that is already past
+    5% dead or 5% inserted since its last vacuum becomes eligible at once: expect an autovacuum wave right after
+    the deploy, at serving time. conexus should review autovacuum_max_workers, autovacuum_vacuum_cost_limit and
+    maintenance_work_mem before the cloud deploy.
+
+    ROLES AND RLS. DDL only, no row DML (no rehearsal seed needed). ALTER TABLE needs ownership, which the
+    migrating role has: the leaves belong to it, and create_tenant_partitions is SECURITY DEFINER, so the
+    trigger path (nexus_svc inserting a token) alters its new leaf as the owner. FORCE ROW LEVEL SECURITY does
+    not apply to DDL. The helper keeps PUBLIC's EXECUTE (it runs with its caller's rights, so only the owner of a
+    leaf can alter it, and the self-heal still works on a cluster whose functions another role owns).
+
+    DEPLOY. This is a Liquibase changeset, so the engine tag that carries it needs the PITR-fork Liquibase walk
+    rehearsal before the cloud deploy. The first boot ALTERs every existing chunks leaf once (catalog change,
+    no rewrite, no table scan): one short SHARE UPDATE EXCLUSIVE lock per leaf, so the cost scales with the leaf
+    count (models x tenants, a handful), not with row count. The autovacuum wave that follows is described under
+    COST OF THE POLICY.
+
+    Placed after vectors-033 and before the runAlways grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-034-1" author="nexus-s9wav">
+        <comment>nexus-s9wav (4lnn1 R1): nexus.partition_set_leaf_autovacuum sets the four autovacuum reloptions on one leaf of nexus.chunks, idempotently; nexus.partition_ensure_leaf (vectors-030-1) is redefined to call it for every leaf it creates under a nexus.chunks parent, so a new tenant's leaves and a new model's leaves carry them from creation. Function definitions only; no DDL on a table, no row DML.</comment>
+        <sql splitStatements="false" stripComments="false">
+-- The ONE place the four values are written. True when it altered the leaf, false when the leaf already carried all
+-- four. Only an ordinary table takes storage parameters: a partitioned parent or model partition is refused by name
+-- rather than by PostgreSQL's own error. The comparison is on the exact stored text (reloptions keeps what was typed).
+CREATE OR REPLACE FUNCTION nexus.partition_set_leaf_autovacuum(p_leaf regclass)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns   text;
+    v_name text;
+    v_kind "char";
+    v_opts text[];
+BEGIN
+    SELECT n.nspname::text, c.relname::text, c.relkind, c.reloptions
+      INTO v_ns, v_name, v_kind, v_opts
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_leaf;
+    IF v_kind IS DISTINCT FROM 'r' THEN
+        RAISE EXCEPTION 'nexus.partition_set_leaf_autovacuum: % is not an ordinary table (a partitioned table takes no storage parameters)', p_leaf
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+    IF COALESCE(v_opts, ARRAY[]::text[]) @> ARRAY[
+           'autovacuum_vacuum_scale_factor=0.05',
+           'autovacuum_vacuum_threshold=1000',
+           'autovacuum_vacuum_insert_scale_factor=0.05',
+           'autovacuum_analyze_scale_factor=0.02']::text[] THEN
+        RETURN false;
+    END IF;
+    EXECUTE pg_catalog.format(
+        'ALTER TABLE %I.%I SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 1000, '
+        'autovacuum_vacuum_insert_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02)',
+        v_ns, v_name);
+    RETURN true;
+END
+$fn$;
+
+-- EXECUTE stays with PUBLIC, unlike the other partition helpers, on purpose: the function runs with its caller's
+-- rights and ALTER TABLE needs ownership of the leaf, so a role that does not own the leaf (nexus_svc, nexus_diag)
+-- is refused by PostgreSQL itself, and the runAlways self-heal must be able to call it when the migrating role
+-- does not own the function (a cluster whose functions were created by a superuser: Catalog013RlsReplayTest).
+
+-- vectors-030-1's body, plus the call after the access mirror. A parent whose name minus a trailing _new is
+-- chunks (the walk's chunks_new included); taxonomy_centroids leaves are left at PostgreSQL's defaults.
+CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf(p_parent regclass, p_model_part regclass, p_tenant text, p_force boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_mp_name     text;
+    v_model       text;
+    v_leaf        text;
+    v_leaf_oid    regclass;
+    v_taken       record;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_mp_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_model_part;
+    SELECT c.relname::text INTO v_parent_name FROM pg_catalog.pg_class c WHERE c.oid = p_parent;
+    v_model := nexus.partition_bound_value(p_model_part);
+    IF v_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_ensure_leaf: % has no single-value LIST bound', p_model_part
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- The existence check: by bound, never by name.
+    PERFORM 1
+       FROM pg_catalog.pg_inherits i
+      WHERE i.inhparent = p_model_part
+        AND nexus.partition_bound_value(i.inhrelid) = p_tenant;
+    IF FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_leaf := nexus.partition_name(v_parent_name, v_model, p_tenant);
+    SELECT c.relkind, c.relispartition, pg_catalog.pg_get_expr(c.relpartbound, c.oid) AS bound
+      INTO v_taken
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = v_ns AND c.relname = v_leaf;
+    IF FOUND THEN
+        RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the leaf of % under %',
+            v_ns, v_leaf, p_tenant, v_mp_name
+            USING ERRCODE = 'duplicate_table',
+                  DETAIL = pg_catalog.format('relkind %s, partition %s, bound %s',
+                                             v_taken.relkind, v_taken.relispartition, COALESCE(v_taken.bound, 'none')),
+                  HINT = 'Two tenants hash to one leaf name, or an unrelated relation holds it. The creation is refused.';
+    END IF;
+
+    EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L)',
+                              v_ns, v_leaf, v_ns, v_mp_name, p_tenant);
+    v_leaf_oid := (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_leaf))::pg_catalog.regclass;
+    PERFORM nexus.partition_copy_access(p_parent, v_leaf_oid, p_force);
+    IF pg_catalog.regexp_replace(v_parent_name, '_new$', '') = 'chunks' THEN
+        PERFORM nexus.partition_set_leaf_autovacuum(v_leaf_oid);
+    END IF;
+    RETURN true;
+END
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+-- vectors-030-1's partition_ensure_leaf, verbatim, then the helper goes. Leaves keep the reloptions they carry
+-- (harmless); the vectors-034-2 rollback clears them.
+CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf(p_parent regclass, p_model_part regclass, p_tenant text, p_force boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_mp_name     text;
+    v_model       text;
+    v_leaf        text;
+    v_taken       record;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_mp_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_model_part;
+    SELECT c.relname::text INTO v_parent_name FROM pg_catalog.pg_class c WHERE c.oid = p_parent;
+    v_model := nexus.partition_bound_value(p_model_part);
+    IF v_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_ensure_leaf: % has no single-value LIST bound', p_model_part
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- The existence check: by bound, never by name.
+    PERFORM 1
+       FROM pg_catalog.pg_inherits i
+      WHERE i.inhparent = p_model_part
+        AND nexus.partition_bound_value(i.inhrelid) = p_tenant;
+    IF FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_leaf := nexus.partition_name(v_parent_name, v_model, p_tenant);
+    SELECT c.relkind, c.relispartition, pg_catalog.pg_get_expr(c.relpartbound, c.oid) AS bound
+      INTO v_taken
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = v_ns AND c.relname = v_leaf;
+    IF FOUND THEN
+        RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the leaf of % under %',
+            v_ns, v_leaf, p_tenant, v_mp_name
+            USING ERRCODE = 'duplicate_table',
+                  DETAIL = pg_catalog.format('relkind %s, partition %s, bound %s',
+                                             v_taken.relkind, v_taken.relispartition, COALESCE(v_taken.bound, 'none')),
+                  HINT = 'Two tenants hash to one leaf name, or an unrelated relation holds it. The creation is refused.';
+    END IF;
+
+    EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L)',
+                              v_ns, v_leaf, v_ns, v_mp_name, p_tenant);
+    PERFORM nexus.partition_copy_access(p_parent,
+        (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_leaf))::pg_catalog.regclass,
+        p_force);
+    RETURN true;
+END
+$fn$;
+
+DROP FUNCTION IF EXISTS nexus.partition_set_leaf_autovacuum(regclass);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-034-2" author="nexus-s9wav" runAlways="true">
+        <comment>nexus-s9wav (4lnn1 R1): self-heal. On every boot, every leaf of the nexus.chunks partition tree is passed to nexus.partition_set_leaf_autovacuum, so a leaf made before vectors-034-1 (the RDR-225 walk's), or one that lost a value, carries the four autovacuum reloptions again. A leaf that already carries them is counted already correct and never altered, whoever owns it. A leaf it cannot lock within 5 s (lock timeout, or a deadlock with a session that waits on this transaction) or does not own is skipped with a WARNING and left for the next boot. Finding no leaf at all is a WARNING (the Java post-migrate step, event chunks_leaf_autovacuum_checked, reports leaves=0 and every unset leaf at WARN). runAlways, so editing this body is checksum-safe; a body guard, not a MARK_RAN precondition (nexus-ixsxa).</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    r         record;
+    v_seen    integer := 0;
+    v_altered integer := 0;
+    v_ok      integer := 0;
+    v_busy    integer := 0;
+    v_gone    integer := 0;
+    v_foreign integer := 0;
+    -- The same four texts as vectors-034-1's helper compares against; keep the two in step.
+    v_four    text[] := ARRAY[
+        'autovacuum_vacuum_scale_factor=0.05',
+        'autovacuum_vacuum_threshold=1000',
+        'autovacuum_vacuum_insert_scale_factor=0.05',
+        'autovacuum_analyze_scale_factor=0.02']::text[];
+BEGIN
+    -- Bound the wait per leaf: a running VACUUM or CREATE INDEX CONCURRENTLY holds SHARE UPDATE EXCLUSIVE.
+    SET LOCAL lock_timeout = '5s';
+    -- Level 0 is the parent itself; the leaves are the rows with isleaf (an ordinary table, relkind r).
+    FOR r IN
+        SELECT t.relid::regclass AS leaf, c.relowner, c.reloptions
+          FROM pg_partition_tree('nexus.chunks'::regclass) t
+          JOIN pg_class c ON c.oid = t.relid
+         WHERE t.level > 0 AND t.isleaf AND c.relkind = 'r'
+         ORDER BY t.relid::regclass::text
+    LOOP
+        v_seen := v_seen + 1;
+        -- Already correct comes first: it needs no lock and no ownership, so a leaf owned by another role that
+        -- already carries the four is not reported (and not warned about) on every boot.
+        IF COALESCE(r.reloptions, ARRAY[]::text[]) @> v_four THEN
+            v_ok := v_ok + 1;
+            CONTINUE;
+        END IF;
+        IF NOT pg_has_role(r.relowner, 'USAGE') THEN
+            v_foreign := v_foreign + 1;
+            RAISE WARNING 'vectors-034-2: % is owned by a role % is not a member of, its autovacuum reloptions are left as they are', r.leaf, current_user;
+            CONTINUE;
+        END IF;
+        BEGIN
+            IF nexus.partition_set_leaf_autovacuum(r.leaf) THEN
+                v_altered := v_altered + 1;
+            ELSE
+                v_ok := v_ok + 1;
+            END IF;
+        EXCEPTION
+            -- lock_not_available: the 5 s lock_timeout. deadlock_detected: a CREATE INDEX CONCURRENTLY that holds
+            -- SHARE UPDATE EXCLUSIVE on the leaf waits for this transaction (WaitForOlderSnapshots) while this
+            -- transaction waits for the leaf; the 1 s deadlock_timeout fires before the 5 s lock_timeout and
+            -- PostgreSQL aborts one side. Either way the leaf is left for the next boot.
+            WHEN lock_not_available OR deadlock_detected THEN
+                v_busy := v_busy + 1;
+                RAISE WARNING 'vectors-034-2: % is locked by another session, its autovacuum reloptions are set on the next boot (%: %)', r.leaf, SQLSTATE, SQLERRM;
+            -- A guard for a leaf that vanishes between the partition-tree scan and the helper (the helper's own check
+            -- says wrong_object_type for a vanished oid, the ALTER says undefined_table once a lock wait ends). The
+            -- scan's AccessShareLock on every leaf, held to the end of this transaction, makes a committed DROP
+            -- impossible meanwhile: a concurrent DROP waits and, if it holds the leaf, ends in deadlock_detected above.
+            WHEN undefined_table OR wrong_object_type THEN
+                v_gone := v_gone + 1;
+                RAISE WARNING 'vectors-034-2: a chunks leaf vanished during the self-heal (oid %), nothing to set (%: %)', r.leaf, SQLSTATE, SQLERRM;
+        END;
+    END LOOP;
+    IF v_seen = 0 THEN
+        RAISE WARNING 'vectors-034-2: nexus.chunks has no leaf partition; the RDR-225 walk always leaves one per model for the default tenant';
+    END IF;
+    RAISE NOTICE 'vectors-034-2: nexus.chunks leaves examined %, altered %, already correct %, locked %, vanished %, foreign-owned %',
+        v_seen, v_altered, v_ok, v_busy, v_gone, v_foreign;
+END
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT t.relid::regclass AS leaf
+          FROM pg_partition_tree('nexus.chunks'::regclass) t
+          JOIN pg_class c ON c.oid = t.relid
+         WHERE t.level > 0 AND t.isleaf AND c.relkind = 'r'
+    LOOP
+        EXECUTE format('ALTER TABLE %s RESET (autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, autovacuum_vacuum_insert_scale_factor, autovacuum_analyze_scale_factor)', r.leaf);
+    END LOOP;
+END
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

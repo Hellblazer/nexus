@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): a parent policy the production tables do not have: RESTRICTIVE, per command, role scoped.
+    CREATE POLICY t225_extra ON nexus.chunks_new AS RESTRICTIVE FOR SELECT TO nexus_svc USING (collection <> '').
+    jOOQ has no CREATE POLICY. A new leaf must mirror it (TenantPartitionFunctionsIntegrationTest). The USING
+    clause is not "true", so this is not db.changelog-test-create-policy.xml. Run on the schema owner's connection
+    through PartitionScratch#addExtraParentPolicy; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p225-extra-policy" author="nexus-3wh8d.7" runAlways="true">
+        <sql>CREATE POLICY t225_extra ON nexus.chunks_new AS RESTRICTIVE FOR SELECT TO nexus_svc USING (collection &lt;&gt; '')</sql>
+    </changeSet>
+</databaseChangeLog>

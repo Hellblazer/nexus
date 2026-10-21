@@ -87,6 +87,7 @@ class TestVictimScenarioEndToEnd:
     backend handle is mocked; the command wiring (including any gate that
     might be reintroduced) runs for real."""
 
+    @pytest.mark.t2_tenant
     def test_search_works(self, runner, no_cred_env):
         db = _fake_t3()
         with patch("nexus.commands.store.make_t3", return_value=db), \

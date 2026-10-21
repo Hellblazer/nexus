@@ -1,0 +1,1 @@
+c_auto perm=auto hook=none style=direct rule=rule

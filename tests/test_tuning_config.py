@@ -154,6 +154,7 @@ def test_pdf_chunk_chars_wiring(tmp_path, chunk_chars, expected_call) -> None:
     expected_call(mock_chunker_cls)
 
 
+@pytest.mark.t2_tenant
 def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
     from nexus.indexer import _index_pdf_file
     pdf = tmp_path / "sample.pdf"
@@ -181,6 +182,7 @@ def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
 
 # ── I3: Search tuning weights wiring ───────────────────────────────────────
 
+@pytest.mark.t2_tenant
 def test_apply_hybrid_scoring_uses_tuning_weights() -> None:
     from nexus.scoring import apply_hybrid_scoring
     from nexus.types import SearchResult

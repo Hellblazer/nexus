@@ -95,6 +95,7 @@ def _http_error(code: int, message: str) -> urllib.error.HTTPError:
     )
 
 
+@pytest.mark.t2_tenant
 def test_post_wraps_onnx_local_refusal_with_restart_remedy() -> None:
     err = _http_error(422, _ENGINE_ONNX_LOCAL_REFUSAL)
     with patch("nexus.db.http_vector_client._request", side_effect=err):
@@ -113,6 +114,7 @@ def test_get_wraps_onnx_local_refusal_with_restart_remedy() -> None:
     assert "nx daemon service stop && nx daemon service start" in str(exc_info.value)
 
 
+@pytest.mark.t2_tenant
 def test_post_unrelated_422_unchanged() -> None:
     """A genuinely different 422 keeps its original message — no false
     positive reframing."""

@@ -11,7 +11,7 @@ import pytest
 
 from nexus.db.t1 import (
     _t1_session_mint_lock_path,
-    clear_t1_session_lease,
+    end_owned_t1_session_lease,
     publish_t1_session_lease,
 )
 from nexus.garbage import (
@@ -192,10 +192,10 @@ def test_lease_clear_also_removes_the_mint_lock(tmp_path: Path) -> None:
     publish_t1_session_lease("sess-1", "tok", tmp_path)
     lock = _t1_session_mint_lock_path("sess-1", tmp_path)
     lock.write_bytes(b"")
-    clear_t1_session_lease("sess-1", tmp_path)
+    end_owned_t1_session_lease("sess-1", tmp_path, set(), lambda: None)
     assert not lock.exists()
     assert not list(tmp_path.glob("t1_*")), "a finished session leaves no T1 files"
-    clear_t1_session_lease("sess-1", tmp_path)  # idempotent
+    end_owned_t1_session_lease("sess-1", tmp_path, set(), lambda: None)  # idempotent
 
 
 class _WriteOnlyProxy:

@@ -3,6 +3,7 @@
 """Nexus exception hierarchy."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Iterable
 
 
@@ -262,7 +263,9 @@ def classify_vector_service_error(
         except Exception:  # noqa: BLE001 — best-effort diagnostic only; must not mask the real error
             serving_mode = None
     return SearchEmbeddingProfileMismatchError(
-        serving_mode=serving_mode, mismatches={", ".join(collections): text},
+        serving_mode=serving_mode,
+        mismatches={", ".join(collections): text},
+        collections=collections,
     )
 
 
@@ -288,6 +291,55 @@ def is_search_embedding_profile_mismatch_text(text: str) -> bool:
     message. See :data:`SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE`.
     """
     return SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in text
+
+
+_VOYAGE_KEY_REMEDY = (
+    "  - Voyage collection(s): the already-running service has not picked up the "
+    "credential: the engine reads NX_VOYAGE_API_KEY only at process spawn. Set "
+    "NX_VOYAGE_API_KEY in the SERVICE's own environment (or persist it with "
+    "`nx config set voyage_api_key --stdin`), then restart it — `nx daemon service "
+    "stop && nx daemon service start`. If a managed/cloud service was intended, "
+    "this process resolved LOCAL mode: `nx config set service_url <url>` and "
+    "`nx config set service_token <token>`, then relaunch the client."
+)
+_BGE_FILES_REMEDY = (
+    "  - bge collection(s): the engine has no bge model files to serve them. Run "
+    "`nx init` to provision the local models, then restart the service — "
+    "`nx daemon service stop && nx daemon service start`. If this client is pointed at "
+    "a managed or Voyage-only engine, bge collections need a local engine."
+)
+
+
+def _mismatch_families(names: "Sequence[str]") -> "set[str] | None":
+    """The embedder families (``bge``, ``voyage``) the refused collections need, from
+    each name's own model segment; ``None`` when any collection does not classify.
+
+    Reads each collection's catalog row through :func:`nexus.corpus.collection_model`
+    (the funnel helper; RDR-204 moved collection identity to the row). Best effort:
+    a collection without a row, or a failed read, leaves the message on its generic
+    two-cause text rather than masking the real error.
+    """
+    from nexus.collection_shape import MODEL_DIMS  # noqa: PLC0415 — circular-dep avoidance (collection_shape)
+    from nexus.corpus import collection_model  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    families: set[str] = set()
+    for name in names:
+        try:
+            model = collection_model(name) if name else None
+        except Exception:  # noqa: BLE001 — best-effort classification; the generic text is the fallback
+            return None
+        if not model:
+            return None
+        # The model's dimension is the family: 768 is bge, 1024 is Voyage. A model the
+        # shape table does not know does not classify.
+        dim = MODEL_DIMS.get(model)
+        if dim == 768:
+            families.add("bge")
+        elif dim == 1024:
+            families.add("voyage")
+        else:
+            return None
+    return families or None
 
 
 class SearchEmbeddingProfileMismatchError(NexusError):
@@ -330,7 +382,13 @@ class SearchEmbeddingProfileMismatchError(NexusError):
     422 through :func:`classify_vector_service_error`.
     """
 
-    def __init__(self, *, serving_mode: str | None, mismatches: dict[str, str]) -> None:
+    def __init__(
+        self,
+        *,
+        serving_mode: str | None,
+        mismatches: dict[str, str],
+        collections: "Sequence[str] | None" = None,
+    ) -> None:
         self.serving_mode = serving_mode
         self.mismatches = dict(mismatches)
         mode = serving_mode or "unknown"
@@ -343,11 +401,29 @@ class SearchEmbeddingProfileMismatchError(NexusError):
         # (a persisted-but-unread config.yml looks identical from here to
         # a genuinely local-only install), so the message states the
         # DIAGNOSTIC each case is recognized by, not a single prescription.
-        super().__init__(
+        families = _mismatch_families(list(collections) if collections is not None else list(mismatches))
+        head = (
             f"this install's current query-side embedding mode ({mode}) cannot "
             f"serve {len(mismatches)} of the targeted collection(s): {detail}. "
             "This means the collection(s) were embedded under a different "
-            "model/credential than this process currently has. Two common "
+            "model/credential than this process currently has. "
+        )
+        # RDR-210 Technical Design 10: on a dual engine the mode string cannot say
+        # which family a refused collection needs, so name the remedy for the family
+        # each collection's own model segment shows. Only when every collection
+        # classifies (a conformant name or row with a bge or voyage model) does the
+        # message narrow; an unclassifiable collection keeps both common causes.
+        if families is not None:
+            lines = []
+            if "voyage" in families:
+                lines.append(_VOYAGE_KEY_REMEDY)
+            if "bge" in families:
+                lines.append(_BGE_FILES_REMEDY)
+            super().__init__(head + "Fix:\n" + "\n".join(lines))
+            return
+        super().__init__(
+            head
+            + "Two common "
             "causes, with different fixes:\n"
             "  (1) Managed/cloud service intended, but this process resolved "
             "LOCAL mode: a GUI-launched subprocess (Claude Desktop's .mcpb "

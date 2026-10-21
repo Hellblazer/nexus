@@ -112,18 +112,28 @@ _HOOKS_JSON_PATHS: tuple[pathlib.Path, ...] = (
 )
 
 
+#: A Bash call fires PostToolUse when it exits 0 and PostToolUseFailure when it
+#: does not, never both, so a call pays for the larger of the two, not their sum.
+_ALTERNATE_POST_EVENTS = ("PostToolUse", "PostToolUseFailure")
+
+
 def _bash_hook_count(manifest: dict) -> int:
-    """Hooks registered against a matcher that includes Bash, in *manifest*.
+    """Hooks one Bash call can run, in *manifest*: every hook registered
+    against a matcher that includes Bash, except that the two post-call events
+    alternate (see :data:`_ALTERNATE_POST_EVENTS`).
 
     Pure, so the cap logic below is falsifiable without editing a real
     hooks.json.
     """
-    total = 0
-    for entries in (manifest.get("hooks") or {}).values():
-        for entry in entries or []:
-            if "Bash" in str(entry.get("matcher", "")):
-                total += len(entry.get("hooks") or [])
-    return total
+    per_event: dict[str, int] = {}
+    for event, entries in (manifest.get("hooks") or {}).items():
+        per_event[event] = sum(
+            len(entry.get("hooks") or [])
+            for entry in entries or []
+            if "Bash" in str(entry.get("matcher", ""))
+        )
+    post = max((per_event.pop(e, 0) for e in _ALTERNATE_POST_EVENTS), default=0)
+    return sum(per_event.values()) + post
 
 
 def test_bash_hook_counter_is_falsifiable() -> None:
@@ -135,6 +145,18 @@ def test_bash_hook_counter_is_falsifiable() -> None:
     assert _bash_hook_count({
         "hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{}, {}]}]}
     }) == 0, "a non-Bash matcher does not spend the Bash budget"
+    assert _bash_hook_count({
+        "hooks": {
+            "PostToolUse": [{"matcher": "Bash", "hooks": [{}]}],
+            "PostToolUseFailure": [{"matcher": "Bash", "hooks": [{}]}],
+        }
+    }) == 1, "PostToolUse and PostToolUseFailure alternate: one call fires one of them"
+    assert _bash_hook_count({
+        "hooks": {
+            "PostToolUse": [{"matcher": "Bash", "hooks": [{}, {}]}],
+            "PostToolUseFailure": [{"matcher": "Bash", "hooks": [{}]}],
+        }
+    }) == 2, "a call pays for the larger of the two post events"
     over = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{}] * 5}]}}
     assert _bash_hook_count(over) > AGGREGATE_CAP, (
         "a 5-hook manifest must exceed the cap, or the assertion below can "
@@ -170,14 +192,17 @@ def test_registered_bash_hooks_within_cap() -> None:
     )
 
 
-#: The real cross-plugin PreToolUse:Bash count right now:
-#: `subagent_git_write_requires_orchestrator` + `credential_print_guard`.
+#: The real cross-plugin per-Bash-call hook count right now:
+#: `subagent_git_write_requires_orchestrator` + `credential_print_guard` +
+#: the PreToolUse half of `subagent_git_integrity_check` (nexus-i93tz), plus
+#: that script's post-call half (PostToolUse or PostToolUseFailure, one fires).
 #: The bd-close gate and the phase-review close gate left at cleanup steps
-#: A2/A3 (nexus-0r1uz), taking the count from the cap (4) to 2.
-CURRENT_BASH_HOOK_COUNT = 2
+#: A2/A3 (nexus-0r1uz), taking the count from the cap (4) to 2; nexus-i93tz
+#: takes it back to the cap, so the next Bash hook needs consolidation.
+CURRENT_BASH_HOOK_COUNT = 4
 
 
-def test_registered_bash_hooks_is_currently_exactly_two() -> None:
+def test_registered_bash_hooks_is_currently_pinned() -> None:
     """Positive pin (nexus-wauo1.26 code review finding: the registry-only
     test above could still pass with a REAL extra hook landing in
     hooks.json with no registry entry, exactly like
@@ -198,7 +223,7 @@ def test_registered_bash_hooks_is_currently_exactly_two() -> None:
         )
     aggregate = sum(per_plugin.values())
     assert aggregate == CURRENT_BASH_HOOK_COUNT, (
-        f"expected the real cross-plugin PreToolUse:Bash count to be "
+        f"expected the real cross-plugin per-Bash-call hook count to be "
         f"exactly {CURRENT_BASH_HOOK_COUNT} right now ({per_plugin}); if it "
         "genuinely changed, update this pin deliberately"
     )

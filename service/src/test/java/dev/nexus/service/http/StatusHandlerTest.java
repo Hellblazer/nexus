@@ -191,6 +191,41 @@ class StatusHandlerTest {
     }
 
     @Test
+    void requestLedgerCounters_fourTopLevelFieldsReflectTheGlobalCounterDeltas_andNoRowCount() throws Exception {
+        // RDR-222 Phase 1 (bead nexus-yye8l.4), [additive]: the four RequestLedger events, same
+        // delta discipline as raced_embeds_total. No ledger row count: /v1/status is
+        // unauthenticated and the ledger is FORCE RLS.
+        start(new StatusHandler(null));
+        JsonNode before = get();
+
+        dev.nexus.service.db.RequestLedgerActivity.recordReplay();
+        dev.nexus.service.db.RequestLedgerActivity.recordInFlight();
+        dev.nexus.service.db.RequestLedgerActivity.recordInFlight();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordTakeover();
+
+        JsonNode after = get();
+        assertThat(after.path("request_ledger_replays_total").asLong(-1)
+            - before.path("request_ledger_replays_total").asLong(-1)).isEqualTo(1L);
+        assertThat(after.path("request_ledger_in_flight_total").asLong(-1)
+            - before.path("request_ledger_in_flight_total").asLong(-1)).isEqualTo(2L);
+        assertThat(after.path("request_ledger_key_reused_total").asLong(-1)
+            - before.path("request_ledger_key_reused_total").asLong(-1)).isEqualTo(3L);
+        assertThat(after.path("request_ledger_takeovers_total").asLong(-1)
+            - before.path("request_ledger_takeovers_total").asLong(-1)).isEqualTo(1L);
+
+        java.util.List<String> ledgerFields = new java.util.ArrayList<>();
+        after.fieldNames().forEachRemaining(f -> {
+            if (f.startsWith("request_ledger")) ledgerFields.add(f);
+        });
+        assertThat(ledgerFields).as("the four counters and nothing else, no row count")
+            .containsExactlyInAnyOrder("request_ledger_replays_total", "request_ledger_in_flight_total",
+                "request_ledger_key_reused_total", "request_ledger_takeovers_total");
+    }
+
+    @Test
     void suppliedVectorMismatchesTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
         // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same delta discipline as
         // raced_embeds_total above.
@@ -201,6 +236,21 @@ class StatusHandlerTest {
 
         long after = get().get("supplied_vector_mismatches_total").asLong();
         assertThat(after - before).isEqualTo(2L);
+    }
+
+    @Test
+    void testTenantResetRoute_isAlwaysPresent_falseUnlessTheRouteIsRegistered() throws Exception {
+        // nexus-0bl77, [additive]. On /v1/status and not /version: the conexus image smoke fails on any /version
+        // key outside the public contract.
+        start(new StatusHandler(null));
+        JsonNode off = get();
+        assertThat(off.has("test_tenant_reset_route")).as("always present").isTrue();
+        assertThat(off.get("test_tenant_reset_route").isBoolean()).isTrue();
+        assertThat(off.get("test_tenant_reset_route").asBoolean()).isFalse();
+        stop();
+
+        start(new StatusHandler(null).testTenantResetRoute(true));
+        assertThat(get().get("test_tenant_reset_route").asBoolean()).isTrue();
     }
 
     @Test
@@ -334,7 +384,12 @@ class StatusHandlerTest {
     }
 
     private static PciIndexSweep.Status read(int valid, int invalid, int unparsed, boolean expired) {
-        return new PciIndexSweep.Status(true, valid, invalid, unparsed, READ_AT, null, 0, expired);
+        return read(valid, invalid, unparsed, 0, expired);
+    }
+
+    private static PciIndexSweep.Status read(int valid, int invalid, int unparsed, int reindexLeftover,
+                                             boolean expired) {
+        return new PciIndexSweep.Status(true, valid, invalid, unparsed, reindexLeftover, READ_AT, null, 0, expired);
     }
 
     private StatusHandler withPci(java.util.function.Supplier<StatusHandler.PerCollectionIndexes> supplier) {
@@ -354,7 +409,7 @@ class StatusHandlerTest {
 
     @Test
     void perCollectionIndexes_theHolderReportsEveryField() throws Exception {
-        var holder = pci(read(4, 1, 2, false),
+        var holder = pci(read(4, 1, 2, 3, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT));
         start(withPci(() -> holder));
 
@@ -362,6 +417,8 @@ class StatusHandlerTest {
         assertThat(o.get("valid").asInt()).isEqualTo(4);
         assertThat(o.get("invalid").asInt()).isEqualTo(1);
         assertThat(o.get("unparsed").asInt()).isEqualTo(2);
+        assertThat(o.get("reindex_leftover").asInt()).as("its own counter, next to unparsed (nexus-rn1yd)")
+            .isEqualTo(3);
         assertThat(o.get("last_read_at").asText()).isEqualTo("2026-10-10T08:00:00Z");
         assertThat(o.get("expired").asBoolean()).isFalse();
         JsonNode me = o.get("this_engine");
@@ -459,7 +516,7 @@ class StatusHandlerTest {
 
     @Test
     void perCollectionIndexes_beforeTheFirstSuccessfulReadTheLastReadTimeIsNull() throws Exception {
-        var never = pci(new PciIndexSweep.Status(false, 0, 0, 0, null, null, 0, false),
+        var never = pci(new PciIndexSweep.Status(false, 0, 0, 0, 0, null, null, 0, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OFF, null, null, null));
         start(withPci(() -> never));
 
@@ -491,7 +548,7 @@ class StatusHandlerTest {
         JsonNode o = get().get("per_collection_indexes");
         var top = new java.util.ArrayList<String>();
         o.fieldNames().forEachRemaining(top::add);
-        assertThat(top).containsExactly("valid", "invalid", "unparsed", "last_read_at", "expired",
+        assertThat(top).containsExactly("valid", "invalid", "unparsed", "reindex_leftover", "last_read_at", "expired",
             "sweep_seconds", "this_engine");
         var inner = new java.util.ArrayList<String>();
         o.get("this_engine").fieldNames().forEachRemaining(inner::add);
@@ -512,7 +569,7 @@ class StatusHandlerTest {
             java.nio.file.Path.of("..", "tests", "fixtures", "pci_status_bodies.json"))).get("cases");
         var cases = new java.util.LinkedHashMap<String, StatusHandler.PerCollectionIndexes>();
         // A build in flight is a pass in flight: PciReconciler.status() cannot report building 1 without a started pass.
-        cases.put("holder", pci(read(4, 1, 2, false), new PciReconciler.DdlStatus(
+        cases.put("holder", pci(read(4, 1, 2, 1, false), new PciReconciler.DdlStatus(
             PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT, java.time.Instant.parse("2026-10-10T07:58:30.250Z"),
             true)));
         cases.put("first_pass_in_flight", pci(read(0, 1, 0, false), new PciReconciler.DdlStatus(
@@ -525,7 +582,7 @@ class StatusHandlerTest {
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.NO_PRIVILEGE, 0, 0, DDL_AT)));
         cases.put("expired", pci(read(3, 0, 0, true),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
-        cases.put("off", pci(new PciIndexSweep.Status(false, 0, 0, 0, null, null, 0, false),
+        cases.put("off", pci(new PciIndexSweep.Status(false, 0, 0, 0, 0, null, null, 0, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OFF, null, null, null)));
 
         var goldenNames = new java.util.ArrayList<String>();

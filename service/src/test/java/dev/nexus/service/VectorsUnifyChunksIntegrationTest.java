@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
@@ -17,9 +18,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,48 +103,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class VectorsUnifyChunksIntegrationTest {
 
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-                + "BEGIN "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-                + "  END IF; "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-                + "  END IF; "
-                + "END; "
-                + "$unrelofunc$");
-            su.createStatement().execute(
-                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
-
-    private static final String SVC_ROLE = "nexus_svc";
-    private static final String SVC_PASS = "nexus_svc_pass";
     // Staged OUTSIDE db/changelog/ (round 3, coordinator directive): the
     // changelog-parity lints (test_changelog_rls_lint.py, test_changelog_validate_precondition_lint.py)
     // assert the master include list matches CHANGELOG_DIR.glob("*.xml")
@@ -160,7 +119,7 @@ class VectorsUnifyChunksIntegrationTest {
 
     // ── Shared aged-box scaffold ─────────────────────────────────────────────
 
-    /** One dedicated container + admin pool, bootstrapped like production. */
+    /** One empty database + admin pool, bootstrapped like production. */
     private record Rig(PostgreSQLContainer<?> pg, com.zaxxer.hikari.HikariDataSource adminDs) {
         void close() {
             adminDs.close();
@@ -169,31 +128,14 @@ class VectorsUnifyChunksIntegrationTest {
     }
 
     private static Rig newRig(String label) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         String role = "nexus_admin_" + label;
         String pass = role + "_pass";
+        // Phase A: the DBA-equivalent bootstrap (migrating role, nexus_svc, CREATE grants,
+        // pg_monitor ADMIN OPTION, extensions, relocation helpers) runs as the db.changelog-test-
+        // nonsuper-owner.xml test changelog, as the superuser, before the NOSUPERUSER walk.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-            su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-            // grants-004-monitor-wal-visibility needs the migration role to hold
-            // pg_monitor WITH ADMIN OPTION before it can grant it onward.
-            su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-            su.createStatement().execute(
-                "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-            // javadoc for the full derivation -- creates the extensions directly as
-            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-            // 001's guard to call mid-walk, since this walk resumes through both
-            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-            // as a NOSUPERUSER role.
-            bootstrapVectorExtensionsForFreshWalk(su, role);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -272,21 +214,17 @@ class VectorsUnifyChunksIntegrationTest {
             // does not exist yet at this migration depth (column-existence guard) --
             // safe at every migrateUpTo boundary this file exercises.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
-            // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: every caller
-            // of seedChunk runs this at the migrateUpTo(rig.adminDs(), "vectors-004-1")
-            // boundary, well before search-path-001 (placed near the changelog's end)
-            // has relocated the extension out of `public` (nexus-cbo4a batch 9 item 0).
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks_" + dim
-                        + " (tenant_id, collection, chash, chunk_text, embedding) "
-                        + "VALUES (?, ?, ?, ?, ?::vector)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.setBytes(3, chash);
-                ps.setString(4, text);
-                ps.setString(5, "[" + "0.01,".repeat(dim - 1) + "0.01]");
-                ps.executeUpdate();
-            }
+            // The embedding binds as a real[] (VectorSeeds.LEGACY_EMBEDDING), deliberately NOT through the
+            // generated Vector binding, which renders ::nexus.vector: every caller of seedChunk runs this at
+            // the migrateUpTo(rig.adminDs(), "vectors-004-1") boundary, well before search-path-001 (placed
+            // near the changelog's end) has relocated the extension out of `public` (nexus-cbo4a batch 9 item 0).
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DSL.table(DSL.name("nexus", "chunks_" + dim)))
+                .set(DSL.field(DSL.name("tenant_id"), String.class), tenant)
+                .set(DSL.field(DSL.name("collection"), String.class), collection)
+                .set(DSL.field(DSL.name("chash"), byte[].class), chash)
+                .set(DSL.field(DSL.name("chunk_text"), String.class), text)
+                .set(VectorSeeds.LEGACY_EMBEDDING, VectorSeeds.legacyEmbedding(dim, 0.01f))
+                .execute();
         }
     }
 
@@ -296,11 +234,9 @@ class VectorsUnifyChunksIntegrationTest {
         return b;
     }
 
-    private static long rowCount(Connection conn, String qualifiedTable) throws Exception {
-        try (var rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM " + qualifiedTable)) {
-            rs.next();
-            return rs.getLong(1);
-        }
+    /** Row count of {@code nexus.<table>}; the legacy per-dim tables are not generated, so it reads by name. */
+    private static long rowCount(Connection conn, String table) throws Exception {
+        return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("nexus", table)));
     }
 
     private static boolean tableExists(Connection conn, String schema, String table) throws Exception {
@@ -326,14 +262,14 @@ class VectorsUnifyChunksIntegrationTest {
 
     private static String changesetExecType(Connection conn, String id, String author, String filename)
             throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT exectype FROM databasechangelog WHERE id = ? AND author = ? AND filename = ?")) {
-            ps.setString(1, id);
-            ps.setString(2, author);
-            ps.setString(3, filename);
-            var rs = ps.executeQuery();
-            return rs.next() ? rs.getString("exectype") : null;
-        }
+        var execType = DSL.field(DSL.name("exectype"), String.class);
+        var rows = DSL.using(conn, SQLDialect.POSTGRES).select(execType)
+            .from(DSL.table(DSL.name("public", "databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq(id),
+                   DSL.field(DSL.name("author"), String.class).eq(author),
+                   DSL.field(DSL.name("filename"), String.class).eq(filename))
+            .fetch(execType);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     // ── Test 1: fresh install, full replay from genesis ─────────────────────
@@ -417,27 +353,24 @@ class VectorsUnifyChunksIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(4L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(4L);
 
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.chunks WHERE chash = ?")) {
-                    ps.setBytes(1, chash32(1));
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).as("chash32(1) came from chunks_384").isTrue();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).isFalse();
-                }
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.chunks WHERE chash = ?")) {
-                    ps.setBytes(1, chash32(3));
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).isFalse();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).as("chash32(3) came from chunks_1024").isTrue();
+                for (int fill : new int[] {1, 3}) {
+                    var flags = DSL.using(conn, SQLDialect.POSTGRES)
+                        .select(CHUNKS.EMBEDDING_384.isNotNull(), CHUNKS.EMBEDDING_768.isNotNull(),
+                                CHUNKS.EMBEDDING_1024.isNotNull())
+                        .from(CHUNKS).where(CHUNKS.CHASH.eq(chash32(fill))).fetch();
+                    assertThat(flags).isNotEmpty();
+                    var row = flags.get(0);
+                    if (fill == 1) {
+                        assertThat(row.get(0, Boolean.class)).as("chash32(1) came from chunks_384").isTrue();
+                        assertThat(row.get(1, Boolean.class)).isFalse();
+                        assertThat(row.get(2, Boolean.class)).isFalse();
+                    } else {
+                        assertThat(row.get(0, Boolean.class)).isFalse();
+                        assertThat(row.get(1, Boolean.class)).isFalse();
+                        assertThat(row.get(2, Boolean.class)).as("chash32(3) came from chunks_1024").isTrue();
+                    }
                 }
             }
         } finally {
@@ -463,7 +396,7 @@ class VectorsUnifyChunksIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(1L);
                 // The 768/1024 HNSW indexes must still be built UNCONDITIONALLY (C4)
                 // even though those shards contributed zero rows.
                 for (String idx : new String[] {
@@ -547,48 +480,49 @@ class VectorsUnifyChunksIntegrationTest {
 
                 // Zero embeddings -> rejected. A model partition's dimension CHECK refuses it too, and which
                 // CHECK PostgreSQL reports first is not part of the contract: either way the row is refused.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text) "
-                                + "VALUES ('t1', 'c768', ?, 'bge-base-en-v15-768', 'x')")) {
-                        ps.setBytes(1, chash32(20));
-                        ps.executeUpdate();
-                    }
-                }).as("zero-embedding row must violate a CHECK (exactly_one_embedding or the model partition's dimension CHECK)")
-                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
-                      assertThat(ex.getSQLState()).as("check_violation").isEqualTo("23514"));
+                assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, "t1")
+                    .set(CHUNKS.COLLECTION, "c768")
+                    .set(CHUNKS.CHASH, chash32(20))
+                    .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .execute())
+                  .as("zero-embedding row must violate a CHECK (exactly_one_embedding or the model partition's dimension CHECK)")
+                  .isInstanceOfSatisfying(DataAccessException.class, ex ->
+                      assertThat(ex.sqlState()).as("check_violation").isEqualTo("23514"));
 
                 // Two embeddings -> rejected.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, "
-                                + "embedding_384, embedding_768) VALUES ('t1', 'c768', ?, 'bge-base-en-v15-768', 'x', ?::nexus.vector, ?::nexus.vector)")) {
-                        ps.setBytes(1, chash32(21));
-                        String v384 = "[" + "0.01,".repeat(383) + "0.01]";
-                        String v768 = "[" + "0.01,".repeat(767) + "0.01]";
-                        ps.setString(2, v384);
-                        ps.setString(3, v768);
-                        ps.executeUpdate();
-                    }
-                }).as("two-embedding row must violate a CHECK (exactly_one_embedding or the model partition's dimension CHECK)")
-                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
-                      assertThat(ex.getSQLState()).as("check_violation").isEqualTo("23514"));
+                assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, "t1")
+                    .set(CHUNKS.COLLECTION, "c768")
+                    .set(CHUNKS.CHASH, chash32(21))
+                    .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.01f))
+                    .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.01f))
+                    .execute())
+                  .as("two-embedding row must violate a CHECK (exactly_one_embedding or the model partition's dimension CHECK)")
+                  .isInstanceOfSatisfying(DataAccessException.class, ex ->
+                      assertThat(ex.sqlState()).as("check_violation").isEqualTo("23514"));
 
                 // Exactly one, per dim (the model's own) -> accepted.
                 int[] dims = {384, 768, 1024};
                 String[] models = {"minilm-l6-v2-384", "bge-base-en-v15-768", "voyage-code-3"};
                 for (int i = 0; i < dims.length; i++) {
                     int dim = dims[i];
-                    String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c" + dim + "', ?, '" + models[i] + "', 'x', ?::nexus.vector)")) {
-                        ps.setBytes(1, chash32(30 + i));
-                        ps.setString(2, vec);
-                        assertThatCode(ps::executeUpdate)
-                            .as("single embedding_%d row must be accepted", dim)
-                            .doesNotThrowAnyException();
-                    }
+                    final String collection = "c" + dim;
+                    final String model = models[i];
+                    final byte[] chash = chash32(30 + i);
+                    assertThatCode(() -> ctx.insertInto(CHUNKS)
+                            .set(CHUNKS.TENANT_ID, "t1")
+                            .set(CHUNKS.COLLECTION, collection)
+                            .set(CHUNKS.CHASH, chash)
+                            .set(CHUNKS.EMBEDDING_MODEL, model)
+                            .set(CHUNKS.CHUNK_TEXT, "x")
+                            .set(VectorSeeds.chunkEmbedding(dim), VectorSeeds.vec(dim, 0.01f))
+                            .execute())
+                        .as("single embedding_%d row must be accepted", dim)
+                        .doesNotThrowAnyException();
                 }
             }
         } finally {
@@ -695,9 +629,9 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThat(tableExists(conn, "nexus", "chunks_384")).isTrue();
                 assertThat(tableExists(conn, "nexus", "chunks_768")).isTrue();
                 assertThat(tableExists(conn, "nexus", "chunks_1024")).isTrue();
-                assertThat(rowCount(conn, "nexus.chunks_384")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.chunks_768")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.chunks_1024")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_384")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_768")).isEqualTo(1L);
+                assertThat(rowCount(conn, "chunks_1024")).isEqualTo(1L);
 
                 // All three shards, not just 384/1024 (critic S4: the prior
                 // version of this test never seeded or asserted chunks_768 at
@@ -717,7 +651,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
                     .as("re-applying after rollback must succeed cleanly")
                     .doesNotThrowAnyException();
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
+                assertThat(rowCount(conn, "chunks")).isEqualTo(3L);
             }
         } finally {
             rig.close();
@@ -753,52 +687,54 @@ class VectorsUnifyChunksIntegrationTest {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper
                 // .insertCollection (the bare two-column raw INSERT this used to run
                 // 23502s on lifecycle_state NOT NULL after the full migrate() above).
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), "t1", "c", "bge-base-en-v15-768");
+                var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                PgContainerHelper.insertCollection(ctx, "t1", "c", "bge-base-en-v15-768");
 
                 // 31-byte chash -> rejected.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                                + "VALUES ('t1', 'c', ?, 'bge-base-en-v15-768', 'x', ?::nexus.vector)")) {
-                        ps.setBytes(1, new byte[31]);
-                        ps.setString(2, "[" + "0.01,".repeat(767) + "0.01]");
-                        ps.executeUpdate();
-                    }
-                }).as("31-byte chash must violate chunks_chash_octet_check on a NEW row write -- "
+                assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, "t1")
+                    .set(CHUNKS.COLLECTION, "c")
+                    .set(CHUNKS.CHASH, new byte[31])
+                    .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.01f))
+                    .execute())
+                  .as("31-byte chash must violate chunks_chash_octet_check on a NEW row write -- "
                       + "the CHECK is NOT VALID (exempts only PRE-EXISTING rows), so a fresh "
                       + "INSERT is fully enforced")
-                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
-                      assertThat(ex.getSQLState())
+                  .isInstanceOfSatisfying(DataAccessException.class, ex ->
+                      assertThat(ex.sqlState())
                           .as("PostgreSQL check_violation SQLSTATE")
                           .isEqualTo("23514"))
                   .hasMessageContaining("chunks_chash_octet_check");
 
                 // 33-byte chash -> rejected.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                                + "VALUES ('t1', 'c', ?, 'bge-base-en-v15-768', 'x', ?::nexus.vector)")) {
-                        ps.setBytes(1, new byte[33]);
-                        ps.setString(2, "[" + "0.01,".repeat(767) + "0.01]");
-                        ps.executeUpdate();
-                    }
-                }).as("33-byte chash must violate chunks_chash_octet_check on a NEW row write")
-                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
-                      assertThat(ex.getSQLState())
+                assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, "t1")
+                    .set(CHUNKS.COLLECTION, "c")
+                    .set(CHUNKS.CHASH, new byte[33])
+                    .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.01f))
+                    .execute())
+                  .as("33-byte chash must violate chunks_chash_octet_check on a NEW row write")
+                  .isInstanceOfSatisfying(DataAccessException.class, ex ->
+                      assertThat(ex.sqlState())
                           .as("PostgreSQL check_violation SQLSTATE")
                           .isEqualTo("23514"))
                   .hasMessageContaining("chunks_chash_octet_check");
 
                 // 32-byte chash -> accepted (CONTROL).
-                try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                            + "VALUES ('t1', 'c', ?, 'bge-base-en-v15-768', 'x', ?::nexus.vector)")) {
-                    ps.setBytes(1, chash32(40));
-                    ps.setString(2, "[" + "0.01,".repeat(767) + "0.01]");
-                    assertThatCode(ps::executeUpdate)
-                        .as("32-byte chash must be accepted")
-                        .doesNotThrowAnyException();
-                }
+                assertThatCode(() -> ctx.insertInto(CHUNKS)
+                        .set(CHUNKS.TENANT_ID, "t1")
+                        .set(CHUNKS.COLLECTION, "c")
+                        .set(CHUNKS.CHASH, chash32(40))
+                        .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                        .set(CHUNKS.CHUNK_TEXT, "x")
+                        .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.01f))
+                        .execute())
+                    .as("32-byte chash must be accepted")
+                    .doesNotThrowAnyException();
             }
         } finally {
             rig.close();
@@ -838,17 +774,12 @@ class VectorsUnifyChunksIntegrationTest {
                     assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
                 }
                 // Non-vacuity: the migration actually moved the seeded rows.
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
-                try (var ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_1024 IS NOT NULL "
-                            + "AND embedding_384 IS NULL AND embedding_768 IS NULL")) {
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1))
-                        .as("every row must land with ONLY the 1024-dim embedding populated -- "
-                            + "no NULL-everywhere rows")
-                        .isEqualTo(3L);
-                }
+                assertThat(rowCount(conn, "chunks")).isEqualTo(3L);
+                assertThat(DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                        CHUNKS.EMBEDDING_1024.isNotNull(), CHUNKS.EMBEDDING_384.isNull(), CHUNKS.EMBEDDING_768.isNull()))
+                    .as("every row must land with ONLY the 1024-dim embedding populated -- "
+                        + "no NULL-everywhere rows")
+                    .isEqualTo(3);
                 assertThat(constraintExists(conn, "chunks_chash_octet_check")).isTrue();
                 assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
                     .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
@@ -899,17 +830,12 @@ class VectorsUnifyChunksIntegrationTest {
                 for (String dim : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                     assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
                 }
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(2L);
-                try (var ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL "
-                            + "AND embedding_384 IS NULL AND embedding_1024 IS NULL")) {
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1))
-                        .as("every row must land with ONLY the 768-dim embedding populated -- "
-                            + "no NULL-everywhere rows")
-                        .isEqualTo(2L);
-                }
+                assertThat(rowCount(conn, "chunks")).isEqualTo(2L);
+                assertThat(DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                        CHUNKS.EMBEDDING_768.isNotNull(), CHUNKS.EMBEDDING_384.isNull(), CHUNKS.EMBEDDING_1024.isNull()))
+                    .as("every row must land with ONLY the 768-dim embedding populated -- "
+                        + "no NULL-everywhere rows")
+                    .isEqualTo(2);
                 assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
                     .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
                     .isFalse();

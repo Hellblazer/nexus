@@ -193,7 +193,7 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     knowledge_owner = writer.register_owner("knowledge", "curator")
 
     src = _coll("src-rt")
@@ -324,7 +324,7 @@ def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     knowledge_owner = writer.register_owner("knowledge", "curator")
 
     src = _coll("src-skip")
@@ -362,7 +362,7 @@ def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_pat
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
 
     src = _coll("src-partial")
@@ -398,7 +398,7 @@ def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_pat
 def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("export-fail")
     _owned_doc(writer, client, col, owner, "wbfpw31 Fail Doc", ["wbfpw31 one lone chunk"])
@@ -425,7 +425,7 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     row, and a numeric-looking segment with no row must NOT be parsed."""
 
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner_tumbler = writer.register_owner(
         "wbfpw33-owner-test", "repo", repo_hash="wbfpw33deadbeefcafe",
     )
@@ -458,7 +458,7 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("wbfpw33-slug-repo", "repo", repo_hash="wbfpw33slugrepocafe")
     dst = f"code__wbfpw33e2e-2ad2825c__{_MODEL}__v1"
     slug = "wbfpw33e2e-2ad2825c"
@@ -528,7 +528,7 @@ def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_colle
 ):
 
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     expected = writer.register_owner("knowledge", "curator")
 
     # A knowledge collection's four-segment name IS conformant, but its
@@ -552,7 +552,7 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     dst = _coll("legacy-docid")
 
@@ -622,7 +622,7 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     dst = _coll("mixed-owner-legacy")
     title = "wbfpw31 mixed doc"
@@ -677,7 +677,7 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     default selection runs it."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     coll = _coll("keep-existing")
     doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 note", ["wbfpw40 version one"])
@@ -735,7 +735,7 @@ def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_ser
     path is exercised."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     coll = _coll("keep-existing-legacy")
     doc, _uri, (v2,) = _owned_doc(writer, client, coll, owner, "wbfpw40 legacy note", ["wbfpw40 legacy current"])
@@ -766,7 +766,7 @@ def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monke
     (nexus-z0o2p.19), so the failure covers the documents of that page."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     coll = _coll("keep-existing-readfail")
     doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 readfail note", ["wbfpw40 readfail v1"])
@@ -791,7 +791,7 @@ def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tm
     document, then import. The re-import must own the file's chunks."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     coll = _coll("delete-then-import")
     doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 restore note", ["wbfpw40 restore v1"])
@@ -818,7 +818,7 @@ def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_p
     """A catalog title is user data; the command nx store import prints must
     round-trip through a shell as exactly one --title argument."""
     client = HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     coll = _coll("hostile-title")
     title = 'x" ; echo INJECTED $(id) `id` ; "'

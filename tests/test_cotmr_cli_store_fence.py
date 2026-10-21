@@ -36,6 +36,8 @@ from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 from tests._catalog_fixture_ops import documents_by_title
 
+pytestmark = pytest.mark.t2_tenant
+
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

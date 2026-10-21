@@ -9,21 +9,41 @@
     test container that migrates as the superuser (PgContainerHelper#applyProductSchema) therefore shows a
     definer function reading past RLS and proves nothing about production. vectors-029's text-gate probe
     depends on exactly this, so its tests migrate through PgContainerHelper#bootstrapNonSuperuserOwner and
-    SchemaMigrator.migrate as the owner, the shape SchemaMigratorIntegrationTest#bootstrap hand-rolls.
+    SchemaMigrator.migrate as the owner. This changelog is the single source of that provisioning: every
+    fixture that needs a non-superuser owner before the product walk (SchemaMigratorIntegrationTest and
+    the other pre-walk bootstrap tests included) calls PgContainerHelper#bootstrapNonSuperuserOwner
+    instead of carrying its own copy (nexus-cbo4a).
 
-    WHAT IT MIRRORS (SchemaMigratorIntegrationTest#bootstrap, same statements): ${adminRole} (LOGIN,
+    WHAT IT PROVISIONS: ${adminRole} (LOGIN,
     NOSUPERUSER NOCREATEDB NOCREATEROLE), nexus_svc (LOGIN, NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS),
     CREATE on the database and on public, pg_monitor WITH ADMIN OPTION (grants-004 passes it on to nexus_svc),
     both extensions, the nexus schema owned by ${adminRole}, and the SECURITY DEFINER relocation helpers
     search-path-001 calls mid-walk (nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema's
-    shape). Run it against a DEDICATED, virgin container only (PgContainerHelper#startDedicated): schema
-    ownership is global state.
+    shape). Run it against a virgin database: PgContainerHelper#startEmptyDatabase (an empty database on the
+    per-fork shared cluster) or a dedicated container. Schema ownership is database-local, so the database is
+    the boundary; roles are cluster-wide. Role creation is guarded by IF NOT EXISTS, so a role that already
+    exists keeps its attributes, and this changelog cannot detect that. On a shared cluster nexus_svc already
+    exists (NOINHERIT, a pg_monitor member, from the template migration), so ${svcInherit} and
+    ${monitorAdminOption}=false cannot take effect there: the five-argument
+    PgContainerHelper#bootstrapNonSuperuserOwner refuses them, and a fixture that needs them runs on a dedicated
+    container. ${adminRole} must be a name no other class uses, or be declared exclusive.
 
     Run through its own databasechangelog table (PgContainerHelper#bootstrapNonSuperuserOwner sets the
     names): whichever role's Liquibase run creates databasechangelog first OWNS it, and the owner's later
     product walk must not find a superuser-owned one in public.
 
     runAlways so a repeat call is harmless; every statement is idempotent.
+
+    TWO PARAMETERS keep the default shape unchanged and cover the fixtures that deliberately differ
+    (nexus-cbo4a, pre-walk bootstrap fold; every other fixture passes the defaults):
+      ${monitorAdminOption}  'true' grants pg_monitor WITH ADMIN OPTION to ${adminRole}; 'false' omits it
+                             (GrantsPgMonitorTest's falsification case: grants-004 must fail loud without it).
+                             Any other value, including an unresolved ${monitorAdminOption}, raises.
+      ${svcInherit}          INHERIT (the PostgreSQL default) or NOINHERIT for nexus_svc
+                             (GrantsPgMonitorTest mirrors production's NOINHERIT nexus_svc).
+
+    Re-running it after a rollback has dropped the nexus schema reinstalls the relocation helpers
+    (SchemaRollbackRoundTripIntegrationTest does exactly that, as nexus.db.pg_provision does on a daemon start).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -42,7 +62,7 @@ END $$;
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        CREATE ROLE nexus_svc LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+        CREATE ROLE nexus_svc LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS ${svcInherit};
     END IF;
 END $$;
 
@@ -51,7 +71,14 @@ DO $$ BEGIN
 END $$;
 
 GRANT CREATE ON SCHEMA public TO ${adminRole};
-GRANT pg_monitor TO ${adminRole} WITH ADMIN OPTION;
+DO $$ BEGIN
+    IF '${monitorAdminOption}' NOT IN ('true', 'false') THEN
+        RAISE EXCEPTION 'monitorAdminOption must be exactly true or false, got %', '${monitorAdminOption}';
+    END IF;
+    IF '${monitorAdminOption}' = 'true' THEN
+        GRANT pg_monitor TO ${adminRole} WITH ADMIN OPTION;
+    END IF;
+END $$;
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;

@@ -95,6 +95,7 @@ def _edge_snapshot(cat: Catalog, tumbler):
     )
 
 
+@pytest.mark.t2_tenant
 class TestLayerBFallback:
     """Layer B: DT absent → zero new edges; pre-existing edge set unchanged."""
 
@@ -151,6 +152,7 @@ class TestLayerCFallback:
         primary = {"year": 2024, "venue": "VLDB", "authors": "A", "doi": "10.1/A"}
         assert _merge_bib_gapfill(primary, {}) == primary
 
+    @pytest.mark.t2_tenant
     def test_enrich_source_dt_makes_no_dt_call_when_unavailable(self):
         # CLI path: available()=False → dt_resolve_doi is never invoked, the
         # primary miss is skipped, exit 0 (exact pre-RDR-139 behaviour).

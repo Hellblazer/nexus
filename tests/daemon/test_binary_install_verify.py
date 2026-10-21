@@ -29,15 +29,20 @@ matrix, T2 nexus_rdr/161-research):
   style). This lets the fail-closed/pass wiring be covered WITHOUT sigstore
   installed and WITHOUT a real release artifact.
 * an end-to-end real verify against a genuine published ``.sigstore.json`` is
-  deferred to an integration test (skip-with-reason) because no real
-  ``engine-service-v*`` release artifact exists yet (RDR-155 P4b freeze
-  window). The gap is declared out loud rather than papered over with a mock
-  pretending to be a real verify.
+  an integration test over the bundles committed in
+  ``tests/daemon/fixtures/rdr161/`` (nexus-3lnxr): real sigstore, real
+  Fulcio/Rekor material, the pinned issuer and identity, no mock, plus two
+  one-byte-change negatives.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
+import json
+import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -331,26 +336,321 @@ def test_cli_install_binary_fails_closed_exit_2(tmp_path, monkeypatch):
     assert "sha256 mismatch" in result.output
 
 
-# ── end-to-end real verify (deferred, declared out loud) ────────────────────
+# ── end-to-end real verify against a genuine published bundle ───────────────
+#
+# nexus-3lnxr. ``tests/daemon/fixtures/rdr161/`` holds the Sigstore bundles
+# published beside a real ``engine-service-v*`` release (see provenance.json
+# there for the tag and the pinned sha256 of each asset). The asset itself is
+# not committed: the test downloads it once into the test-substrate cache,
+# checks the pinned sha256, and runs the production ``verify_signature`` with
+# the real sigstore checker, no seam. The 5 MB ``nexus-pg-<platform>.txz`` stands in
+# for the 160 MB ``nexus-service`` binary; the same workflow signs both under
+# the same identity. The release tag is pinned here and does NOT track
+# ``REQUIRED_ENGINE_VERSION``, so an engine bump never invalidates the fixture.
+#
+# These tests share an integration job with unrelated PRs, and they touch two
+# networks (the GitHub release download, sigstore's TUF trust-root refresh).
+# Both are retried a bounded number of times on a TRANSPORT failure only, the
+# way ``tests/db/_service_fixture.py`` retries the PG-bundle install
+# (nexus-9rnfr, nexus-v460j). A verdict (bad digest, bad signature, wrong
+# identity) is never retried, and each negative asserts the verdict's own
+# message and its sigstore ``VerificationError`` cause, so an outage cannot
+# satisfy it.
 
-_REAL_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "rdr161" / "nexus-service-linux-amd64.sigstore.json"
-)
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "rdr161"
+_PROVENANCE = json.loads((_FIXTURE_DIR / "provenance.json").read_text(encoding="utf-8"))
+
+
+def _sleep(seconds: float) -> None:
+    """Module-level so the offline retry tests can stub the backoff."""
+    time.sleep(seconds)
+
+
+def _retry_transient(fn, *, transient):
+    """Call *fn*, retrying a ``BinaryVerificationError`` that *transient*
+    accepts, up to the attempt count and backoff of the PG-bundle retry."""
+    from tests.db._service_fixture import _TUF_RETRY_ATTEMPTS, _TUF_RETRY_BACKOFF_S
+
+    for attempt in range(1, _TUF_RETRY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except binstall.BinaryVerificationError as exc:
+            if not transient(exc) or attempt == _TUF_RETRY_ATTEMPTS:
+                raise
+            _sleep(_TUF_RETRY_BACKOFF_S * attempt)
+
+
+def _download_is_transient(exc: Exception) -> bool:
+    """A fetch failure that is not the release saying it lacks the asset."""
+    return isinstance(exc, binstall.BinaryDownloadError) and not isinstance(
+        exc, binstall.BinaryAssetAbsentError
+    )
+
+
+def _verify_is_transient(exc: Exception) -> bool:
+    """A verify failure whose cause is the TUF refresh or the network, never a
+    ``VerificationError`` verdict."""
+    try:
+        import sigstore.errors as sse
+    except ImportError:
+        return False
+    return isinstance(
+        exc.__cause__,
+        (sse.TUFError, sse.NetworkError, sse.MetadataError, sse.RootError, OSError),
+    )
+
+
+def _verify_with_retry(asset: Path, bundle: Path, **kwargs) -> None:
+    """Production ``verify_signature``, real sigstore, retried on a TUF or
+    network failure only."""
+    _retry_transient(
+        lambda: binstall.verify_signature(asset, bundle, **kwargs),
+        transient=_verify_is_transient,
+    )
+
+
+def _is_pinned(path: Path, entry: dict) -> bool:
+    return (
+        path.is_file()
+        and path.stat().st_size == entry["size"]
+        and binstall.compute_sha256(path) == entry["sha256"]
+    )
+
+
+def _materialize_asset(cache: Path, release_tag: str, entry: dict) -> Path:
+    """The release asset in *cache*, sha256-pinned. A cached copy that fails
+    its pin is deleted and downloaded once more; a download that still fails
+    its pin fails the test."""
+    name = entry["asset"]
+    asset = cache / name
+    if _is_pinned(asset, entry):
+        return asset
+    asset.unlink(missing_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    # Per-process temp name + atomic replace: xdist workers and parallel
+    # jobs sharing one cache never see a half-written asset.
+    part = cache / f"{name}.{os.getpid()}.part"
+    try:
+        _retry_transient(
+            lambda: binstall._download(binstall.release_asset_url(release_tag, name), part),
+            transient=_download_is_transient,
+        )
+        os.replace(part, asset)
+    except binstall.BinaryVerificationError as exc:
+        pytest.fail(f"cannot arm the rdr161 fixture: {exc}")
+    finally:
+        part.unlink(missing_ok=True)
+    assert _is_pinned(asset, entry), f"{asset} does not match the sha256 pinned in provenance.json"
+    return asset
+
+
+def _real_asset_and_bundle() -> tuple[Path, Path]:
+    """The host's genuine release asset (downloaded, sha256-pinned) and its
+    committed bundle. Fails, never skips, when the fixture cannot be armed:
+    a skip here is the silent disarm this test exists to prevent."""
+    from nexus.db.pg_bundle import current_platform_tag
+    from tests.db._service_fixture import substrate_cache_root
+
+    plat = current_platform_tag()
+    entry = _PROVENANCE["assets"].get(plat)
+    if entry is None:
+        pytest.skip(
+            f"no rdr161 fixture for platform {plat!r} (release {_PROVENANCE['release_tag']} "
+            f"publishes {sorted(_PROVENANCE['assets'])}); mac-x64 has no engine artifact"
+        )
+    bundle = _FIXTURE_DIR / f"{entry['asset']}.sigstore.json"
+    assert bundle.is_file(), f"committed fixture missing: {bundle}"
+    cache = substrate_cache_root() / "rdr161-fixture" / _PROVENANCE["release_tag"]
+    return _materialize_asset(cache, _PROVENANCE["release_tag"], entry), bundle
+
+
+def _assert_verdict(exc_info, message: str) -> None:
+    """The rejection is sigstore's verdict (not a transport failure) and says *message*."""
+    import sigstore.errors as sse
+
+    assert message in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, sse.VerificationError), (
+        f"rejected for a reason other than a verdict: {exc_info.value.__cause__!r}"
+    )
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    not (_SIGSTORE_INSTALLED and _REAL_FIXTURE.is_file()),
-    reason=(
-        "no genuine engine-service-v* .sigstore.json fixture exists yet "
-        "(produced by the publisher nexus-ltjws at a real release; blocked by "
-        "the RDR-155 P4b freeze window). Capture one from the first signed "
-        "release and drop it at tests/daemon/fixtures/rdr161/ to arm this."
-    ),
-)
 def test_verify_signature_real_bundle_end_to_end():
-    asset = _REAL_FIXTURE.with_suffix("")  # the binary sits beside the bundle
-    binstall.verify_signature(asset, _REAL_FIXTURE)  # real sigstore verify, no mock
+    asset, bundle = _real_asset_and_bundle()
+    _verify_with_retry(asset, bundle)  # real sigstore verify, no mock
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_one_changed_asset_byte(tmp_path):
+    asset, bundle = _real_asset_and_bundle()
+    data = bytearray(asset.read_bytes())
+    data[len(data) // 2] ^= 0x01
+    tampered = tmp_path / asset.name
+    tampered.write_bytes(bytes(data))
+    with pytest.raises(binstall.BinaryVerificationError, match="digest mismatch") as ei:
+        _verify_with_retry(tampered, bundle)
+    _assert_verdict(ei, "digest mismatch")
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_one_changed_signature_byte(tmp_path):
+    asset, bundle = _real_asset_and_bundle()
+    doc = json.loads(bundle.read_text(encoding="utf-8"))
+    sig = bytearray(base64.b64decode(doc["messageSignature"]["signature"]))
+    sig[0] ^= 0x01
+    doc["messageSignature"]["signature"] = base64.b64encode(bytes(sig)).decode("ascii")
+    bad_bundle = tmp_path / bundle.name
+    bad_bundle.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(binstall.BinaryVerificationError, match="Signature is invalid") as ei:
+        _verify_with_retry(asset, bad_bundle)
+    _assert_verdict(ei, "Signature is invalid")
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_a_wrong_identity_regexp():
+    asset, bundle = _real_asset_and_bundle()
+    with pytest.raises(
+        binstall.BinaryVerificationError,
+        match="does not match the pinned release identity",
+    ) as ei:
+        _verify_with_retry(asset, bundle, identity_regexp=r"https://github\.com/Other/repo/.*")
+    _assert_verdict(ei, "does not match the pinned release identity")
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_a_wrong_issuer():
+    asset, bundle = _real_asset_and_bundle()
+    with pytest.raises(
+        binstall.BinaryVerificationError, match=r"0 of 2 policies succeeded"
+    ) as ei:
+        _verify_with_retry(asset, bundle, issuer="https://accounts.google.com")
+    _assert_verdict(ei, "0 of 2 policies succeeded")
+
+
+# ── the fixture's own retry and cache handling (offline) ────────────────────
+
+
+def _fake_entry(payload: bytes) -> dict:
+    return {
+        "asset": "nexus-pg-fake.txz",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+    }
+
+
+@pytest.fixture
+def _no_backoff(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(sys.modules[__name__], "_sleep", sleeps.append)
+    return sleeps
+
+
+def test_fixture_download_recovers_from_one_transient_failure(tmp_path, monkeypatch, _no_backoff):
+    payload = b"release-asset-bytes"
+    calls: list[str] = []
+
+    def flaky(url, dest, **_):
+        calls.append(url)
+        if len(calls) == 1:
+            raise binstall.BinaryDownloadError("connection reset")
+        dest.write_bytes(payload)
+
+    monkeypatch.setattr(binstall, "_download", flaky)
+    asset = _materialize_asset(tmp_path, "engine-service-v0.0.0", _fake_entry(payload))
+    assert asset.read_bytes() == payload
+    assert len(calls) == 2
+    assert len(_no_backoff) == 1
+
+
+def test_fixture_download_does_not_retry_an_absent_asset(tmp_path, monkeypatch, _no_backoff):
+    calls: list[str] = []
+
+    def absent(url, dest, **_):
+        calls.append(url)
+        raise binstall.BinaryAssetAbsentError("HTTP 404")
+
+    monkeypatch.setattr(binstall, "_download", absent)
+    with pytest.raises(pytest.fail.Exception, match="cannot arm the rdr161 fixture"):
+        _materialize_asset(tmp_path, "engine-service-v0.0.0", _fake_entry(b"x"))
+    assert len(calls) == 1
+    assert _no_backoff == []
+
+
+def test_fixture_download_gives_up_after_the_bounded_attempts(tmp_path, monkeypatch, _no_backoff):
+    from tests.db._service_fixture import _TUF_RETRY_ATTEMPTS
+
+    calls: list[str] = []
+
+    def down(url, dest, **_):
+        calls.append(url)
+        raise binstall.BinaryDownloadError("network is unreachable")
+
+    monkeypatch.setattr(binstall, "_download", down)
+    with pytest.raises(pytest.fail.Exception, match="cannot arm the rdr161 fixture"):
+        _materialize_asset(tmp_path, "engine-service-v0.0.0", _fake_entry(b"x"))
+    assert len(calls) == _TUF_RETRY_ATTEMPTS
+
+
+def test_fixture_replaces_a_cached_asset_that_fails_its_pin(tmp_path, monkeypatch, _no_backoff):
+    payload = b"the-real-release-bytes"
+    entry = _fake_entry(payload)
+    (tmp_path / entry["asset"]).write_bytes(b"x" * len(payload))  # right size, wrong bytes
+    calls: list[str] = []
+
+    def good(url, dest, **_):
+        calls.append(url)
+        dest.write_bytes(payload)
+
+    monkeypatch.setattr(binstall, "_download", good)
+    asset = _materialize_asset(tmp_path, "engine-service-v0.0.0", entry)
+    assert asset.read_bytes() == payload
+    assert len(calls) == 1
+
+
+def test_fixture_fails_when_a_fresh_download_still_fails_its_pin(tmp_path, monkeypatch, _no_backoff):
+    entry = _fake_entry(b"expected")
+    calls: list[str] = []
+
+    def wrong(url, dest, **_):
+        calls.append(url)
+        dest.write_bytes(b"unexpect")  # same size, wrong digest
+
+    monkeypatch.setattr(binstall, "_download", wrong)
+    with pytest.raises(AssertionError, match="does not match the sha256 pinned"):
+        _materialize_asset(tmp_path, "engine-service-v0.0.0", entry)
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(not _SIGSTORE_INSTALLED, reason="sigstore not installed")
+def test_verify_retry_retries_a_tuf_failure_and_never_a_verdict(monkeypatch, _no_backoff):
+    import sigstore.errors as sse
+
+    def wrapped(cause):
+        err = binstall.BinaryVerificationError("signature verification failed")
+        err.__cause__ = cause
+        return err
+
+    outcomes = [wrapped(sse.TUFError("refresh failed")), None]
+
+    def verify(asset, bundle, **_):
+        out = outcomes.pop(0)
+        if out is not None:
+            raise out
+
+    monkeypatch.setattr(binstall, "verify_signature", verify)
+    _verify_with_retry(Path("a"), Path("b"))
+    assert outcomes == [] and len(_no_backoff) == 1
+
+    verdicts: list[int] = []
+
+    def reject(asset, bundle, **_):
+        verdicts.append(1)
+        raise wrapped(sse.VerificationError("Signature is invalid for input"))
+
+    monkeypatch.setattr(binstall, "verify_signature", reject)
+    with pytest.raises(binstall.BinaryVerificationError):
+        _verify_with_retry(Path("a"), Path("b"))
+    assert verdicts == [1]
 
 
 # ── nexus-pnwu0 / GH #1390: chash-poison upgrade gate ───────────────────────

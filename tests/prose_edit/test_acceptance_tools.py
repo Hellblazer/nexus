@@ -71,6 +71,8 @@ def test_the_fake_nx_prints_the_real_nx_wording_remedy_included() -> None:
         node.args[0].value for node in ast.walk(ast.parse(src))
         if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ServiceEndpointUnresolvableError"
         and node.args and isinstance(node.args[0], ast.Constant) and "nx daemon service start" in node.args[0].value
+        # the default wording; the login-race variant (nexus-iedjp) says "still be starting"
+        and "still be starting" not in node.args[0].value
     ]
     assert len(raised) == 1
     helpers = (ACC.parents[2] / "src" / "nexus" / "commands" / "_helpers.py").read_text()

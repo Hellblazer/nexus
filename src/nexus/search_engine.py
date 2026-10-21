@@ -15,7 +15,7 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
-from nexus.corpus import embedding_model_for_collection_name
+from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection_name
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
@@ -35,6 +35,7 @@ __all__ = [
     "_overfetch_multiplier",
     "SearchDiagnostics",
     "apply_ranking_boosts",
+    "boost_window_size",
     "apply_file_diversity_cap",
     "LexicalLegUnavailableError",
 ]
@@ -65,6 +66,27 @@ class SearchDiagnostics:
     format (the "top of the ranking"); internally it is a ``min`` over dropped
     distances because smaller cosine distance = higher rank.
 
+    ``kept`` maps name → the number of rows that collection contributes to the
+    engine's candidate pool (nexus-079ly): the rows it holds after the
+    engine's global cut and the lexical union, BEFORE the topic post-filter,
+    the enrichment cap and the caller's page slice. Read it through
+    :meth:`kept_for`. The cut that decides it is the
+    engine pool limit (at least 300 rows, 1000 with rerank), not
+    ``--limit``/``-n``: a collection whose rows all rank below ``-n`` still counts
+    as kept. *raw* and *dropped* are the engine's per-collection counts, taken
+    BEFORE that cut: on the per-collection route a collection can hold
+    ``raw > 0`` and ``dropped == 0`` yet contribute nothing because the pool
+    limit cut all its rows. A ``--lexical`` row may duplicate a vector row the
+    engine dropped by threshold; the engine reports no dropped ids, so that
+    overlap is not corrected and lexical rows never touch *raw* or *dropped*.
+    On the batched route *kept* is ``raw - dropped``, as it always was. On the
+    per-collection route ``kept == 0`` therefore means "contributed no rows to
+    the candidate pool" (so ``zero_hit_rate`` in search telemetry counts a
+    collection cut entirely by the pool limit as a zero hit), not "the
+    threshold dropped everything"; ``worst_offender`` requires both.
+    ``zero_hit_rate`` mixes the two meanings across its window until the
+    per-collection route is the only one.
+
     The struct is populated by ``search_cross_corpus`` when the caller passes
     ``diagnostics_out=[]``; the CLI reads ``worst_offender()`` to emit the
     silent-zero stderr note. The engine itself never emits stderr.
@@ -79,6 +101,21 @@ class SearchDiagnostics:
     # HTTP 400 on an embedding-space mismatch), name → error text. These are
     # excluded from ``per_collection`` so threshold telemetry stays clean.
     failed_collections: dict[str, str] = field(default_factory=dict)
+    #: name → rows contributed to the engine's candidate pool (nexus-079ly).
+    #: Last field so positional construction stays additive. Empty for a
+    #: hand-built struct; :meth:`kept_for` then falls back to ``raw - dropped``.
+    kept: dict[str, int] = field(default_factory=dict)
+
+    def kept_for(self, name: str) -> int:
+        """Rows *name* contributes to the engine's candidate pool.
+
+        The explicit ``kept`` figure when the search recorded one, else
+        ``raw - dropped`` for a struct built without it.
+        """
+        if name in self.kept:
+            return self.kept[name]
+        raw, dropped = self.per_collection.get(name, (0, 0))[:2]
+        return raw - dropped
 
     def collections_with_drops(self) -> int:
         return sum(
@@ -88,14 +125,16 @@ class SearchDiagnostics:
     def worst_offender(self) -> tuple[str, float | None, float] | None:
         """Return ``(name, threshold, top_distance)`` for the worst offender.
 
-        Worst offender = collection where every candidate was dropped, with
-        the highest ``top_distance`` among those. ``None`` when no collection
-        had every candidate filtered.
+        Worst offender = collection where every candidate was dropped and
+        which contributed no row to the candidate pool, with the highest
+        ``top_distance`` among those. ``None`` when no collection had every
+        candidate filtered.
         """
         candidates = [
             (name, threshold, top_dist)
             for name, (raw, dropped, threshold, top_dist) in self.per_collection.items()
-            if raw > 0 and dropped == raw and top_dist is not None
+            if raw > 0 and dropped == raw and self.kept_for(name) == 0
+            and top_dist is not None
         ]
         if not candidates:
             return None
@@ -549,6 +588,52 @@ def _threshold_for_collection(name: str, cfg: dict) -> float | None:
     return thresholds.get("default")
 
 
+#: Engine embedder families under which the Voyage-calibrated thresholds can
+#: apply to at least one collection: Voyage-only and dual (Voyage + bge).
+#: ``onnx-local`` (bge only) filters nothing.
+_DUAL_ENGINE_MODE = "dual"
+_THRESHOLD_ENGINE_MODES: frozenset[str] = frozenset({"voyage", _DUAL_ENGINE_MODE})
+
+
+def _engine_is_dual(t3: Any) -> bool:
+    """True when the engine behind *t3* reports the ``dual`` embedder family
+    (a Voyage family beside a bge one). The same ``embedding_mode()`` signal
+    :func:`_voyage_thresholds_active` reads (memoized on the client handle);
+    a handle that cannot report one is not dual."""
+    mode = getattr(t3, "embedding_mode", None)
+    return callable(mode) and mode() == _DUAL_ENGINE_MODE
+
+
+def _threshold_for_collection_model(
+    name: str, cfg: dict, *, dual: bool = False,
+) -> float | None:
+    """:func:`_threshold_for_collection`, withheld from a collection whose
+    own embedding model is a local one (bge, MiniLM).
+
+    RDR-210 Technical Design 12 (nexus-hf29s): thresholds are chosen per
+    collection by its model, not by the engine's mode. The Voyage value
+    admits every bge result (off-topic bge top-10 minimum distance 0.369
+    against 0.65, 210-research-17) and the measured bge threshold's F1 (0.47)
+    is too low to filter on, so a bge collection gets none on any engine, as
+    on a keyless engine today.
+
+    A name with NO model token (a legacy two-segment name) cannot say which
+    family holds its vectors. On a non-dual engine it keeps the prefix
+    threshold, as before. On a ``dual`` engine (*dual* true) a bge collection
+    may sit under that name, so it gets NO threshold: the conservative
+    reading, and what "dual" meant before per-family thresholds (nexus-ndr0t
+    S3). Only the absence of a token is covered: a four-segment name whose
+    token is unrecognised (neither a local model nor a known Voyage one)
+    still gets the prefix threshold on every engine, dual included.
+    """
+    token = _model_token(name)
+    if token in LOCAL_EMBEDDING_MODELS:
+        return None
+    if token is None and dual:
+        return None
+    return _threshold_for_collection(name, cfg)
+
+
 def _voyage_thresholds_active(t3: Any) -> bool:
     """True when distance thresholds should apply for this T3 handle.
 
@@ -577,7 +662,10 @@ def _voyage_thresholds_active(t3: Any) -> bool:
     # can no longer silently regress search quality (Gap 3), and the signal is
     # what actually embedded the corpus. Unknown (probe failed) → thresholds
     # off: never guess Voyage; a down service fails the search itself anyway.
-    return t3.embedding_mode() == "voyage"
+    # RDR-210 Technical Design 12 (nexus-hf29s): a "dual" engine serves a
+    # Voyage family beside the bge one, so thresholds are on for it too;
+    # _threshold_for_collection_model then keeps them off the bge family.
+    return t3.embedding_mode() in _THRESHOLD_ENGINE_MODES
 
 
 def _overfetch_multiplier(collection_name: str) -> int:
@@ -590,6 +678,13 @@ def _overfetch_multiplier(collection_name: str) -> int:
         if collection_name.startswith(prefix):
             return 4
     return 2
+
+
+def _model_token(name: str) -> str | None:
+    """The embedding-model token *name* carries, ``None`` for a name that has
+    none. The one name-parse site in this module (the RDR-204 parse census
+    counts them), shared by model grouping and the per-family thresholds."""
+    return embedding_model_for_collection_name(name)
 
 
 def _group_collections_by_embedding_model(collections: list[str]) -> list[list[str]]:
@@ -619,7 +714,7 @@ def _group_collections_by_embedding_model(collections: list[str]) -> list[list[s
     """
     groups: dict[str, list[str]] = {}
     for name in collections:
-        key = embedding_model_for_collection_name(name) or name
+        key = _model_token(name) or name
         groups.setdefault(key, []).append(name)
     return list(groups.values())
 
@@ -1145,7 +1240,19 @@ def search_cross_corpus(
     *top_distance* is the minimum (best-ranked) distance across ALL raw
     candidates for that collection (kept or dropped), not just the
     dropped subset — see ``SearchDiagnostics`` for the dropped-only
-    variant.
+    variant. *kept_count* is the number of rows the collection contributes
+    to the engine's candidate pool (nexus-079ly), counted before the topic
+    post-filter, the enrichment cap and the caller's page slice. On the
+    batched route that is ``raw_count`` minus the threshold-dropped rows; on
+    the per-collection route *raw_count* and the dropped count are the
+    engine's per-collection counts before the global cut (a ``--lexical`` row
+    may duplicate a dropped vector row: the engine reports no dropped ids, so
+    this is not corrected), and *kept_count* is what survived that cut and the
+    lexical union. The cut is the engine pool limit (at least 300 rows, 1000
+    with rerank), not ``--limit``. ``zero_hit_rate`` there means "contributed
+    no rows to the candidate pool", so a collection cut entirely by the pool
+    limit counts as a zero hit; it mixes route meanings across its window
+    until the per-collection route is the only one.
 
     *content_chars* (nexus-tao37) asks the per-collection route to cap each
     row's text at that many code points. Pass it only when every reader of
@@ -1229,6 +1336,7 @@ def search_cross_corpus(
     want_embeddings = cluster_by == "semantic" and taxonomy is None
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
+    diag_kept: dict[str, int] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
@@ -1285,15 +1393,20 @@ def search_cross_corpus(
             "--lexical."
         )
 
+    dual_engine = (
+        apply_thresholds and threshold_override is None and _engine_is_dual(t3)
+    )
+
     def _threshold_for(col: str) -> float | None:
         """The distance threshold applied to *col*: ``None`` when thresholds
         are off for this handle, the override when one was given, else the
-        configured per-corpus value."""
+        configured per-corpus value (none for a model-less name on a dual
+        engine, nexus-ndr0t S3)."""
         if not apply_thresholds:
             return None
         if threshold_override is not None:
             return threshold_override
-        return _threshold_for_collection(col, cfg)
+        return _threshold_for_collection_model(col, cfg, dual=dual_engine)
 
     def _to_result(r: dict, col: str) -> SearchResult:
         """One engine row as a :class:`SearchResult` attributed to *col*."""
@@ -1527,6 +1640,7 @@ def search_cross_corpus(
                 "error": None,
                 "results": results,
                 "raw_count": len(col_raw),
+                "kept": len(results),
                 "dropped": dropped,
                 "threshold": threshold,
                 "min_dropped_distance": min_dropped_distance,
@@ -1597,7 +1711,11 @@ def search_cross_corpus(
         ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
         the batched path runs it (same batches, same per-batch size). Its rows
         are unioned in here, threshold-exempt, with the vector copy winning a
-        tie; the diagnostics count each added row as raw.
+        tie; a lexical row counts toward ``kept`` only (nexus-079ly): ``raw``
+        and ``dropped`` stay the engine's per-collection counts. ``kept`` is
+        the rows the collection holds after the engine's pool-limit cut and
+        the lexical union (before the topic filter, the enrichment cap and the
+        page cut); the pool limit is at least 300 rows, not ``--limit``.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
             chunks = [
@@ -1719,6 +1837,7 @@ def search_cross_corpus(
                 "error": None,
                 "results": results,
                 "raw_count": raw_count,
+                "kept": len(results),
                 "dropped": dropped,
                 "threshold": _threshold_for(col),
                 "min_dropped_distance": min_dropped,
@@ -1763,11 +1882,8 @@ def search_cross_corpus(
                     # in here: lexical rows are threshold-exempt, so the row
                     # is kept, as the batched path keeps it.
                     part["results"].append(_to_result(r, col))
-                    part["raw_count"] += 1
-                    d = r["distance"]
-                    if part["min_raw_distance"] is None or d < part["min_raw_distance"]:
-                        part["min_raw_distance"] = d
             for col, part in live.items():
+                part["kept"] = len(part["results"])
                 part["lexical_ids"] = {
                     x.id for x in part["results"] if x.id in lexical_by_col[col]
                 }
@@ -1919,6 +2035,7 @@ def search_cross_corpus(
             part["raw_count"], part["dropped"], part["threshold"],
             part["min_dropped_distance"],
         )
+        diag_kept[col] = part["kept"]
         min_raw_per_collection[col] = part["min_raw_distance"]
         if rerank_meta_out is not None and part.get("rerank_meta"):
             rerank_meta_out[col] = part["rerank_meta"]
@@ -1991,6 +2108,7 @@ def search_cross_corpus(
     if diagnostics_out is not None:
         diagnostics_out.append(SearchDiagnostics(
             per_collection=diag_per_collection,
+            kept=diag_kept,
             total_dropped=total_dropped,
             total_raw=total_raw,
             failed_collections=failed_collections,
@@ -2009,9 +2127,9 @@ def search_cross_corpus(
         rows = [
             (
                 ts, query_hash, col,
-                raw_count, raw_count - dropped_count, min_raw_per_collection[col], thr,
+                raw_count, diag_kept[col], min_raw_per_collection[col], thr,
             )
-            for col, (raw_count, dropped_count, thr, _dropped_min)
+            for col, (raw_count, _dropped_count, thr, _dropped_min)
             in diag_per_collection.items()
         ]
         try:
@@ -2154,12 +2272,28 @@ def search_cross_corpus(
     return all_results
 
 
+#: Floor of the boost window (nexus-cbg2s): rows normalised and ranked together.
+_BOOST_WINDOW_FLOOR = 30
+
+
+def boost_window_size(page_size: int) -> int:
+    """Rows the client boosts are normalised over for a page of *page_size*:
+    ``max(30, 3 * page_size)`` (nexus-cbg2s).
+
+    The one definition both surfaces use (``nx search`` passes ``-n``, the
+    MCP ``search`` tool passes ``limit``), so a page ranks the same whichever
+    asks, and the one the file-diversity cap's ``window`` argument takes.
+    """
+    return max(_BOOST_WINDOW_FLOOR, 3 * max(1, page_size))
+
+
 def apply_ranking_boosts(
     results: list[SearchResult],
     *,
     hybrid: bool = False,
     tuning: TuningConfig | None = None,
     catalog: Any | None = None,
+    window: int | None = None,
 ) -> list[SearchResult]:
     """Apply the CLI's post-retrieval ranking boosts — hybrid scoring
     (RDR-frecency) then bibliographic quality boost (RDR-055 E2) — and
@@ -2191,6 +2325,22 @@ def apply_ranking_boosts(
     ``apply_hybrid_scoring``'s docstring). Domination control now lives at
     the render layer: see :func:`apply_file_diversity_cap` below.
 
+    *window* (nexus-cbg2s; pass :func:`boost_window_size`) makes the result
+    independent of how deep the pool is. The hybrid score min-max normalises
+    distance and frecency over the pool, so with ``window=None`` (the
+    historical behaviour, kept for callers that consume the whole pool) a
+    deeper fetch moved every score and could swap near ties on a page whose
+    nearest rows had not changed. With a window, the *window* nearest rows (by
+    raw distance on the calibrated scale, ties broken by collection then id:
+    :func:`nexus.scoring.order_by_calibrated_distance`) are normalised, scored
+    and sorted among themselves, exactly as a pool of that size would be; the
+    remaining rows follow in that same distance order, scored on the WINDOW's
+    scale (clamped into [0, 1]) so their ``hybrid_score`` is comparable but
+    never moves a window row. Any pool that holds each collection's nearest
+    *window* rows therefore yields the same first *window* rows and scores,
+    and a deeper pool only extends the tail. A pool of *window* rows or fewer
+    is the whole window: the same scores as ``window=None``.
+
     Does NOT apply, by design, to result rows that never carry the
     metadata these boosts read:
 
@@ -2208,18 +2358,37 @@ def apply_ranking_boosts(
     """
     if not results:
         return results
-    from nexus.scoring import apply_hybrid_scoring, apply_quality_boost  # noqa: PLC0415 — deferred to avoid a module-load-time scoring<->search_engine cycle
+    from nexus.scoring import (  # noqa: PLC0415 — deferred to avoid a module-load-time scoring<->search_engine cycle
+        apply_hybrid_scoring,
+        apply_quality_boost,
+        order_by_calibrated_distance,
+    )
 
     _tuning = tuning or TuningConfig()
-    results = apply_hybrid_scoring(
-        results,
-        hybrid=hybrid,
-        vector_weight=_tuning.vector_weight,
-        frecency_weight=_tuning.frecency_weight,
-        file_size_threshold=_tuning.file_size_threshold,
-        catalog=catalog,
-    )
-    return apply_quality_boost(results)
+    scoring_kwargs: dict[str, Any] = {
+        "hybrid": hybrid,
+        "vector_weight": _tuning.vector_weight,
+        "frecency_weight": _tuning.frecency_weight,
+        "file_size_threshold": _tuning.file_size_threshold,
+        "catalog": catalog,
+    }
+    if window is None:
+        return apply_quality_boost(apply_hybrid_scoring(results, **scoring_kwargs))
+
+    # Calibrated raw distance, deliberately (see order_by_calibrated_distance):
+    # the one key a deeper fetch cannot change for a row it shares with a
+    # shallower one, and the order today's page is cut in when the boosts do
+    # not reorder it. The collection/id tiebreak makes the cut, and every score
+    # tie below, a function of the rows and not of the order they arrived in.
+    by_distance = order_by_calibrated_distance(results)
+    head, tail = by_distance[:window], by_distance[window:]
+    head = apply_quality_boost(apply_hybrid_scoring(head, **scoring_kwargs))
+    if tail:
+        # Scored in place on the window's scale; the list order stays raw
+        # distance (apply_hybrid_scoring's own sort is not wanted here: a
+        # deeper pool would let a later row's frecency reorder the tail).
+        apply_quality_boost(apply_hybrid_scoring(tail, window=head, **scoring_kwargs))
+    return head + tail
 
 
 # ── File diversity cap (render layer) — nexus-0bmhd, 2026-09-01 ────────────
@@ -2255,6 +2424,7 @@ def apply_file_diversity_cap(
     results: list[SearchResult],
     *,
     max_per_file: int = _DEFAULT_MAX_CHUNKS_PER_FILE,
+    window: int | None = None,
 ) -> list[SearchResult]:
     """Reorder *results* so at most *max_per_file* chunks from the same
     file appear before chunks from other files — a non-destructive stable
@@ -2279,12 +2449,24 @@ def apply_file_diversity_cap(
     after the slice is too late (the domination already consumed the
     slots).
 
+    *window* (nexus-cbg2s) caps ``results[:window]`` and ``results[window:]``
+    separately and joins them. Pass the boost window
+    (:func:`boost_window_size`) when *results* came from
+    :func:`apply_ranking_boosts` with that window: the cap then never pulls
+    a row from beyond the window ahead of an overflow row inside it, which
+    is what keeps a page independent of pool depth.
+
     A no-op (returns *results* unchanged, not a copy) for an empty list
     or ``max_per_file <= 0``. Otherwise always returns a NEW list; the
     input list and its elements are never mutated.
     """
     if not results or max_per_file <= 0:
         return results
+    if window is not None and 0 < window < len(results):
+        return (
+            apply_file_diversity_cap(results[:window], max_per_file=max_per_file)
+            + apply_file_diversity_cap(results[window:], max_per_file=max_per_file)
+        )
     kept: list[SearchResult] = []
     overflow: list[SearchResult] = []
     counts: dict[str, int] = {}

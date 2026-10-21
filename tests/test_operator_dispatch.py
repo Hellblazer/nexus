@@ -269,6 +269,7 @@ class TestOptInToolAccess:
             "loads ZERO MCP servers (no --mcp-config + strict = none)"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_allowed_tools_emits_flag(self) -> None:
         """Passing allowed_tools must emit --allowedTools with the
@@ -293,6 +294,7 @@ class TestOptInToolAccess:
         val = argv[argv.index("--allowedTools") + 1]
         assert val == "Read,Grep,mcp__nexus"
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_mcp_servers_emits_inline_config(self) -> None:
         """Passing mcp_servers must emit --mcp-config with an inline
@@ -357,6 +359,7 @@ class TestOptInToolAccess:
             "stateless operator injected an MCP server — must stay tool-free"
         )
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_tool_enabled_dispatch_still_parses_json(self) -> None:
         """Opt-in tool flags must not change the output contract — the
@@ -445,6 +448,85 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_claude_code_session_id_beats_the_flat_file(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: the flat file is whichever Claude session wrote it
+        last. A parent that carries CLAUDE_CODE_SESSION_ID (its real session)
+        injects that into the child, not the file's value, so concurrent
+        Claude windows do not hand each other's id to their children."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-real-session")
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "parent-real-session"
+
+    @pytest.mark.asyncio
+    async def test_nx_session_id_beats_claude_code_session_id_and_the_file(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: NX_SESSION_ID is tier 2 and is never shadowed. With
+        all three sources present the child gets NX_SESSION_ID; swapping it
+        with CLAUDE_CODE_SESSION_ID (or the file) turns this red."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_SESSION_ID", "forced-by-nx")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-real-session")
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "forced-by-nx"
+
+    @pytest.mark.asyncio
+    async def test_file_is_still_injected_when_no_session_env(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The raw file read is load-bearing (nexus-d8yul): with neither env
+        var, the file's id is still injected, so the child's SessionStart
+        hook sees a nested session and leaves ``current_session`` alone."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="file-uuid"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "file-uuid"
+
+    @pytest.mark.asyncio
     async def test_omits_nx_session_id_when_no_parent_session(self) -> None:
         """When there's no parent session (e.g. CLI usage outside Claude Code),
         claude_dispatch must not export an empty/None NX_SESSION_ID — the
@@ -506,6 +588,7 @@ class TestSubprocessContract:
         assert "NX_T1_SESSION_ID" not in env
         assert "NX_T1_SESSION" not in env
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_tool_granted_dispatch_mints_own_t1_session(self) -> None:
         """A dispatch that DOES grant tool access (allowed_tools set) mints
@@ -5160,6 +5243,7 @@ class TestIsolatedHermeticChild:
         ask, explicitly. That is now the exceptional case."""
         assert "--setting-sources" not in await self._argv_for(isolated=False)
 
+    @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_isolation_does_not_break_the_t1_mint(self) -> None:
         """The coupling a sibling session asked us to confirm rather than

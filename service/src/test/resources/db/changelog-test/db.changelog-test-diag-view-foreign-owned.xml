@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: Taxonomy011ForeignOwnedDiagViewTest's fixture, in Liquibase XML instead of Java SQL
+    strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). Run after the full product
+    migration, as the cluster superuser, through PgContainerHelper#runSuperuserTestChangelog on an empty
+    database of its own (PgContainerHelper#startEmptyDatabase with ${adminRole} declared exclusive, so the
+    role is absent when the database is handed out and dropped when it is released).
+
+    1. Production-shaped ownership (same technique as Catalog013RlsReplayTest): a NOSUPERUSER NOBYPASSRLS
+       ${adminRole} owns every nexus/t1 table and sequence. The loop reads pg_tables/pg_sequences only, so
+       it never touches the diag view, which stays superuser-owned: the "table owner != view owner" shape
+       the bug depends on.
+    2. Test-only relaxation (same technique as Taxonomy010BackfillDirectIntegrationTest): drop the
+       migrated diag view, drop topic_assignments_chunk_fk (added by taxonomy-012, re-added by vectors-030; its doc_id leg targets bytea
+       nexus.chunks.chash, so the TEXT revert below would fail on the type mismatch first; the throwaway
+       container never re-adds it), revert topic_assignments.doc_id to TEXT so taxonomy-011-1's own
+       TEXT-to-bytea SQL replays exactly as authored, and recreate the diag view as a superuser-owned stub
+       (GrantsSvcForeignOwnedRelationTest's simplification: the ownership check under test depends only on
+       the view existing and being foreign-owned, not on its body).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="diag-view-foreign-owned-1-owner" author="nexus-cbo4a">
+        <sql splitStatements="false" stripComments="false">
+CREATE ROLE ${adminRole} LOGIN PASSWORD '${adminPass}' NOSUPERUSER NOBYPASSRLS;
+GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO ${adminRole};
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('nexus', 't1') LOOP
+        EXECUTE format('ALTER TABLE %I.%I OWNER TO ${adminRole}', r.schemaname, r.tablename);
+    END LOOP;
+    FOR r IN SELECT schemaname, sequencename FROM pg_sequences WHERE schemaname IN ('nexus', 't1') LOOP
+        EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO ${adminRole}', r.schemaname, r.sequencename);
+    END LOOP;
+END
+$$;
+        </sql>
+    </changeSet>
+
+    <changeSet id="diag-view-foreign-owned-2-text-doc-id" author="nexus-cbo4a">
+        <sql>
+DROP VIEW IF EXISTS nexus.diag_chash_conformance;
+ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk;
+ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex');
+CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n;
+        </sql>
+    </changeSet>
+</databaseChangeLog>

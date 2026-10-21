@@ -152,7 +152,7 @@ rows through the normal tools, never to edit the changeset. Run the same join fo
 a centroid that has a registry row and disagrees fails the walk the same way. ABORT if not 0.
 
 **Probe C2 (centroids with no registry row).** These are not copied. They stay in `taxonomy_centroids_retired_225`
-and taxonomy rebuilds them; the walk does not log them (step 6 counts them and subtracts).
+(until `vectors-036-1` drops it) and taxonomy rebuilds them; the walk does not log them (step 6 counts them and subtracts).
 
 ```sql
 SELECT count(*) AS orphan_centroids FROM nexus.taxonomy_centroids ct
@@ -465,6 +465,7 @@ SELECT (SELECT count(*) FROM public.databasechangelog WHERE id = 'vectors-030-1'
 | --- | --- | --- | --- |
 | 0 | `r` | NULL | Not committed. The walk rolled back, or never started. |
 | 1 | `p` | `chunks_retired_225` | Committed. |
+| 1 | `p` | NULL | Committed, and `vectors-036-1` has since dropped the retired tables. |
 | anything else | | | Stop. Do not touch anything. Ask Sam and conexus. |
 
 Read the engine's own error text beside it: `schema_migration_failed error="..."` carries Liquibase's message, which
@@ -483,6 +484,8 @@ remedy is fix-forward.
 | `vectors-031-2` guard assertions | `vectors-031-2: policy chunks_gate_probe_owner_read must name exactly the migrating role ...` or `vectors-031-2: role(s) ... have the privileges of the migrating role ...` | The copy of `vectors-029`'s post-condition. The changeset chooses the invoker branch whenever the policy does not name the migrating role or a login role subject to RLS inherits that role, so these fire only when the state moves during the walk. Remedy: put the policy or the membership right (the second message names the roles), restart. Do not weaken the check. |
 | After the complete line | `event=chunks_isolation_check_failed` (a policy applies to the service role) or `event=chunks_isolation_structure_gaps` (a parent, model partition or leaf does not mirror its parent) | The engine refuses to serve and exits 1; under `--restart unless-stopped` the container loops until someone repairs it (§ 5.5 sets `--restart=no` for the first boot). **Drift on a model partition or leaf no longer loops here.** The migration step re-mirrors both parents onto their trees at every boot as the schema owner and logs `event=partition_access_drift_repaired count=N relations=[...]` at WARN when it had work to do (a healthy boot logs `event=partition_access_checked` at INFO and changes nothing). Read that WARN: it names the relations that drifted, and a repaired relation is a finding to explain (who created or edited it), not noise. The manual remedy remains only for drift the copy cannot fix, which is logged as `event=partition_access_drift_unrepaired` (ERROR, naming the relations and the problems) just before the refusal: a wrong policy or flag on the PARENT, or a migrating role that does not own the tables or the function. **Remedy, as the table owner (`nexus_admin`; the engine's runtime role cannot do this):** put any wrong policy on the PARENT right first (the function copies from it), then `SELECT nexus.partition_sync_access('nexus.chunks'::regclass);` and `SELECT nexus.partition_sync_access('nexus.taxonomy_centroids'::regclass);`. For a policy violation (`chunks_gate_probe_owner_read` applying to the service role): `DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks` and then `partition_sync_access` for both parents (dropping it on the parent alone leaves its copy on every leaf, and the next boot refuses on each), or `REVOKE` the role membership. Then `docker start conexus-engine`. |
 | After the complete line | `root_token_seed_*` | Token seeding failed; unrelated to the layout. Read the line. |
+| `vectors-036-1` (the later drop, nexus-3wh8d.22) | `canceling statement due to lock timeout` after 120 s | A session holds a lock on `chunks_retired_225` or `taxonomy_centroids_retired_225` (an idle transaction on the recovery source, a vacuum). Nothing was dropped. Find the holder with `SELECT pid, usename, state, query FROM pg_stat_activity WHERE pid IN (SELECT pid FROM pg_locks WHERE relation IN ('nexus.chunks_retired_225'::regclass, 'nexus.taxonomy_centroids_retired_225'::regclass))`, end that session, restart the engine. |
+| `vectors-036-1` | `cannot drop table nexus.chunks_retired_225 because other objects depend on it` | Something still reads a retired table, most likely `diag_chash_conformance` left bound to it by the walk (Probe O, a view the migrating role could not replace). Nothing was dropped. The view's owner runs `DROP VIEW nexus.diag_chash_conformance` (the next boot's `taxonomy-011-8` recreates it over `chunks`), or drops the other dependent the message names; then restart. Do not add CASCADE. |
 
 Rehearsal assertion (nexus-3wh8d.27): the engine on the fork, migrated by the production-shaped non-superuser role
 (`nexus_admin`), boots through `ChunksIsolationCheck` and logs `event=chunks_isolation_check_ok`. A rehearsal that
@@ -648,7 +651,7 @@ names. A local walk that fails leaves the old layout (one transaction) and the i
 is installed; the client pin converges on whatever the installed client names. Walking installs back to an earlier
 engine needs a new client that moves the pin backward (`docs/contributing.md` § Break-glass, engine-deploy revert), and
 a committed local walk is not undone by that: the previous engine fails on the new layout exactly as in § 6.3, and
-the retired tables hold the only copy of the old layout.
+the retired tables hold the only copy of the old layout until `vectors-036-1` drops them.
 
 - The engine refuses to start when free disk is below 2.2 x the vector tables (`LocalDiskPreflight`, local installs
   that set `NX_PG_DATA_DIR`), naming the shortfall. That is the local abort criterion; it is inferred, not measured
@@ -661,6 +664,11 @@ the retired tables hold the only copy of the old layout.
   intermediate release walks `vectors-030-1` and the later drop changeset in one boot, and the retired tables are
   gone before anyone could use them. State this in the P3.3 changeset comment and in the CHANGELOG of the release that
   carries the drop; the drop changeset needs its own `DATA EFFECT:` line and a fork walk.
+  **The drop ships as `vectors-036-1`** (nexus-3wh8d.22, `vectors-036-drop-retired-225.xml`). It logs
+  `vectors-036-1: dropping nexus.<table> (N row(s))` for each table, drops both without CASCADE (a view that still
+  reads a retired table fails the drop and leaves both in place), and skips a table that is absent. It waits at most 120 s for its locks (failure rows in § 6.1). Its rollback
+  recreates both tables empty. Cloud: deploy it no earlier than 14 days after the 2026-10-07 walk deploy, in an
+  engine tag after 0.1.161.
 
 ## 9. Placeholders and open questions
 
@@ -689,7 +697,7 @@ measurements; they are marked as such.
 Operator notes from the rehearsal: conexus's `walk.sh` exits 1 on this walk because its relfilenode compare flags the
 rebuilt `chunks`; that is expected for vectors-030-1 and not a failure. Judge the walk by § 4 and § 6.1, not by that exit
 code. `nexus_diag` reading nothing from `catalog_collections`, `taxonomy_centroids`, `chunk_orphaned_at`,
-`service_tokens` or `chunks_retired_225` is the RDR-182 content boundary (`grants-nexus-diag.xml`), not a lost grant.
+`service_tokens` or `chunks_retired_225` (until `vectors-036-1` drops it) is the RDR-182 content boundary (`grants-nexus-diag.xml`), not a lost grant.
 
 ### 9.2 Questions for conexus
 

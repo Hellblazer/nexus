@@ -937,6 +937,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
         assert captured["model"] == "sonnet"
 
 
+@pytest.mark.t2_tenant
 class TestP2COptInPlannerBehavior:
     """RDR-196 .p2c (nexus-nyry9.16): the inline planner's own
     ``claude_dispatch`` call, gated on the SAME env var (planner tier

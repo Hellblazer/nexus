@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """A fenced HOME must not leak into the venv uv builds for the checkout.
 
-nexus-t0pke. ``fence_home`` recreates ``~/.local`` as a real directory (it
-shadows ``.local/state``) whose entries link through to the real ones, so uv
-finds its managed Pythons at ``<gate_home>/.local/share/uv/python``. In a
+nexus-t0pke. uv derives its managed-Python root from HOME, so under the fenced
+home it looks at ``<gate_home>/.local/share/uv/python`` (when the fence mirrored
+``.local``, through a symlink; since nexus-ld3aa the fenced home has none, and
+the pin below is what keeps uv off it). In a
 checkout with no ``.venv`` (a fresh worktree), the gate's first ``uv run``
 built ``.venv`` on that path: ``bin/python`` and ``pyvenv.cfg``'s ``home =``
 pointed into the gate's scratch dir. The gate deleted the scratch dir on exit,
@@ -48,7 +49,7 @@ def _gate_sequence(real: Path, gate: Path, *, pin: bool, extra: dict[str, str] |
     env.update(extra or {})
     script = (
         f'source "{_FENCE_LIB}"; REAL_HOME="{real}"; '
-        f'fence_home "$REAL_HOME" "{gate}" ".config/nexus"; '
+        f'fence_home "$REAL_HOME" "{gate}"; '
         f'export HOME="{gate}"; fence_home_env "{gate}"; '
         + ('fence_uv_env "$REAL_HOME"; ' if pin else "")
         + 'printf "UV_CACHE_DIR=%s\\n" "${UV_CACHE_DIR:-}"; '

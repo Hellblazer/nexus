@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import terminal_signals_default
+
 SCRIPT = Path(__file__).parent.parent / "scripts" / "watched_pytest.py"
 spec = importlib.util.spec_from_file_location("watched_pytest", SCRIPT)
 assert spec is not None and spec.loader is not None
@@ -73,11 +75,16 @@ def test_a_failing_run_keeps_pytests_exit_code(tmp_path: Path) -> None:
 def test_a_hang_is_killed_with_its_tree_and_the_test_is_named(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     t0 = time.monotonic()
-    code, status, out = _watch(tmp_path, _HANG, "--stall", "3", "--faulthandler-timeout", "1",
+    # The stall clock starts with the watcher, so the nested interpreter's silent start
+    # (imports, plugins, collection) counts against it. 3 s was too tight on a loaded shard:
+    # the kill landed before pytest printed anything, so no test was named (nexus-npbum,
+    # CI 39341824865 shard 6). 10 s covers that start and still fires long before the
+    # test's own 120 s sleep.
+    code, status, out = _watch(tmp_path, _HANG, "--stall", "10", "--faulthandler-timeout", "1",
                                env={"GRANDCHILD_PID_FILE": str(pid_file)})
-    assert time.monotonic() - t0 < 30, "the watchdog must fire in seconds, not wait for the test"
+    assert time.monotonic() - t0 < 60, "the watchdog must fire in seconds, not wait for the test"
     assert (code, status["state"]) == (wp.EXIT_STALLED, "stalled"), out
-    assert status["current_test"] == "test_case.py::test_hangs"
+    assert status["current_test"] == "test_case.py::test_hangs", out
     assert "test_case.py::test_hangs" in out
     log = (tmp_path / "run.log").read_text()
     assert "Timeout (0:00:01)!" in log, "faulthandler must dump the stacks before the kill"
@@ -113,16 +120,54 @@ def test_quiet_output_is_refused(tmp_path: Path) -> None:
         wp.build_command(["pytest", "-q"], 10)
 
 
+@pytest.mark.parametrize("command", [
+    ["uv", "run", "pytest", "-n", "8"],
+    ["/venv/bin/pytest", "-n", "auto", "-p", "no:cacheprovider", "-o", "addopts="],
+    ["uv", "run", "pytest", "--deselect", "tests/test_x.py::test_y", "--durations", "10", "--dist", "loadfile"],
+])
+def test_a_command_with_no_selection_gets_the_full_suite_hint(command: list[str]) -> None:
+    # nexus-clmlb: option VALUES (8, addopts=, no:cacheprovider, a --deselect node id, 10, loadfile)
+    # are not a selection.
+    assert wp.selection_hint(command) == wp.SELECTION_HINT
+
+
+@pytest.mark.parametrize("command", [
+    ["uv", "run", "pytest", "tests/test_watched_pytest.py", "-n", "8"],
+    ["uv", "run", "pytest", "-n", "8", "tests/db/test_x.py::test_y"],
+    ["uv", "run", "pytest", "-k", "fan_in"],
+    ["uv", "run", "pytest", "-kfan_in"],
+    ["uv", "run", "pytest", "-m", "lint", "-o", "addopts=", "-n", "8"],
+    ["uv", "run", "pytest", "--lf", "-n", "8"],
+    ["uv", "run", "pytest", "--sw"],
+    ["uv", "run", "python", "-m", "pytest", "tests/"],
+    ["python", "scripts/something.py"],
+])
+def test_a_command_that_selects_tests_gets_no_hint(command: list[str]) -> None:
+    assert wp.selection_hint(command) is None
+
+
+def test_the_hint_is_printed_and_the_run_still_goes_ahead(tmp_path: Path) -> None:
+    out = io.StringIO()
+    status = tmp_path / "s.json"
+    args = wp.parse_args(["--log", str(tmp_path / "l"), "--status", str(status), "--no-notify",
+                          "--", sys.executable, "-m", "pytest", "--version"])
+    code = wp.run(args, out)
+    assert f"watched_pytest: {wp.SELECTION_HINT}" in out.getvalue()
+    # The run went ahead: pytest itself ran and wrote its version line, and the status says so.
+    assert code == 0, out.getvalue()
+    assert "pytest" in (tmp_path / "l").read_text()
+    assert json.loads(status.read_text())["state"] == "passed"
+
+
 def test_the_watcher_ignores_console_ctrl_only_on_windows() -> None:
     """On Windows the watcher must outlive the break that killed the run, or nobody
     reports it. On POSIX it must not ignore SIGINT: the child would inherit that."""
-    before = signal.getsignal(signal.SIGINT)
-    try:
+    # A run started with '&' from a non-interactive shell inherits SIGINT=SIG_IGN;
+    # start from the default so the assertion checks the function, not the inheritance.
+    with terminal_signals_default():
         wp._ignore_console_ctrl()
         ignored = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
-        assert ignored is (sys.platform == "win32")
-    finally:
-        signal.signal(signal.SIGINT, before)
+    assert ignored is (sys.platform == "win32")
 
 
 def test_the_hung_test_is_tracked_from_v_lines() -> None:

@@ -90,22 +90,84 @@ class PlpgsqlCheckGateTest {
 
     static PostgreSQLContainer<?> pg;
     static List<PlpgsqlCheck.Finding> findings;
+    static java.util.Set<String> scanned;
     static long buildMillis;
+
+    /** What the plpgsql_check image adds to the product's Postgres image. */
+    static final String PLPGSQL_CHECK_INSTALL =
+        "apt-get update && apt-get install -y --no-install-recommends postgresql-17-plpgsql-check"
+            + " && rm -rf /var/lib/apt/lists/*";
+
+    static final String PLPGSQL_CHECK_REPO = "nexus-test/pg17-plpgsql-check";
+
+    /** The ISO week the image is built for (UTC), e.g. {@code 2026-W43}. */
+    static String isoWeek(java.time.LocalDate day) {
+        return String.format("%d-W%02d", day.get(java.time.temporal.IsoFields.WEEK_BASED_YEAR),
+            day.get(java.time.temporal.IsoFields.WEEK_OF_WEEK_BASED_YEAR));
+    }
+
+    /**
+     * The image's tag: the week plus its recipe's hash. The image is kept after the run (Testcontainers
+     * deletes a built image at exit by default), so the daemon's build cache answers the rest of the week's
+     * Service CI jobs instead of repeating the apt download and the layer write on each (nexus-aca0q.2: about
+     * 40 MB of container writes per job on chas). The cache keys on the base image's ID and the instructions,
+     * not the tag, so the week also goes INTO the recipe (a LABEL before the RUN): a new week misses the cache
+     * and apt serves a current plpgsql_check. The pool's weekly prune never removes a tagged image, so the
+     * build removes this repo's older tags itself ({@link #removeOlderTags}).
+     */
+    static String plpgsqlCheckImageName(String week) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest((PgContainerHelper.IMAGE + "\n" + week + "\n" + PLPGSQL_CHECK_INSTALL).getBytes(StandardCharsets.UTF_8));
+            return PLPGSQL_CHECK_REPO + ":" + week + "-" + java.util.HexFormat.of().formatHex(digest).substring(0, 12);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Remove this repo's tags other than {@code keep}. Best effort: a tag in use by a running job's container
+     *  is refused by the daemon and stays; nothing here can fail the gate. */
+    static void removeOlderTags(String keep) {
+        try {
+            var docker = org.testcontainers.DockerClientFactory.instance().client();
+            for (var img : docker.listImagesCmd().withReferenceFilter(PLPGSQL_CHECK_REPO).exec()) {
+                for (String tag : img.getRepoTags() == null ? new String[0] : img.getRepoTags()) {
+                    if (tag.startsWith(PLPGSQL_CHECK_REPO + ":") && !tag.equals(keep)) {
+                        try {
+                            docker.removeImageCmd(tag).exec();
+                        } catch (RuntimeException e) {
+                            System.out.println("PLPGSQL_CHECK kept older image " + tag + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            System.out.println("PLPGSQL_CHECK could not list older images: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void the_image_tag_carries_the_iso_week_and_changes_with_it() {
+        assertThat(isoWeek(java.time.LocalDate.of(2026, 10, 20))).isEqualTo("2026-W43");
+        assertThat(isoWeek(java.time.LocalDate.of(2027, 1, 1))).isEqualTo("2026-W53");
+        assertThat(plpgsqlCheckImageName("2026-W43")).startsWith(PLPGSQL_CHECK_REPO + ":2026-W43-")
+            .isNotEqualTo(plpgsqlCheckImageName("2026-W44"));
+    }
 
     @BeforeAll
     static void walkAndCheck() throws Exception {
         long t0 = System.nanoTime();
-        var image = new ImageFromDockerfile()
+        String week = isoWeek(java.time.LocalDate.now(java.time.ZoneOffset.UTC));
+        var image = new ImageFromDockerfile(plpgsqlCheckImageName(week), false)
             .withDockerfileFromBuilder(b -> b
                 .from(PgContainerHelper.IMAGE)
-                .run("apt-get update && apt-get install -y --no-install-recommends postgresql-17-plpgsql-check"
-                    + " && rm -rf /var/lib/apt/lists/*")
+                .label("nexus.plpgsql-check.week", week)
+                .run(PLPGSQL_CHECK_INSTALL)
                 .build());
         String imageName = image.get();
+        removeOlderTags(imageName);
         buildMillis = (System.nanoTime() - t0) / 1_000_000;
-        pg = new PostgreSQLContainer<>(DockerImageName.parse(imageName).asCompatibleSubstituteFor("postgres"))
-            .withDatabaseName("postgres").withUsername("postgres").withPassword("postgres")
-            .withUrlParam("sslmode", "disable");
+        pg = PgContainerHelper.newContainer(DockerImageName.parse(imageName));
         pg.start();
         Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
         var cfg = new HikariConfig();
@@ -118,8 +180,9 @@ class PlpgsqlCheckGateTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.runSuperuserDdl(su, "CREATE EXTENSION plpgsql_check");
+            PgContainerHelper.createPlpgsqlCheckExtension(su);
             findings = PlpgsqlCheck.findFindings(su, List.of("nexus"));
+            scanned = PlpgsqlCheck.scannedRoutines(su, List.of("nexus"));
         }
     }
 
@@ -173,6 +236,36 @@ class PlpgsqlCheckGateTest {
             assertThat(used[i]).as("allow-list entry matched nothing, so it is stale: %s", ALLOWED_IN_VECTORS_030.get(i)).isTrue();
         }
     }
+
+    /**
+     * RDR-222 Amendment A1 (nexus-1579m): {@code nexus.gc_expire_quarantine_bounded} is defined by vectors-035, not
+     * vectors-030, so the all-levels test above does not cover it and the test below checks it at {@code error}
+     * only. It is new code with no legacy lines to carry, so it is held to the stricter standard here: no finding
+     * at any level. It is not vacuous: its first run reported {@code v_rows bigint := 0} (an int literal into a
+     * bigint, a "target type is different type than source type" finding) in the body, which the body now avoids.
+     */
+    @Test
+    void gcExpireQuarantineBounded_hasNoFindingAtAnyLevel() throws Exception {
+        // Non-vacuity: "no finding" says nothing about a function the scan never reached (a rename, a changed
+        // selection). The control is that the function is in the scanned set; it is red with the name misspelt.
+        assertThat(scanned).as("the scan examined the function (positive control)").contains("nexus." + GC_EXPIRE_BOUNDED);
+        var mine = findings.stream().filter(f -> f.function().equals(GC_EXPIRE_BOUNDED))
+            .map(PlpgsqlCheck.Finding::describe).toList();
+        assertThat(mine).as("plpgsql_check findings in nexus.gc_expire_quarantine_bounded (all_warnings on)").isEmpty();
+    }
+
+    @Test
+    void theScannedSetCoversEveryFindingTheAnalyserReported() {
+        // The scanned-set query is a typed copy of the findings query's selection; a finding for a routine it
+        // misses means the copy has drifted and its positive controls mean less than they say. One direction
+        // only: it catches the copy omitting a routine that has findings, not the SQL file narrowing its
+        // selection or the copy omitting a clean routine, so a positive control proves the function exists
+        // under the copy's selection, which matches plpgsql-check-findings.sql as of nexus-1579m.
+        var withFindings = findings.stream().map(f -> f.schema() + "." + f.function()).collect(Collectors.toCollection(TreeSet::new));
+        assertThat(scanned).as("scanned set").isNotEmpty().containsAll(withFindings);
+    }
+
+    static final String GC_EXPIRE_BOUNDED = "gc_expire_quarantine_bounded";
 
     @Test
     void everyOtherLivePlpgsqlRoutineInNexus_hasNoFindingAtLevelError() throws Exception {

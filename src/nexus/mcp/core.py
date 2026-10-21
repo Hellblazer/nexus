@@ -69,8 +69,10 @@ from nexus.mcp_infra import (
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
     invalidate_collections_cache as _invalidate_collections_cache,
+    list_collections_or_not_ready,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
+    ServiceNotReadyError as _ServiceNotReadyError,
     flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
     search_taxonomy as _search_taxonomy,
     search_telemetry_sink as _search_telemetry_sink,
@@ -170,8 +172,16 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     suffix ``HttpScratchStore`` threads into the exception text, rather than
     stating one inference as observed fact for every case.
     """
-    _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
+
+    # nexus-5rs3i: a service that is not answering is a state, not a fault in this tool, so it
+    # logs one warning without a traceback. The text already says it is not an empty store and
+    # points to `nx doctor`; the generic "may be unreachable" hint below would repeat it.
+    if isinstance(e, _ServiceNotReadyError):
+        _log.warning(f"mcp_{tool}_service_not_ready", error=text)
+        return f"Error: {text}"
+
+    _log.error(f"mcp_{tool}_failed", error=text, exc_info=True)
 
     from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
         HEAL_ADOPTED_SUFFIX,
@@ -695,13 +705,16 @@ def _raise_t1_unavailable_this_process() -> None:
     raise T1UnavailableThisProcessError(
         "T1 unavailable this process: no resolvable session id for this "
         "MCP server instance (neither NX_SESSION_ID nor "
-        "CLAUDE_CODE_SESSION_ID resolved one). This affects T1 scratch "
+        "CLAUDE_CODE_SESSION_ID resolved one, and the machine-wide "
+        "current_session file is deliberately skipped for a server Claude "
+        "Code did not start). This affects T1 scratch "
         "only — every other nexus tool (search, memory, store, catalog) "
         "is unaffected. A sub-agent that inherited a LIVE minted token "
         "from its parent is unaffected too (checked before this hook "
-        "would ever be consulted). Remedy: reconnect the conexus "
-        "MCP/extension from a Claude Code session that stamps a "
-        "resolvable session id, or run `nx doctor --check-t1`."
+        "would ever be consulted). Remedy: set NX_SESSION_ID in this "
+        "server's environment (the env block of its entry in the host's "
+        "MCP configuration) to name the scratch scope, then restart the "
+        "server; or run `nx doctor --check-t1`."
     )
 
 
@@ -1457,10 +1470,9 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # a failure to clear just leaves an orphaned lease that self-heals
     # once its own TTL genuinely elapses, same as today.
     #
-    # nexus-r0d37 fix-round finding 1: NOT `clear_t1_session_lease`'s
-    # unconditional unlink -- that function's own contract requires
-    # PERMANENT sole ownership (genuine process teardown), which a
-    # handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
+    # nexus-r0d37 fix-round finding 1: NOT an unconditional unlink --
+    # that needs PERMANENT sole ownership (genuine process teardown),
+    # which a handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
     # above and the delete running, a live sibling MCP process (another
     # window/host resolved to the SAME `old_session_id`) could
     # independently win `_lock_guarded_mint_or_borrow`'s flock and
@@ -2262,44 +2274,13 @@ def _t1_session_shutdown() -> None:
     # best-effort second chance (T2 puts upsert, so running both is safe).
     _flush_flagged_t1_entries(session_id)
 
-    # nexus-k9sec: revoke and clear only what is still OURS. The revoke is by
-    # (tenant, session_id), so it kills whichever token the session holds. If
-    # the published lease names a different token than this process's own, a
-    # successor owner (a borrower that recovered while this owner looked dead,
-    # or a same-id process that started in the window) has taken the session;
-    # revoking would strand it, with the lease it published wiped besides.
-    try:
-        import nexus.config as _nexus_config  # noqa: PLC0415 — module attribute, not a by-value import (nexus-78blw ratchet)
-        from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-
-        published = read_t1_session_lease(session_id, _nexus_config.nexus_config_dir())
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; an unreadable lease means "not displaced", the pre-k9sec behaviour
-        published = None
-        _log.warning("t1_session_lease_read_failed", session_id=session_id, error=str(_exc))
     minted_here = _OWNED_T1_MINTED.pop(session_id, None)
     if not minted_here:
         # Ownership recorded without a mint record (a test's, or a path that
         # predates this bookkeeping): fall back to the process env.
         env_token = _os.environ.get("NX_T1_SESSION", "").strip()
         minted_here = {env_token} if env_token else set()
-    if published and minted_here and published not in minted_here:
-        _log.warning(
-            "t1_session_teardown_displaced", session_id=session_id,
-            msg="another process owns this session's token now; leaving its "
-            "lease and token alone",
-        )
-        return
 
-    # nexus-c8yvj: remove the published lease FIRST so a stale lease is
-    # never read by a later, unrelated process once this session has
-    # genuinely ended (mirrors the existing t1_addr.<session_id>
-    # cleanup-before-token-close ordering used elsewhere in this module).
-    try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.db.t1 import clear_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        clear_t1_session_lease(session_id, nexus_config_dir())
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
-        _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
     # The revoke is bounded the same way as the flush: HttpTokenStore's client
     # waits up to 30 s plus a 12 s rebind retry, and this runs in the SIGTERM
     # handler's synchronous chain (critique of cf234888a). An abandoned revoke
@@ -2317,13 +2298,53 @@ def _t1_session_shutdown() -> None:
             token_outcome["error"] = str(_exc)
             _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
 
-    revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
-    revoker.start()
-    revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
-    if not token_outcome:
+    revoke_started = False
+
+    def _bounded_revoke() -> None:
+        nonlocal revoke_started
+        revoke_started = True
+        revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
+        revoker.start()
+        revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+        if not token_outcome:
+            _log.warning(
+                "t1_session_token_close_incomplete", session_id=session_id,
+                timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+            )
+
+    # nexus-k9sec: revoke and clear only what is still OURS. The revoke is by
+    # (tenant, session_id), so it kills whichever token the session holds. If
+    # the published lease names a different token than this process's own, a
+    # successor owner (a borrower that recovered while this owner looked dead,
+    # or a same-id process that started in the window) has taken the session;
+    # revoking would strand it, with the lease it published wiped besides.
+    # nexus-g5mir: the compare, the lease unlink (nexus-c8yvj: lease first, so
+    # a stale lease is never read once the session has ended) and the revoke
+    # run under the session's mint lock, so a successor cannot mint between
+    # the compare and the revoke.
+    try:
+        import nexus.config as _nexus_config  # noqa: PLC0415 — module attribute, not a by-value import (nexus-78blw ratchet)
+        from nexus.db import t1 as _t1  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        outcome = _t1.end_owned_t1_session_lease(
+            session_id, _nexus_config.nexus_config_dir(), minted_here, _bounded_revoke,
+        )
+    except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
+        _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
+        if not revoke_started:
+            _bounded_revoke()
+        return
+    if outcome == _t1.T1TeardownOutcome.DISPLACED:
         _log.warning(
-            "t1_session_token_close_incomplete", session_id=session_id,
-            timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+            "t1_session_teardown_displaced", session_id=session_id,
+            msg="another process owns this session's token now; leaving its "
+            "lease and token alone",
+        )
+    elif outcome == _t1.T1TeardownOutcome.LEFT_TO_HOLDER:
+        _log.warning(
+            "t1_session_teardown_lock_held", session_id=session_id,
+            msg="another process is minting this session; leaving its lease "
+            "and token alone",
         )
 
 
@@ -2970,6 +2991,7 @@ def _search_render(
         from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             apply_file_diversity_cap,
             apply_ranking_boosts,
+            boost_window_size,
             flag_displayed_contradictions,
             search_cross_corpus,
         )
@@ -3013,6 +3035,11 @@ def _search_render(
         # the uncached path would render.
         need = offset + limit
         fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        # nexus-cbg2s: the boosts normalise over this many nearest rows, not
+        # over however deep the pool happens to be, so the page does not move
+        # with the fetch depth. Fixed by the page size alone (never by offset),
+        # so every page of one query is cut from the same ordering.
+        boost_window = boost_window_size(limit)
         # ``lexical`` MUST be in this tuple. It changes WHICH rows are
         # retrieved, so a lexical call that reused a vector-only page would be
         # served silently-wrong results inside the 120s TTL — and the wrapper
@@ -3020,7 +3047,7 @@ def _search_render(
         # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical,
+            topic or "", threshold, lexical, boost_window,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3081,22 +3108,37 @@ def _search_render(
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
+                window=boost_window,
             )
             if lexical_rerank:
                 # Same consumption as the CLI's: scored rows lead in server
-                # relevance order; rows a degraded collection left unscored
-                # follow in boosted order, since the two scales differ.
-                scored = [r for r in results if "rerank_score" in r.metadata]
-                for r in scored:
-                    r.hybrid_score = float(r.metadata["rerank_score"])
-                scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                # relevance order; rows beyond the engine's rerank cap follow
+                # in boosted order, since the two scales differ. RDR-210
+                # Technical Design 12 (nexus-hf29s): when a collection
+                # DEGRADED and others were scored, "scored rows lead" would
+                # sink the degraded family's rows, so every row stays in the
+                # calibrated hybrid_score order apply_ranking_boosts set.
                 degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                scored = [r for r in results if "rerank_score" in r.metadata]
+                partial_rerank = bool(degraded) and bool(scored)
+                if partial_rerank:
+                    # apply_ranking_boosts already ordered the rows (calibrated
+                    # window order, then distance order past the window).
+                    pass
+                else:
+                    for r in scored:
+                        r.hybrid_score = float(r.metadata["rerank_score"])
+                    scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                    results = scored + [r for r in results if "rerank_score" not in r.metadata]
                 if degraded:
                     rerank_note = (
                         f"lexical rerank degraded in {len(degraded)} collection(s) "
                         f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
-                        "their lexical rows are in vector-distance order and may be cut"
+                        + (
+                            "all rows are in calibrated distance order"
+                            if partial_rerank
+                            else "their lexical rows are in vector-distance order and may be cut"
+                        )
                     )
             if clustered:
                 # apply_ranking_boosts sorts by hybrid_score globally, which
@@ -3115,6 +3157,10 @@ def _search_render(
                     # best rerank score and each cluster's rows by score,
                     # scored rows first.
                     def _score(r) -> float:
+                        if partial_rerank:
+                            # Mixed scales: the calibrated hybrid_score orders
+                            # every row (Technical Design 12, nexus-hf29s).
+                            return r.hybrid_score
                         s = r.metadata.get("rerank_score")
                         return float(s) if s is not None else float("-inf")
 
@@ -3147,10 +3193,14 @@ def _search_render(
         # appear contiguously; interleaving a file cap into that order
         # would break the grouping the renderer relies on.
         display_results = (
-            results if (structured or clustered) else apply_file_diversity_cap(results)
+            results if (structured or clustered)
+            else apply_file_diversity_cap(results, window=boost_window)
         )
 
-        # Apply pagination
+        # Apply pagination. ``total`` is the number of rows the pool holds after
+        # the threshold, which depends on how many rows were fetched (per-collection
+        # k, and the page lookahead), so "of N" still varies with k even though the
+        # page above it does not (nexus-cbg2s). It was never a corpus-wide count.
         total = len(display_results)
         page = display_results[offset:offset + limit]
         if not page:
@@ -3264,7 +3314,8 @@ def _search_render(
             # Both numbers, because the order comes from the second one.
             # `d=` is the raw vector distance (absolute, lower is better);
             # `s=` is the hybrid score this page was sorted by (relative to
-            # this window, higher is better). Printing only `d=` while
+            # the boost window, the nearest max(30, 3*limit) rows of the pool,
+            # higher is better; nexus-cbg2s). Printing only `d=` while
             # sorting by `s=` is what nexus-la5pr was filed about.
             dist = f"d={r.distance:.4f} s={r.hybrid_score:.3f}"
             label = title or source or r.id
@@ -3838,6 +3889,22 @@ def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     return list(groups.values())
 
 
+def _group_calibration_factor(group: list[str]) -> float:
+    """The cross-model distance factor for one model-homogeneous *group*
+    (RDR-210 Technical Design 12): the group's model is its catalog row's
+    ``embedding_model`` (the same authority :func:`_group_collections_by_model`
+    groups by), and a group with no row falls to the model its name carries,
+    never to a guess from the prefix."""
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred for startup cost (rare/branch-local)
+    from nexus.scoring import _calibration_factor_for_model  # noqa: PLC0415 — deferred for startup cost (rare/branch-local)
+
+    try:
+        model = collection_model(group[0])
+    except CollectionNotRegisteredError:
+        model = embedding_model_for_collection_calibrated(group[0])
+    return _calibration_factor_for_model(model)
+
+
 def _distance_key(row: dict) -> float:
     """Sort key for combined-query merge rows: missing OR ``None`` -> +inf.
 
@@ -3908,13 +3975,16 @@ def _grouped_combined_query(
     — matching ``search_topic_scoped``'s existing (uncaught) per-collection
     loop.
 
-    CAVEAT: when *target* spans more than one embedding model, the merge
-    ranks rows by raw cosine distance across DIFFERENT embedding-model
-    vector spaces (e.g. ``voyage-code-3`` vs ``voyage-context-3``).
-    Distance values from different models are not a rigorously comparable
-    metric — the merge order can carry a systematic per-model bias. This is
-    the same class of accepted caveat ``search_topic_scoped`` already
-    documents for its own per-collection merge.
+    Merge order (RDR-210 Technical Design 12, nexus-hf29s): when *target*
+    spans more than one embedding model, rows are ordered by CALIBRATED
+    distance, the raw distance times the model's factor from
+    :func:`nexus.scoring._calibration_factor_for_model` (the same table
+    ``apply_hybrid_scoring`` pools over). Raw cosine distance is not
+    comparable across models: a bge hit and a Voyage hit at the same raw
+    distance are not equally relevant, so a raw-distance sort sinks one
+    family. The rows' own ``distance`` is left as the engine reported it.
+    A single-model target sorts on raw distance, as before (one common
+    factor cannot change the order).
 
     *t3* (nexus-vply6 fix round 2, point 3 — "every read path names it
     identically") is passed through to
@@ -3932,16 +4002,23 @@ def _grouped_combined_query(
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.errors import classify_vector_service_error  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
-    rows: list[dict] = []
-    for group in _group_collections_by_model(target):
+    groups = _group_collections_by_model(target)
+    # One factor per group, applied only when more than one group merges.
+    factors = (
+        [_group_calibration_factor(g) for g in groups] if len(groups) > 1 else None
+    )
+    keyed: list[tuple[float, dict]] = []
+    for i, group in enumerate(groups):
         try:
-            rows.extend(call(group))
+            group_rows = call(group)
         except VectorServiceError as exc:
             raise classify_vector_service_error(
                 exc, collections=group, t3=t3,
             ) from exc
-    rows.sort(key=_distance_key)
-    return rows
+        factor = 1.0 if factors is None else factors[i]
+        keyed.extend((_distance_key(r) * factor, r) for r in group_rows)
+    keyed.sort(key=lambda kr: kr[0])
+    return [r for _, r in keyed]
 
 
 def _dedup_by_id(rows: list[dict]) -> list[dict]:
@@ -6604,13 +6681,16 @@ def memory_put(
         if not content:
             return "Error: content is required"
         # Translate empty strings to None so MemoryStore.put's
-        # fall-back chain (NX_AGENT env, read_claude_session_id) takes
+        # fall-back chain (NX_AGENT env, resolve_active_session_id) takes
         # over rather than persisting literal empty strings.
         agent_arg = agent if agent else None
         # Resolve session at the MCP layer so NX_SESSION_ID env wins
-        # over MemoryStore's legacy getsid-file fall-back. Subagents
-        # carry NX_SESSION_ID set by claude_dispatch (RDR-094); the
-        # legacy file is only present in non-MCP contexts.
+        # over MemoryStore's fall-back. Subagents carry NX_SESSION_ID set
+        # by claude_dispatch (RDR-094). When it is unset the store resolves
+        # the session through ``resolve_active_session_id``: CLAUDE_CODE_
+        # SESSION_ID, then the machine-wide current_session file, which an
+        # MCP server Claude Code did not start never consults (nexus-xs7fp),
+        # so such a server's write carries no session (nexus-d8yul).
         if session:
             session_arg: str | None = session
         else:
@@ -7084,7 +7164,7 @@ def collection_list() -> str:
     collection, sorted by name.
     """
     try:
-        cols = _get_t3().list_collections()
+        cols = list_collections_or_not_ready(_get_t3(), routing=False)
         if not cols:
             return "No collections found."
         lines: list[str] = []
@@ -13060,6 +13140,12 @@ def main():
     from nexus.mcp._win_stdin import isolate_stdin  # noqa: PLC0415 — entry-point only
 
     _stdin_isolation = isolate_stdin()
+
+    # nexus-xs7fp: this process is an MCP server, so the machine-wide
+    # current_session file is only its session when Claude Code started it.
+    from nexus.session import mark_mcp_server_process  # noqa: PLC0415 — entry-point only
+
+    mark_mcp_server_process()
 
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in

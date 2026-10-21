@@ -56,7 +56,7 @@ class Catalog044OwnerFromDocumentsRepairTest {
 
     @Test
     void repairsNonTumblerOwnersOfCollectionsThatHaveDocuments() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_catalog044_test";
             final String pass = "nexus_admin_catalog044_test_pass";

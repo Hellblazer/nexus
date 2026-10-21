@@ -142,6 +142,11 @@ public final class PciBuilderSession {
         NO_PRIVILEGE,
         /** The request failed the name or shape check; nothing was sent. */
         REJECTED,
+        /**
+         * A leftover's drop was refused by the re-read just before the DROP: the index is valid now (a concurrent
+         * build finished since the snapshot) or gone. Nothing was dropped; the next pass judges what is there.
+         */
+        STALE,
         /** The statement, or a check before it, failed; see the log. A failed build may leave an INVALID index. */
         FAILED,
         /**
@@ -469,8 +474,18 @@ public final class PciBuilderSession {
         }
 
         /**
-         * Drop {@code index} from {@code leaf}. Only a parsed index with the builder's name shape is touched; an
-         * operator's or leftover {@code pci_} index is {@link DdlOutcome#REJECTED}.
+         * Drop {@code index} from {@code leaf}. Only two kinds are touched: a parsed index with the builder's name
+         * shape, and an INVALID REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a
+         * builder name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd). An operator's {@code pci_} index
+         * and a valid {@code _ccnew} are {@link DdlOutcome#REJECTED}.
+         *
+         * <p>A leftover is judged on a snapshot that may be a pass old, so its drop re-reads
+         * {@code pg_index.indisvalid} for that name on this session immediately before the DROP. An index that is valid
+         * now (an operator's {@code CREATE INDEX CONCURRENTLY} finished since the snapshot) or gone is
+         * {@link DdlOutcome#STALE}: no DROP is sent. The read and the DROP are two statements, so the residual window is
+         * the read-to-DROP round trip plus the DROP's own wait for the heap lock, up to the 5 s lock timeout: a build
+         * still running holds that lock, and one that finishes inside the wait is dropped. A REINDEX that renames the
+         * name away inside the wait makes the {@code IF EXISTS} DROP a no-op that still reports DONE.
          */
         public DdlOutcome drop(PciCatalog.Leaf leaf, PciCatalog.Index index) {
             if (ended != null) {
@@ -478,15 +493,44 @@ public final class PciBuilderSession {
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
-            if (!index.parsed() || !PciCatalog.isBuilderName(index.name())) {
-                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={}",
-                    index.name(), index.parsed());
+            boolean ours = index.parsed() ? PciCatalog.isBuilderName(index.name())
+                : index.leftover() && !index.valid() && PciCatalog.isLeftoverName(index.name());
+            if (!ours) {
+                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={}",
+                    index.name(), index.parsed(), index.leftover());
                 return DdlOutcome.REJECTED;
             }
-            return run("drop", DROP_LOCK_TIMEOUT, index.name(), leaf, () -> {
+            java.util.function.Supplier<DdlOutcome> recheck = index.leftover()
+                ? () -> staleLeftover(leaf, index.name()) : () -> null;
+            return run("drop", DROP_LOCK_TIMEOUT, index.name(), leaf, recheck, () -> {
                 String sql = render(DROP_TEMPLATE, leaf.schema(), index.name());
                 runDrop(sql);
             });
+        }
+
+        /** {@link DdlOutcome#STALE} when the leftover is valid or gone now, else {@code null}: go on to the DROP. */
+        private DdlOutcome staleLeftover(PciCatalog.Leaf leaf, String name) {
+            Boolean valid = ctx.select(DSL.field(DSL.name("i", "indisvalid"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_index")).as("i"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("i", "indexrelid"))))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq(name))
+                .fetchOne(0, Boolean.class);
+            if (valid == null) {
+                log.info("event=pci_drop_skipped_stale reason=gone index={} leaf={}.{}", name, leaf.schema(),
+                    leaf.name());
+                return DdlOutcome.STALE;
+            }
+            if (valid) {
+                log.warn("event=pci_drop_skipped_stale reason=valid_now index={} leaf={}.{} "
+                    + "detail=\"the leftover became valid since the snapshot; nothing dropped\"", name, leaf.schema(),
+                    leaf.name());
+                return DdlOutcome.STALE;
+            }
+            return null;
         }
 
         private interface Ddl {
@@ -495,6 +539,12 @@ public final class PciBuilderSession {
 
         private DdlOutcome run(String op, String lockTimeout, String indexName, PciCatalog.Leaf leaf,
                                Ddl statement) {
+            return run(op, lockTimeout, indexName, leaf, () -> null, statement);
+        }
+
+        /** As above; {@code precheck} runs on this session just before the statement and returns non-null to veto it. */
+        private DdlOutcome run(String op, String lockTimeout, String indexName, PciCatalog.Leaf leaf,
+                               java.util.function.Supplier<DdlOutcome> precheck, Ddl statement) {
             long startedNanos = System.nanoTime();
             try {
                 if (migrationHolds()) {
@@ -503,6 +553,10 @@ public final class PciBuilderSession {
                 }
                 setSession("lock_timeout", lockTimeout);
                 setSession("statement_timeout", BUILD_STATEMENT_TIMEOUT);
+                DdlOutcome veto = precheck.get();
+                if (veto != null) {
+                    return veto;
+                }
                 statement.execute();
             } catch (SQLException e) {
                 return failed(op, indexName, leaf, e.getSQLState(), e);

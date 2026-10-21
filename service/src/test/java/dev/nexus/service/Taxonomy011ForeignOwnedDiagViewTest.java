@@ -11,16 +11,10 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.Test;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -36,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code DROP VIEW} was a no-op the first time — the view did not exist
  * yet). This class reconstructs the missing scenario directly: it replays
  * {@code taxonomy-011-1}'s OWN {@code <sql>} text (via
- * {@link #extractChangesetSql}, the same technique
+ * {@link PgContainerHelper#replayChangeset}, the same technique
  * {@link Taxonomy010BackfillDirectIntegrationTest} already established for
  * an otherwise-hard-to-stage changeset) against a connection that owns
  * {@code nexus.topic_assignments} but does NOT own a pre-existing,
@@ -49,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * precedent, {@code SchemaRollbackRoundTripIntegrationTest#reapplyForward},
  * ever actually uses).
  *
- * <p>Each {@code @Test} gets its OWN dedicated container and runs the full
+ * <p>Each {@code @Test} gets its OWN empty database (it declares the replay role exclusive: a bare CREATE ROLE on the shared cluster) and runs the full
  * migration independently (mirroring {@code GrantsSvcForeignOwnedRelationTest}
  * / {@code Catalog013RlsReplayTest}'s own per-test-container shape) —
  * deliberately NOT a shared {@code @BeforeAll}: an earlier revision of this
@@ -96,22 +90,20 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
     @Test
     void foreignOwnedView_failsLoudlyWithNamedRemedy_notSilently() throws Exception {
-        try (var pg = PgContainerHelper.startDedicated();
+        try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            fullMigrationThenOwnershipReassign(pg, su);
-            resetToTextDocIdWithForeignOwnedView(su);
+            migrateThenSeedForeignOwnedView(pg, su);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatThrownBy(() -> admin.createStatement().execute(sql))
+                assertThatThrownBy(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("taxonomy-011-1's DROP VIEW must fail LOUD with the NAMED nexus-7ec4i "
                         + "remedy when the view is foreign-owned -- not a silent skip "
                         + "(structurally impossible for the ALTER to survive a surviving "
                         + "dependent view, verified empirically this fix round against a real "
                         + "PostgreSQL 17 instance) and not a raw, unnamed PostgreSQL error")
-                    .isInstanceOf(Exception.class)
+                    .isInstanceOf(java.sql.SQLException.class)
                     .hasMessageContaining("nexus-7ec4i")
                     .hasMessageContaining("does not own it and cannot drop it")
                     .hasMessageContaining("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
@@ -129,28 +121,28 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
     @Test
     void foreignOwnedViewDropped_beforeRetry_letsTheConversionApply() throws Exception {
-        try (var pg = PgContainerHelper.startDedicated();
+        try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            fullMigrationThenOwnershipReassign(pg, su);
-            resetToTextDocIdWithForeignOwnedView(su);
+            migrateThenSeedForeignOwnedView(pg, su);
 
-            String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatThrownBy(() -> admin.createStatement().execute(sql))
+                // SQLException, not Exception: the changeset text is now read inside the replay, so a changeset
+                // that could not be found (IllegalStateException) must not satisfy this ground-truth failure.
+                assertThatThrownBy(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("ground truth: the same first failure as the sibling test, before "
                         + "the deploy-window remedy is applied")
-                    .isInstanceOf(Exception.class);
+                    .isInstanceOf(java.sql.SQLException.class);
             }
 
             // THE DEPLOY-WINDOW REMEDY (bead nexus-k1dgb): a superuser drops the
             // foreign-owned view immediately before retrying the migration.
-            su.createStatement().execute("DROP VIEW nexus.diag_chash_conformance");
+            DSL.using(su, SQLDialect.POSTGRES).dropView(DSL.name("nexus", "diag_chash_conformance")).execute();
 
             try (Connection admin = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-                assertThatCode(() -> admin.createStatement().execute(sql))
+                assertThatCode(() -> PgContainerHelper.replayChangeset(admin, CHANGELOG_FILE, CHANGESET_ID))
                     .as("once the foreign-owned view is gone, the SAME extracted SQL must "
                         + "apply cleanly -- taxonomy-011-1's DROP VIEW IF EXISTS is now a "
                         + "true no-op (absent), and the ALTER converts doc_id to bytea")
@@ -166,20 +158,19 @@ class Taxonomy011ForeignOwnedDiagViewTest {
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /**
-     * Full migration as the container superuser, then production-shaped
-     * ownership reassignment (same technique as {@code Catalog013RlsReplayTest}):
-     * every nexus/t1 table + sequence -> {@link #ADMIN_ROLE}. Deliberately
-     * NOT the diag view -- this loop structurally cannot touch it
-     * (pg_tables/pg_sequences only) -- leaving it superuser-owned: exactly
-     * the "table owner != view owner" shape this bug depends on.
+     * Full migration as the container superuser, then {@code db.changelog-test-diag-view-foreign-owned.xml}
+     * (nexus-cbo4a): production-shaped ownership reassignment of every nexus/t1 table and sequence to
+     * {@link #ADMIN_ROLE}, and the test-only relaxation that reverts {@code topic_assignments.doc_id} to
+     * TEXT so {@code taxonomy-011-1}'s own SQL replays as authored, with the diag view recreated as a
+     * superuser-owned (so foreign-owned) stub. See that file's header for each step's reason.
      */
-    private static void fullMigrationThenOwnershipReassign(
+    private static void migrateThenSeedForeignOwnedView(
             org.testcontainers.containers.PostgreSQLContainer<?> pg, Connection su) throws Exception {
-        // DEDICATED connection for the Liquibase run -- Catalog013RlsReplayTest's
+        // DEDICATED connection for the master-changelog run -- Catalog013RlsReplayTest's
         // own javadoc documents this exact trap: Liquibase flips its connection
-        // to autoCommit=false and leaves that state behind, so reusing `su`
-        // directly here would make the role-creation DDL below "an uncommitted
-        // CREATE ROLE failing password auth" for every later connection.
+        // to autoCommit=false and leaves that state behind, so `su` would be left
+        // mid-transaction for the checks below. (runSuperuserTestChangelog restores
+        // autoCommit itself, so the fixture changelog can run on `su`.)
         try (Connection migrationConn = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(migrationConn));
@@ -187,103 +178,15 @@ class Taxonomy011ForeignOwnedDiagViewTest {
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
 
-        su.createStatement().execute(
-            "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-            + "' NOSUPERUSER NOBYPASSRLS");
-        su.createStatement().execute("GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);
-        su.createStatement().execute(
-            "DO $$ DECLARE r record; BEGIN "
-            + "  FOR r IN SELECT schemaname, tablename FROM pg_tables "
-            + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-            + "    EXECUTE format('ALTER TABLE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-            + "                   r.schemaname, r.tablename); "
-            + "  END LOOP; "
-            + "  FOR r IN SELECT schemaname, sequencename FROM pg_sequences "
-            + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-            + "    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-            + "                   r.schemaname, r.sequencename); "
-            + "  END LOOP; "
-            + "END $$");
-    }
-
-    /**
-     * Test-only relaxation (same technique as {@code
-     * Taxonomy010BackfillDirectIntegrationTest}): drop whatever diag view
-     * exists (from the full migration above, superuser-owned since the
-     * superuser ran taxonomy-011-8 too), revert doc_id back to TEXT so
-     * {@code taxonomy-011-1}'s OWN TEXT-to-bytea SQL can be replayed
-     * exactly as authored, then recreate the diag view as a FOREIGN-owned
-     * stub (same simplification {@code GrantsSvcForeignOwnedRelationTest}
-     * already established: the ownership-check mechanism under test does
-     * not depend on the view's real body, only on it existing and being
-     * owned by a role other than {@link #ADMIN_ROLE}).
-     */
-    private static void resetToTextDocIdWithForeignOwnedView(Connection su) throws Exception {
-        su.createStatement().execute("DROP VIEW IF EXISTS nexus.diag_chash_conformance");
-        // RDR-194 P3d (nexus-tk070.p3d): the full migration above now ALSO runs
-        // taxonomy-012, which ADDs topic_assignments_chunk_fk -- a composite FK
-        // whose (source_collection, doc_id) leg targets nexus.chunks(collection,
-        // chash), bytea. The ALTER below would now hit "foreign key constraint
-        // ... cannot be implemented" (a bytea-vs-TEXT type mismatch on the
-        // referencing column) before ever reaching the foreign-owned-view
-        // scenario this class exists to prove -- same test-only-relaxation
-        // shape as the view drop directly above, and the identical fix
-        // Taxonomy010BackfillDirectIntegrationTest applies for the same
-        // reason: this dedicated, throwaway container never re-adds the
-        // constraint.
-        su.createStatement().execute(
-            "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
-        su.createStatement().execute(
-            "CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n");
+        PgContainerHelper.runSuperuserTestChangelog(su,
+            "db/changelog-test/db.changelog-test-diag-view-foreign-owned.xml",
+            "databasechangelog_test_diag_view", Map.of("adminRole", ADMIN_ROLE, "adminPass", ADMIN_PASS));
         String owner = PgCatalogProbes.relationOwner(
             DSL.using(su, SQLDialect.POSTGRES), "nexus", "diag_chash_conformance");
         assertThat(owner)
             .as("sanity: the seeded view must be foreign-owned relative to the replay role")
             .isNotNull()
             .isNotEqualTo(ADMIN_ROLE);
-    }
-
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Same technique as
-     * {@code Taxonomy010BackfillDirectIntegrationTest#extractChangesetSql} /
-     * {@code SchemaRollbackRoundTripIntegrationTest#extractChangesetSql}
-     * (duplicated locally rather than shared — no common test-utility class
-     * exists for this yet). Deliberately NOT recursive — only direct
-     * children are the changeset's FORWARD SQL, not the nested
-     * {@code <rollback>}'s.
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        Document doc;
-        try (var in = Taxonomy011ForeignOwnedDiagViewTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            Element cs = (Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    Node n = children.item(j);
-                    if (n.getNodeType() == Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
     }
 
     private static String columnUdtName(Connection c) throws Exception {

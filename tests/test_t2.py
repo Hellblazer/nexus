@@ -56,6 +56,8 @@ from tests._t2_fixture_ops import (
 # the migration-guard test can be reframed for GHA stability.
 import os
 
+pytestmark = pytest.mark.t2_tenant
+
 
 _OLD_FTS_SCHEMA = """PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS memory (

@@ -469,6 +469,7 @@ class TestAgainstTheEngine:
     and a live collection, read through the real catalog and vector
     clients, produce the expected findings and a truthful examined count."""
 
+    @pytest.mark.t2_tenant
     def test_ghost_and_live_collection_through_real_clients(self) -> None:
         tag = uuid.uuid4().hex[:10]
         # The test engine serves the local bge-768 embedder; a voyage-named

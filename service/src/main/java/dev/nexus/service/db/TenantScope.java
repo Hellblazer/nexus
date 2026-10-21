@@ -101,7 +101,21 @@ public final class TenantScope {
         Collections.synchronizedMap(new IdentityHashMap<>());
 
     private static final int DEFAULT_POOL_SIZE = 10;
-    private static final long DEFAULT_TIMEOUT_MS = 30_000L;
+    /** HikariCP's own default connection timeout, the wait used when the DataSource is not a Hikari pool. */
+    static final long DEFAULT_TIMEOUT_MS = 30_000L;
+
+    /**
+     * The longest {@code dataSource} makes a caller wait for a connection: the Hikari pool's configured
+     * connection timeout, else {@link #DEFAULT_TIMEOUT_MS}. The one place this is read, so the admission
+     * wait here and the request ledger's lease margin (RDR-222: the lease covers two of these waits)
+     * cannot drift apart (nexus-yye8l.20).
+     */
+    static long connectionTimeoutMs(DataSource dataSource) {
+        if (dataSource instanceof com.zaxxer.hikari.HikariDataSource hikari && hikari.getConnectionTimeout() > 0) {
+            return hikari.getConnectionTimeout();
+        }
+        return DEFAULT_TIMEOUT_MS;
+    }
 
     private final DataSource dataSource;
     private final Semaphore admission;
@@ -111,18 +125,13 @@ public final class TenantScope {
     public TenantScope(DataSource dataSource) {
         this.dataSource = dataSource;
         int poolSize = DEFAULT_POOL_SIZE;
-        long timeoutMs = DEFAULT_TIMEOUT_MS;
         if (dataSource instanceof com.zaxxer.hikari.HikariDataSource hikari) {
             int configured = hikari.getMaximumPoolSize();
             if (configured > 0) {
                 poolSize = configured;
             }
-            long ct = hikari.getConnectionTimeout();
-            if (ct > 0) {
-                timeoutMs = ct;
-            }
         }
-        this.admissionTimeoutMs = timeoutMs;
+        this.admissionTimeoutMs = connectionTimeoutMs(dataSource);
         this.poolSize = poolSize;
         final int permits = poolSize * 2;
         this.admission = ADMISSION.computeIfAbsent(
@@ -136,6 +145,11 @@ public final class TenantScope {
         this.poolSize = Math.max(1, admissionPermits / 2);
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(admissionPermits, true));
+    }
+
+    /** How long {@link #withTenant} waits for an admission permit; read by tests that pin it to the lease margin. */
+    long admissionTimeoutMs() {
+        return admissionTimeoutMs;
     }
 
     /**

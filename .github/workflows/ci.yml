@@ -18,14 +18,21 @@ on:
     branches: [main, develop]
 
 concurrency:
+  # One run at a time on develop, the newest push waiting (Sam, 2026-10-18,
+  # labrun RDR-001 F15, nexus-1wf1s). The 2026-10-17 goal stands: every
+  # develop commit is covered by a finished run. develop is linear, so the
+  # run of the newest pending push tests every commit before it; a running
+  # develop run is never cancelled, and a newer push replaces only the one
+  # pending run. Replayed over 69 develop pushes this kept one develop run
+  # (6 shards) in flight instead of 4-6 that queued against the 10-shard
+  # cap, at 72-81% of the run-minutes. Trade-off: a red run can cover
+  # several commits, so finding the culprit may take a rerun of an earlier
+  # one. Do not return to cancelling on develop: under continuous pushes it
+  # livelocked (verdict p90 45-52 min). On PRs and every other ref the
+  # 2026-07-06 CI-cost rule holds: a newer push cancels the run it
+  # supersedes. main is not a push trigger, and tags run another workflow.
   group: ci-${{ github.ref }}
-  # Cancel superseded runs on PRs AND develop pushes (2026-07-06 CI-cost
-  # pass): back-to-back develop pushes were stacking full ~20-min runs for
-  # commits already made stale by the next push. The old "never cancel
-  # main" concern (tag pushes cancelling version-bump CI) is moot now that
-  # main is not a push trigger at all and tags run a different workflow
-  # with its own concurrency group.
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
   lint:
@@ -397,7 +404,8 @@ jobs:
     #
     # CI-COST SHAPE, per the standing directives:
     #  - ONE build for the whole matrix. The jar is a DETERMINISTIC ARTIFACT of
-    #    service/pom.xml + service/src/main/**, so it is CACHED on exactly that
+    #    service/pom.xml + service/src/main/** + service/src/build/** (the jOOQ
+    #    codegen runner and its generator config), so it is CACHED on exactly that
     #    input and rebuilt only on a key miss — which is precisely when a fresh
     #    build proves something.
     #  - The build step is skipped outright on a cache hit; the job then costs
@@ -408,12 +416,16 @@ jobs:
     #  - ubuntu-latest only. No premium runner: the artifact is
     #    platform-neutral bytecode.
     #
-    # A clean checkout runs the testcontainers jOOQ codegen (Docker) because
+    # A clean checkout runs the jOOQ codegen runner (Docker) because
     # the generated sources are NOT committed — which is exactly why the cache
     # is load-bearing rather than a nicety.
     name: service jar (pytest substrate)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     # nexus-n0ful: doc-only pushes/PRs need no engine substrate at all. Job-
     # level skip (never a workflow-level paths: filter — that hangs required
     # checks, see the pytest-gate job below for the fan-in that makes this
@@ -444,7 +456,7 @@ jobs:
           # a partial-match jar would be built from different sources, which is
           # the stale-jar class tests/db/_service_fixture.py::
           # jar_freshness_skip_reason exists to catch.
-          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**') }}
+          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**', 'service/src/build/**') }}
 
       - name: Set up GraalVM 25.0.3
         if: steps.jar-cache.outputs.cache-hit != 'true'
@@ -650,6 +662,74 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
+      - name: Shared dependencies venv (pool only; nexus-dvk18)
+        # Replaces the per-job `uv sync` on the pool: the dependencies are built ONCE per
+        # (uv.lock, python, platform, groups) under $NX_LAB_CACHE_ROOT (labrun), read-only and
+        # precompiled, and each job layers a thin venv with the project editable on it, under
+        # $RUNNER_WORKSPACE (tmpfs). Inferred (replay of the old uv_sync + teardown steps; to be measured on the first pool run, nexus-dvk18) to remove ~105 MB/shard of NVMe writes, 71 MB of it ext4
+        # metadata outside the job's cgroup (replay on nexus-aca0q). Contract and design:
+        # the header of scripts/ci_shared_venv.sh. It never fails the job: on any problem it
+        # reports used=false and the steps below run their own uv sync. It is used only when
+        # LAB_WS=tmpfs (labrun F1): without the tmpfs workspace the thin venv and the project's
+        # pyc would sit on NVMe and F3 (skipped whenever F5 is used) would be lost, so such a job
+        # gets used=false and F3 runs.
+        # Its `venv` output is what UV_PROJECT_ENVIRONMENT must be in the steps that run uv: the
+        # thin venv when used, else (labrun F1, LAB_WS=tmpfs) a venv on disk under $LAB_DISK_DIR,
+        # so a fallback sync does not copy ~1.3 GB into the tmpfs. It is set per step, never
+        # job-wide: a job-wide value would make any other project's `uv run` sync into this venv.
+        # Setup-uv and the wheel cache come first (uv and the interpreter); the F3 step below
+        # reads this step's `used` output.
+        id: sharedvenv
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: scripts/ci_shared_venv.sh --group dev --smoke-import nexus
+
+      - name: Bytecode to /dev/shm (PYTHONPYCACHEPREFIX, pool only; nexus-m643n)
+        # Collection alone writes 116 MB of .pyc per shard to the pool host's NVMe
+        # (replay of 2026-10-19, T2 nexus/analysis-ci-startup-bytes-2026-10-19);
+        # with the prefix on /dev/shm the disk write is 23 MB: about 90 MB per
+        # shard, ~0.5 GB per run, measured for collection only (children run with
+        # python -I ignore the prefix). With labrun F1 (tmpfs workspace, venv on
+        # disk) the in-tree pyc is already in RAM and this still saves the venv's
+        # (~20 MB/shard, inferred). The prefix redirects EVERY import's bytecode,
+        # the venv's site-packages included (uv sync does not compile:
+        # UV_COMPILE_BYTECODE is unset), and every child process that inherits the
+        # job env (engine bootstrap scripts, nested pytest).
+        # F5 EXCLUDES THIS STEP (nexus-dvk18): with sys.pycache_prefix set Python
+        # never reads the shared venv's precompiled __pycache__, so a job that
+        # uses the shared venv must not set the prefix (its own pyc lands in the
+        # tmpfs workspace). This step is the fallback path and sits after the F5
+        # step so it can see whether F5 took the job.
+        # COST: /dev/shm pages are charged to the job's memory cgroup, so the
+        # ~50 MB (up to ~0.1 GB) the prefix holds comes out of the lab-6c18g
+        # grant's 18.4 GB cap (labrun), the same cap tests/_tmp_root.py draws on.
+        # Per-job directory: run_id + run_attempt + python + shard keeps sibling
+        # shards on the shared pool user apart; the last step of the job removes it
+        # (if: always()). A job killed past its steps leaves ~50 MB, so this step
+        # also sweeps this user's nx-pyc-<run>-<attempt>-py<ver>-s<shard> dirs older
+        # than 12 h (job timeout is 35 min, so never a live job's).
+        # A runner without a writable /dev/shm (macOS, Windows, GitHub-hosted)
+        # keeps the default location: the step is pool-only, and a failed mkdir
+        # there degrades to the default with a notice, never a failed job.
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux' && steps.sharedvenv.outputs.used != 'true'
+        env:
+          NX_PYC_DIR: /dev/shm/nx-pyc-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}-s${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+            find /dev/shm -maxdepth 1 -type d -user "$(id -u)" -regextype posix-extended \
+              -regex '/dev/shm/nx-pyc-[0-9]+-[0-9]+-py[0-9.]+-s[0-9]+' -mmin +720 \
+              -exec rm -rf {} + 2>/dev/null || true
+            rm -rf "$NX_PYC_DIR" 2>/dev/null || true
+            if mkdir -m 0700 "$NX_PYC_DIR" 2>/dev/null; then
+              echo "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" >> "$GITHUB_ENV"
+              echo "bytecode prefix: $NX_PYC_DIR"
+            else
+              echo "::notice::could not create $NX_PYC_DIR; bytecode stays in the default location"
+            fi
+          else
+            echo "::notice::no writable /dev/shm on this runner; bytecode stays in the default location"
+          fi
+
       - name: Cache MiniLM ONNX model
         if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
@@ -711,7 +791,7 @@ jobs:
         # engine-substrate family for a reason that does not exist here.
         #
         # Touching is not a bypass. The service-jar cache key is
-        # hashFiles('service/pom.xml', 'service/src/main/**') with NO
+        # hashFiles('service/pom.xml', 'service/src/main/**', 'service/src/build/**') with NO
         # restore-keys, so a hit already proves the jar was built from exactly
         # these sources — a strictly stronger guarantee than the mtime proxy it
         # replaces.
@@ -765,6 +845,11 @@ jobs:
           persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Install project + dev deps
+        # Skipped when the shared venv took the job (F5, above); otherwise syncs into the venv
+        # location the F5 step reported (disk under labrun F1, else the default .venv).
+        if: steps.sharedvenv.outputs.used != 'true'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
         run: uv sync --group dev
 
       - name: Prime docling artifacts (cache or self-hosted asset)
@@ -799,6 +884,12 @@ jobs:
         # artifacts dir fails HERE instead of degrading to PyMuPDF mid-suite.
         # No retry loop: there is no network fetch left to be flaky, so a
         # failure now means the artifacts are wrong and retrying cannot help.
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
+          # With the shared venv uv must not sync: the shared packages are invisible to its scan
+          # and a sync would install them all into the thin venv. '0', never '': uv rejects an
+          # empty boolean.
+          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
         run: uv run python scripts/ci_warm_docling.py
 
       - name: Run tests (shard ${{ matrix.shard }}/6)
@@ -809,8 +900,14 @@ jobs:
         # matrix, this `--splits` and the job and step names disagree), keyed off the committed
         # .test_durations.json. Refresh cadence (JSON has no comment syntax,
         # so it lives here + pyproject.toml's pytest-split dev-dep comment):
-        # regenerate on demand with
-        #   uv run pytest tests/ -q --store-durations --durations-path=.test_durations.json
+        # regenerate on demand from one green develop run's own timings
+        # (each shard uploads nx-shard-durations.json; nexus-zkr7q):
+        #   gh run download <run> -p 'ddl-report-shard-*' -D <dir>
+        #   python3 -m tests._shard_collection <dir> --shards 6 --write-durations .test_durations.json
+        # (it refuses a run with a re-run job: that shard ran alone, off the others' scale).
+        # Before committing, replay the split on the new file (collect-only, every group
+        # above the 1500 floor) and judge the next runs on the slowest/fastest ratio and
+        # the mean shard step, not the sum: six balanced shards share the host the whole time.
         # when shard balance visibly drifts (one shard consistently the
         # tail) — stale entries only degrade balance, never correctness:
         # pytest-split falls back to the suite average for any test id
@@ -825,13 +922,53 @@ jobs:
         # shard's tests first and xdist spreads them, so the split is the same
         # on both.
         #
+        # nexus-zkr7q: least_duration, not pytest-split's default duration_based_chunks.
+        # Chunks are contiguous runs of the collection order, so an accurate durations file
+        # puts a slow contiguous cluster (the shell-suite wiring tests) in a shard of its own:
+        # the 2026-10-20 refresh (f442ab0c7) left shard 2 with 526 tests, under the executed
+        # floor below, and was reverted. least_duration hands each test to the lightest group
+        # (ids sorted first, so every leg computes the same split from the same collection) and
+        # keeps collection order inside a group. Hand runs on chas, one shard at a time and
+        # uncontended (lab-l grants, -n 4 on 6 pinned cores, 2026-10-21, refreshed file): about
+        # 5095 passed per shard and 343 to 447 s each. Develop CI with chunks ran 290 to 652 s
+        # (bdc81dac0); the CI figures under least_duration are read on the first runs after it
+        # lands (nexus-zkr7q), and the durations are regenerated from CI's own shards if the
+        # tail or the spread misses.
+        #
         # TMPDIR on the pool: /tmp there is tmpfs, so every worker's Postgres
         # data directory and every tmp_path lived in memory and was charged to
         # the job's 18 GB cap. Measured on the first -n 5 run (2026-10-11): 3.3
         # to 4.0 GB of shmem per shard, with one shard pinned at the cap.
-        # $RUNNER_TEMP is on disk and is deleted with the job.
+        # $RUNNER_TEMP is on disk and is deleted with the job. It is the tempdir
+        # the step STARTS with, not the one the tests run on: the pool job has
+        # LAB_CPUS set, so tests/_tmp_root.py (nexus-kyujr) points the controller's
+        # TMPDIR and pytest basetemp at a private /dev/shm directory when the
+        # tmpfs gates pass (charged to the grant, removed at the end of the run),
+        # and keeps this one as the original tempdir (crash reports, the kept
+        # nx-* reports and a failed run's evidence land under it). When a gate
+        # refuses, the summary line says why and this directory is used as is.
+        # The Postgres clusters follow the same rule (tests/_engine_substrate.py,
+        # nexus-vo9qn): the run decides tmpfs or disk ONCE from the grant's cgroup
+        # headroom (3 GiB), and a run that chose tmpfs keeps every cluster on
+        # /dev/shm, charged to the 18 GB cap. A later cluster start under 512 MiB of
+        # headroom waits 45 s and then fails with SubstrateRootExhausted rather than
+        # spilling to disk (measured shard peak 13.7 GB, about 4.7 GB of margin).
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
+          # With the shared venv uv must not sync: the shared packages are invisible to its scan
+          # and a sync would install them all into the thin venv. '0', never '': uv rejects an
+          # empty boolean.
+          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
         run: |
           set -euo pipefail
+          # nexus-ekp7w: the DDL counter writes this shard's nx-ddl-report.json here (a
+          # persistent pool workspace must not carry a previous run's), and the steps below
+          # compare it (advisory) and hand it to the fan-in in pytest-gate.
+          export NX_DDL_REPORT_DIR="$RUNNER_TEMP/ddl-report"
+          rm -rf "$NX_DDL_REPORT_DIR"
+          # nexus-abcqb: the storage-touch guard writes this shard's nx-storage-touch-report.json
+          # beside it, so the one per-shard artifact carries both reports to pytest-gate.
+          export NX_STORAGE_TOUCH_REPORT_DIR="$NX_DDL_REPORT_DIR"
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
             mkdir -p "$TMPDIR"
@@ -846,7 +983,7 @@ jobs:
             export NX_ONNX_INTRA_OP_THREADS=2
           fi
           uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} \
-            --splits 6 --group ${{ matrix.shard }} \
+            --splits 6 --group ${{ matrix.shard }} --splitting-algorithm least_duration \
             --durations-path=.test_durations.json | tee shard-output.txt
 
       # nexus-lemv5: per-shard executed-count floor — the same backstop the
@@ -858,7 +995,8 @@ jobs:
       # failure already failed the run step above), not the collected count.
       # Measured on the 6-shard runs of 2026-09-30 (nexus-qzxzh, runs 36782096550,
       # 36784801648, 36785966097): 3406 to 5946 executed per shard, about 27.7k
-      # default-selected tests in all. 1500 is 44% of the smallest shard: it
+      # default-selected tests in all; since least_duration (nexus-zkr7q, 2026-10-21) every
+      # shard passes about 5100 of about 30.6k. 1500 is under a third of a shard: it
       # catches a shard that skipped its corpus down to near zero, not half a
       # shard vanishing, and not a dropped group (a shard that never ran has no
       # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).
@@ -869,6 +1007,62 @@ jobs:
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
             || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
+      # nexus-ekp7w / nexus-2rhif: the DDL and bytes-written ratchet. THE GATE IS NOT HERE.
+      # One shard's bytes per test and DDL per test move with which tests the split gave it
+      # (a 15% heavier mix tripped a per-shard ceiling with no code change), so this step only
+      # prints how the shard compares and exits 0 (--advisory). The run's verdict is the
+      # fan-in over all shards in `pytest-gate`, which reads the report uploaded next.
+      # 3.12 only: the 3.13 legs (PRs to main) are a second copy of the same suite, and the
+      # fan-in expects exactly one report per shard. A shard whose report is missing fails
+      # the upload (if-no-files-found), never reads as a clean one.
+      # The gate is armed (`[python_unit] measured_on` is set in tests/ddl_ceiling.toml, 2026-10-20), so
+      # neither step is `continue-on-error` (tests/scripts/test_ddl_ratchet_wiring.py): a missing
+      # script or report fails here, and the fan-in fails on a missing report (exit 12).
+      - name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)
+        if: success() && matrix.python-version == '3.12'
+        run: python3 scripts/ddl_ratchet.py check --suite python_unit --report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory
+
+      - name: Upload this shard's DDL report (read by the fan-in in pytest-gate)
+        if: success() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ddl-report-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/ddl-report/nx-ddl-report.json
+            ${{ runner.temp }}/ddl-report/nx-storage-touch-report.json
+            ${{ runner.temp }}/ddl-report/nx-shard-collection-*.json
+            ${{ runner.temp }}/ddl-report/nx-shard-durations.json
+          retention-days: 7
+          if-no-files-found: error
+          # A re-run of all jobs keeps the first attempt's artifacts under the same names.
+          overwrite: true
+
+      # nexus-ww33u: a failed pool shard copies its evidence (engine and pg log tails, the failed
+      # tests' tmp_path trees, SUMMARY.txt) under its original tempdir, $RUNNER_TEMP/tmp, which is
+      # deleted with the job (tests/_tmp_root.py). Upload it so a load-dependent red can be read
+      # after the job; nothing is there on a hosted runner or a passing shard.
+      - name: Upload a failed shard's evidence (pool only)
+        if: failure() && runner.environment == 'self-hosted'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: failed-evidence-shard-${{ matrix.shard }}-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/tmp/nexus-test-reports-*/*/failed
+          retention-days: 7
+          if-no-files-found: ignore
+          # A re-run of all jobs keeps the first attempt's artifacts under the same names.
+          overwrite: true
+
+      - name: Remove the bytecode prefix (pool only; nexus-m643n)
+        # Last step, if: always(): the /dev/shm pages are charged to this job's
+        # grant and outlive it otherwise. Removes only a directory this job's
+        # setup step named (nx-pyc-*); with the prefix unset it does nothing.
+        if: always() && runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: |
+          case "${PYTHONPYCACHEPREFIX:-}" in
+            /dev/shm/nx-pyc-*) rm -rf -- "$PYTHONPYCACHEPREFIX" || echo "::notice::could not remove $PYTHONPYCACHEPREFIX (a child may still hold it); the next job's 12 h sweep takes it" ;;
+            *) echo "no /dev/shm bytecode prefix to remove" ;;
+          esac
+
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
     # marker (pyproject.toml) carves ~760 O(repo) meta-tests — AST/regex
@@ -877,23 +1071,44 @@ jobs:
     # `-m 'not integration and not slow and not lint'` hot loop the `test`
     # matrix above runs. They only change when repo STRUCTURE changes, not
     # application behavior, so they run once here instead of once per shard
-    # x python-version leg. Deliberately a single small ubuntu job with NO
-    # matrix (CI cost discipline, CLAUDE.md): these tests are pure-Python
-    # AST/regex scans with no engine substrate, no PG, no JDK — the cheapest
-    # possible leg, unlike the `test` matrix's engine-backed T2 substrate.
+    # x python-version leg. These tests are pure-Python AST/regex scans with
+    # no engine substrate, no PG, no JDK, on hosted ubuntu runners: the
+    # cheapest possible leg, unlike the `test` matrix's engine-backed T2
+    # substrate. nexus-0h5a7 (Sam, 2026-10-21): split over TWO hosted jobs by
+    # pytest-split. At -n 4 on one 4-vCPU runner the leg took 9.0-14.8 min
+    # (median 13.7, the spread is runner speed) and was develop CI's longest
+    # Python leg in 6 of 9 runs, against 10.9-12.0 for the slowest shard. The
+    # repo is public, so the second hosted job costs nothing and takes no pool
+    # capacity. The split is applied after `-m lint` deselects. It interleaves:
+    # --splitting-algorithm least_duration with no recorded durations gives every
+    # test the same weight, so each test goes to the lighter group and the two get
+    # alternate tests (1088 + 1087 on 2026-10-21) with the slow scans spread
+    # across both. The default contiguous split put 298 s and 571 s of test time
+    # in the two groups (b036d0ce4), and balancing by durations recorded on a
+    # laptop put 1795 and 373 tests in them, under the per-group floor
+    # (5c99d3609), because laptop call times do not weigh CI's per-test cost.
+    # The interleaved groups still ran 571 s and 349 s of tests at a6937b1c2;
+    # --durations=20 names each group's slowest tests on CI (the floor below
+    # reads the final summary line, which prints after that table).
     #
     # test_marker_selection_coverage.py's own non-vacuity check
     # (test_marker_is_wired_to_a_real_invocation) requires a REAL
     # `pytest ... -m lint` invocation to exist under .github/ — this job's
     # `run:` step below IS that invocation, closing the loop the marker
     # itself enforces (nexus-s6dei).
-    name: pytest (lint markers)
+    name: pytest (lint markers, group ${{ matrix.group }}/2)
     runs-on: ubuntu-latest
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true'
+    strategy:
+      # Both halves always finish, so a red names every failing lint test.
+      fail-fast: false
+      matrix:
+        group: [1, 2]
     # 6.8 to 9.6 min measured on develop 2026-09-26; runs 36268338775 and 36273704547 hit 10.
     # 2026-10-14: a08876f28's run hit 15 with all 1374 tests passed (tests alone 14:40) and its
     # rerun took 14:00, so the ceiling is 25 (nexus-2ziaz, folded in for nexus_637's ox0c0 work).
+    # Those are serial figures; since nexus-0h5a7 the job runs at -n 4 (lower this after a measured run).
     timeout-minutes: 25
     env:
       # nexus-wixar (2026-08-18): this job provisions NO service jar (by
@@ -968,22 +1183,32 @@ jobs:
         # above already does this correctly; this one did not.
         # The non-vacuity floor below does not cover it: it asks whether
         # enough tests PASSED, which a pipefail-less tee would not make fatal.
+        # nexus-0h5a7: this job is develop CI's critical path (19-24 min serial on the hosted 4-vCPU runner,
+        # and job 119003409658 on 2026-10-21 was cancelled at the 25-min timeout, while the shard matrix
+        # ends by 12-14 min), so it runs under xdist on the same runner: no extra runner and no pool
+        # capacity. -n 4 is explicit because -n auto counts physical cores (psutil), likely 2 here. The
+        # lint selection is xdist-clean on a dev laptop (2154 passed in ~3.3 min at -n 8, 2026-10-21);
+        # the hosted wall time is unmeasured until the first run.
         run: |
           set -euo pipefail
-          uv run pytest -m lint -q | tee lint-output.txt
+          uv run pytest -m lint -q -n 4 --splits 2 --group ${{ matrix.group }} \
+            --splitting-algorithm least_duration --durations=20 | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
         # pytest failure) and reported SUCCESS on real CI -- the exact
         # vacuous-gate class this step exists to make structurally
         # impossible, not just less likely. Reads the PASSED count off
-        # pytest's own final summary line; the corpus is ~830 tests, so 400
-        # leaves headroom for shrinkage and still fails the bug's signature.
+        # pytest's own final summary line; the corpus was ~830 tests when this
+        # floor was set (about 2.1k on 2026-10-21). The two interleaved groups run
+        # about 1.1k each; a laptop-durations split once put 373 in one (5c99d3609),
+        # under the 400 floor then, so the floor is 200 per group: still far above
+        # the bug's signature (0 executed).
         run: |
           set -euo pipefail
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)" || summary=""
-          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 400 ] \
-            || { echo "::error::lint leg passed fewer than 400 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 200 ] \
+            || { echo "::error::lint leg passed fewer than 200 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
   test-docs-readers:
     # nexus-q99w4 (Sam, 2026-10-05, option B): the doc-only fast lane skips
@@ -1606,6 +1831,69 @@ jobs:
 
           echo "pytest-gate: PASS"
 
+      # nexus-ekp7w / nexus-2rhif: THE DDL AND BYTES-WRITTEN GATE, armed 2026-10-20 from three Linux CI
+      # fan-ins (tests/ddl_ceiling.toml has the numbers and `[python_unit] measured_on`). It runs only
+      # after the verdict above passed (a step's implicit success() skips it otherwise), so it sees a green
+      # shard matrix, and only when the shards ran (code=true). A ceiling breach fails pytest-gate; the
+      # failure message names the metric, and a new Liquibase changeset bumps migration_ddl_per_worker in
+      # the same commit (tests/AGENTS.md). tests/scripts/test_ddl_ratchet_wiring.py keeps the flag and the
+      # continue-on-error lines consistent with the marker.
+      # When the shards ran hosted (the test job's runs-on condition, repeated in the run line and kept equal
+      # by that test), --bytes-advisory reports a WAL breach without failing: WAL per test is host-dependent
+      # and the ceilings were measured on the pool. The DDL metrics are exact and gate on every runner.
+      # Fan-in sums every shard's report and judges the whole run against tests/ddl_ceiling.toml:
+      # bytes and DDL per test over all tests, and the migration's per booted worker, which do not
+      # move with the shard split, with -n (the pool runs 4 workers a shard, a hosted runner one)
+      # or with workers that never booted a substrate. `--shards` is the matrix length
+      # (tests/scripts/test_ddl_ratchet_wiring.py keeps them equal), and a missing report, a
+      # worker that died before reporting, or a measured 0 is exit 12, a failure, never a pass.
+      # Ceilings are reduce-only: lower one in the commit that lowers the number.
+      - name: Check out the ratchet and its ceilings
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ddl_ratchet.py
+            tests/ddl_ceiling.toml
+            tests/__init__.py
+            tests/_storage_touch_fan_in.py
+            tests/storage_touch_ceiling.toml
+            tests/_shard_collection.py
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch every shard's DDL report
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: ddl-report-shard-*
+          path: ddl-reports
+
+      - name: DDL/bytes ratchet over the whole run (fan-in)
+        if: needs.changes.outputs.code == 'true'
+        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
+
+      # nexus-abcqb: the tenant-saving ratchet. Sums `provisioned` over every shard's
+      # nx-storage-touch-report.json (uploaded with the DDL report) and checks the run's total against
+      # tests/storage_touch_ceiling.toml. Stdlib only, from the repo root (python3 >= 3.11 for tomllib).
+      # ARMED (nexus-ylpac): `[python_unit] measured_on` in that file names the CI runs the ceiling came
+      # from, so a run whose tenant-minting total is above it fails pytest-gate.
+      # tests/scripts/test_storage_touch_fan_in_wiring.py keeps the step and that key consistent.
+      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6
+
+      # nexus-bo5lv: every shard must split the SAME collection. least_duration (nexus-zkr7q) sorts the
+      # ids and fills the lightest group, so one test missing from one leg's collection moves most of the
+      # split, and the legs would run overlapping groups with a gap while each still passed. Each shard's
+      # workers record the split's input and the group they kept (tests/_shard_collection_plugin.py); this
+      # checks the inputs agree and the groups partition them.
+      - name: Every shard split the same collection
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          python3 -m tests._shard_collection ddl-reports --shards 6
+
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a
     # COMPLETE PG tree + pgvector — can be driven by nx's own provisioner to a
@@ -1724,7 +2012,10 @@ jobs:
               - 'src/nexus/db/pg_provision.py'
               - 'tests/db/test_pg_provision_ca3_bundle.py'
               - 'tests/db/test_pg_bundle_relocation.py'
+              - 'tests/db/test_pg_bundle_extract.py'
+              - 'src/nexus/db/pg_bundle.py'
               - 'scripts/assert_ca3_ran.py'
+              - 'scripts/assert_integration_affected_ran.py'
               - 'scripts/build_pg_bundle.sh'
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
@@ -1886,6 +2177,23 @@ jobs:
           # Reuse the CA-3 non-vacuity asserter (keys on the shared
           # "no CA-3 bundle" skip phrase + the CREATE EXTENSION core test).
           uv run python scripts/assert_ca3_ran.py reloc.xml
+          # First-run locate/extract/select path on the .txz this job just built
+          # (nexus-zfynv). NEXUS_PG_BUNDLE was exported by no gate, so the test
+          # skipped everywhere. Same non-vacuity checker as the affected-
+          # integration job: a skip of the file's only integration test fails.
+          export NEXUS_PG_BUNDLE="$txz"
+          printf '%s\n' tests/db/test_pg_bundle_extract.py > extract-selected.txt
+          set +e
+          uv run pytest tests/db/test_pg_bundle_extract.py -o addopts="" -m integration \
+            --collect-only -q > extract-collect.txt
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then cat extract-collect.txt; echo "::error::collect-only exited $rc"; exit 1; fi
+          collected="$(grep -cE '^[^ ]+\.py::' extract-collect.txt || true)"
+          uv run pytest tests/db/test_pg_bundle_extract.py \
+            -o addopts="" -m integration -q -rs --junit-xml=extract.xml
+          python3 scripts/assert_integration_affected_ran.py \
+            --junit extract.xml --selected extract-selected.txt --collected "$collected"
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.gate.outputs.run == 'true'
@@ -2117,7 +2425,7 @@ jobs:
     # service. A jOOQ-apply, Liquibase, or GraalVM-reachability regression in
     # service/** can merge to develop unseen until a human cuts a release tag.
     # This is a PR trip-wire: on service/** changes, regenerate jOOQ sources
-    # (testcontainers codegen, Docker) and run the SAME native build the release
+    # (the codegen runner, Docker) and run the SAME native build the release
     # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
     #
     # REQUIRED CHECK since 2026-07-13 (nexus-a5rj8, decided by Hal): a RED
@@ -2131,6 +2439,10 @@ jobs:
     name: engine-service native build (PR trip-wire)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -2174,7 +2486,7 @@ jobs:
           distribution: 'graalvm'
           cache: 'maven'
 
-      - name: Generate jOOQ sources (testcontainers codegen, Docker)
+      - name: Generate jOOQ sources (codegen runner, Docker)
         if: steps.changes.outputs.svc == 'true'
         working-directory: service
         run: ./mvnw -q generate-sources
@@ -2262,6 +2574,10 @@ jobs:
     name: write-seam behavioural gate (nexus-h29w1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # nexus-fkhd3: this job checks the codegen replay, so it never restores a cached tree
+      # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
+      NX_JOOQ_CACHE: "off"
     steps:
       - uses: actions/checkout@v7
         with:

@@ -187,6 +187,7 @@ def _seed_collection_with_chunk(t3: T3Database, name: str) -> None:
 # ── Idempotency: re-index after migration ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_migration_returns_conformant_when_steady_state(
     service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:
@@ -212,6 +213,7 @@ def test_migration_returns_conformant_when_steady_state(
 # ── Partial state both-exist: skip rename ──────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_migration_skips_when_both_collections_exist(
     service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:
@@ -280,6 +282,7 @@ def test_migration_no_op_when_catalog_uninitialized(
     assert t3.collection_exists(legacy)
 
 
+@pytest.mark.t2_tenant
 def test_migration_no_op_when_owner_unregistered(
     active_catalog, tmp_path: Path, t3, registry: RepoRegistry, monkeypatch,
 ) -> None:
@@ -314,6 +317,7 @@ def test_migration_no_op_when_owner_unregistered(
 # ── Greenfield (no T3 collections yet) ─────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_migration_returns_conformant_rdr_on_greenfield(
     service_repo_with_owner: Path, active_catalog, t3, registry: RepoRegistry,
 ) -> None:

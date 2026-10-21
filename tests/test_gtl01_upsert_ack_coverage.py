@@ -37,6 +37,9 @@ import structlog
 from structlog.testing import capture_logs
 
 from nexus.db.http_vector_client import HttpVectorClient
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 _COLL = "code__x__stub-code-1024__v1"
 

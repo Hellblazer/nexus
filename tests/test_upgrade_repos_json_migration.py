@@ -57,6 +57,7 @@ class TestRepoJsonMigration:
         # No exception, file still absent.
         assert not (cfg / "repos.json").exists()
 
+    @pytest.mark.t2_tenant
     def test_deletes_file_on_full_catalog_parity(
         self, cfg: Path, cat: Catalog, repo: Path,
     ) -> None:
@@ -68,6 +69,7 @@ class TestRepoJsonMigration:
 
         assert not (cfg / "repos.json").exists()
 
+    @pytest.mark.t2_tenant
     def test_keeps_file_when_catalog_missing_owner(
         self, cfg: Path, cat: Catalog, repo: Path,
     ) -> None:
@@ -83,6 +85,7 @@ class TestRepoJsonMigration:
         # File survives.
         assert (cfg / "repos.json").exists()
 
+    @pytest.mark.t2_tenant
     def test_skips_stale_registry_entries(
         self, cfg: Path, cat: Catalog, repo: Path, tmp_path: Path,
     ) -> None:
@@ -106,6 +109,7 @@ class TestRepoJsonMigration:
         # Live repo has parity; stale entry filtered; file deleted.
         assert not reg_path.exists()
 
+    @pytest.mark.t2_tenant
     def test_dry_run_does_not_delete(
         self, cfg: Path, cat: Catalog, repo: Path,
     ) -> None:

@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Single tenant, real NOBYPASSRLS migrating role (same {@link
  * Hygiene001NotNullMigrationRlsTest#bootstrapAdminRole} / {@link
- * PgContainerHelper#startDedicated()} idiom {@link
+ * PgContainerHelper#startEmptyDatabase()} idiom {@link
  * Hygiene002CollectionAttributesWalkTest} already established for this
  * table's own RLS-toggle mechanism) -- this test's job is to prove the NEW
  * branch-selection logic hygiene-004-1 adds, not to re-prove the RLS-toggle
@@ -69,7 +69,7 @@ class Hygiene004OwnerGrammarUnderscoreTest {
 
     @Test
     void refilesOnlyTheUnderscoredOwnerRowsHygiene002MisclassifiedAsDisputed() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene004_test";
             final String pass = "nexus_admin_hygiene004_test_pass";

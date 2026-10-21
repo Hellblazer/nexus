@@ -36,6 +36,8 @@ import pytest
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
+pytestmark = pytest.mark.t2_tenant
+
 #: (label, store_cls) — every T2 Http*Store adopting RefreshableHttpStoreMixin
 #: shares this constructor-time env-resolution contract. Sorted by label for
 #: deterministic xdist collection order.

@@ -91,6 +91,7 @@ def _seed_plan_row(
 # ── nx plan list / show / delete / reseed (nexus-la28) ─────────────────────
 
 
+@pytest.mark.t2_tenant
 class TestPlanList:
     def test_list_empty_library(self, runner: CliRunner) -> None:
         """A fresh tenant has no plans; list says so instead of erroring.
@@ -173,6 +174,7 @@ class TestPlanList:
         assert data[0]["origin"] == "builtin"
 
 
+@pytest.mark.t2_tenant
 class TestPlanShow:
     def test_show_by_id(
         self, runner: CliRunner, plan_db: T2Database,
@@ -208,6 +210,7 @@ class TestPlanShow:
         assert "no plan" in result.output.lower()
 
 
+@pytest.mark.t2_tenant
 class TestPlanDelete:
     def test_delete_with_yes_flag(
         self, runner: CliRunner, plan_db: T2Database,
@@ -249,6 +252,7 @@ class TestPlanDelete:
 
 
 class TestPlanReseed:
+    @pytest.mark.t2_tenant
     def test_reseed_idempotent(self, runner: CliRunner) -> None:
         """Reseed against the live (engine-served) library is idempotent.
 

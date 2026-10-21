@@ -372,3 +372,73 @@ def test_content_type_inferred_from_collection_prefix() -> None:
     # Non-conformant name with an empty prefix falls back; never the old 'pdf'.
     assert _content_type_for_collection("__weird") == "knowledge"
     assert _content_type_for_collection("code__x") != "pdf"
+
+
+# ── link_by_content_hash ─────────────────────────────────────────────────────
+
+
+class _FakeManifestCatalog:
+    """Records manifest appends; ``entries`` are what list_by_collection returns."""
+
+    def __init__(self, entries: list) -> None:
+        self._entries = entries
+        self.appended: dict[str, list[dict]] = {}
+
+    def list_by_collection(self, collection: str, *, limit: int):
+        return self._entries
+
+    def get_manifest(self, tumbler: str) -> list:
+        return []
+
+    def append_manifest_chunks(self, tumbler: str, chunks: list[dict], *, collection: str) -> None:
+        self.appended.setdefault(tumbler, []).extend(chunks)
+
+
+def _entry(tumbler: str, *, head_hash: str = "", index_content_hash: str = "", meta: dict | None = None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        tumbler=tumbler, head_hash=head_hash,
+        index_content_hash=index_content_hash, meta=meta or {},
+    )
+
+
+def _pdf_chunk(cid: str, content_hash: str, chunk_index: int) -> dict:
+    return {"id": cid, "meta": {"content_hash": content_hash, "chunk_index": chunk_index}}
+
+
+class TestLinkByContentHash:
+    """nexus-lhmu1: the join key is the file-content hash, never head_hash
+    (the indexing commit for repo rows), as link_generator._pdf_content_hash."""
+
+    def test_joins_on_index_content_hash_not_head_hash(self) -> None:
+        commit = "c" * 40
+        cat = _FakeManifestCatalog([
+            _entry("1.1.1", head_hash=commit, index_content_hash="a" * 64),
+            _entry("1.1.2", head_hash=commit, meta={"content_hash": "b" * 64}),
+        ])
+        t3 = _FakeT3({"docs__x": [
+            _pdf_chunk("k2", "a" * 64, 1),
+            _pdf_chunk("k1", "a" * 64, 0),
+            _pdf_chunk("k3", "b" * 64, 0),
+            _pdf_chunk("k4", commit, 0),  # a chunk whose content_hash is the commit joins nothing
+        ]})
+        linked_chunks, linked_docs, unmatched = ob.link_by_content_hash(cat, t3, "docs__x")
+        assert (linked_chunks, linked_docs, unmatched) == (3, 2, 1)
+        assert [c["chash"] for c in cat.appended["1.1.1"]] == ["k1", "k2"]
+        assert [c["chash"] for c in cat.appended["1.1.2"]] == ["k3"]
+
+    def test_hash_shared_by_two_documents_links_neither(self) -> None:
+        cat = _FakeManifestCatalog([
+            _entry("1.1.1", index_content_hash="a" * 64),
+            _entry("1.1.2", index_content_hash="a" * 64),
+        ])
+        t3 = _FakeT3({"docs__x": [_pdf_chunk("k1", "a" * 64, 0)]})
+        assert ob.link_by_content_hash(cat, t3, "docs__x") == (0, 0, 1)
+        assert cat.appended == {}
+
+    def test_head_hash_only_rows_are_not_joinable(self) -> None:
+        cat = _FakeManifestCatalog([_entry("1.1.1", head_hash="a" * 64)])
+        t3 = _FakeT3({"docs__x": [_pdf_chunk("k1", "a" * 64, 0)]})
+        assert ob.link_by_content_hash(cat, t3, "docs__x") == (0, 0, 0)
+        assert cat.appended == {}

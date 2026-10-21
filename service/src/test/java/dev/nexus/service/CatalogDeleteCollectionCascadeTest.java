@@ -126,40 +126,49 @@ class CatalogDeleteCollectionCascadeTest {
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 and
             // taxonomy_centroids_384/768/1024 collapse to "chunks" and
             // "taxonomy_centroids" -- one orphan-check each, not three.
-            for (String tbl : List.of("chunks", "topics", "taxonomy_meta",
-                    "taxonomy_centroids",
-                    "document_aspects", "document_highlights", "aspect_extraction_queue")) {
-                assertThat(rows(su, "SELECT COUNT(*) FROM nexus." + tbl
-                    + " WHERE tenant_id='" + TENANT_A + "' AND collection='" + COLL + "'"))
-                    .as("no orphan rows in " + tbl).isZero();
-            }
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
-                + "' AND source_collection='" + COLL + "'")).as("assignment orphans").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + COLL + "'")).as("catalog_documents orphans").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TENANT_A
-                + "' AND doc_id='dc-doc-1'")).as("manifest rows cascaded via catalog_documents").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + COLL + "'")).as("registry row gone").isZero();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT_A), CHUNKS.COLLECTION.eq(COLL)))
+                .as("no orphan rows in chunks").isZero();
+            assertThat(ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq(TENANT_A), TOPICS.COLLECTION.eq(COLL)))
+                .as("no orphan rows in topics").isZero();
+            assertThat(ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.TENANT_ID.eq(TENANT_A),
+                TAXONOMY_META.COLLECTION.eq(COLL))).as("no orphan rows in taxonomy_meta").isZero();
+            assertThat(ctx.fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_A),
+                TAXONOMY_CENTROIDS.COLLECTION.eq(COLL))).as("no orphan rows in taxonomy_centroids").isZero();
+            assertThat(ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A),
+                DOCUMENT_ASPECTS.COLLECTION.eq(COLL))).as("no orphan rows in document_aspects").isZero();
+            assertThat(ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A),
+                DOCUMENT_HIGHLIGHTS.COLLECTION.eq(COLL))).as("no orphan rows in document_highlights").isZero();
+            assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A),
+                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(COLL))).as("no orphan rows in aspect_extraction_queue").isZero();
+            assertThat(ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A),
+                TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(COLL))).as("assignment orphans").isZero();
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A),
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(COLL))).as("catalog_documents orphans").isZero();
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A),
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("dc-doc-1"))).as("manifest rows cascaded via catalog_documents").isZero();
+            assertThat(ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A),
+                CATALOG_COLLECTIONS.NAME.eq(COLL))).as("registry row gone").isZero();
         }
     }
 
     @Test @Order(30)
     void deleteCollection_isTenantIsolated_tenantBUntouched() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_B
-                + "' AND name='" + COLL + "'")).as("tenant B registry intact").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_B),
+                CATALOG_COLLECTIONS.NAME.eq(COLL))).as("tenant B registry intact").isEqualTo(1);
             // RDR-191 (nexus-o8dil.48): nexus.chunks unified -- all 4 seeded rows
             // (2x embedding_384 + 1x embedding_768 + 1x embedding_1024) are one
             // table now, not 2 in chunks_384 alone.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + COLL + "'")).as("tenant B chunks intact").isEqualTo(4);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + COLL + "'")).as("tenant B queue intact").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + COLL + "'")).as("tenant B centroids intact").isEqualTo(3);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + COLL + "'")).as("tenant B taxonomy_meta intact").isEqualTo(1);
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT_B), CHUNKS.COLLECTION.eq(COLL)))
+                .as("tenant B chunks intact").isEqualTo(4);
+            assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_B),
+                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(COLL))).as("tenant B queue intact").isEqualTo(2);
+            assertThat(ctx.fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_B),
+                TAXONOMY_CENTROIDS.COLLECTION.eq(COLL))).as("tenant B centroids intact").isEqualTo(3);
+            assertThat(ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.TENANT_ID.eq(TENANT_B),
+                TAXONOMY_META.COLLECTION.eq(COLL))).as("tenant B taxonomy_meta intact").isEqualTo(1);
         }
     }
 
@@ -214,16 +223,16 @@ class CatalogDeleteCollectionCascadeTest {
         repo.deleteCollection(TENANT_F8D, COLL_DEL);
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id='" + TENANT_F8D + "' AND doc_id='f8d-doc' AND collection='" + COLL_DEL + "'"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_F8D),
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("f8d-doc"), CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(COLL_DEL)))
                 .as("F8d: a manifest row denormalized to the deleted collection must not "
                     + "survive though its owning document is homed elsewhere")
                 .isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks "
-                + "WHERE tenant_id='" + TENANT_F8D + "' AND collection='" + COLL_DEL + "'"))
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT_F8D), CHUNKS.COLLECTION.eq(COLL_DEL)))
                 .as("the T3 chunk content for the deleted collection is gone").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents "
-                + "WHERE tenant_id='" + TENANT_F8D + "' AND tumbler='f8d-doc'"))
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_F8D),
+                CATALOG_DOCUMENTS.TUMBLER.eq("f8d-doc")))
                 .as("the owning document, homed in a DIFFERENT collection, must "
                     + "survive the deletion of COLL_DEL")
                 .isEqualTo(1);
@@ -466,11 +475,5 @@ class CatalogDeleteCollectionCascadeTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private static int rows(Connection su, String sql) throws Exception {
-        var rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
     }
 }

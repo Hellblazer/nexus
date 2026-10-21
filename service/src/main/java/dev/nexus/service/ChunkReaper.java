@@ -169,7 +169,7 @@ final class ChunkReaper {
     private static final int STATEMENT_TIMEOUT_MS = 25_000;
     private static final int LOCK_TIMEOUT_MS = 2_000;
     /** Marker in the move function's own 55P03 message when the SWEEP GATE (not a row lock) timed out. */
-    private static final String GATE_MESSAGE_MARKER = "RDR-191 sweep gate";
+    private static final String GATE_MESSAGE_MARKER = dev.nexus.service.db.PgSession.SWEEP_GATE_MESSAGE_MARKER;
 
     /**
      * The reaper's settings. Defaults are Sam's rulings (2026-09-26 and 2026-10-01): hourly, 300 chunks per
@@ -531,6 +531,38 @@ final class ChunkReaper {
     private final Map<String, String> resumeCollection = new ConcurrentHashMap<>();
     private final Map<String, String> resumeExpiry = new ConcurrentHashMap<>();
 
+    /**
+     * Forget everything this reaper remembers about {@code tenant}: its timeout streaks and rest passes, its
+     * per-tenant resume cursors, and the wall-clock-cut cursor when it names that tenant (bead nexus-0bl77, the
+     * test-only tenant reset route). Streak keys are {@code tenant/collection#stage}, so they match on the
+     * {@code tenant/} prefix; a tenant id that itself contained {@code '/'} could lose a sibling's streak, which
+     * only shortens a backoff.
+     *
+     * @return the number of entries removed
+     */
+    public int evictTenant(String tenant) {
+        int removed = 0;
+        String prefix = tenant + "/";
+        var streaks = timeoutStreaks.keySet().iterator();
+        while (streaks.hasNext()) {
+            if (streaks.next().startsWith(prefix)) {
+                streaks.remove();
+                removed++;
+            }
+        }
+        if (resumeCollection.remove(tenant) != null) {
+            removed++;
+        }
+        if (resumeExpiry.remove(tenant) != null) {
+            removed++;
+        }
+        if (tenant.equals(resumeTenant)) {
+            resumeTenant = null;
+            removed++;
+        }
+        return removed;
+    }
+
     /** Consecutive timeouts of one statement, and the last pass it is skipped through. */
     private static final class TimeoutStreak {
         int consecutive;
@@ -550,12 +582,21 @@ final class ChunkReaper {
         return streak != null && pass <= streak.skipThroughPass ? streak.skipThroughPass - pass + 1 : 0;
     }
 
+    /** What {@link #noteTimeout} leaves behind: the streak length and the passes the statement now rests. Returned
+     *  so a caller formats its message from it and never reads {@link #timeoutStreaks} again, where a tenant reset
+     *  ({@link #evictTenant}) may have removed the entry in between (nexus-0bl77). */
+    private record TimeoutNote(long consecutive, long rest) { }
+
+    /** Test-only (nexus-0bl77): runs inside {@link #noteTimeout} after the streak is updated and before it returns,
+     *  so a test can evict the tenant exactly there. Null in production. */
+    volatile Runnable testOnlyAfterNoteTimeout;
+
     /**
      * Record one more timeout of the statement under {@code key} on pass {@code pass}. From the
      * {@value #TIMEOUT_BACKOFF_AFTER}rd in a row it rests for 2^k passes, at most 24 hours of passes.
-     * Returns the passes it now rests (0 before the third).
+     * Returns the streak length and the passes it now rests (0 before the third).
      */
-    private long noteTimeout(String key, long pass) {
+    private TimeoutNote noteTimeout(String key, long pass) {
         TimeoutStreak streak = timeoutStreaks.computeIfAbsent(key, k -> new TimeoutStreak());
         streak.consecutive++;
         long rest = 0;
@@ -565,11 +606,17 @@ final class ChunkReaper {
             rest = Math.min(1L << Math.min(k, 30L), cap);
             streak.skipThroughPass = pass + rest;
         }
-        return rest;
+        TimeoutNote note = new TimeoutNote(streak.consecutive, rest);
+        Runnable hook = testOnlyAfterNoteTimeout;
+        if (hook != null) {
+            hook.run();
+        }
+        return note;
     }
 
-    private static String streakDetail(long consecutive, long rest) {
-        return " consecutive=" + consecutive + (rest > 0 ? " it rests for the next " + rest + " pass(es)" : "");
+    private static String streakDetail(TimeoutNote note) {
+        return " consecutive=" + note.consecutive()
+            + (note.rest() > 0 ? " it rests for the next " + note.rest() + " pass(es)" : "");
     }
 
     /**
@@ -1011,10 +1058,10 @@ final class ChunkReaper {
     private CollectionResult censusTimedOut(String tenant, String name, ReaperRepository.Pass probe, String streakKey,
                                             long pass) {
         long timedOut = censusTimedOutTotal.incrementAndGet();
-        long rest = noteTimeout(streakKey, pass);
+        TimeoutNote note = noteTimeout(streakKey, pass);
         return refuse(tenant, name, Refusal.CENSUS_TIMED_OUT, probe.reapable(), probe.total(),
             "census statement exceeded " + settings.censusTimeout().toSeconds() + "s; it was not read, so nothing is "
-                + "moved; census_timed_out_total=" + timedOut + streakDetail(timeoutStreaks.get(streakKey).consecutive, rest),
+                + "moved; census_timed_out_total=" + timedOut + streakDetail(note),
             List.of());
     }
 
@@ -1024,11 +1071,11 @@ final class ChunkReaper {
      */
     private CollectionResult statementTimedOut(String tenant, String name, String stage, String key, long pass) {
         long timedOut = statementTimedOutTotal.incrementAndGet();
-        long rest = noteTimeout(key, pass);
+        TimeoutNote note = noteTimeout(key, pass);
         return refuse(tenant, name, Refusal.STATEMENT_TIMED_OUT, 0, 0,
             "the " + stage.substring(1) + " statement exceeded its " + (STATEMENT_TIMEOUT_MS / 1000) + "s bound; "
                 + "nothing was moved by it; statement_timed_out_total=" + timedOut
-                + streakDetail(timeoutStreaks.get(key).consecutive, rest),
+                + streakDetail(note),
             List.of());
     }
 
@@ -1198,7 +1245,7 @@ final class ChunkReaper {
                 // The expiry (or the listing of the sibling's origins) hit its bound: a counted refusal, audited
                 // once under the sibling's name, resting after the third in a row.
                 long timedOut = statementTimedOutTotal.incrementAndGet();
-                long rest = noteTimeout(key, pass);
+                TimeoutNote note = noteTimeout(key, pass);
                 if (origins == null && pop.quietWhenNoOrigins()) {
                     // The client-moved population looks in EVERY sibling, code, docs and rdr ones included, and the
                     // listing is where it timed out, so nothing says this sibling is a knowledge one: log only. No
@@ -1207,7 +1254,7 @@ final class ChunkReaper {
                     log.warn("event=reaper_{}expire_timed_out tenant={} quarantine={} statement_timed_out_total={} "
                             + "detail={}", v, tenant, quarantine, timedOut,
                         "listing the origins of the client-moved rows exceeded its " + (STATEMENT_TIMEOUT_MS / 1000)
-                            + "s bound" + streakDetail(timeoutStreaks.get(key).consecutive, rest));
+                            + "s bound" + streakDetail(note));
                     return null;
                 }
                 long n = refusedTotal.incrementAndGet();
@@ -1216,7 +1263,7 @@ final class ChunkReaper {
                     + (expired > 0 ? "deleted " + expired + " chunk(s) of the origins it reached first, none after"
                         : "deleted nothing")
                     + "; statement_timed_out_total=" + timedOut
-                    + streakDetail(timeoutStreaks.get(key).consecutive, rest);
+                    + streakDetail(note);
                 log.warn("event=reaper_{}expire_refused tenant={} quarantine={} reason={} refused_total={} "
                         + "expired_before_refusal={} expiry_protected_before_refusal={} detail={}", v, tenant,
                     quarantine, Refusal.STATEMENT_TIMED_OUT, n, expired, protectedCount, detail);

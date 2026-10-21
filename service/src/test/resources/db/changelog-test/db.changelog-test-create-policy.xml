@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (true).
+    jOOQ has no CREATE POLICY. A policy that admits every row, to put a table in a posture the chunks isolation
+    check must (or must not) flag. Run through PgContainerHelper#createPolicyUsingTrue, which renders ${table}
+    from a jOOQ Table and takes ${kind} and ${command} from closed lists and ${policy} and ${role} as plain
+    identifiers (or PUBLIC); runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="create-policy" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (true)</sql>
+    </changeSet>
+</databaseChangeLog>

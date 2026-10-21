@@ -49,6 +49,9 @@ from tests._catalog_fixture_ops import (
     bypass_fk_seed_chunk,
     seed_manifest_chunks,
 )
+import pytest
+
+pytestmark = pytest.mark.t2_tenant
 
 _SEQ = [0]
 

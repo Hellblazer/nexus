@@ -28,6 +28,7 @@ def test_activity_page_renders():
     assert "text/html" in resp.headers["content-type"]
 
 
+@pytest.mark.t2_tenant
 def test_health_page_renders():
     app = create_app()
     client = TestClient(app)

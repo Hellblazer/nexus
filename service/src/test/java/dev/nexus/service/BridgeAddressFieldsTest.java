@@ -26,6 +26,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -155,40 +158,49 @@ class BridgeAddressFieldsTest {
         // Schema: catalog_owners PK is (tenant_id, tumbler_prefix); catalog_documents PK is (tenant_id, tumbler).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            org.jooq.DSLContext ownCtx = DSL.using(su, SQLDialect.POSTGRES);
             // owner — actual schema has (tenant_id, tumbler_prefix, name, owner_type, repo_root)
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root)"
-                + " VALUES ('" + TENANT + "', 'g5addr', 'G5 Addr Test', 'user', '')"
-                + " ON CONFLICT DO NOTHING");
+            ownCtx.insertInto(CATALOG_OWNERS)
+                .set(CATALOG_OWNERS.TENANT_ID, TENANT)
+                .set(CATALOG_OWNERS.TUMBLER_PREFIX, "g5addr")
+                .set(CATALOG_OWNERS.NAME, "G5 Addr Test")
+                .set(CATALOG_OWNERS.OWNER_TYPE, "user")
+                .set(CATALOG_OWNERS.REPO_ROOT, "")
+                .onConflictDoNothing()
+                .execute();
             // document — PK is (tenant_id, tumbler)
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents"
-                + " (tenant_id, tumbler, title, content_type, source_uri, indexed_at)"
-                + " VALUES ('" + TENANT + "', 'g5addr.1', 'G5 Test Note', 'markdown', '"
-                + SOURCE_URI + "', now())"
-                + " ON CONFLICT DO NOTHING");
+            ownCtx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "g5addr.1")
+                .set(CATALOG_DOCUMENTS.TITLE, "G5 Test Note")
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "markdown")
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, SOURCE_URI)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, DSL.currentOffsetDateTime())
+                .onConflictDoNothing()
+                .execute();
             // manifest row linking document -> chunk
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks"
-                + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
-                + " VALUES ('" + TENANT + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "',"
-                + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-                + "' AND name = '" + COL + "'))"
-                + " ON CONFLICT DO NOTHING");
+            insertManifestRow(ownCtx, TENANT);
 
             // H2 isolation: TENANT2 owns the SAME tumbler string 'g5addr.1' with a DIFFERENT
             // source_uri. The JOIN must use d.tenant_id=? so TENANT2's search never returns
             // TENANT's SOURCE_URI (and vice versa).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr', 'G5 Addr Test 2', 'user', '')"
-                + " ON CONFLICT DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents"
-                + " (tenant_id, tumbler, title, content_type, source_uri, indexed_at)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 'G5 Test Note 2', 'markdown',"
-                + " 'file:///vault/tenant2/other.md', now())"
-                + " ON CONFLICT DO NOTHING");
+            ownCtx.insertInto(CATALOG_OWNERS)
+                .set(CATALOG_OWNERS.TENANT_ID, TENANT2)
+                .set(CATALOG_OWNERS.TUMBLER_PREFIX, "g5addr")
+                .set(CATALOG_OWNERS.NAME, "G5 Addr Test 2")
+                .set(CATALOG_OWNERS.OWNER_TYPE, "user")
+                .set(CATALOG_OWNERS.REPO_ROOT, "")
+                .onConflictDoNothing()
+                .execute();
+            ownCtx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT2)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "g5addr.1")
+                .set(CATALOG_DOCUMENTS.TITLE, "G5 Test Note 2")
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "markdown")
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///vault/tenant2/other.md")
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, DSL.currentOffsetDateTime())
+                .onConflictDoNothing()
+                .execute();
 
             // RDR-192 Step 5 (nexus-wbfpw.10): live(c) requires a live own-collection
             // manifest owner for a chunk to be visible at all -- CHASH_WITHOUT_URI used
@@ -198,7 +210,6 @@ class BridgeAddressFieldsTest {
             // (the column defaults to '' NOT NULL, so this is the closest surviving
             // analogue of "no source_uri to resolve" -- see search_optIn_carriesSourceUri
             // and get_optIn_carriesSourceUris, which assert "" rather than null now).
-            org.jooq.DSLContext ownCtx = DSL.using(su, SQLDialect.POSTGRES);
             ownCtx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, TENANT)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, "g5addr.2")
@@ -254,14 +265,22 @@ class BridgeAddressFieldsTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks"
-                + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "',"
-                + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT2
-                + "' AND name = '" + COL + "'))"
-                + " ON CONFLICT DO NOTHING");
+            insertManifestRow(DSL.using(su, SQLDialect.POSTGRES), TENANT2);
         }
+    }
+
+    /** The manifest row linking {@code g5addr.1} to {@code CHASH_WITH_URI} under {@code tenant}. */
+    private static void insertManifestRow(org.jooq.DSLContext ctx, String tenant) {
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "g5addr.1")
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(CHASH_WITH_URI))
+            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, COL))
+            .onConflictDoNothing()
+            .execute();
     }
 
     @AfterAll

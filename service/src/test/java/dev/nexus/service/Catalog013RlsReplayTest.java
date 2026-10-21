@@ -5,6 +5,7 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
@@ -13,12 +14,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -94,24 +95,24 @@ class Catalog013RlsReplayTest {
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
-            // DBA bootstrap: the grants changeset (runAlways) requires nexus_svc.
-            exec(su,
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; "
-                + "  END IF; "
-                + "END $$");
-            exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '"
-                + ADMIN_PASS + "' NOSUPERUSER NOBYPASSRLS");
+            // nexus_svc needs no hand-created bootstrap: role-001-nexus-svc.xml (first
+            // include of the master changelog, run as superuser in step 1) creates it
+            // before the runAlways grants changeset needs it (nexus-cbo4a batch 9).
+            // The replay role below stays hand-built: it is the point of this test.
+            PgContainerHelper.createLoginRole(su, ADMIN_ROLE, ADMIN_PASS, false);
             // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
             // visibility: granting pg_monitor onward to nexus_svc needs the grantor to
             // hold pg_monitor WITH ADMIN OPTION (or be superuser). Same DBA-bootstrap
             // mirror as GrantsSvcForeignOwnedRelationTest and the other replay fixtures.
-            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
+            PgContainerHelper.grantRoleWithAdminOption(su, "pg_monitor", ADMIN_ROLE);
 
             // 1. Full changelog as superuser — post-RDR-180 schema (bytea).
             liquibaseUpdate(pg.getJdbcUrl(),
                 PgContainerHelper.USERNAME, PgContainerHelper.PASSWORD);
+            // The nexus_test helper functions seedRow's FK bypass calls (nexus-cbo4a). Journalled in the
+            // superuser-owned public.databasechangelog under their own file name, so the admin replay in
+            // step 5 neither sees nor re-runs them; nexus_test is outside the step-3 ownership loop.
+            PgContainerHelper.installTestObjects(su);
 
             // 2. Seed the REAL mid-migration legacy state: 16-byte decoded
             //    pre-RDR-180 values (what the type conversion leaves before
@@ -126,33 +127,28 @@ class Catalog013RlsReplayTest {
             // mid-migration state arises from the type conversion of rows
             // that predate rdr180; reconstruct it the same way the pre-flip
             // incident tests did — drop, seed, re-add NOT VALID.
-            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
-                + "DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+                .dropConstraint("catalog_document_chunks_chash_octet_check").execute();
             byte[] legacyA = HexFormat.of().parseHex("a".repeat(32));  // 16 bytes
             byte[] legacyC = HexFormat.of().parseHex("c".repeat(32));
             seedRow(su, "t1", legacyA, "code__x");
             seedRow(su, "t2", legacyC, "code__z");
-            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            PgContainerHelper.readdChashOctetChecksNotValid(su);
 
             // 3. Production-shaped ownership for the replay role.
-            exec(su, "GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);
-            exec(su,
-                "DO $$ DECLARE r record; BEGIN "
-                + "  FOR r IN SELECT schemaname, tablename FROM pg_tables "
-                + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-                + "    EXECUTE format('ALTER TABLE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-                + "                   r.schemaname, r.tablename); "
-                + "  END LOOP; "
-                + "  FOR r IN SELECT schemaname, sequencename FROM pg_sequences "
-                + "           WHERE schemaname IN ('nexus', 't1') LOOP "
-                + "    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO " + ADMIN_ROLE + "', "
-                + "                   r.schemaname, r.sequencename); "
-                + "  END LOOP; "
-                + "END $$");
-            exec(su, "GRANT ALL ON TABLE public.databasechangelog, "
-                + "public.databasechangeloglock TO " + ADMIN_ROLE);
+            // db.changelog-test-product-schema-owner.xml: USAGE/CREATE on the schemas, then ownership of
+            // every nexus/t1 table and sequence.
+            PgContainerHelper.handProductSchemaTo(su, ADMIN_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .grant(DSL.privilege("ALL"))
+                .on(DSL.table(DSL.name("public", "databasechangelog")))
+                .to(DSL.role(ADMIN_ROLE))
+                .execute();
+            DSL.using(su, SQLDialect.POSTGRES)
+                .grant(DSL.privilege("ALL"))
+                .on(DSL.table(DSL.name("public", "databasechangeloglock")))
+                .to(DSL.role(ADMIN_ROLE))
+                .execute();
 
             String url = pg.getJdbcUrl();
             try (Connection admin = DriverManager.getConnection(url, ADMIN_ROLE, ADMIN_PASS)) {
@@ -160,9 +156,9 @@ class Catalog013RlsReplayTest {
                 // 4. The RLS-blindness ground truth that motivated the
                 //    no-DML design: FORCE RLS + no tenant GUC hides every
                 //    row from the non-BYPASSRLS owner.
-                assertThat(count(su, "SELECT count(*) FROM nexus.catalog_document_chunks"))
+                assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS))
                     .as("superuser ground truth").isEqualTo(2);
-                assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_document_chunks"))
+                assertThat(DSL.using(admin, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS))
                     .as("FORCE RLS hides every row from the non-BYPASSRLS owner "
                         + "— any DML in a changeset would silently no-op here")
                     .isEqualTo(0);
@@ -177,15 +173,16 @@ class Catalog013RlsReplayTest {
 
             // 6. The legacy rows are byte-untouched (rekey belongs to
             //    /v1/remap/rekey under withTenant, never to Liquibase).
-            assertThat(count(su,
-                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE octet_length(chash) = 16"))
+            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(suCtx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                    DSL.function("octet_length", Integer.class, CATALOG_DOCUMENT_CHUNKS.CHASH).eq(16)))
                 .as("mid-migration legacy rows survive the replay unmodified")
                 .isEqualTo(2);
             // The octet CHECK exists and remains NOT VALID (validated only
             // by the client rung's admin connection, post-rekey).
-            assertThat(count(su,
-                "SELECT count(*) FROM pg_constraint "
-                + "WHERE conname = 'catalog_document_chunks_chash_octet_check' AND NOT convalidated"))
+            assertThat(suCtx.fetchCount(DSL.table(DSL.name("pg_constraint")),
+                    DSL.field(DSL.name("conname"), String.class).eq("catalog_document_chunks_chash_octet_check"),
+                    DSL.field(DSL.name("convalidated"), Boolean.class).isFalse()))
                 .isEqualTo(1);
         }
     }
@@ -215,16 +212,18 @@ class Catalog013RlsReplayTest {
         // Manifest vehicle (RDR-187: the chash_index original was dropped):
         // parent doc first, then the chunk-pointer row carrying the legacy
         // 16-byte chash.
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_documents "
-            + "(tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) "
-            + "VALUES (?, ?, 'replay doc', 'a', 2026, 'paper', 'research', ?) "
-            + "ON CONFLICT DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, "replay-" + tenant);
-            ps.setString(3, collection);
-            ps.executeUpdate();
-        }
+        DSLContext seed = DSL.using(c, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "replay-" + tenant)
+            .set(CATALOG_DOCUMENTS.TITLE, "replay doc")
+            .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+            .set(CATALOG_DOCUMENTS.YEAR, 2026)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflictDoNothing()
+            .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every catalog_document_chunks insert. This
         // test's whole point is replaying a LEGACY 16-byte (pre-octet-CHECK) chash
@@ -234,38 +233,16 @@ class Catalog013RlsReplayTest {
         // FK locally: drop the constraint, insert, then re-add it NOT VALID
         // (catalog-029-0's exact shape) so it is live again (unvalidated) for every
         // subsequent statement on this connection/container.
-        c.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-            + "VALUES (?, ?, 0, ?, ?, (SELECT embedding_model FROM nexus.catalog_collections "
-            + "WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, "replay-" + tenant);
-            ps.setBytes(3, chash);
-            ps.setString(4, collection);
-            ps.setString(5, tenant);
-            ps.setString(6, collection);
-            ps.executeUpdate();
-        }
-        c.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks "
-            + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-            + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-            + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-            + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
+        PgContainerHelper.dropCatalogChunksFk(c);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "replay-" + tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                PgContainerHelper.collectionModel(seed, tenant, collection))
+            .execute();
+        PgContainerHelper.readdCatalogChunksFkNotValid(c);
     }
 }

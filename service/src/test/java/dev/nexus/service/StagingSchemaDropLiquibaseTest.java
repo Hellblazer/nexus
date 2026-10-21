@@ -19,12 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.SQLWarning;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -65,13 +60,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       MARK_RAN branch.</li>
  * </ol>
  *
- * <p>Hermetic: Testcontainers pgvector, requires Docker. Dedicated clusters:
+ * <p>Hermetic: Testcontainers pgvector, requires Docker. Each test takes an empty database on the shared
+ * cluster (nexus-7xfh7), and declares the cluster-global roles it creates ({@code nexus_diag}, {@code ops_dba},
+ * {@code staging_nonowner}) exclusive, so the holder drops them at stop. Formerly dedicated clusters:
  * {@code nexus_diag} is a cluster-global role.
  */
 class StagingSchemaDropLiquibaseTest {
 
     static final String MASTER = "db/changelog/db.changelog-master.xml";
     static final String DROP_CHANGESET = "staging-6-drop-landing-schema";
+    private static final String STAGING_DROP_CHANGELOG = "db/changelog/staging-003-drop-landing-schema.xml";
 
     private static final List<String> STAGING_TABLES = List.of(
         "chunks", "document_chunks", "topic_assignments",
@@ -164,13 +162,13 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void agedStore_withRows_nexusDiagAndItsStagingGrants_isDropped() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("nexus_diag")) {
             // nexus_diag exists BEFORE the pre-drop walk, as it does on every production
             // cluster (created by pg_provision/the DBA, never by the changelog). jOOQ's
-            // open-source DSL has no CREATE ROLE, so this is one raw statement.
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            // open-source DSL has no CREATE ROLE, so it goes through a test changelog.
+            try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                st.execute("CREATE ROLE nexus_diag NOLOGIN");
+                PgContainerHelper.createNologinRole(su, "nexus_diag");
             }
 
             migrateUpToDropChangeset(pg);
@@ -188,12 +186,14 @@ class StagingSchemaDropLiquibaseTest {
                 assertThat(ctx.fetchCount(STAGING_FRECENCY) + ctx.fetchCount(STAGING_DOC_CHUNKS))
                     .as("precondition: the aged rows landed, so the drop has data to discard")
                     .isEqualTo(2);
-                try (Statement st = su.createStatement()) {
-                    // What the OLD grants-nexus-diag-3 gave nexus_diag on staging (before nexus-z0o2p.27).
-                    st.execute("GRANT USAGE ON SCHEMA staging TO nexus_diag;"
-                        + " GRANT SELECT ON ALL TABLES IN SCHEMA staging TO nexus_diag;"
-                        + " ALTER DEFAULT PRIVILEGES IN SCHEMA staging GRANT SELECT ON TABLES TO nexus_diag");
+                // What the OLD grants-nexus-diag-3 gave nexus_diag on staging (before nexus-z0o2p.27):
+                // schema USAGE, SELECT on every table (the seven asserted above), and a default ACL.
+                PgContainerHelper.grantSchemaUsage(su, "staging", "nexus_diag");
+                for (String t : STAGING_TABLES) {
+                    ctx.grant(DSL.privilege("SELECT")).on(DSL.table(DSL.name("staging", t)))
+                        .to(DSL.role("nexus_diag")).execute();
                 }
+                PgContainerHelper.grantSchemaDefaultSelectAcl(su, "staging", "nexus_diag");
                 assertThat(stagingDefaultAcls(ctx))
                     .as("precondition: the old default ACL on schema staging is present")
                     .isPositive();
@@ -225,7 +225,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void foreignObjectInTheSchema_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             Table<?> foreign = DSL.table(DSL.name("staging", "ops_note"));
@@ -252,7 +252,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void namedTableWithADependentViewOutsideTheSchema_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             // An ops-created view over a table the changeset DOES name: DROP TABLE of it
@@ -284,7 +284,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void namedTableReferencedByAForeignKeyFromOutside_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             // A DBA table in public with a foreign key INTO staging.frecency's primary key.
@@ -321,7 +321,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nosuperuserOwnerRole_dropsEverythingItOwns_andTheSchema() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             provisionOwnerRole(pg);
             try (Connection owner = ownerConnection(pg)) {
                 walkUpToDropChangeset(owner);
@@ -355,7 +355,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nosuperuserOwnerRole_withForeignOwnedObjects_dropsWhatItNames_andLeavesWhatItDoesNot() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("ops_dba")) {
             provisionOwnerRole(pg);
             try (Connection owner = ownerConnection(pg)) {
                 walkUpToDropChangeset(owner);
@@ -363,14 +363,10 @@ class StagingSchemaDropLiquibaseTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                try (Statement st = su.createStatement()) {
-                    st.execute("CREATE ROLE ops_dba NOLOGIN");
-                    st.execute("ALTER TABLE staging.relevance_log OWNER TO ops_dba");
-                }
+                PgContainerHelper.createNologinRole(su, "ops_dba");
+                PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("staging", "relevance_log")), "ops_dba");
                 ctx.createTable(DSL.name("staging", "ops_note")).column("note", SQLDataType.CLOB).execute();
-                try (Statement st = su.createStatement()) {
-                    st.execute("ALTER TABLE staging.ops_note OWNER TO ops_dba");
-                }
+                PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("staging", "ops_note")), "ops_dba");
             }
 
             try (Connection owner = ownerConnection(pg)) {
@@ -401,29 +397,26 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nonOwnerRole_everyDropRaisesInsufficientPrivilege_andNothingIsDropped() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("staging_nonowner")) {
             migrateUpToDropChangeset(pg);
+            assertThat(PgContainerHelper.changesetForwardText(STAGING_DROP_CHANGELOG, DROP_CHANGESET))
+                .as("the replay runs the staging drop itself").contains("DROP SCHEMA staging");
 
-            String body = extractChangesetBody(DROP_CHANGESET);
-            assertThat(body).contains("DROP SCHEMA staging");
-
-            List<String> notices = new ArrayList<>();
+            List<String> notices;
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 ctx.insertInto(STAGING_FRECENCY, TENANT_ID, CHUNK_ID).values("t-keep", "feedbeef").execute();
-                try (Statement st = su.createStatement()) {
-                    st.execute("CREATE ROLE staging_nonowner NOLOGIN");
-                    st.execute("GRANT USAGE ON SCHEMA staging TO staging_nonowner");
-                    st.execute("SET ROLE staging_nonowner");
-                    try {
-                        st.execute(body); // must not throw: a refused drop is a NOTICE, never an error
-                        for (SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) {
-                            notices.add(w.getMessage());
-                        }
-                    } finally {
-                        st.execute("RESET ROLE");
-                    }
+                PgContainerHelper.createNologinRole(su, "staging_nonowner");
+                PgContainerHelper.grantSchemaUsage(su, "staging", "staging_nonowner");
+                // SET ROLE is the GUC "role"; the value "none" is RESET ROLE.
+                ctx.set(DSL.name("role"), DSL.inline("staging_nonowner")).execute();
+                try {
+                    // The changeset's own body, read from the changelog; the NOTICEs are read off the statement's
+                    // warning chain. Must not throw: a refused drop is a NOTICE, never an error.
+                    notices = PgContainerHelper.replayChangeset(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
+                } finally {
+                    ctx.set(DSL.name("role"), DSL.inline("none")).execute();
                 }
 
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
@@ -451,7 +444,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void rollback_isIdempotent_overAPartiallyDroppedSchema() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -462,17 +455,19 @@ class StagingSchemaDropLiquibaseTest {
             }
             updateAll(pg);
 
-            String rollback = extractChangesetRollback(DROP_CHANGESET);
-            assertThat(rollback).contains("CREATE POLICY tenant_isolation");
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
                     .as("precondition: the tolerant drop left exactly one table behind")
                     .containsExactly("frecency");
 
-                st.execute(rollback); // over a partial drop: frecency and its policy already exist
-                st.execute(rollback); // and again over the complete structure
+                assertThat(PgContainerHelper.changesetRollbackText(STAGING_DROP_CHANGELOG, DROP_CHANGESET))
+                    .as("the rollback replay recreates the policy").contains("CREATE POLICY tenant_isolation");
+                // over a partial drop: frecency and its policy already exist
+                PgContainerHelper.replayChangesetRollback(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
+                // and again over the complete structure
+                PgContainerHelper.replayChangesetRollback(su, STAGING_DROP_CHANGELOG, DROP_CHANGESET);
 
                 assertThat(PgCatalogProbes.tablesInSchema(ctx, "staging"))
                     .containsExactlyInAnyOrderElementsOf(STAGING_TABLES);
@@ -488,7 +483,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void missingSchema_marksTheChangesetRan() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             try (Connection su = pg.createConnection("")) {
@@ -506,40 +501,6 @@ class StagingSchemaDropLiquibaseTest {
         }
     }
 
-    private static final Pattern SQL_BODY = Pattern.compile("<sql(?:\\s[^>]*)?>(.*?)</sql>", Pattern.DOTALL);
-
-    /** The {@code <sql>} text of one changeset, read from the changelog on the classpath. */
-    private static String extractChangesetBody(String changesetId) throws Exception {
-        String xml;
-        try (var in = StagingSchemaDropLiquibaseTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/staging-003-drop-landing-schema.xml")) {
-            assertThat(in).as("staging-003 changelog on the classpath").isNotNull();
-            xml = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        }
-        int at = xml.indexOf("<changeSet id=\"" + changesetId + "\"");
-        assertThat(at).as("changeset " + changesetId).isGreaterThanOrEqualTo(0);
-        Matcher m = SQL_BODY.matcher(xml);
-        assertThat(m.find(at)).isTrue();
-        return m.group(1);
-    }
-
-    private static final Pattern ROLLBACK_BODY = Pattern.compile("<rollback>(.*?)</rollback>", Pattern.DOTALL);
-
-    /** The {@code <rollback>} text of one changeset, read from the changelog on the classpath. */
-    private static String extractChangesetRollback(String changesetId) throws Exception {
-        String xml;
-        try (var in = StagingSchemaDropLiquibaseTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/staging-003-drop-landing-schema.xml")) {
-            assertThat(in).as("staging-003 changelog on the classpath").isNotNull();
-            xml = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        }
-        int at = xml.indexOf("<changeSet id=\"" + changesetId + "\"");
-        assertThat(at).as("changeset " + changesetId).isGreaterThanOrEqualTo(0);
-        Matcher m = ROLLBACK_BODY.matcher(xml);
-        assertThat(m.find(at)).isTrue();
-        return m.group(1);
-    }
-
     private static String schemaOwner(DSLContext ctx) {
         return ctx.select(DSL.function("pg_get_userbyid", String.class, DSL.field(DSL.name("nspowner"))))
             .from(DSL.table(DSL.name("pg_namespace")))
@@ -551,19 +512,12 @@ class StagingSchemaDropLiquibaseTest {
      * Provision the cluster the way production's DBA does: a NOSUPERUSER role that will run
      * the walk (and so create and own schema staging), the service role, the CREATE grants a
      * schema creator needs, and the extension-relocation helper the mid-walk
-     * search-path-001 changeset calls. Mirrors SchemaMigratorIntegrationTest's bootstrap.
+     * search-path-001 changeset calls. All of it is the db.changelog-test-nonsuper-owner.xml
+     * test changelog (PgContainerHelper#bootstrapNonSuperuserOwner).
      */
     private static void provisionOwnerRole(PostgreSQLContainer<?> pg) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            su.setAutoCommit(true);
-            st.execute("CREATE ROLE " + OWNER_ROLE + " LOGIN PASSWORD '" + OWNER_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            st.execute("CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'"
-                + " NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            st.execute("GRANT CREATE ON DATABASE " + pg.getDatabaseName() + " TO " + OWNER_ROLE);
-            st.execute("GRANT CREATE ON SCHEMA public TO " + OWNER_ROLE);
-            st.execute("GRANT pg_monitor TO " + OWNER_ROLE + " WITH ADMIN OPTION");
-            SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk(su, OWNER_ROLE);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, OWNER_ROLE, OWNER_PASS);
         }
     }
 }

@@ -457,6 +457,12 @@ COLLECT_FLOOR = 730
 
 
 @pytest.mark.lint
+# The child collects every integration file, and several (test_mcp_server,
+# test_integration, test_check_engine_release_floor) probe whether a service is
+# reachable at IMPORT time; with none configured each probe constructs the
+# resolver's error and swallows it. That is the point of the skipif, and the
+# storage-touch guard sees it through the child shim (nexus-j23ni).
+@pytest.mark.expects_unresolvable_endpoint
 def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
     """The selector's universe must contain every file pytest collects.
 

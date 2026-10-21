@@ -1,0 +1,65 @@
+# Every test class that boots its own Postgres (nexus-0ty8z, step 1).
+# A class is a caller of PgContainerHelper.startEmptyDatabase / startDedicated / newContainer, or a
+# class that was moved onto a template clone and must stay there (call=clone).
+# Columns: class <TAB> call <TAB> kind <TAB> reason.  DbStartClassificationGateTest enforces the table
+# both ways: an unlisted caller fails, a stale row fails. A class whose subject is NOT the walk or a
+# cluster-level fact has no kind here; it takes a clone (PgContainerHelper.start() or startMigratedByOwner()).
+Catalog044OwnerFromDocumentsRepairTest	startEmptyDatabase	WALK	migrates to just before catalog-044-1, seeds the pre-fix owner shape, applies the rest and reads the repair back
+ServiceTokenScopeBackfillTest	startEmptyDatabase	WALK	builds the pre-003 service_tokens shape by hand, then applies only service-tokens-003 and asserts the backfill
+VectorsUnifyChunksIntegrationTest	startEmptyDatabase	WALK	stages vectors-004 against a seeded per-dimension pre-state and asserts the unify
+VectorsRepointFunctionsIntegrationTest	startEmptyDatabase	WALK	chains vectors-004, taxonomy-007 and vectors-005 over a seeded pre-state and calls every repointed object
+VectorsUnifyCentroidsIntegrationTest	startEmptyDatabase	WALK	stages taxonomy-007 against seeded per-dimension centroids and asserts the unify
+Taxonomy014TenantFkRepointTest	startEmptyDatabase	WALK	walks to before taxonomy-014, seeds the pre-repoint foreign keys, applies it and asserts the repoint
+Rdr71gw2CollectionNotNullTest	startEmptyDatabase	WALK	stops the walk before vectors-004-1: catalog-025 reads the per-dimension chunk tables the unify drops
+MigrationJobsDroppedTest	startEmptyDatabase	WALK	proves migration-002 drops migration_jobs, against a walk that excludes the drop and one that includes it
+Hygiene001NotNullMigrationRlsTest	startEmptyDatabase	WALK	walks to before hygiene-001-1, seeds legacy rows in two tenants, asserts the FORCE-RLS-toggled backfill as a NOBYPASSRLS owner
+Hygiene002CollectionAttributesWalkTest	startEmptyDatabase	WALK	walks to before hygiene-002-1, seeds every branch, asserts the backfill and the constraints it adds
+Hygiene004OwnerGrammarUnderscoreTest	startEmptyDatabase	WALK	walks to before hygiene-004-1, seeds misclassified rows, asserts the re-file
+Hygiene005GcRegistrationFromOriginRowDataCorrectionTest	startEmptyDatabase	WALK	walks to before hygiene-005-3, seeds the shipped defect's shape, asserts the correction
+Hygiene006SequenceCatchupTest	startEmptyDatabase	WALK	walks to before hygiene-006-1, seeds lagging sequences, asserts the catch-up
+Hygiene007DocCountRecountTest	startEmptyDatabase	WALK	walks to before hygiene-007-1, seeds drifted doc_count, asserts the recount
+Hygiene008GcBoundedRegistrationDataCorrectionTest	startEmptyDatabase	WALK	walks to before hygiene-008-1, produces the misregistration with the old function body, asserts the correction
+AspectDocIdBackfillTest	startEmptyDatabase	WALK	walks to before aspects-004, seeds a legacy row, asserts the FORCE-RLS-toggled backfill stamps it as a NOBYPASSRLS owner
+Pipeline002PerRowIdentityMigrationTest	startEmptyDatabase	WALK	walks to before pipeline-002-1, seeds the pipeline-001 shape, asserts the re-key and the rollback
+Catalog036EmbeddingProfileSchemaLiquibaseTest	startEmptyDatabase	WALK	its two empty-database cases need the state between catalog-036 and hygiene-002-1, and a populated pre-existing row
+TuplesBaselineSchemaLiquibaseTest	startEmptyDatabase	WALK	rolls the tuples changesets back and reapplies them, walks from empty, and cleans legacy oversized rows
+StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-003, sets up one shape per test (aged rows, foreign grants, non-owner), finishes the walk and asserts the drop
+P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
+P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
+SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk back to a tag and re-walks, asserting what each rollback leaves
+SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
+SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks
+P225DiskPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's disk preflight, which fires only while vectors-030-1 is still pending
+GrantsNexusDiagViewAccessIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and connects as it to prove the grants a full walk gives it
+Taxonomy011ForeignOwnedDiagViewTest	startEmptyDatabase	OWNERSHIP	replays taxonomy-011-1 against a pre-existing foreign-owned view, a state only a database before the walk can hold
+GrantsSvcForeignOwnedRelationTest	startEmptyDatabase	OWNERSHIP	replays the GH 1402 crash loop: an owner walks from scratch, then a superuser-owned view meets the grants changeset
+TextGateProbeSingleRoleGuardIntegrationTest	startEmptyDatabase	OWNERSHIP	walks the schema as each of several migrator roles (nexus_svc, a superuser, a BYPASSRLS login) and asserts vectors-029's precondition
+TextGateProbeSingleRoleGuardIntegrationTest	startDedicated	CLUSTER_STATE	grants role membership edges on nexus_svc, which would leak into every later class on a shared cluster
+ServiceIntegrationTest	startEmptyDatabase	SKELETON	a hand-made RLS harness with no product schema; pins that /version reports a missing public.databasechangelog, so the database must be unmigrated
+VersionHandlerSchemaChangesetCountTest	startEmptyDatabase	SKELETON	builds a minimal public.databasechangelog-shaped table itself; a migrated database already has the real one
+SharedClusterEmptyDatabaseTest	startEmptyDatabase	INFRA	tests acquireEmptyDatabase itself: isolation, exclusive roles, cleanup
+GrantsPgMonitorTest	startDedicated	CLUSTER_STATE	falsifies grants-004 without the migrator's pg_monitor admin option; on a shared cluster nexus_svc already holds pg_monitor (role membership is cluster-wide)
+ReadPathLeafPruningIntegrationTest	startDedicated	CLUSTER_STATE	reads the plans auto_explain writes to the container's server log, and sets auto_explain on a cluster-wide role
+Rdr192LiveCExplainEvidenceIntegrationTest	startDedicated	CLUSTER_STATE	reads auto_explain plans from the container's server log, which a shared cluster fills with every class's output
+PgServerLogTest	startDedicated	CLUSTER_STATE	tests the server-log reader against containers whose log it controls
+PgServerLogTest	newContainer	INFRA	builds the container recipe unstarted to pin its wait strategy, and starts one whose wait must fail to read the log tail it prints
+TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STATE	a latency measurement that creates and drops about 2,500 leaves; wants an idle server and a lock table of its own
+ChashProbePlanShapeTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
+ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
+ChunkLiveOwnersRecallExtendedIntegrationTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 4g tmpfs and 6g container
+PgBouncerTenantIsolationTest	newContainer	NETWORK	attaches the Postgres container to a Docker network shared with a PgBouncer container
+PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a different image (plpgsql_check)
+DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)
+DdlCountSwitchTest	startDedicated	INFRA	tests the DDL counter's switch on a dedicated container (its server log goes to Docker when the counter is off)
+DdlCountSwitchTest	startEmptyDatabase	INFRA	tests the DDL counter's switch on an empty database (the probe is installed only when the counter is on)
+DdlExitBudgetTest	newContainer	INFRA	registers unstarted containers with the DDL counter to drive its JVM-exit budget; nothing is booted
+PristineCloneSkipTest	startEmptyDatabase	INFRA	tests applyProductSchema's pristine-clone skip; needs an empty database to prove the skip never applies to one
+PgContainerTmpfsGateTest	newContainer	INFRA	tests the container factory's own tmpfs and memory bounds
+FailFastPostgreSQLContainerTest	newContainer	INFRA	tests that the factory returns the fail-fast container
+ChunkLeafAutovacuumReloptionsIntegrationTest	clone	CLONE_OWNER	asserts the state the walk leaves and later boots; the walk is the owner-migrated template's (nexus-0ty8z)
+TenantPartitionFunctionsIntegrationTest	clone	CLONE_OWNER	tests the vectors-030 objects on scratch parents, as the owner; the walk is the template's (nexus-0ty8z)
+DropTenantPartitionsIntegrationTest	clone	CLONE_OWNER	tests drop_tenant_partitions as the owner on a migrated store; the walk is the template's (nexus-0ty8z)
+PciReconcilerIntegrationTest	clone	CLONE_OWNER	tests the PCI reconciler as the owner on a migrated store; the walk is the template's (nexus-0ty8z)
+LeafBloatCatalogIntegrationTest	clone	CLONE_OWNER	reads leaf statistics and reloptions of a migrated store as the owner and a service role; the walk is the template's (nexus-dxsjc)
+PartitionAccessSelfHealIntegrationTest	clone	CLONE_OWNER	injects drift by owner DDL on a migrated store and re-runs migrate; the first walk is the template's (nexus-0ty8z)
+SchemaMigratorStaleChangelogLockIntegrationTest	clone	CLONE	needs a completed first walk, then drives the lock cases; a template clone is that walk (nexus-0ty8z)

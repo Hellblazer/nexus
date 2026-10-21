@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: ServiceIntegrationTest's hand-rolled skeleton harness, in Liquibase XML
+    instead of Java SQL strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests
+    included).
+
+    The harness deliberately does NOT run the product master changelog (nexus-yhmav
+    opt-out, see the test's startAll): it provisions only what the S0.1 RLS spike and the
+    auth matrix need. A plain LOGIN service role svc_test, a FORCE-RLS probe table
+    nexus_test.rls_probe whose policy keys on the nexus.tenant GUC, and a minimal
+    nexus.service_tokens table (shape mirrors service-tokens-001-baseline.xml plus the
+    service-tokens-003 scope column, NO RLS, read pre-tenant-context) seeded with the
+    test bearer token's hash as a wildcard bootstrap row.
+
+    Parameter: ${tokenHash}, the sha256 hex of the test bearer token, set through
+    PgContainerHelper#installRlsProbeHarness. Applied once per database: ServiceIntegrationTest's
+    startEmptyDatabase() database on the shared per-fork cluster (svc_test is cluster-wide).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="rls-probe-harness-1-role" author="nexus-cbo4a">
+        <comment>Service role: plain LOGIN, subject to RLS.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_test') THEN
+        CREATE ROLE svc_test LOGIN PASSWORD 'svc_test_pass';
+    END IF;
+END
+$$;
+        </sql>
+    </changeSet>
+
+    <changeSet id="rls-probe-harness-2-probe-table" author="nexus-cbo4a">
+        <comment>
+            RLS-enforced probe table. FORCE applies the policy even to the table owner;
+            the policy admits only rows whose tenant_id equals the nexus.tenant GUC.
+        </comment>
+        <sql>
+CREATE SCHEMA IF NOT EXISTS nexus_test;
+CREATE TABLE IF NOT EXISTS nexus_test.rls_probe (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    payload TEXT
+);
+ALTER TABLE nexus_test.rls_probe ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus_test.rls_probe FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON nexus_test.rls_probe;
+CREATE POLICY tenant_isolation ON nexus_test.rls_probe
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+GRANT USAGE ON SCHEMA nexus_test TO svc_test;
+GRANT SELECT, INSERT, UPDATE, DELETE ON nexus_test.rls_probe TO svc_test;
+GRANT USAGE ON SEQUENCE nexus_test.rls_probe_id_seq TO svc_test;
+        </sql>
+    </changeSet>
+
+    <changeSet id="rls-probe-harness-3-service-tokens" author="nexus-cbo4a">
+        <comment>
+            RDR-152 nexus-gmiaf.32.2: AuthFilter resolves bearer to tenant against
+            nexus.service_tokens, so the harness needs a minimal credential table.
+            nexus-868dq: TokenStore SELECTs scope on every lookup, so the column is
+            required.
+        </comment>
+        <sql>
+CREATE SCHEMA IF NOT EXISTS nexus;
+CREATE TABLE IF NOT EXISTS nexus.service_tokens (
+    token_hash TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    label TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    scope TEXT NOT NULL DEFAULT 'tenant'
+);
+GRANT USAGE ON SCHEMA nexus TO svc_test;
+GRANT SELECT ON nexus.service_tokens TO svc_test;
+INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)
+    VALUES ('${tokenHash}', 'test-tenant', 'test-bound')
+    ON CONFLICT (token_hash) DO NOTHING;
+        </sql>
+    </changeSet>
+</databaseChangeLog>

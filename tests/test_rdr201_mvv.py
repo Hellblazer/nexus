@@ -53,6 +53,7 @@ from click.testing import CliRunner
 from nexus.commands.rdr import rdr
 from nexus.tables.check import BLOCKING_CODES, CLOSED_BY_ESCAPE, OVERLAP, check_table, exit_code, groups_of
 from nexus.tables.load import load_packaged_table, load_table
+import pytest
 
 _RDR_BODY = """## Problem Statement
 
@@ -169,6 +170,7 @@ def _leg3_accepted_to_closed_succeeds(root: Path) -> None:
     assert "closed_date: 2026-06-24" in text
 
 
+@pytest.mark.t2_tenant
 def test_leg3_accepted_to_closed_succeeds(tmp_path: Path) -> None:
     _leg3_accepted_to_closed_succeeds(tmp_path)
 
@@ -226,6 +228,7 @@ def test_leg4_planted_duplicate_accept_row_overlap(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.t2_tenant
 def test_all_four_mvv_legs_ran_together(tmp_path_factory) -> None:
     _leg1_lifecycle_table_lints_clean()
     _leg2_draft_to_closed_refuses_illegal_transition(tmp_path_factory.mktemp("leg2"))

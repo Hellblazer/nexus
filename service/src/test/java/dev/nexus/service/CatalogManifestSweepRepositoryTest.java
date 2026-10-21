@@ -5,6 +5,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,6 +21,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -26,6 +30,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -103,9 +109,6 @@ class CatalogManifestSweepRepositoryTest {
      * nexus.chunks carries the SAME {@code chunks_chash_octet_check} as
      * catalog_document_chunks, so a wrong-length stub would itself violate that check.
      */
-    private static final String STUB_VECTOR_384 =
-        "[" + "0.1,".repeat(383) + "0.1]";
-
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
             return;
@@ -121,12 +124,15 @@ class CatalogManifestSweepRepositoryTest {
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(ctx, tenant, collection);
             // RDR-225: a chunk carries its collection's model (every collection here is 384-d).
-            return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
-                tenant, collection, chashHex, PgContainerHelper.collectionModel(ctx, tenant, collection),
-                STUB_VECTOR_384);
+            return ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         });
     }
 
@@ -210,34 +216,28 @@ class CatalogManifestSweepRepositoryTest {
             // RDR-225: the tenant needs partition leaves before its first chunk (the upsertCollection
             // above registers the collection but is not the leaf-creating call under every path).
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks
             // (vectors-004-unify-chunks.xml) -- embedding_384 replaces the bare
             // embedding column.
-            var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
-                + " VALUES (?, ?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, PgContainerHelper.collectionModel(
-                DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, collection));
-            ps.setString(5, "seed text " + hexChash);
-            ps.setString(6, zeroVec);
-            ps.executeUpdate();
+            var ctx = DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChash)
+                .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0f))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
+                .execute();
         }
     }
 
     private boolean chunk384Exists(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.chunks WHERE tenant_id = ? AND collection = ? AND chash = ? "
-                + "AND embedding_384 IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            return ps.executeQuery().next();
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CHUNKS,
+                CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION.eq(collection),
+                CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)), CHUNKS.EMBEDDING_384.isNotNull());
         }
     }
 
@@ -476,7 +476,8 @@ class CatalogManifestSweepRepositoryTest {
             su.setAutoCommit(true);
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
             // nexus.chunks -- a single REVOKE now covers what three did.
-            su.createStatement().execute("REVOKE DELETE ON nexus.chunks FROM " + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("DELETE")).on(CHUNKS).from(DSL.role(SVC_ROLE)).execute();
         }
         try {
             var result = writeManifestManySeeded(TENANT_A, List.of(
@@ -511,7 +512,8 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("GRANT DELETE ON nexus.chunks TO " + SVC_ROLE);
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("DELETE")).on(CHUNKS).to(DSL.role(SVC_ROLE)).execute();
             }
         }
     }
@@ -569,21 +571,12 @@ class CatalogManifestSweepRepositoryTest {
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThatThrownBy(() -> acquireGateExclusive(connA, TENANT_A, col1, 1000))
                 .as("A's exclusive acquire must be refused, not silently granted, while B holds SHARED")
-                .isInstanceOf(SQLException.class)
-                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("55P03"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(e -> assertThat(((DataAccessException) e).sqlState()).isEqualTo("55P03"));
             connA.rollback();
 
             // B now completes its manifest insert normally and commits.
-            try (var psB = connB.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
-                psB.setString(1, TENANT_A);
-                psB.setString(2, "swp.8a-b");
-                psB.setString(3, shared1);
-                psB.setString(4, col1);
-                psB.executeUpdate();
-            }
+            insertManifestRowOn(connB, "swp.8a-b", shared1, col1);
             connB.commit();
         }
 
@@ -614,30 +607,13 @@ class CatalogManifestSweepRepositoryTest {
 
             PgContainerHelper.setTenant(connB, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateShared(connB, TENANT_A, col2);
-            try (var psB = connB.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
-                psB.setString(1, TENANT_A);
-                psB.setString(2, "swp.8b-b");
-                psB.setString(3, shared2);
-                psB.setString(4, col2);
-                psB.executeUpdate();
-            }
+            insertManifestRowOn(connB, "swp.8b-b", shared2, col2);
             connB.commit();   // B fully committed before A even starts.
 
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(connA, TENANT_A, col2, 2000);
             int deletedByA;
-            try (var psA = connA.prepareStatement(SWEEP_GUARD_DELETE_SQL)) {
-                psA.setString(1, TENANT_A);
-                psA.setString(2, col2);
-                psA.setString(3, shared2);
-                psA.setString(4, TENANT_A);
-                psA.setString(5, col2);
-                psA.setString(6, shared2);
-                deletedByA = psA.executeUpdate();
-            }
+            deletedByA = sweepGuardDelete(connA, TENANT_A, col2, shared2);
             assertThat(deletedByA)
                 .as("A's guard, evaluated under the gate, sees B's now-committed reference")
                 .isEqualTo(0);
@@ -651,40 +627,61 @@ class CatalogManifestSweepRepositoryTest {
     /** The EXACT guard shape {@code sweepChunks} uses (both {@code NOT
      *  EXISTS} clauses) — driven manually so hand-written tests can control
      *  commit order around it. RDR-191 (nexus-o8dil.48): targets the unified
-     *  {@code nexus.chunks}, not the retired {@code chunks_384}. */
-    private static final String SWEEP_GUARD_DELETE_SQL =
-        "DELETE FROM nexus.chunks c "
-        + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
-        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
-        + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-        + "  WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash AND d.deleted_at IS NULL) "
-        + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d2 "
-        + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
-        + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
-        + "  AND (d2.metadata ->> 'doc_id') = ?)";
+     *  {@code nexus.chunks}, not the retired {@code chunks_384}. Typed jOOQ
+     *  (nexus-cbo4a); returns the rows deleted. */
+    private static int sweepGuardDelete(Connection conn, String tenant, String collection, String chashHex) {
+        var c = CHUNKS.as("c");
+        var m = CATALOG_DOCUMENT_CHUNKS.as("m");
+        var d = CATALOG_DOCUMENTS.as("d");
+        var d2 = CATALOG_DOCUMENTS.as("d2");
+        return DSL.using(conn, SQLDialect.POSTGRES).deleteFrom(c)
+            .where(c.TENANT_ID.eq(tenant))
+            .and(c.COLLECTION.eq(collection))
+            .and(c.CHASH.eq(HexFormat.of().parseHex(chashHex)))
+            .andNotExists(DSL.selectOne().from(m)
+                .join(d).on(d.TENANT_ID.eq(m.TENANT_ID)).and(d.TUMBLER.eq(m.DOC_ID))
+                .where(m.TENANT_ID.eq(c.TENANT_ID))
+                .and(m.CHASH.eq(c.CHASH))
+                .and(d.DELETED_AT.isNull()))
+            .andNotExists(DSL.selectOne().from(d2)
+                .where(d2.TENANT_ID.eq(tenant))
+                .and(d2.PHYSICAL_COLLECTION.eq(collection))
+                .and(d2.DELETED_AT.isNull())
+                .and(d2.FILE_PATH.isNull().or(d2.FILE_PATH.eq("")))
+                .and(DSL.jsonbGetAttributeAsText(d2.METADATA, "doc_id").eq(chashHex)))
+            .execute();
+    }
 
-    /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape on a raw
-     *  connection, for tests that need manual transaction control around it. */
+    /** Writer B's manifest insert, on its own (already tenant-scoped) transaction connection. */
+    private static void insertManifestRowOn(Connection conn, String docId, String chashHex, String collection) {
+        DSL.using(conn, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+            .execute();
+    }
+
+    /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape (through jOOQ on
+     *  that connection), for tests that need manual transaction control around it. */
     private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock_shared(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     /** Hand-drives {@code acquireSweepGateExclusive}'s exact SQL shape
-     *  (lock_timeout + statement_timeout, then the exclusive acquire) on a
-     *  raw connection. */
+     *  (lock_timeout, then the exclusive acquire, through
+     *  jOOQ on that connection). */
     private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
             throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", String.class, DSL.inline("lock_timeout"),
+                DSL.val(String.valueOf(lockTimeoutMs)), DSL.inline(true))).fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection)))).fetch();
     }
 
     @Test @Order(17)
@@ -706,11 +703,11 @@ class CatalogManifestSweepRepositoryTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("REVOKE SELECT ON nexus.catalog_document_chunks FROM " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT (tenant_id, doc_id, \"position\", chunk_index, line_start, "
-                + "line_end, char_start, char_end, collection, embedding_model) ON nexus.catalog_document_chunks TO "
-                + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).from(DSL.role(SVC_ROLE)).execute();
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                "db/changelog-test/db.changelog-test-manifest-chunks-column-select.xml",
+                "databasechangelog_test_manifest_chunks_column_select", Map.of("role", SVC_ROLE));
         }
         // Only the operation under test runs with the column revoked — every
         // verification read below (including this test's own getManifest
@@ -726,8 +723,8 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "GRANT SELECT ON nexus.catalog_document_chunks TO " + SVC_ROLE);
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).to(DSL.role(SVC_ROLE)).execute();
             }
         }
 
@@ -946,12 +943,9 @@ class CatalogManifestSweepRepositoryTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION test_slow_sweep_delete() RETURNS trigger AS $$ "
-                + "BEGIN PERFORM pg_sleep(6); RETURN OLD; END; $$ LANGUAGE plpgsql");
-            su.createStatement().execute(
-                "CREATE TRIGGER test_slow_sweep_delete_trigger BEFORE DELETE ON nexus.chunks "
-                + "FOR EACH ROW EXECUTE FUNCTION test_slow_sweep_delete()");
+            PgContainerHelper.runSuperuserTestChangelog(su,
+                "db/changelog-test/db.changelog-test-slow-sweep-delete-install.xml",
+                "databasechangelog_test_slow_sweep_delete_install", Map.of());
         }
         try {
             var result = writeManifestManySeeded(TENANT_A, List.of(
@@ -975,9 +969,9 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks");
-                su.createStatement().execute("DROP FUNCTION IF EXISTS test_slow_sweep_delete()");
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                    "db/changelog-test/db.changelog-test-slow-sweep-delete-drop.xml",
+                    "databasechangelog_test_slow_sweep_delete_drop", Map.of());
             }
         }
     }

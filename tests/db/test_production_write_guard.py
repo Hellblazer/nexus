@@ -175,7 +175,7 @@ class TestGuardProductionWrite:
 
         msg = str(exc_info.value)
         assert "NX_ALLOW_PROD_WRITE" in msg
-        assert "http://127.0.0.1:1" in msg
+        assert "127.0.0.1:1" in msg  # host:port only since nexus-ujbf8 (log_endpoint)
         assert str(fake_root) in msg
 
     def test_exported_service_url_does_not_exempt_the_write(
@@ -293,7 +293,7 @@ class TestGuardProductionWrite:
 
         matches = [log for log in logs if log.get("event") == "guard_production_write.opt_in_accepted"]
         assert len(matches) == 1, logs
-        assert matches[0]["base_url"] == "http://127.0.0.1:9"
+        assert matches[0]["base_url"] == "127.0.0.1:9"  # host:port only since nexus-ujbf8
         assert matches[0]["reason"] == "arc-end MVV, nexus-a2qhz, reviewed"
 
     def test_non_dev_checkout_write_is_not_logged(
@@ -442,7 +442,7 @@ class TestHttpVectorClientGuardWiring:
         monkeypatch.setattr(service_endpoint, "guard_production_write", _fake_guard)
 
         with pytest.raises(service_endpoint.ProductionWriteGuardError):
-            hvc._post("/v1/vectors/store-put", {"ids": ["x"]})
+            hvc._post("/v1/vectors/upsert-chunks", {"ids": ["x"]})
 
         assert calls == ["http://127.0.0.1:1"]
 

@@ -25,8 +25,11 @@ import pytest
 from cut_plugin_release import (
     CutRefused,
     check_main_readiness,
+    coupling_violations,
+    import_coupling_check,
     perform_cut,
     phase2_deferral_check,
+    plugin_import_edges,
 )
 from tests._module_seam import setattr_in
 
@@ -1096,14 +1099,14 @@ _PHASE1_SHIPPED = {
     STANDIN_PY: "standin v1\n",
     NOTICE_PY: "notice v1\n",
     HOOKS_JSON: "hooks v1\n",
-    MCP_JSON: "mcp v1\n",
+    MCP_JSON: "{\"mcp\": \"v1\"}\n",
     LOCKSTEP_HOOK: "lockstep v1\n",
 }
 #: What the pinned tag carries when it predates Phase 1 entirely (today).
 _PRE_PHASE1 = {
     ENDPOINT_PY: "endpoint v1\n",
     HOOKS_JSON: "hooks v0\n",
-    MCP_JSON: "mcp v0\n",
+    MCP_JSON: "{\"mcp\": \"v0\"}\n",
     LOCKSTEP_HOOK: "lockstep v0\n",
 }
 
@@ -1112,7 +1115,7 @@ _P1_FILES = {
     STANDIN_PY: "standin v2\n",
     NOTICE_PY: "notice v2\n",
     HOOKS_JSON: "hooks v2 via launcher\n",
-    MCP_JSON: "mcp v2 via launcher\n",
+    MCP_JSON: "{\"mcp\": \"v2 via launcher\"}\n",
     LOCKSTEP_HOOK: "lockstep v2\n",
 }
 _P2_FILES = {
@@ -1317,7 +1320,7 @@ class TestPhase2DeferralGuard:
     ) -> None:
         repo, ledger = _phase_repo(
             tmp_path, base=_PHASE1_SHIPPED,
-            develop={**_P2_FILES, HOOKS_JSON: "hooks v3\n", MCP_JSON: "mcp v3\n"},
+            develop={**_P2_FILES, HOOKS_JSON: "hooks v3\n", MCP_JSON: "{\"mcp\": \"v3\"}\n"},
             awaiting=[HOOKS_JSON, MCP_JSON], deferred=sorted(_P2_FILES),
         )
         assert f"{len(_P2_FILES)} guarded path(s)" in _check(repo, ledger)
@@ -1464,3 +1467,166 @@ class TestPhase2DeferralGuard:
         with pytest.raises(CutRefused) as exc:
             _check(repo, ledger)
         assert "Phase 1 has not shipped" not in str(exc.value)
+
+
+SEQ_PY = "conexus/mcp/sequential_thinking.py"
+LOOP_PY = "conexus/launch/_stdio_loop.py"
+HELPER_PY = "conexus/launch/_loop_helper.py"
+_SEQ_MCP_JSON = json.dumps(
+    {
+        "sequential-thinking": {
+            "command": "uv",
+            "args": ["tool", "run", "python", "${CLAUDE_PLUGIN_ROOT}/mcp/sequential_thinking.py"],
+        }
+    }
+)
+#: What main (the installs) carries: a server with its own loop, no shared one.
+_COUPLING_BASE = {MCP_JSON: _SEQ_MCP_JSON, SEQ_PY: "import json\n# own loop\n"}
+#: What develop moves to: the server imports the loop from conexus/launch/,
+#: through a sys.path insert as the real server does.
+_COUPLING_SEQ_V2 = (
+    "import os\nimport sys\n"
+    "sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'launch'))\n"
+    "import _stdio_loop\nimport json\n"
+)
+_COUPLING_DEVELOP = {SEQ_PY: _COUPLING_SEQ_V2, LOOP_PY: "import _loop_helper\n", HELPER_PY: "VALUE = 1\n"}
+
+
+def _coupling_repo(
+    tmp_path: pathlib.Path, *, awaiting: list[str], deferred: list[str]
+) -> tuple[pathlib.Path, str]:
+    return _phase_repo(
+        tmp_path, base=_COUPLING_BASE, develop=_COUPLING_DEVELOP,
+        awaiting=awaiting, deferred=deferred,
+    )
+
+
+def _coupling(repo: pathlib.Path, ledger: str) -> str:
+    return import_coupling_check(repo, "origin/main", "origin/develop", ledger)
+
+
+class TestImportCouplingGuard:
+    """A cut must not ship a script and hold back a module it imports.
+
+    The sequential-thinking server loads in every session and imports
+    ``launch/_stdio_loop.py``; a ledger that defers the loop but not the
+    server ships a plugin that cannot start its own MCP server.
+    """
+
+    def test_a_ledger_that_splits_the_server_from_its_loop_refuses(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _coupling_repo(
+            tmp_path, awaiting=[SEQ_PY, HELPER_PY], deferred=[LOOP_PY]
+        )
+        with pytest.raises(CutRefused) as exc:
+            _coupling(repo, ledger)
+        message = str(exc.value)
+        assert f"{SEQ_PY} imports {LOOP_PY}" in message
+        assert "ModuleNotFoundError" in message
+
+    def test_a_ledger_that_keeps_them_together_passes_and_counts_what_it_examined(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _coupling_repo(
+            tmp_path, awaiting=[SEQ_PY, LOOP_PY, HELPER_PY], deferred=[]
+        )
+        report = _coupling(repo, ledger)
+        # SEQ (from .mcp.json), LOOP (launch/ and imported), HELPER (launch/)
+        assert "3 script(s) examined, 2 sibling import(s)" in report
+
+    def test_deferring_the_whole_chain_passes(self, tmp_path: pathlib.Path) -> None:
+        repo, ledger = _coupling_repo(
+            tmp_path, awaiting=[], deferred=[SEQ_PY, LOOP_PY, HELPER_PY]
+        )
+        assert "2 sibling import(s)" in _coupling(repo, ledger)
+
+    def test_a_deferred_importer_with_a_shipping_importee_passes(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Dead weight on the plugin, no failure at start."""
+        repo, ledger = _coupling_repo(
+            tmp_path, awaiting=[LOOP_PY, HELPER_PY], deferred=[SEQ_PY]
+        )
+        _coupling(repo, ledger)
+
+    def test_the_split_is_found_one_import_deeper(self, tmp_path: pathlib.Path) -> None:
+        """The loop ships, the server ships, but the loop's own import is held back."""
+        repo, ledger = _coupling_repo(
+            tmp_path, awaiting=[SEQ_PY, LOOP_PY], deferred=[HELPER_PY]
+        )
+        with pytest.raises(CutRefused) as exc:
+            _coupling(repo, ledger)
+        assert f"{LOOP_PY} imports {HELPER_PY}" in str(exc.value)
+
+    def test_a_malformed_mcp_json_refuses_rather_than_examining_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _phase_repo(
+            tmp_path, base={**_COUPLING_BASE, MCP_JSON: "not json\n"},
+            develop=_COUPLING_DEVELOP, awaiting=[SEQ_PY, LOOP_PY, HELPER_PY],
+            deferred=[],
+        )
+        with pytest.raises(CutRefused, match="is not JSON"):
+            _coupling(repo, ledger)
+
+    def test_perform_cut_refuses_the_split_before_a_branch_exists(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Wired into the cut itself, beside the Phase 2 guard. Uses a server and
+        a module BESIDE it under mcp/, so Phase 2 (conexus/launch/) is not armed
+        and this refusal is the only one in play."""
+        server, shared = "conexus/mcp/srv.py", "conexus/mcp/_shared.py"
+        mcp = json.dumps({"s": {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/srv.py"]}})
+        repo, _ = _phase_repo(
+            tmp_path, base={MCP_JSON: mcp, server: "v1\n"},
+            develop={server: "import _shared\n", shared: "X = 1\n"},
+            awaiting=[server], deferred=[shared],
+        )
+        with pytest.raises(CutRefused, match=f"{server} imports {shared}"):
+            _cut(repo)
+        assert _run(repo, "branch", "--list", "plugin-release/*") == ""
+
+    def test_perform_cut_passes_the_same_pair_when_together(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        server, shared = "conexus/mcp/srv.py", "conexus/mcp/_shared.py"
+        mcp = json.dumps({"s": {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/srv.py"]}})
+        repo, _ = _phase_repo(
+            tmp_path, base={MCP_JSON: mcp, server: "v1\n"},
+            develop={server: "import _shared\n", shared: "X = 1\n"},
+            awaiting=[server, shared], deferred=[],
+        )
+        assert _cut(repo)["battery_ran"] == ["battery"]
+
+
+class TestImportCouplingOnTheRealTree:
+    """The fixtures above prove the rule; this proves it sees the real plugin."""
+
+    _ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+    def _tree(self) -> tuple[set[str], dict[str, set[str]]]:
+        paths = {
+            str(p.relative_to(self._ROOT))
+            for p in (self._ROOT / "conexus").rglob("*")
+            if p.is_file() and (p.suffix == ".py" or p.name == ".mcp.json")
+            and "__pycache__" not in p.parts
+        }
+
+        def read(path: str) -> str | None:
+            target = self._ROOT / path
+            return target.read_text(encoding="utf-8") if target.is_file() else None
+
+        return paths, plugin_import_edges(paths, read)
+
+    def test_the_server_and_the_stand_in_are_seen_importing_the_shared_loop(self) -> None:
+        _, edges = self._tree()
+        assert LOOP_PY in edges[SEQ_PY]
+        assert LOOP_PY in edges["conexus/launch/nx_standin.py"]
+        assert len(edges) >= 4, sorted(edges)
+
+    def test_deferring_only_the_loop_while_the_server_ships_is_refused(self) -> None:
+        _, edges = self._tree()
+        bad = coupling_violations(edges, shipping={SEQ_PY}, held_back={LOOP_PY})
+        assert (SEQ_PY, LOOP_PY) in bad
+        assert coupling_violations(edges, shipping={SEQ_PY, LOOP_PY}, held_back=set()) == []

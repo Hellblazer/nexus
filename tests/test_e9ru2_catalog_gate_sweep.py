@@ -94,6 +94,7 @@ def fake_client(monkeypatch):
     return _FakeHttpCatalogClient
 
 
+@pytest.mark.t2_tenant
 def test_pdf_hook_fresh_box_service_mode_registers(
     service_mode_fresh_box, fake_client, tmp_path
 ):
@@ -120,6 +121,7 @@ def test_pdf_hook_fresh_box_service_mode_registers(
     )
 
 
+@pytest.mark.t2_tenant
 def test_markdown_hook_fresh_box_service_mode_registers(
     service_mode_fresh_box, fake_client, tmp_path
 ):
@@ -140,6 +142,7 @@ def test_markdown_hook_fresh_box_service_mode_registers(
     assert reg["year"] == 2026
 
 
+@pytest.mark.t2_tenant
 def test_register_or_lookup_fresh_box_no_local_catalog_created(
     service_mode_fresh_box, fake_client, tmp_path
 ):
@@ -199,6 +202,7 @@ def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.t2_tenant
 def test_markdown_hook_service_down_is_loud_not_silent(
     service_mode_fresh_box, fake_client, tmp_path, monkeypatch
 ):

@@ -21,7 +21,7 @@ import java.util.function.Function;
  * query), so that shape admitted up to 2x the intended bound — the exact
  * "bound the SUM of concurrent local embeds" goal the diagnosis (T2 [24231])
  * set out to meet was not met. This class is the fix: constructed EXACTLY
- * ONCE per process ({@code Main.java}'s local-mode branch), its single
+ * ONCE per process ({@code Main.java}'s local-model setup), its single
  * {@link Semaphore} is shared by every {@link AdmissionControlledEmbedder}
  * AND {@link AdmissionControlledReranker} wrapper in that process, however
  * many routers or callers hold a reference to one.

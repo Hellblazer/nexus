@@ -313,6 +313,79 @@ class PciBuilderSessionIntegrationTest {
     }
 
     @Test
+    void aReindexLeftover_isDropped_aValidCcnewAndAMisShapedLeftoverAreRejected() throws Exception {
+        String collection = collectionName("leftover");
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.build(leaf, 1024, collection)).isEqualTo(DdlOutcome.DONE);
+        }
+        String ccnew = base + "_ccnew";
+        String validCcnew = base + "_ccnew7";
+        try (Connection su = pg.createConnection("")) {
+            for (String n : new String[] {ccnew, validCcnew}) {
+                PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), n, "embedding_1024", collection);
+            }
+            PgContainerHelper.markIndexInvalid(su, leaf.schema(), ccnew);
+        }
+        PciCatalog.Index leftover = indexOn(M1024, T1, ccnew).orElseThrow();
+        PciCatalog.Index valid = indexOn(M1024, T1, validCcnew).orElseThrow();
+        assertThat(leftover.leftover()).isTrue();
+        assertThat(valid.leftover()).isFalse();
+        assertThat(valid.parsed()).isFalse();
+        // A leftover claim on a name that is not builder-name plus cc(new|old)N, and one with no claim at all.
+        PciCatalog.Index misShaped = new PciCatalog.Index(base + "_ccnewX", false, null, collection);
+        PciCatalog.Index operatorMade = new PciCatalog.Index("pci_foo", false, null, collection);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, valid)).as("a valid _ccnew is never touched").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, misShaped)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, operatorMade)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, leftover)).isEqualTo(DdlOutcome.DONE);
+            assertThat(pass.currentSetting("lock_timeout")).as("the existing drop's timeout").isEqualTo("5s");
+        }
+        assertThat(indexOn(M1024, T1, ccnew)).as("the leftover is gone").isEmpty();
+        assertThat(indexOn(M1024, T1, validCcnew)).isPresent();
+        assertThat(indexOn(M1024, T1, base)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+    }
+
+    @Test
+    void aLeftoverThatIsValidNow_isNeverDropped_theReReadBeforeTheDropSaysStale() throws Exception {
+        String collection = collectionName("leftover-valid");
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        // A VALID index under a leftover-shaped name, as an operator's CREATE INDEX CONCURRENTLY finishing between
+        // the snapshot and the drop leaves; the drop is handed the STALE snapshot, which said invalid.
+        String name = base + "_ccnew3";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), name, "embedding_1024", collection);
+        }
+        PciCatalog.Index staleSnapshot = new PciCatalog.Index(name, false, null, collection);
+        assertThat(indexOn(M1024, T1, name)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, staleSnapshot)).isEqualTo(DdlOutcome.STALE);
+        }
+
+        assertThat(indexOn(M1024, T1, name)).as("the now-valid index was not dropped")
+            .hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+    }
+
+    @Test
+    void aLeftoverThatIsGone_isStale_notDone() throws Exception {
+        String collection = collectionName("leftover-gone");
+        String name = PciCatalog.indexName(M1024, T1, collection) + "_ccold";
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        assertThat(indexOn(M1024, T1, name)).isEmpty();
+        PciCatalog.Index staleSnapshot = new PciCatalog.Index(name, false, null, collection);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, staleSnapshot)).as("IF EXISTS would no-op; a vanished leftover is not a drop")
+                .isEqualTo(DdlOutcome.STALE);
+        }
+    }
+
+    @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aDropBlockedByAnOpenTransaction_givesUpAfterFiveSeconds_andLeavesTheIndex() throws Exception {
         String collection = collectionName("droptimeout");
@@ -517,7 +590,7 @@ class PciBuilderSessionIntegrationTest {
     void aMigrationLockHeldInAnotherDatabase_isNotAHolderHere_butIsInItsOwn() throws Exception {
         String other = "pcibld_otherdb";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "CREATE DATABASE " + other);
+            PgContainerHelper.createDatabase(su, other);
         }
         try {
             String url = pg.getJdbcUrl().replace("/" + pg.getDatabaseName(), "/" + other);
@@ -543,7 +616,7 @@ class PciBuilderSessionIntegrationTest {
             }
         } finally {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "DROP DATABASE IF EXISTS " + other);
+                PgContainerHelper.dropDatabaseIfExists(su, other);
             }
         }
     }
@@ -583,9 +656,10 @@ class PciBuilderSessionIntegrationTest {
     @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aRoleThatMayNotLogIn_givesAuthFailed_withSqlState28000() throws Exception {
         String role = "pcibld_nologin";
-        String password = "nologin-" + UUID.randomUUID();
+        // Letters, digits and underscore only: the helper refuses anything else in a password literal.
+        String password = "nologin_" + UUID.randomUUID().toString().replace('-', '_');
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " PASSWORD '" + password + "' NOLOGIN");
+            PgContainerHelper.createNologinRoleWithPassword(su, role, password);
         }
         try {
             PciBuilderSession session = new PciBuilderSession(pg.getJdbcUrl(), role, password, NONCE, ON);
@@ -600,7 +674,7 @@ class PciBuilderSessionIntegrationTest {
             assertThat(logs).noneMatch(l -> l.contains(password));
         } finally {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + role);
+                PgContainerHelper.dropRoleRevokingGrants(su, role);
             }
         }
     }
@@ -668,9 +742,7 @@ class PciBuilderSessionIntegrationTest {
         // An operator-made pci_ index: parsed()==false, a non-builder name.
         String operatorMade = "pci_foo";
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdl(su,
-                "CREATE INDEX " + operatorMade + " ON " + leaf.schema() + "." + leaf.name()
-                    + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = 'x'");
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), operatorMade, "embedding_1024", "x");
         }
         PciCatalog.Index unparsed = leaf(M1024, T1).indexes().stream()
             .filter(i -> operatorMade.equals(i.name())).findFirst().orElseThrow();

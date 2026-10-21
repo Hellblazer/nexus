@@ -584,6 +584,7 @@ def _register_real_doc(
 
 
 class TestFootnotesCliConversion:
+    @pytest.mark.t2_tenant
     def test_converts_file_in_place(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -599,6 +600,7 @@ class TestFootnotesCliConversion:
         assert "## Footnotes" in body
         assert "CLI Test Doc" in body
 
+    @pytest.mark.t2_tenant
     def test_second_run_is_a_no_op(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -616,6 +618,7 @@ class TestFootnotesCliConversion:
         assert doc.read_text() == first_body
         assert "already up to date" in r2.output
 
+    @pytest.mark.t2_tenant
     def test_check_mode_fails_on_unconverted_file_and_writes_nothing(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -628,6 +631,7 @@ class TestFootnotesCliConversion:
         assert result.exit_code == 1, result.output
         assert doc.read_text() == original  # nothing written
 
+    @pytest.mark.t2_tenant
     def test_check_mode_passes_on_converted_file(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -643,6 +647,7 @@ class TestFootnotesCliConversion:
         assert result.exit_code == 0, result.output
         assert doc.read_text() == converted
 
+    @pytest.mark.t2_tenant
     def test_dry_run_writes_nothing_and_prints_a_diff(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -657,6 +662,7 @@ class TestFootnotesCliConversion:
         assert "+" in result.output  # a unified diff was printed
         assert "Dry Run Doc" in result.output
 
+    @pytest.mark.t2_tenant
     def test_to_links_reverses_a_converted_file(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -674,6 +680,7 @@ class TestFootnotesCliConversion:
         assert doc.read_text() == original
         assert "## Footnotes" not in doc.read_text()
 
+    @pytest.mark.t2_tenant
     def test_dangling_tumbler_writes_nothing_reports_and_exits_1(self, tmp_path: Path) -> None:
         """GH #896's own acceptance criterion, held literally
         (code-review round): an unresolvable tumbler means NOTHING is
@@ -697,6 +704,7 @@ class TestFootnotesCliConversion:
         assert "not converted" in result.output
         assert doc.read_text() == original  # NOTHING written
 
+    @pytest.mark.t2_tenant
     def test_mixed_resolvable_and_dangling_writes_nothing_at_all(self, tmp_path: Path) -> None:
         """The literal 'no PARTIAL write' case: one tumbler resolves
         fine, a second is dangling -- the whole file stays untouched,
@@ -722,6 +730,7 @@ class TestFootnotesCliConversion:
         assert f"unresolved tumbler {bad_tumbler}" in result.output
         assert doc.read_text() == original  # not even the "good" one converted
 
+    @pytest.mark.t2_tenant
     def test_check_treats_dangling_tumbler_as_failure(self, tmp_path: Path) -> None:
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.commands.catalog import catalog
@@ -738,6 +747,7 @@ class TestFootnotesCliConversion:
         assert result.exit_code == 1, result.output
         assert doc.read_text() == original
 
+    @pytest.mark.t2_tenant
     def test_dry_run_shows_dangling_reference_without_writing(self, tmp_path: Path) -> None:
         """--dry-run always shows the FULL picture, dangling references
         included, even though the real write would be refused."""
@@ -772,6 +782,7 @@ class TestFootnotesCliConversion:
         result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--check", "--to-links"])
         assert result.exit_code == 2, result.output
 
+    @pytest.mark.t2_tenant
     def test_dry_run_and_to_links_together_is_allowed(self, tmp_path: Path) -> None:
         """--dry-run + --to-links previews the REVERSE conversion --
         an entirely legitimate, explicitly supported combination."""
@@ -800,6 +811,7 @@ class TestFootnotesCliConversion:
         result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--refresh", "--to-links"])
         assert result.exit_code == 2, result.output
 
+    @pytest.mark.t2_tenant
     def test_refresh_flag_leaves_new_link_untouched(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -813,6 +825,7 @@ class TestFootnotesCliConversion:
         assert doc.read_text() == original  # brand-new link untouched
         assert "already up to date" in result.output
 
+    @pytest.mark.t2_tenant
     def test_style_short_option_produces_shorter_footnote_body(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
@@ -864,6 +877,7 @@ class TestStrictUtf8AndAtomicWrite:
         # byte-identical afterward -- not even a partial/lossy rewrite.
         assert doc.read_bytes() == invalid_bytes
 
+    @pytest.mark.t2_tenant
     def test_write_uses_a_sibling_tmp_file_then_replaces(self, tmp_path: Path) -> None:
         """Mirrors nexus.commands.t3._save_backfill_state's tmp+rename
         pattern -- proven here by asserting no stray .tmp file survives

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
+import org.jooq.exception.DataAccessException;
+import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.impl.DSL;
@@ -118,12 +120,9 @@ class PgVectorRepositoryGcQuarantineTest {
             // carry (catalog_links_id_seq, gc_audit_id_seq) are now redundant with
             // bootstrapServiceRole's broader "USAGE, SELECT ON ALL SEQUENCES" and
             // are dropped.
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_restore_rereferenced(int, text, text, text) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_quarantine_orphans(int, text, text, text, text, int)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_restore_rereferenced(int, text, text, text)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean)", SVC_ROLE);
         }
 
         var cfg = new HikariConfig();
@@ -196,8 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
             throws Exception {
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            conn.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(conn);
         }
         if (collectionRegistered(tenant, collection)) {
             seedManifest(tenant, docId, chash, collection);
@@ -225,12 +223,7 @@ class PgVectorRepositoryGcQuarantineTest {
         }
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            conn.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.readdCatalogChunksFkNotValid(conn);
         }
     }
 
@@ -292,49 +285,48 @@ class PgVectorRepositoryGcQuarantineTest {
     }
 
     private long chunkCount(String collection) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection + "' AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL");
-            rs.next();
-            return rs.getLong(1);
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(collection), CHUNKS.EMBEDDING_1024.isNotNull());
         }
     }
 
     private String chunkText(String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            var rows = DSL.using(conn, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CHUNK_TEXT);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     private String metadataField(String collection, String chash, String key) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            var field = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key);
+            var rows = DSL.using(conn, SQLDialect.POSTGRES).select(field).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(field);
+            return rows.isEmpty() ? null : rows.get(0);
         }
     }
 
     /** nexus-brxnp: this chash's {@code created_at}, normalized to UTC. */
     private OffsetDateTime createdAt(String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT created_at FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            rs.next();
-            return rs.getObject(1, OffsetDateTime.class).withOffsetSameInstant(ZoneOffset.UTC);
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).select(CHUNKS.CREATED_AT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CREATED_AT).get(0).withOffsetSameInstant(ZoneOffset.UTC);
         }
     }
 
     /** nexus-brxnp: backdates one chunk's {@code created_at}, for a non-vacuous "untouched by restore" proof. */
     private void backdateChunk(String collection, String chash, OffsetDateTime to) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            st.execute(
-                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET created_at = '" + to + "' WHERE collection = '"
-                + collection + "' AND chash = decode('" + chash + "', 'hex')");
+        try (var conn = pg.createConnection("")) {
+            DSL.using(conn, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.CREATED_AT, to)
+                .where(CHUNKS.COLLECTION.eq(collection))
+                .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .execute();
         }
     }
 
@@ -355,11 +347,9 @@ class PgVectorRepositoryGcQuarantineTest {
      *  nexus-syfes regression target: a zero-orphan/zero-restore GC pass must NOT
      *  leave one of these behind for a collection sibling that was never written to. */
     private boolean collectionRegistered(String tenant, String name) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT 1 FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + name + "'");
-            return rs.next();
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES).fetchExists(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(name));
         }
     }
 
@@ -370,12 +360,17 @@ class PgVectorRepositoryGcQuarantineTest {
     private record CollectionRow(String contentType, String ownerId, String embeddingModel, String modelVersion) {}
 
     private CollectionRow collectionRow(String tenant, String name) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT content_type, owner_id, embedding_model, model_version FROM nexus.catalog_collections "
-                + "WHERE tenant_id = '" + tenant + "' AND name = '" + name + "'");
-            if (!rs.next()) return null;
-            return new CollectionRow(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4));
+        try (var conn = pg.createConnection("")) {
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant), CATALOG_COLLECTIONS.NAME.eq(name))
+                .fetch();
+            if (rows.isEmpty()) return null;
+            var r = rows.get(0);
+            return new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
+                r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL), r.get(CATALOG_COLLECTIONS.MODEL_VERSION));
         }
     }
 
@@ -433,7 +428,7 @@ class PgVectorRepositoryGcQuarantineTest {
         String originCol = originCol("case3");
         String quarantineCol = quarantineCol("case3");
         // RDR-225: the statement below must fail on chash and nothing else, so the tenant has its partition
-        // leaves and the row names a real model (a missing leaf or model would also be an SQLException).
+        // leaves and the row names a real model (a missing leaf or model would also be a DataAccessException).
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT_A);
         }
@@ -443,13 +438,23 @@ class PgVectorRepositoryGcQuarantineTest {
         // one, so that refusal branch is now structurally dead, not merely
         // untested.
         assertThatThrownBy(() -> {
-            try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-                st.execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                    + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, '" + MODEL + "', 'x', "
-                    + "('[' || repeat('0,', 1023) || '0]')::nexus.vector)");
+            try (var conn = pg.createConnection("")) {
+                DSL.using(conn, SQLDialect.POSTGRES).insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT_A)
+                    .set(CHUNKS.COLLECTION, originCol)
+                    .setNull(CHUNKS.CHASH)
+                    .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0f))
+                    .execute();
             }
-        }).isInstanceOf(SQLException.class);
+        }).isInstanceOfSatisfying(DataAccessException.class, ex -> {
+            assertThat(ex.sqlState()).as("not_null_violation").isEqualTo("23502");
+            // 23502 fires for ANY NOT NULL column; the server text names the column. (The word
+            // "chash" alone would be vacuous: jOOQ's message also carries the rendered INSERT.)
+            assertThat(ex.getMessage()).as("the violated column is chash")
+                .contains("null value in column \"chash\"");
+        });
     }
 
     // ── PK COLLISION on re-quarantine: upsert (last-write-wins), never an error ─

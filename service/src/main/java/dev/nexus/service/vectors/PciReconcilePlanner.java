@@ -42,7 +42,8 @@ import java.util.TreeSet;
  *   <li>{@code inFlightIndex}: the name of the build this holder is running now, or {@code null}.</li>
  * </ul>
  *
- * <p><b>Output.</b> An ordered list the executor runs front to back: every {@link Drop} (by index name), then every
+ * <p><b>Output.</b> An ordered list the executor runs front to back: every {@link Drop} (by index name; a
+ * {@link DropReason#REINDEX_LEFTOVER} drop is one of them), then every
  * {@link SkipCountSuspect} (by collection), then every {@link Build} (largest count first, then collection name). Drops
  * come first because a drop frees a cap slot the same plan then spends. A drop that fails (the 5 s lock timeout) leaves
  * its index in place, so the leaf can briefly hold one more than the cap; the next pass drops it again.
@@ -67,7 +68,19 @@ import java.util.TreeSet;
  *       {@code CREATE INDEX CONCURRENTLY IF NOT EXISTS}, which would be a silent no-op against a failed index whose
  *       drop timed out. The rebuild is the next pass, once the name is free. The holder's own in-flight index is left
  *       alone whatever the rules say; the next pass judges it once it is valid.</li>
- *   <li>An unparsed index ({@link Index#parsed()} false) is never touched (decision 4).</li>
+ *   <li>An unparsed index ({@link Index#parsed()} false) is never touched (decision 4), with ONE carve-out (Sam,
+ *       2026-10-18, T2 {@code nexus_rdr/227-decision-4-amendment-reindex-leftovers}, nexus-rn1yd): a REINDEX
+ *       CONCURRENTLY <i>leftover</i> ({@link Index#leftover()}: an INVALID {@code pci_<hash>_ccnew}/{@code _ccold[N]}
+ *       that passed every other condition of the parsed rule) is dropped as {@link DropReason#REINDEX_LEFTOVER},
+ *       whatever the registry and the counts say. It is still NOT parsed in the routing sense: it never serves, never
+ *       blocks a build for its collection, and is never charged against the cap. A VALID {@code _ccnew}/{@code _ccold}
+ *       is never touched.
+ *       <p><b>No in-progress guard.</b> An invalid {@code _ccnew} is also what a REINDEX CONCURRENTLY that is still
+ *       running looks like, and nothing here reads {@code pg_stat_progress_create_index}. None is needed: the running
+ *       reindex holds a {@code ShareUpdateExclusiveLock} on the leaf for its whole run, and
+ *       {@code DROP INDEX CONCURRENTLY} needs the same lock on the leaf first, so the drop waits and ends at the
+ *       drop's {@code lock_timeout} (5 s), the index stays, and the next pass judges it again. A leftover whose
+ *       reindex has ended takes the lock at once and drops.</li>
  *   <li>{@code NX_SEARCH_PCI=0}: an empty plan, so no builds and no drops.</li>
  * </ul>
  *
@@ -120,7 +133,12 @@ public final class PciReconcilePlanner {
         /** The registry no longer lists the collection for this tenant and model. */
         NOT_IN_REGISTRY("not_in_registry"),
         /** The registry row has {@code superseded_by} set. */
-        SUPERSEDED("superseded");
+        SUPERSEDED("superseded"),
+        /**
+         * An invalid {@code _ccnew}/{@code _ccold} left by a failed REINDEX CONCURRENTLY of a builder index
+         * ({@link Index#leftover()}); dropped whatever the registry and the counts say (nexus-rn1yd).
+         */
+        REINDEX_LEFTOVER("reindex_leftover");
 
         private final String label;
 
@@ -139,7 +157,7 @@ public final class PciReconcilePlanner {
     /** Build {@code name} on the leaf for {@code collection}; {@code name} is {@link PciCatalog#indexName}. */
     public record Build(String name, String collection) implements Action { }
 
-    /** Drop the existing index {@code name}, which serves {@code collection}. */
+    /** Drop the existing index {@code name}, which serves (or, for a leftover, was made from) {@code collection}. */
     public record Drop(String name, String collection, DropReason reason) implements Action { }
 
     /**
@@ -175,6 +193,13 @@ public final class PciReconcilePlanner {
         Set<String> served = new HashSet<>();
         int kept = 0;
         for (Index index : leaf.indexes()) {
+            // A leftover is invalid by construction (PciCatalog.Index refuses a valid one); the check is the second
+            // line, so that a valid index can never be planned for a drop on the strength of a leftover claim.
+            if (index.leftover() && !index.valid()) {
+                // Not parsed in the routing sense: no served.add, no kept++, no cap slot, no build block.
+                drops.put(index.name(), new Drop(index.name(), index.leftoverOf(), DropReason.REINDEX_LEFTOVER));
+                continue;
+            }
             if (!index.parsed()) {
                 continue;
             }

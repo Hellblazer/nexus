@@ -45,16 +45,6 @@ class SchemaMigratorDateExecutedUtcTest {
         TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"));
 
         try (var pg = PgContainerHelper.start()) {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                // KEPT RAW: conditional CREATE ROLE via a DO $$ block -- no typed jOOQ
-                // DDL form for "create this role only if it does not already exist",
-                // and no nexus_test bootstrap function covers it this round (candidate
-                // for one, per the task brief's ladder-file exclusion list).
-                su.createStatement().execute(
-                    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                    + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
-            }
             var cfg = new HikariConfig();
             cfg.setJdbcUrl(pg.getJdbcUrl());
             cfg.setUsername(pg.getUsername());

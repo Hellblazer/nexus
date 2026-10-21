@@ -347,7 +347,7 @@ check_wiring "B3 return 3 sets B3_NOT_RUN" '3\) echo "  \$B3_LINE"; B3_NOT_RUN=1
 check_wiring "B3 violation is a leg failure" '\*\) _leg_fail "\$B3_LINE"'
 check_wiring "J is judged on the status body leg B fetched" 'J_LINE="\$\(_reaper_status_verdict "\$STATUS_BODY"\)"'
 check_wiring "J violation is a leg failure" '_leg_fail "\$J_LINE"'
-check_wiring "the leg battery expects 11 legs (A B C+D E F H I J K L M)" '^EXPECTED_LEGS=11$'
+check_wiring "the leg battery expects 12 legs (A B C+D E F H I J K L M N)" '^EXPECTED_LEGS=12$'
 check_wiring "L runs each probe through _route_probe, which judges with the real _route_probe_verdict and the expectation env" \
   'line="\$\(_route_probe_verdict "\$label" "\$EDGE_CODE" "\$EDGE_BODY" "\$fragment" "\$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE"\)" \|\| rc=\$\?'
 check_wiring "L: an unasserted old-engine 404 (exit 3) sets the not-served flag" '3\) echo "  \$line"; L_ABSENT=\$\(\(L_ABSENT \+ 1\)\); L_ROUTE_NOT_SERVED=1 ;;'
@@ -419,8 +419,8 @@ k_code = "\n".join(code(legs["K"]))
 
 # 1. _edge_post only inside leg K.
 for name, lines in legs.items():
-    if name not in ("K", "L") and re.search(r"\b_edge_post\b", "\n".join(code(lines))):
-        errs.append("_edge_post used outside legs K and L (in %s)" % name)
+    if name not in ("K", "L", "N") and re.search(r"\b_edge_post\b", "\n".join(code(lines))):
+        errs.append("_edge_post used outside legs K, L and N (in %s)" % name)
 
 # 2. The leg-K names are assigned exactly once, to the unregistered shape, and never rebound another way.
 want_assign = {
@@ -549,7 +549,25 @@ else:
             errs.append("%s: leg L body %r is not the allowlisted refused request %r" % (label, b, want[0]))
         if fragment != want[1]:
             errs.append("%s: leg L must expect the engine message fragment %r, got %r" % (label, want[1], fragment))
-print("; ".join(errs) if errs else "OK %d" % (len(calls) + len(l_calls)))
+# 7. Leg N (nexus-0bl77, authenticated by nexus-69be4): exactly one probe, of the one test-only path, with the body {}
+# and the default header file (the leg-B bearer, as K, L and M send it: the edge refuses an unauthenticated /v1
+# request with 403, so an unauthenticated probe would be a false red). Safe to send because {} names no tenant, so a
+# registered route refuses it before it evicts anything. The probe takes no third argument: nothing may redirect it
+# to another header file or smuggle a tenant into the body.
+n_probes = 0
+if "N" not in legs:
+    errs.append("no leg N found")
+else:
+    n_code = "\n".join(code(legs["N"]))
+    N_CALL = re.compile(r"^[ \t]*_edge_post\s+\"/v1/_test/tenant-reset\"\s+'\{\}'[ \t]*$", re.M)
+    n_posted = len(re.findall(r"^[ \t]*_edge_post\s", n_code, re.M))
+    n_probes = len(N_CALL.findall(n_code))
+    if not (n_probes == n_posted == 1):
+        errs.append("leg N must hold exactly 1 _edge_post call, the tenant-reset probe with the body '{}' and no "
+                    "header-file argument (the leg-B bearer), got %d matching, %d posted" % (n_probes, n_posted))
+    if not re.search(r'^if \[ ! -s "\$BEARER_FILE" \]; then\n\s*_leg_fail "N: no bearer', n_code, re.M):
+        errs.append("leg N must fail closed when leg B resolved no bearer (the K, L and M guard)")
+print("; ".join(errs) if errs else "OK %d" % (len(calls) + len(l_calls) + n_probes))
 PY
 K_AUDIT="$("$E2E_PYTHON" "$TMP/k_audit.py" "$GATE")"
 if [[ "$K_AUDIT" == OK\ * ]]; then
@@ -622,7 +640,7 @@ neg_case "a curl with a clustered -sSX write flag outside leg K" "a curl with a 
   'NOAUTH_STATUS="$(curl -sS -m 20 -o /dev/null' 'NOAUTH_STATUS="$(curl -sSX POST -m 20 -o /dev/null'
 neg_case "the helper's method changed to DELETE" "methods ['DELETE']" \
   'curl -sS -m 30 -X POST' 'curl -sS -m 30 -X DELETE'
-neg_case "_edge_post called from leg J" "_edge_post used outside legs K and L (in J)" \
+neg_case "_edge_post called from leg J" "_edge_post used outside legs K, L and N (in J)" \
   'J_RC=0
 ' 'J_RC=0
 _edge_post "/v1/vectors/reapable" '"'{}'"'
@@ -700,7 +718,7 @@ neg_case "a client write call added to leg L" "a client write call in leg L" \
 ' 'L_ROUTE_NOT_SERVED=0
 uv run python -c '"'store.put(1)'"'
 '
-neg_case "_edge_post called from leg I" "_edge_post used outside legs K and L (in I)" \
+neg_case "_edge_post called from leg I" "_edge_post used outside legs K, L and N (in I)" \
   'store = HttpTupleStore()
 addr = f"ccpg-desc-' 'store = HttpTupleStore()
 _edge_post "/v1/vectors/search-per-collection" "{}"
@@ -709,7 +727,7 @@ addr = f"ccpg-desc-'
 check_wiring "M judges its probes through _surface_judge, and a violation is a leg failure" '_leg_fail "M: the engine surfaces through the edge did not answer as the engine does'
 check_wiring "the not-served note reaches the PASSED line (leg M)" 'new engine surfaces NOT served: M saw an engine without'
 check_wiring "the leg M expectation env accepts only unset, served, absent" 'NX_EXPECTED_ENGINE_SURFACES" in'
-neg_case "_edge_post called from leg M" "_edge_post used outside legs K and L (in M)" \
+neg_case "_edge_post called from leg M" "_edge_post used outside legs K, L and N (in M)" \
   '    M_BAD=0
 ' '    M_BAD=0
     _edge_post "/v1/vectors/search-per-collection" "{}"
@@ -722,6 +740,133 @@ neg_case "a raw curl -X POST inside leg M" "a curl with a write flag in leg M" \
 neg_case "a client write call added to leg M" "a client write call in leg M" \
   'M_NOT_SERVED=0
 ' 'M_NOT_SERVED=0
+uv run python -c '"'store.put(1)'"'
+'
+
+# ── Leg N: the test-only tenant-reset route is absent (nexus-0bl77) ───────────────────────────────────────
+# The two judges, extracted from the real script. The leg FAILS CLOSED: only a 404 from the bearer-authenticated POST
+# passes N2, and N1 passes only a readable status body that does not report the route registered.
+extract_fn() {   # <function-name> <outfile>: the function from the real gate, anchored like the others
+  sed -n "/^$1() {/,/^}/p" "$GATE" > "$2"
+  if [ "$(head -n 1 "$2")" != "$1() {" ] || [ "$(sed -n 'x;$p' "$2")" != 'PY' ] || [ "$(tail -n 1 "$2")" != '}' ]; then
+    echo "[FAIL] $1 not found or not closed on its PY heredoc in $GATE (extracted $(wc -l < "$2") lines)"
+    echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
+    exit 1
+  fi
+}
+extract_fn _tenant_reset_status_verdict "$TMP/n1fn.sh"
+extract_fn _tenant_reset_probe_verdict "$TMP/n2fn.sh"
+# run_n <label> <want-rc> <want-text> <fn-file> <fn-name> <args...>
+run_n() {
+  local label="$1" want_rc="$2" want_text="$3" file="$4" fn="$5" out rc
+  shift 5
+  # shellcheck disable=SC1090
+  out="$(source "$file"; "$fn" "$@")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+ST_OLD='{"embedding_mode":"voyage"}'
+ST_FALSE='{"embedding_mode":"voyage","test_tenant_reset_route":false}'
+ST_TRUE='{"embedding_mode":"voyage","test_tenant_reset_route":true}'
+run_n "N1: the flag false -> ok" 0 "ok [N1]: /v1/status reports test_tenant_reset_route=false" "$TMP/n1fn.sh" _tenant_reset_status_verdict "$ST_FALSE"
+run_n "N1: the key omitted (an engine before the route) -> ok, says what it proves" 0 "carries no test_tenant_reset_route" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict "$ST_OLD"
+run_n "N1: the flag true -> violation, names the knob that must never be set" 1 "NX_TEST_TENANT_RESET_ROUTE must never be set" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict "$ST_TRUE"
+run_n "N1: the flag is the string \"true\" -> violation (not a boolean)" 1 "which is not a boolean" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict '{"embedding_mode":"voyage","test_tenant_reset_route":"true"}'
+run_n "N1: the flag is null -> violation (not a boolean)" 1 "which is not a boolean" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict '{"embedding_mode":"voyage","test_tenant_reset_route":null}'
+run_n "N1: an empty status body -> violation, never a pass on a body that could not be read" 1 "no readable status body" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict ""
+run_n "N1: an edge HTML page -> violation" 1 "no readable status body" "$TMP/n1fn.sh" _tenant_reset_status_verdict "<html>502</html>"
+run_n "N1: JSON that is not a status body (no embedding_mode) -> violation" 1 "no readable status body" \
+  "$TMP/n1fn.sh" _tenant_reset_status_verdict '{"test_tenant_reset_route":false}'
+run_n "N2: an authenticated POST answering 404 -> ok (the route is absent)" 0 "ok [N2]" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
+  "<h1>404 Not Found</h1>No context found for request"
+run_n "N2: the 404 ok line prints the body head, so the first live run records the real 404 body" 0 \
+  "body: '<h1>404 Not Found</h1>No context found for request'" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
+  "<h1>404 Not Found</h1>No context found for request"
+run_n "N2: the 404 body head is cut at 80 chars and kept on one line" 0 "body: '$(printf 'a%.0s' $(seq 1 79)) '" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 "$(printf 'a%.0s' $(seq 1 79))
+$(printf 'b%.0s' $(seq 1 40))"
+# run_nx <label> <want-rc> <want-text> <forbidden-text> <args...>: like run_n against the probe judge, and the output
+# must NOT contain the forbidden text (an edge-shaped body must never print the REGISTERED verdict).
+run_nx() {
+  local label="$1" want_rc="$2" want_text="$3" forbid="$4" out rc
+  shift 4
+  # shellcheck disable=SC1090
+  out="$(source "$TMP/n2fn.sh"; _tenant_reset_probe_verdict "$@")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]] && [[ "$out" != *"$forbid"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text' without '$forbid', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+run_n "N2: 403 with the engine's operator refusal -> REGISTERED, names the operator-only refusal" 1 "route is REGISTERED" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"error":"operator privilege required: this operation needs the root token"}'
+run_n "N2: 403 engine body names the operator refusal" 1 "operator-only refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"error":"operator privilege required: this operation needs the root token"}'
+run_n "N2: 400 with the engine's missing-tenant body -> REGISTERED, names the missing-tenant refusal" 1 "route is REGISTERED" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
+run_n "N2: 400 engine body names the missing-tenant refusal" 1 "missing-tenant refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"error":"missing required string field: tenant"}'
+run_n "N2: 503 with the engine's PCI body -> REGISTERED, names the NX_SEARCH_PCI=1 refusal" 1 "route is REGISTERED" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused: NX_SEARCH_PCI=1 builds per-collection indexes, which are DDL a data reset does not drop"}'
+run_n "N2: 503 engine body names the NX_SEARCH_PCI=1 refusal" 1 "NX_SEARCH_PCI=1 refusal" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"error":"tenant reset refused: NX_SEARCH_PCI=1 builds per-collection indexes, which are DDL a data reset does not drop"}'
+run_nx "N2: 403 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 403 '{"message":"Forbidden"}'
+run_nx "N2: 400 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 400 '{"message":"Bad Request"}'
+run_nx "N2: 503 with an edge-shaped body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 503 '{"message":"Service Unavailable"}'
+run_nx "N2: 403 with an empty body -> INCONCLUSIVE, never REGISTERED" 1 "INCONCLUSIVE" "REGISTERED" 403 ''
+run_nx "N2: a 400 body carrying the 403 fragment is not a match (each code has its own fragment)" 1 "INCONCLUSIVE" "REGISTERED" \
+  400 '{"error":"operator privilege required"}'
+run_n "N2: an inconclusive code without an N1 line points at the N1 line above" 1 "read the N1 line above" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}'
+run_n "N2: an inconclusive code with N1 ok says the refusal is the edge's" 1 "N1 reported the flag absent or false: the refusal is the edge's" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 403 '{"message":"Forbidden"}' "ok [N1]: /v1/status reports test_tenant_reset_route=false"
+run_n "N2: an inconclusive code with N1 ok (key omitted) says the refusal is the edge's" 1 "the refusal is the edge's" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 400 '{"message":"Bad Request"}' "ok [N1]: /v1/status carries no test_tenant_reset_route (an engine that predates the route; N2 judges the route itself)"
+run_n "N2: an inconclusive code with N1 failed points at the N1 line" 1 "N1 did not pass: read the N1 line above" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 503 '{"message":"Service Unavailable"}' "N1: /v1/status reports test_tenant_reset_route=true: x"
+run_n "N2: 401 -> violation, absence is not shown (fails closed), not read as registered" 1 "the leg fails closed" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 401 '{"error":"missing or invalid bearer"}'
+run_n "N2: 200 -> violation" 1 "answers HTTP 200" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 200 '{"tenant":"x","evicted":{}}'
+run_n "N2: 405 -> violation" 1 "answers HTTP 405" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 405 ''
+run_n "N2: 502 -> violation" 1 "answers HTTP 502" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 502 '<html>Bad Gateway</html>'
+run_n "N2: a curl failure (000) -> violation" 1 "answers HTTP 000" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 000 ''
+run_n "N2: an empty status code -> violation" 1 "the leg fails closed" "$TMP/n2fn.sh" _tenant_reset_probe_verdict "" ''
+
+check_wiring "N judges the /v1/status body leg B fetched" 'N1_LINE="\$\(_tenant_reset_status_verdict "\$STATUS_BODY"\)"'
+check_wiring "N judges the probe by its code, body and the N1 line" 'N2_LINE="\$\(_tenant_reset_probe_verdict "\$EDGE_CODE" "\$EDGE_BODY" "\$N1_LINE"\)"'
+check_wiring "N: a violation is a leg failure" '_leg_fail "N: the test-only tenant-reset route is not shown absent from the engine'
+check_wiring "N fails closed when leg B resolved no bearer" '_leg_fail "N: no bearer \(leg B could not resolve one\)'
+neg_case "a second leg-N probe" "leg N must hold exactly 1 _edge_post call" \
+  '    N2_LINE="$(_tenant_reset_probe_verdict' '    _edge_post "/v1/_test/tenant-reset" '"'{}'"'
+    N2_LINE="$(_tenant_reset_probe_verdict'
+neg_case "a leg-N probe to another path" "leg N must hold exactly 1 _edge_post call" \
+  '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/tenants/create" '"'{}'"
+neg_case "a leg-N probe with a body" "leg N must hold exactly 1 _edge_post call" \
+  '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/_test/tenant-reset" '"'{\"tenant\":\"x\"}'"
+neg_case "a leg-N probe redirected to another header file" "leg N must hold exactly 1 _edge_post call" \
+  '_edge_post "/v1/_test/tenant-reset" '"'{}'" '_edge_post "/v1/_test/tenant-reset" '"'{}' \"\$N_NOAUTH\""
+neg_case "leg N without the no-bearer guard" "leg N must fail closed when leg B resolved no bearer" \
+  '_leg_fail "N: no bearer' '_leg_fail "N: gone'
+neg_case "a raw curl -X POST inside leg N" "a curl with a write flag in leg N" \
+  'N_BAD=0
+' 'N_BAD=0
+curl -sS -X POST -H @"$BEARER_FILE" --data '"'{}'"' "$SERVICE_URL/v1/_test/tenant-reset" >/dev/null
+'
+neg_case "a client write call added to leg N" "a client write call in leg N" \
+  'N_BAD=0
+' 'N_BAD=0
 uv run python -c '"'store.put(1)'"'
 '
 

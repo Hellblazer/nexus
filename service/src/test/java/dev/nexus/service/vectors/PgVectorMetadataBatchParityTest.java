@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -13,8 +15,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -235,53 +236,41 @@ class PgVectorMetadataBatchParityTest {
     // ---------------------------------------------------------------------------
 
     private long superuserCount(String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.COLLECTION.eq(collection), CHUNKS.EMBEDDING_1024.isNotNull());
         }
     }
 
     private String superuserEmbedding(String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT " + DimTables.embeddingColumn(1024) + "::text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist", collection, chash).isTrue();
-                return rs.getString(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var embeddingText = CHUNKS.EMBEDDING_1024.cast(org.jooq.impl.SQLDataType.CLOB);
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(embeddingText).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(embeddingText);
+            assertThat(rows).as("row %s/%s must exist", collection, chash).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     private String rawMetadataV(String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT metadata->>'v' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist", collection, chash).isTrue();
-                return rs.getString(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var v = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "v");
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(v).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(v);
+            assertThat(rows).as("row %s/%s must exist", collection, chash).isNotEmpty();
+            return rows.get(0);
         }
     }
 
     private String rawStoredText(String collection, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, collection);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist", collection, chash).isTrue();
-                return rs.getString(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetch(CHUNKS.CHUNK_TEXT);
+            assertThat(rows).as("row %s/%s must exist", collection, chash).isNotEmpty();
+            return rows.get(0);
         }
     }
 

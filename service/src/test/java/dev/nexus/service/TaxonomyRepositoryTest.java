@@ -5,17 +5,21 @@ import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 
 import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -100,22 +104,20 @@ class TaxonomyRepositoryTest {
         // RDR-225: every collection this class seeds is registered under the 768-wide model (the
         // non-conformant names take the bge-base-en-v15-768 fallback, the conformant ones name it), and
         // the chunk carries its collection's model.
-        StringBuilder zeroVec = new StringBuilder("[");
-        for (int i = 0; i < 768; i++) {
-            if (i > 0) zeroVec.append(',');
-            zeroVec.append('0');
-        }
-        zeroVec.append(']');
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
-                + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
-                + "' AND name = '" + collection + "'), "
-                + "'seed', '" + zeroVec + "'::nexus.vector) ON CONFLICT DO NOTHING");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            ctx.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, tenant)
+                .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+                .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                .set(CHUNKS.CHUNK_TEXT, "seed")
+                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0f))
+                .onConflictDoNothing()
+                .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -152,10 +154,12 @@ class TaxonomyRepositoryTest {
                     "disc-doc-1", "disc-doc-2",
                     // nexus-71988 assignMany fixtures
                     "am-doc-1", "am-doc-2", "am-doc-dup", "am-doc-proj")) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
-                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Test fixture: " + tumbler)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                    .execute();
             }
             // RDR-156 P0.2: topic_assignments.source_collection now enforces a FK to
             // catalog_collections(tenant_id, name).  Seed stub rows for all test collections.
@@ -744,12 +748,14 @@ class TaxonomyRepositoryTest {
         repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"zeta\",\"alpha\"]");
 
         try (java.sql.Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT link_types::text AS lt FROM nexus.topic_links "
-                + "WHERE tenant_id = '" + TENANT_A + "' "
-                + "AND from_topic_id = " + t1 + " AND to_topic_id = " + t2);
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("lt"))
+            String lt = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPIC_LINKS.LINK_TYPES.cast(SQLDataType.CLOB))
+                .from(TOPIC_LINKS)
+                .where(TOPIC_LINKS.TENANT_ID.eq(TENANT_A)
+                    .and(TOPIC_LINKS.FROM_TOPIC_ID.eq(t1)).and(TOPIC_LINKS.TO_TOPIC_ID.eq(t2)))
+                .fetchOne(0, String.class);
+            assertThat(lt).isNotNull();
+            assertThat(lt)
                 .as("jsonb array canonical text inserts a space after each comma but "
                     + "preserves element order — zeta stays before alpha")
                 .isEqualTo("[\"zeta\", \"alpha\"]");
@@ -783,12 +789,14 @@ class TaxonomyRepositoryTest {
         repo.refreshProjectionLinks(TENANT_A);
 
         try (java.sql.Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT link_types::text AS lt FROM nexus.topic_links "
-                + "WHERE tenant_id = '" + TENANT_A + "' "
-                + "AND from_topic_id = " + Math.min(t1, t2) + " AND to_topic_id = " + Math.max(t1, t2));
-            assertThat(rs.next()).isTrue();
-            String lt = rs.getString("lt");
+            String lt = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPIC_LINKS.LINK_TYPES.cast(SQLDataType.CLOB))
+                .from(TOPIC_LINKS)
+                .where(TOPIC_LINKS.TENANT_ID.eq(TENANT_A)
+                    .and(TOPIC_LINKS.FROM_TOPIC_ID.eq(Math.min(t1, t2)))
+                    .and(TOPIC_LINKS.TO_TOPIC_ID.eq(Math.max(t1, t2))))
+                .fetchOne(0, String.class);
+            assertThat(lt).isNotNull();
             assertThat(lt).as("original cooccurrence type must survive the merge").contains("cooccurrence");
             assertThat(lt).as("projection type must be spliced in by the merge").contains("projection");
         }
@@ -1075,10 +1083,15 @@ class TaxonomyRepositoryTest {
                 // Stamp GUC as 'injector-tenant'
                 PgContainerHelper.setTenant(c, TenantScope.DEFAULT_TENANT_GUC, "injector-tenant", true);
                 // Attempt INSERT with a different tenant_id → WITH CHECK rejects
-                var e = assertThrows(PSQLException.class,
-                    () -> c.createStatement().execute(
-                        "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
-                        "VALUES ('other-tenant', 'evil', 'col-x', 0, NOW(), 'pending')"));
+                var e = assertThrows(DataAccessException.class,
+                    () -> DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+                        .set(TOPICS.TENANT_ID, "other-tenant")
+                        .set(TOPICS.LABEL, "evil")
+                        .set(TOPICS.COLLECTION, "col-x")
+                        .set(TOPICS.DOC_COUNT, 0)
+                        .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+                        .set(TOPICS.REVIEW_STATUS, "pending")
+                        .execute());
                 // RLS WITH CHECK violation → new row violates row-level security policy
                 assertThat(e.getMessage()).containsIgnoringCase("row-level security");
                 c.rollback();
@@ -1106,9 +1119,8 @@ class TaxonomyRepositoryTest {
         com.zaxxer.hikari.HikariDataSource rawDs = new com.zaxxer.hikari.HikariDataSource(rawConfig);
         try (Connection c = rawDs.getConnection()) {
             c.setAutoCommit(true);
-            var rs = c.createStatement().executeQuery(
-                "SELECT id FROM nexus.topics WHERE label = 'fail-closed-check'");
-            assertThat(rs.next()).as("unset GUC must return 0 rows (fail-closed)").isFalse();
+            assertThat(DSL.using(c, SQLDialect.POSTGRES).fetchExists(TOPICS, TOPICS.LABEL.eq("fail-closed-check")))
+                .as("unset GUC must return 0 rows (fail-closed)").isFalse();
         } finally {
             rawDs.close();
         }

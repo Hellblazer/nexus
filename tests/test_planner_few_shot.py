@@ -204,6 +204,7 @@ async def test_plan_miss_prompt_includes_scoping_rules_block(monkeypatch):
     assert core._PLANNER_SCOPING_RULES in prompt
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.asyncio
 async def test_plan_miss_prompt_scoping_rules_follow_question_and_collections(
     monkeypatch,
@@ -317,6 +318,7 @@ def test_collection_hint_samples_every_prefix_family(cloud_mode, monkeypatch) ->
     assert _sample_collection_names_by_prefix([], 24) == []
 
 
+@pytest.mark.t2_tenant
 def test_sample_collection_names_by_prefix_families_pinned() -> None:
     """RDR-204 Phase 3 funnel (nexus-ft04v.21): the family key derivation
     (``n.split("__", 1)[0]``) became a funnel-helper branch. Pin: a

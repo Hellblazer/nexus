@@ -87,6 +87,7 @@ class TestPersistAssignmentsBatch:
         assert store.persist_assignments([]) == 0
 
 
+@pytest.mark.t2_tenant
 class TestPersistAssignmentsBatchSelfHeals:
     """RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]
     Significant finding 1): the batch write self-heals on the engine's

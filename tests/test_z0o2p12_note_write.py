@@ -157,7 +157,7 @@ class _Recording:
 def real_cat():
     from nexus.catalog.factory import make_catalog_writer
 
-    w = make_catalog_writer(priority="interactive")
+    w = make_catalog_writer()
     yield w
     w.close()
 
@@ -598,7 +598,7 @@ class TestConcurrentPuts:
         barrier = threading.Barrier(4)
 
         def worker():
-            w = make_catalog_writer(priority="interactive")
+            w = make_catalog_writer()
             try:
                 barrier.wait()
                 write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
@@ -636,7 +636,7 @@ class TestConcurrentPuts:
         barrier = threading.Barrier(2)
 
         def worker(pieces):
-            w = make_catalog_writer(priority="interactive")
+            w = make_catalog_writer()
             try:
                 barrier.wait()
                 write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=w)
@@ -1063,6 +1063,7 @@ class TestOneRequestPrimitive:
         return write_note(catalog_doc_id=_DOC, collection=_COLLECTION, pieces=["x"],
                           content_hash=content_hash, cat=cat)
 
+    @pytest.mark.t2_tenant
     def test_a_failed_document_is_rejected_by_both(self):
         from nexus.errors import BatchWriteFailedError
 
@@ -1072,6 +1073,7 @@ class TestOneRequestPrimitive:
         with pytest.raises(NoteWriteError, match="failed_doc_ids"):
             self._note(cat)
 
+    @pytest.mark.t2_tenant
     def test_chunks_the_engine_dropped_as_unreferenced_are_rejected_by_both(self):
         from nexus.errors import BatchWriteFailedError
 
@@ -1081,6 +1083,7 @@ class TestOneRequestPrimitive:
         with pytest.raises(ManifestVerifyUncertainError, match="cannot be trusted"):
             self._note(cat)
 
+    @pytest.mark.t2_tenant
     def test_a_refused_stamp_is_rejected_by_both(self):
         from nexus.errors import IndexRunVerifyRefused
 
@@ -1092,6 +1095,7 @@ class TestOneRequestPrimitive:
         with pytest.raises(ManifestVerifyUncertainError, match="refused to stamp"):
             self._note(cat)
 
+    @pytest.mark.t2_tenant
     def test_a_good_answer_is_taken_the_same_way_by_both(self):
         cat = _CannedCat({"failed_doc_ids": [], "chunks_written": 1, "swept": 2, "sweep_skipped": 1,
                           "dropped_chashes": {_DOC: ["a" * 64, "b" * 64]}, "dropped_count": {_DOC: 2}})

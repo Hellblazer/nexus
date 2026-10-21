@@ -32,8 +32,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * a manifest row) is manifest-less, so the reaper (nexus-2x9xa) must not run
  * on a tenant whose legacy-unmanifested backfill has not completed. The
  * client's upgrade-ladder rung {@code rdr192-manifest-backfill} records that
- * completion in {@code nexus.ladder_completions} only after a fresh census
- * reads zero; {@link Rdr192BackfillGate} is the read of that fact the reaper
+ * completion in {@code nexus.ladder_completions} only after a census reads
+ * zero, each collection read in that session or kept from one at most 24 hours
+ * earlier; {@link Rdr192BackfillGate} is the read of that fact the reaper
  * calls. Real Postgres with RLS, through the service role.
  *
  * <p>Fails CLOSED: no record, another rung's record, another tenant's record,

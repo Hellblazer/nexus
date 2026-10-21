@@ -45,6 +45,7 @@ def _owner_of(cat, tumbler: str) -> dict:
     return owners[prefix]
 
 
+@pytest.mark.t2_tenant
 def test_an_rdr_in_a_git_repo_registers_under_the_repo_owner_relative_and_typed_rdr(tmp_path):
     """THE BEAD: no owner row exists yet; the result is a repo owner, a
     repo-relative path and content_type rdr, never a curator row."""
@@ -71,6 +72,7 @@ def test_an_rdr_in_a_git_repo_registers_under_the_repo_owner_relative_and_typed_
     )
 
 
+@pytest.mark.t2_tenant
 def test_a_later_repo_index_finds_the_same_row(tmp_path):
     """The point of using the repo identity: nx index repo's own lookup
     (owner by repo_hash, then by_file_path with the relative path) lands on
@@ -96,6 +98,7 @@ def test_a_later_repo_index_finds_the_same_row(tmp_path):
     assert [d for d in cat.all_documents() if d.file_path == "docs/note.md" and str(d.tumbler).startswith(str(owner) + ".")] .__len__() == 1
 
 
+@pytest.mark.t2_tenant
 def test_a_non_rdr_markdown_keeps_the_callers_type(tmp_path):
     from nexus.doc_indexer import _register_or_lookup_doc_id
 
@@ -108,6 +111,7 @@ def test_a_non_rdr_markdown_keeps_the_callers_type(tmp_path):
     assert doc.content_type == "prose" and doc.file_path == "docs/guide.md"
 
 
+@pytest.mark.t2_tenant
 def test_a_file_outside_any_git_repo_still_registers_under_the_curator(tmp_path):
     """The corpus identity is unchanged where it belongs: standalone notes."""
     from nexus.doc_indexer import _register_or_lookup_doc_id
@@ -123,6 +127,7 @@ def test_a_file_outside_any_git_repo_still_registers_under_the_curator(tmp_path)
     assert owner["owner_type"] == "curator" and owner["name"] == corpus, owner
 
 
+@pytest.mark.t2_tenant
 def test_a_pdf_inside_a_git_repo_keeps_the_corpus_identity(tmp_path):
     """A paper filed in a repo is a curated corpus document, not a repo document."""
     from nexus.doc_indexer import _register_or_lookup_doc_id
@@ -137,6 +142,7 @@ def test_a_pdf_inside_a_git_repo_keeps_the_corpus_identity(tmp_path):
     assert _owner_of(cat, doc_id)["owner_type"] == "curator"
 
 
+@pytest.mark.t2_tenant
 def test_the_configured_rdr_paths_drive_the_type(tmp_path, monkeypatch):
     from nexus.doc_indexer import _repo_home_for
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
@@ -155,6 +161,7 @@ def test_the_configured_rdr_paths_drive_the_type(tmp_path, monkeypatch):
     assert _repo_home_for(make_catalog_reader(), make_catalog_writer(), g, "prose")[2] == "prose"
 
 
+@pytest.mark.t2_tenant
 def test_a_file_in_a_nested_agent_worktree_registers_as_the_primary_file(tmp_path):
     """Review [24431] Critical: the worktree segment must never reach the
     stored path. A file the primary also holds registers as the primary's
@@ -193,6 +200,7 @@ def test_a_file_in_a_nested_agent_worktree_registers_as_the_primary_file(tmp_pat
     assert not [d for d in cat.all_documents() if "rdr-903-worktree-only" in (d.file_path or "")]
 
 
+@pytest.mark.t2_tenant
 def test_indexing_a_worktree_only_file_end_to_end_mints_nothing(tmp_path, monkeypatch):
     """Critique [24433] Critical: through index_markdown, a refused file used to
     be chunked anyway and the post-hook minted the curator row. The refusal

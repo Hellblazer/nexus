@@ -733,6 +733,7 @@ def _mock_reg() -> MagicMock:
     return mock
 
 
+@pytest.mark.t2_tenant
 class TestSkipLineNamesFailedDiscover:
     """Requirement 4: the maintenance-mode skip line says when the last
     discover attempt failed, instead of reading as reassurance."""

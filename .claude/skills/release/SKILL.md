@@ -164,7 +164,11 @@ registration asserted, semantic search returns both sentinels, doctor with
 zero ✗ and warnings checked against the script's allowlist. Must end
 `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
 `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
-runs. Every new fresh-box warning is a decision: fix it or allowlist it in
+runs. The work tree (about 2.5 GB) is created under `$TMPDIR` and removed on
+exit. On failure the script prints `FAILURE EVIDENCE PRESERVED: <dir>`, a small
+`$TMPDIR/fresh-mvv-*-logs` dir holding the leg logs plus the engine and Postgres
+logs from the sandbox HOME (never config or credentials); `FRESH_MVV_KEEP_WORK=1`
+keeps the whole tree on failure instead (nexus-0tqr7). Every new fresh-box warning is a decision: fix it or allowlist it in
 the script WITH a rationale + bead reference.
 
 **Leg 9/10 (nexus-utpuw.19) — a generation install on that same virgin HOME.**

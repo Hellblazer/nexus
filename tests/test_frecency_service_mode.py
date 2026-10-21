@@ -71,6 +71,7 @@ def _make_svc_client(
 class TestFrecencyServiceModeRouting:
     """In service mode, _run_index_frecency_only must route through HttpVectorClient."""
 
+    @pytest.mark.t2_tenant
     def test_make_t3_not_called_in_service_mode(self, tmp_path: Path) -> None:
         """make_t3 must NOT be called when NX_STORAGE_BACKEND_VECTORS=service."""
         svc = _make_svc_client()
@@ -86,6 +87,7 @@ class TestFrecencyServiceModeRouting:
 
         mock_make_t3.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_service_client_used_in_service_mode(self, tmp_path: Path) -> None:
         """get_http_vector_client IS called; the returned client is used as db."""
         svc = _make_svc_client()
@@ -186,6 +188,7 @@ class TestFrecencyServiceModeRouting:
                 f"Expected frecency_score=0.88 in updated metadata, got: {updated_metas}"
             )
 
+    @pytest.mark.t2_tenant
     def test_structured_log_emitted_in_service_mode(self, tmp_path: Path) -> None:
         """A 'frecency_service_mode' log event must be emitted (replaces old skip log)."""
         svc = _make_svc_client()
@@ -204,6 +207,7 @@ class TestFrecencyServiceModeRouting:
         call_args = mock_log.info.call_args
         assert call_args[0][0] == "frecency_service_mode"
 
+    @pytest.mark.t2_tenant
     def test_collection_not_found_skipped_gracefully(self, tmp_path: Path) -> None:
         """When get_collection raises ChromaNotFoundError, the collection is skipped."""
         svc = _make_svc_client(collection_exists=False)
@@ -222,6 +226,7 @@ class TestFrecencyServiceModeRouting:
         # update_chunks must NOT have been called (collection skipped)
         svc.update_chunks.assert_not_called()
 
+    @pytest.mark.t2_tenant
     def test_no_write_when_frecency_map_empty_service_mode(self, tmp_path: Path) -> None:
         """Empty frecency_map means no update_chunks call."""
         svc = _make_svc_client(collection_exists=True, chunk_ids=[], chunk_metas=[])
@@ -244,6 +249,7 @@ class TestFrecencyServiceModeRouting:
 class TestFrecencyNonServiceMode:
     """In non-service mode, make_t3() IS called (normal path)."""
 
+    @pytest.mark.t2_tenant
     def test_make_t3_called_in_local_mode(self, tmp_path: Path) -> None:
         """make_t3 must be called in local (non-service) mode."""
         fake_db = MagicMock()

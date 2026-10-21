@@ -4,16 +4,17 @@ T1, T2, and T3 implementations. The interesting policy lives in the Liquibase/up
 
 **ChromaDB is GONE (RDR-155 P4b, 2026-07-25).** The dependency is dropped, not
 merely unused: it is absent from `uv.lock` and not importable. Serving is the
-pgvector nexus-service in every mode. `chroma://` URI literals and
-`ChromaSchemeHandler.java` survive deliberately — they are a persisted data
-format (RDR-169 G3), not a dependency. Pinned by
+pgvector nexus-service in every mode. `chroma://` URI literals survive
+deliberately — they are a persisted data format (RDR-169 G3), not a
+dependency. (`ChromaSchemeHandler.java`, the engine's resolver for them, was
+removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 `tests/test_rdr155_p4b_deletion_gate.py`.
 
 ## Modules
 
 | File | Purpose |
 |---|---|
-| `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via its own `t1_session_lease.<session_id>` flat file (`publish_t1_session_lease` / `read_t1_session_lease` / `clear_t1_session_lease`), published by the MCP lifespan and refreshed periodically. `daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` lease this replaced) is retired (nexus-8zfwv, 2026-08-07) — T1 no longer rides the daemon-lifecycle primitive at all. |
+| `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via its own `t1_session_lease.<session_id>` flat file (`publish_t1_session_lease` / `read_t1_session_lease` / `end_owned_t1_session_lease`), published by the MCP lifespan and refreshed periodically. `daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` lease this replaced) is retired (nexus-8zfwv, 2026-08-07) — T1 no longer rides the daemon-lifecycle primitive at all. |
 | `t2/` | Package: nine domain stores + `T2Database` facade. See **T2 domain stores** below. |
 | `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
 | `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |

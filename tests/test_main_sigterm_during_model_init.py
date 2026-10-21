@@ -39,6 +39,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.service_bge_model import service_bge_model_dir, service_bge_model_present
+from tests._child_process import popen_in_group
 from tests._engine_substrate import ensure_engine
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,9 +94,11 @@ def _spawn(state: dict, dbname: str, log_path: Path, extra_env: dict[str, str]):
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_VOYAGE_API_KEY", None)  # local mode: bge loads at boot
     fh = open(log_path, "wb")  # noqa: SIM115 — closed by the caller after reaping
-    return subprocess.Popen(
+    # popen_in_group records the JVM for the crash sweep (nexus-qsqc6) and makes it a group leader, which the
+    # sweep's group kill needs.
+    return popen_in_group(
         [java, f"-XX:ErrorFile={log_path.parent}/hs_err_%p.log", "-jar", str(_JAR)],
-        env=env, stdout=fh, stderr=fh,
+        popen=subprocess.Popen, env=env, stdout=fh, stderr=fh,
     ), fh
 
 

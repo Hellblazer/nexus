@@ -25,6 +25,8 @@ import pytest
 import nexus.catalog.factory as factory
 from nexus.catalog.store_hook import catalog_store_hook
 
+pytestmark = pytest.mark.t2_tenant
+
 #: Full sha256 hex chunk natural-id (RDR-180 wire shape).
 _DOC_ID = "a" * 64
 _COLLECTION = "knowledge__knowledge__bge-base-en-v15-768__v1"

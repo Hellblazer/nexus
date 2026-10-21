@@ -14,7 +14,7 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
                                  the agent's reply on stdin -> filtered proposal JSON
   brief.py tmpdir [--ready]      a fresh temporary directory outside the repository; --ready prints WORK= and the
                                  absolute path of INPUT, REPLY, FILTERED, REASONS, ENTRY and CARD inside it
-  brief.py site-layer [--site-page FILE]
+  brief.py site-layer [--site-page FILE] [--genre G]
                                  the site-page section 3 layer memory.py `read` takes
 
 TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text).
@@ -57,7 +57,8 @@ the repo style sheet lists site_page_section3_ignored, _query_only and _note_onl
 entry starting with the rule's opening words in quotes; a document's own record (`memory.py add-entry --level
 doc`) can carry the same three lists, and for a rule both treat the document's wins, so one essay can ignore or
 query a rule the genre applies. A listed rule that matches no bullet stops the build, so a skill edit cannot
-silently change what the editor applies.
+silently change what the editor applies. A rule that belongs to one genre (GENRE_DROPS: "No semicolons" is for
+how-to pages) is left out of the other genre's sheet by the genre itself, with no memory entry.
 
 `filter` takes the agent's reply (one ```json block, a verbatim repeat of it, or bare JSON), keeps the first
 --budget edits, runs memory.py filter (validation and stored rejections), then drops any
@@ -96,6 +97,9 @@ MEMORY = HERE / "memory.py"
 DEFAULT_SITE_PAGE = HERE.parents[1] / "site-page" / "SKILL.md"
 COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer")
 SITE_GENRES = ("how-to", "exploration-essay")
+# Section 3 bullets that apply to some site genres only (nexus-ger02.23): the bullet's opening words, and the
+# genres it is dropped for. "No semicolons" is for web/ how-to pages; a docs/exploration essay may use them.
+GENRE_DROPS: dict[str, tuple[str, ...]] = {"No semicolons": ("exploration-essay",)}
 DEFAULT_BUDGET = 10
 PHASE3_FLAGS = ("--mode", "--voice-card", "--word-budget")
 TREATMENT_KEYS = {
@@ -362,14 +366,23 @@ def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], la
 
 
 def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
-                     *narrower: tuple[str, dict[str, list[str]], str]) -> Obj:
+                     *narrower: tuple[str, dict[str, list[str]], str], genre: str | None = None) -> Obj:
     """memory.py's {"scalars", "lists"} layer for site-page section 3.
 
     Ignored rules are dropped; query-only and note-only rules are kept under their own
     list. `treatments` is the repo style sheet's; each (layer name, treatments) after it is a narrower layer
     (the document's), and for a bullet that two layers treat, the narrower layer's treatment wins.
+    A bullet in GENRE_DROPS is left out for the genres listed there, after the treatments are matched, so an
+    entry naming it stays valid for the genre that applies it. A GENRE_DROPS rule with no bullet stops the build
+    for the genre it drops from, as a stale treatment entry does.
     """
     normalized = [_norm(b) for b in bullets]
+    for opening, genres in GENRE_DROPS.items():
+        if genre in genres and not any(b.startswith(opening) for b in normalized):
+            raise _user(f'site-page section 3 has no bullet opening "{opening}..." (brief.py drops it by genre): '
+                        "the skill changed; update GENRE_DROPS in brief.py")
+    dropped = {i for i, b in enumerate(normalized)
+               for opening, genres in GENRE_DROPS.items() if genre in genres and b.startswith(opening)}
     kind_of = _treatment_kinds(normalized, treatments, "repo")
     for name, extra, where in narrower:
         kind_of.update(_treatment_kinds(normalized, extra, name, where))
@@ -378,7 +391,7 @@ def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
     notes: list[str] = []
     for i, bullet in enumerate(bullets):
         kind = kind_of.get(i)
-        if kind == "ignored":
+        if kind == "ignored" or i in dropped:
             continue
         {"query_only": queries, "note_only": notes}.get(kind or "", rules).append(bullet)
     return {"scalars": {}, "lists": {
@@ -412,10 +425,11 @@ def _site_page_text(path: Path) -> str:
         raise _user(f"site-page skill unreadable at {path}: {exc}") from exc
 
 
-def site_layer(site_page: Path, target: str | None = None) -> Obj:
+def site_layer(site_page: Path, target: str | None = None, genre: str | None = None) -> Obj:
     """Section 3 of the site-page skill as the genre layer. The repo style sheet lists which rules are ignored,
     query-only or note-only; a document's own record can list them too (`target` names the document), and for a
-    rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies."""
+    rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies.
+    `genre` drops the rules that do not apply to it (GENRE_DROPS); None keeps every rule."""
     repo_sheet = memory_json(["entries", "--level", "repo"])
     treatments = treatments_from_lists(cast(Obj, repo_sheet.get("lists") or {}))
     narrower: list[tuple[str, dict[str, list[str]], str]] = []
@@ -423,7 +437,7 @@ def site_layer(site_page: Path, target: str | None = None) -> Obj:
         doc_sheet = memory_json(["entries", "--level", "doc", "--path", target])
         narrower.append(("document", treatments_from_lists(cast(Obj, doc_sheet.get("lists") or {})),
                          f"--level doc --path {shlex.quote(target)}"))
-    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments, *narrower)
+    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments, *narrower, genre=genre)
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +748,7 @@ def cmd_build(a: argparse.Namespace) -> str:
         if genre in SITE_GENRES:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
                 layer_file = Path(fh.name)
-                json.dump(site_layer(Path(a.site_page), a.target), fh)
+                json.dump(site_layer(Path(a.site_page), a.target, genre), fh)
             read_args += ["--site-layer", str(layer_file)]
         read = memory_json(read_args)
     finally:
@@ -1408,6 +1422,8 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("path")
     s = sub.add_parser("site-layer", help="the site-page section 3 layer")
     s.add_argument("--site-page", default=str(DEFAULT_SITE_PAGE))
+    s.add_argument("--genre", choices=SITE_GENRES, default=None,
+                   help="drop the rules that do not apply to this genre (default: keep every rule)")
     return p
 
 
@@ -1442,7 +1458,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "rmtmp":
             cmd_rmtmp(args.path)
         else:
-            layer = site_layer(Path(args.site_page))
+            layer = site_layer(Path(args.site_page), genre=args.genre)
             sys.stdout.write(json.dumps(layer, ensure_ascii=False, indent=1) + "\n")
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")

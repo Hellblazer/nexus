@@ -1233,6 +1233,26 @@ def test_remove_tree_clears_read_only_files_and_never_raises(tmp_path: Path) -> 
     bw.remove_tree(tmp_path / "never-existed")  # must not raise
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_remove_tree_never_raises_on_a_directory_it_cannot_enter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """rmtree's POSIX fd walk hands the handler ``os.open`` for a directory it cannot
+    enter; re-calling it with a path alone raised TypeError (5588beead)."""
+    tree = tmp_path / "t"
+    (tree / "shut" / "inner").mkdir(parents=True)
+    (tree / "shut").chmod(0)
+    try:
+        if os.access(tree / "shut", os.R_OK):
+            pytest.skip("this user is not refused by mode bits (root): nothing to exercise")
+        bw.remove_tree(tree)
+        assert "could not fully remove" in capsys.readouterr().err
+    finally:
+        # The handler leaves the non-empty parent at S_IWRITE (0o200), so it goes first.
+        tree.chmod(0o700)
+        (tree / "shut").chmod(0o700)
+
+
 # --------------------------------------------------------------------------- #
 # nexus-f9bgu.27: the smoke extracts the way the client does, and compares long paths
 # --------------------------------------------------------------------------- #

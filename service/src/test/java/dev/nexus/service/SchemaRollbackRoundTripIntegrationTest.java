@@ -199,62 +199,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class SchemaRollbackRoundTripIntegrationTest {
 
-    // SANCTIONED RAW (nexus-cbo4a): mirrors SchemaMigratorIntegrationTest's own
-    // bootstrapVectorExtensionsForFreshWalk (see that method's javadoc for the full
-    // derivation) -- DBA/superuser provisioning DDL simulating nexus.db.pg_provision.py's
-    // real bootstrap step: CREATE EXTENSION (no jOOQ typed form for extension DDL),
-    // CREATE SCHEMA ... AUTHORIZATION (no typed AUTHORIZATION clause in jOOQ's fluent
-    // schema DSL), and CREATE OR REPLACE FUNCTION with a plpgsql SECURITY DEFINER body
-    // (jOOQ has no typed DSL for authoring an arbitrary function body). Same class as
-    // SchemaMigratorIntegrationTest's admin/svc role bootstrap, kept raw by decision
-    // per RawSqlGateTest's own javadoc.
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-                + "BEGIN "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-                + "  END IF; "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-                + "  END IF; "
-                + "END; "
-                + "$unrelofunc$");
-            su.createStatement().execute(
-                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
 
     private static final Logger log =
         LoggerFactory.getLogger(SchemaRollbackRoundTripIntegrationTest.class);
 
     private static final String MASTER_CHANGELOG_RELATIVE = "db/changelog/db.changelog-master.xml";
 
-    private static final String ADMIN_ROLE = "nexus_admin_rollback";
-    private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
+    private static final String ADMIN_ROLE = "nexus_admin_schemarollback";
+    private static final String ADMIN_PASS = "nexus_admin_schemarollback_pass";
 
     /**
      * The TWELVE {@code runAlways} changesets, in master order. Formerly eleven
@@ -294,6 +246,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static final List<String> RUN_ALWAYS_IDS = List.of(
         "staging-4-svc-grants",
         "taxonomy-011-8",
+        "vectors-034-2",
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
         "grants-003-purge-vacuum-maintain",
@@ -333,7 +286,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void runAlwaysChangesetsFloatToTheExecutionTail() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -474,20 +427,17 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("nexus_diag");
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
                 // BYPASSRLS is why this role is superuser-created and never
                 // created by the changelog (nexus-vounk): a policy-subject
                 // session with no nexus.tenant GUC counts ZERO rows.
-                // SANCTIONED RAW: CREATE ROLE is cluster-level DDL with no jOOQ typed-DSL
-                // form (same category as role-001-1's own declared-irreversible role
-                // bootstrap and SchemaMigratorIntegrationTest's admin/svc role bootstrap,
-                // kept raw by decision per RawSqlGateTest's own javadoc).
-                su.createStatement().execute(
-                    "CREATE ROLE nexus_diag LOGIN PASSWORD 'nexus_diag_pass' "
-                        + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+                // CREATE ROLE has no jOOQ typed-DSL form: db.changelog-test-login-role.xml.
+                // nexus_diag is deliberately not part of the shared
+                // bootstrapNonSuperuserOwner provisioning.
+                PgContainerHelper.createLoginRole(su, "nexus_diag", "nexus_diag_pass", true);
             }
             try (HikariDataSource ds = newAdminPool(pg, "nexus-admin-era-transition")) {
                 // ── A single fresh migrate() now lands DIRECTLY in view
@@ -564,18 +514,15 @@ class SchemaRollbackRoundTripIntegrationTest {
             // taxonomy-011-8, upgrading through this exact changeset).
             // Direct-replay proof, bypassing Liquibase's own ordering
             // entirely — mirrors Taxonomy010BackfillDirectIntegrationTest's
-            // extractChangesetSql technique.
+            // PgContainerHelper.replayChangeset technique.
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 dsl(su).dropView(DSL.table(DSL.name("nexus", "diag_chash_conformance"))).execute();
-                // SANCTIONED RAW: replays grants-nexus-diag-1's own <sql> body verbatim
-                // (extractChangesetSql), byte-for-byte, to prove its LEGACY BRANCH logic is
-                // still correct even though it is now practically unreachable via a live
-                // walk (see this test's own javadoc above) -- a typed-DSL re-expression
-                // would no longer be the SAME statement Liquibase itself executes.
-                String sql = extractChangesetSql(
-                    "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
-                su.createStatement().execute(sql);
+                // Replays grants-nexus-diag-1's own <sql> body verbatim (read from the product changelog), to
+                // prove its LEGACY BRANCH logic is still correct even though it is now practically
+                // unreachable via a live walk (see this test's own javadoc above) -- a typed-DSL
+                // re-expression would no longer be the SAME statement Liquibase itself executes.
+                PgContainerHelper.replayChangeset(su, "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
                 assertThat(diagBaseTableGrants(su))
                     .as("grants-nexus-diag-1's own legacy-branch SQL, replayed directly "
                         + "against a connection where the view genuinely does not exist, "
@@ -587,44 +534,6 @@ class SchemaRollbackRoundTripIntegrationTest {
         } finally {
             pg.stop();
         }
-    }
-
-    /**
-     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
-     * out of {@code changelogFile} (classpath resource), concatenated in document
-     * order. Same technique as
-     * {@code Taxonomy010BackfillDirectIntegrationTest#extractChangesetSql}
-     * (duplicated locally rather than shared — no common test-utility class
-     * exists for this yet).
-     */
-    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
-        org.w3c.dom.Document doc;
-        try (var in = SchemaRollbackRoundTripIntegrationTest.class.getClassLoader()
-                .getResourceAsStream(changelogFile)) {
-            if (in == null) {
-                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
-            }
-            var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            doc = factory.newDocumentBuilder().parse(in);
-        }
-        org.w3c.dom.NodeList changeSets = doc.getElementsByTagNameNS(
-            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
-        for (int i = 0; i < changeSets.getLength(); i++) {
-            org.w3c.dom.Element cs = (org.w3c.dom.Element) changeSets.item(i);
-            if (changesetId.equals(cs.getAttribute("id"))) {
-                StringBuilder sb = new StringBuilder();
-                org.w3c.dom.NodeList children = cs.getChildNodes();
-                for (int j = 0; j < children.getLength(); j++) {
-                    org.w3c.dom.Node n = children.item(j);
-                    if (n.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
-                        sb.append(n.getTextContent()).append('\n');
-                    }
-                }
-                return sb.toString();
-            }
-        }
-        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
     }
 
     /**
@@ -641,7 +550,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void fullChangelog_rollsBackCompletely_andReappliesToTheSameSchema() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -748,7 +657,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // again.
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
-                    bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
+                    PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
                 }
 
                 // ── FORWARD AGAIN: the schema must come back identical. ─────
@@ -790,7 +699,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void textGateProbeRollback_restoresInvokerProbes_dropsThePolicy_andRevokesTheServiceGrant() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -918,7 +827,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     // reads the RIGHT column through the RIGHT cast.
     @Test
     void typeHygieneRollback_restoresExactDataAndRoundTripsForward() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -1972,39 +1881,19 @@ class SchemaRollbackRoundTripIntegrationTest {
 
     // ── Container bootstrap (mirrors SchemaUpgradeRehearsalIntegrationTest) ──
 
-    // SANCTIONED RAW: bespoke admin/svc role bootstrap against a DEDICATED container
-    // (PgContainerHelper.startDedicated(), never applyProductSchema's role-001-created
-    // nexus_admin) -- CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor
-    // WITH ADMIN OPTION are cluster-level DDL with no jOOQ typed-DSL form. Same class,
-    // same exclusion as SchemaMigratorIntegrationTest's own admin/svc role bootstrap
-    // (RawSqlGateTest's own javadoc names both as kept-raw-by-decision; batch 8's
-    // role-bootstrap fold explicitly excluded this file for the same reason).
+    /**
+     * The DBA-side provisioning against an empty database on the per-fork shared cluster
+     * (PgContainerHelper#startEmptyDatabase; never applyProductSchema's role-001-created
+     * nexus_admin): the admin role, CREATE on the database and public, pg_monitor WITH ADMIN
+     * OPTION for the admin (nexus-hzhgl; GrantsPgMonitorTest is the falsification proof), the
+     * extensions and the SECURITY DEFINER relocation helpers search-path-001 calls mid-walk.
+     * nexus_svc is NOT created here: the cluster already holds it (NOINHERIT, from the template
+     * migration), and CREATE ROLE IF NOT EXISTS leaves it as it is. All of it is
+     * db.changelog-test-nonsuper-owner.xml, run as the superuser through
+     * PgContainerHelper#bootstrapNonSuperuserOwner.
+     */
     private static void dbaBootstrap(Connection su) throws Exception {
-        su.setAutoCommit(true);
-        su.createStatement().execute(
-            "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-        su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
-        su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-        // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
-        // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
-        // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
-        // PostgreSQL refuses that GRANT unless the migration role already holds
-        // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
-        // the falsification proof of this exact prerequisite.
-        su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-        su.createStatement().execute(
-            "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
-                + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-        // javadoc for the full derivation -- creates the extensions directly as
-        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-        // 001's guard to call mid-walk, since this walk resumes through both
-        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-        // as a NOSUPERUSER role.
-        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
+        PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
     }
 
     private static HikariDataSource newAdminPool(PostgreSQLContainer<?> pg, String poolName) {

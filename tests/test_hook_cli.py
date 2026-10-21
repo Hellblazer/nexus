@@ -23,6 +23,7 @@ without reading.
 from __future__ import annotations
 
 import io
+import pytest
 
 
 # ── _read_stdin_session_id helper ──────────────────────────────────────────
@@ -212,6 +213,7 @@ class TestSessionStartCmdSourcePassthrough:
         assert result.exit_code == 0
         mock_start.assert_called_once_with(claude_session_id=None, source=None)
 
+    @pytest.mark.t2_tenant
     def test_end_to_end_clear_writes_a_real_marker(self, tmp_path, monkeypatch):
         """Full stack: stdin JSON -> CLI -> hooks.session_start -> a real
         marker file on disk, with a mocked ancestry/sibling resolution
@@ -246,6 +248,7 @@ class TestSessionStartCmdSourcePassthrough:
 # ── nexus-h33x8.4: guidance imperative reaches the real CLI output ─────────
 
 
+@pytest.mark.t2_tenant
 class TestSessionStartCmdGuidanceImperative:
     """True end-to-end: no mocking of ``hooks.session_start`` or
     ``session_start_guidance`` — pins that ``nx hook session-start`` (Tier

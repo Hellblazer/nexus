@@ -487,7 +487,7 @@ def _strand_a_superseded_chunk(client: HttpVectorClient, subject: str, title: st
     tumbler = str(doc.tumbler)
     (v1_chash,) = {r.chash for r in reader.get_manifest(tumbler)}
     v2_chash = hashlib.sha256(v2.encode()).hexdigest()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     try:
         writer.write_manifest_many(
             [(tumbler, [{"chash": v2_chash, "position": 0}])],

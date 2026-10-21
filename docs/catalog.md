@@ -519,6 +519,8 @@ Two dispositions, reported per row:
 
 - **Ghosts** — collections nothing references any more (no live row in any
   non-audit collection-scoped table). `--apply` deletes the registry row.
+  A rename's retired row whose successor is still registered is a live
+  redirect and is left unchanged; one whose successor is gone is a ghost.
 - **Dormant** — collections still referenced somewhere but with no vector
   stats row (nothing to embed or read). `--apply` flips `lifecycle_state`
   to `dormant`; the row itself is not deleted — see [Storage Tiers §

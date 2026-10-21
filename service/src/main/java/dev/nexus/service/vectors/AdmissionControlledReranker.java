@@ -39,6 +39,11 @@ public final class AdmissionControlledReranker implements Reranker {
     }
 
     @Override
+    public boolean available() {
+        return delegate.available();
+    }
+
+    @Override
     public List<Scored> rerank(String query, List<String> documents, Integer topK) {
         try {
             if (interactive) {

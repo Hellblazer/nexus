@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a: CREATE INDEX ${indexName} ON ${tableName} USING hnsw (${column} nexus.vector_cosine_ops), in
+    Liquibase XML instead of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests
+    included). jOOQ's createIndex has neither an access method nor an operator class.
+
+    DenseGateScanBudgetIntegrationTest rebuilds the unified-chunks HNSW index after a bulk load, the way the
+    cloud's ALTER TYPE rewrite did. Run on the superuser connection through
+    PgContainerHelper#runSuperuserTestChangelog, so a session-level SET the caller made on that connection
+    (max_parallel_maintenance_workers) governs the build. runAlways, bookkeeping in its own table.
+    The three parameters are fixed test literals, never input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index" author="nexus-cbo4a" runAlways="true">
+        <sql>CREATE INDEX ${indexName} ON ${tableName} USING hnsw (${column} nexus.vector_cosine_ops)</sql>
+    </changeSet>
+</databaseChangeLog>

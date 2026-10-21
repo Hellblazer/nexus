@@ -1025,12 +1025,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * The whole entry lands in the evidence file; the return value is the plan alone.
      */
     private String probeBodyPlan(String label, String token) throws Exception {
-        int from = pg.getLogs().length();
+        int from = PgContainerHelper.serverLog(pg).length();
         Table<?> fn = probe384(token, COLL);
         int rows = explainScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn).fetch().size());
         String block = null;
         for (int attempt = 0; attempt < 100 && block == null; attempt++) {
-            String logs = pg.getLogs();
+            String logs = PgContainerHelper.serverLog(pg);
             int mark = logs.indexOf(BODY_MARKER, from);
             if (mark >= 0) {
                 int begin = logs.lastIndexOf("LOG:  duration:", mark);
