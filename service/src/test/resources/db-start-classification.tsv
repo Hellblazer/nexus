@@ -25,6 +25,7 @@ Catalog036EmbeddingProfileSchemaLiquibaseTest	startEmptyDatabase	WALK	its two em
 TuplesBaselineSchemaLiquibaseTest	startEmptyDatabase	WALK	rolls the tuples changesets back and reapplies them, walks from empty, and cleans legacy oversized rows
 StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-003, sets up one shape per test (aged rows, foreign grants, non-owner), finishes the walk and asserts the drop
 P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
+P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
 SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk back to a tag and re-walks, asserting what each rollback leaves
 SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
 SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks

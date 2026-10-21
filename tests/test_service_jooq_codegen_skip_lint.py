@@ -371,7 +371,10 @@ def test_the_product_generator_keeps_the_excludes_and_the_vector_binding() -> No
     """The two settings with a reason attached: the partition-leaf excludes (RDR-225) and the pgvector binding (nexus-xtmtf)."""
     root = ET.parse(_SERVICE / "src/build/jooq/jooq-main.xml").getroot()
     excludes = root.findtext("j:generator/j:database/j:excludes", namespaces=_JOOQ_NS)
-    assert excludes and "databasechangelog" in excludes and "_t_[0-9a-f]{16}" in excludes and "_retired_225" in excludes
+    assert excludes and "databasechangelog" in excludes and "_t_[0-9a-f]{16}" in excludes
+    # vectors-036-1 (nexus-3wh8d.22) dropped the retired pre-walk tables, so codegen has none to skip; an exclude
+    # that names them again would hide a table somebody re-created under that name.
+    assert "_retired_225" not in excludes
     [forced] = root.findall("j:generator/j:database/j:forcedTypes/j:forcedType", _JOOQ_NS)
     assert forced.findtext("j:binding", namespaces=_JOOQ_NS) == "dev.nexus.service.jooq.binding.VectorBinding"
     assert forced.findtext("j:includeTypes", namespaces=_JOOQ_NS) == "vector"

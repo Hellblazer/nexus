@@ -457,7 +457,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         // ambiguous-arm seed below, distinct from code__x/code__y so its
                         // fresh chunks_384/768 rows don't perturb vectors-004-1's own
                         // per-collection row-count assertions further down.
-                        {"t1", "code__p3ba"}, {"t1", "code__p3bb"}}) {
+                        {"t1", "code__p3ba"}, {"t1", "code__p3bb"},
+                        // nexus-3wh8d.22: hygiene-001-9b's dedicated centroid. It used to live in a collection with no
+                        // registry row, so the walk left it in taxonomy_centroids_retired_225 and the assertion read
+                        // it there; vectors-036-1 drops that table, so the collection is registered (under a 384-d
+                        // model, matching its 384-d centroid) and the walk copies the row into the live table.
+                        {"t1", "code__hyg9b__minilm-l6-v2-384__v1"}}) {
                         registerCollection(su, tc[0], tc[1]);
                     }
                     // Legacy 64-char chash_index rows — Catalog013RlsReplayTest's
@@ -782,10 +787,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // perturb THEIR per-collection count assertions. No stub
                     // registration needed (taxonomy_centroids_<dim> carries no FK to
                     // catalog_collections or nexus.topics, per taxonomy-007-1's own
-                    // coverage note above). label=null binds SQL NULL through the
-                    // typed jOOQ insert.
+                    // coverage note above), except that the collection is registered in
+                    // the FK-parent list above (see its nexus-3wh8d.22 note). label=null
+                    // binds SQL NULL through the typed jOOQ insert.
                     seedTaxonomyCentroidLegacyContent(
-                        su, 384, "t1", "code__hyg9b", 999L, null);
+                        su, 384, "t1", "code__hyg9b__minilm-l6-v2-384__v1", 999L, null);
 
                     // hygiene-001-10/-11 (nexus-tk070.p6a follow-on, coordinator scope
                     // addition): plans TTL catch-up sweep + plans.verb NOT NULL. Two
@@ -1603,11 +1609,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
                     // hygiene-001-9b: the dedicated code__hyg9b taxonomy_centroids row
                     // (label=null at seed time) must end up with label = ''.
-                    // RDR-225: code__hyg9b has no registry row, so the walk does not copy its centroid (derived
-                    // data, taxonomy rebuilds it); it stays in the retired table, which still proves the backfill.
-                    assertThat(dsl(su).fetchCount(CENTROIDS_RETIRED_225,
-                            RETIRED_TENANT_ID.eq("t1").and(RETIRED_COLLECTION.eq("code__hyg9b"))
-                                .and(RETIRED_TOPIC_ID.eq(999L)).and(RETIRED_LABEL.eq(""))))
+                    // RDR-225: the walk copies the centroid into the live partitioned table (its collection is
+                    // registered), so the backfilled label is read there.
+                    assertThat(dsl(su).fetchCount(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID.eq("t1")
+                                .and(TAXONOMY_CENTROIDS.COLLECTION.eq("code__hyg9b__minilm-l6-v2-384__v1"))
+                                .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(999L)).and(TAXONOMY_CENTROIDS.LABEL.eq(""))))
                         .as("hygiene-001-9b must backfill taxonomy_centroids.label to "
                             + "'', never leave it NULL")
                         .isEqualTo(1);
@@ -3147,14 +3154,6 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
     /** nexus.chash_index: present on the old leg, dropped at HEAD (rdr187-2), so no generated table. */
     private static final org.jooq.Table<?> CHASH_INDEX_RETIRED = DSL.table(DSL.name("nexus", "chash_index"));
-
-    /** nexus.taxonomy_centroids_retired_225 is excluded from codegen (pom.xml), so it is addressed by quoted name. */
-    private static final org.jooq.Table<?> CENTROIDS_RETIRED_225 =
-        DSL.table(DSL.name("nexus", "taxonomy_centroids_retired_225"));
-    private static final org.jooq.Field<String> RETIRED_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
-    private static final org.jooq.Field<String> RETIRED_COLLECTION = DSL.field(DSL.name("collection"), String.class);
-    private static final org.jooq.Field<Long> RETIRED_TOPIC_ID = DSL.field(DSL.name("topic_id"), Long.class);
-    private static final org.jooq.Field<String> RETIRED_LABEL = DSL.field(DSL.name("label"), String.class);
 
     /** taxonomy-014-2's anti-join: topics whose parent_id names no topic of the same tenant. */
     private static int topicsWithMissingParent(Connection c) {

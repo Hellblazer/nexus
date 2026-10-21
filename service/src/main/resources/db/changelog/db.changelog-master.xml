@@ -1818,6 +1818,9 @@
     -->
     <include file="db/changelog/vectors-035-gc-expire-quarantine-bounded.xml"/>
 
+    <!-- RDR-225 P3.3 (nexus-3wh8d.22): drops the retired pre-walk tables. After the walk (vectors-030), before the grants. -->
+    <include file="db/changelog/vectors-036-drop-retired-225.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

@@ -83,6 +83,12 @@ class P225MigrationWalkIntegrationTest {
     private static final String ADMIN_PASS = "nexus_admin_p225walk_pass";
     private static final String MASTER = "db/changelog/db.changelog-master.xml";
     private static final String WALK = "vectors-030-1";
+    /**
+     * vectors-036-1 drops the retired pre-walk tables (nexus-3wh8d.22). What a test asserts about them it asserts at
+     * the state the walk leaves, so the walk's own claims about the retired tables are read before this changeset
+     * runs, and the rest of the chain runs after.
+     */
+    private static final String DROP_RETIRED = "vectors-036-1";
 
     // tenants
     static final String TA = "p225-a";
@@ -128,6 +134,12 @@ class P225MigrationWalkIntegrationTest {
      */
     final List<String> engineLog = new java.util.concurrent.CopyOnWriteArrayList<>();
 
+    /** What the retired tables held and carried at the state the walk leaves, before vectors-036-1 drops them. */
+    record RetiredAtWalk(long chunksRows, long centroidsRows, Map<String, Boolean> forced, Map<String, Boolean> viewsReading,
+                         List<String> retiredIndexNames) { }
+
+    RetiredAtWalk retiredAtWalk;
+
     /** Pre-walk facts the post-walk assertions compare against. */
     List<PartitionScratch.PolicyRow> preWalkChunksPolicies;
     TreeSet<String> preWalkChunksAcl;
@@ -155,6 +167,10 @@ class P225MigrationWalkIntegrationTest {
         };
         jul.addHandler(capture);
         try {
+            migrateUpTo(adminDs, DROP_RETIRED);
+            try (Connection su = pg.createConnection("")) {
+                retiredAtWalk = readRetiredAtWalk(DSL.using(su, SQLDialect.POSTGRES));
+            }
             applyRemaining(adminDs);
         } finally {
             jul.removeHandler(capture);
@@ -185,8 +201,8 @@ class P225MigrationWalkIntegrationTest {
             // The hidden rows (no manifest row claims them) are present, not dropped.
             assertThat(ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(A_MINI))).isEqualTo(2);
             assertThat(ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(N_CODE))).isEqualTo(1);
-            // And the old table still holds exactly what it held (a recovery copy).
-            assertThat(retiredCount(ctx, "chunks_retired_225")).isEqualTo(12L);
+            // And the old table held exactly what it held (a recovery copy) until vectors-036-1 dropped it.
+            assertThat(retiredAtWalk.chunksRows()).isEqualTo(12L);
         }
     }
 
@@ -225,7 +241,7 @@ class P225MigrationWalkIntegrationTest {
                 .forEach(r -> actual.put(r.value1() + "|" + r.value2(), r.value3().longValue()));
             assertThat(actual).isEqualTo(EXPECTED_CENTROIDS);
             // 6 centroids seeded; 1 is not copied (its collection has no registry row: derived data) and stays put.
-            assertThat(retiredCount(ctx, "taxonomy_centroids_retired_225")).isEqualTo(6L);
+            assertThat(retiredAtWalk.centroidsRows()).isEqualTo(6L);
             Field<String> leaf = tableoid();
             for (var r : ctx.select(TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, leaf)
                     .from(TAXONOMY_CENTROIDS).fetch()) {
@@ -285,9 +301,10 @@ class P225MigrationWalkIntegrationTest {
                 .contains("tenant_isolation", "chunks_gate_probe_owner_read");
             // Every grant the old table carried reached the new parent (the runAlways grants then added to both).
             assertThat(PartitionScratch.acl(ctx, "chunks")).containsAll(preWalkChunksAcl);
-            // FORCE is back on every table the walk toggled, the retired ones included.
-            for (String t : List.of("chunks_retired_225", "taxonomy_centroids_retired_225", "catalog_collections",
-                    "catalog_document_chunks", "topic_assignments", "chunk_orphaned_at", "gc_audit")) {
+            // FORCE is back on every table the walk toggled, the retired ones included (read before they were dropped).
+            assertThat(retiredAtWalk.forced()).containsOnlyKeys("chunks_retired_225", "taxonomy_centroids_retired_225")
+                .allSatisfy((t, forced) -> assertThat(forced).as("FORCE on %s at the walk", t).isTrue());
+            for (String t : List.of("catalog_collections", "catalog_document_chunks", "topic_assignments", "chunk_orphaned_at", "gc_audit")) {
                 assertThat(PgCatalogProbes.rowSecurity(ctx, "nexus", t).forced()).as("FORCE on %s", t).isTrue();
             }
         }
@@ -302,7 +319,7 @@ class P225MigrationWalkIntegrationTest {
                 assertThat(PgCatalogProbes.viewExists(ctx, "nexus", v)).as(v).isTrue();
                 assertThat(PgCatalogProbes.relOptions(ctx, "nexus", v)).as("options of %s", v).contains("security_invoker=true");
                 assertThat(viewDependsOn(ctx, v, "chunks")).as("%s reads the NEW chunks", v).isTrue();
-                assertThat(viewDependsOn(ctx, v, "chunks_retired_225")).as("%s must not read the retired table", v).isFalse();
+                assertThat(retiredAtWalk.viewsReading().get(v)).as("%s must not read the retired table (read at the walk)", v).isFalse();
             }
             // The PUBLIC read grant vectors-019 put on two of them came back with the recreated views.
             assertThat(PartitionScratch.acl(ctx, "live_chunks").toString()).contains("=r/");
@@ -339,13 +356,21 @@ class P225MigrationWalkIntegrationTest {
             }
             List<String> parentIdx = PgCatalogProbes.indexDefs(ctx, "nexus", "chunks");
             assertThat(parentIdx).hasSize(7).allSatisfy(d -> assertThat(d).doesNotContain("_new"));
-            for (String old : List.of("chunks_pk", "idx_chunks_embedding_1024", "idx_chunks_embedding_384", "idx_chunks_embedding_768",
-                    "idx_chunks_tenant_chash", "idx_chunks_trgm", "idx_chunks_tsv")) {
+            for (String old : OLD_CHUNK_INDEXES) {
                 assertThat(PgCatalogProbes.indexExists(ctx, "nexus", old)).as(old).isTrue();
-                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", old + "_retired_225")).as(old + "_retired_225").isTrue();
             }
             assertThat(PgCatalogProbes.indexDefs(ctx, "nexus", "taxonomy_centroids")).hasSize(4);
-            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "taxonomy_centroids_pk_retired_225")).isTrue();
+            // The old tables carried the suffixed names at the walk (read then), and vectors-036-1 took them with the tables.
+            assertThat(retiredAtWalk.retiredIndexNames()).containsExactlyInAnyOrderElementsOf(
+                java.util.stream.Stream.concat(OLD_CHUNK_INDEXES.stream().map(i -> i + "_retired_225"),
+                    java.util.stream.Stream.of("taxonomy_centroids_pk_retired_225", "idx_taxonomy_centroids_embedding_384_retired_225",
+                        "idx_taxonomy_centroids_embedding_768_retired_225", "idx_taxonomy_centroids_embedding_1024_retired_225")).toList());
+            assertThat(PgCatalogProbes.tablesInSchema(ctx, "nexus")).as("vectors-036-1 dropped the retired tables")
+                .doesNotContain("chunks_retired_225", "taxonomy_centroids_retired_225");
+            for (String old : OLD_CHUNK_INDEXES) {
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", old + "_retired_225")).as(old + "_retired_225 is gone").isFalse();
+            }
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "taxonomy_centroids_pk_retired_225")).isFalse();
             // The old table's HNSW survived under its retired name and no relation is left under a staging name.
             assertThat(PgCatalogProbes.tablesInSchema(ctx, "nexus")).doesNotContain("chunks_new", "taxonomy_centroids_new");
             // The outbound key refuses a chunk filed under a model other than its collection's.
@@ -651,7 +676,9 @@ class P225MigrationWalkIntegrationTest {
                     // ALTER TABLE form PostgreSQL accepts on a view, so the owner helper serves.)
                     PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("nexus", "diag_chash_conformance")), "postgres");
                 }
-                applyRemaining(ds);
+                // Up to the drop of the retired tables, not past it: the view must not read the retired table, which
+                // only means something while that table still exists.
+                migrateUpTo(ds, DROP_RETIRED);
                 try (Connection su = c2.createConnection("")) {
                     DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                     assertThat(PgCatalogProbes.relationOwner(ctx, "nexus", "diag_chash_conformance")).isEqualTo(ADMIN);
@@ -750,6 +777,10 @@ class P225MigrationWalkIntegrationTest {
         // The rollback exists to keep the rollback test chain executable. It restores table shape only: the step 7.8
         // function bodies stay in their post-walk form and every row written since the walk is discarded, which
         // oldLayoutShape (no function bodies, no post-walk rows) cannot see. It is not a recovery path; PITR is.
+        // The chain runs up to vectors-036-1, not through it: that changeset deletes the retired tables' rows and its
+        // rollback restores shape only, so a rollback through it cannot bring the pre-walk rows back, and a second walk
+        // over manifest rows whose chunks the drop deleted fails its foreign-key validation. The drop's own rollback is
+        // pinned by P225DropRetiredIntegrationTest and SchemaRollbackRoundTripIntegrationTest.
         PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
@@ -762,7 +793,7 @@ class P225MigrationWalkIntegrationTest {
                     seedStore(ctx);
                     preWalk = oldLayoutShape(ctx);
                 }
-                applyRemaining(ds);
+                migrateUpTo(ds, DROP_RETIRED);
                 List<String> walked;
                 try (Connection su = c2.createConnection("")) {
                     walked = snapshot(DSL.using(su, SQLDialect.POSTGRES));
@@ -782,7 +813,7 @@ class P225MigrationWalkIntegrationTest {
                     assertThat(oldLayoutShape(ctx)).as("the old layout is back, including its keys, names and views").isEqualTo(preWalk);
                     assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")))).as("the pre-walk rows are the ones that return").isEqualTo(12);
                 }
-                applyRemaining(ds);
+                migrateUpTo(ds, DROP_RETIRED);
                 try (Connection su = c2.createConnection("")) {
                     assertThat(snapshot(DSL.using(su, SQLDialect.POSTGRES))).as("forward again rebuilds the same shape").isEqualTo(walked);
                 }
@@ -918,8 +949,29 @@ class P225MigrationWalkIntegrationTest {
         return DSL.field(DSL.name("tableoid")).cast(org.jooq.impl.DefaultDataType.getDefaultDataType("regclass")).cast(String.class);
     }
 
+    private static final List<String> OLD_CHUNK_INDEXES = List.of("chunks_pk", "idx_chunks_embedding_1024", "idx_chunks_embedding_384",
+        "idx_chunks_embedding_768", "idx_chunks_tenant_chash", "idx_chunks_trgm", "idx_chunks_tsv");
+
     private static long retiredCount(DSLContext ctx, String table) {
         return ctx.fetchCount(DSL.table(DSL.name("nexus", table)));
+    }
+
+    /** Reads what the retired tables hold and carry; called at the state the walk leaves, before vectors-036-1. */
+    private static RetiredAtWalk readRetiredAtWalk(DSLContext ctx) {
+        Map<String, Boolean> forced = new TreeMap<>();
+        for (String t : List.of("chunks_retired_225", "taxonomy_centroids_retired_225")) {
+            forced.put(t, PgCatalogProbes.rowSecurity(ctx, "nexus", t).forced());
+        }
+        Map<String, Boolean> views = new TreeMap<>();
+        for (String v : List.of("live_chunks", "collection_vector_stats", "diag_chash_conformance")) {
+            views.put(v, viewDependsOn(ctx, v, "chunks_retired_225"));
+        }
+        List<String> idx = new ArrayList<>();
+        for (String t : List.of("chunks_retired_225", "taxonomy_centroids_retired_225")) {
+            PgCatalogProbes.indexDefs(ctx, "nexus", t).forEach(d -> idx.add(d.replaceFirst("^CREATE (UNIQUE )?INDEX (\\S+) .*$", "$2")));
+        }
+        return new RetiredAtWalk(retiredCount(ctx, "chunks_retired_225"), retiredCount(ctx, "taxonomy_centroids_retired_225"),
+            forced, views, idx);
     }
 
     private static float reltuples(DSLContext ctx, String rel) {

@@ -661,6 +661,11 @@ the retired tables hold the only copy of the old layout.
   intermediate release walks `vectors-030-1` and the later drop changeset in one boot, and the retired tables are
   gone before anyone could use them. State this in the P3.3 changeset comment and in the CHANGELOG of the release that
   carries the drop; the drop changeset needs its own `DATA EFFECT:` line and a fork walk.
+  **The drop ships as `vectors-036-1`** (nexus-3wh8d.22, `vectors-036-drop-retired-225.xml`). It logs
+  `vectors-036-1: dropping nexus.<table> (N row(s))` for each table, drops both without CASCADE (a view that still
+  reads a retired table fails the drop and leaves both in place), and skips a table that is absent. Its rollback
+  recreates both tables empty. Cloud: deploy it no earlier than 14 days after the 2026-10-07 walk deploy, in an
+  engine tag after 0.1.161.
 
 ## 9. Placeholders and open questions
 

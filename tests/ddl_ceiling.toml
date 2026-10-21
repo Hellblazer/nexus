@@ -65,7 +65,9 @@ ddl_per_test = 1.013
 migration_wal_bytes_per_worker = 11038000
 # 2101 -> 2103 (2026-10-21): 62949fa41 (nexus-1579m, bounded expire-quarantine) added a Liquibase changeset
 # without the bump; CI 39617797428 at f9e267297 counted 2103 on every worker.
-migration_ddl_per_worker = 2103
+# 2103 -> 2105 (2026-10-21): vectors-036-1 (nexus-3wh8d.22, drop of the retired pre-walk tables) adds two DDL
+# statements to a fresh migration; measured by a scoped substrate run of this tree (ddl: migration=2105).
+migration_ddl_per_worker = 2105
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

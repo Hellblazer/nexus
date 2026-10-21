@@ -150,22 +150,6 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "CASCADE_CARRIED_TABLES reasoning). Registering it would add nothing the chunks "
         "entry does not already give."
     ),
-    ("chunks_retired_225", "collection"): (
-        "RDR-225 vectors-030-1: the pre-partition nexus.chunks, kept for 14 days after the migration "
-        "walk as its rollback source and the baseline of its reconciliation, then dropped. It holds "
-        "the same rows the partitioned nexus.chunks was copied from, nothing writes to it, and "
-        "nothing reads it but the rollback, so it is not live collection data: a rename that "
-        "re-homed it would rewrite a copy no code consults, and collectionIsEmpty must not count it "
-        "(the live rows are in nexus.chunks, which IS registered). Remove this entry when the "
-        "table is dropped; test_documented_exclusions_are_live fails until then."
-    ),
-    ("taxonomy_centroids_retired_225", "collection"): (
-        "RDR-225 vectors-030-1: the pre-partition nexus.taxonomy_centroids, kept for 14 days as "
-        "the walk's rollback source (it also holds the centroids the walk declined to copy, which "
-        "taxonomy rebuilds). Same ruling as chunks_retired_225 above: a retired copy nothing "
-        "writes or reads, not live collection data; the live rows are in nexus.taxonomy_centroids, "
-        "which IS registered. Remove this entry when the table is dropped."
-    ),
     ("chash_remap", "target_collection"): (
         "Same ledger and same ruling as source_collection above; the target leg is "
         "historical fact about a completed migration, not a live pointer. See "

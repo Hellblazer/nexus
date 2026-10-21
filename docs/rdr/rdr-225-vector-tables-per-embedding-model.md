@@ -823,6 +823,8 @@ The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-t
 
 #### Step 3: Drop `chunks_retired_225` after 14 days
 
+2026-10-21 (as built, nexus-3wh8d.22): changeset `vectors-036-1` (`vectors-036-drop-retired-225.xml`, after `vectors-035`, before the runAlways grants) drops `chunks_retired_225` and `taxonomy_centroids_retired_225`, each with its `_retired_225` indexes, constraints and policies. For each table that exists it logs `vectors-036-1: dropping nexus.<table> (N row(s))` with `RAISE NOTICE` (counted with FORCE RLS switched off, since the migrating role has no BYPASSRLS) and runs `DROP TABLE IF EXISTS`, with no CASCADE, so a dependent view fails the drop and leaves both tables in place. An absent table is skipped. The changeset comment states the DATA EFFECT (irreversible) and the local window: the time between the engine release carrying `vectors-030-1` and the one carrying this changeset, zero for an install that crosses both in one boot. The rollback recreates both tables empty in the shape `vectors-030-1` leaves, because `vectors-030-1`'s rollback raises when `nexus.chunks` is partitioned and a retired table is missing; `P225DropRetiredIntegrationTest` compares columns, indexes, constraints, policies, RLS and FORCE, reloptions, owner and triggers between the walked state and the rolled-back one. The jOOQ exclude for the retired names and the two schema-parity inventory entries are removed in the same change. Not yet run: the PITR-fork walk of the changelog through this changeset, and the cloud deploy.
+
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |

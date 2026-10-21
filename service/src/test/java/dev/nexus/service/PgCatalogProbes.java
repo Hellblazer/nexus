@@ -374,7 +374,7 @@ public final class PgCatalogProbes {
     /**
      * Number of top-level, locally declared {@code pg_constraint} rows named {@code conname}, schema-agnostic.
      * Same scope as {@link #constraintValidated}: partition clones (conparentid != 0), inherited CHECKs
-     * (conislocal false) and the {@code *_retired_225} tables' constraints are not counted, so the count answers
+     * (conislocal false) are not counted, so the count answers
      * "how many constraints of this name did the migration declare", never "how many partitions cloned it".
      */
     public static int constraintCount(DSLContext ctx, String conname) {
@@ -385,8 +385,7 @@ public final class PgCatalogProbes {
             .join(rel).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
             .where(DSL.field(DSL.name("k", "conname"), String.class).eq(conname))
             .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
-            .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue())
-            .and(DSL.not(DSL.field(DSL.name("r", "relname"), String.class).endsWith("_retired_225"))));
+            .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue()));
     }
 
     /** {@code pg_constraint.convalidated} for the constraint named {@code conname}, or null. */
@@ -402,8 +401,6 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
             // A CHECK constraint a partition inherits carries conparentid 0 too; only the declaring table's is local.
             .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue())
-            // The retired tables (chunks_retired_225, taxonomy_centroids_retired_225) keep their constraint names.
-            .and(DSL.not(DSL.field(DSL.name("r", "relname"), String.class).endsWith("_retired_225")))
             .fetchOne(DSL.field(DSL.name("k", "convalidated"), Boolean.class));
     }
 
@@ -422,12 +419,8 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("c", "conname"), String.class).eq(conname))
             .and(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
             // RDR-225: a foreign key onto a partitioned table is cloned once per partition under the same name;
-            // the caller names the top-level one (conparentid 0), and the retired tables keep their old names.
+            // the caller names the top-level one (conparentid 0).
             .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(0L))
-            .and(DSL.not(DSL.field(DSL.name("c", "conrelid"), Object.class).in(
-                DSL.select(DSL.field(DSL.name("rr", "oid"), Object.class))
-                    .from(DSL.table(DSL.name("pg_class")).as("rr"))
-                    .where(DSL.field(DSL.name("rr", "relname"), String.class).endsWith("_retired_225")))))
             .fetchOne();
         return r == null ? null : new Constraint(r.get(convalidated), r.get(condeferrable),
             r.get(condeferred), r.get(confupdtype), r.get(confdeltype));
