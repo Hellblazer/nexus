@@ -772,8 +772,9 @@ manifest probe uses `idx_catalog_chunks_chash` `(tenant_id, chash)` and
 filters on collection. A page therefore costs the sibling's eligible rows and
 a drain costs pages times that, not an early-stopping ordered walk over the
 chunks primary key `(tenant_id, collection, chash, embedding_model)` as first
-assumed. Linear extrapolation at about 0.026 ms per sibling row (warm): 10k
-rows about 0.5 s for walk plus count, 100k rows about 5 s (at the bar), cold
+assumed. Linear extrapolation at about 0.055 ms per sibling row (warm, walk
+plus count; the count alone is about 0.026 ms): 10k rows about 0.5 s for walk
+plus count, 100k rows about 5 s (at the bar), cold
 about twice that. If one page's walk or `refused` count cannot finish inside
 25 s, a smaller `row_limit` does not help (the cost is the rows scanned, not
 the rows deleted): every page fails 57014 and rolls back, the loop stops loud
@@ -919,7 +920,7 @@ sums `expired` and takes `refused` from the first page that carries it.
   (`chunk_quarantine.py:372-434`) and `quarantine_orphans_bounded_serverside`
   (`:456-556`), capped by `_gc_loop_max_iterations` (`:327-347`; 200 pages at
   the default). `GC_EXPIRE_ROW_LIMIT_DEFAULT = 2000`, the shared GC default
-  (`:368-369`), unless the 1a measurement lowers it. Every page sends the
+  (`:368-369`); the 1a measurement kept it. Every page sends the
   inert floor `expire_quarantine_serverside` sends today (`:732-733`) and the
   same `cutoff`, computed once by the caller (`indexer.py:4159-4161`,
   `commands/t3.py:323`); The non-strict loop (the indexer path) sends
@@ -1116,7 +1117,11 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
   an `Idempotency-Key` is accepted, and the keyed form can answer 503
   `sweep_gate_busy`. Without `row_limit` the route is byte-identical and a
   key on it is 400 `idempotency_key_unsupported`. `[additive]` both
-  directions (Technical Design 7.6). The engine entry is added to
+  directions (Technical Design 7.6). The `row_limit` parse is shared: a
+  fractional or out-of-int `row_limit` is now 400 on `quarantine-orphans` and
+  `restore-rereferenced` too, where it was truncated or wrapped; released
+  clients send only integers (nexus-r0vkh recorded the non-positive case), and
+  the engine entry says so. The engine entry is added to
   `docs/wire-contract-pending.md` under `## Unshipped` with the push, once its
   sha is published (`test_cited_commit_shas_resolve` resolves cited shas), with
   the client entry beside it.
@@ -1254,7 +1259,9 @@ is never refused.
   on every page, so it costs pages times that population where the
   unbounded form paid one scan, and a page whose walk cannot finish in 25 s
   fails every time until an index serves the predicate (Technical Design
-  7.1). Measured before 1a ships (Phase 1a).
+  7.1). Measured on a PITR fork in Phase 1a: about 7 ms a page on the largest
+  live sibling (81 rows), about 5 s extrapolated at 100k rows (bead
+  nexus-hu0pw holds the index for that case).
 - Negative: unkeyed callers, sole abandoned attempts and multi-request
   operations stay outside the guarantee (What this does NOT close).
 
@@ -1584,8 +1591,11 @@ Python (client):
 Scenario on the engine substrate, the ll31n replay for expire (the
 `tests/test_yye8l13_ll31n_replay_substrate.py` pattern): a keyed bounded
 expire page held past the client's socket timeout reports committed with the
-true `expired` count, and the drain finishes with every eligible row gone
-exactly once.
+true `expired` count without re-running the page (one POST, one `gc_audit`
+row); and a page whose attempt rolled back behind a held sweep gate is resent
+once under the same key and commits once. Both are single pages of five rows;
+multi-page draining is the Java function tests' (drain without skip, no
+stall).
 
 Minimum viable validation for 1a: that scenario, plus the drain-without-skip,
 no-stall and concurrent re-quarantine function tests.

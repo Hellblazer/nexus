@@ -257,7 +257,10 @@ class PlpgsqlCheckGateTest {
     @Test
     void theScannedSetCoversEveryFindingTheAnalyserReported() {
         // The scanned-set query is a typed copy of the findings query's selection; a finding for a routine it
-        // misses means the copy has drifted and its positive controls mean less than they say.
+        // misses means the copy has drifted and its positive controls mean less than they say. One direction
+        // only: it catches the copy omitting a routine that has findings, not the SQL file narrowing its
+        // selection or the copy omitting a clean routine, so a positive control proves the function exists
+        // under the copy's selection, which matches plpgsql-check-findings.sql as of nexus-1579m.
         var withFindings = findings.stream().map(f -> f.schema() + "." + f.function()).collect(Collectors.toCollection(TreeSet::new));
         assertThat(scanned).as("scanned set").isNotEmpty().containsAll(withFindings);
     }

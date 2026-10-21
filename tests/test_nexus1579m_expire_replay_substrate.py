@@ -49,15 +49,18 @@ LONG_HOLD_S = 3.5
 
 
 class _PostSpy:
-    """Records every POST the client makes to the expire route, delegating to the real ``_post``."""
+    """Records every POST the client makes to the expire route and the Idempotency-Key it carries (the
+    thread-local ``_keyed_sweep_post`` sets around each attempt), delegating to the real ``_post``."""
 
     def __init__(self, monkeypatch) -> None:
         self.paths: list[str] = []
+        self.keys: list[str | None] = []
         real = hvc._post
 
         def spy(path, body, **kwargs):
             if path == EXPIRE_PATH:
                 self.paths.append(path)
+                self.keys.append(getattr(hvc._request_key_capture, "value", None))
             return real(path, body, **kwargs)
 
         monkeypatch.setattr(hvc, "_post", spy)
@@ -157,7 +160,8 @@ def test_an_expire_page_that_rolled_back_behind_a_held_gate_is_resent_under_its_
     assert spy.states[-1] == "committed", spy.states
     assert elapsed > 2.0, "the first attempt waited out the engine's 2 s gate bound before it rolled back"
     assert len(posts.paths) == 2, "the original POST and exactly one resend (under the same key)"
-    assert len(set(spy.paths)) == 1, f"one request key throughout: {set(spy.paths)}"
+    assert None not in posts.keys and len(set(posts.keys)) == 1, f"the resend carried the original key: {posts.keys}"
+    assert len(set(spy.paths)) == 1, f"every poll asked about one request key: {set(spy.paths)}"
     assert outcome == (SEEDED, 0, True), "the resend's committed page, counted once"
     assert _count(sibling) == 0
     rows = _expire_audit_rows(origin, sibling)
