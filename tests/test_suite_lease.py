@@ -912,7 +912,7 @@ def test_a_stale_reclaim_logs_only_after_the_reclaim_claim_has_succeeded(
             seen_at_claim.append(events_log.exists())
         return real_mkdir(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "mkdir", watching_mkdir)
+    setattr_in(monkeypatch, _suite_lease, "os.mkdir", watching_mkdir)
     release = _suite_lease.acquire("taker", lease_root=lease_root)
     monkeypatch.undo()
     assert release is not None
@@ -989,7 +989,7 @@ def test_a_reclaim_that_loses_the_reclaim_race_logs_only_the_final_outcome(
                 raise FileExistsError(path)
         return real_mkdir(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "mkdir", losing_mkdir)
+    setattr_in(monkeypatch, _suite_lease, "os.mkdir", losing_mkdir)
     assert _suite_lease.acquire("taker", lease_root=lease_root) is None
     monkeypatch.undo()
     (event,) = _events(events_log)
@@ -1012,7 +1012,7 @@ def test_a_lost_reclaim_race_followed_by_a_won_wait_logs_acquired_after_wait_not
                 raise FileExistsError(path)
         return real_mkdir(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "mkdir", losing_once)
+    setattr_in(monkeypatch, _suite_lease, "os.mkdir", losing_once)
     _fake_clock(monkeypatch)
     release = _suite_lease.acquire("taker", wait_seconds=60, lease_root=lease_root)
     monkeypatch.undo()
