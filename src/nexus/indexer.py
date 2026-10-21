@@ -5402,11 +5402,15 @@ def _run_index(
     if _local_mode:
         # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk
         # is the model that EMBEDDED it. In local mode that is the model the
-        # collection name pins (the engine embeds server-side), not the Python
-        # EF's: without the ``[local]`` extra the EF falls back to MiniLM while
-        # a bge-768 collection is written. Resolved here, after the legacy-name
-        # migration, so it follows the final names. A non-conformant (legacy)
-        # name pins nothing, so it keeps the Python EF's name.
+        # engine embeds with, which it routes by the registry row's
+        # embedding_model (EmbedderRouter.resolveEmbedderStrict) -- not the
+        # Python EF's: without the ``[local]`` extra the EF falls back to
+        # MiniLM while a bge-768 collection is written. This indexer registers
+        # the row with the name's own token (the registration loop below), so
+        # the token is what the engine uses. Resolved here, after the
+        # legacy-name migration, so it follows the final names. A
+        # non-conformant (legacy) name carries no token, so it keeps the
+        # Python EF's name.
         if is_conformant_collection_name(code_collection):
             code_model = index_model_for_collection(code_collection)
         if is_conformant_collection_name(docs_collection):
@@ -6571,10 +6575,19 @@ def _run_index(
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()
 
+    # nexus-s80u9: the rdr collection's own model token labels its chunks, as
+    # the docs collection's does its own; a name that carries no token (legacy)
+    # keeps the docs label it always had.
+    rdr_model = (
+        index_model_for_collection(rdr_col_name)
+        if rdr_col_name is not None and is_conformant_collection_name(rdr_col_name)
+        else docs_model
+    )
+
     def _index_one_rdr(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
         return _contain_transient_upsert(lambda: _index_prose_file(
-            file, repo, rdr_col_name, docs_model, rdr_col, db,
+            file, repo, rdr_col_name, rdr_model, rdr_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,

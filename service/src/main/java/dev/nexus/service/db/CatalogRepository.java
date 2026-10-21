@@ -8257,7 +8257,9 @@ public final class CatalogRepository {
      * <p><b>Retired predecessors (nexus-s80u9).</b> A rename leaves the old name as a tombstone naming its successor;
      * deleting the successor also removes the empty tombstones that name it ({@link #deleteRetiredPredecessorsOf}),
      * so {@code nx collection rename A B} then {@code nx collection delete B} leaves no row for A. The removal is not
-     * in the returned counts, whose key set is a wire contract.
+     * in the returned counts, whose key set is a wire contract. It is skipped when {@code keepQuarantine} is set:
+     * that caller ({@code nx collection reindex}) re-registers the same name at once, so the tombstones still
+     * name a live successor.
      *
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
@@ -8293,6 +8295,8 @@ public final class CatalogRepository {
      *                       no audit row, no sibling unregistered), for a caller that re-registers the SAME name
      *                       straight away ({@code nx collection reindex}) and so keeps the rows restorable.
      *                       Ignored for a {@code quarantine-*} name: deleting that collection removes its own rows.
+     *                       Also keeps the retired predecessors that name {@code name} as successor
+     *                       ({@link #deleteRetiredPredecessorsOf}), for the same reason: the name comes back.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
         DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine);
@@ -8481,7 +8485,11 @@ public final class CatalogRepository {
             //    then count. Remove it here, in the same transaction. Deliberately NOT in `counts`: the response's
             //    key set is a wire contract and this is cleanup of the rename's own residue, not data the caller
             //    asked to delete.
-            List<String> retiredRemoved = deleteRetiredPredecessorsOf(ctx, tenant, name);
+            //    Skipped under keepQuarantine: that flag means the caller re-registers the SAME name straight away
+            //    (nx collection reindex), so the tombstones naming it still name a live successor and are the
+            //    redirect that `nx collection info A` and the client's superseded-write refusal read.
+            List<String> retiredRemoved = keepQuarantine
+                ? List.of() : deleteRetiredPredecessorsOf(ctx, tenant, name);
             return new DeleteOutcome(counts, unregisteredSiblings, retiredRemoved);
         });
     }
@@ -9927,6 +9935,10 @@ public final class CatalogRepository {
      *       quarantine has no content of its own, and deleting its row would leave those rows with no live
      *       origin. Checked first. Once those rows expire or are restored, the next sweep treats it as the
      *       ghost it then is;</li>
+     *   <li>leaves it UNCHANGED when {@link #collectionHoldsContent} is false but it is a retired row
+     *       ({@code superseded_by} set) whose successor is registered in the same tenant (nexus-s80u9): a rename's
+     *       tombstone is a live redirect, the source of {@code nx collection info}'s "renamed to" and of the
+     *       client's superseded-write refusal. Checked after the quarantine hold and before the ghost delete;</li>
      *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
      *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
      *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
@@ -10042,13 +10054,19 @@ public final class CatalogRepository {
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
-            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                    CATALOG_COLLECTIONS.SUPERSEDED_BY)
                 .from(CATALOG_COLLECTIONS)
                 .fetch();
+            java.util.Set<String> registered = new java.util.HashSet<>();
+            for (var r : nameAndState) {
+                registered.add(r.value1());
+            }
             List<SweptRow> out = new ArrayList<>(nameAndState.size());
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
+                String supersededBy = r.value3();
                 boolean holdsContent = collectionHoldsContent(ctx, name);
                 if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
                     // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
@@ -10058,6 +10076,14 @@ public final class CatalogRepository {
                     // quarantine collection still holds a row that is its own (tagged for it, or untagged and
                     // attributable to it alone). The sweep after those rows expire or are restored reclaims it.
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINED_ORIGIN));
+                } else if (!holdsContent && supersededBy != null && !supersededBy.isEmpty() && !supersededBy.equals(name)
+                        && registered.contains(supersededBy)) {
+                    // nexus-s80u9: a retired row (a rename's tombstone) whose successor is registered in this
+                    // tenant is a live redirect, not a ghost: `nx collection info A` reads "renamed to B" from it
+                    // and the client refuses a write to A because of it. Reported as unchanged, so the response
+                    // shape is the same. A tombstone whose successor is gone names nothing and stays a ghost;
+                    // a chain A to B to C keeps both rows while C exists (each names a registered row).
+                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
                 } else if (!holdsContent) {
                     // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
                     // a drained quarantine sibling included. Checked BEFORE the quarantine

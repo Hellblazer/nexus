@@ -2995,6 +2995,45 @@ def test_local_mode_chunk_metadata_names_the_model_the_engine_embeds_with(tmp_pa
         assert models == {"bge-base-en-v15-768"}, (name, models)
 
 
+def test_rdr_chunks_are_labelled_with_the_rdr_collections_own_model_token(tmp_path, monkeypatch):
+    """nexus-s80u9 review round: the rdr pass reused ``docs_model``, so an rdr
+    collection whose name carries a different token from the docs collection's
+    was labelled with the docs collection's. The label is the rdr collection's
+    own token (a conformant name pins one)."""
+    from nexus.indexer import _run_index, _repo_collection_or_legacy as _real  # noqa: PLC0415 — deferred import, same idiom as the sibling tests
+
+    class _MiniLMOnlyEF:
+        model_name = "all-MiniLM-L6-v2"
+
+    rdr_name = "rdr__repo-1a2b3c4d__minilm-l6-v2-384__v1"
+
+    def _names(repo_path, content_type):
+        return rdr_name if content_type == "rdr" else _real(repo_path, content_type)
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    monkeypatch.setattr("nexus.indexer._repo_collection_or_legacy", _names)
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "README.md").write_text("# Title\n\nSome prose for the docs collection.\n")
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
+    reg = {
+        "collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "code_collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "docs_collection": "docs__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+    }
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.db.local_ef.LocalEmbeddingFunction": {"return_value": _MiniLMOnlyEF()},
+    }):
+        _run_index(repo, _reg(reg))
+
+    assert {m.get("embedding_model") for m in ups[rdr_name]} == {"minilm-l6-v2-384"}, ups.keys()
+    assert {m.get("embedding_model") for m in ups[reg["docs_collection"]]} == {"bge-base-en-v15-768"}
+
+
 def test_run_index_registers_rdr_collection_when_rdr_files_exist(tmp_path):
     """nexus-bd44g fix round (code review coverage gap): the registration
     loop's third slot (rdr_col_name) must actually fire when RDR files

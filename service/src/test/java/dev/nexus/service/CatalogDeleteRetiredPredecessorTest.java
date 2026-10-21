@@ -132,6 +132,104 @@ class CatalogDeleteRetiredPredecessorTest {
         assertThat(rowNames(t2)).as("tenant 2 still holds B, and A's tombstone names it").contains(a, b);
     }
 
+    @Test
+    void deletingTheSuccessorWithKeepQuarantine_keepsTheTombstone_theReindexPath() throws Exception {
+        // nx collection reindex deletes with keep_quarantine=true and re-registers the SAME name straight away,
+        // so the tombstone still names a live successor and is the redirect `nx collection info A` reads.
+        String tenant = "del-retired-reindex";
+        String a = "knowledge__drp-r__minilm-l6-v2-384__v1";
+        String b = "knowledge__drp-r__minilm-l6-v2-384__v2";
+        seed(tenant, a, true);
+        repo.renameCollection(tenant, a, b);
+
+        repo.deleteCollection(tenant, b, true);
+
+        assertThat(rowNames(tenant)).as("A's tombstone survives a reindex of B").contains(a).doesNotContain(b);
+        assertThat(supersededBy(tenant, a)).isEqualTo(b);
+
+        // And the default (false) still removes it: the keep is the explicit opt-out.
+        seed(tenant, b, false);
+        repo.deleteCollection(tenant, b, false);
+        assertThat(rowNames(tenant)).doesNotContain(a, b);
+    }
+
+    @Test
+    void aRetiredRowWhoseRowsSitInQuarantine_isKept_whenItsSuccessorIsDeleted() throws Exception {
+        // The QuarantineOrigin.holdsRowsOf arm of the removal predicate: A holds no content of its own, but a
+        // registered quarantine collection holds a row that is A's, and A's registry row is that row's only origin.
+        String tenant = "del-retired-quar";
+        String a = "knowledge__drp-q__minilm-l6-v2-384__v1";
+        String b = "knowledge__drp-q__minilm-l6-v2-384__v2";
+        seed(tenant, a, true);
+        repo.renameCollection(tenant, a, b);
+        String sibling = "quarantine-" + a;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            String hex = dev.nexus.service.db.Chash.ofText(sibling + "/kept").toHex();
+            PgContainerHelper.insertChunks(ctx, tenant, sibling, java.util.List.of(hex),
+                java.util.List.of("kept text"), java.util.List.of(new float[384]),
+                java.util.List.of(java.util.Map.of("origin_collection", a, "quarantined_at", "2026-09-01T00:00:00Z")));
+        }
+
+        repo.deleteCollection(tenant, b);
+
+        assertThat(rowNames(tenant)).as("A is the origin of a quarantined row, so its row stays").contains(a);
+    }
+
+    // ── ghost sweep: a tombstone with a live successor is a redirect, not a ghost ──
+
+    @Test
+    void theGhostSweep_keepsATombstoneWhoseSuccessorIsLive_inDryRunAndApply() throws Exception {
+        String tenant = "sweep-retired-live";
+        String a = "knowledge__sw-a__minilm-l6-v2-384__v1";
+        String b = "knowledge__sw-a__minilm-l6-v2-384__v2";
+        seed(tenant, a, true);
+        repo.renameCollection(tenant, a, b);
+
+        var dry = repo.sweepGhostsAndMarkDormant(tenant, true);
+        assertThat(dry.ghostNames()).as("nx doctor's Ghost collections row reads zero after a rename").isEmpty();
+        assertThat(dry.ghostsDeleted()).isZero();
+
+        var applied = repo.sweepGhostsAndMarkDormant(tenant, false);
+        assertThat(applied.ghostNames()).isEmpty();
+        assertThat(rowNames(tenant)).as("--apply does not delete the redirect").contains(a, b);
+        assertThat(supersededBy(tenant, a)).isEqualTo(b);
+    }
+
+    @Test
+    void theGhostSweep_stillReclaimsATombstoneWhoseSuccessorIsGone() throws Exception {
+        String tenant = "sweep-retired-dangling";
+        String a = "knowledge__sw-d__minilm-l6-v2-384__v1";
+        String b = "knowledge__sw-d__minilm-l6-v2-384__v2";
+        seed(tenant, a, true);
+        repo.renameCollection(tenant, a, b);
+        // keep_quarantine skips the tombstone removal (the reindex path), so B is gone and A names nothing.
+        repo.deleteCollection(tenant, b, true);
+        assertThat(rowNames(tenant)).contains(a).doesNotContain(b);
+
+        assertThat(repo.sweepGhostsAndMarkDormant(tenant, true).ghostNames()).containsExactly(a);
+        assertThat(repo.sweepGhostsAndMarkDormant(tenant, false).ghostNames()).containsExactly(a);
+        assertThat(rowNames(tenant)).doesNotContain(a);
+    }
+
+    @Test
+    void theGhostSweep_keepsEveryRowOfAChainWhileTheLastSuccessorIsLive() throws Exception {
+        String tenant = "sweep-retired-chain";
+        String a = "knowledge__sw-c__minilm-l6-v2-384__v1";
+        String b = "knowledge__sw-c__minilm-l6-v2-384__v2";
+        String c = "knowledge__sw-c__minilm-l6-v2-384__v3";
+        seed(tenant, a, true);
+        repo.renameCollection(tenant, a, b);
+        repo.renameCollection(tenant, b, c);
+
+        var result = repo.sweepGhostsAndMarkDormant(tenant, false);
+
+        assertThat(result.ghostNames()).isEmpty();
+        assertThat(rowNames(tenant)).contains(a, b, c);
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     private java.util.List<String> rowNames(String tenant) throws Exception {
@@ -139,6 +237,15 @@ class CatalogDeleteRetiredPredecessorTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             return ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).fetch(CATALOG_COLLECTIONS.NAME);
+        }
+    }
+
+    private String supersededBy(String tenant, String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                .fetchOne(0, String.class);
         }
     }
 
