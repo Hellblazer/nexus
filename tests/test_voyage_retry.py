@@ -185,7 +185,6 @@ def test_retry_accumulator_reset_zeros_all_counters() -> None:
     assert post == {
         "voyage_seconds": 0.0, "voyage_count": 0,
         "vector_seconds": 0.0, "vector_count": 0,
-        "etl_seconds": 0.0, "etl_count": 0,
         "total_seconds": 0.0, "total_count": 0,
         # nexus-cy9u7: reset_retry_stats() also resets the shared
         # RateLimitBrake (nexus.rate_brake.reset_brake).

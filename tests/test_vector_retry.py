@@ -152,8 +152,8 @@ def test_retryable_string_fallback_requires_a_status_token_not_a_substring(
 
 
 @pytest.mark.parametrize("status,expected", [
-    (429, True), (404, False), (500, False), (502, True), (503, True), (504, True),
-], ids=["429", "404", "500", "502", "503", "504"])
+    (429, True), (403, False), (404, False), (500, False), (502, True), (503, True), (504, True),
+], ids=["429", "403", "404", "500", "502", "503", "504"])
 def test_retryable_real_vector_service_error_shape(status: int, expected: bool) -> None:
     # nexus-cy9u7 CRITICAL-1: this is the REAL production shape — a
     # VectorServiceError chained from urllib.error.HTTPError — the

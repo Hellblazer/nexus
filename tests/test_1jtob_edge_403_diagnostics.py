@@ -15,8 +15,10 @@ blocked request into four days of chasing the wrong cause:
    file, so the traceback surfaced at the phase boundary with no indication of
    which document was rejected. The suppressed sibling failures WERE logged
    with `file=`; the one that ended the run was not.
-3. AMPLIFIED. `retry._RETRYABLE_ETL_HTTP_STATUSES` contained 403 on a
-   "transient edge 403" premise that was never measured.
+3. AMPLIFIED. The migration ETL's retry status set contained 403 on a
+   "transient edge 403" premise that was never measured. (That retry
+   classifier and its tests were deleted with the migration ETL, nexus-nhym2;
+   tests/test_vector_retry.py pins 403 as not retryable for the vector client.)
 
 The real cause was AWS WAF `KnownBadInputs` / `JavaDeserializationRCE_BODY`
 matching a JVM root package prefix in the request body: RDR-195 quotes a JVM
@@ -141,43 +143,6 @@ class TestVectorServiceErrorFlag:
 
     def test_carries_the_flag(self) -> None:
         assert VectorServiceError("boom", code=403, edge_refusal=True).edge_refusal
-
-
-class TestRetryClassification:
-    """Defect 3: the ETL retry set had the two 403 populations backwards."""
-
-    def test_403_is_not_retryable(self) -> None:
-        from nexus.retry import _is_retryable_etl_error
-
-        assert _is_retryable_etl_error(_waf_403()) is False
-
-    def test_the_genuinely_transient_statuses_still_retry(self) -> None:
-        """The edge is not blanket-untrusted. An ALB 503 (no healthy target)
-        carries server: awselb/2.0 and IS transient -- narrowing must not
-        collateral-damage it."""
-        from nexus.retry import _is_retryable_etl_error
-
-        for code in (429, 502, 503, 504):
-            err = urllib.error.HTTPError(
-                "https://api.conexus-nexus.com/v1/x", code, "x",
-                _headers(Server="awselb/2.0"), None,
-            )
-            assert _is_retryable_etl_error(err) is True, f"{code} must still retry"
-
-    def test_edge_refusal_4xx_wrapper_is_not_retryable(self) -> None:
-        from nexus.retry import _is_retryable_etl_error
-
-        assert _is_retryable_etl_error(
-            VectorServiceError("blocked", code=403, edge_refusal=True)
-        ) is False
-
-    def test_transport_drops_still_retry(self) -> None:
-        """Regression guard on the code=None wrapper path (the code-review gap
-        that this set's history already once re-opened)."""
-        from nexus.retry import _is_retryable_etl_error
-
-        assert _is_retryable_etl_error(urllib.error.URLError("dropped")) is True
-        assert _is_retryable_etl_error(TimeoutError("slow")) is True
 
 
 class TestFailureNamesTheFile:

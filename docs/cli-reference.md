@@ -3516,7 +3516,7 @@ Exit codes:
 - `0` — the T3 vector store is reachable.
 - `1` — unreachable; the report is not actionable without a working store. Suitable as a CI gate.
 
-**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections are unchanged.
+**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections were unchanged by that rename; `retry` later dropped `etl_seconds` and `etl_count` (nexus-nhym2).
 
 ```
 nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains
