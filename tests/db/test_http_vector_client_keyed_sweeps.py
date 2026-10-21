@@ -283,6 +283,29 @@ def test_polls_that_fail_three_times_surface_the_original_error(srv, client, clo
     _assert_unresolved_note(exc.value, "the status polls kept failing")
 
 
+def test_a_status_poll_whose_body_does_not_parse_is_a_failed_poll_and_the_next_poll_settles_it(
+    srv, client, clock,
+):
+    """A mangled poll body (edge HTML, a truncation) says nothing about the request: it counts as a failed
+    poll, never a ValueError that would abort the indexer's whole prune pass."""
+    path, call, form = _FORMS["quarantine"]
+    srv.script(f"POST {path}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", sv.Reply(200, b"<html>bad gateway</html>"), _committed("quarantine"))
+    assert call(client) == _stored("quarantine")
+    assert len(_polls(srv)) == 2 and len(_posts(srv, path)) == 1
+
+
+def test_status_polls_whose_bodies_never_parse_surface_the_original_error(srv, client, clock):
+    path, call, _ = _FORMS["quarantine"]
+    srv.script(f"POST {path}", sv.err(504, "gw"))
+    srv.script(f"GET {_STATUS}", sv.Reply(200, b"{not json"))
+    with pytest.raises(hv.VectorServiceError) as exc:
+        call(client)
+    assert exc.value.code == 504
+    assert len(_polls(srv)) == 3
+    _assert_unresolved_note(exc.value, "the status polls kept failing")
+
+
 # ── sweep_gate_busy and the edge 503 ─────────────────────────────────────────
 
 

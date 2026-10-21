@@ -2145,7 +2145,11 @@ def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, Any]:
                 return "surface", "no_ledger"
             failures += 1
             _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
-        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException) as exc:
+        except (
+            urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException,
+            # A mangled poll body (edge HTML, a truncation) says nothing about the request: a failed poll.
+            json.JSONDecodeError,
+        ) as exc:
             failures += 1
             _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
         else:
