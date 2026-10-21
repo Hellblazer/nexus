@@ -33,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -532,14 +534,18 @@ class PciCatalogIntegrationTest {
      * opened before the lock is unaffected). The test used to poll pg_stat_activity from a monitor connection opened
      * after starting the holder; when the holder's LOCK won that race the monitor's connect hung for the whole 8 s
      * and the test failed with "the holder ended before the read began" (develop 123b2d088). The latch replaces the
-     * monitor, and the read's pool is warmed before the lock so the bounded read reuses an open connection.
+     * monitor. Both pool connections are open before the lock (a warm-up read on the 30 s bound, then a wait for
+     * the pool to fill), so the bounded read reuses one, and the holder and the read get their own threads: on the
+     * common pool of a 2-vCPU host (parallelism 1) the read would queue behind the sleeping holder.
      */
     @Test
     void aReadBlockedByALock_failsAtTheStatementBound_whileTheLockIsStillHeld() throws Exception {
         PciCatalog bounded = new PciCatalog(svcDs, Duration.ofMillis(500));
         assertThat(bounded.readBound()).isEqualTo(Duration.ofMillis(500));
-        assertThat(bounded.read().leaves()).as("warm the pool before the lock").isNotEmpty();
+        assertThat(catalog.read().leaves()).as("warm the pool before the lock").isNotEmpty();
+        await("both pool connections to be open", () -> svcDs.getHikariPoolMXBean().getTotalConnections() == 2);
 
+        ExecutorService threads = Executors.newFixedThreadPool(2);
         CountDownLatch locked = new CountDownLatch(1);
         CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> {
             try (Connection su = pg.createConnection("")) {
@@ -553,7 +559,7 @@ class PciCatalogIntegrationTest {
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
-        });
+        }, threads);
         try {
             await("the holder to take the lock", () -> {
                 if (holder.isDone()) {
@@ -564,7 +570,7 @@ class PciCatalogIntegrationTest {
             });
 
             long began = System.nanoTime();
-            CompletableFuture<PciCatalog.Snapshot> read = CompletableFuture.supplyAsync(bounded::read);
+            CompletableFuture<PciCatalog.Snapshot> read = CompletableFuture.supplyAsync(bounded::read, threads);
 
             assertThatThrownBy(() -> read.get(30, TimeUnit.SECONDS))
                 .as("the read must end while the lock is held, not wait for its release")
@@ -576,7 +582,11 @@ class PciCatalogIntegrationTest {
             assertThat(holder).as("the lock was still held when the read gave up").isNotDone();
             assertThat(tookMs).as("it waited out the bound, not less").isGreaterThanOrEqualTo(400);
         } finally {
-            holder.get(60, TimeUnit.SECONDS);
+            try {
+                holder.get(60, TimeUnit.SECONDS);
+            } finally {
+                threads.shutdownNow();
+            }
         }
 
         assertThat(catalog.read().leaves()).as("the pool is healthy and the lock is gone").isNotEmpty();
