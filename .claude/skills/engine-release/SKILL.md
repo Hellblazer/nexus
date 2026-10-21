@@ -89,7 +89,11 @@ every cloud client (cloud-client-path-gate leg A FAILED 2026-08-21,
 nexus-04sff / conexus-f6w7; same class as nexus-bwulw).
 
 Before pushing the tag: `git diff <last-engine-tag>..HEAD --
-service/src/main/java/dev/nexus/service/http/VersionHandler.java`. For every
+service/src/main/java/dev/nexus/service/http/VersionHandler.java
+service/src/main/java/dev/nexus/service/http/EmbedPosture.java`. The body is
+built in both: `EmbedPosture.appendFields` adds the embedding and reranker fields,
+and a diff of `VersionHandler.java` alone missed `reranker_available` at the
+v0.1.162 cut (conexus caught it at image-smoke). For every
 field ADDED, surface a REQUEST relay to conexus naming the field and the
 engine tag ("add `<field>` to the edge /version allowlist, mirror-don't-invent:
 absent on older engines stays absent") and record the conexus bead id on the
