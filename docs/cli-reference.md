@@ -1320,7 +1320,11 @@ until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
 narrower scope.
 
 `--dry-run` reports what a pass WOULD create — per generator, by link type, by
-creator, and source fan-out — and writes nothing. The preview runs the SAME
+creator, and source fan-out — and writes nothing. With `--pdf` (the default) it
+also reports the stale `same-as` links the write pass would retract
+(nexus-h0uy7: a PDF re-indexed with new bytes no longer duplicates the document
+it was linked to), a count and up to `--sample` of them, and the total link
+count it prints is net of those retractions. The preview runs the SAME
 generators through a recording writer rather than a separate preview path, so
 it cannot drift from the write path. Counts mean "would create", never "would
 attempt": pre-existing links are deduped against and repeated proposals within
@@ -1919,7 +1923,7 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to move any
 
 **Who expires what.** The move frees no storage: moved chunks sit in a `quarantine-*` collection (these collections appear in `nx collection list`) until they expire, and each side expires what it moved (Sam, 2026-10-01), with one engine-side exception for `knowledge__*` (below, Sam, 2026-10-04).
 
-- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` uses only the row-derived name and `quarantine-<collection>`, with no such query, so a chunk stranded under any other name waits for `nx t3 gc`). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
+- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` uses only the row-derived name and `quarantine-<collection>`, with no such query, so a chunk stranded under any other name waits for `nx t3 gc`). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. The expiry is the bounded, request-keyed drain (RDR-222 Amendment A1, nexus-1579m): pages of 2,000 rows, each committed on its own, each sent with an `Idempotency-Key` so a resend after a timeout cannot repeat it. `nx t3 gc` runs it strict: a drain that stops short, an error on the first page, or a page that fails after earlier ones committed is an exit 1 that names the pages and rows that did expire and, for a page the request ledger could not settle, its request key (`GET /v1/requests/<key>` says whether it committed); a page that committed with its count lost makes the line read `at least N expired`, and a refused count the engine did not give reads `refused unknown`. `nx index repo` runs the same loop non-strict: it logs a failed page and carries on. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
 - **The engine expires the chunks its reaper moved**, on its own retention (`NX_REAPER_QUARANTINE_RETENTION_DAYS`, default 14), in every sibling.
 - **The engine also expires the chunks a client moved, in `quarantine-knowledge__*` siblings only** (nexus-wbfpw.75), because no repo index sweeps a knowledge collection and these rows used to wait for a hand-run `nx t3 gc`. Its retention is its own, `NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS` (default 14, an engine setting: the engine cannot see your `NX_GC_QUARANTINE_DAYS`), counted from the row's own `quarantined_at`. It keeps every chunk the origin's manifest references, has no fraction floor, and is audited as `gc_audit` operation `reaper_expire_client_quarantine` (`nx catalog gc-audit list --operation reaper_expire_client_quarantine --json`), distinct from `reaper_expire_quarantine` for the rows the reaper moved. Code, docs and rdr quarantine is never touched by it, and neither is a knowledge row whose sibling or origin is not registered as such (the origin must be live). Your `NX_GC_QUARANTINE_DAYS` does not govern these rows on an engine that carries it: set it to 60 and the engine still deletes a knowledge row at 14 days. Your `nx t3 gc` expiry still works beside it: the engine's rows are a strict subset of what yours would take, and a row one took is simply absent to the other. An engine without this change expires none of these rows; only your `nx t3 gc` does.
 
@@ -2697,7 +2701,7 @@ nx collection list
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
-The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. If the service does not confirm the delete (a read timeout makes one attempt, so it may or may not have committed), the command stops before it re-registers or re-indexes anything and exits non-zero. Its message says to run `nx collection info NAME`: if the collection still lists chunks, re-run `reindex`; if it reports not found, the delete committed, so re-index from the original sources (`nx index repo`, `nx index md` or `nx index pdf`) and run `nx collection delete NAME` to clear any pipeline rows the unconfirmed delete left. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
 
 **Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
@@ -3294,12 +3298,19 @@ user, run from an elevated Command Prompt. The row is absent on POSIX.
 
 **Smart App Control row (Windows only, nexus-f9bgu.57).** "Smart App Control"
 reads `VerifiedAndReputablePolicyState` under
-`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. On is a failure in local mode,
-because Windows then blocks the unsigned PostgreSQL bundle and the Python uv
-installs, and a warning in cloud mode, where its effect is not measured.
-Evaluation is a warning, because Windows can switch it on later. A state that
-cannot be read is a warning; off passes. `nx init` refuses local provisioning
-while the state is on. See
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. The registry value alone does
+not decide: with it on, in local mode, the row runs the real PostgreSQL bundle
+binary (`--version`, once a bundle is installed; an unsigned stand-in
+executable before that) and asks whether Windows blocks it. A program that ran
+is a warning (the registry says on but nothing is blocked now, and Windows can
+start enforcing). The row is a failure only when the bundle binary is blocked
+(`WinError 4551`) or cannot be tried. In cloud mode on is a warning, where its
+effect is not measured. Evaluation is a warning, because Windows can switch it
+on later. A state that cannot be read is a warning; off passes. `nx init`
+follows the same probe: it refuses local provisioning when the state is on and
+an unsigned stand-in does not run (blocked, or not told), and goes on when it
+runs. A bundle binary blocked after the download raises the same refusal
+instead of a raw `[WinError 4551]`. See
 [Smart App Control](windows-install.md#smart-app-control). The row is absent on
 POSIX, and also on a Windows that has no Smart App Control (the registry value
 does not exist, as on Windows 10 and older Windows 11).
