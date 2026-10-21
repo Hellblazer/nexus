@@ -29,12 +29,13 @@ _log = structlog.get_logger(__name__)
 #: derived from aspect_readers' own bounded-retry constants (nexus-tb2yj):
 #: httpx applies its timeout to connect/read/write/pool separately, so one
 #: attempt can take up to 2x HTTPS_STAT_TIMEOUT_S; HTTPS_STAT_MAX_ATTEMPTS
-#: attempts plus the backoff between them is the same "~61.5s" figure
+#: attempts plus the backoff between them, plus one confirming HEAD after an
+#: ETag mismatch (nexus-ltrjf): the "~81.5s" figure
 #: aspect_readers._stat_https_uri's own module comment states. Computed
 #: here (not hand-typed into the --check-references help text below) so it
 #: cannot silently drift from the constants it describes.
 _REFERENCES_HTTPS_WORST_CASE_S: float = (
-    HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+    (HTTPS_STAT_MAX_ATTEMPTS + 1) * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
 )
 #: Whole-run worst case AT THE DEFAULT SAMPLE, concurrency-aware
 #: (nexus-0ne1m critique, significant #1): doctor_references.check_references
@@ -2778,7 +2779,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
          "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
          "applies that timeout to connect/read/write/pool separately, "
-         "plus HTTPS_STAT_RETRY_DELAYS_S backoff). Up to "
+         "plus HTTPS_STAT_RETRY_DELAYS_S backoff, plus one confirming HEAD "
+         "after an ETag mismatch). Up to "
          f"{_REFERENCES_MAX_CONCURRENCY} stats run concurrently sharing one "
          "httpx.Client, so the whole run's worst case is "
          "ceil(sample / min(concurrency, sample)) * that per-call bound -- "
@@ -2790,11 +2792,11 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "'stale' or 'dangling'; 'unknown' never fails this check alone. "
          "Not applicable (exit 0) on a box with no reference-only "
          "documents. Remedy for a document stuck at 'unknown' because it "
-         "predates ETag capture: `nx catalog backfill-etags`. Residual "
-         "limitation backfill-etags does NOT fix: a host that mints a "
-         "fresh ETag on every response reads 'stale' on every run "
-         "regardless of real content change -- treat repeated stale "
-         "against the same host as unknown, not a real signal.",
+         "predates ETag capture: `nx catalog backfill-etags`. A host that "
+         "mints a fresh ETag on every response reads 'unknown': an ETag "
+         "mismatch is confirmed with one more HEAD, and an ETag that "
+         "changes again with no Last-Modified and an unchanged (or absent) "
+         "Content-Length is an unstable validator.",
 )
 @click.option(
     "--references-sample",

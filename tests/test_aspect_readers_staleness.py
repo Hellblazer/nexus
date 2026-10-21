@@ -640,6 +640,71 @@ class TestStatHttpsUri:
 
         assert result == StatOk(current_mtime=None, etag_stale=True)
 
+    def test_unstable_etags_with_no_content_length_on_either_read_unknown(
+        self, https_stat_server
+    ) -> None:
+        """A dynamic page often sends no Content-Length on HEAD; both absent is equal."""
+        base_url, handler = https_stat_server
+        handler.header_sequence = [{"ETag": '"r1"'}, {"ETag": '"r2"'}]
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client, recorded_etag='"r0"')
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert "unstable validator" in result.detail
+        assert "no Content-Length on either" in result.detail
+
+    def test_a_second_etag_equal_to_the_recorded_one_reads_fresh(self, https_stat_server) -> None:
+        """A host alternating between validators answered the recorded one again."""
+        base_url, handler = https_stat_server
+        handler.header_sequence = [{"ETag": '"b"'}, {"ETag": '"a"'}]
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client, recorded_etag='"a"')
+        finally:
+            client.close()
+
+        assert result == StatOk(current_mtime=None, etag_stale=False)
+
+    def test_a_last_modified_on_the_confirming_head_keeps_stale(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.header_sequence = [
+            {"ETag": '"r1"'},
+            {"ETag": '"r2"', "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"},
+        ]
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client, recorded_etag='"r0"')
+        finally:
+            client.close()
+
+        assert result == StatOk(current_mtime=None, etag_stale=True)
+
+    def test_a_failed_confirming_head_keeps_stale(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.status_sequence = [200, 404]
+        handler.header_sequence = [{"ETag": '"r1"'}, {"ETag": '"r2"'}]
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client, recorded_etag='"r0"')
+        finally:
+            client.close()
+
+        assert result == StatOk(current_mtime=None, etag_stale=True)
+        assert handler.request_count == 2
+
+    def test_the_confirming_head_works_without_an_injected_client(self, https_stat_server) -> None:
+        """Production passes no client: the first is closed before the confirm,
+        which builds its own."""
+        base_url, handler = https_stat_server
+        handler.header_sequence = [{"ETag": '"r1"'}, {"ETag": '"r2"'}]
+        result = _stat_https_uri(f"{base_url}/paper.pdf", recorded_etag='"r0"')
+
+        assert isinstance(result, StatFail) and "unstable validator" in result.detail
+        assert handler.request_count == 2
+
     def test_weak_etag_matches_the_equivalent_strong_one(self, https_stat_server) -> None:
         """nexus-0ne1m critique (code review): W/"x" and "x" name the same
         value under RFC 7232 SS2.3 weak comparison -- a leading W/ is

@@ -131,6 +131,14 @@ class TestEstimatedWorstCaseS:
     def test_zero_sample_is_zero(self) -> None:
         assert estimated_worst_case_s(0) == 0.0
 
+    def test_the_per_document_bound_counts_the_confirming_head(self) -> None:
+        """nexus-ltrjf: 3 attempts and 1 confirming HEAD, each up to 2 x 10 s,
+        plus 1.5 s of backoff; doctor's help text uses the same number."""
+        from nexus.commands import doctor as doctor_cmd
+
+        assert doctor_references._https_worst_case_per_call_s() == pytest.approx(81.5)
+        assert doctor_cmd._REFERENCES_HTTPS_WORST_CASE_S == pytest.approx(81.5)
+
     def test_default_concurrency_is_max_concurrency(self) -> None:
         assert estimated_worst_case_s(16) == pytest.approx(estimated_worst_case_s(16, MAX_CONCURRENCY))
 
