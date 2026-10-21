@@ -969,6 +969,11 @@ jobs:
           # nexus-abcqb: the storage-touch guard writes this shard's nx-storage-touch-report.json
           # beside it, so the one per-shard artifact carries both reports to pytest-gate.
           export NX_STORAGE_TOUCH_REPORT_DIR="$NX_DDL_REPORT_DIR"
+          # nexus-ey246: the guard's whole-run checks gate each shard (some test provisioned, some
+          # clean, some touch event, children reached the shim, no late touch); a split run only
+          # printed them. 84 shard jobs over 14 green develop runs (39601335728 to 39658645803)
+          # printed zero late, unprovisioned and thread touches, guard errors and stale exemptions.
+          export NX_STORAGE_TOUCH_SWEEP=1
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
             mkdir -p "$TMPDIR"

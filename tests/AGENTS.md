@@ -376,10 +376,10 @@ deselects them, so no census has said which of them touch storage.
   missing shard would under-count and pass), on a report from a non-sweep run, and on a repeated run id. A session never gates on its share: it sees only its file neighbourhood of the suite, so
   `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
   Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
-  prints the number to commit. **No CI leg runs the fan-in yet, and both ceilings are still `"measure"`**:
-  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_GUARD_MODE=report` supplies the number
-  (in fail mode that run exits non-zero on the known late child touches). A split shard's report is
-  already a whole-run one; the docs-readers leg still needs the variable exported. Marks only get added, so when the count rises, drop marks a test
+  prints the number to commit. pytest-gate runs the fan-in over the six shards' reports, and the
+  `python_unit` ceiling is armed (measured on CI, `measured_on` in the ceiling file). The CI shards
+  export `NX_STORAGE_TOUCH_SWEEP=1` (nexus-ey246), so each shard gates on the whole-run checks, late
+  touches included; the docs-readers leg does not export it. Marks only get added, so when the count rises, drop marks a test
   no longer needs before raising the ceiling.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`

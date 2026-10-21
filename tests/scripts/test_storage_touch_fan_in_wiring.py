@@ -50,6 +50,9 @@ def wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
     runner = [s for s in _steps(doc, "test") if str(s.get("name", "")).startswith("Run tests")]
     if not runner or 'NX_STORAGE_TOUCH_REPORT_DIR="$NX_DDL_REPORT_DIR"' not in str(runner[0].get("run", "")):
         problems.append("test: the 'Run tests' step does not point NX_STORAGE_TOUCH_REPORT_DIR at the DDL report directory")
+    if not runner or not re.search(r"^\s*export NX_STORAGE_TOUCH_SWEEP=1\s*$", str(runner[0].get("run", "")), re.M):
+        problems.append("test: the 'Run tests' step does not export NX_STORAGE_TOUCH_SWEEP=1, so the shards' whole-run "
+                        "checks are advice only (nexus-ey246)")
     uploads = [s for s in _steps(doc, "test") if str(s.get("with", {}).get("name", "")).startswith("ddl-report-shard-")]
     if len(uploads) != 1 or _REPORT not in str(uploads[0]["with"].get("path", "")):
         problems.append(f"test: the per-shard report artifact does not carry {_REPORT}")
@@ -101,6 +104,8 @@ def test_an_armed_ceiling_is_a_number() -> None:
     ("old", "new", "expect"),
     [
         ('export NX_STORAGE_TOUCH_REPORT_DIR="$NX_DDL_REPORT_DIR"', "echo no-dir", "NX_STORAGE_TOUCH_REPORT_DIR"),
+        ("          export NX_STORAGE_TOUCH_SWEEP=1\n", "          # export NX_STORAGE_TOUCH_SWEEP=1\n",
+         "does not export NX_STORAGE_TOUCH_SWEEP=1"),
         ("${{ runner.temp }}/ddl-report/nx-storage-touch-report.json", "${{ runner.temp }}/ddl-report/other.json",
          "does not carry nx-storage-touch-report.json"),
         ("python3 -m tests._storage_touch_fan_in", "python3 -m tests._other", "found 0"),
