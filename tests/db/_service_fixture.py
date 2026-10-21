@@ -512,11 +512,13 @@ def build_in_progress_reason(
         # build_lease_track_pid) once the ./mvnw child exists; it outlives
         # a wrapper killed directly, so it wins over the wrapper's pid
         # exactly as in _build_lease_group_alive (nexus-pv93h).
+        # Digits only, as the lib's ^[0-9]+$: int() also takes "-1", "+5" and
+        # "1_0", and a signal to -1 always reports alive. ("0" passes, as it does there.)
         if raw_pgid:
-            if not _group_alive(int(raw_pgid)):
+            if not (raw_pgid.isascii() and raw_pgid.isdigit() and _group_alive(int(raw_pgid))):
                 return None
         elif raw_pid:
-            if not _pid_alive(int(raw_pid)):
+            if not (raw_pid.isascii() and raw_pid.isdigit() and _pid_alive(int(raw_pid))):
                 return None  # holder is gone; the lease lib will reclaim it
         elif time.time() - lease.stat().st_mtime >= _build_lease_populate_grace_s():
             return None  # the claimer died before writing its pid; the lib reclaims that too
@@ -654,7 +656,7 @@ def _jar_freshness_mtime(jar: Path) -> float:
         return jar_mtime
 
 
-def _jar_checkout(jar: Path) -> Path:
+def jar_checkout(jar: Path) -> Path:
     """The checkout whose ``service/target`` holds *jar*, so the build lease is
     scoped to the jar's own checkout (nexus-m5vb3); this checkout for a jar laid
     out any other way. Not resolved: a gate-jar-cache link points into the cache."""
@@ -680,7 +682,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     # jar's current bytes is meaningful -- it is mid-replacement. Reporting
     # that is strictly more useful than reporting whatever the partial file
     # happens to look like right now (nexus-06fu4).
-    building = build_in_progress_reason(repo_root=_jar_checkout(jar))
+    building = build_in_progress_reason(repo_root=jar_checkout(jar))
     if building:
         return building
     if not jar.exists():

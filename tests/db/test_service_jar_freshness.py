@@ -459,6 +459,17 @@ class TestLeaseReaderMatchesTheShell:
         (d / "pid").write_text("4194304\n")  # above pid_max on darwin and linux
         assert build_in_progress_reason(tmp_path / "root") is None
 
+    def test_a_pid_or_pgid_that_is_not_all_digits_is_dead(self, tmp_path):
+        """The lib's ^[0-9]+$: int() takes "-1", "+5" and "1_0", and signal 0
+        to pid -1 always succeeds, so a corrupt lease would read live forever."""
+        d, _ = self._dir(tmp_path)
+        for bad in ("0x1", "-1", "+5", "1_0"):
+            (d / "pid").write_text(f"{bad}\n")
+            assert build_in_progress_reason(tmp_path / "root") is None, bad
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "pgid").write_text("-1\n")
+        assert build_in_progress_reason(tmp_path / "root") is None, "a corrupt pgid wins over a live pid"
+
     def test_a_byte_that_is_not_utf8_in_a_descriptive_file_is_still_a_build(self, tmp_path):
         d, _ = self._dir(tmp_path)
         (d / "pid").write_text(f"{os.getpid()}\n")
@@ -599,7 +610,7 @@ class TestBootCheckHonoursTheLeaseWait:
 
         calls: list[int] = []
 
-        def _wait(max_seconds):
+        def _wait(max_seconds, **_kw):
             calls.append(max_seconds)
             return after_wait
 
@@ -634,6 +645,29 @@ class TestBootCheckHonoursTheLeaseWait:
         monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
         es._jar_ready_reason(tmp_path / "x.jar")
         assert calls == []
+
+    def test_the_wait_is_scoped_to_the_jars_checkout(self, tmp_path, monkeypatch) -> None:
+        """nexus-m5vb3: the boot waits for a build in the checkout whose jar it
+        launches, and not for one in another checkout."""
+        from tests import _engine_substrate as es
+
+        other, here = tmp_path / "other", tmp_path / "here"
+        for checkout in (other, here):
+            (checkout / "service" / "target").mkdir(parents=True)
+        d = tmp_path / "root" / "service"
+        d.mkdir(parents=True)
+        (d / "pid").write_text(f"{os.getpid()}\n")
+        (d / "worktree").write_text(f"{other}\n")
+        monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        monkeypatch.setattr("tests.db._service_fixture._REPO_ROOT", here)
+        waits: list[str | None] = []
+        monkeypatch.setattr(es, "wait_for_build_lease", lambda _s, **kw: waits.append(kw["reason_fn"]()))
+        monkeypatch.setattr(es, "jar_freshness_skip_reason", lambda jar: None)
+        es._jar_ready_reason(here / "service" / "target" / "x.jar")
+        assert waits == [], "another checkout's build held up this checkout's boot"
+        es._jar_ready_reason(other / "service" / "target" / "x.jar")
+        assert len(waits) == 1 and waits[0] is not None, waits
 
     def test_the_shared_freshness_check_never_waits(self, tmp_path, monkeypatch) -> None:
         from tests.db import _service_fixture as sf
