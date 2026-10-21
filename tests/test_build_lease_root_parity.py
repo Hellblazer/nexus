@@ -62,11 +62,16 @@ def test_reader_sees_a_lease_the_shell_writes(monkeypatch: pytest.MonkeyPatch, t
         env=env,
     )
     try:
-        deadline = 100
-        while deadline and not (override / "service" / "pid").exists():
+        # The claim is the pid file; ts, label and command are written after it,
+        # so a reader that starts at the pid alone can see "unknown" for the rest
+        # under load (chas lab-l, 15 workers, 2026-10-21). ``command`` is last.
+        last = override / "service" / "command"
+        deadline = 300
+        while deadline and not (last.exists() and last.read_text().strip()):
             deadline -= 1
             subprocess.run(["sleep", "0.1"], check=False)
         assert (override / "service" / "pid").exists(), "shell holder never acquired"
+        assert last.exists() and last.read_text().strip(), "shell holder never finished writing"
         reason = _service_fixture.build_in_progress_reason(override)
         assert reason is not None and "parity-test" in reason
     finally:
