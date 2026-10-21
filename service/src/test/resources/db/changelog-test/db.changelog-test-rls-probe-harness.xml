@@ -13,7 +13,8 @@
     test bearer token's hash as a wildcard bootstrap row.
 
     Parameter: ${tokenHash}, the sha256 hex of the test bearer token, set through
-    PgContainerHelper#installRlsProbeHarness. Applied once per dedicated container.
+    PgContainerHelper#installRlsProbeHarness. Applied once per database: ServiceIntegrationTest's
+    startEmptyDatabase() database on the shared per-fork cluster (svc_test is cluster-wide).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

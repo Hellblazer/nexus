@@ -169,9 +169,9 @@ class SchemaMigratorIntegrationTest {
     void stopAll() {
         if (adminDs != null) adminDs.close();
         if (svcDs   != null) svcDs.close();
-        try {
-            if (pg != null) pg.stop();
-        } catch (Exception ignored) { }
+        // nexus-ap7sm: not swallowed, so a leaked exclusive role fails this class's own teardown
+        // rather than the next class's acquire.
+        if (pg != null) pg.stop();
     }
 
     // ── Test 1: non-superuser owner migrates + all tables present + idempotent ─
@@ -425,7 +425,7 @@ class SchemaMigratorIntegrationTest {
     @Order(5)
     void agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop() throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_aged_test";
             final String pass = "nexus_admin_aged_test_pass";
 
@@ -580,8 +580,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -606,7 +604,7 @@ class SchemaMigratorIntegrationTest {
     @Order(6)
     void agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop() throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_aged_ci_test";
             final String pass = "nexus_admin_aged_ci_test_pass";
 
@@ -733,8 +731,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -813,7 +809,7 @@ class SchemaMigratorIntegrationTest {
     @Order(8)
     void agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop() throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_aged_fk002_test";
             final String pass = "nexus_admin_aged_fk002_test_pass";
 
@@ -940,8 +936,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo("MARK_RAN");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1024,7 +1018,7 @@ class SchemaMigratorIntegrationTest {
     @Order(10)
     void presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop() throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_aged_viol_test";
             final String pass = "nexus_admin_aged_viol_test_pass";
 
@@ -1178,8 +1172,6 @@ class SchemaMigratorIntegrationTest {
                         .isNull();
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1296,7 +1288,7 @@ class SchemaMigratorIntegrationTest {
     void lateUpgradingDeployment_withPreExistingDanglingManifestPopulation_bootsSuccessfully_andRemediates()
             throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_o8dil29_test";
             final String pass = "nexus_admin_o8dil29_test_pass";
 
@@ -1444,8 +1436,6 @@ class SchemaMigratorIntegrationTest {
                         .isEqualTo(1);
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1466,7 +1456,7 @@ class SchemaMigratorIntegrationTest {
     @Order(14)
     void bareValidateWithoutRemediation_againstDanglingPopulation_throws() throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_o8dil29_neg_test";
             final String pass = "nexus_admin_o8dil29_neg_test_pass";
 
@@ -1570,8 +1560,6 @@ class SchemaMigratorIntegrationTest {
                         .hasMessageContaining("fk_catalog_chunks_chunk");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1621,7 +1609,7 @@ class SchemaMigratorIntegrationTest {
     void chunksCollectionFk_bareValidateWithoutReconcile_againstUnregisteredCollection_throws()
             throws Exception {
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_o8dil49_neg_test";
             final String pass = "nexus_admin_o8dil49_neg_test_pass";
 
@@ -1693,8 +1681,6 @@ class SchemaMigratorIntegrationTest {
                         .hasMessageContaining("chunks_collection_fk");
                 }
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
@@ -1770,7 +1756,7 @@ class SchemaMigratorIntegrationTest {
         final String pass = role + "_q81g7_pass";
 
         PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startEmptyDatabase(role);
-        try {
+        try (roleNamedPg) {
             // Phase A: the minimal DBA-equivalent bootstrap, for a role whose NAME is
             // the variable under test.
             bootstrapRole(roleNamedPg, role, pass);
@@ -1820,8 +1806,6 @@ class SchemaMigratorIntegrationTest {
                     }
                 }
             }
-        } finally {
-            try { roleNamedPg.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -1855,7 +1839,12 @@ class SchemaMigratorIntegrationTest {
         try {
             bootstrapRole(c, role, pass);
         } catch (Exception e) {
-            c.stop();
+            // nexus-ap7sm: a stop() that fails too is attached to e, never thrown in its place.
+            try {
+                c.stop();
+            } catch (RuntimeException stopFailure) {
+                e.addSuppressed(stopFailure);
+            }
             throw e;
         }
         return c;
@@ -1884,7 +1873,7 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_sp";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try (var ds = roleDataSource(c, role, pass, 1)) {
+        try (c; var ds = roleDataSource(c, role, pass, 1)) {
             SchemaMigrator.migrate(ds);
             try (Connection conn = ds.getConnection()) {
                 String sp = DSL.using(conn, SQLDialect.POSTGRES)
@@ -1893,8 +1882,6 @@ class SchemaMigratorIntegrationTest {
                     .fetchOne(0, String.class);
                 assertThat(sp).as("session search_path after the walk").isEqualTo("public");
             }
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -1911,7 +1898,7 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_split";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try {
+        try (c) {
             try (var ds = roleDataSource(c, role, pass, 2)) {
                 SchemaMigrator.migrate(ds);
                 try (Connection conn = ds.getConnection()) {
@@ -1932,8 +1919,6 @@ class SchemaMigratorIntegrationTest {
                         .doesNotContain("databasechangelog");
                 }
             }
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -1948,7 +1933,7 @@ class SchemaMigratorIntegrationTest {
         final String role = "nexus_admin_q81g7_stray";
         final String pass = role + "_pass";
         PostgreSQLContainer<?> c = startRoleContainer(role, pass);
-        try (var ds = roleDataSource(c, role, pass, 2)) {
+        try (c; var ds = roleDataSource(c, role, pass, 2)) {
             SchemaMigrator.migrate(ds);
             try (Connection conn = ds.getConnection()) {
                 // The stray a failed boot 2 leaves: an empty table of that name in the
@@ -1960,8 +1945,6 @@ class SchemaMigratorIntegrationTest {
             }
             SchemaMigrator.MigrationOutcome again = SchemaMigrator.migrate(ds);
             assertThat(again.newChangesets()).isZero();
-        } finally {
-            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2028,7 +2011,7 @@ class SchemaMigratorIntegrationTest {
         final int duplicatedIdentities = 2;
 
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
-        try {
+        try (agedPg) {
             final String role = "nexus_admin_jl08t_test";
             final String pass = "nexus_admin_jl08t_test_pass";
 
@@ -2295,8 +2278,6 @@ class SchemaMigratorIntegrationTest {
                         + "database's owner, not something a migration performs")
                     .isEqualTo(rowsAfterSecondWalk);
             }
-        } finally {
-            agedPg.stop();
         }
     }
 
