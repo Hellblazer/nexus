@@ -21,6 +21,11 @@ note, not a failure: the partition above is the gate, and the rerun leans on pyt
 
     python -m tests._shard_collection <dir> --shards 6
 
+``--write-durations PATH`` then refreshes the split's durations file from the same run (nexus-zkr7q):
+each shard's ``nx-shard-durations.json`` holds the seconds its tests took there, and the six are
+merged over PATH's existing entries. It writes nothing unless the check passed and every group
+left one, so the refresh comes from one whole, partitioned run.
+
 STANDARD LIBRARY ONLY: pytest-gate runs it with no pytest installed. The pytest half that
 writes the report is ``tests/_shard_collection_plugin.py``.
 """
@@ -34,6 +39,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 REPORT_GLOB = "nx-shard-collection*.json"
+DURATIONS_NAME = "nx-shard-durations.json"
 
 
 def digest(nodeids: Iterable[str]) -> tuple[int, str]:
@@ -105,16 +111,58 @@ def check(directory: Path, shards: int) -> tuple[list[str], str]:
     return problems, summary + "".join(f"\n  note: {n}" for n in notes)
 
 
+def merge_durations(directory: Path, shards: int) -> tuple[list[str], dict[str, float]]:
+    """``(problems, seconds by test id)`` from every shard's durations file under *directory*; a file's
+    group is the one its sibling collection report names."""
+    problems: list[str] = []
+    merged: dict[str, float] = {}
+    groups: set[int] = set()
+    for path in sorted(directory.rglob(DURATIONS_NAME)):
+        siblings = sorted(path.parent.glob(REPORT_GLOB))
+        try:
+            group = json.loads(siblings[0].read_text()).get("group") if siblings else None
+            seconds = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            problems.append(f"{path}: unreadable ({exc})")
+            continue
+        if group is None:
+            problems.append(f"{path}: no collection report beside it names its group")
+        elif group in groups:
+            problems.append(f"group {group}: more than one durations file ({path})")
+        else:
+            groups.add(group)
+            merged.update(seconds)
+    missing = sorted(set(range(1, shards + 1)) - groups)
+    if missing:
+        problems.append(f"no durations from group(s) {missing}")
+    return problems, merged
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     parser.add_argument("directory", type=Path)
     parser.add_argument("--shards", type=int, required=True)
+    parser.add_argument("--write-durations", type=Path, metavar="PATH",
+                        help="merge the shards' durations into PATH (only when the check passes)")
     args = parser.parse_args(argv)
     problems, summary = check(args.directory, args.shards)
     print(f"shard collection check: {summary}: {'ok' if not problems else 'FAILED'}")
     for p in problems:
         print(f"  {p}")
-    return 1 if problems else 0
+    if problems or args.write_durations is None:
+        return 1 if problems else 0
+    problems, merged = merge_durations(args.directory, args.shards)
+    for p in problems:
+        print(f"  {p}")
+    if problems:
+        print(f"durations: {args.write_durations} left unchanged")
+        return 1
+    target: Path = args.write_durations
+    current = json.loads(target.read_text()) if target.exists() else {}
+    current.update(merged)
+    target.write_text(json.dumps(current, sort_keys=True, indent=4))
+    print(f"durations: {len(merged)} measured tests merged into {target} ({len(current)} entries)")
+    return 0
 
 
 if __name__ == "__main__":

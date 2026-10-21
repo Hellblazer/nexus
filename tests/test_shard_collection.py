@@ -135,6 +135,18 @@ def test_the_plugin_records_a_real_split_that_the_check_accepts(
     assert all(r["verified"] is True for r in recs), recs
     problems, summary = sc.check(tmp_path, 3)
     assert problems == [] and "given the same 9 tests, groups holding 9" in summary, (problems, summary)
+    # One durations file per shard, from the controller only, holding exactly the tests that shard ran.
+    files = sorted(tmp_path.rglob(sc.DURATIONS_NAME))
+    assert [f.parent.name for f in files] == ["shard-1", "shard-2", "shard-3"], files
+    ran = [set(json.loads(f.read_text())) for f in files]
+    assert all(len(r) == 3 for r in ran) and set().union(*ran) == {f"test_many.py::test_{i}" for i in range(9)}, ran
+    target = tmp_path / "durations.json"
+    target.write_text(json.dumps({"tests/test_gone.py::test_kept": 7.0, "test_many.py::test_0": 99.0}))
+    assert sc.main([str(tmp_path), "--shards", "3", "--write-durations", str(target)]) == 0
+    written = json.loads(target.read_text())
+    assert set(written) == set().union(*ran) | {"tests/test_gone.py::test_kept"}, written
+    assert written["tests/test_gone.py::test_kept"] == 7.0 and written["test_many.py::test_0"] < 99.0
+    assert all(isinstance(v, float) and v >= 0 for v in written.values())
 
 
 def test_the_plugin_writes_nothing_without_a_split_or_a_report_dir(pytester: pytest.Pytester, tmp_path: Path,
@@ -147,12 +159,13 @@ def test_the_plugin_writes_nothing_without_a_split_or_a_report_dir(pytester: pyt
     pytester.runpytest_subprocess().assert_outcomes(passed=1)
     monkeypatch.delenv("NX_DDL_REPORT_DIR")
     pytester.runpytest_subprocess("--splits", "2", "--group", "1").assert_outcomes(passed=1)
-    assert not list(tmp_path.rglob(sc.REPORT_GLOB))
+    assert not list(tmp_path.rglob(sc.REPORT_GLOB)) and not list(tmp_path.rglob(sc.DURATIONS_NAME))
 
 
 def test_ci_uploads_the_reports_and_pytest_gate_checks_them() -> None:
     text = CI.read_text()
     assert "${{ runner.temp }}/ddl-report/nx-shard-collection-*.json" in text
+    assert "${{ runner.temp }}/ddl-report/nx-shard-durations.json" in text
     assert "            tests/_shard_collection.py\n" in text, "pytest-gate's sparse checkout must carry the check"
     shards = text.count("python3 -m tests._shard_collection ddl-reports --shards 6")
     assert shards == 1, shards
@@ -178,3 +191,34 @@ def test_a_pytest_started_inside_a_test_never_writes_over_the_shards_report(
     pytester.runpytest_subprocess("--splits", "2", "--group", "1").assert_outcomes(passed=1)
     assert [p.name for p in shard.iterdir()] == ["nx-shard-collection-gw0.json"]
     assert (shard / "nx-shard-collection-gw0.json").read_text() == "the parent shard's report\n"
+
+
+def _durations(d: Path, group: int, seconds: dict[str, float]) -> None:
+    (d / f"ddl-report-shard-{group}" / sc.DURATIONS_NAME).write_text(json.dumps(seconds))
+
+
+def test_durations_are_written_only_from_a_whole_checked_run(tmp_path: Path) -> None:
+    """nexus-zkr7q: the refresh takes one run's six files, or leaves the durations file alone."""
+    reports = tmp_path / "reports"
+    _partition(reports)
+    for g in (1, 2):
+        _durations(reports, g, {i: 1.5 for i in IDS[g - 1::3]})
+    target = tmp_path / "durations.json"
+    target.write_text('{"x": 1.0}')
+    assert sc.main([str(reports), "--shards", "3", "--write-durations", str(target)]) == 1
+    assert target.read_text() == '{"x": 1.0}', "a missing group leaves the file unchanged"
+    assert sc.merge_durations(reports, 3)[0] == ["no durations from group(s) [3]"]
+
+    _durations(reports, 3, {i: 2.5 for i in IDS[2::3]})
+    _write(reports, 2, IDS[:-1], IDS[:-1][1::3])  # the check now fails: group 2 split another collection
+    assert sc.main([str(reports), "--shards", "3", "--write-durations", str(target)]) == 1
+    assert target.read_text() == '{"x": 1.0}', "a failed check leaves the file unchanged"
+
+    _write(reports, 2, IDS, IDS[1::3])
+    (reports / "stray").mkdir()
+    (reports / "stray" / sc.DURATIONS_NAME).write_text("{}")
+    assert any("no collection report beside it" in p for p in sc.merge_durations(reports, 3)[0])
+    (reports / "stray" / sc.DURATIONS_NAME).unlink()
+    assert sc.main([str(reports), "--shards", "3", "--write-durations", str(target)]) == 0
+    assert json.loads(target.read_text()) == {"x": 1.0, **{i: 1.5 for i in IDS[0::3] + IDS[1::3]},
+                                              **{i: 2.5 for i in IDS[2::3]}}

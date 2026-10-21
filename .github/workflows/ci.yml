@@ -900,8 +900,10 @@ jobs:
         # matrix, this `--splits` and the job and step names disagree), keyed off the committed
         # .test_durations.json. Refresh cadence (JSON has no comment syntax,
         # so it lives here + pyproject.toml's pytest-split dev-dep comment):
-        # regenerate on demand with
-        #   uv run pytest tests/ -q --store-durations --durations-path=.test_durations.json
+        # regenerate on demand from one green develop run's own timings
+        # (each shard uploads nx-shard-durations.json; nexus-zkr7q):
+        #   gh run download <run> -p 'ddl-report-shard-*' -D <dir>
+        #   python3 -m tests._shard_collection <dir> --shards 6 --write-durations .test_durations.json
         # when shard balance visibly drifts (one shard consistently the
         # tail) — stale entries only degrade balance, never correctness:
         # pytest-split falls back to the suite average for any test id
@@ -1025,6 +1027,7 @@ jobs:
             ${{ runner.temp }}/ddl-report/nx-ddl-report.json
             ${{ runner.temp }}/ddl-report/nx-storage-touch-report.json
             ${{ runner.temp }}/ddl-report/nx-shard-collection-*.json
+            ${{ runner.temp }}/ddl-report/nx-shard-durations.json
           retention-days: 7
           if-no-files-found: error
           # A re-run of all jobs keeps the first attempt's artifacts under the same names.
