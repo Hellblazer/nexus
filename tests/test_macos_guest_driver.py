@@ -661,6 +661,56 @@ def test_preflight_refuses_a_symlinked_key(h: Harness) -> None:
 
 
 @_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("rel", "mode"),
+    [
+        ("tree/scripts/lib/build-lease.sh", 0o666),
+        ("tree/scripts/lib", 0o775),
+        ("tree", 0o775),
+    ],
+)
+def test_preflight_refuses_a_lease_library_or_ancestor_writable_by_group_or_other(h: Harness, rel: str, mode: int) -> None:
+    # host.sh sources this file as the invoking user (nexus-so80u): whoever can write it
+    # or a directory above it runs code as us, so preflight check_chains it like the key.
+    (h.tmp / rel).chmod(mode)
+    res = h.run_host("preflight")
+    assert res.returncode == 3, res.stdout
+    assert "writable by group or other" in res.stderr
+    assert rel.rsplit("/", 1)[-1] in res.stderr
+
+
+@_POSIX_ONLY
+def test_preflight_refuses_a_symlinked_lease_library(h: Harness) -> None:
+    lib = h.tree / "scripts" / "lib" / "build-lease.sh"
+    real = h.tmp / "elsewhere-lease.sh"
+    lib.rename(real)
+    lib.symlink_to(real)
+    res = h.run_host("preflight")
+    assert res.returncode == 3
+    assert "is a symlink" in res.stderr
+
+
+@_POSIX_ONLY
+def test_preflight_needs_the_lease_library(h: Harness) -> None:
+    (h.tree / "scripts" / "lib" / "build-lease.sh").unlink()
+    res = h.run_host("preflight")
+    assert res.returncode == 3
+    assert "no lease library" in res.stderr
+
+
+@_POSIX_ONLY
+def test_hold_refuses_a_writable_lease_library_before_sourcing_it(h: Harness) -> None:
+    lib = h.tree / "scripts" / "lib" / "build-lease.sh"
+    marker = h.tmp / "sourced"
+    lib.write_text(f"touch '{marker}'\n", encoding="utf-8")
+    lib.chmod(0o666)
+    res = h.run_host("hold", "nx-mac-run-x")
+    assert res.returncode == 3, res.stdout
+    assert "writable by group or other" in res.stderr
+    assert not marker.exists()
+
+
+@_POSIX_ONLY
 def test_preflight_needs_the_pinned_guest_host_key(h: Harness) -> None:
     (h.base / "ssh" / "known_hosts").unlink()
     res = h.run_host("preflight")

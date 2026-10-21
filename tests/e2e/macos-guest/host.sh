@@ -264,6 +264,17 @@ check_chain() {
     done
 }
 
+# lease_lib_checked: print the path of the lease library cmd_hold sources, after the
+# same owner and mode check as the key and the pin. Sourcing runs the file as the
+# invoking user, so anyone who can write it or a directory above it could run code as us
+# (nexus-so80u). Exit 3 when it is missing or fails the check.
+lease_lib_checked() {
+    local lib="$LEASE_REPO/scripts/lib/build-lease.sh"
+    [[ -r "$lib" ]] || die 3 "no lease library at $lib"
+    check_chain "$lib"
+    printf '%s\n' "$lib"
+}
+
 cmd_preflight() {
     local self
     self="$(cd -P "$(dirname "$0")" && pwd -P)/$(basename "$0")"
@@ -278,6 +289,7 @@ cmd_preflight() {
     check_chain "$KEYDIR/id_ed25519"
     [[ -s "$KEYDIR/known_hosts" ]] || die 3 "no pinned guest host key at $KEYDIR/known_hosts (run build-image.sh)"
     check_chain "$KEYDIR/known_hosts"
+    lease_lib_checked >/dev/null
     need_run_uid
     sudo -n launchctl print "gui/$RUN_UID" >/dev/null 2>&1 \
         || die 3 "$RUN_AS (uid $RUN_UID) is not signed in at the hellmini login window; sign it in once (Screen Sharing)"
@@ -541,8 +553,7 @@ cmd_hold() {
     valid_vm "$vm"
     [[ "$vm" == nx-mac-run-* ]] || die 2 "hold refuses $vm (only nx-mac-run-*)"
     [[ -z "$keep" || "$keep" == keep ]] || die 2 "hold VM [keep]"
-    lib="$LEASE_REPO/scripts/lib/build-lease.sh"
-    [[ -r "$lib" ]] || die 3 "no lease library at $lib"
+    lib="$(lease_lib_checked)" || exit $?
     [[ -z "$LEASE_COMMON" ]] || export NX_BUILD_LEASE_ROOT="$LEASE_COMMON/nexus-build-lease"
     # shellcheck source=/dev/null
     source "$lib"
