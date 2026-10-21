@@ -341,6 +341,7 @@ def _take_suite_lease() -> None:
         if held is not None:
             wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
             if wait == 0 and not _suite_lease_unguarded():
+                _suite_lease.record_refusal()  # nexus-jqk5c: this exit never reaches acquire, which logs the rest
                 pytest.exit(
                     "suite lease: refusing to start — another substrate-heavy "
                     f"run holds this box ({held}). Two at once exhaust the "
@@ -3356,6 +3357,19 @@ def _isolate_plugin_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # nexus-konsk: the same-version ref-drift check reads known_marketplaces.json
     # too (to find each marketplace's local clone); isolate it the same way.
     monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "isolated-claude-plugins" / "known_marketplaces.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_lease_events_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lease-contention log (nexus-jqk5c) at a per-test tmp file.
+
+    ``tests/_suite_lease.py`` and ``scripts/lib/build-lease.sh`` append a line per
+    contended lease event to a per-host log under the user's state dir. A test that
+    contends a tmp-root lease, or a child process it spawns, would otherwise write
+    into the real one and show labrun contention that never happened. The session's
+    own lease (taken before any fixture runs) is real and logs to the real path.
+    """
+    monkeypatch.setenv("NX_LEASE_EVENTS_LOG", str(tmp_path / "lease-events.log"))
 
 
 @pytest.fixture(autouse=True)

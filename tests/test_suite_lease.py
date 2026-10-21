@@ -743,3 +743,199 @@ def test_a_new_lease_is_group_writable_and_never_world_writable_whatever_the_uma
             assert mode & 0o002 == 0, (name, "world-writable", oct(mode))
     finally:
         release()
+
+
+# -- lease telemetry (nexus-jqk5c): one key=value line per contended event -----------
+#
+# Only contention is logged: an immediate acquire writes nothing, so the log is the
+# record of waits and refusals labrun measures. Best-effort throughout.
+
+_EVENT_RE = re.compile(
+    r"^ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z lease=suite name=suite host=\S+ pid=(?P<pid>\d+) "
+    r"waited_s=(?P<waited>\d+) outcome=(?P<outcome>[a-z_]+)(?P<rest>.*)$"
+)
+
+
+@pytest.fixture
+def events_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A per-test log; never the real per-host one."""
+    log = tmp_path / "state" / "lease-events.log"
+    monkeypatch.setenv(_suite_lease.EVENTS_LOG_ENV, str(log))
+    return log
+
+
+def _events(log: Path) -> list[re.Match[str]]:
+    if not log.exists():
+        return []
+    lines = log.read_text().splitlines()
+    parsed = [_EVENT_RE.match(line) for line in lines]
+    assert all(parsed), lines
+    return [m for m in parsed if m]
+
+
+def _fake_clock(monkeypatch: pytest.MonkeyPatch, on_sleep=None) -> dict[str, float]:
+    """A monotonic clock that only advances when the (fake) sleep is called."""
+    state = {"t": 5_000.0}
+
+    def fake_sleep(seconds: float) -> None:
+        state["t"] += seconds
+        if on_sleep is not None:
+            on_sleep(state)
+
+    proxy = module_time(monkeypatch, _suite_lease)
+    proxy.sleep = fake_sleep
+    proxy.monotonic = lambda: state["t"]
+    return state
+
+
+def test_an_immediate_acquire_writes_no_event(lease_root: Path, events_log: Path) -> None:
+    release = _suite_lease.acquire("quiet", lease_root=lease_root)
+    assert release is not None
+    release()
+    assert not events_log.exists()
+    release = _suite_lease.acquire("quiet-with-wait", wait_seconds=60, lease_root=lease_root)
+    assert release is not None
+    release()
+    assert not events_log.exists()
+
+
+def test_a_refusal_with_no_wait_logs_one_refused_line_naming_the_holder(lease_root: Path, events_log: Path) -> None:
+    first = _suite_lease.acquire("peer run: pytest -n auto", lease_root=lease_root)
+    assert first is not None
+    try:
+        assert _suite_lease.acquire("second", lease_root=lease_root) is None
+    finally:
+        first()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "refused"
+    assert event["waited"] == "0"
+    assert event["pid"] == str(os.getpid())
+    assert event["rest"] == f' holder_pid={os.getpid()} holder_label="peer run: pytest -n auto"'
+
+
+def test_a_wait_that_runs_out_logs_one_gave_up_line_with_the_wait(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _suite_lease.acquire("holder", lease_root=lease_root)
+    assert first is not None
+    _fake_clock(monkeypatch)
+    try:
+        assert _suite_lease.acquire("waiter", wait_seconds=3, lease_root=lease_root) is None
+    finally:
+        first()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "gave_up"
+    assert event["waited"] == "3"
+    assert event["rest"] == f" holder_pid={os.getpid()} holder_label=holder"
+
+
+def test_a_wait_that_succeeds_logs_one_acquired_after_wait_line(
+        lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _suite_lease.acquire("holder", lease_root=lease_root)
+    assert first is not None
+    sleeps: list[float] = []
+
+    def release_on_third_sleep(_state: dict[str, float]) -> None:
+        sleeps.append(1.0)
+        if len(sleeps) == 3:
+            first()
+
+    _fake_clock(monkeypatch, release_on_third_sleep)
+    release = _suite_lease.acquire("waiter", wait_seconds=60, lease_root=lease_root)
+    assert release is not None
+    release()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "acquired_after_wait"
+    assert event["waited"] == "3"
+    assert event["rest"] == f" holder_pid={os.getpid()} holder_label=holder"
+
+
+def test_reclaiming_a_dead_holders_lease_logs_one_stale_reclaimed_line(lease_root: Path, events_log: Path) -> None:
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{dead.pid}\n")
+    (lease / "label").write_text("crashed run\n")
+    release = _suite_lease.acquire("taker", lease_root=lease_root)
+    assert release is not None
+    release()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "stale_reclaimed"
+    assert event["waited"] == "0"
+    assert event["rest"] == f' holder_pid={dead.pid} holder_label="crashed run"'
+
+
+def test_a_pidless_reclaim_logs_stale_reclaimed_without_a_holder_pid(lease_root: Path, events_log: Path) -> None:
+    _pidless_lease(lease_root, "empty-dir")
+    release = _suite_lease.acquire("taker", lease_root=lease_root, now=_clock(_T0 + _suite_lease.PIDLESS_GRACE_SECONDS + 1))
+    assert release is not None
+    release()
+    (event,) = _events(events_log)
+    assert event["outcome"] == "stale_reclaimed"
+    assert event["rest"] == ""
+
+
+def test_the_early_refusal_in_the_conftest_gate_logs_a_refused_line(
+        conftest_gate, lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no wait requested the gate exits 75 before it ever calls acquire: it logs the refusal itself."""
+    monkeypatch.setattr(_suite_lease, "_lease_root", lambda: lease_root)
+    lease = lease_root / _suite_lease.RESOURCE  # by hand: the fixture's acquire always loses
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{os.getpid()}\n")
+    (lease / "label").write_text("peer-run\n")
+    with pytest.raises(pytest.exit.Exception) as err:
+        conftest_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    (event,) = _events(events_log)
+    assert event["outcome"] == "refused"
+    assert event["rest"] == f" holder_pid={os.getpid()} holder_label=peer-run"
+
+
+@pytest.mark.parametrize("how", ["parent-is-a-file", "log-is-a-directory"])
+def test_an_unwritable_log_changes_nothing(lease_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    if how == "parent-is-a-file":
+        (tmp_path / "blocker").write_text("")
+        bad = tmp_path / "blocker" / "events.log"
+    else:
+        bad = tmp_path / "a-dir"
+        bad.mkdir()
+    monkeypatch.setenv(_suite_lease.EVENTS_LOG_ENV, str(bad))
+    first = _suite_lease.acquire("holder", lease_root=lease_root)
+    assert first is not None
+    try:
+        assert _suite_lease.acquire("refused", lease_root=lease_root) is None  # logs a refusal, into the void
+    finally:
+        first()
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir()
+    (lease / "pid").write_text(f"{dead.pid}\n")
+    release = _suite_lease.acquire("taker", lease_root=lease_root)  # a stale reclaim, logged into the void
+    assert release is not None
+    release()
+
+
+def test_the_default_log_path_is_under_xdg_state_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(_suite_lease.EVENTS_LOG_ENV, raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    assert _suite_lease.events_log_path() == tmp_path / "xdg" / "nexus" / "lease-events.log"
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert _suite_lease.events_log_path() == tmp_path / "home" / ".local" / "state" / "nexus" / "lease-events.log"
+
+
+def test_concurrent_writers_never_interleave_a_line(events_log: Path) -> None:
+    import threading  # noqa: PLC0415 -- this test only
+
+    def write(i: int) -> None:
+        _suite_lease.record_event("suite", "refused", 0, holder_pid=i, holder_label=f"label {i}")
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    events = _events(events_log)
+    assert len(events) == 40
+    assert {m["rest"] for m in events} == {f' holder_pid={i} holder_label="label {i}"' for i in range(40)}
