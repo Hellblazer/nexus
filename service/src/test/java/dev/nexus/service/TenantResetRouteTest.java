@@ -162,6 +162,31 @@ class TenantResetRouteTest {
         }
     }
 
+    /**
+     * nexus-axzgk: the cloud gate's leg N sends exactly these two requests, {} with the leg-B data bearer and
+     * {} with root. Both name no tenant, so the danger is a handler that falls back to the caller's own tenant;
+     * each caller's tenant holds state here, and both must keep it.
+     */
+    @Test
+    void theGatesEmptyBodyRequests_evictNothing() throws Exception {
+        String tenant = "rr-gate-" + shortId();
+        String raw = createTenant(tenant);
+        String defaultCollection = "rr-gate-default-" + shortId();
+        CollectionRegistry.markKnown(tenant, "c", row());
+        CollectionRegistry.markKnown("default", defaultCollection, row());
+        try {
+            var data = post(on, PATH, raw, "{}");
+            assertThat(data.statusCode()).as("data bearer + {}: %s", data.body()).isEqualTo(403);
+            var root = post(on, PATH, ROOT, "{}");
+            assertThat(root.statusCode()).as("root + {}: %s", root.body()).isEqualTo(400);
+            assertThat(CollectionRegistry.isKnown(tenant, "c")).as("the data bearer's own tenant is untouched").isTrue();
+            assertThat(CollectionRegistry.isKnown("default", defaultCollection)).as("root's own tenant is untouched").isTrue();
+        } finally {
+            CollectionRegistry.evictTenant(tenant);
+            CollectionRegistry.evict("default", defaultCollection);
+        }
+    }
+
     @Test
     void noBearerIs401() throws Exception {
         var req = TestHttp.request(base(on) + PATH)
