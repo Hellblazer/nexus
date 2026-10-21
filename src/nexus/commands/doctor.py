@@ -1123,7 +1123,7 @@ def _report_aspect_queue_service() -> None:
 
     click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
     # The spawner declines to start the aspect worker when `claude` is not on
-    # PATH and says so once per process in a log line; this is the durable
+    # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
     # can run. Not applicable (silent) with nothing pending, so a virgin box
     # stays clean. The predicate is the daemon's own, imported at call time.

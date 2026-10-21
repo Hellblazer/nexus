@@ -672,6 +672,7 @@ public class TenantKeyedStateGateTest {
                 "CatalogRepository.AppendOutcome.sweep",
                 "CatalogRepository.DanglingEndpointException.missing",
                 "CatalogRepository.DeleteOutcome.counts",
+                "CatalogRepository.DeleteOutcome.retiredRemoved",
                 "CatalogRepository.DeleteOutcome.unregisteredSiblings",
                 "CatalogRepository.GhostSweepResult.dormantNames",
                 "CatalogRepository.GhostSweepResult.ghostNames",

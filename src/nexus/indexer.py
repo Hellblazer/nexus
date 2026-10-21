@@ -29,7 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
-from nexus.corpus import index_model_for_collection
+from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -5398,6 +5398,19 @@ def _run_index(
         # the migration writer is scoped to this block.
         if _migrate_writer is not None:
             _migrate_writer.close()
+
+    if _local_mode:
+        # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk
+        # is the model that EMBEDDED it. In local mode that is the model the
+        # collection name pins (the engine embeds server-side), not the Python
+        # EF's: without the ``[local]`` extra the EF falls back to MiniLM while
+        # a bge-768 collection is written. Resolved here, after the legacy-name
+        # migration, so it follows the final names. A non-conformant (legacy)
+        # name pins nothing, so it keeps the Python EF's name.
+        if is_conformant_collection_name(code_collection):
+            code_model = index_model_for_collection(code_collection)
+        if is_conformant_collection_name(docs_collection):
+            docs_model = index_model_for_collection(docs_collection)
 
     # nexus-27u7: defer T3 collection creation to the per-content-type
     # branches that actually have files. Pre-fix the indexer

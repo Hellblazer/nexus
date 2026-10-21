@@ -653,7 +653,8 @@ def _require_extraction_credentials() -> None:
 _spawn_lock = threading.Lock()
 _recent_spawn: dict[str, float] = {}  # tenant -> monotonic deadline
 #: Whether this process has already said that it is not spawning because
-#: ``claude`` is absent. One line per process: on a box without ``claude`` every
+#: ``claude`` is absent. One debug line per process (``nx doctor`` carries the
+#: user-facing warning): on a box without ``claude`` every
 #: indexing step and every ``nx store put`` reaches the spawner, and a child per
 #: call left 119 refusals and a 400 KB crash log in one measured run.
 _claude_absent_logged = False
@@ -723,7 +724,8 @@ def ensure_aspect_worker_daemon(
     the spawned daemon may not have published its lease yet (the name is
     "ensure", not "running"). Returns False, spawning nothing, when ``claude`` is
     not on ``PATH``: the child's own credential guard would refuse it, so the
-    spawner checks first and says so once per process. Enqueued rows are
+    spawner checks first and notes it once per process at debug level (``nx
+    doctor`` reports the idle queue). Enqueued rows are
     unaffected and wait in the service queue for a worker on a box that has
     ``claude``.
     """
@@ -741,7 +743,12 @@ def ensure_aspect_worker_daemon(
         if not _claude_available():
             if not _claude_absent_logged:
                 _claude_absent_logged = True
-                _log.warning(
+                # debug, not warning (nexus-s80u9 N3): every CLI invocation is
+                # its own process, so a once-per-process warning printed on
+                # every `nx store put` and `nx index repo`. The durable signal
+                # is `nx doctor`'s "aspect extraction is idle" WARN, which
+                # names the pending count and the remedy.
+                _log.debug(
                     "aspect_worker_daemon.spawn_skipped_claude_absent",
                     tenant=tenant,
                     hint="aspect extraction is off: the `claude` binary is not on PATH. "

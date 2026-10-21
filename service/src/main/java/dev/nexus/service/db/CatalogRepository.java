@@ -8254,6 +8254,11 @@ public final class CatalogRepository {
      * per-table deleted-row count map (preserves the {@code CascadeCounts} / CLI-render
      * + telemetry contract); no {@code failures} list — the operation is all-or-nothing.
      *
+     * <p><b>Retired predecessors (nexus-s80u9).</b> A rename leaves the old name as a tombstone naming its successor;
+     * deleting the successor also removes the empty tombstones that name it ({@link #deleteRetiredPredecessorsOf}),
+     * so {@code nx collection rename A B} then {@code nx collection delete B} leaves no row for A. The removal is not
+     * in the returned counts, whose key set is a wire contract.
+     *
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
      *
@@ -8296,6 +8301,10 @@ public final class CatalogRepository {
         for (String sibling : outcome.unregisteredSiblings()) {
             CollectionRegistry.evict(tenant, sibling);
         }
+        // Retired predecessors of the deleted name (nexus-s80u9): their rows are gone too.
+        for (String retired : outcome.retiredRemoved()) {
+            CollectionRegistry.evict(tenant, retired);
+        }
         // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
         // CollectionRegistry entry would make later writers silently skip
         // re-registration if the name is reused. Same post-commit discipline as
@@ -8336,7 +8345,8 @@ public final class CatalogRepository {
     }
 
     /** What {@link #deleteCollectionTxn} committed: the per-table counts, and the quarantine siblings it unregistered. */
-    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings) {}
+    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings,
+                                 List<String> retiredRemoved) {}
 
     private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
@@ -8465,8 +8475,45 @@ public final class CatalogRepository {
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
-            return new DeleteOutcome(counts, unregisteredSiblings);
+            // 8. nexus-s80u9 (7.77.0 shakeout N5): a rename retires the old name as a tombstone that names its
+            //    successor (renameCollectionTxn step 3). With the successor deleted the tombstone names nothing
+            //    and, having been emptied by the re-home, holds nothing: debris the ghost sweep and `nx doctor`
+            //    then count. Remove it here, in the same transaction. Deliberately NOT in `counts`: the response's
+            //    key set is a wire contract and this is cleanup of the rename's own residue, not data the caller
+            //    asked to delete.
+            List<String> retiredRemoved = deleteRetiredPredecessorsOf(ctx, tenant, name);
+            return new DeleteOutcome(counts, unregisteredSiblings, retiredRemoved);
         });
+    }
+
+    /**
+     * Delete the retired registry rows that name {@code successor} as {@code superseded_by} and hold nothing,
+     * then the ones that named those, until none is left (a chain of renames A to B to C is debris from the end
+     * once C goes). The predicate is the ghost sweep's own, {@link #collectionHoldsContent} plus the quarantine
+     * hold: a retired row that still holds content (a plain supersede moves nothing, so the old name keeps its
+     * chunks) or whose rows sit in quarantine is the data's only home and stays, and so does everything that names
+     * it. Each pass deletes at least one row or ends, so the loop terminates, a cycle included.
+     */
+    private List<String> deleteRetiredPredecessorsOf(DSLContext ctx, String tenant, String successor) {
+        List<String> all = new ArrayList<>();
+        List<String> frontier = List.of(successor);
+        while (!frontier.isEmpty()) {
+            List<String> removed = new ArrayList<>();
+            for (String retired : ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(frontier))
+                    .fetch(CATALOG_COLLECTIONS.NAME)) {
+                if (collectionHoldsContent(ctx, retired) || QuarantineOrigin.holdsRowsOf(ctx, tenant, retired)) {
+                    continue;
+                }
+                ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(retired)).execute();
+                removed.add(retired);
+            }
+            all.addAll(removed);
+            frontier = removed;
+        }
+        return all;
     }
 
     /**

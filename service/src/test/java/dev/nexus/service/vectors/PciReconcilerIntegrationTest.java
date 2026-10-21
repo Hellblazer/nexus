@@ -1317,6 +1317,30 @@ class PciReconcilerIntegrationTest {
         assertThat(logged("event=pci_builder_auth_failed")).isEqualTo(1);
     }
 
+    /**
+     * nexus-s80u9 (7.77.0 shakeout N7): before its first pass an engine is not a holder yet, so the holder-only fields
+     * are null, but it is not a standby either: {@code builder_state} reads {@code ok}. docs/configuration.md states
+     * exactly this shape; the document used to say null meant standby.
+     */
+    @Test
+    void beforeItsFirstPass_theStatusReadsOkWithNullHolderOnlyFields_notStandby() throws Exception {
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep, new MutableClock());
+
+        assertThat(r.status().builderState()).isEqualTo(BuilderState.OK);
+        assertThat(r.status().building()).isNull();
+        assertThat(r.status().failing()).isNull();
+        assertThat(r.status().passStartedAt()).isNull();
+        assertThat(r.status().passInProgress()).isFalse();
+        assertThat(r.status().lastDdlPassAt()).isNull();
+        JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("ok");
+        assertThat(me.get("building").isNull()).isTrue();
+        assertThat(me.get("failing").isNull()).isTrue();
+        assertThat(me.get("last_ddl_pass_at").isNull()).isTrue();
+    }
+
     @Test
     void aStandbyEngineKeepsItsLastCompletedPassTime_andReportsNoBuildingFailingOrPassInFlight() throws Exception {
         String tenant = newTenant("standby");

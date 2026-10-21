@@ -2958,6 +2958,43 @@ def test_run_index_registration_loop_skips_when_vectors_opt_out_of_service(tmp_p
     )
 
 
+def test_local_mode_chunk_metadata_names_the_model_the_engine_embeds_with(tmp_path, monkeypatch):
+    """7.77.0 shakeout N6 (nexus-s80u9): on a local install without the
+    ``[local]`` extra the Python-side EF falls back to MiniLM, but T3 embeds
+    server-side with the model the collection NAME pins (bge-768 by default).
+    The indexer stamped the Python EF's model into every chunk, so
+    ``nx search --json`` reported ``all-MiniLM-L6-v2`` on bge-768 collections.
+    The label is the collection's own model token, the same value
+    ``nx store put``, ``nx index md`` and the catalog row carry."""
+    from nexus.indexer import _run_index  # noqa: PLC0415 — deferred import, same idiom as the sibling tests
+
+    class _MiniLMOnlyEF:
+        model_name = "all-MiniLM-L6-v2"
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # overrides this module's cloud_mode pin
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "README.md").write_text("# Title\n\nSome prose for the docs collection.\n")
+    reg = {
+        "collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "code_collection": "code__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+        "docs_collection": "docs__repo-1a2b3c4d__bge-base-en-v15-768__v1",
+    }
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.db.local_ef.LocalEmbeddingFunction": {"return_value": _MiniLMOnlyEF()},
+    }):
+        _run_index(repo, _reg(reg))
+
+    assert set(ups) >= {reg["code_collection"], reg["docs_collection"]}, ups.keys()
+    for name in (reg["code_collection"], reg["docs_collection"]):
+        models = {m.get("embedding_model") for m in ups[name]}
+        assert models == {"bge-base-en-v15-768"}, (name, models)
+
+
 def test_run_index_registers_rdr_collection_when_rdr_files_exist(tmp_path):
     """nexus-bd44g fix round (code review coverage gap): the registration
     loop's third slot (rdr_col_name) must actually fire when RDR files
