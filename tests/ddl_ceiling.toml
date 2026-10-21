@@ -63,7 +63,9 @@ ddl_tolerance = 0.05
 wal_bytes_per_test = 18450
 ddl_per_test = 1.013
 migration_wal_bytes_per_worker = 11038000
-migration_ddl_per_worker = 2101
+# 2101 -> 2103 (2026-10-21): 62949fa41 (nexus-1579m, bounded expire-quarantine) added a Liquibase changeset
+# without the bump; CI 39617797428 at f9e267297 counted 2103 on every worker.
+migration_ddl_per_worker = 2103
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
