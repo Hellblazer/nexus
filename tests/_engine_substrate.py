@@ -101,7 +101,7 @@ import structlog
 from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
-from tests._child_process import kill_group, popen_in_group, stop_group
+from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
 from tests._ddl_counter import PROBE_SQL, READY_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
 from tests._pg_ctl import pg_ctl_start
@@ -590,8 +590,11 @@ def session_pg_root(
     ``NX_TEST_PG_ROOT`` is a standing instruction and is read every time; the
     automatic choice is made on the first call and persisted in *env* (default
     ``os.environ``) for every later cluster, in this process and in the xdist
-    workers it spawns. A Linux refusal is warned about once, by the process that
-    decided."""
+    workers it spawns. Deciding warns about nothing: a refusal is warned about at
+    the first disk cluster start in each process (:func:`pg_cluster_parent`), so
+    an xdist run that starts no cluster says nothing (nexus-t71bk). The process
+    that decided owns the env value and clears it at
+    :func:`end_pg_root_session`."""
     env = os.environ if env is None else env
     override = (env.get(_PG_ROOT_ENV) or "").strip()
     if override:
@@ -601,16 +604,53 @@ def session_pg_root(
     if valid:
         return root, refusal, False
     root, refusal = decide_pg_root(env=env, **decide_kw)
-    if refusal is not None:
-        _tmpfs_refused(refusal)
     env[_PG_ROOT_SESSION_ENV] = _encode_session_root(root, refusal)
+    if env is os.environ:
+        _OWNED_SESSION[:] = [env[_PG_ROOT_SESSION_ENV]]
     return root, refusal, False
 
 
 _OWNED_LOGS: set[str] = set()
+#: The session decision this process wrote to ``os.environ`` (at most one value).
+#: :func:`end_pg_root_session` clears it, so a second ``pytest.main`` in a
+#: long-lived process (an IDE test server) decides afresh (nexus-t71bk).
+_OWNED_SESSION: list[str] = []
 #: This process's own cluster starts: the summary source of a serial run, which
 #: needs no cross-process log.
 _LOCAL_ROWS: list[dict] = []
+#: Whether this process has warned that its clusters go to disk (nexus-t71bk).
+_REFUSAL_WARNED: list[bool] = []
+
+#: The run's cluster log is ``<tempdir>/nexus-pg-roots-<controller pid>-*.log``; the
+#: pid lets a later controller remove the log of one that was SIGKILLed.
+_RUN_LOG_PREFIX = "nexus-pg-roots-"
+_RUN_LOG_NAME = re.compile(r"nexus-pg-roots-(\d+)-[^/]*\.log")
+
+
+def _sweep_dead_run_logs(tmpdir: Path | None = None) -> int:
+    """Remove cluster logs left by controllers that died before their summary
+    (SIGKILL, OOM). Only regular files this uid owns whose name carries a pid that
+    is no longer alive; a log without a pid in its name is left alone. Returns how
+    many were removed (nexus-t71bk)."""
+    d = Path(tempfile.gettempdir()) if tmpdir is None else tmpdir
+    removed = 0
+    try:
+        candidates = list(d.glob(f"{_RUN_LOG_PREFIX}*.log"))
+    except OSError:
+        return 0
+    for p in candidates:
+        m = _RUN_LOG_NAME.fullmatch(p.name)
+        if m is None or int(m[1]) == os.getpid() or pid_alive(int(m[1])):
+            continue
+        try:
+            st = p.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != int(_current_uid()):
+                continue
+            p.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def begin_pg_root_session() -> None:
@@ -625,8 +665,10 @@ def begin_pg_root_session() -> None:
     except Exception as exc:  # noqa: BLE001 — workers must not decide on their own
         persist_controller_failure(exc)
     if not os.environ.get(_PG_ROOT_LOG_ENV):
+        with contextlib.suppress(Exception):
+            _sweep_dead_run_logs()
         try:
-            fd, path = tempfile.mkstemp(prefix="nexus-pg-roots-", suffix=".log")
+            fd, path = tempfile.mkstemp(prefix=f"{_RUN_LOG_PREFIX}{os.getpid()}-", suffix=".log")
         except OSError as exc:  # the summary is lost; the decision above stands
             _log.warning("nexus_t2_substrate.cluster_log_unavailable", error=str(exc))
             return
@@ -646,6 +688,7 @@ def persist_controller_failure(exc: BaseException) -> None:
             return
         reason = f"the controller could not decide ({type(exc).__name__}: {exc})"
         os.environ[_PG_ROOT_SESSION_ENV] = _encode_session_root(None, reason)
+        _OWNED_SESSION[:] = [os.environ[_PG_ROOT_SESSION_ENV]]
         _tmpfs_refused(reason)
 
 
@@ -661,12 +704,13 @@ def _record_cluster_root(kind: str, root: str | None, reason: str | None) -> Non
 
 def pg_root_run_summary(*, finish: bool = False) -> str | None:
     """The one-line "where did the clusters go" answer for this run, or None when
-    no cluster started. An xdist run reads every worker's rows from the cluster
-    log; a serial run reads its own. With ``finish`` the controller also removes
-    the log it created."""
+    no cluster started. The controller that opened the cluster log reads every
+    worker's rows from it; any other process, a serial run or a nested pytest that
+    inherited an outer run's log, reads its own (nexus-t71bk). With ``finish`` the
+    controller also removes the log it created."""
     path = os.environ.get(_PG_ROOT_LOG_ENV)
     rows = list(_LOCAL_ROWS)
-    if path:
+    if path and path in _OWNED_LOGS:
         try:
             rows = [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
         except (OSError, ValueError):
@@ -688,6 +732,24 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
     if roots:
         line += " [root " + ", ".join(roots) + "]"
     return line
+
+
+def end_pg_root_session() -> None:
+    """At the end of a pytest run in this process: remove the cluster log it opened
+    if the summary did not, clear the session decision it wrote, and forget its
+    cluster starts and warning, so the next ``pytest.main`` in the same process
+    starts clean. An inherited decision or log is left alone (nexus-t71bk)."""
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    if path and path in _OWNED_LOGS:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        os.environ.pop(_PG_ROOT_LOG_ENV, None)
+    _OWNED_LOGS.clear()
+    if _OWNED_SESSION and os.environ.get(_PG_ROOT_SESSION_ENV) == _OWNED_SESSION[0]:
+        os.environ.pop(_PG_ROOT_SESSION_ENV, None)
+    _OWNED_SESSION.clear()
+    _LOCAL_ROWS.clear()
+    _REFUSAL_WARNED.clear()
 
 
 #: A start below the hard floor waits this long for headroom to come back before
@@ -850,6 +912,9 @@ def pg_cluster_parent() -> str | None:
     the run's summary line (nexus-vo9qn)."""
     root, refusal, explicit = session_pg_root()
     if root is None:
+        if refusal is not None and not _REFUSAL_WARNED:
+            _REFUSAL_WARNED.append(True)
+            _tmpfs_refused(refusal)
         _log_cluster_root(None, refusal)
         return None
     if not explicit:

@@ -591,6 +591,19 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(line)
 
 
+def pytest_unconfigure(config):
+    """Clear the cluster-root session this process opened, so a second
+    ``pytest.main`` in the same process decides afresh (nexus-t71bk)."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        from tests._engine_substrate import end_pg_root_session
+
+        end_pg_root_session()
+    except Exception:  # noqa: BLE001 — cleanup never fails a run
+        return
+
+
 def pytest_sessionstart(session):
     """Snapshot fixture cache files in ~/.config/nexus/ at session
     start so ``pytest_sessionfinish`` can detect leaks introduced

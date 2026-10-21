@@ -56,6 +56,8 @@ def _fresh_session_decision(monkeypatch):
     monkeypatch.setenv(sub._PG_ROOT_SESSION_ENV, "")
     monkeypatch.delenv(sub._PG_ROOT_LOG_ENV, raising=False)
     monkeypatch.setattr(sub, "_LOCAL_ROWS", [])
+    monkeypatch.setattr(sub, "_OWNED_SESSION", [])
+    monkeypatch.setattr(sub, "_REFUSAL_WARNED", [])
 
 
 @pytest.fixture
@@ -706,10 +708,10 @@ class TestRootIsDecidedOncePerRun:
         assert first[0] == Path("/dev/shm/nexus-test-pg-1000")
         assert squeezed == first
 
-    def test_a_refusal_is_just_as_sticky(self) -> None:
+    def test_a_refusal_is_just_as_sticky(self, recwarn) -> None:
         env: dict[str, str] = {}
-        with pytest.warns(UserWarning, match="tmpfs"):
-            first = self._decide(env, free_bytes=_tight)
+        first = self._decide(env, free_bytes=_tight)
+        assert not [w for w in recwarn if "tmpfs" in str(w.message)]  # warned at a start
         again = self._decide(env)  # roomy now: the run stays where it started
         assert first[0] is None and "free" in (first[1] or "")
         assert again == first
@@ -891,6 +893,7 @@ class TestEveryClusterStartSaysWhereItWent:
         log = tmp_path / "roots.log"
         log.write_text("")
         monkeypatch.setenv(sub._PG_ROOT_LOG_ENV, str(log))
+        monkeypatch.setattr(sub, "_OWNED_LOGS", {str(log)})  # this process opened it
         sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-1", None)
         sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-1", None)
         sub._record_cluster_root("disk", None, "the cgroup memory headroom is 1 MiB")
@@ -1331,3 +1334,108 @@ class TestTmpfsHardening:
         assert quota is not None, "/dev/shm has usrquota but quotactl_fd did not answer"
         headroom = sub._quota_headroom(*quota)
         assert headroom is None or 0 <= headroom <= shutil.disk_usage("/dev/shm").total
+
+
+class TestSessionEndsCleanAndSaysOnlyWhatItSaw:
+    """nexus-t71bk: the nexus-vo9qn review's leftovers."""
+
+    def test_a_dead_controllers_log_is_swept_and_nothing_else(self, tmp_path) -> None:
+        done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                              capture_output=True, text=True, check=True)
+        dead = int(done.stdout)
+        assert not sub.pid_alive(dead)
+        names = {
+            "dead": f"nexus-pg-roots-{dead}-abc.log",
+            "live": f"nexus-pg-roots-{os.getppid()}-abc.log",
+            "self": f"nexus-pg-roots-{os.getpid()}-abc.log",
+            "old": "nexus-pg-roots-abc.log",  # no pid: owner unknown, left alone
+        }
+        for n in names.values():
+            (tmp_path / n).write_text("")
+        (tmp_path / f"nexus-pg-roots-{dead}-dir.log").mkdir()  # not a regular file
+        assert sub._sweep_dead_run_logs(tmp_path) == 1
+        assert not (tmp_path / names["dead"]).exists()
+        for k in ("live", "self", "old"):
+            assert (tmp_path / names[k]).exists(), k
+        assert (tmp_path / f"nexus-pg-roots-{dead}-dir.log").is_dir()
+
+    def test_the_controllers_log_carries_its_pid(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (None, None))
+        sub.begin_pg_root_session()
+        try:
+            name = Path(os.environ[sub._PG_ROOT_LOG_ENV]).name
+            assert name.startswith(f"nexus-pg-roots-{os.getpid()}-")
+            assert sub._RUN_LOG_NAME.fullmatch(name)
+        finally:
+            sub.end_pg_root_session()
+
+    def test_ending_clears_the_decision_so_the_next_run_decides_afresh(
+        self, monkeypatch,
+    ) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        answers = iter([(Path("/dev/shm/nexus-test-pg-1"), None), (None, "squeezed")])
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: next(answers))
+        sub.begin_pg_root_session()
+        path = Path(os.environ[sub._PG_ROOT_LOG_ENV])
+        sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-1", None)
+        sub.end_pg_root_session()  # no summary ran: the log goes too
+        assert not path.exists()
+        assert sub._PG_ROOT_LOG_ENV not in os.environ
+        assert sub._PG_ROOT_SESSION_ENV not in os.environ
+        assert sub._LOCAL_ROWS == []
+        assert sub.session_pg_root()[:2] == (None, "squeezed")  # the second run
+
+    def test_ending_leaves_an_inherited_decision_alone(self, monkeypatch) -> None:
+        monkeypatch.setenv(sub._PG_ROOT_SESSION_ENV, "tmpfs=/dev/shm/nexus-test-pg-9")
+        monkeypatch.setenv(sub._PG_ROOT_LOG_ENV, "/nonexistent/outer.log")
+        sub.end_pg_root_session()
+        assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+        assert os.environ[sub._PG_ROOT_LOG_ENV] == "/nonexistent/outer.log"
+
+    def test_deciding_warns_nothing_and_the_first_disk_start_warns_once(
+        self, monkeypatch, recwarn,
+    ) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (None, "/dev/shm is not tmpfs"))
+        sub.begin_pg_root_session()
+        try:
+            assert not [w for w in recwarn if "tmpfs" in str(w.message)]
+            assert sub.pg_cluster_parent() is None
+            assert sub.pg_cluster_parent() is None
+            hits = [w for w in recwarn if "not using tmpfs" in str(w.message)]
+            assert len(hits) == 1 and "not tmpfs" in str(hits[0].message)
+        finally:
+            sub.end_pg_root_session()
+
+    def test_a_nested_run_reports_its_own_starts_not_the_outer_log(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        outer = tmp_path / "outer.log"
+        outer.write_text(json.dumps({"kind": "tmpfs", "root": "/x", "reason": None}) + "\n" * 1)
+        monkeypatch.setenv(sub._PG_ROOT_LOG_ENV, str(outer))
+        assert sub.pg_root_run_summary(finish=True) is None  # started nothing itself
+        assert outer.exists()  # and never removes the outer run's log
+        sub._record_cluster_root("disk", None, None)
+        assert "clusters on tmpfs 0, on disk 1" in (sub.pg_root_run_summary() or "")
+        assert len(outer.read_text().splitlines()) == 2  # still feeds the outer run
+
+    def test_unconfigure_ends_the_session_for_a_controller_only(self, monkeypatch) -> None:
+        from tests import conftest as ct
+
+        ended: list[int] = []
+        monkeypatch.setattr(sub, "end_pg_root_session", lambda: ended.append(1))
+
+        class Cfg:
+            pass
+
+        class WorkerCfg:
+            workerinput = {"workerid": "gw0"}
+
+        ct.pytest_unconfigure(WorkerCfg())
+        assert ended == []
+        ct.pytest_unconfigure(Cfg())
+        assert ended == [1]
