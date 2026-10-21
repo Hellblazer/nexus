@@ -29,19 +29,20 @@
 #                the same 581 as the 55c082c63 measurement.
 #
 # pytest-gate runs the python_unit fan-in over the six shards' reports (they ride the DDL report
-# artifact). It is ADVISORY until `measured_on` is set under [python_unit]: these numbers are chas
-# numbers, so CI fan-ins must confirm them first, as the DDL ratchet's were
+# artifact). THE PYTHON_UNIT GATE IS ARMED (2026-10-21, nexus-ylpac): `measured_on` names the CI runs
+# whose fan-in total is the ceiling, and the step is enforced
 # (tests/scripts/test_storage_touch_fan_in_wiring.py holds the step's continue-on-error to that key).
-# The arming commit sets provisioned_tests to the CI fan-in's own total (lower than 4916 if CI's
-# selection skips tenant tests chas runs) together with measured_on naming those CI runs; arming
-# at a chas number above the CI total would let that many regressions pass at tolerance 0.
+# CI's selection skips no tenant test chas runs (CI 39452192135 at 28fc79b4e counted 4916, the chas
+# number); the ceiling is 4925, not 4916, because the tests added between the chas measurement and
+# the arming runs mint 9 more (CI 39509863155 at badd4a5cf already counted 4919).
 # A CI shard turns the whole-run checks on by itself (pytest-split is splitting it), so its report says
 # sweep=true and the fan-in accepts it. The docs-readers leg is neither split nor above SWEEP_AUTO_FLOOR,
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4916
+provisioned_tests = 4925
 tolerance_tests = 0
+measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
 # substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
