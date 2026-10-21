@@ -571,7 +571,7 @@ omit the filesystem's journal and metadata and writeback charged to no sampled c
 can sit far below the device; the `docker (driver, logging driver, debug, cgroup version)` line, which must
 match across arms. Measured on chas (2026-10-19, Java main, two arms each): the counter costs nothing
 measurable. Per-container sum 64-72 KiB in every arm, 17-18 containers a run. containerd 49/47 MiB on vs
-45/46 off; dockerd 18/16 on vs 27/27 off (on is lower: Docker's json log shrinks from 4.2 MB to 30 KB);
+45/46 off; dockerd 18/16 on vs 27/27 off (on is lower: Docker's json log shrinks from 4.2 MB to 30 KB, sized every tick; the sampler now sizes an unreadable log through `docker logs` every 30 s, so set `NX_IO_SAMPLER_LOGS_EVERY=1` to compare arms on log bytes);
 systemd-journald 662/436 on vs 690/407 off, host noise that does not follow the counter, written against
 about 2 MB of journal entries (ssh login and veth/network churn, present at idle), so journald's own write
 amplification dominates. The lab owner's nvme0n1 sampler gave 0.84 / 0.66 / 0.51 / 0.52 GB for on / off /

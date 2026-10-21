@@ -189,6 +189,7 @@ case "$1" in
         cat "$FAKE_DIR/ids" 2>/dev/null; exit 0 ;;
     inspect) [[ " $FAKE_STALL " == *" inspect "* ]] && stall; id="${@: -1}"; cat "$FAKE_DIR/info-$id" ;;
     logs)
+        [[ -n "${FAKE_LOG_CALLS:-}" ]] && echo "$2" >>"$FAKE_LOG_CALLS"
         if [[ -e "$FAKE_DIR/logs-$2.gone" ]]; then echo "Error response from daemon: No such container: $2" >&2; exit 1; fi
         cat "$FAKE_DIR/logs-$2" ;;
     info) [[ " $FAKE_STALL " == *" info "* ]] && stall; echo "overlay2 json-file false 2" ;;
@@ -404,7 +405,9 @@ def test_a_sampler_loop_that_outlives_its_grace_is_killed_and_reported(world: di
         extra_env={**_BOUNDS, "NX_IO_SAMPLER_DOCKER_TIMEOUT": "20", "NX_IO_SAMPLER_FINAL": "1", "FAKE_STALL": "ps"},
         timeout=_HANG_BOUND_SECONDS,
     )
-    assert time.monotonic() - started < _HANG_BOUND_SECONDS
+    # Under the 20 s docker bound: a loop that is only waited for, not killed, takes 23 s or more. About 5 s
+    # idle and up to 16 s with every core busy, so 18 keeps the margin both ways.
+    assert time.monotonic() - started < 18
     assert result.returncode == 0, result.stderr
     assert "sampler loop still running 1s after the command ended; killed" in result.stderr
     _assert_no_stalled_calls_left(world)
@@ -523,6 +526,59 @@ def test_a_bad_interval_is_refused_before_the_command_runs(world: dict[str, Path
     result = _run(world, f"touch '{marker}'", interval=bad)
     assert result.returncode == 2 and not marker.exists(), result.stderr
     assert "-i must be a positive number" in result.stderr or "-i needs seconds" in result.stderr
+
+
+def test_the_run_label_with_no_value_is_refused_before_the_command_runs(world: dict[str, Path]) -> None:
+    marker = world["tmp"] / "ran"
+    result = _run(world, f"touch '{marker}'", "-f", "label=dev.nexus.test.run")
+    assert result.returncode == 2 and not marker.exists(), result.stderr
+    assert "names the run label with no value" in result.stderr
+
+
+def _until_ticks(world: dict[str, Path], n: int) -> str:
+    """A command that returns once the sampler loop has ticked N times (up to 60 s), not after a fixed sleep
+    that a loaded box can outrun."""
+    return (
+        f"for _ in $(seq 600); do for f in '{world['tmp']}'/nx-io-sampler.*/samples; do "
+        f"[ -s \"$f\" ] && [ \"$(cat \"$f\")\" -ge {n} ] && break 2; done; sleep 0.1; done"
+    )
+
+
+def test_a_bad_logs_every_is_refused_before_the_command_runs(world: dict[str, Path]) -> None:
+    marker = world["tmp"] / "ran"
+    result = _run(world, f"touch '{marker}'", extra_env={"NX_IO_SAMPLER_LOGS_EVERY": "abc"})
+    assert result.returncode == 2 and not marker.exists(), result.stderr
+    assert "LOGS_EVERY bounds must be positive whole seconds, got 'abc'" in result.stderr
+
+
+def test_an_unreadable_log_is_sized_through_docker_on_its_first_tick_then_every_logs_every_and_at_the_end(
+    world: dict[str, Path],
+) -> None:
+    # Container B's json log is unreadable, so it is sized by `docker logs`, which re-reads the whole log
+    # through dockerd. Ticks every 0.1 s for about 1.5 s: with LOGS_EVERY 60 that is the first tick and the
+    # final sample, two calls, not one per tick.
+    calls = world["fake"] / "logs-calls"
+    result = _run(
+        world, _until_ticks(world, 5), interval="0.1",
+        extra_env={"NX_IO_SAMPLER_LOGS_EVERY": "60", "FAKE_LOG_CALLS": str(calls)},
+    )
+    assert result.returncode == 0, result.stderr
+    samples = int(_kept_state(result.stderr).joinpath("samples").read_text())
+    assert samples >= 5, f"the loop must tick often enough for the throttle to matter: {samples}"
+    assert calls.read_text().count(CID_B) == 2, calls.read_text()
+    assert "json-log bytes total: 200 B  (1 sized by stat of docker's LogPath, 1 by 'docker logs | wc -c'" in result.stderr
+
+
+def test_an_unreadable_log_is_sized_again_once_logs_every_has_passed(world: dict[str, Path]) -> None:
+    # LOGS_EVERY 1 over about 3.5 s: the first tick, two or more periodic sizings, the final sample.
+    calls = world["fake"] / "logs-calls"
+    result = _run(
+        world, f"sleep 3.5; {_until_ticks(world, 6)}", interval="0.1",
+        extra_env={"NX_IO_SAMPLER_LOGS_EVERY": "1", "FAKE_LOG_CALLS": str(calls)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().count(CID_B) >= 4, calls.read_text()
+    assert "the 'docker logs' sizes are lower bounds taken every 1s" in result.stderr
 
 
 def test_a_process_name_is_one_path_component_and_never_starts_with_a_dash(world: dict[str, Path]) -> None:

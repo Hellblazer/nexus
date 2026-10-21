@@ -25,7 +25,10 @@
 #
 # Needs no root. What it cannot read it skips and says so in the report: a cgroup whose io.stat is
 # unreadable, a json log under /var/lib/docker/containers (root-only on most hosts; the log is then
-# sized by `docker logs | wc -c`, its payload without the json wrapper, so a lower bound).
+# sized by `docker logs | wc -c`, its payload without the json wrapper, so a lower bound; that re-reads
+# the whole log through dockerd, so it runs every NX_IO_SAMPLER_LOGS_EVERY seconds, default 30, and at
+# the final sample, not every tick; a container gone by then keeps the size of its last sizing, up to
+# that many seconds stale, and one shorter-lived than that is sized only at its first tick).
 #
 # WHAT THE NUMBERS ARE NOT (attribution limits). cgroup wbytes count the bios a cgroup issues to a block
 # device. They omit the filesystem's own journal and metadata writes and any kernel writeback charged to
@@ -38,9 +41,8 @@
 # found through sysfs slaves) is reported but not added, so the stack is counted once, at the device
 # below it; a stack with a layer missing from the set, or a dm spanning disks only some of which are
 # listed, is not resolved. The daemon deltas and the device delta are HOST-WIDE: run when the pool is
-# quiet, or they include other jobs. On chas (2026-10-19) journald's own write cost dominated the
-# daemons, about 300x the size of the entries it holds, present at idle, and fed by ssh/login and
-# veth/network churn: compare an A/B arm against an idle window, not against zero.
+# quiet, or they include other jobs, and compare an A/B arm against an idle window, not against zero.
+# Measured chas numbers live in tests/AGENTS.md (the DDL counter section), not here.
 #
 # Every docker call is bounded (NX_IO_SAMPLER_DOCKER_TIMEOUT seconds, default 20); after COMMAND ends the
 # sampler loop gets NX_IO_SAMPLER_GRACE seconds (default 10), then is killed, and the final sample gets
@@ -62,6 +64,10 @@ SYS_DEV_BLOCK=${NX_IO_SAMPLER_SYS_DEV_BLOCK:-/sys/dev/block}
 DOCKER_TIMEOUT=${NX_IO_SAMPLER_DOCKER_TIMEOUT:-20}
 SAMPLER_GRACE=${NX_IO_SAMPLER_GRACE:-10}
 FINAL_SAMPLE_SECS=${NX_IO_SAMPLER_FINAL:-30}
+# How often, in seconds, a container whose json log file is unreadable is sized by `docker logs | wc -c`,
+# which re-reads the whole log through dockerd each time. The final sample always sizes it.
+LOGS_EVERY=${NX_IO_SAMPLER_LOGS_EVERY:-30}
+FINAL_TICK=""
 STATE=""
 
 # ---- parsing helpers (pure; unit-tested with fixture files) ---------------------------------
@@ -357,6 +363,9 @@ report() {
     done
     report_device "$state" "$attributed"
     echo "json-log bytes total: $(fmt_bytes "$logtotal")  (${logstat} sized by stat of docker's LogPath, ${logdocker} by 'docker logs | wc -c' payload because the file was unreadable)"
+    if ((logdocker > 0)); then
+        echo "  (the 'docker logs' sizes are lower bounds taken every ${LOGS_EVERY}s: a container's last size before it died is missed; NX_IO_SAMPLER_LOGS_EVERY=1 for an A/B arm)"
+    fi
     echo "top 10 containers by wbytes:"
     container_rows "$state" | awk 'NR <= 10 { printf "  %14d  %s  %s\n", $1, $2, $3 }'
     echo "top 10 callers (dev.nexus.test.caller) by summed wbytes:"
@@ -401,6 +410,14 @@ daemon_end() {
     done
 }
 
+# Whether a container's log is due a `docker logs` sizing: until one succeeds, every LOGS_EVERY seconds
+# after the last that did, and on the final sample.
+docker_log_due() {
+    local dir=$1 last=""
+    [[ -r $dir/logat ]] && last=$(<"$dir/logat")
+    [[ -n $FINAL_TICK || -z $last ]] || ((SECONDS - last >= LOGS_EVERY))
+}
+
 # One tick: every running container, resolved once (cgroup, caller, log path), then its wbytes and log size.
 sample_once() {
     local state=$1 root=$2 id dir info pid logpath caller cg w size
@@ -430,8 +447,9 @@ sample_once() {
             echo stat >"$dir/logmode"
         # A container that died between the listing and now makes docker print an error and fail: that
         # text is not log. Pipefail carries docker's status through the pipe, so the size is skipped.
-        elif size=$(dock logs "$id" 2>&1 | wc -c | tr -d ' ') && [[ $size =~ ^[0-9]+$ ]]; then
+        elif docker_log_due "$dir" && size=$(dock logs "$id" 2>&1 | wc -c | tr -d ' ') && [[ $size =~ ^[0-9]+$ ]]; then
             record_max "$dir/logmax" "$size"
+            echo "$SECONDS" >"$dir/logat"
             [[ -e $dir/logmode ]] || echo docker >"$dir/logmode"
         fi
     done < <(dock ps -q --no-trunc ${PS_FILTER[@]+"${PS_FILTER[@]}"} 2>/dev/null)
@@ -502,6 +520,10 @@ main() {
                     die "filter '$2' has an empty value (is NX_TEST_RUN_ID exported?): it would match every container with an empty value"
                     return 2
                 }
+                [[ $2 == label=dev.nexus.test.run ]] && {
+                    die "filter '$2' names the run label with no value: it would match every run's containers; give =\$NX_TEST_RUN_ID"
+                    return 2
+                }
                 PS_FILTER+=(--filter "$2"); shift 2 ;;
             -r) root=$2; shift 2 ;;
             -h | --help) usage; return 0 ;;
@@ -514,8 +536,8 @@ main() {
         return 2
     fi
     local bound
-    for bound in "$DOCKER_TIMEOUT" "$SAMPLER_GRACE" "$FINAL_SAMPLE_SECS"; do
-        positive_int "$bound" || { die "the NX_IO_SAMPLER_DOCKER_TIMEOUT/GRACE/FINAL bounds must be positive whole seconds, got '$bound'"; return 2; }
+    for bound in "$DOCKER_TIMEOUT" "$SAMPLER_GRACE" "$FINAL_SAMPLE_SECS" "$LOGS_EVERY"; do
+        positive_int "$bound" || { die "the NX_IO_SAMPLER_DOCKER_TIMEOUT/GRACE/FINAL/LOGS_EVERY bounds must be positive whole seconds, got '$bound'"; return 2; }
     done
     if ! command -v docker >/dev/null 2>&1 || ! bounded "$DOCKER_TIMEOUT" docker ps -q >/dev/null 2>&1; then
         die "docker is not usable as this user (the listing failed or did not answer in ${DOCKER_TIMEOUT}s); not running the command"
@@ -543,6 +565,7 @@ main() {
     trap - INT TERM
     stop_sampler "$state" "$SAMPLER_PID"
     # one more look at what is still running
+    FINAL_TICK=1
     bounded "$FINAL_SAMPLE_SECS" sample_once "$state" "$root" || echo "final sample did not finish in ${FINAL_SAMPLE_SECS}s" >>"$state/timeouts"
     daemon_end "$state" "$root"
     cp "$PROC_ROOT/diskstats" "$state/diskstats.end" 2>/dev/null
