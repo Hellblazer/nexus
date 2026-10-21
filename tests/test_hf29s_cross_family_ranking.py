@@ -217,6 +217,37 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
     }
 
 
+def test_grouped_combined_query_reorders_a_single_family_voyage_code_plus_docs_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-ndr0t B1, pinned deliberately (Technical Design 12): a cloud or
+    ``voyage`` query over ``code__`` plus ``docs__`` spans TWO models
+    (voyage-code-3 at 1.0, voyage-context-3 at 0.45/0.65 = 0.692), so it
+    reorders against raw distance even though no bge collection is involved.
+    This is the rule working as designed, not a bge-only effect; the release
+    note says so. If the factors for the Voyage models change, this order
+    changes with them and this test is the tripwire."""
+    monkeypatch.setattr(mcp_infra, "get_collection_row", _row_for)
+    code = "code__owner__voyage-code-3__v1"
+    docs = "docs__owner__voyage-context-3__v1"
+    assert _calibration_factor_for_model("voyage-code-3") == pytest.approx(1.0)
+    assert _calibration_factor_for_model("voyage-context-3") == pytest.approx(0.45 / 0.65)
+    rows = {
+        code: [{"id": "c1", "collection": code, "distance": 0.70}],      # 0.700
+        docs: [
+            {"id": "d1", "collection": docs, "distance": 0.90},          # 0.623
+            {"id": "d2", "collection": docs, "distance": 0.60},          # 0.415
+        ],
+    }
+    merged = mcp_core._grouped_combined_query(
+        [code, docs], lambda group: list(rows[group[0]]),
+    )
+    # Raw-distance order would be d2 (0.60), c1 (0.70), d1 (0.90).
+    assert [r["id"] for r in merged] == ["d2", "d1", "c1"]
+    # The engine's distances are reported untouched.
+    assert {r["id"]: r["distance"] for r in merged} == {"c1": 0.70, "d1": 0.90, "d2": 0.60}
+
+
 def test_grouped_combined_query_single_model_keeps_raw_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -377,6 +408,69 @@ def test_mcp_one_group_degraded_falls_back_to_calibrated_order_with_the_note() -
     assert "calibrated distance order" in text
 
 
+def _mcp_clustered_search(query: str, rows: list[SearchResult], degraded: dict[str, dict]):
+    """``_mcp_search`` with ``cluster_by="semantic"``; rows carry cluster labels."""
+    labels = {"b-rel": "cluster-bge", "v-mid": "cluster-voyage", "v-hi": "cluster-voyage"}
+    for r in rows:
+        r.metadata["_cluster_label"] = labels[r.id]
+    t3 = _mock_t3([
+        {"name": BGE_KNOW, "count": 3, "embedding_model": BGE},
+        {"name": VOY_RDR, "count": 3, "embedding_model": "voyage-context-3"},
+    ])
+    t3.supports_server_rerank = True
+
+    def _cross_corpus(*a, **kw):
+        if kw.get("rerank_meta_out") is not None:
+            kw["rerank_meta_out"].update(degraded)
+        return list(rows)
+
+    try:
+        with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            return search(query=query, corpus=f"{BGE_KNOW},{VOY_RDR}", lexical=True,
+                          cluster_by="semantic", structured=True)
+    finally:
+        mcp_infra.inject_t3(None)
+
+
+@pytest.mark.t2_tenant
+def test_mcp_unscored_tail_without_a_degrade_still_trails_the_scored_rows() -> None:
+    """Mirror of the CLI test: the engine scores a capped candidate set, so an
+    unscored tail with NO degrade is the normal shape and keeps "scored rows
+    lead", even though the tail row is closer by calibrated distance."""
+    rows = [
+        SearchResult(id="scored", content="x", distance=0.75, collection=VOY_RDR,
+                     metadata={"rerank_score": 0.9}),
+        SearchResult(id="tail", content="x", distance=0.33, collection=BGE_KNOW,
+                     metadata={}),
+    ]
+    out = _mcp_search("hf29s mcp unscored tail no degrade", rows, {})
+    assert out["ids"] == ["scored", "tail"]
+
+
+@pytest.mark.t2_tenant
+def test_mcp_clustered_partial_rerank_orders_clusters_and_rows_by_the_calibrated_score() -> None:
+    """The clustered branch with a partial rerank (one collection degraded, the
+    other scored): clusters and the rows inside them order by the calibrated
+    ``hybrid_score``, not by rerank score. With "scored rows lead" the cluster
+    holding the scored Voyage rows would come first and b-rel last."""
+    out = _mcp_clustered_search(
+        "hf29s mcp clustered partial", _mcp_rows(False, True),
+        {BGE_KNOW: {"degraded": True, "error": "rate limited"}},
+    )
+    # Calibrated at the interim 1.30: b-rel 0.429, v-mid 0.436, v-hi 0.519. The
+    # bge cluster's best row leads; the voyage cluster follows, its rows in score order.
+    assert out["ids"] == ["b-rel", "v-mid", "v-hi"]
+
+
+@pytest.mark.t2_tenant
+def test_mcp_clustered_all_scored_orders_clusters_by_rerank_score() -> None:
+    """Control for the test above: with no degrade the same rows and clusters
+    order by rerank score, so the partial test discriminates the branch."""
+    out = _mcp_clustered_search("hf29s mcp clustered all scored", _mcp_rows(True, True), {})
+    assert out["ids"] == ["v-hi", "v-mid", "b-rel"]
+
+
 # ── 6. thresholds are per collection family ─────────────────────────────────
 
 
@@ -454,3 +548,106 @@ def test_a_fake_engine_with_the_attribute_gate_filters_voyage_not_bge():
     results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE], 10, _Fake())
     ids = {r.id for r in results}
     assert "voy-far" not in ids and "bge-far" in ids
+
+
+# ── 7. a legacy (model-token-less) name on a dual engine (nexus-ndr0t S3/B4) ─
+#
+# Decision of record: an unknown family under a dual engine gets NO threshold.
+# A dual engine serves a bge family beside the Voyage one, a name that carries
+# no model token cannot say which family holds its vectors, and the 0.45-0.65
+# prefix thresholds are Voyage-calibrated (they admit every bge result). A
+# non-dual engine keeps the old rule: a legacy name keeps the prefix threshold.
+
+LEGACY = "docs__legacyowner"
+_LEGACY_ROWS = [
+    {"id": "leg-near", "content": "k", "distance": 0.30},
+    {"id": "leg-far", "content": "d", "distance": 0.80},
+]
+
+
+def _legacy_t3(monkeypatch: pytest.MonkeyPatch, mode: str | None):
+    t3 = _ModeT3.make(monkeypatch, mode)
+    monkeypatch.setitem(_ModeT3.ROWS, LEGACY, list(_LEGACY_ROWS))
+    return t3
+
+
+def test_a_legacy_name_has_no_model_token_so_the_family_is_unknown() -> None:
+    from nexus.search_engine import _model_token
+
+    assert _model_token(LEGACY) is None
+
+
+def test_threshold_for_collection_model_legacy_name_by_engine_kind() -> None:
+    from nexus.search_engine import _threshold_for_collection_model
+
+    cfg = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
+    # Non-dual (the default): a legacy name keeps the prefix threshold, as before.
+    assert _threshold_for_collection_model(LEGACY, cfg) == pytest.approx(0.65)
+    assert _threshold_for_collection_model(LEGACY, cfg, dual=False) == pytest.approx(0.65)
+    # Dual: the family is unknown, so no threshold.
+    assert _threshold_for_collection_model(LEGACY, cfg, dual=True) is None
+    # A named Voyage collection is still filtered on a dual engine; bge still never.
+    assert _threshold_for_collection_model(_ModeT3.VOY, cfg, dual=True) == pytest.approx(0.65)
+    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=True) is None
+    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=False) is None
+
+
+@pytest.mark.t2_tenant
+@pytest.mark.parametrize(
+    "mode, legacy_filtered",
+    [
+        ("voyage", True),       # a voyage-only engine: the legacy name is Voyage, as before
+        ("dual", False),        # the change: unknown family on a dual engine, no threshold
+        ("onnx-local", False),  # thresholds off for the engine
+        (None, False),          # mode unknown: thresholds off
+    ],
+    ids=["voyage", "dual", "onnx-local", "unknown"],
+)
+def test_legacy_name_threshold_by_engine_mode(monkeypatch, mode, legacy_filtered):
+    t3 = _legacy_t3(monkeypatch, mode)
+    results = search_cross_corpus("q", [LEGACY, _ModeT3.VOY, _ModeT3.BGE], 10, t3)
+    ids = {r.id for r in results}
+    assert ("leg-far" not in ids) is legacy_filtered
+    assert "leg-near" in ids
+    # The named families keep their rule on every engine (test 6 pins it too).
+    assert ("voy-far" not in ids) is (mode in ("voyage", "dual"))
+    assert "bge-far" in ids
+
+
+@pytest.mark.t2_tenant
+def test_an_explicit_override_still_filters_a_legacy_name_on_a_dual_engine(monkeypatch):
+    t3 = _legacy_t3(monkeypatch, "dual")
+    results = search_cross_corpus("q", [LEGACY], 10, t3, threshold_override=0.5)
+    assert {r.id for r in results} == {"leg-near"}
+
+
+def test_the_doctor_probe_judges_a_legacy_name_by_the_same_rule(monkeypatch):
+    """`nx doctor` must not judge a model-less name by a threshold search no
+    longer applies to it on a dual engine."""
+    from nexus.doctor_search import _default_threshold_for
+
+    class _Engine:
+        def __init__(self, mode):
+            self._mode = mode
+
+        def embedding_mode(self):
+            return self._mode
+
+    assert _default_threshold_for(LEGACY, _Engine("dual")) is None
+    assert _default_threshold_for(LEGACY, _Engine("voyage")) is not None
+    assert _default_threshold_for(LEGACY) is not None
+    assert _default_threshold_for(_ModeT3.VOY, _Engine("dual")) is not None
+
+
+def test_a_fake_engine_reporting_dual_gives_a_legacy_name_no_threshold(monkeypatch):
+    class _Fake:
+        _voyage_client = object()
+
+        def embedding_mode(self):
+            return "dual"
+
+        def search(self, query, collection_names, n_results=10, where=None, **kw):
+            return list(_LEGACY_ROWS)
+
+    results = search_cross_corpus("q", [LEGACY], 10, _Fake())
+    assert {r.id for r in results} == {"leg-near", "leg-far"}

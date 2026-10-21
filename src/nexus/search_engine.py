@@ -591,10 +591,22 @@ def _threshold_for_collection(name: str, cfg: dict) -> float | None:
 #: Engine embedder families under which the Voyage-calibrated thresholds can
 #: apply to at least one collection: Voyage-only and dual (Voyage + bge).
 #: ``onnx-local`` (bge only) filters nothing.
-_THRESHOLD_ENGINE_MODES: frozenset[str] = frozenset({"voyage", "dual"})
+_DUAL_ENGINE_MODE = "dual"
+_THRESHOLD_ENGINE_MODES: frozenset[str] = frozenset({"voyage", _DUAL_ENGINE_MODE})
 
 
-def _threshold_for_collection_model(name: str, cfg: dict) -> float | None:
+def _engine_is_dual(t3: Any) -> bool:
+    """True when the engine behind *t3* reports the ``dual`` embedder family
+    (a Voyage family beside a bge one). The same ``embedding_mode()`` signal
+    :func:`_voyage_thresholds_active` reads (memoized on the client handle);
+    a handle that cannot report one is not dual."""
+    mode = getattr(t3, "embedding_mode", None)
+    return callable(mode) and mode() == _DUAL_ENGINE_MODE
+
+
+def _threshold_for_collection_model(
+    name: str, cfg: dict, *, dual: bool = False,
+) -> float | None:
     """:func:`_threshold_for_collection`, withheld from a collection whose
     own embedding model is a local one (bge, MiniLM).
 
@@ -603,10 +615,19 @@ def _threshold_for_collection_model(name: str, cfg: dict) -> float | None:
     admits every bge result (off-topic bge top-10 minimum distance 0.369
     against 0.65, 210-research-17) and the measured bge threshold's F1 (0.47)
     is too low to filter on, so a bge collection gets none on any engine, as
-    on a keyless engine today. A name that carries no model token (a legacy
-    two-segment name) keeps the prefix threshold, as before.
+    on a keyless engine today.
+
+    A name that carries no model token (a legacy two-segment name) cannot say
+    which family holds its vectors. On a non-dual engine it keeps the prefix
+    threshold, as before. On a ``dual`` engine (*dual* true) the family is
+    unknown and a bge collection may sit under that name, so it gets NO
+    threshold: the conservative reading, and what "dual" meant before
+    per-family thresholds (nexus-ndr0t S3).
     """
-    if _model_token(name) in LOCAL_EMBEDDING_MODELS:
+    token = _model_token(name)
+    if token in LOCAL_EMBEDDING_MODELS:
+        return None
+    if token is None and dual:
         return None
     return _threshold_for_collection(name, cfg)
 
@@ -1370,15 +1391,20 @@ def search_cross_corpus(
             "--lexical."
         )
 
+    dual_engine = (
+        apply_thresholds and threshold_override is None and _engine_is_dual(t3)
+    )
+
     def _threshold_for(col: str) -> float | None:
         """The distance threshold applied to *col*: ``None`` when thresholds
         are off for this handle, the override when one was given, else the
-        configured per-corpus value."""
+        configured per-corpus value (none for a model-less name on a dual
+        engine, nexus-ndr0t S3)."""
         if not apply_thresholds:
             return None
         if threshold_override is not None:
             return threshold_override
-        return _threshold_for_collection_model(col, cfg)
+        return _threshold_for_collection_model(col, cfg, dual=dual_engine)
 
     def _to_result(r: dict, col: str) -> SearchResult:
         """One engine row as a :class:`SearchResult` attributed to *col*."""

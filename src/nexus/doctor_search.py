@@ -241,13 +241,14 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
     return out
 
 
-def _default_threshold_for(col: str) -> float | None:
+def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
-    from nexus.search_engine import _threshold_for_collection_model  # noqa: PLC0415 — deferred import
+    from nexus.search_engine import _engine_is_dual, _threshold_for_collection_model  # noqa: PLC0415 — deferred import
 
     # The same per-collection rule search applies: a local-model (bge, MiniLM)
-    # collection has no Voyage-calibrated threshold, so the probe must not judge it by one.
-    return _threshold_for_collection_model(col, load_config())
+    # collection has no Voyage-calibrated threshold, so the probe must not judge it by one,
+    # and neither must a model-less legacy name on a dual engine (nexus-ndr0t S3).
+    return _threshold_for_collection_model(col, load_config(), dual=_engine_is_dual(t3))
 
 
 def _neighbour_probe(
@@ -280,7 +281,7 @@ def _neighbour_probe(
     """
     import statistics  # noqa: PLC0415 — probe path only
 
-    threshold = (threshold_for or _default_threshold_for)(col)
+    threshold = threshold_for(col) if threshold_for else _default_threshold_for(col, t3)
     nearest: list[float] = []
     seen = kept = 0
     try:

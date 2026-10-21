@@ -31,7 +31,7 @@ REVIEWED: dict[str, tuple[int, str]] = {
     "db/managed_endpoint.py": (5, "the capabilities dataclass carries embedding_mode verbatim; no decision is made on it"),
     "errors.py": (1, "serving_mode is a diagnostic in the profile-mismatch error; the remedy is chosen by the collection's family"),
     "mcp_infra.py": (3, "a warm-up probe step named embedding_mode; no decision"),
-    "search_engine.py": (2, "the threshold gate is now embedding_mode() in _THRESHOLD_ENGINE_MODES (voyage and dual; P1.5, nexus-hf29s); the rest is the serving_mode diagnostic"),
+    "search_engine.py": (3, "the threshold gate is embedding_mode() in _THRESHOLD_ENGINE_MODES (voyage and dual; P1.5, nexus-hf29s); _engine_is_dual reads the same embedding_mode() so a model-less name gets no threshold on a dual engine (nexus-ndr0t S3); the rest is the serving_mode diagnostic"),
 }
 
 
