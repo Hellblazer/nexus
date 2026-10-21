@@ -1175,14 +1175,15 @@ jobs:
         # vacuous-gate class this step exists to make structurally
         # impossible, not just less likely. Reads the PASSED count off
         # pytest's own final summary line; the corpus was ~830 tests when this
-        # floor was set (about 2.1k on 2026-10-21, about 1.1k per group since the
-        # two-group split), so 400 per group still fails the bug's signature (a
-        # near-total mass skip).
+        # floor was set (about 2.1k on 2026-10-21). Since the duration-balanced
+        # two-group split a group runs about 370 to 1800 of them (373 and 1796 on
+        # 5c99d3609, where a 400 floor failed group 2), so the floor is 200 per
+        # group: still far above the bug's signature (0 executed).
         run: |
           set -euo pipefail
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)" || summary=""
-          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 400 ] \
-            || { echo "::error::lint leg passed fewer than 400 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 200 ] \
+            || { echo "::error::lint leg passed fewer than 200 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
   test-docs-readers:
     # nexus-q99w4 (Sam, 2026-10-05, option B): the doc-only fast lane skips

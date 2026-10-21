@@ -545,8 +545,10 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # non-canonical fixture token otherwise) -- it falls to
     # split_candidate_collection_name (a DIFFERENT primitive than
     # embedding_model_for_collection_name above) for the same no-row
-    # first-write case.
-    "src/nexus/db/http_vector_client.py": 4,
+    # first-write case. The retired put() carried one more
+    # embedding_model_for_collection_name call; it went with the method
+    # (38f4167be, nexus-nt76j).
+    "src/nexus/db/http_vector_client.py": 3,
     # _infer_content_type (write-path metadata normalization, prefers the
     # row, falls to its own documented "anything but code -> prose"
     # default) and the two TTL-expire sweeps (class (c), a collection
@@ -1027,8 +1029,9 @@ def test_pin_matches_documented_total() -> None:
     53 -- 52 on 2026-09-24 when index-md's knowledge__ extractor warning,
     and its class-(a) split, were deleted, nexus-kk4ut; then 52 -- 46 on
     2026-10-01 when db/embed_migrate.py (4 sites) and db/reconcile.py's
-    two parse helpers were deleted as dead code, nexus-z0o2p.25) is derived from the same dict the guards above check
+    two parse helpers were deleted as dead code, nexus-z0o2p.25; then 46 -- 45
+    on 2026-10-21 when HttpVectorClient.put was retired, nexus-nt76j) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 46
+    assert PARSE_SITE_PIN == 45
