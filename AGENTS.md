@@ -111,6 +111,7 @@ Two of them hold always-on rules, repeated here because no file read triggers th
 10. **Never hand-run `nx index repo` from a worktree.**
 11. **Serena:** a session that did not START in the worktree must never use a Serena write tool (it can silently write the primary). Use Edit/Write with absolute worktree paths, then `git status --short`.
 12. **Default test host is `chas`** (`ssh chas-test`; `-n auto` = 32 workers, do not raise it); `hellmini` is the second. Recipes: T2 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto`.
+13. **Hand runs are targeted; after a push, develop CI is the full suite** (nexus-clmlb). Run the changed modules' tests (a path or `-k`) through `lab-run`; once a commit is pushed, read its develop CI verdict rather than rerunning the suite on it. A hand full suite needs a stated reason: a pre-push run the change class requires, a run CI cannot do, or a flake being bisected. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
 
 **Moving an in-flight session:** apply or cherry-pick into the new worktree and verify there FIRST, then revert the primary, never the reverse. **A remote pytest hand run goes through `scripts/watched_pytest.py`** (`--stall 180 --status <file> -- uv run pytest ...`); read the status file, never sleep and guess. Read long runs with `head` as well as `tail`.
 

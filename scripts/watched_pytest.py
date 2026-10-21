@@ -29,6 +29,9 @@ What it adds to the command:
 Exit codes: the command's own when it finished, 124 stalled, 125 killed by a
 console Ctrl event, 126 hit ``--max-total``, 2 bad arguments. Stdlib only.
 
+A command that names no test selection (no path, node id or ``-k``) gets a one-line hint: a hand
+full suite mostly repeats what develop CI runs on the same commit (nexus-clmlb). It never blocks.
+
 ``-q`` is refused, because quiet output hides which test is running. Under
 xdist (``-n``) the hung test cannot be named from the log; the report gives the
 last result line instead.
@@ -136,6 +139,39 @@ def build_command(command: list[str], faulthandler_s: float) -> list[str]:
     if "-q" in command or "--quiet" in command:
         raise ValueError("-q hides which test is running; drop it (this script adds -v)")
     return [*command, "-v", "-o", f"faulthandler_timeout={int(faulthandler_s)}"]
+
+
+#: pytest options whose value is the NEXT argument, so that argument is not a test selection.
+_VALUE_OPTIONS = frozenset({
+    "-n", "-m", "-k", "-o", "-p", "-c", "-W", "--tb", "--maxfail", "--durations", "--rootdir",
+    "--deselect", "--ignore", "--ignore-glob", "--basetemp", "--junitxml", "--dist", "--timeout",
+    "--confcutdir", "--log-level", "--import-mode",
+})
+
+SELECTION_HINT = (
+    "hint: no test selection (path, node id or -k), so this is a full suite; after a push, develop "
+    "CI already runs it on that commit. Run the changed modules' tests, or say why CI cannot answer "
+    "(AGENTS.md, nexus-clmlb)."
+)
+
+
+def selection_hint(command: list[str]) -> str | None:
+    """`SELECTION_HINT` when the pytest command selects no tests, else None. Advisory only."""
+    try:
+        start = next(i for i, arg in enumerate(command)
+                     if arg == "pytest" or arg.endswith(("/pytest", "\\pytest", "pytest.exe")))
+    except StopIteration:
+        return None
+    args = command[start + 1:]
+    for i, arg in enumerate(args):
+        if arg.startswith(("-k", "--keyword")):
+            return None
+        if arg.startswith("-"):
+            continue
+        if i > 0 and args[i - 1] in _VALUE_OPTIONS:
+            continue
+        return None
+    return SELECTION_HINT
 
 
 def classify(returncode: int, *, stalled: bool, over_total: bool) -> tuple[str, int]:
@@ -301,6 +337,8 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
     except ValueError as exc:
         sys.stderr.write(f"watched_pytest: {exc}\n")
         return 2
+    if (hint := selection_hint(args.command)) is not None:
+        print(f"watched_pytest: {hint}", file=out)
     log_path = Path(args.log)
     status_path = Path(args.status) if args.status else None
     _ignore_console_ctrl()

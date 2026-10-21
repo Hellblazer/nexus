@@ -120,6 +120,38 @@ def test_quiet_output_is_refused(tmp_path: Path) -> None:
         wp.build_command(["pytest", "-q"], 10)
 
 
+@pytest.mark.parametrize("command", [
+    ["uv", "run", "pytest", "-n", "8"],
+    ["uv", "run", "pytest", "-m", "lint", "-o", "addopts=", "-n", "8"],
+    ["/venv/bin/pytest", "-n", "auto", "-p", "no:cacheprovider"],
+])
+def test_a_command_with_no_selection_gets_the_full_suite_hint(command: list[str]) -> None:
+    # nexus-clmlb: option VALUES (8, lint, addopts=, no:cacheprovider) are not a selection.
+    assert wp.selection_hint(command) == wp.SELECTION_HINT
+
+
+@pytest.mark.parametrize("command", [
+    ["uv", "run", "pytest", "tests/test_watched_pytest.py", "-n", "8"],
+    ["uv", "run", "pytest", "-n", "8", "tests/db/test_x.py::test_y"],
+    ["uv", "run", "pytest", "-k", "fan_in"],
+    ["uv", "run", "pytest", "-kfan_in"],
+    ["uv", "run", "python", "-m", "pytest", "tests/"],
+    ["python", "scripts/something.py"],
+])
+def test_a_command_that_selects_tests_gets_no_hint(command: list[str]) -> None:
+    assert wp.selection_hint(command) is None
+
+
+def test_the_hint_is_printed_and_the_run_still_goes_ahead(tmp_path: Path) -> None:
+    out = io.StringIO()
+    args = wp.parse_args(["--log", str(tmp_path / "l"), "--status", str(tmp_path / "s.json"), "--no-notify",
+                          "--", sys.executable, "-c", "print('ok')"])
+    args.command = [sys.executable, "-m", "pytest", "--version"]
+    code = wp.run(args, out)
+    assert f"watched_pytest: {wp.SELECTION_HINT}" in out.getvalue()
+    assert code == 0, out.getvalue()
+
+
 def test_the_watcher_ignores_console_ctrl_only_on_windows() -> None:
     """On Windows the watcher must outlive the break that killed the run, or nobody
     reports it. On POSIX it must not ignore SIGINT: the child would inherit that."""

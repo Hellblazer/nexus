@@ -14,6 +14,7 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 
 | Need | Command | Notes |
 |------|---------|-------|
+| Agent hand run | `lab-run -c lab-m -- uv run pytest <paths or -k>` | Targeted. After a push, read develop CI instead of rerunning the suite; a hand full suite needs a stated reason (AGENTS.md rule 13, `docs/agents/test-running.md` § Hand runs and develop CI). |
 | Default dev loop | `uv run pytest -n auto` | ~13min parallel (auto-capped to this box's SysV shared-memory budget, AGENTS.md). THE loop. |
 | Debugging interleaving/isolation | `uv run pytest` (serial) | ~14min; only when parallelism masks the signal |
 | Repo-structure invariants | `uv run pytest -m lint` | O(repo) meta-tests; PR-gated by CI `test-lint`; run when touching `conexus/`, RDR frontmatter, storage-boundary/hook invariants |
