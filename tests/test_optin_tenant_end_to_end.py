@@ -52,8 +52,12 @@ def test_the_real_conftest_provisions_by_marker_and_by_parameter_only(tmp_path: 
     env["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "build-lease")
     env.pop("NX_BUILD_LEASE_WAIT", None)
     proc = subprocess.run(
-        # `-m` after the addopts' own: the integration-marked probe case must be selected
-        [sys.executable, "-m", "pytest", _PROBE, "-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-m", "not lint"],
+        # `-m` after the addopts' own: the integration-marked probe case must be selected. --basetemp: the
+        # report below lives in the child's basetemp, and a shared temproot's numbered basetemps are pruned
+        # to the newest three by whichever pytest starts next, so on an xdist shard another child session
+        # deleted pytest-2 before this one read it (shard 1/6 of 7fd83e5a3); pytester passes its own the same way.
+        [sys.executable, "-m", "pytest", _PROBE, "-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-m", "not lint",
+         f"--basetemp={tmp_path / 'child-basetemp'}"],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600,
     )
     out = proc.stdout + proc.stderr
