@@ -22,8 +22,8 @@
 #                   (hermetic — honors the suite's addopts markers)
 #
 # Env passthrough:
-#   NX_TEST_T2_SUBSTRATE   forwarded into every container when set (=engine
-#                          flips the autouse pin to the engine substrate)
+#   NX_TEST_T2_SUBSTRATE   forwarded into every container when set (=none
+#                          provisions nothing; unset is the default substrate)
 #   PYTEST_ADDOPTS         forwarded when set
 set -euo pipefail
 

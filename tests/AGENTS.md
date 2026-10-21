@@ -350,8 +350,9 @@ that touches while no test is running is a late touch, owned by the test that cr
 Tests marked `integration`, `slow` or `lint` keep a tenant per test: the default selection
 deselects them, so no census has said which of them touch storage.
 
-- `NX_TEST_T2_SUBSTRATE=per-test` (older spelling `engine`) is the escape hatch: a tenant
-  for every test, the guard off. Kept for one release; `none` still provisions nothing.
+- `NX_TEST_T2_SUBSTRATE=none` provisions nothing. The `per-test` escape hatch (older spelling
+  `engine`: a tenant for every test, the guard off) shipped in 7.83.0 and is retired
+  (nexus-llo7w); either value now errors every test at setup, naming the variable.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
   some touch event, and Python children that were spawned reached the shim: `children_seen` must be

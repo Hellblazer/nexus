@@ -1120,11 +1120,11 @@ def test_the_start_up_canary_refuses_a_session_whose_recorder_is_unreachable(pyt
     assert "storage-touch guard cannot see itself" in result.stderr.str() + result.stdout.str()
 
 
-@pytest.mark.parametrize("substrate", ["optin", "per-test"])
+@pytest.mark.parametrize("substrate", ["optin", "none"])
 def test_thread_and_popen_patches_live_only_while_an_optin_session_runs(pytester, monkeypatch, substrate) -> None:
     """``Thread.__init__`` and ``Popen.__init__`` are patched by the guard and by
-    nothing else: present for the session, restored after it, and left alone by
-    the escape hatch."""
+    nothing else: present for the session, restored after it, and left alone
+    under ``none``."""
     import subprocess
     import threading
 
@@ -1148,7 +1148,7 @@ def test_patches():
         assert getattr(threading.Thread.__init__, "_nx_storage_touch_thread", False)
         assert getattr(subprocess.Popen.__init__, "_nx_storage_touch_popen", False)
     else:
-        assert g._patch_refs == refs_before, "the escape hatch took a reference on the patches"
+        assert g._patch_refs == refs_before, "a session under none took a reference on the patches"
 ''', mode="report", substrate=substrate)
     result.assert_outcomes(passed=1)
     assert (threading.Thread.__init__, subprocess.Popen.__init__) == before

@@ -35,7 +35,7 @@ from tests import _storage_touch_guard
 import sys as _sys  # noqa: E402
 
 # tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
-# guard; active in the default substrate (optin), inert under none and per-test.
+# guard; active in the default substrate (optin), inert under none.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
 pytest_plugins = [
@@ -262,6 +262,17 @@ _RETIRED_T2_SUBSTRATES: dict[str, str] = {
         "the only substrate. If you meant 'this test needs no T2 store', "
         "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
     ),
+    **{
+        value: (
+            f"NX_TEST_T2_SUBSTRATE={value}: the per-test escape hatch (a tenant "
+            "for every test) was retired after one release (nexus-llo7w). "
+            "Unset the variable: a test that touches storage asks for a tenant "
+            "with pytest.mark.t2_tenant or a t2_tenant parameter, and the "
+            "storage-touch guard names one that does not. "
+            "NX_TEST_T2_SUBSTRATE=none provisions nothing."
+        )
+        for value in ("per-test", "engine")
+    },
 }
 
 
@@ -291,7 +302,7 @@ def _selected_t2_substrate_boots_engine() -> bool:
     ``t2_tenant`` tenant boot the engine, but which ones is not known until
     they run, and a session that boots even once spends the machine-wide
     shared-memory budget the suite lease and the preflight protect. So the
-    lease is taken and the preflight runs exactly as for ``per-test``.
+    lease is taken and the preflight runs.
     """
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
@@ -2828,9 +2839,8 @@ def t2_service_env(request: pytest.FixtureRequest,
     dropped (``minted_test_tenant``, RDR-225), so a worker's PG does not
     grow by about 50 relations per test.
 
-    ``NX_TEST_T2_SUBSTRATE=per-test`` (the escape hatch) has ``_pin_t2_substrate``
-    pull this fixture in for every test. Requestable directly by tests that want
-    the tenant name.
+    Requestable directly by tests that want the tenant name. Under
+    ``NX_TEST_T2_SUBSTRATE=none`` a test that requests it still gets this body.
 
     Under the default substrate, ``optin`` (nexus-j23ni), it is an alias for
     ``t2_tenant``: the tenant, the test's T1 session and the shared posture
@@ -2854,8 +2864,7 @@ def t2_tenant(request: pytest.FixtureRequest,
     Under the default substrate (``optin``) it is a thin wrapper over the same
     machinery as ``t2_service_env``: the minted tenant, plus this test's T1
     session, and not ``NX_LOCAL`` (``_pin_local_posture_optin`` owns that).
-    Under ``per-test`` ``_pin_t2_substrate`` already provisions every test, so
-    this just hands back that tenant.
+    Under ``none`` a test that requests it gets ``t2_service_env``'s body.
     """
     if not _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_service_env")
@@ -2878,7 +2887,7 @@ def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
     ambient ``NX_STORAGE_BACKEND``, which the tenant fixture otherwise
     overrides; ``_pin_t2_substrate`` depends on this fixture so the drop runs
     BEFORE a marker-requested tenant sets ``service``, not after. Nothing under
-    ``per-test`` and ``none``.
+    ``none``.
     """
     if not _storage_touch_guard.optin_selected():
         return
@@ -3128,8 +3137,9 @@ def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: 
     module ``pytestmark`` included) or requests one of those fixtures; every
     other test mints nothing, and the storage-touch guard
     (``tests/_storage_touch_guard.py``, fail mode) fails one that reaches
-    storage without a tenant, naming it. ``NX_TEST_T2_SUBSTRATE=per-test`` is
-    the escape hatch back to a tenant for EVERY test, for one release.
+    storage without a tenant, naming it. ``NX_TEST_T2_SUBSTRATE=per-test`` was
+    the escape hatch back to a tenant for EVERY test; after one release it is
+    retired (nexus-llo7w) and refused by name like ``sqlite``.
     ``scripts/annotate_t2_tenant.py`` regenerates the marks from a census.
 
     The substrate is what the product actually ships on;
@@ -3190,19 +3200,17 @@ def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: 
         return
     if selected in _RETIRED_T2_SUBSTRATES:
         raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
-    if _storage_touch_guard.optin_selected():
-        # nexus-j23ni, the default since the flip: mint only for a test that
-        # carries the marker (module ``pytestmark`` included); one that
-        # requests ``t2_tenant`` by parameter gets it from that request. The
-        # storage-touch guard (fail mode) names a test that reaches storage
-        # with neither. ``NX_TEST_T2_SUBSTRATE=per-test`` mints for every test.
-        if (
-            request.node.get_closest_marker("t2_tenant") is not None
-            or any(request.node.get_closest_marker(m) is not None for m in _UNCENSUSED_MARKERS)
-        ):
-            request.getfixturevalue("t2_tenant")
-        return
-    request.getfixturevalue("t2_service_env")
+    # nexus-j23ni, the default since the flip and now the only tenant mode
+    # (anything else is refused above or is a UsageError at configure): mint
+    # only for a test that carries the marker (module ``pytestmark`` included);
+    # one that requests ``t2_tenant`` by parameter gets it from that request.
+    # The storage-touch guard (fail mode) names a test that reaches storage
+    # with neither.
+    if (
+        request.node.get_closest_marker("t2_tenant") is not None
+        or any(request.node.get_closest_marker(m) is not None for m in _UNCENSUSED_MARKERS)
+    ):
+        request.getfixturevalue("t2_tenant")
 
 
 @pytest.fixture(autouse=True)

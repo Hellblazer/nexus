@@ -19,11 +19,11 @@ per run.
 ## Usage
 
 ```bash
-# Full suite, 6 shards, engine substrate:
-NX_TEST_T2_SUBSTRATE=engine tests/containers/fanout.sh
+# Full suite, 6 shards (the default substrate: a tenant for each test that asks):
+tests/containers/fanout.sh
 
 # Explicit roster, 2 shards, custom caps:
-NX_TEST_T2_SUBSTRATE=engine tests/containers/fanout.sh -n 2 --cpus 2 --memory 3g \
+tests/containers/fanout.sh -n 2 --cpus 2 --memory 3g \
   tests/test_t2_engine_substrate.py tests/test_memory_consolidation.py
 
 # Rebuild image only (e.g. after a floor bump):
@@ -82,12 +82,12 @@ tarball (chroma re-downloads on archive-hash miss).
   64 MB default is tight once a shard's engine substrate is up.
 - Engine JAR needs Java 25 (`service/pom.xml` `maven.compiler.release=25`);
   base image is `eclipse-temurin:25-jre-noble`.
-- `NX_TEST_T2_SUBSTRATE=engine` (today's spelling is `per-test`; both mean the
-  same, and the default substrate now mints a tenant only for tests that ask for
-  one, nexus-j23ni) boots ONE PG + JAR per container (session-
-  scoped, memoized) and mints a tenant per test — per-shard isolation is the
-  container, per-test isolation is the tenant token. Budget ~15-25 s of
-  substrate boot per container before the first test runs.
+- The default substrate (nexus-j23ni) boots ONE PG + JAR per container
+  (session-scoped, memoized) the first time a test asks for a tenant, and mints
+  a tenant for each test that asks: per-shard isolation is the container,
+  per-test isolation is the tenant token. Budget ~15-25 s of substrate boot per
+  container before the first such test runs. `NX_TEST_T2_SUBSTRATE=engine` and
+  `per-test` (a tenant for every test) are retired (nexus-llo7w) and error.
 - uv is fetched from its GitHub release tarball, not `ghcr.io/astral-sh/uv`
   (ghcr pulls are denied from some networks; the GitHub asset is identical).
 - The engine JAR's `Bge768Embedder` exits at boot without the bge-768 fp32
@@ -135,7 +135,7 @@ inert, not wrong.
 ## Leg 3 — sweep fan-out (design sketch)
 
 Already covered by `fanout.sh`'s explicit file-list mode: a chunked sweep
-(e.g. the RDR-155 flip dry-run's `NX_TEST_T2_SUBSTRATE=engine` sweeps) is
+(e.g. the RDR-155 flip dry-run's sweeps) is
 exactly `fanout.sh -n K <chunk files...>` with the env passthrough. The one
 addition worth making when leg 3 goes live: a `--chunk-file` option that
 accepts the sweep planner's chunk manifest (one file per line) verbatim, and

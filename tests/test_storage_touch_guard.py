@@ -70,12 +70,12 @@ def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
          sweep: bool = True, floor: int | str | None = None):
     """Run ``body`` in a nested session. ``substrate`` names ``NX_TEST_T2_SUBSTRATE``
     (None leaves it unset: the default); by default ``optin`` picks ``optin`` and
-    not ``optin`` picks ``per-test``, the escape hatch the guard is inert under.
+    not ``optin`` picks ``none``, which the guard is inert under.
     ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks.
     ``NX_STORAGE_TOUCH_SWEEP_FLOOR`` is deleted unless ``floor`` names it, so a floor
     exported in the outer environment cannot turn a ``sweep=False`` run into a swept one."""
     if substrate == "":
-        substrate = "optin" if optin else "per-test"
+        substrate = "optin" if optin else "none"
     if substrate is None:
         monkeypatch.delenv("NX_TEST_T2_SUBSTRATE", raising=False)
     else:
@@ -382,10 +382,9 @@ def test_swallows():
 
 # It constructs the error itself; under the default (optin) outer run that outer guard sees it.
 @pytest.mark.expects_unresolvable_endpoint
-@pytest.mark.parametrize("substrate", ["per-test", "engine", "none"])
+@pytest.mark.parametrize("substrate", ["none"])
 def test_the_guard_is_inert_outside_optin(pytester, monkeypatch, substrate) -> None:
-    """``per-test`` (the escape hatch), its older spelling ``engine`` and ``none``
-    all leave the guard uninstalled: nothing patched, nothing reported."""
+    """``none`` leaves the guard uninstalled: nothing patched, nothing reported."""
     from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
 
     before = ServiceEndpointUnresolvableError.__init__
@@ -752,7 +751,7 @@ def test_optin_counts_as_a_session_that_may_boot_the_engine() -> None:
     try:
         for value, expected in (
             ("optin", True), ("none", False), (None, True), ("sqlite", False),
-            ("per-test", True), ("engine", True),
+            ("per-test", False), ("engine", False),
         ):
             if value is None:
                 os.environ.pop("NX_TEST_T2_SUBSTRATE", None)
@@ -764,6 +763,17 @@ def test_optin_counts_as_a_session_that_may_boot_the_engine() -> None:
             os.environ.pop("NX_TEST_T2_SUBSTRATE", None)
         else:
             os.environ["NX_TEST_T2_SUBSTRATE"] = saved
+
+
+def test_the_guard_and_the_conftest_retire_the_same_values() -> None:
+    """The guard lets a retired value through configure so the conftest can refuse it
+    by name; the two lists are one fact kept in two modules (nexus-llo7w)."""
+    from tests import _storage_touch_guard as g
+    from tests.conftest import _RETIRED_T2_SUBSTRATES
+
+    assert set(_RETIRED_T2_SUBSTRATES) == g.RETIRED_VALUES
+    assert {"per-test", "engine"} <= g.RETIRED_VALUES
+    assert not g.RETIRED_VALUES & g.KNOWN_VALUES
 
 
 def test_workers_report_into_one_merged_file_under_xdist(pytester, monkeypatch) -> None:
