@@ -173,16 +173,26 @@ trap '_forward_signal TERM' TERM
 # leaves the jar, and the cache link, alone. A plugin goal that writes the jar
 # directly counts too (jar:jar, shade:shade, org.apache.maven.plugins:
 # maven-jar-plugin:3.4.1:jar, ...), as does any phase that runs after package.
+# Each argument is split on whitespace first: one quoted argument such as
+# "clean package" reaches mvnw as one word but names the package phase
+# (nexus-8qdpe). `${_words[@]+...}` keeps an empty argument safe under set -u on
+# bash 3.2.
+_unshare_needed=0
 for _arg in "$@"; do
-    case "$_arg" in
-        package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test|\
-        *:jar|*:shade|*jar-plugin*|*shade-plugin*)
-            # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
-            source "$repo_root/scripts/lib/gate-jar-cache.sh"
-            gate_jar_cache_unshare "$repo_root/service/target/nexus-service-1.0-SNAPSHOT.jar"
-            break ;;
-    esac
+    read -r -a _words <<< "$_arg"
+    for _word in ${_words[@]+"${_words[@]}"}; do
+        case "$_word" in
+            package|verify|install|deploy|pre-integration-test|integration-test|post-integration-test|\
+            *:jar|*:shade|*jar-plugin*|*shade-plugin*)
+                _unshare_needed=1 ;;
+        esac
+    done
 done
+if [[ $_unshare_needed -eq 1 ]]; then
+    # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
+    source "$repo_root/scripts/lib/gate-jar-cache.sh"
+    gate_jar_cache_unshare "$repo_root/service/target/nexus-service-1.0-SNAPSHOT.jar"
+fi
 
 cd "$repo_root/service"
 if [[ -n "$lab_class" ]]; then

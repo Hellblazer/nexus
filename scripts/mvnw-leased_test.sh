@@ -143,7 +143,13 @@ for goal1a in verify install deploy integration-test jar:jar shade:shade \
     MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
     [[ ! -e "$tjar1a" ]] && ok "goal '$goal1a' unlinked the shared jar" || bad "goal '$goal1a' left the shared jar linked"
 done
-for goal1a in compile test test-compile clean; do
+# nexus-8qdpe: one quoted argument naming several goals is split before matching.
+for goal1a in "clean package" "  install -DskipTests"; do
+    rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
+    MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
+    [[ ! -e "$tjar1a" ]] && ok "quoted '$goal1a' unlinked the shared jar" || bad "quoted '$goal1a' left the shared jar linked"
+done
+for goal1a in compile test test-compile clean "clean test" ""; do
     rm -f "$tjar1a"; ln "$entry1a" "$tjar1a"
     MVNW_STUB_MARKER="$WORKDIR/stub-1a.txt" "$repo/scripts/mvnw-leased.sh" -q "$goal1a" >/dev/null 2>&1
     [[ "$tjar1a" -ef "$entry1a" ]] && ok "goal '$goal1a' leaves the shared jar linked" || bad "goal '$goal1a' unlinked the jar"
