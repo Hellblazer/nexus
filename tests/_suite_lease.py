@@ -398,6 +398,9 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> tuple
     may do I/O the original code did not.
     """
     try:
+        # Read BEFORE the pid: the window the docstring accepts runs from the
+        # pid read to the rename, and this keeps it exactly as it was.
+        label = _read_label(lease)
         pid_file = lease / "pid"
         pid: int | None = None
         try:
@@ -406,9 +409,6 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> tuple
             pid = None  # missing, empty or garbage: a pid-less lease
         except OSError:
             return None  # unreadable (EACCES and kin): HELD, fail closed
-        # Read with the pid, BEFORE the liveness decision: a read between the
-        # decision and the rename would widen the window the docstring accepts.
-        label = _read_label(lease)
         if pid is not None:
             if _pid_alive(pid):
                 return None
