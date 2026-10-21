@@ -1100,6 +1100,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true'
+    # CodeQL on PR #1617: an explicit read-only token (the job checks out and reads caches only).
+    permissions:
+      contents: read
     strategy:
       # Both halves always finish, so a red names every failing lint test.
       fail-fast: false
