@@ -699,6 +699,11 @@ def _is_non_replayable_path(path: str) -> bool:
     )
 
 
+#: A body that cannot be read as JSON: the parser refused it, or its bytes are not UTF-8. Both mean a mangled
+#: or cut response (edge HTML, a truncation), never a statement about what the engine did.
+_UNREADABLE_BODY_ERRORS: tuple[type[ValueError], ...] = (json.JSONDecodeError, UnicodeDecodeError)
+
+
 def _response_body(resp: Any) -> bytes:
     """The body bytes of *resp* (a 2xx response or an ``HTTPError``), gunzipped when the engine
     compressed it (``Content-Encoding: gzip``, nexus-tjyzn). Identity bodies pass through."""
@@ -2148,7 +2153,7 @@ def _poll_request_status(key: str, tenant: str, path: str) -> tuple[str, Any]:
         except (
             urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException,
             # A mangled poll body (edge HTML, a truncation) says nothing about the request: a failed poll.
-            json.JSONDecodeError,
+            *_UNREADABLE_BODY_ERRORS,
         ) as exc:
             failures += 1
             _log.warning("keyed_sweep_status_poll_failed", path=path, request_id=key, error=str(exc)[:200])
@@ -2236,7 +2241,7 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
             try:
                 with _request_key(key):
                     result = _post(path, body, tenant=tenant, timeout=_SWEEP_POST_TIMEOUT_S)
-            except json.JSONDecodeError as bad:
+            except _UNREADABLE_BODY_ERRORS as bad:
                 # A 200 whose body does not parse (edge HTML, a truncation that is not an IncompleteRead):
                 # the page may have committed. Reframed as a transport-level failure (code None, cause the
                 # decode error) so it is polled like the other ambiguous outcomes, and so an unsettled one

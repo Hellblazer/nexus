@@ -20,6 +20,7 @@ Rules pinned here (nexus-zxgld, nexus-yye8l.12):
 """
 from __future__ import annotations
 
+import gzip
 import http.client
 import json
 import uuid
@@ -142,6 +143,16 @@ def _committed(form: str) -> sv.Reply:
 
 
 # ── polling on an ambiguous outcome ──────────────────────────────────────────
+
+
+# Bodies that cannot be read as JSON, each failing at a different layer: the JSON parser, the UTF-8 decode,
+# a gzip stream cut short, and a gzip stream with a corrupt header.
+_UNREADABLE = {
+    "not-json": sv.Reply(200, b"{not json"),
+    "not-utf8": sv.Reply(200, b'{"expired": "\xff\xfe"}'),
+    "gzip-truncated": sv.Reply(200, gzip.compress(b'{"expired": 1}')[:12], {"Content-Encoding": "gzip"}),
+    "gzip-corrupt": sv.Reply(200, b"\x1f\x8bnot-a-gzip-stream", {"Content-Encoding": "gzip"}),
+}
 
 
 @pytest.mark.parametrize("form", sorted(_FORMS))
@@ -283,14 +294,15 @@ def test_polls_that_fail_three_times_surface_the_original_error(srv, client, clo
     _assert_unresolved_note(exc.value, "the status polls kept failing")
 
 
+@pytest.mark.parametrize("unreadable", sorted(_UNREADABLE))
 def test_a_status_poll_whose_body_does_not_parse_is_a_failed_poll_and_the_next_poll_settles_it(
-    srv, client, clock,
+    srv, client, clock, unreadable,
 ):
     """A mangled poll body (edge HTML, a truncation) says nothing about the request: it counts as a failed
     poll, never a ValueError that would abort the indexer's whole prune pass."""
     path, call, form = _FORMS["quarantine"]
     srv.script(f"POST {path}", sv.err(504, "gw"))
-    srv.script(f"GET {_STATUS}", sv.Reply(200, b"<html>bad gateway</html>"), _committed("quarantine"))
+    srv.script(f"GET {_STATUS}", _UNREADABLE[unreadable], _committed("quarantine"))
     assert call(client) == _stored("quarantine")
     assert len(_polls(srv)) == 2 and len(_posts(srv, path)) == 1
 
@@ -841,12 +853,13 @@ def test_a_refused_key_on_the_first_page_is_raised_unchanged_when_strict_and_nev
         assert len(_posts(srv, _EXPIRE)) == 1, "a refused key is never resent"
 
 
+@pytest.mark.parametrize("unreadable", sorted(_UNREADABLE))
 @pytest.mark.parametrize("form", sorted(_FORMS))
-def test_a_200_whose_body_does_not_parse_is_ambiguous_and_polled(srv, client, clock, form):
+def test_a_200_whose_body_does_not_parse_is_ambiguous_and_polled(srv, client, clock, form, unreadable):
     """The page may have committed before its body was cut or mangled (edge HTML, a truncation that is not
     an IncompleteRead): the ledger is asked, never a blind resend and never a bare JSONDecodeError."""
     path, call, _ = _FORMS[form]
-    srv.script(f"POST {path}", sv.Reply(200, b"{not json"))
+    srv.script(f"POST {path}", _UNREADABLE[unreadable])
     srv.script(f"GET {_STATUS}", _committed(form))
     assert call(client) == _stored(form)
     assert len(_posts(srv, path)) == 1, "committed: never resent"

@@ -715,9 +715,10 @@ def expire_quarantine_across_serverside(
 
     The bounded loop (:func:`expire_quarantine_bounded_serverside`, non-strict) never raises a page
     outcome, the first page's included, so with it every sibling's expiry runs and logs its own
-    result. Two carve-outs propagate and end the pass: a response-shape defect (``ValueError`` /
-    ``TypeError`` from a parsed body with the wrong fields) and ``ProductionWriteGuardError`` (a
-    stop-and-verify refusal). Only a client object with no bounded method falls back to the unbounded call, and
+    result. Two carve-outs propagate out of this function: a response-shape defect (``ValueError`` /
+    ``TypeError`` from a parsed body with the wrong fields; the indexer re-raises it and the prune pass
+    ends) and ``ProductionWriteGuardError`` (a stop-and-verify refusal; the indexer's catch-all ends
+    only this collection's siblings). Only a client object with no bounded method falls back to the unbounded call, and
     there ``best_effort`` keeps its meaning: a :class:`VectorServiceError` or ``OSError`` (a
     local-mode transport failure) on any sibling after the first is logged
     (``quarantine_sibling_expire_failed``, naming the sibling) and skipped, and a failure on the
@@ -793,8 +794,8 @@ def expire_quarantine_bounded_serverside(
     short the siblings after it, with two carve-outs. Anything outside that error set propagates in both
     modes: a response-shape defect (a parsed body with the wrong fields: ``ValueError``, ``TypeError``) is a
     data defect, and :class:`~nexus.db.service_endpoint.ProductionWriteGuardError` is a stop-and-verify
-    refusal. A 200 whose body does not parse is not a defect but an ambiguous outcome: the client polls the
-    ledger for it (``_keyed_sweep_post``), and an unsettled one arrives here as a ``VectorServiceError``.
+    refusal. A 200 whose body does not parse, or is not UTF-8, is not a defect but an ambiguous outcome:
+    the client polls the ledger for it (``_keyed_sweep_post``), and an unsettled one arrives here as a ``VectorServiceError``.
 
     ``count_refused`` is sent only for a strict drain, until a page has answered it: the indexer discards
     ``refused``, and counting it costs the engine a sibling-wide scan inside the 25 s bound.
