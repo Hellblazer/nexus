@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/lib/bare_mvnw_lint_test.sh — repo-wide guard (bead nexus-c00dw):
 # every REAL ./mvnw or `mvn ` invocation in scripts/, tests/e2e/,
-# conexus/skills/ must be routed through the single-builder lease
+# conexus/skills/, service/ (nexus-8qdpe; build output under target/ excluded) must be routed through the single-builder lease
 # (scripts/lib/build-lease.sh), directly or via scripts/mvnw-leased.sh /
 # scripts/build-gate-jar.sh — never a bare call that can collide with a
 # concurrent build of the same service/target. Run directly with bash:
@@ -71,6 +71,7 @@ DOC_ONLY_FILES=(
     "scripts/lib/gate-jar-cache_test.sh"
     "conexus/skills/composition-probe/SKILL.md"
     "scripts/validate/integration-stack.sh"
+    "service/README.md"   # nexus-8qdpe: build instructions in a fenced block, nothing this lint's shell runs
 )
 
 # Files fully exempt: they acquire the build lease themselves (at/near the
@@ -87,6 +88,7 @@ SELF_GUARDED_FILES=(
 # file matches AND its line contains the substring.
 ALLOWLIST=(
     'tests/e2e/gc-ab/run-ab.sh|-c "./mvnw|host-side build_lease_acquire/build_lease_release wraps this docker run call (build_variant())'
+    'service/linux-native-verify.sh|./mvnw -q -Pnative -DskipTests package|host-side build_lease_acquire_wait at the top of the script wraps the docker run this line executes in; released in cleanup() on EXIT (nexus-8qdpe)'
     'conexus/skills/cli-controller/SKILL.md|mvn clean install|generic tmux-driving example, not scoped to nexus service/ (see inline nx-mvnw-allowlist comment at the site)'
 )
 
@@ -240,15 +242,15 @@ while IFS=: read -r file lineno content; do
     violations=$((violations + 1))
 done < <(
     grep -rnE --include='*.sh' --include='*.md' \
-        --exclude='bare_mvnw_lint_test.sh' \
+        --exclude='bare_mvnw_lint_test.sh' --exclude-dir=target \
         '(\./mvnw\b|(^|[^w])mvn[[:space:]])' \
-        -- scripts tests/e2e conexus/skills 2>/dev/null
+        -- scripts tests/e2e conexus/skills service 2>/dev/null
 )
 
 if [[ $checked -eq 0 ]]; then
-    bad "non-vacuity: the sweep found ZERO candidate lines across scripts/, tests/e2e/, conexus/skills/ -- the grep pattern itself is broken, not evidence of a clean repo (nexus-moht0 doctrine)"
+    bad "non-vacuity: the sweep found ZERO candidate lines across scripts/, tests/e2e/, conexus/skills/, service/ -- the grep pattern itself is broken, not evidence of a clean repo (nexus-moht0 doctrine)"
 elif [[ $violations -eq 0 ]]; then
-    ok "swept $checked candidate ./mvnw / mvn line(s) across scripts/, tests/e2e/, conexus/skills/ -- zero unguarded invocations"
+    ok "swept $checked candidate ./mvnw / mvn line(s) across scripts/, tests/e2e/, conexus/skills/, service/ -- zero unguarded invocations"
 else
     bad "$violations unguarded invocation(s) found above -- route each through scripts/mvnw-leased.sh (or scripts/build-gate-jar.sh), or add an ALLOWLIST entry in this test naming why it is safe"
 fi

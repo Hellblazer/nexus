@@ -15,9 +15,17 @@ BUILDER=lp2qo-lin-build
 cleanup() {
   docker rm -f "$PG" "$BUILDER" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  build_lease_release service 2>/dev/null || true
 }
 trap cleanup EXIT
 cleanup
+
+# nexus-8qdpe: the ./mvnw below runs INSIDE the container, but $REPO is bind-mounted,
+# so service/target is the same single-writer resource every host build writes. Take
+# the host-side build lease around the docker build, as tests/e2e/gc-ab/run-ab.sh does.
+# shellcheck source=../scripts/lib/build-lease.sh
+. "$REPO/scripts/lib/build-lease.sh"
+build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" linux-native-verify || exit 1
 
 # nexus-k6zxp: service/target's jar may be a hard link into the gate-jar cache. This
 # build runs as root in the container, ignores the read-only bit and rewrites the jar
