@@ -25,12 +25,42 @@ SCRIPT = REPO_ROOT / "scripts" / "diag" / "container_io_sampler.sh"
 FIXTURES = Path(__file__).parent / "fixtures" / "io_sampler"
 
 
-def _call(function: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run one helper of the sourced script and return its result."""
+def _call(function: str, *args: str, sys_dev_block: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run one helper of the sourced script and return its result. sysfs is a fixture tree, never the host's."""
     quoted = " ".join(f"'{a}'" for a in args)
+    env = {**os.environ, "NX_IO_SAMPLER_SYS_DEV_BLOCK": str(sys_dev_block or FIXTURES / "no-sysfs")}
     return subprocess.run(
-        ["bash", "-c", f"source '{SCRIPT}'; {function} {quoted}"], capture_output=True, text=True, timeout=30,
+        ["bash", "-c", f"source '{SCRIPT}'; {function} {quoted}"], capture_output=True, text=True, timeout=30, env=env,
     )
+
+
+def _sysfs(base: Path, stack: dict[str, list[str]], disks: dict[str, str], partitions: dict[str, tuple[str, str]]) -> Path:
+    """A /sys/dev/block fixture: STACK maps a maj:min to its slave names, DISKS a disk name to its maj:min,
+    PARTITIONS a partition name to (its disk's name, its own maj:min)."""
+    devices, by_id = base / "devices", base / "dev" / "block"
+    by_id.mkdir(parents=True)
+    for name, dev in disks.items():
+        (devices / name).mkdir(parents=True)
+        (devices / name / "dev").write_text(dev + "\n")
+        (by_id / dev).symlink_to(devices / name)
+    for name, (disk, dev) in partitions.items():
+        (devices / disk / name).mkdir(parents=True)
+        (devices / disk / name / "dev").write_text(dev + "\n")
+        (devices / disk / name / "partition").write_text("3\n")
+    for dev, slaves in stack.items():
+        node = devices / f"virtual-{dev.replace(':', '-')}"
+        (node / "slaves").mkdir(parents=True)
+        (node / "dev").write_text(dev + "\n")
+        for slave in slaves:
+            target = devices / slave if slave in disks else devices / partitions[slave][0] / slave
+            (node / "slaves" / slave).symlink_to(target)
+        (by_id / dev).symlink_to(node)
+    return by_id
+
+
+def _chas_sysfs(base: Path) -> Path:
+    """chas: LVM dm-0 (252:0) on nvme0n1p3, the partition of disk nvme0n1 (259:0)."""
+    return _sysfs(base, {"252:0": ["nvme0n1p3"]}, {"nvme0n1": "259:0"}, {"nvme0n1p3": ("nvme0n1", "259:3")})
 
 
 # ---- helpers against fixture files -------------------------------------------------------------
@@ -39,6 +69,34 @@ def _call(function: str, *args: str) -> subprocess.CompletedProcess[str]:
 def test_sum_wbytes_adds_every_device_row() -> None:
     result = _call("sum_wbytes", str(FIXTURES / "io.stat.two-devices"))
     assert result.returncode == 0 and result.stdout.strip() == str(2097152 + 1000), result.stderr
+
+
+def test_stacked_ids_names_a_device_whose_slave_disk_is_also_listed(tmp_path: Path) -> None:
+    sysfs = _chas_sysfs(tmp_path / "sys")
+    both = _call("stacked_ids", "259:0", "252:0", sys_dev_block=sysfs)
+    assert both.returncode == 0 and both.stdout.split() == ["252:0"], both.stderr
+    # dm-0 alone: the disk it sits on is not listed, so nothing is counted twice and nothing is left out
+    alone = _call("stacked_ids", "252:0", sys_dev_block=sysfs)
+    assert alone.stdout.split() == []
+
+
+def test_stacked_ids_finds_an_md_mirror_on_two_listed_disks(tmp_path: Path) -> None:
+    sysfs = _sysfs(tmp_path / "sys", {"9:0": ["sda", "sdb"]}, {"sda": "8:0", "sdb": "8:16"}, {})
+    result = _call("stacked_ids", "8:0", "8:16", "9:0", sys_dev_block=sysfs)
+    assert result.stdout.split() == ["9:0"], result.stderr
+
+
+def test_sum_wbytes_counts_a_stacked_device_once(tmp_path: Path) -> None:
+    io_stat = tmp_path / "io.stat"
+    io_stat.write_text(
+        "259:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n"
+        "252:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n"
+    )
+    stacked = _call("sum_wbytes", str(io_stat), sys_dev_block=_chas_sysfs(tmp_path / "sys"))
+    assert stacked.stdout.strip() == "4096", stacked.stderr
+    # without sysfs nothing is known to be stacked: every row is added, as before
+    unknown = _call("sum_wbytes", str(io_stat))
+    assert unknown.stdout.strip() == "8192"
 
 
 def test_sum_wbytes_of_an_empty_io_stat_is_zero_and_of_a_missing_file_fails_silently() -> None:
@@ -189,6 +247,7 @@ def _env(world: dict[str, Path], extra: dict[str, str] | None = None) -> dict[st
         # a sleep length unique to this test dir, so a stalled call that outlives the run can be found
         "FAKE_SLEEP": f"{300 + (zlib.crc32(str(world['tmp']).encode()) % 100000) / 1e6:.6f}",
         "NX_IO_SAMPLER_PROC": str(world["proc"]),
+        "NX_IO_SAMPLER_SYS_DEV_BLOCK": str(world["tmp"] / "no-sysfs"),
         "NX_IO_SAMPLER_STATE_BASE": str(world["tmp"]),
         "TMPDIR": str(world["tmp"]),
         **(extra or {}),
@@ -378,6 +437,44 @@ def test_the_report_gives_the_docker_driver_and_reconciles_with_the_device(world
     assert "device wbytes (/proc/diskstats), nvme0n1 (259:0): 40960 (40.00 KiB)" in err
     assert "attributed to sampled cgroups (containers + daemons + the command's cgroup): 4096 (4.00 KiB)" in err
     assert "unattributed = device - attributed: 36864 (36.00 KiB)" in err
+
+
+def test_a_device_stacked_on_the_nvme_is_reported_but_counted_once(world: dict[str, Path]) -> None:
+    # nexus-eyu4m, the chas shape: every write lands on both LVM 252:0 and disk 259:0, in io.stat and in
+    # /proc/diskstats. Adding both rows read 2x the device delta and 2x the container's bytes.
+    a = "system.slice/docker-a.scope"
+    sysfs = _chas_sysfs(world["tmp"] / "sys")
+    io_stat = world["root"] / a / "io.stat"
+    diskstats = world["proc"] / "diskstats"
+    diskstats.write_text(
+        "259 0 nvme0n1 100 0 800 10 200 0 8000 20 0 30 40\n252 0 dm-0 100 0 800 10 200 0 8000 20 0 30 40\n"
+    )
+    command = "; ".join([
+        f"printf '259:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\\n252:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\\n' > '{io_stat}'",
+        "sleep 0.5",
+        f"printf '259 0 nvme0n1 100 0 800 10 200 0 8080 20 0 30 40\\n252 0 dm-0 100 0 800 10 200 0 8080 20 0 30 40\\n' > '{diskstats}'",
+        "sleep 0.3",
+    ])
+    result = _run(world, command, extra_env={"NX_IO_SAMPLER_SYS_DEV_BLOCK": str(sysfs)})
+    assert result.returncode == 0, result.stderr
+    err = result.stderr
+    assert "device wbytes (/proc/diskstats), nvme0n1 (259:0): 40960 (40.00 KiB)" in err
+    assert "device wbytes (/proc/diskstats), dm-0 (252:0): 40960 (40.00 KiB)  (stacked on another device listed here, which carries these bytes: not added)" in err
+    assert "attributed to sampled cgroups (containers + daemons + the command's cgroup): 4096 (4.00 KiB)" in err
+    assert "unattributed = device - attributed: 36864 (36.00 KiB)" in err
+
+
+def test_the_report_says_when_sysfs_is_unreadable_and_two_devices_could_be_one_stack(world: dict[str, Path]) -> None:
+    (world["proc"] / "diskstats").write_text(
+        "259 0 nvme0n1 100 0 800 10 200 0 8000 20 0 30 40\n252 0 dm-0 100 0 800 10 200 0 8000 20 0 30 40\n"
+    )
+    a = "system.slice/docker-a.scope"
+    (world["root"] / a / "io.stat").write_text(
+        "259:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n252:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n"
+    )
+    result = _run(world, "sleep 0.3")
+    assert result.returncode == 0, result.stderr
+    assert "is unreadable: a device stacked on another is added twice, here and in the cgroup sums" in result.stderr
 
 
 def test_the_report_says_when_there_is_no_device_to_reconcile(world: dict[str, Path]) -> None:

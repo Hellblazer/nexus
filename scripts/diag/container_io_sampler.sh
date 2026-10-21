@@ -34,7 +34,10 @@
 # (do not name an -x process that shares a cgroup with another). NOT SEEN: a container that starts and
 # dies between two ticks, and the last SECS seconds of each container's life, so the container sum is a
 # LOWER bound; lower -i to tighten it. Block-device writes only: tmpfs (the test clusters' data
-# directory) is not one. The daemon deltas and the device delta are HOST-WIDE: run when the pool is
+# directory) is not one. A device stacked directly on another listed one (dm/LVM or md on the NVMe,
+# found through sysfs slaves) is reported but not added, so the stack is counted once, at the device
+# below it; a stack with a layer missing from the set, or a dm spanning disks only some of which are
+# listed, is not resolved. The daemon deltas and the device delta are HOST-WIDE: run when the pool is
 # quiet, or they include other jobs. On chas (2026-10-19) journald's own write cost dominated the
 # daemons, about 300x the size of the entries it holds, present at idle, and fed by ssh/login and
 # veth/network churn: compare an A/B arm against an idle window, not against zero.
@@ -53,6 +56,8 @@ set -uo pipefail
 
 # Where /proc is (tests point this at a fixture tree).
 PROC_ROOT=${NX_IO_SAMPLER_PROC:-/proc}
+# Where the block devices' sysfs entries are, by maj:min (tests point this at a fixture tree).
+SYS_DEV_BLOCK=${NX_IO_SAMPLER_SYS_DEV_BLOCK:-/sys/dev/block}
 # Bounds, in seconds (see the header).
 DOCKER_TIMEOUT=${NX_IO_SAMPLER_DOCKER_TIMEOUT:-20}
 SAMPLER_GRACE=${NX_IO_SAMPLER_GRACE:-10}
@@ -61,11 +66,36 @@ STATE=""
 
 # ---- parsing helpers (pure; unit-tested with fixture files) ---------------------------------
 
-# wbytes summed over every device row of an io.stat file; fails (prints nothing) when unreadable.
+# The ids among the arguments (maj:min) that sit on another of them: a dm or md device one of whose slaves
+# is another argument (a partition slave answers for the disk that holds it). A write to such a stack is
+# counted at both layers, in io.stat and in /proc/diskstats, so adding every row counts it twice
+# (nexus-eyu4m; chas has LVM 252:0 on nvme0n1p3, disk 259:0). The DDL counter applies the same rule.
+stacked_ids() {
+    local id slave node below
+    for id in "$@"; do
+        for slave in "$SYS_DEV_BLOCK/$id"/slaves/*; do
+            [[ -e $slave ]] || continue
+            node=$(cd -P "$slave" 2>/dev/null && pwd) || continue
+            [[ -e $node/partition ]] && node=${node%/*}
+            [[ -r $node/dev ]] || continue
+            below=$(<"$node/dev")
+            if [[ $below != "$id" && " $* " == *" $below "* ]]; then
+                echo "$id"
+                break
+            fi
+        done
+    done
+}
+
+# wbytes summed over the device rows of an io.stat file, leaving out a device stacked on another row
+# (stacked_ids); fails (prints nothing) when unreadable.
 sum_wbytes() {
-    local file=$1
+    local file=$1 skip
     [[ -r $file ]] || return 1
-    awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^wbytes=/) { split($i, kv, "="); t += kv[2] } } END { printf "%d\n", t }' "$file"
+    # shellcheck disable=SC2046  # maj:min ids, split on purpose
+    skip=$(stacked_ids $(awk 'NF { print $1 }' "$file") | tr '\n' ' ')
+    awk -v skip=" $skip" 'index(skip, " " $1 " ") { next }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^wbytes=/) { split($i, kv, "="); t += kv[2] } } END { printf "%d\n", t }' "$file"
 }
 
 # The cgroup v2 path (no leading slash) of a /proc/<pid>/cgroup file: its "0::" line. Fails when
@@ -242,7 +272,7 @@ count_containers() {
 
 # The block device's own write delta and what the sampled cgroups leave unaccounted for.
 report_device() {
-    local state=$1 attributed=$2 rows device=0 name dev bytes
+    local state=$1 attributed=$2 rows device=0 name dev bytes stacked
     if [[ -r $state/diskstats.base && -r $state/diskstats.end && -s $state/devices ]]; then
         sort -u "$state/devices" >"$state/devices.u"
         rows=$(diskstats_delta "$state/diskstats.base" "$state/diskstats.end" "$state/devices.u")
@@ -251,10 +281,19 @@ report_device() {
         echo "device writes (/proc/diskstats): none to reconcile (no block device appeared in a sampled io.stat, or /proc/diskstats was unreadable)"
         return 0
     fi
+    # shellcheck disable=SC2046  # maj:min ids, split on purpose
+    stacked=" $(stacked_ids $(cat "$state/devices.u") | tr '\n' ' ')"
     while read -r name dev bytes; do
+        if [[ $stacked == *" $dev "* ]]; then
+            echo "device wbytes (/proc/diskstats), $name ($dev): $(fmt_bytes "$bytes")  (stacked on another device listed here, which carries these bytes: not added)"
+            continue
+        fi
         echo "device wbytes (/proc/diskstats), $name ($dev): $(fmt_bytes "$bytes")"
         device=$((device + bytes))
     done <<<"$rows"
+    if [[ ! -d $SYS_DEV_BLOCK && $(wc -l <<<"$rows") -gt 1 ]]; then
+        echo "($SYS_DEV_BLOCK is unreadable: a device stacked on another is added twice, here and in the cgroup sums)"
+    fi
     echo "attributed to sampled cgroups (containers + daemons + the command's cgroup): $(fmt_bytes "$attributed")"
     echo "unattributed = device - attributed: $(fmt_bytes $((device - attributed)))  (filesystem journal and metadata, writeback charged to no sampled cgroup, other jobs: the device delta is host-wide)"
 }
