@@ -122,11 +122,12 @@ def test_quiet_output_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("command", [
     ["uv", "run", "pytest", "-n", "8"],
-    ["uv", "run", "pytest", "-m", "lint", "-o", "addopts=", "-n", "8"],
-    ["/venv/bin/pytest", "-n", "auto", "-p", "no:cacheprovider"],
+    ["/venv/bin/pytest", "-n", "auto", "-p", "no:cacheprovider", "-o", "addopts="],
+    ["uv", "run", "pytest", "--deselect", "tests/test_x.py::test_y", "--durations", "10", "--dist", "loadfile"],
 ])
 def test_a_command_with_no_selection_gets_the_full_suite_hint(command: list[str]) -> None:
-    # nexus-clmlb: option VALUES (8, lint, addopts=, no:cacheprovider) are not a selection.
+    # nexus-clmlb: option VALUES (8, addopts=, no:cacheprovider, a --deselect node id, 10, loadfile)
+    # are not a selection.
     assert wp.selection_hint(command) == wp.SELECTION_HINT
 
 
@@ -135,6 +136,9 @@ def test_a_command_with_no_selection_gets_the_full_suite_hint(command: list[str]
     ["uv", "run", "pytest", "-n", "8", "tests/db/test_x.py::test_y"],
     ["uv", "run", "pytest", "-k", "fan_in"],
     ["uv", "run", "pytest", "-kfan_in"],
+    ["uv", "run", "pytest", "-m", "lint", "-o", "addopts=", "-n", "8"],
+    ["uv", "run", "pytest", "--lf", "-n", "8"],
+    ["uv", "run", "pytest", "--sw"],
     ["uv", "run", "python", "-m", "pytest", "tests/"],
     ["python", "scripts/something.py"],
 ])
@@ -144,12 +148,15 @@ def test_a_command_that_selects_tests_gets_no_hint(command: list[str]) -> None:
 
 def test_the_hint_is_printed_and_the_run_still_goes_ahead(tmp_path: Path) -> None:
     out = io.StringIO()
-    args = wp.parse_args(["--log", str(tmp_path / "l"), "--status", str(tmp_path / "s.json"), "--no-notify",
-                          "--", sys.executable, "-c", "print('ok')"])
-    args.command = [sys.executable, "-m", "pytest", "--version"]
+    status = tmp_path / "s.json"
+    args = wp.parse_args(["--log", str(tmp_path / "l"), "--status", str(status), "--no-notify",
+                          "--", sys.executable, "-m", "pytest", "--version"])
     code = wp.run(args, out)
     assert f"watched_pytest: {wp.SELECTION_HINT}" in out.getvalue()
+    # The run went ahead: pytest itself ran and wrote its version line, and the status says so.
     assert code == 0, out.getvalue()
+    assert "pytest" in (tmp_path / "l").read_text()
+    assert json.loads(status.read_text())["state"] == "passed"
 
 
 def test_the_watcher_ignores_console_ctrl_only_on_windows() -> None:

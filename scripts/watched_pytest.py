@@ -29,8 +29,9 @@ What it adds to the command:
 Exit codes: the command's own when it finished, 124 stalled, 125 killed by a
 console Ctrl event, 126 hit ``--max-total``, 2 bad arguments. Stdlib only.
 
-A command that names no test selection (no path, node id or ``-k``) gets a one-line hint: a hand
-full suite mostly repeats what develop CI runs on the same commit (nexus-clmlb). It never blocks.
+A command that names no test selection (no path, node id, ``-k``, ``-m``, ``--lf`` or ``--sw``) gets
+a one-line hint: a hand full suite mostly repeats a green run of the same tree, develop CI's or
+another agent's (nexus-clmlb). It never blocks.
 
 ``-q`` is refused, because quiet output hides which test is running. Under
 xdist (``-n``) the hung test cannot be named from the log; the report gives the
@@ -148,10 +149,13 @@ _VALUE_OPTIONS = frozenset({
     "--confcutdir", "--log-level", "--import-mode",
 })
 
+#: Arguments that select a subset of the suite on their own.
+_SELECTING_FLAGS = ("-k", "--keyword", "-m", "--lf", "--last-failed", "--sw", "--stepwise", "--pyargs")
+
 SELECTION_HINT = (
-    "hint: no test selection (path, node id or -k), so this is a full suite; after a push, develop "
-    "CI already runs it on that commit. Run the changed modules' tests, or say why CI cannot answer "
-    "(AGENTS.md, nexus-clmlb)."
+    "hint: no test selection (path, node id, -k or -m), so this is a full suite. If this tree already "
+    "has a green full run (develop CI or a hand run), do not repeat it; otherwise announce its change "
+    "class, the tree sha and that no green full run of it exists (AGENTS.md rule 13, nexus-clmlb)."
 )
 
 
@@ -164,7 +168,7 @@ def selection_hint(command: list[str]) -> str | None:
         return None
     args = command[start + 1:]
     for i, arg in enumerate(args):
-        if arg.startswith(("-k", "--keyword")):
+        if arg.startswith(_SELECTING_FLAGS):
             return None
         if arg.startswith("-"):
             continue

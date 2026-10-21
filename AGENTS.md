@@ -13,7 +13,7 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```bash
 uv sync                                  # install deps
 scripts/reinstall-tool.sh                # install nx CLI locally (preserves extras)
-uv run pytest -n auto                    # full unit suite, ~13min parallel (no API keys needed; auto-capped)
+uv run pytest -n auto                    # full unit suite, ~13min parallel (no API keys needed; auto-capped); hand full suites: rule 13
 uv run pytest                            # serial fallback (~14min; debugging only)
 uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
 uv run pytest -m integration             # E2E (requires .env from .env.example)
@@ -111,7 +111,7 @@ Two of them hold always-on rules, repeated here because no file read triggers th
 10. **Never hand-run `nx index repo` from a worktree.**
 11. **Serena:** a session that did not START in the worktree must never use a Serena write tool (it can silently write the primary). Use Edit/Write with absolute worktree paths, then `git status --short`.
 12. **Default test host is `chas`** (`ssh chas-test`; `-n auto` = 32 workers, do not raise it); `hellmini` is the second. Recipes: T2 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto`.
-13. **Hand runs are targeted; after a push, develop CI is the full suite** (nexus-clmlb). Run the changed modules' tests (a path or `-k`) through `lab-run`; once a commit is pushed, read its develop CI verdict rather than rerunning the suite on it. A hand full suite needs a stated reason: a pre-push run the change class requires, a run CI cannot do, or a flake being bisected. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
+13. **Hand runs are targeted, and no tree gets two green full runs** (nexus-clmlb). Iterate on the changed modules' tests (a path, `-k` or `-m`). A green full run of a tree (same sha, clean) is not repeated by anyone, whoever ran it: hand on the sha and the status file; once pushed, develop CI's verdict is the run. A fix round reruns its reds plus its change class's tripwire. A hand full suite is announced with the change class it is for, the tree sha, and "no green full run of this tree exists"; "pre-push" alone is not a reason. Full suites run on chas through `lab-run -c lab-l -- python3 scripts/watched_pytest.py ...`; engine builds and suites through `scripts/mvnw-leased.sh --lab-run <class>`. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
 
 **Moving an in-flight session:** apply or cherry-pick into the new worktree and verify there FIRST, then revert the primary, never the reverse. **A remote pytest hand run goes through `scripts/watched_pytest.py`** (`--stall 180 --status <file> -- uv run pytest ...`); read the status file, never sleep and guess. Read long runs with `head` as well as `tail`.
 
