@@ -243,11 +243,20 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
 
 def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
-    from nexus.search_engine import _engine_is_dual, _threshold_for_collection_model  # noqa: PLC0415 — deferred import
+    from nexus.search_engine import (  # noqa: PLC0415 — deferred import
+        _engine_is_dual,
+        _threshold_for_collection_model,
+        _voyage_thresholds_active,
+    )
 
-    # The same per-collection rule search applies: a local-model (bge, MiniLM)
-    # collection has no Voyage-calibrated threshold, so the probe must not judge it by one,
-    # and neither must a model-less legacy name on a dual engine (nexus-ndr0t S3).
+    # The same rule search applies. Search gates every threshold on
+    # _voyage_thresholds_active, so on an onnx-local or unknown-mode engine it
+    # filters nothing and the probe must not judge by a threshold search would
+    # not apply. Past the gate, a local-model (bge, MiniLM) collection has no
+    # Voyage-calibrated threshold, and neither has a model-less legacy name on
+    # a dual engine (nexus-ndr0t).
+    if not _voyage_thresholds_active(t3):
+        return None
     return _threshold_for_collection_model(col, load_config(), dual=_engine_is_dual(t3))
 
 
@@ -281,10 +290,12 @@ def _neighbour_probe(
     """
     import statistics  # noqa: PLC0415 — probe path only
 
-    threshold = threshold_for(col) if threshold_for else _default_threshold_for(col, t3)
     nearest: list[float] = []
     seen = kept = 0
     try:
+        # Inside the try: the default rule reads the engine's embedding_mode(),
+        # which may raise, and one collection's failure is its own row.
+        threshold = threshold_for(col) if threshold_for else _default_threshold_for(col, t3)
         for text, self_id in samples:
             rows = search_fn(text, [col], n_results + 1, t3,
                              diagnostics_out=[], threshold_override=float("inf"))

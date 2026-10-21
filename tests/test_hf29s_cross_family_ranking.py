@@ -623,10 +623,16 @@ def test_an_explicit_override_still_filters_a_legacy_name_on_a_dual_engine(monke
 
 def test_the_doctor_probe_judges_a_legacy_name_by_the_same_rule(monkeypatch):
     """`nx doctor` must not judge a model-less name by a threshold search no
-    longer applies to it on a dual engine."""
+    longer applies to it on a dual engine. The end-to-end probe pin is in
+    tests/test_doctor_search.py."""
     from nexus.doctor_search import _default_threshold_for
 
+    cfg = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
+    monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: cfg)
+
     class _Engine:
+        _voyage_client = object()  # the attribute gate search keeps for fakes
+
         def __init__(self, mode):
             self._mode = mode
 
@@ -634,9 +640,10 @@ def test_the_doctor_probe_judges_a_legacy_name_by_the_same_rule(monkeypatch):
             return self._mode
 
     assert _default_threshold_for(LEGACY, _Engine("dual")) is None
-    assert _default_threshold_for(LEGACY, _Engine("voyage")) is not None
-    assert _default_threshold_for(LEGACY) is not None
-    assert _default_threshold_for(_ModeT3.VOY, _Engine("dual")) is not None
+    assert _default_threshold_for(LEGACY, _Engine("voyage")) == pytest.approx(0.65)
+    assert _default_threshold_for(_ModeT3.VOY, _Engine("dual")) == pytest.approx(0.65)
+    # No handle: search applies no thresholds without a Voyage signal.
+    assert _default_threshold_for(LEGACY) is None
 
 
 def test_a_fake_engine_reporting_dual_gives_a_legacy_name_no_threshold(monkeypatch):

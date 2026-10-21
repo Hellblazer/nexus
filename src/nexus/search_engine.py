@@ -617,12 +617,14 @@ def _threshold_for_collection_model(
     is too low to filter on, so a bge collection gets none on any engine, as
     on a keyless engine today.
 
-    A name that carries no model token (a legacy two-segment name) cannot say
-    which family holds its vectors. On a non-dual engine it keeps the prefix
-    threshold, as before. On a ``dual`` engine (*dual* true) the family is
-    unknown and a bge collection may sit under that name, so it gets NO
-    threshold: the conservative reading, and what "dual" meant before
-    per-family thresholds (nexus-ndr0t S3).
+    A name with NO model token (a legacy two-segment name) cannot say which
+    family holds its vectors. On a non-dual engine it keeps the prefix
+    threshold, as before. On a ``dual`` engine (*dual* true) a bge collection
+    may sit under that name, so it gets NO threshold: the conservative
+    reading, and what "dual" meant before per-family thresholds (nexus-ndr0t
+    S3). Only the absence of a token is covered: a four-segment name whose
+    token is unrecognised (neither a local model nor a known Voyage one)
+    still gets the prefix threshold on every engine, dual included.
     """
     token = _model_token(name)
     if token in LOCAL_EMBEDDING_MODELS:

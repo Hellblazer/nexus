@@ -829,6 +829,9 @@ use, carrying the document's aspects and highlights with it.
       measured bge threshold's absolute F1 (0.47) is too low to filter on
       (210-research-17). The request already carries thresholds per collection
       (`search_engine.py:1637-1646`).
+      A collection whose name carries no model token gets no threshold on a
+      dual engine and keeps the prefix threshold otherwise; interim, until
+      nexus-noayy reads the family from the catalog row.
 
 ### Re-embed to the profile default
 
@@ -1565,6 +1568,9 @@ engine can return two families to one search. **Tests**:
 - Thresholds: on fake engines reporting `voyage` and `dual`, a Voyage collection
   is filtered by its threshold and a bge collection is not; on `onnx-local`
   neither is, as today.
+- Thresholds: a collection whose name carries no model token gets no threshold
+  on a dual engine and keeps the prefix threshold otherwise; interim, until
+  nexus-noayy reads the family from the catalog row.
 
 ### Phase 2: Engine
 
