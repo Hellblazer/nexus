@@ -40,6 +40,7 @@ from nexus.daemon.service_registry import (
     pid_running,
     process_state,
     reclaim_lease_if_dead_owner,
+    storage_service_member_check,
     storage_service_stack_matcher,
     sweep_matching_processes,
 )
@@ -624,7 +625,8 @@ class TestStorageServiceStackMatcher:
         --foreground`` with NO ``--config-dir`` token at all, so this
         fallback stays required for it — a unit-launched supervisor from
         THAT era is invisible to this matcher unless a flagless command
-        is recognized as belonging to the DEFAULT config dir. A unit
+        is offered to the member check (a bare start names no directory; the
+        default dir is only what it resolves to on its own). A unit
         generated from now on is argv-explicit and never reaches this
         fallback at all (see the matcher's own docstring)."""
         default_dir = Path("/home/fakehome") / ".config" / "nexus"
@@ -677,15 +679,21 @@ class TestStorageServiceStackMatcher:
         matcher = storage_service_stack_matcher(Path("/home/fakehome/.config/nexus"))
         assert not matcher(command)
 
-    def test_flagless_command_never_matches_an_explicit_other_dir(
+    def test_flagless_command_is_offered_to_a_non_default_dir_for_the_member_verdict(
         self, tmp_path: Path,
     ) -> None:
-        """A flagless command means ONLY the default dir, never an
-        explicit non-default one -- an isolated test/second-profile stack
-        must not be swept by a live default-dir stop, and vice versa."""
+        """nexus-uy35j: a bare supervisor command names no directory, so the
+        matcher offers it for ANY target and ``storage_service_member_check``
+        decides which directory it serves. The text rule still refuses a
+        command that only carries the verb, and an explicit other
+        ``--config-dir`` never matches by omission."""
         other = tmp_path / "isolated-stack"
         matcher = storage_service_stack_matcher(other)
-        assert not matcher("/usr/local/bin/nx daemon service start --foreground")
+        assert matcher("/usr/local/bin/nx daemon service start --foreground")
+        assert not matcher("ssh box nx daemon service start")
+        assert not matcher(
+            f"/usr/local/bin/nx daemon service start --foreground --config-dir {tmp_path / 'else'}"
+        )
 
     def test_config_dir_containing_a_space_matches_itself(self) -> None:
         """nexus-cd1k0.3: the process table's command string is already
@@ -699,13 +707,14 @@ class TestStorageServiceStackMatcher:
         )
         assert matcher(f"{well_known_binary_path(spaced)} -Duser.timezone=UTC")
 
-    def test_config_dir_with_a_space_still_requires_the_flag(self) -> None:
-        """A flagless command means only the DEFAULT dir -- a space in the
-        target config_dir does not change that; it must not accidentally
-        become a wildcard."""
+    def test_config_dir_with_a_space_offers_a_bare_supervisor_to_the_member_verdict(self) -> None:
+        """A space in the target config_dir changes nothing about the flagless
+        rule (nexus-uy35j): the bare supervisor is offered, the member check
+        decides, and a command carrying another ``--config-dir`` is not."""
         spaced = Path("/Users/x/Library/Application Support/nexus")
         matcher = storage_service_stack_matcher(spaced)
-        assert not matcher("/usr/local/bin/nx daemon service start --foreground")
+        assert matcher("/usr/local/bin/nx daemon service start --foreground")
+        assert not matcher("/usr/local/bin/nx daemon service start --foreground --config-dir /elsewhere")
 
     def test_config_dir_with_a_space_followed_by_more_argv(self) -> None:
         """--config-dir need not be the LAST token; a value containing a
@@ -806,7 +815,8 @@ class TestSweepMatchingProcesses:
             side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
         ):
             result = sweep_matching_processes(
-                storage_service_stack_matcher(cfg), exclude_pid=99999, member_check=None,
+                storage_service_stack_matcher(cfg), exclude_pid=99999,
+                member_check=storage_service_member_check(cfg),
             )
         assert isinstance(result, ProcessSweepResult)
         assert result.available
@@ -841,7 +851,8 @@ class TestSweepMatchingProcesses:
             side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
         ):
             result = sweep_matching_processes(
-                storage_service_stack_matcher(cfg), exclude_pid=400, member_check=None,
+                storage_service_stack_matcher(cfg), exclude_pid=400,
+                member_check=storage_service_member_check(cfg),
             )
         assert sorted(result.pids) == [196]
         assert terminated == [[196]]
@@ -869,6 +880,18 @@ class TestSweepMatchingProcesses:
         )
         assert child.stdout.strip() == "True"
 
+    def test_a_missing_member_check_is_refused(self, tmp_path: Path) -> None:
+        """The matcher now offers a bare start for every target, so a sweep with
+        no second stage could signal another directory's supervisor. There is
+        no text-only mode: the caller must pass a check (nexus-uy35j)."""
+        with patch("nexus.daemon.service_registry.all_process_rows") as rows:
+            with pytest.raises(ValueError, match="member_check"):
+                sweep_matching_processes(
+                    storage_service_stack_matcher(tmp_path / "nexus"),
+                    member_check=None,  # type: ignore[arg-type]
+                )
+        rows.assert_not_called()
+
     def test_no_matches_is_a_true_noop(self, tmp_path: Path) -> None:
         """No matching process => no terminate_pids call at all — a clean
         sweep must not narrate or signal anything (mirrors
@@ -879,7 +902,9 @@ class TestSweepMatchingProcesses:
         ), patch(
             "nexus.daemon.service_registry.terminate_pids",
         ) as term:
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), member_check=storage_service_member_check(cfg),
+            )
         assert result.available
         assert result.found == ()
         assert result.pids == ()
@@ -905,7 +930,9 @@ class TestSweepMatchingProcesses:
             "nexus.daemon.service_registry.terminate_pids",
             side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), member_check=storage_service_member_check(cfg),
+            )
         assert result.pids == (214,), (
             f"the recycled pid 196 must never be signalled: {result}"
         )
@@ -919,7 +946,9 @@ class TestSweepMatchingProcesses:
             "nexus.daemon.service_registry.all_process_rows",
             side_effect=RuntimeError("no ps, no /proc"),
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), member_check=storage_service_member_check(cfg),
+            )
         assert not result.available
         assert result.error and "no ps" in result.error
         assert result.found == ()
@@ -939,7 +968,9 @@ class TestSweepMatchingProcesses:
         ), patch(
             "nexus.daemon.service_registry.terminate_pids", return_value=[196],
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), member_check=storage_service_member_check(cfg),
+            )
         assert result.pids == (196,)
         assert result.stubborn == (196,)
 

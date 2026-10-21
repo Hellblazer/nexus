@@ -431,6 +431,23 @@ def env_host_port_url() -> str | None:
     return f"http://{host}:{port}"
 
 
+def _supervisor_registered_for_login() -> bool:
+    """True when the storage-service autostart unit is installed for this user
+    AND bakes this client's config dir (nexus-iedjp). A unit installed for
+    another directory is not the supervisor this client is waiting on. Reads
+    the unit file only: this runs inside an error path, so it never asks
+    launchctl/systemctl (a ten-second ceiling each) and never raises. A unit
+    the manager has disabled still reads as registered; the message then keeps
+    the start hint, so the worst case is one extra retry."""
+    try:
+        from nexus.commands.daemon import _service_autostart_unit_serves  # noqa: PLC0415 — deferred: CLI module, loaded only on the failure path
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+
+        return _service_autostart_unit_serves(nexus_config_dir())
+    except Exception:  # noqa: BLE001 — the unit lookup must never replace the endpoint error
+        return False
+
+
 def resolve_service_config(
     *,
     wait_budget_s: float = 0.0,
@@ -491,6 +508,20 @@ def resolve_service_config(
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
         # stranded-install detector at CLI/MCP startup.
+        if _supervisor_registered_for_login():
+            # nexus-iedjp: a unit registered to start at login that has not
+            # published its lease yet is a login race, not a service nobody
+            # started. Say so, and keep the start hint for the lease that
+            # never appears.
+            raise ServiceEndpointUnresolvableError(
+                "nexus-service endpoint is not resolvable yet (NX_STORAGE_BACKEND="
+                "service): the supervisor is registered to start at login and may "
+                "still be starting; retry in a few seconds. If it stays "
+                "unresolvable, start the supervisor with 'nx daemon service start' "
+                "(publishes the endpoint lease this client auto-discovers), or "
+                "export NX_SERVICE_PORT / NX_SERVICE_TOKEN (and optionally "
+                "NX_SERVICE_HOST) explicitly."
+            )
         raise ServiceEndpointUnresolvableError(
             "nexus-service endpoint is not resolvable (NX_STORAGE_BACKEND="
             "service): start the supervisor with 'nx daemon service start' "

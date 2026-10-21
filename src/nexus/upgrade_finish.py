@@ -74,6 +74,8 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 from nexus.util.nx_argv import nx_argv
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from nexus import install_layout
     from nexus.daemon.installer import ActivationProbe
 
@@ -1394,9 +1396,20 @@ def _running_engine(config_dir: Path) -> RunningEngine:
     return RunningEngine(up=True, version=parsed)
 
 
-def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
+def service_stack_pids(
+    config_dir: Path,
+    *,
+    unreadable_out: list[int] | None = None,
+    environment_of: Callable[[int, tuple[str, ...]], dict[str, str] | None] | None = None,
+) -> list[tuple[int, str]]:
     """``[(pid, command)]`` for the storage-service SUPERVISOR and ENGINE
     processes belonging to *config_dir*, read from the OS process table.
+
+    A flagless ``daemon service start`` whose own environment cannot be read
+    (nexus-qwn3p) is neither listed nor dropped silently: its pid is appended
+    to *unreadable_out* when the caller passes one, so the listing can be
+    reported as unverified instead of complete. *environment_of* is the seam
+    for that reader (default: the platform reader); it exists for tests.
 
     nexus-cfgo9 follow-up. ``stop_storage_service`` decides what to signal
     from the LEASE, and concludes "already stopped" when no live lease is
@@ -1441,20 +1454,53 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     ancestors = _registry.ancestor_pids(me)
     # nexus-oacd3: a flagless `daemon service start` names no directory, so
     # the process is asked which one it serves.
-    member = storage_service_member_check(config_dir)
-    return [
-        (pid, command)
-        for pid, _age, command in all_process_rows()
-        if pid != me and pid not in ancestors and matcher(command) and member(pid, command) == "member"
-    ]
+    member = storage_service_member_check(config_dir, environment_of=environment_of)
+    found: list[tuple[int, str]] = []
+    for pid, _age, command in all_process_rows():
+        if pid == me or pid in ancestors or not matcher(command):
+            continue
+        verdict = member(pid, command)
+        if verdict == "member":
+            found.append((pid, command))
+        elif verdict == "unreadable" and unreadable_out is not None:
+            unreadable_out.append(pid)
+    return found
 
 
 def _sweep_surviving_stack(
     config_dir: Path, before: list[tuple[int, str]],
+    *, unreadable: Sequence[int] = (),
 ) -> str:
     """The note :func:`_sweep_surviving_stack_detail` produces, without the
     refusals (kept for callers that only report)."""
-    return _sweep_surviving_stack_detail(config_dir, before)[0]
+    return _sweep_surviving_stack_detail(config_dir, before, unreadable=unreadable)[0]
+
+
+def _unverified_candidate_note(unreadable: Sequence[int]) -> str:
+    """The sweep note for flagless ``daemon service start`` candidates whose
+    environment could not be read (nexus-qwn3p), or ``""`` when none is left.
+
+    Such a pid is never signalled: it may serve another directory. It is named
+    here because the listing the sweep ran against was therefore incomplete,
+    and "nothing left running" would be a claim this module cannot make. A pid
+    that has exited, is a zombie, or now runs something that is not a
+    ``daemon service start`` (a recycled pid) is dropped."""
+    live: list[int] = []
+    for pid in unreadable:
+        if not _pid_alive(pid) or process_state(pid) == "Z":
+            continue
+        current = process_command(pid)
+        if current and "daemon service start" not in current:
+            continue
+        live.append(pid)
+    if not live:
+        return ""
+    return (
+        f"[stop-sweep] UNVERIFIED: pid(s) {', '.join(str(p) for p in live)} look like "
+        "a bare `nx daemon service start` whose environment could not be read, so "
+        "it is not known whether they serve this config dir; they were left running. "
+        "If one is this stack's supervisor, stop it by hand before relying on the restart"
+    )
 
 
 def _refused_sweep_note(
@@ -1495,6 +1541,19 @@ def _refused_sweep_note(
 
 
 def _sweep_surviving_stack_detail(
+    config_dir: Path, before: list[tuple[int, str]],
+    *, unreadable: Sequence[int] = (),
+) -> tuple[str, list[GracefulStopSend]]:
+    """The survivor sweep (:func:`_sweep_survivors`) plus the unverified-candidate
+    note for *unreadable* pids (nexus-qwn3p), joined into one note."""
+    note, refused = _sweep_survivors(config_dir, before)
+    unverified = _unverified_candidate_note(unreadable)
+    if unverified:
+        note = f"{note} {unverified}" if note else unverified
+    return note, refused
+
+
+def _sweep_survivors(
     config_dir: Path, before: list[tuple[int, str]],
 ) -> tuple[str, list[GracefulStopSend]]:
     """Kill any pre-stop stack member that survived ``nx daemon service stop``.
@@ -1615,8 +1674,9 @@ def _restart_and_verify(
     (:func:`_sweep_surviving_stack`), which is what makes the subsequent
     start a real spawn rather than a short-circuit.
     """
+    unreadable: list[int] = []
     try:
-        before = service_stack_pids(config_dir)
+        before = service_stack_pids(config_dir, unreadable_out=unreadable)
     except Exception as exc:  # noqa: BLE001 — no process table: degrade to the old choreography
         _log.warning("restart_stack_snapshot_failed", error=str(exc))
         before = []
@@ -1638,7 +1698,9 @@ def _restart_and_verify(
         )
         sweep_refused: list[GracefulStopSend] = []
         try:
-            sweep_note, sweep_refused = _sweep_surviving_stack_detail(config_dir, before)
+            sweep_note, sweep_refused = _sweep_surviving_stack_detail(
+                config_dir, before, unreadable=unreadable,
+            )
         except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"

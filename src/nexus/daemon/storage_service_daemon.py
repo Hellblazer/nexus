@@ -1133,11 +1133,19 @@ def _default_engine_liveness_scan(
     from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — deferred import, avoids a module-level cross-import cycle
 
     binary_str = str(binary_path)
-    return [
-        (pid, command)
-        for pid, command in service_stack_pids(config_dir)
-        if binary_str in command
-    ]
+    unreadable: list[int] = []
+    rows = service_stack_pids(config_dir, unreadable_out=unreadable)
+    if unreadable:
+        # nexus-qwn3p: a bare `daemon service start` whose environment cannot
+        # be read is a supervisor, not an engine, so it cannot be a live engine
+        # here and does not change the answer. It is still a candidate the scan
+        # could not place, and the lock cleanup that consults this should say so.
+        _log.warning(
+            "engine_liveness_scan_unverified",
+            pids=list(unreadable),
+            config_dir=str(config_dir),
+        )
+    return [(pid, command) for pid, command in rows if binary_str in command]
 
 
 def _admin_dbname(creds: dict[str, str]) -> str:

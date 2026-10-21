@@ -955,9 +955,9 @@ class TestFailLoud:
         """nexus-cd1k0.19 review round 2, finding 4: the two bare
         subprocess.run(["nx", "daemon", "service", "stop"/"start"]) calls
         used to inherit environment and never pass --config-dir at all --
-        closing the false-positive surface storage_service_stack_matcher's
-        flagless-matches-default rule otherwise has against a live,
-        env-scoped invocation on the same box. Both calls must now carry
+        closing the false-positive surface a bare start otherwise has against
+        storage_service_stack_matcher's environment check (a live,
+        env-scoped invocation on the same box). Both calls must now carry
         an explicit --config-dir with the RESOLVED absolute path."""
         from nexus import upgrade_finish as uf
 

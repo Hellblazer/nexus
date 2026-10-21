@@ -3331,8 +3331,8 @@ class TestEnsureStorageSupervisor:
         spawned supervisor's argv must carry an EXPLICIT, RESOLVED-ABSOLUTE
         --config-dir -- never rely on the spawned process re-deriving its
         own config dir from an inherited environment. storage_service_stack_
-        matcher's flagless-matches-default rule exists only for units
-        installed BEFORE this fix; a freshly spawned supervisor must never
+        matcher's bare-start branch (decided by the environment check) exists
+        only for units installed BEFORE this fix; a freshly spawned supervisor must never
         be flagless."""
         from nexus.commands import daemon as daemon_mod
         from nexus import config as _config

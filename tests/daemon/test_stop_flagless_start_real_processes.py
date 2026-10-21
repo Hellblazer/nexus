@@ -80,6 +80,7 @@ def box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     class Box:
         default_dir = home / ".config" / "nexus"
         other_dir = tmp_path / "gate-scratch"
+        second_dir = tmp_path / "second-scratch"
         home_dir = home
 
         def start(self, args: list[str], **env: str) -> subprocess.Popen:
@@ -126,7 +127,10 @@ class TestSweepWithRealProcesses:
         with patch.object(sr, "all_process_rows", return_value=rows):
             terminated: list[list[int]] = []
             with patch.object(sr, "terminate_pids", side_effect=lambda pids, **_: terminated.append(sorted(pids)) or []):
-                sr.sweep_matching_processes(matcher, exclude_pid=-1, member_check=None)
+                sr.sweep_matching_processes(
+                    matcher, exclude_pid=-1,
+                    member_check=lambda _pid, _command: "member",  # the text-only answer, no second stage
+                )
         assert terminated == [sorted([gate.pid, own.pid])]
 
     def test_a_default_dir_sweep_leaves_the_other_dirs_flagless_start_and_stops_its_own(self, box) -> None:
@@ -140,16 +144,42 @@ class TestSweepWithRealProcesses:
         assert own.wait(timeout=10) is not None
         assert _alive(gate)
 
-    def test_a_stop_for_the_gates_own_scratch_dir_matches_nothing_flagless(self, box) -> None:
-        """The matcher still accepts a flagless command only for the default dir,
-        so a stop for another dir signals no flagless start at all."""
+    def test_a_stop_for_a_non_default_dir_stops_the_flagless_start_that_serves_it(self, box) -> None:
+        """nexus-uy35j: the matcher used to offer a flagless command only for the
+        default dir, so ``stop(D)`` for a non-default ``D`` never reached a bare
+        start whose own ``NEXUS_CONFIG_DIR`` is ``D``. The member verdict decides."""
         gate = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.other_dir), HOME=str(box.home_dir))
         matcher = sr.storage_service_stack_matcher(box.other_dir)
         check = sr.storage_service_member_check(box.other_dir)
         with patch.object(sr, "all_process_rows", return_value=box.table(gate)):
             result = sr.sweep_matching_processes(matcher, exclude_pid=-1, grace_s=5, member_check=check)
-        assert result.pids == ()
-        assert _alive(gate)
+        assert result.pids == (gate.pid,)
+        assert gate.wait(timeout=10) is not None
+
+    def test_a_non_default_dir_sweep_leaves_the_flagless_start_of_a_different_dir(self, box) -> None:
+        """Two real flagless children under different ``NEXUS_CONFIG_DIR`` values:
+        a stop for one signals that one and leaves the other, and the default
+        dir's own bare start is left too."""
+        mine = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.other_dir), HOME=str(box.home_dir))
+        theirs = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.second_dir), HOME=str(box.home_dir))
+        home_start = box.start(["daemon", "service", "start"], HOME=str(box.home_dir))
+        matcher = sr.storage_service_stack_matcher(box.other_dir)
+        check = sr.storage_service_member_check(box.other_dir)
+        with patch.object(sr, "all_process_rows", return_value=box.table(mine, theirs, home_start)):
+            result = sr.sweep_matching_processes(matcher, exclude_pid=-1, grace_s=5, member_check=check)
+        assert result.pids == (mine.pid,)
+        assert result.unreadable == ()
+        assert mine.wait(timeout=10) is not None
+        assert _alive(theirs) and _alive(home_start)
+
+    def test_an_unreadable_flagless_start_is_reported_for_a_non_default_dir_too(self, box) -> None:
+        mystery = box.start(["daemon", "service", "start"])  # no NEXUS_CONFIG_DIR, no HOME
+        matcher = sr.storage_service_stack_matcher(box.other_dir)
+        check = sr.storage_service_member_check(box.other_dir)
+        with patch.object(sr, "all_process_rows", return_value=box.table(mystery)):
+            result = sr.sweep_matching_processes(matcher, exclude_pid=-1, grace_s=2, member_check=check)
+        assert result.pids == () and result.unreadable == (mystery.pid,)
+        assert _alive(mystery)
 
     def test_an_explicit_supervisor_is_stopped_by_its_own_dir_only(self, box) -> None:
         sup = box.start(
@@ -183,6 +213,20 @@ def test_stop_storage_service_for_the_default_dir_spares_the_gates_start(box) ->
     assert _alive(gate)
 
 
+def test_stop_storage_service_for_a_non_default_dir_finds_its_flagless_start(box) -> None:
+    """nexus-uy35j end to end through ``stop_storage_service``: no lease exists
+    for the non-default dir, so the stop reaches the start only through the
+    process-table fallback. The other dir's start survives."""
+    mine = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.other_dir), HOME=str(box.home_dir))
+    theirs = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.second_dir), HOME=str(box.home_dir))
+    with patch.object(sr, "all_process_rows", return_value=box.table(mine, theirs)):
+        outcome = stop_storage_service(config_dir=box.other_dir)
+    assert outcome.pids == (mine.pid,)
+    assert outcome.already_stopped is False
+    assert mine.wait(timeout=10) is not None
+    assert _alive(theirs)
+
+
 class TestUnreadableFlaglessCandidate:
     """A flagless start whose directory cannot be established is left alone, and
     the stop says so instead of reporting "already stopped" (nexus-oacd3)."""
@@ -210,7 +254,7 @@ class TestUnreadableFlaglessCandidate:
 
 def test_service_stack_pids_lists_only_the_flagless_start_that_serves_the_stopped_dir(box) -> None:
     """Pins the `member(pid, command)` conjunct in ``upgrade_finish.service_stack_pids``:
-    the matcher alone accepts both flagless children (the default-dir text rule),
+    the matcher alone offers both flagless children (a bare start names no directory),
     so only the per-process environment check can drop the one that serves another
     directory."""
     elsewhere = box.start(
@@ -222,3 +266,13 @@ def test_service_stack_pids_lists_only_the_flagless_start_that_serves_the_stoppe
     with patch("nexus.upgrade_finish.all_process_rows", return_value=rows):
         listed = [pid for pid, _command in service_stack_pids(box.default_dir)]
     assert listed == [under_home.pid]
+
+
+def test_service_stack_pids_lists_the_flagless_start_that_serves_a_non_default_dir(box) -> None:
+    """nexus-uy35j: the upgrade path's snapshot shares the matcher, so it sees a
+    non-default dir's bare start too, and only that one."""
+    mine = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.other_dir), HOME=str(box.home_dir))
+    theirs = box.start(["daemon", "service", "start"], NEXUS_CONFIG_DIR=str(box.second_dir), HOME=str(box.home_dir))
+    with patch("nexus.upgrade_finish.all_process_rows", return_value=box.table(mine, theirs)):
+        listed = [pid for pid, _command in service_stack_pids(box.other_dir)]
+    assert listed == [mine.pid]

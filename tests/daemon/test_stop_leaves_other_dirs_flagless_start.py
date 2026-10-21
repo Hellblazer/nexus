@@ -4,10 +4,12 @@ signal a flagless ``nx daemon service start`` that serves another.
 
 The release battery's local-service gate runs a flagless ``uv run nx daemon
 service start`` with the directory in ``NEXUS_CONFIG_DIR`` only. Since
-nexus-mqfu0 the stack matcher accepts a flagless command line for the DEFAULT
+nexus-mqfu0 the stack matcher accepted a flagless command line for the DEFAULT
 directory, so a sibling leg's default-dir stop signalled it (the gate exited
 143 before any test ran). A flagless command line names no directory; the
-process's own environment does, and the sweeps now ask it.
+process's own environment does, and the sweeps now ask it. Since nexus-uy35j
+the matcher offers a bare start for every target and the environment check
+alone decides which directory it serves.
 
 This module is the platform-independent half and runs on Windows too: the
 KERN_PROCARGS2 parser on synthetic blocks, the fail-closed reader shapes, the
@@ -157,6 +159,45 @@ class TestOwnerDirectory:
         assert check(11, explicit) == "member"  # text names the dir: environment not consulted
         assert check(13, f"{well_known_binary_path(mine)} -Xmx1g") == "member"
         assert asked == []
+
+
+class TestWindowsFlaglessCandidates:
+    """Windows has no environment reader (``process_environment_values`` is
+    ``None`` there), so a bare start serves a directory nobody can establish."""
+
+    def test_the_member_check_folds_case_as_the_matcher_does(self, tmp_path: Path) -> None:
+        """The matcher case-folds on Windows and offers this command; a check
+        that tested the raw text would call it a non-flagless command and say
+        ``member``, signalling a start whose directory was never read."""
+        shouted = "C:\\Py\\NX.EXE Daemon Service Start"
+        assert sr._is_flagless_start_command(shouted, windows=True)
+        assert not sr._is_flagless_start_command(shouted, windows=False)
+        win = sr.storage_service_member_check(tmp_path, platform="win32")
+        assert win(10, shouted) == "unreadable"
+        assert win(10, shouted + " --CONFIG-DIR C:\\x") == "member"  # the text names the dir
+        posix = sr.storage_service_member_check(tmp_path, platform="linux", environment_of=lambda p, n: None)
+        assert posix(10, shouted) == "member"  # POSIX argv is case-sensitive: not this verb
+
+    def test_a_non_default_target_does_not_signal_a_bare_start_and_lists_it(
+        self, tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "isolated-profile"  # not the default dir
+        command = "C:\\Py\\nx.exe daemon service start"
+        rows = [(777, 5, command)]
+        matcher = sr.storage_service_stack_matcher(target, platform="win32")
+        assert matcher(command)  # offered for any target (nexus-uy35j) ...
+        terminated: list[list[int]] = []
+        with patch.object(sr, "all_process_rows", return_value=rows), \
+                patch.object(sr, "process_command", return_value=command), \
+                patch.object(sr, "terminate_pids", side_effect=lambda pids, **_: terminated.append(list(pids)) or []):
+            result = sr.sweep_matching_processes(
+                matcher, exclude_pid=-1,
+                member_check=sr.storage_service_member_check(target, platform="win32"),
+            )
+        # ... but with no environment to read it is neither signalled nor lost.
+        assert terminated == []
+        assert result.found == ()
+        assert result.unreadable == (777,)
 
 
 class TestUnreadableFlaglessCandidateReporting:

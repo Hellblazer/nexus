@@ -578,8 +578,8 @@ def autostart_unit_config_dir(dest: Path) -> Path:
     systemd ``ExecStart``, the launchd ``ProgramArguments`` or the Windows
     task's ``<Arguments>``. A unit with no flag (one installed before the flag
     was baked, nexus-cd1k0.19) means the DEFAULT dir: the units set no
-    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``,
-    the same literal ``storage_service_stack_matcher`` uses. The path is
+    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``
+    (what ``nexus_config_dir()`` falls back to). The path is
     returned as written, unresolved.
 
     Raises ``ValueError`` naming the problem when the file cannot be read or

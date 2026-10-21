@@ -163,7 +163,11 @@ class TestServiceRegistry:
                              lambda *a, **k: real_rows(platform="win32", win_info_api=api)), \
                 patch.object(sr, "process_command",
                              lambda pid: real_cmd(pid, platform="win32", win_info_api=api)):
-            result = sr.sweep_matching_processes(matcher, exclude_pid=-1, member_check=None)
+            result = sr.sweep_matching_processes(
+                matcher, exclude_pid=-1,
+                # explicit --config-dir commands only: every candidate is a member
+                member_check=lambda _pid, _command: "member",
+            )
         assert result.available and sorted(result.pids) == [300, 310]
         assert seen == [[300, 310]]
 
