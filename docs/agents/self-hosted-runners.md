@@ -90,17 +90,19 @@ differ from a GitHub-hosted runner:
   (`tests/AGENTS.md` has the full paragraph).
   An engine build inverts the order: `scripts/mvnw-leased.sh --lab-run <class>
   ...` takes the build lease first and then the grant, so waiting for another
-  build holds no cores (nexus-iqmih). Run inside a grant instead, `mvnw-leased.sh`
-  and `build-gate-jar.sh` refuse at once with exit 75 when another build holds the
-  lease (nexus-dfg0q); CI jobs keep waiting.
+  build holds no cores (nexus-iqmih); `scripts/build-gate-jar.sh --lab-run <class>`
+  does the same for the gate jar (nexus-t6t9f). Run inside a grant instead,
+  `mvnw-leased.sh` and `build-gate-jar.sh` refuse at once with exit 75 when another
+  build holds the lease (nexus-dfg0q); CI jobs keep waiting. `--lab-run` inside a
+  grant is refused (exit 64): a second grant can wait forever while the first is held.
 
 **Standing worktree for verification runs on chas** (nexus-fkhd3, under
 nexus-aca0q). Measured 2026-10-19: once the test phase stopped writing, what a
 verification run still paid per run was setup: a fresh worktree, `uv sync` into
 a new `.venv`, and a gate-jar build whose jOOQ codegen boots Postgres and
 replays the whole Liquibase changelog (~1000 changesets, ~350-410 MB written).
-So a session mints ONE worktree and reuses it. The jar is built first and outside
-the grant, the suite runs inside it:
+So a session mints ONE worktree and reuses it. The jar is built first, in its own earlier
+grant (`scripts/build-gate-jar.sh --lab-run <class>`), the suite runs inside a later one:
 
 ```bash
 # once per session, as nxtest on chas, from the clone that holds the other worktrees
@@ -112,18 +114,24 @@ git fetch origin
 git checkout --detach <sha>
 test -z "$(git status --porcelain)" || { echo "dirty tree: a stray edit or stamp keys a different jar"; exit 1; }
 
-# (a) the jar, inside a grant; exit 75 means another build holds the lease: wait and rerun, never unwrapped
-lab-run -c lab-m -- scripts/build-gate-jar.sh
+# (a) the jar: --lab-run takes the build lease first (waiting for it costs no cores), then builds under a lab-m grant
+scripts/build-gate-jar.sh --lab-run lab-m
 
 # (b) the suite, inside the grant, under the stall watchdog
 lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stall 180 --status ~/pytest-<session>.json -- uv run pytest -n auto <selection>'
 ```
 
 - **The jar is built inside `lab-run`** (labrun, 2026-10-19: Maven package is
-  heavy work, and no heavy work runs outside a grant). Inside a grant a hand run
-  does not wait for the build lease: it refuses at once with exit 75 when another
-  build holds it (nexus-dfg0q), so the grant never sits idle on a lease. On 75,
-  wait and rerun; never fall back to running unwrapped. A `HIT` (the `gate jar
+  heavy work, and no heavy work runs outside a grant). `build-gate-jar.sh --lab-run
+  <class>` does it in the right order: it waits for the build lease outside any
+  grant, then runs Maven as `lab-run -c <class> -- ./mvnw ...` in its own process
+  group, so the build is visible to the pool scheduler and a TERM reaches it;
+  `release.properties` is restored and the lease released only after that group
+  is gone (nexus-t6t9f). A `HIT` starts no `lab-run` at all. The older form,
+  `lab-run -c lab-m -- scripts/build-gate-jar.sh`, still works: inside a grant a hand
+  run does not wait for the build lease and refuses at once with exit 75 when
+  another build holds it (nexus-dfg0q), so the grant never sits idle on a lease. On
+  75, wait and rerun; never fall back to running unwrapped. A `HIT` (the `gate jar
   cache HIT` line) runs no Maven and writes no jar bytes: it hard-links the
   cached jar into `service/target` (`jar link`), or leaves the jar already there
   (`jar kept`), and copies the 131 MB only where linking fails (`jar clone-or-copy` or
@@ -132,8 +140,7 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   `service/target` jar before a `package`-reaching build, so a bare `./mvnw
   package` or an IDE build right after it fails with "jar is read-only" (remedy:
   remove `service/target/nexus-service-1.0-SNAPSHOT.jar`, or build through
-  `mvnw-leased.sh` / `build-gate-jar.sh`); a `MISS` runs Maven under the grant. `build-gate-jar.sh --lab-run <class>` (nexus-t6t9f) will take
-  the lease before the grant instead.
+  `mvnw-leased.sh` / `build-gate-jar.sh`); a `MISS` runs Maven under the grant.
 - **The suite goes through `scripts/watched_pytest.py`**, never a bare pytest, and
   you read its status file instead of sleeping and guessing. `uv sync` sits inside
   the grant because it is incremental against the kept `.venv`.

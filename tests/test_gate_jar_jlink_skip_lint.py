@@ -34,7 +34,9 @@ def test_jlink_image_execution_honours_the_property() -> None:
 
 
 def test_gate_jar_script_passes_the_skip_on_its_mvn_command() -> None:
+    # The build is launched through leased_build_run (nexus-t6t9f), so the command is
+    # `leased_build_run "$lab_class" ./mvnw ... package ...`; a bare ./mvnw line counts too.
     cmds = [ln for ln in _SCRIPT.splitlines()
-            if ln.lstrip().startswith("./mvnw") and "package" in ln]
+            if re.match(r'\s*(?:leased_build_run "\$lab_class" )?\./mvnw\b', ln) and "package" in ln]
     assert len(cmds) == 1, cmds  # non-vacuity: exactly one build command
     assert "-Dnexus.jlink.skip=true" in cmds[0]

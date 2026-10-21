@@ -152,7 +152,9 @@ def _bin_bash_is_pre_4() -> bool:
 # used to, loose enough that adding a new assertion to one of these suites
 # never requires touching this file.
 SUITES = [
-    _Suite("scripts/build-gate-jar_test.sh", 24),
+    # 130, not 24 (nexus-t6t9f): 139 pass in the foreground launch this file uses; a launch that ignores
+    # HUP/QUIT at entry skips their cases (121), so the floor sits between and catches a silent skip.
+    _Suite("scripts/build-gate-jar_test.sh", 130),
     _Suite("scripts/lib/bare_mvnw_lint_test.sh", 2),
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),

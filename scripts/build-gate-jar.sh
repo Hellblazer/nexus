@@ -80,7 +80,21 @@
 # disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
 # scripts/lib/gate-jar-cache.sh.
 #
-#   usage: scripts/build-gate-jar.sh [extra mvn args...]
+# --lab-run <class> (nexus-t6t9f): on a lab pool host (chas, qwent) pass it
+# instead of wrapping this script in lab-run, exactly as scripts/mvnw-leased.sh
+# does (nexus-iqmih). The lease is then taken BEFORE the pool grant, so a build
+# waiting its turn holds no cores, and the Maven build runs as `lab-run -c <class>
+# -- ./mvnw ...`, which makes it visible to the pool scheduler (a bare run is
+# not). A cache HIT starts no lab-run at all: the jar is already built and no
+# grant is taken for it. The build runs as its own process group, recorded as the
+# lease's pgid, with INT/TERM/HUP/QUIT forwarded to it; release.properties is
+# restored and the lease released only once that group is gone, after the group
+# has been re-polled for 3 s following a KILL escalation. If it is still alive at
+# exit, BOTH steps are skipped and a WARNING on stderr says so (the stamp stays
+# until a later run or a hand restore). A signal ends the script with exit 130
+# (TERM used to give 143). See scripts/lib/leased-build.sh.
+#
+#   usage: scripts/build-gate-jar.sh [--lab-run <class>] [extra mvn args...]
 
 set -euo pipefail
 
@@ -93,17 +107,28 @@ source "$repo_root/scripts/lib/build-lease.sh"
 source "$repo_root/scripts/lib/release-props-lease.sh"
 # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
 source "$repo_root/scripts/lib/gate-jar-cache.sh"
+# shellcheck source=./lib/leased-build.sh disable=SC1091
+source "$repo_root/scripts/lib/leased-build.sh"
+
+lab_class=""
+if [[ "${1:-}" == "--lab-run" ]]; then
+    leased_build_check_lab_run build-gate-jar.sh "${2:-}"
+    lab_class="$2"
+    shift 2
+fi
+
 # Inside a lab-run grant a hand run refuses at once instead of waiting
 # (build_lease_caller_wait, nexus-dfg0q).
 build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh "$@" || {
     rc=$?
-    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint build-gate-jar.sh
+    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint build-gate-jar.sh "take the lease before the grant: scripts/build-gate-jar.sh --lab-run <class> ... outside lab-run"
     exit "$rc"
 }
-# Release on every exit path from here on; the props-restore trap below
-# replaces this once there is a stamp to restore. Without it a failure in
-# the key computation would leak the lease until stale reclaim.
-trap 'build_lease_release service' EXIT
+# Release on every exit path from here on, and never while the build is alive
+# (scripts/lib/leased-build.sh). The finish command below is replaced once there
+# is a stamp to restore. Without this a failure in the key computation would
+# leak the lease until stale reclaim.
+leased_build_init build-gate-jar.sh service
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
 
@@ -179,7 +204,8 @@ cp "$props" "$backup"
 # release-looking JAR. release_props_restore_and_release always restores
 # first and releases second, so no other process can ever observe a freed
 # lease while this file is still stamped.
-trap 'release_props_restore_and_release "$props" "$backup" service' EXIT
+# shellcheck disable=SC2034  # read by the EXIT trap in scripts/lib/leased-build.sh
+LEASED_BUILD_FINISH=(release_props_restore_and_release "$props" "$backup" service)
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"
@@ -203,7 +229,9 @@ gate_jar_cache_unshare "$repo_root/service/target/$jar_name"
 cd "$repo_root/service"
 # -Dnexus.jlink.skip=true: the jlink image is not part of the gate jar and nothing
 # reads it here; skipping it saves its writes per miss (service/pom.xml, nexus-0a1hw).
-./mvnw -q package -DskipTests -Dnexus.jlink.skip=true "$@"
+# A non-zero exit exits this script with the same code (set -e); the EXIT path
+# restores release.properties and releases the lease.
+leased_build_run "$lab_class" ./mvnw -q package -DskipTests -Dnexus.jlink.skip=true "$@"
 
 built_jar="$repo_root/service/target/$jar_name"
 test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }

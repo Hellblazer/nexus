@@ -409,6 +409,81 @@ else
     fi
 fi
 
+# ── Test 11 (nexus-t6t9f): losing the stale-reclaim race is retried, not refused, even at wait 0.
+# A hand run inside a lab-run grant waits 0 s (build_lease_caller_wait). Two contenders racing to
+# reclaim one stale lease: the loser used to read "lost the race ... Retry." as a held lease and
+# refuse with 75, though the lease was free a moment later. `mv` is shadowed by a shell function
+# that fails its first N calls (counted in a file: acquire runs in a $(...) subshell), which is
+# exactly what the loser of the rename sees.
+echo "Test 11: a lost stale-reclaim race is retried at wait 0; a race lost forever still ends in rc 75"
+repo11="$WORKDIR/repo11"
+_fake_repo "$repo11"
+_stale11() {
+    rm -rf "$repo11/service/.build-lease/race"
+    bash -c "source '$repo11/scripts/lib/build-lease.sh'; build_lease_acquire race" >/dev/null 2>&1   # exits without releasing: stale
+}
+_race11() {  # _race11 <failing-mv-calls> <wait>
+    local cnt="$WORKDIR/mv11.count"; : > "$cnt"
+    MV_COUNT="$cnt" MV_FAILS="$1" bash -c "
+        source '$repo11/scripts/lib/build-lease.sh'
+        mv() { echo x >> \"\$MV_COUNT\"; if [[ \$(wc -l < \"\$MV_COUNT\" | tr -d ' ') -le \$MV_FAILS ]]; then return 1; fi; command mv \"\$@\"; }
+        build_lease_acquire_wait race $2 && echo HELD" 2>&1
+}
+_stale11
+start11=$SECONDS
+out11="$(_race11 1 0)"; rc11=$?
+if [[ $rc11 -eq 0 && "$out11" == *HELD* ]]; then ok "one lost reclaim race at wait 0 is retried and the lease is acquired"; else bad "wait 0, one lost race: rc $rc11: $out11"; fi
+if [[ "$(wc -l < "$WORKDIR/mv11.count" | tr -d ' ')" == 2 ]]; then ok "the reclaim ran twice (the lost race, then the retry)"; else bad "reclaim attempts: $(wc -l < "$WORKDIR/mv11.count")"; fi
+if (( SECONDS - start11 < 10 )); then ok "the retry did not wait out a held-lease poll"; else bad "took $((SECONDS - start11))s"; fi
+_stale11
+out11b="$(_race11 1000 0)"; rc11b=$?
+attempts11="$(wc -l < "$WORKDIR/mv11.count" | tr -d ' ')"
+if [[ $rc11b -eq 75 && "$out11b" == *"lost the race"* ]]; then ok "a race lost on every attempt still ends in rc 75 with the reason"; else bad "perpetual race: rc $rc11b: $out11b"; fi
+if (( attempts11 > 1 && attempts11 <= 10 )); then ok "the retries are bounded ($attempts11 attempts)"; else bad "attempts: $attempts11"; fi
+
+# ── Test 12 (nexus-t6t9f): build_lease_untrack_pid points liveness back at the holder's own pid.
+# A holder whose tracked build group has exited but which is itself alive must not be reclaimable.
+echo "Test 12: after build_lease_untrack_pid a live holder is not reclaimed; a non-holder's call is a no-op"
+repo12="$WORKDIR/repo12"
+_fake_repo "$repo12"
+rm -rf "$repo12/service/.build-lease/untrack"
+out12="$WORKDIR/untrack12.out"; rm -f "$out12"
+bash -c "
+    source '$repo12/scripts/lib/build-lease.sh'
+    build_lease_acquire untrack || exit 9
+    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    build_lease_track_pid untrack \$dead
+    echo TRACKED > '$out12'
+    sleep 2
+    build_lease_untrack_pid untrack
+    echo UNTRACKED >> '$out12'
+    sleep 6" >/dev/null 2>&1 &
+holder12=$!
+for _ in $(seq 1 50); do grep -q TRACKED "$out12" 2>/dev/null && break; sleep 0.1; done
+peer12="$(bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_acquire untrack" 2>&1)"; peerrc12=$?
+if [[ $peerrc12 -eq 0 && "$peer12" == *"reclaiming stale"* ]]; then ok "control: while the dead group is tracked the lease reads stale and is reclaimed"; else bad "control: rc $peerrc12: $peer12"; fi
+kill -9 "$holder12" 2>/dev/null; wait "$holder12" 2>/dev/null
+rm -rf "$repo12/service/.build-lease/untrack"
+rm -f "$out12"
+bash -c "
+    source '$repo12/scripts/lib/build-lease.sh'
+    build_lease_acquire untrack || exit 9
+    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    build_lease_track_pid untrack \$dead
+    build_lease_untrack_pid untrack
+    echo UNTRACKED > '$out12'
+    sleep 6" >/dev/null 2>&1 &
+holder12=$!
+for _ in $(seq 1 50); do grep -q UNTRACKED "$out12" 2>/dev/null && break; sleep 0.1; done
+peer12="$(bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_acquire untrack" 2>&1)"; peerrc12=$?
+if [[ $peerrc12 -eq 75 && "$peer12" == *REFUSED* && "$peer12" != *"reclaiming"* ]]; then ok "an untracked live holder is refused, not reclaimed"; else bad "rc $peerrc12: $peer12"; fi
+if [[ ! -e "$repo12/service/.build-lease/untrack/pgid" ]]; then ok "the pgid file is gone"; else bad "pgid file remains"; fi
+# a non-holder (this shell) must not touch the pgid
+printf '%s\n' 99999 > "$repo12/service/.build-lease/untrack/pgid"
+bash -c "source '$repo12/scripts/lib/build-lease.sh'; build_lease_untrack_pid untrack"
+if [[ "$(cat "$repo12/service/.build-lease/untrack/pgid" 2>/dev/null)" == 99999 ]]; then ok "a non-holder's untrack is a no-op"; else bad "a non-holder removed the pgid"; fi
+kill -9 "$holder12" 2>/dev/null; wait "$holder12" 2>/dev/null
+
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

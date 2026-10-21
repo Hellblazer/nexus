@@ -69,6 +69,7 @@ repo="$WORKDIR/repo"
 mkdir -p "$repo/scripts/lib" "$repo/service/target" "$repo/service/.build-lease"
 cp "$HERE/lib/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
 cp "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/gate-jar-cache.sh"
+cp "$HERE/lib/leased-build.sh" "$repo/scripts/lib/leased-build.sh"
 cp "$HERE/mvnw-leased.sh" "$repo/scripts/mvnw-leased.sh"
 chmod +x "$repo/scripts/mvnw-leased.sh"
 
@@ -451,10 +452,14 @@ if _sigint_delivery_works; then
     _test_signal_forwarding INT 5b
 else
     skip "OS-level SIGINT delivery is unavailable in this execution environment (a trap installed in THIS shell, self-signaled via 'kill -INT \$\$' in the same command, never fired — reproduced deterministically; bash documents 'signals ignored upon entry to the shell cannot be trapped or reset', and that disposition is inherited by every descendant regardless of set -m or nesting). This is an environment property, not evidence about mvnw-leased.sh's code, so it is not reported as a failure. Falling back to two logic-level checks that do not depend on OS SIGINT delivery reaching the wrapper's own trap:"
-    if grep -q "trap '_forward_signal INT' INT" "$repo/scripts/mvnw-leased.sh"; then
-        ok "mvnw-leased.sh registers an INT trap wired to the SAME _forward_signal function TERM uses (verified end-to-end by Test 4) — not just TERM"
+    # The traps live in scripts/lib/leased-build.sh since nexus-t6t9f; mvnw-leased.sh installs them
+    # by calling leased_build_init.
+    if grep -q "trap '_leased_build_forward_signal INT' INT" "$repo/scripts/lib/leased-build.sh" &&
+        grep -q "trap '_leased_build_forward_signal TERM' TERM" "$repo/scripts/lib/leased-build.sh" &&
+        grep -q '^leased_build_init mvnw-leased.sh service' "$repo/scripts/mvnw-leased.sh"; then
+        ok "mvnw-leased.sh installs (via leased_build_init) an INT trap wired to the SAME forward function TERM uses (verified end-to-end by Test 4) — not just TERM"
     else
-        bad "mvnw-leased.sh no longer registers 'trap ... INT' at all — SIGINT forwarding is unwired"
+        bad "the INT trap is no longer installed by leased_build_init, or mvnw-leased.sh no longer calls it — SIGINT forwarding is unwired"
     fi
     # Prove the underlying OS primitive _forward_signal relies on for INT
     # specifically (`kill -s INT -- -PGID`) actually terminates a live

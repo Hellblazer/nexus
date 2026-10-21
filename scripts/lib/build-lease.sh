@@ -125,7 +125,9 @@
 #       every 5s, one "waiting" line on stderr at the first refusal and one
 #       per minute after) instead of refused; rc 75 only once max-seconds
 #       have elapsed with the lease still held. max-seconds 0 is a single
-#       attempt (the old refuse-immediately behaviour). Filesystem errors
+#       attempt per HOLDER (the old refuse-immediately behaviour); losing a
+#       stale-reclaim race is not a holder and is retried up to 5 times, 1s
+#       apart, whatever max-seconds is (nexus-t6t9f). Filesystem errors
 #       (rc 74) are never retried.
 #   build_lease_release <name>
 #       Release the lease. Only the holding pid may
@@ -306,6 +308,14 @@ _build_lease_claim() {
     mkdir "$dir" && (set -C; printf '%s\n' "$$" > "$dir/pid") 2>/dev/null
 }
 
+# The phrase build_lease_acquire's two "lost the race" refusals carry, and the
+# number of immediate retries build_lease_acquire_wait gives one (nexus-t6t9f).
+# A lost race is not a held lease: the winner of a reclaim is a moment from
+# holding it and the lease may be free again right after, so a caller that waits
+# 0 s (a hand run inside a lab-run grant) must not read it as "held, give up".
+_BUILD_LEASE_LOST_RACE="lost the race"
+_BUILD_LEASE_RACE_RETRIES=5
+
 # build_lease_track_pid <name> <pgid> — record the process-group id of the
 # REAL build process (e.g. a `./mvnw ... &` launched under `set -m` job
 # control, whose pgid equals its own pid as the new group's leader) into an
@@ -325,6 +335,24 @@ build_lease_track_pid() {
     existing_pid="$(cat "$dir/pid" 2>/dev/null || true)"
     [[ "$existing_pid" == "$$" ]] || return 0
     printf '%s\n' "$pgid" > "$dir/pgid"
+    return 0
+}
+
+# build_lease_untrack_pid <name> — forget the tracked process group, so the
+# lease's liveness is the holder's own pid again. A wrapper calls it once the
+# build it tracked has exited and it still has work to do under the lease (a
+# cache store, a file restore): the pgid file otherwise keeps naming the dead
+# group, and build_lease_acquire reads the pgid FIRST, so a waiting peer would
+# reclaim the lease as stale while the holder is alive (nexus-t6t9f). Same
+# ownership guard as build_lease_track_pid.
+build_lease_untrack_pid() {
+    local name="${1:?build_lease_untrack_pid: usage: build_lease_untrack_pid <name>}"
+    local dir existing_pid
+    dir="$(_build_lease_dir "$name")"
+    [[ -d "$dir" ]] || return 0
+    existing_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    [[ "$existing_pid" == "$$" ]] || return 0
+    rm -f "$dir/pgid"
     return 0
 }
 
@@ -396,7 +424,7 @@ build_lease_acquire() {
     echo "build_lease_acquire: WARNING — reclaiming stale build lease '$name' (previous holder pid=${existing_pid:-unknown}${existing_pgid:+, process group $existing_pgid}, label=${existing_label}, acquired=${existing_ts} is not alive); it never released cleanly." >&2
     local capture="${dir}.reclaim.$$.$RANDOM"
     if ! mv "$dir" "$capture" 2>/dev/null; then
-        echo "build_lease_acquire: REFUSED — lost the race reclaiming stale build lease '$name'; another process is already reclaiming it. Retry." >&2
+        echo "build_lease_acquire: REFUSED — $_BUILD_LEASE_LOST_RACE reclaiming stale build lease '$name'; another process is already reclaiming it. Retry." >&2
         return 75
     fi
     rm -rf "$capture" 2>/dev/null
@@ -409,7 +437,7 @@ build_lease_acquire() {
         echo "build_lease_acquire: ERROR — could not re-create build lease '$name' at $dir after reclaiming it, and not because someone else claimed it first: $mkdir_err. This looks like a filesystem or permission problem, not lock contention." >&2
         return 74
     fi
-    echo "build_lease_acquire: REFUSED — lost the race re-creating build lease '$name' after reclaiming it; another process claimed it first. Retry." >&2
+    echo "build_lease_acquire: REFUSED — $_BUILD_LEASE_LOST_RACE re-creating build lease '$name' after reclaiming it; another process claimed it first. Retry." >&2
     return 75
 }
 
@@ -419,7 +447,7 @@ build_lease_acquire_wait() {
     local max="${2:?build_lease_acquire_wait: usage: build_lease_acquire_wait <name> <max-seconds> [command args]}"
     shift 2 || true
     [[ "$max" =~ ^[0-9]+$ ]] || { echo "build_lease_acquire_wait: max-seconds must be a non-negative integer, got '$max'" >&2; return 64; }
-    local waited=0 rc err announced=0
+    local waited=0 rc err announced=0 races=0
     while :; do
         # `|| rc=$?`: callers run under `set -e` (both wrapper scripts), and
         # a bare failing command substitution in an assignment would exit
@@ -436,6 +464,14 @@ build_lease_acquire_wait() {
         if [[ $rc -ne 75 ]]; then
             printf '%s\n' "$err" >&2
             return $rc
+        fi
+        # A lost reclaim race is retried at once, within a small bound and
+        # without spending the wait: it is contention for a lease that is free
+        # or about to be, not a live holder to wait out.
+        if [[ "$err" == *"$_BUILD_LEASE_LOST_RACE"* ]] && (( races < _BUILD_LEASE_RACE_RETRIES )); then
+            races=$((races + 1))
+            sleep 1
+            continue
         fi
         if (( waited >= max )); then
             printf '%s\n' "$err" >&2

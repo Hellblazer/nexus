@@ -68,6 +68,7 @@ DOC_ONLY_FILES=(
     "scripts/lib/build-lease.sh"
     "scripts/lib/build-lease_test.sh"
     "scripts/mvnw-leased_test.sh"
+    "scripts/build-gate-jar_test.sh"   # nexus-t6t9f: asserts the ./mvnw argv a stub lab-run receives, as a string
     "scripts/lib/gate-jar-cache_test.sh"
     "conexus/skills/composition-probe/SKILL.md"
     "scripts/validate/integration-stack.sh"

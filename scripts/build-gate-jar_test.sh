@@ -18,15 +18,24 @@ unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY LAB_CPUS GI
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_gate_jar_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok() { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
+skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
+# A signal ignored on entry to the shell cannot be trapped, by this script's children either: nohup
+# ignores HUP, and a job launched in the background of a non-interactive shell ignores INT and QUIT.
+# That is a property of how the suite was launched, not of the scripts under test, so the signal cases
+# skip (loudly, counted) there; a foreground run exercises them.
+_trap_works() {  # _trap_works <SIG>
+    bash -c "trap 'exit 7' $1; kill -s $1 \$\$; sleep 1; exit 0" >/dev/null 2>&1
+    [[ $? -eq 7 ]]
+}
 
 repo="$WORKDIR/repo"
 props_rel="service/src/main/resources/META-INF/nexus/release.properties"
 mkdir -p "$repo/scripts/lib" "$repo/service/src/main/resources/META-INF/nexus" "$repo/src/nexus"
 cp "$HERE/build-gate-jar.sh" "$repo/scripts/"
-cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/"
+cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$HERE/lib/leased-build.sh" "$repo/scripts/lib/"
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' > "$repo/src/nexus/engine_version.py"
@@ -38,6 +47,24 @@ cat > "$repo/service/mvnw" <<'STUB'
 #!/usr/bin/env bash
 echo run >> "$MVNW_COUNT"
 [[ "${MVNW_FAIL:-0}" == 1 ]] && exit 1
+# MVNW_HANG=<file>: publish this pid there and block, as a long build does; a TERM
+# is recorded in <file>.term so a test can tell it from a KILL escalation.
+# MVNW_IGNORE_TERM=1: the build ignores TERM/HUP and keeps running ~3 s, as a JVM finishing a write does,
+# so the wrapper has to wait for the group (a stub that dies at once proves nothing about the wait).
+# MVNW_LINGER=<seconds>: leave a background process in the build's group that outlives the build.
+if [[ -n "${MVNW_LINGER:-}" ]]; then (sleep "$MVNW_LINGER" >/dev/null 2>&1 &); fi
+if [[ -n "${MVNW_HANG:-}" ]]; then
+    if [[ "${MVNW_IGNORE_TERM:-0}" == 1 ]]; then
+        trap '' TERM HUP QUIT
+        echo "$$" > "$MVNW_HANG"; sleep 3
+        exit 0
+    fi
+    # The trap also kills its own `sleep`: a background command of a non-job-control shell ignores
+    # SIGQUIT, so without it the group would outlive a QUIT by the full 30 s.
+    trap 'echo term > "$MVNW_HANG.term"; kill "$sl" 2>/dev/null; exit 143' TERM HUP QUIT
+    echo "$$" > "$MVNW_HANG"; sleep 30 & sl=$!; wait $sl
+    exit 0
+fi
 mkdir -p target
 # Worst case for a hard-linked jar: a writer that rewrites the existing inode in
 # place and does not respect its read-only mode (root, or a plugin that chmods).
@@ -267,6 +294,204 @@ out7="$(cd "$repo" && LAB_CPUS=8 NX_BUILD_LEASE_WAIT=60 NX_GATE_JAR_CACHE=off sc
 kill -9 "$holder6" 2>/dev/null; wait "$holder6" 2>/dev/null
 rm -rf "$repo/.git/nexus-build-lease/service"
 
+# ── Tests 11a-11h (nexus-t6t9f): --lab-run <class> takes the lease FIRST, then builds under
+# lab-run as its own process group, mirroring mvnw-leased.sh. A stub lab-run records its args,
+# whether the lease was already held when it started, and runs the command it was given.
+echo "Test 11a: --lab-run <class> acquires the lease, then runs the build under lab-run, stamped and restored"
+leasedir="$repo/.git/nexus-build-lease/service"
+labbin="$WORKDIR/labbin"; mkdir -p "$labbin"
+cat > "$labbin/lab-run" <<STUB
+#!/usr/bin/env bash
+{
+    echo "LABRUN_ARGS=\$*"
+    if [[ -f "$leasedir/pid" ]]; then echo "LEASE_HELD_AT_START=yes"; else echo "LEASE_HELD_AT_START=no"; fi
+} > "\$LABRUN_STUB_MARKER"
+[[ "\$1" == "-c" && "\$3" == "--" ]] || exit 64
+shift 3
+exec "\$@"
+STUB
+chmod +x "$labbin/lab-run"
+echo 'class L1 {}' > "$repo/service/src/main/L1.java"
+labmark="$WORKDIR/labrun-11a.txt"; rm -f "$labmark"
+cnt11="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out11a="$(cd "$repo" && PATH="$labbin:$PATH" LABRUN_STUB_MARKER="$labmark" scripts/build-gate-jar.sh --lab-run lab-m -Pfoo 2>&1)"; rc11a=$?
+[[ $rc11a -eq 0 && "$out11a" == *"MISS"* && "$out11a" == *"built "* ]] && ok "the --lab-run build succeeded" || bad "rc $rc11a: $out11a"
+labc="$(cat "$labmark" 2>/dev/null)"
+[[ "$labc" == "LABRUN_ARGS=-c lab-m -- python3 -c "*" ./mvnw -q package -DskipTests -Dnexus.jlink.skip=true -Pfoo"* ]] && ok "lab-run got the class and ./mvnw with the mvn args untouched (--lab-run itself consumed)" || bad "lab-run args: ${labc:-<never invoked>}"
+[[ "$labc" == *"LEASE_HELD_AT_START=yes"* ]] && ok "the lease was already held when lab-run started (lease before grant)" || bad "lab-run started without the lease: $labc"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$((cnt11 + 1))" ]] && ok "mvnw ran once, inside lab-run" || bad "mvnw count $(wc -l < "$MVNW_COUNT")"
+ref11="$(printf '%s\n' "$out11a" | sed -n 's/^stamped build_ref=//p')"
+python3 - "$tjar" "$ref11" <<'PY' && ok "the jar carries the stamp and the printed build_ref" || bad "jar lacks the stamp"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert "release_version=0.1.107\n" in p and f"build_ref={sys.argv[2]}\n" in p, p
+PY
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored" || bad "props dirty after the --lab-run build"
+[[ ! -d "$leasedir" ]] && ok "lease released after the --lab-run build" || bad "lease still held"
+
+echo "Test 11b: a cache HIT under --lab-run never starts lab-run (no grant is taken for a jar that is already built)"
+labmark="$WORKDIR/labrun-11b.txt"; rm -f "$labmark"
+out11b="$(cd "$repo" && PATH="$labbin:$PATH" LABRUN_STUB_MARKER="$labmark" scripts/build-gate-jar.sh --lab-run lab-m -Pfoo 2>&1)"; rc11b=$?
+[[ $rc11b -eq 0 && "$out11b" == *"HIT"* && ! -e "$labmark" ]] && ok "HIT, and lab-run was not invoked" || bad "rc $rc11b, marker $(ls "$labmark" 2>&1): $out11b"
+[[ ! -d "$leasedir" ]] && ok "lease released after the HIT" || bad "lease still held after the HIT"
+
+echo "Test 11c: --lab-run with no lab-run on PATH exits 127 and takes no lease; without a class it exits 64"
+out11c="$(cd "$repo" && PATH="/usr/bin:/bin" scripts/build-gate-jar.sh --lab-run lab-m 2>&1)"; rc11c=$?
+[[ $rc11c -eq 127 && "$out11c" == *"lab-run is not on PATH"* && ! -d "$leasedir" ]] && ok "rc 127, no lease left" || bad "rc $rc11c: $out11c"
+out11c2="$(cd "$repo" && PATH="$labbin:$PATH" scripts/build-gate-jar.sh --lab-run 2>&1)"; rc11c2=$?
+[[ $rc11c2 -eq 64 && ! -d "$leasedir" ]] && ok "rc 64 for --lab-run with no class" || bad "rc $rc11c2: $out11c2"
+
+echo "Test 11d: --lab-run inside a lab-run grant is refused (no nested grant), before any lease or build"
+cnt11d="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+out11d="$(cd "$repo" && LAB_CPUS=8 PATH="$labbin:$PATH" scripts/build-gate-jar.sh --lab-run lab-m 2>&1)"; rc11d=$?
+[[ $rc11d -eq 64 && "$out11d" == *"inside a lab-run grant"* ]] && ok "rc 64 naming the nested grant" || bad "rc $rc11d: $out11d"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$cnt11d" && ! -d "$leasedir" ]] && ok "no build, no lease left" || bad "a build ran or the lease was left"
+
+echo "Test 11e: a failing build under --lab-run propagates its exit code, restores release.properties, releases the lease"
+echo 'class L2 {}' > "$repo/service/src/main/L2.java"
+out11e="$(cd "$repo" && PATH="$labbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/labrun-11e.txt" MVNW_FAIL=1 scripts/build-gate-jar.sh --lab-run lab-m 2>&1)"; rc11e=$?
+[[ $rc11e -eq 1 ]] && ok "exit 1 from mvnw comes back as 1" || bad "rc $rc11e: $out11e"
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored" || bad "props dirty after a failed --lab-run build"
+[[ ! -d "$leasedir" ]] && ok "lease released after the failed build" || bad "lease left held after a failed --lab-run build"
+
+echo "Test 11f: inside a grant, the refusal names the --lab-run form"
+(cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &
+holder11f=$!
+for _ in $(seq 1 50); do [[ -f "$leasedir/pid" ]] && break; sleep 0.1; done
+out11f="$(cd "$repo" && LAB_CPUS=8 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc11f=$?
+[[ $rc11f -eq 75 && "$out11f" == *"--lab-run <class>"* ]] && ok "the refusal names the --lab-run form" || bad "rc $rc11f: $out11f"
+kill -9 "$holder11f" 2>/dev/null; wait "$holder11f" 2>/dev/null
+rm -rf "$leasedir"
+
+# TERM while a build runs. The stub lab-run below dies on TERM and leaves its command running (what sudo
+# does on chas), the worst case: the wrapper must signal the build's own group, and release.properties
+# and the lease must go back only after that group is gone.
+_term_case() {  # _term_case <label> <extra build-gate-jar.sh args...>; env TERM_SIG (default TERM), IGNORE_TERM (default 0)
+    local label="$1"; shift
+    local sig="${TERM_SIG:-TERM}" ignore="${IGNORE_TERM:-0}"
+    if ! _trap_works "$sig"; then
+        skip "[$label] $sig is ignored on entry in this launch environment (nohup, or a backgrounded non-interactive suite): it cannot be trapped, so there is nothing to forward; run the suite in the foreground"
+        return 0
+    fi
+    local started="$WORKDIR/term-$label.started" build wrapper script_pid term_start released_while_alive=0
+    rm -f "$started" "$started.term"
+    set -m
+    (cd "$repo" && PATH="$labbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/labrun-$label.txt" MVNW_HANG="$started" \
+        NX_GATE_JAR_CACHE=off MVNW_IGNORE_TERM="$ignore" scripts/build-gate-jar.sh "$@" >"$WORKDIR/term-$label.out" 2>&1) &
+    wrapper=$!
+    set +m
+    for _ in $(seq 1 100); do [[ -f "$started" ]] && break; sleep 0.1; done
+    if [[ ! -f "$started" ]]; then
+        bad "[$label] the hanging build never started (setup failure)"
+        kill -9 "$wrapper" 2>/dev/null; return 0
+    fi
+    build="$(cat "$started")"
+    for _ in $(seq 1 30); do [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build" ]] && break; sleep 0.1; done
+    [[ "$(cat "$leasedir/pgid" 2>/dev/null)" == "$build" ]] && ok "[$label] the lease's pgid names the build's own group" || bad "[$label] the lease's pgid is $(cat "$leasedir/pgid" 2>/dev/null), not $build"
+    [[ "$(cat "$repo/$props_rel")" == *"release_version=0.1.107"* ]] && ok "[$label] release.properties is stamped while the build runs" || bad "[$label] props not stamped mid-build"
+    # The job is a subshell around the script; the lease's pid is the script itself.
+    script_pid="$(cat "$leasedir/pid" 2>/dev/null)"
+    term_start=$SECONDS
+    kill -s "$sig" "$script_pid" 2>/dev/null
+    for _ in $(seq 1 400); do
+        if kill -0 -- "-$build" 2>/dev/null; then
+            [[ ! -d "$leasedir" ]] && released_while_alive=1
+            [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && released_while_alive=1
+        fi
+        kill -0 "$wrapper" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$build" 2>/dev/null; then
+        bad "[$label] the build's group is still alive after the script exited"
+        kill -9 -- "-$build" 2>/dev/null
+    else
+        ok "[$label] the build's group is gone after the script exited"
+    fi
+    # TERM itself, not a KILL escalation 30 s later: the build recorded it.
+    if [[ "$ignore" == 1 ]]; then
+        # The build ignored the signal and ended on its own after ~3 s: the wrapper had to wait for it.
+        [[ $SECONDS -ge $((term_start + 2)) && $SECONDS -lt $((term_start + 25)) ]] && ok "[$label] the wrapper waited for the build that ignored $sig" || bad "[$label] the wrapper did not wait for a build ignoring $sig ($((SECONDS - term_start)) s)"
+    else
+        [[ -f "$started.term" && $SECONDS -lt $((term_start + 25)) ]] && ok "[$label] $sig reached the build's own group promptly" || bad "[$label] the build never saw $sig within 25 s (forwarding broken, or only a KILL escalation ended it)"
+    fi
+    [[ $released_while_alive -eq 0 && ! -d "$leasedir" ]] && ok "[$label] the lease and the props went back only after the build's group was gone" || bad "[$label] lease or props released while the build ran ($released_while_alive) or lease still held after"
+    [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "[$label] release.properties restored after the signal" || bad "[$label] props dirty after the signal: $(cat "$repo/$props_rel")"
+    wait "$wrapper" 2>/dev/null
+    rm -rf "$leasedir"
+}
+cat > "$labbin/lab-run" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == "-c" && "$3" == "--" ]] || exit 64
+shift 3
+trap 'exit 143' TERM HUP QUIT
+set -m
+"$@" &
+set +m
+wait $!
+STUB
+chmod +x "$labbin/lab-run"
+echo "Test 11g: TERM under --lab-run reaches the build even when lab-run does not forward it"
+_term_case lab --lab-run lab-s
+echo "Test 11h: TERM without --lab-run also reaches the build (same signal handling on the direct path)"
+_term_case direct
+echo "Test 11i: HUP reaches the build and releases only after it is gone (a closed terminal must not leave props stamped and the lease held)"
+TERM_SIG=HUP _term_case lab-hup --lab-run lab-s
+TERM_SIG=HUP _term_case direct-hup
+echo "Test 11j: QUIT is forwarded the same way"
+TERM_SIG=QUIT _term_case direct-quit
+echo "Test 11k: a build that IGNORES TERM for ~3 s keeps the lease and the stamped props until its group is gone"
+IGNORE_TERM=1 _term_case lab-ignore --lab-run lab-s
+IGNORE_TERM=1 _term_case direct-ignore
+
+# After the build group exits the wrapper still has work (cache store, props restore). The lease's pgid
+# must not keep naming the dead group then, or a waiting peer reclaims it as stale (liveness keys on the
+# pgid first) and starts a build over a jar the wrapper is still storing.
+echo "Test 11l: a peer cannot reclaim the lease while the wrapper is alive after its build has exited"
+_after_build_case() {  # _after_build_case <label> <lab-class-or-empty>
+    local label="$1" cls="$2" out="$WORKDIR/after-$1.out" holder peer_out peer_rc
+    rm -f "$out"; rm -rf "$leasedir"
+    # Stub lab-run from the 11a block would be replaced above; give this case its own pass-through.
+    (cd "$repo" && PATH="$labbin:$PATH" bash -c "
+        source scripts/lib/build-lease.sh; source scripts/lib/leased-build.sh
+        build_lease_acquire service t || exit 9
+        leased_build_init t service
+        leased_build_run '$cls' sleep 1
+        echo BUILT
+        sleep 12" >"$out" 2>&1) &
+    holder=$!
+    for _ in $(seq 1 100); do grep -q BUILT "$out" 2>/dev/null && break; sleep 0.2; done
+    if ! grep -q BUILT "$out" 2>/dev/null; then
+        bad "[$label] the harness never finished its build (setup failure): $(cat "$out" 2>/dev/null)"
+        kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; return 0
+    fi
+    peer_out="$(cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service" 2>&1)"; peer_rc=$?
+    [[ $peer_rc -eq 75 && "$peer_out" == *"REFUSED"* && "$peer_out" != *"reclaiming"* ]] && ok "[$label] a peer is refused while the wrapper is alive after its build" || bad "[$label] peer rc $peer_rc: $peer_out"
+    kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+    rm -rf "$leasedir"
+}
+_after_build_case direct ""
+_after_build_case lab lab-s
+
+# A group member that outlives the build leader (a daemon the build started) keeps the lease tracked, and
+# the EXIT trap leaves lease and stamp in place with a WARNING rather than release under a live writer.
+echo "Test 11m: a process left in the build's group keeps the lease and the stamp until it is gone"
+rm -rf "$leasedir"
+echo 'class L3 {}' > "$repo/service/src/main/L3.java"
+out11m="$(cd "$repo" && MVNW_LINGER=5 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc11m=$?
+[[ "$out11m" == *"WARNING"*"exiting WITHOUT releasing"* ]] && ok "the lingering group is named in a WARNING at exit" || bad "rc $rc11m, no WARNING: $out11m"
+[[ -d "$leasedir" ]] && ok "the lease is still held while the group is alive" || bad "the lease was released under a live group member"
+[[ "$(cat "$repo/$props_rel")" == *"release_version=0.1.107"* ]] && ok "release.properties was left stamped too (both finish steps skipped, as the WARNING says)" || bad "props restored under a live group member"
+sleep 6
+out11m2="$(cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service && build_lease_release service" 2>&1)"; rc11m2=$?
+[[ $rc11m2 -eq 0 && "$out11m2" == *"reclaiming stale"* ]] && ok "once the group is gone a later acquire reclaims the lease" || bad "rc $rc11m2: $out11m2"
+printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
+rm -rf "$leasedir"
+
+echo "Test 11n: sourcing leased-build.sh before build-lease.sh fails fast, naming the missing library"
+out11n="$(bash -c "source '$repo/scripts/lib/leased-build.sh'; echo SOURCED" 2>&1)"; rc11n=$?
+[[ $rc11n -ne 0 && "$out11n" == *"source scripts/lib/build-lease.sh first"* && "$out11n" != *SOURCED* ]] && ok "out-of-order source fails fast (rc $rc11n)" || bad "rc $rc11n: $out11n"
+
 echo
-echo "build-gate-jar_test.sh: $PASS passed, $FAIL failed"
+skipnote=""; (( SKIP == 0 )) || skipnote=", $SKIP skipped"
+echo "build-gate-jar_test.sh: $PASS passed, $FAIL failed$skipnote"
 [[ $FAIL -eq 0 ]]
