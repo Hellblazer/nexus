@@ -757,7 +757,7 @@ the local disk preflight.
 - The Java upsert's conflict target becomes the four-column PK.
 - The no-leaf error is mapped to a 500.
 - A lock timeout (SQLSTATE 55P03) during token issuance is mapped to a retryable 503 in `TokenAdminHandler` and `DataTokenHandler`, not to `HttpUtil`'s default 500.
-- The jOOQ record-count guard is bumped in the same change as the schema. The jOOQ exclude pattern (service/pom.xml `excludes`) lands with the schema change, in the Phase 1 changeset's commit, and covers partition leaves, model partitions, `chunks_retired_225` and the `_new` names (`chunks_new`, `taxonomy_centroids_new` and what is created under them), so only the parents generate classes.
+- The jOOQ record-count guard is bumped in the same change as the schema. The jOOQ exclude pattern (service/pom.xml `excludes`) lands with the schema change, in the Phase 1 changeset's commit, and covers partition leaves, model partitions, `chunks_retired_225` (until `vectors-036-1` dropped it and its exclude, nexus-3wh8d.22) and the `_new` names (`chunks_new`, `taxonomy_centroids_new` and what is created under them), so only the parents generate classes.
 
 #### Step 2: Read path
 

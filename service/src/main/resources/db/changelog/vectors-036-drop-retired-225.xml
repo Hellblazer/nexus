@@ -59,8 +59,14 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-036-1" author="nexus-3wh8d.22">
-        <comment>RDR-225 P3.3: drop nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 (the pre-walk tables vectors-030-1 kept), with their _retired_225 indexes and constraints. Logs each table's row count first (RAISE NOTICE); no CASCADE; an absent table is skipped. DATA EFFECT: irreversible, every row of nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 is deleted with the tables; the rollback recreates both EMPTY in the shape vectors-030-1 leaves. Cloud window: 14 days after the 2026-10-07 walk deploy. Local window: the time between the engine release carrying vectors-030-1 and the one carrying this changeset; zero when an install crosses both in one boot.</comment>
+        <comment>RDR-225 P3.3: drop nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 (the pre-walk tables vectors-030-1 kept), with their _retired_225 indexes and constraints. Logs each table's row count first (RAISE NOTICE); no CASCADE; lock_timeout 120s; an absent table is skipped. DATA EFFECT: irreversible, every row of nexus.chunks_retired_225 and nexus.taxonomy_centroids_retired_225 is deleted with the tables; the rollback recreates both EMPTY in the shape vectors-030-1 leaves. Cloud window: 14 days after the 2026-10-07 walk deploy. Local window: the time between the engine release carrying vectors-030-1 and the one carrying this changeset; zero when an install crosses both in one boot.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
+-- A session holding a lock on a retired table (an operator's idle transaction on the recovery source) fails the
+-- boot with a lock_not_available error after 120 s instead of hanging it; a role-level statement_timeout must not
+-- kill the row count. Both revert at the end of the transaction (the vectors-030-1 settings).
+SET LOCAL lock_timeout = '120s';
+SET LOCAL statement_timeout = 0;
+
 DO $drop$
 DECLARE
     t text;
