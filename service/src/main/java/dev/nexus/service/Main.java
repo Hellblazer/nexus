@@ -59,6 +59,12 @@ public final class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
+        // nexus-37n79: the build's trust-store check asks the built executable what it trusts, and
+        // the engine starts nothing for that question.
+        if (TrustAnchors.requested(args)) {
+            TrustAnchors.print(System.out);
+            return;
+        }
         // nexus-17jvq: FIRST, before anything can load a DJL class. DJL's tokenizer build calls home to the
         // AWS metadata address and its CUDA path downloads a JNI library; the engine loads only local files.
         LocalTokenizers.goOffline();

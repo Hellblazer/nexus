@@ -94,9 +94,9 @@ def _aliases(store: Path) -> set[str]:
     return {line.split(",")[0] for line in listed.splitlines() if ", trustedCertEntry" in line}
 
 
-def _run(mode: str, path: Path, source: Path) -> subprocess.CompletedProcess[str]:
+def _run(mode: str, path: Path, source: Path, *props: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(_java()), f"-Dnexus.truststore.source={source}", str(_PROGRAM), mode, str(path)],
+        [str(_java()), f"-Dnexus.truststore.source={source}", *props, str(_PROGRAM), mode, str(path)],
         capture_output=True, text=True, check=False, timeout=180,
     )
 
@@ -211,6 +211,83 @@ def test_verify_fails_where_there_is_no_executable(tmp_path: Path, source: Path)
     assert run.returncode == 1 and "no nexus-service executable" in run.stderr
 
 
+# nexus-37n79: stand-in for `nexus-service --trust-anchors`, the engine's TrustAnchors mode: the
+# default TrustManager over the store named in its source, printed in the engine's protocol.
+_ANCHORS_PROBE = """
+import java.security.KeyStore;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+public class Probe {
+    public static void main(String[] args) throws Exception {
+        if (args.length != 1 || !args[0].equals("--trust-anchors")) throw new IllegalArgumentException(String.join(" ", args));
+        System.setProperty("javax.net.ssl.trustStore", "%s");
+        // keytool's stand-in stores protect their bags (the pruned store does not); the password
+        // makes every store here load all its roots.
+        System.setProperty("javax.net.ssl.trustStorePassword", "changeit");
+        TrustManagerFactory f = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        f.init((KeyStore) null);
+        java.util.List<java.security.cert.X509Certificate> issuers = new java.util.ArrayList<>();
+        for (javax.net.ssl.TrustManager m : f.getTrustManagers()) {
+            if (m instanceof X509TrustManager x) issuers.addAll(java.util.List.of(x.getAcceptedIssuers()));
+        }
+        System.out.println("engine log line before the protocol");
+        System.out.println("trust_anchors count=" + issuers.size());
+        for (java.security.cert.X509Certificate c : issuers) {
+            System.out.println("trust_anchor " + c.getSubjectX500Principal().getName());
+        }
+    }
+}
+"""
+
+
+def _anchors(tmp_path: Path, source: Path, probe_body: str) -> subprocess.CompletedProcess[str]:
+    """Prune into <tmp>/native-truststore/cacerts, as the build does, then run anchors with a probe."""
+    assert _run("prune", tmp_path / "native-truststore" / "cacerts", source).returncode == 0
+    probe = tmp_path / "Probe.java"
+    probe.write_text(probe_body)
+    return _run("anchors", tmp_path, source, f"-Dnexus.truststore.probe={probe}")
+
+
+def test_anchors_passes_an_executable_that_trusts_exactly_the_pruned_store(tmp_path: Path, source: Path) -> None:
+    store = (tmp_path / "native-truststore" / "cacerts").as_posix()
+    run = _anchors(tmp_path, source, _ANCHORS_PROBE % store)
+    assert run.returncode == 0, run.stderr
+    assert f"trusts {len(_ROOTS) - len(DROP)} roots" in run.stdout and "none distrusted" in run.stdout
+
+
+def test_anchors_fails_an_executable_that_trusts_the_unpruned_store(tmp_path: Path, source: Path) -> None:
+    # What v0.1.161 does: the build JDK's whole cacerts, AAA and emSign included.
+    run = _anchors(tmp_path, source, _ANCHORS_PROBE % source.as_posix())
+    assert run.returncode == 1
+    assert f"trusts {len(_ROOTS)} roots, the pruned store holds {len(_ROOTS) - len(DROP)}" in run.stderr
+    assert "trusts CN=AAA Certificate Services" in run.stderr and "emSign Root CA - G1" in run.stderr
+
+
+def test_anchors_fails_an_executable_that_does_not_trust_a_required_root(tmp_path: Path, source: Path) -> None:
+    # Same count as the pruned store, one KEEP root swapped for an unrelated one: the subject check
+    # catches what a count alone would pass.
+    roots = {a: s for a, s in _ROOTS.items() if a not in DROP and a != "gtsrootcar1 [jdk]"}
+    roots["swapped [jdk]"] = "CN=Swapped Root, O=Test, C=US"
+    other = _store(tmp_path / "other", roots)
+    run = _anchors(tmp_path, source, _ANCHORS_PROBE % other.as_posix())
+    assert run.returncode == 1
+    assert "does not trust required root gtsrootcar1 [jdk]" in run.stderr
+    assert "extra [CN=Swapped Root,O=Test,C=US]" in run.stderr
+
+
+def test_anchors_fails_an_executable_that_prints_no_count(tmp_path: Path, source: Path) -> None:
+    # Non-vacuity: an executable that ignores the flag and exits 0 must not pass.
+    silent = "public class Probe { public static void main(String[] args) { System.out.println(\"started\"); } }"
+    run = _anchors(tmp_path, source, silent)
+    assert run.returncode == 1 and "printed no trust_anchors line" in run.stderr
+
+
+def test_anchors_fails_an_executable_that_exits_nonzero(tmp_path: Path, source: Path) -> None:
+    failing = "public class Probe { public static void main(String[] args) { System.exit(3); } }"
+    run = _anchors(tmp_path, source, failing)
+    assert run.returncode == 1 and "exited 3" in run.stderr
+
+
 def test_the_program_and_this_file_name_the_same_roots() -> None:
     src = _PROGRAM.read_text()
 
@@ -248,8 +325,10 @@ def test_the_native_profile_builds_from_the_pruned_store_and_verifies_after_the_
         e.findtext("m:id", namespaces=_NS): e for e in plugins["maven-antrun-plugin"].findall("m:executions/m:execution", _NS)
     }
     prune, verify = executions["prune-native-truststore"], executions["verify-native-truststore"]
+    anchors = executions["verify-native-trust-anchors"]
     assert prune.findtext("m:phase", namespaces=_NS) == "prepare-package"
     assert verify.findtext("m:phase", namespaces=_NS) == "package"
+    assert anchors.findtext("m:phase", namespaces=_NS) == "package"
     native_phase = plugins["native-maven-plugin"].find("m:executions/m:execution/m:phase", _NS)
     assert native_phase is not None and native_phase.text == "package"
 
@@ -258,3 +337,4 @@ def test_the_native_profile_builds_from_the_pruned_store_and_verifies_after_the_
 
     assert args(prune) == ["${project.basedir}/src/build/java/NativeTrustStore.java", "prune", store]
     assert args(verify) == ["${project.basedir}/src/build/java/NativeTrustStore.java", "verify", "${project.build.directory}"]
+    assert args(anchors) == ["${project.basedir}/src/build/java/NativeTrustStore.java", "anchors", "${project.build.directory}"]

@@ -18,8 +18,14 @@
 //                            was empty still held all of them), while the captured KeyStore is the
 //                            only thing that carries "<name> [jdk]" (the released v0.1.161 binary
 //                            holds each alias twice).
+//   anchors <dir>            nexus-37n79: run the built executable in <dir> as
+//                            `nexus-service --trust-anchors`, which prints the issuers its default
+//                            TrustManager accepts, and require exactly the certificates of
+//                            <dir>/native-truststore/cacerts (the store prune wrote): the same count,
+//                            the same subjects, no subject of the distrusted hierarchy, every KEEP
+//                            root present. This is what the engine's TLS trusts, not alias strings.
 //
-// Run as a source-file program: java NativeTrustStore.java prune|verify <path>.
+// Run as a source-file program: java NativeTrustStore.java prune|verify|anchors <path>.
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -32,8 +38,13 @@ import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.Security;
 import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
 
 public class NativeTrustStore {
 
@@ -63,7 +74,7 @@ public class NativeTrustStore {
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) {
-            fail("usage: java NativeTrustStore.java prune <out-file> | verify <dir-or-binary>");
+            fail("usage: java NativeTrustStore.java prune <out-file> | verify <dir-or-binary> | anchors <dir>");
         }
         // nexus.truststore.source exists for the tests; the build always reads the JDK's own cacerts.
         File source = new File(System.getProperty("nexus.truststore.source",
@@ -72,6 +83,7 @@ public class NativeTrustStore {
         switch (args[0]) {
             case "prune" -> prune(jdk, Path.of(args[1]));
             case "verify" -> verify(jdk, binary(Path.of(args[1])));
+            case "anchors" -> anchors(jdk, Path.of(args[1]));
             default -> fail("unknown mode " + args[0]);
         }
     }
@@ -142,6 +154,80 @@ public class NativeTrustStore {
         }
         System.out.printf("native trust store verified in %s (%d bytes): %d dropped roots absent, %d required roots present%n",
                 binary, image.length, checkedDrop, KEEP.size());
+    }
+
+    static void anchors(KeyStore jdk, Path dir) throws GeneralSecurityException, IOException, InterruptedException {
+        Path storeFile = dir.resolve("native-truststore").resolve("cacerts");
+        KeyStore pruned = KeyStore.getInstance(storeFile.toFile(), PASSWORD);
+        Set<Certificate> expected = new HashSet<>();
+        for (String alias : java.util.Collections.list(pruned.aliases())) {
+            expected.add(pruned.getCertificate(alias));
+        }
+        Set<String> expectedSubjects = new TreeSet<>();
+        for (Certificate cert : expected) {
+            expectedSubjects.add(((X509Certificate) cert).getSubjectX500Principal().getName());
+        }
+
+        // nexus.truststore.probe exists for the tests: a Java source file that stands in for the
+        // executable. The build always runs the executable it just made.
+        String probe = System.getProperty("nexus.truststore.probe");
+        List<String> command = probe != null
+                ? List.of(new File(System.getProperty("java.home"), "bin/java").getPath(), probe, "--trust-anchors")
+                : List.of(binary(dir).toString(), "--trust-anchors");
+        Path captured = Files.createTempFile("nexus-trust-anchors", ".txt");
+        Process process = new ProcessBuilder(command).redirectErrorStream(true)
+                .redirectOutput(captured.toFile()).start();
+        if (!process.waitFor(120, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            fail(command + " did not exit within 120 s");
+        }
+        String text = Files.readString(captured, StandardCharsets.UTF_8);
+        Files.delete(captured);
+        if (process.exitValue() != 0) {
+            fail(command + " exited " + process.exitValue() + ": " + text);
+        }
+        int reported = -1;
+        List<String> subjects = new ArrayList<>();
+        for (String line : text.split("\\R")) {
+            if (line.startsWith("trust_anchors count=")) {
+                reported = Integer.parseInt(line.substring("trust_anchors count=".length()).trim());
+            } else if (line.startsWith("trust_anchor ")) {
+                subjects.add(line.substring("trust_anchor ".length()));
+            }
+        }
+
+        List<String> problems = new ArrayList<>();
+        if (reported < 0) {
+            problems.add("printed no trust_anchors line: " + text);
+        } else if (reported != subjects.size()) {
+            problems.add("reported " + reported + " anchors but listed " + subjects.size());
+        }
+        if (subjects.size() != expected.size()) {
+            problems.add("trusts " + subjects.size() + " roots, the pruned store holds " + expected.size());
+        }
+        for (String subject : subjects) {
+            if (DISTRUSTED_SUBJECT.matcher(subject).find()) {
+                problems.add("trusts " + subject);
+            }
+        }
+        for (String alias : KEEP) {
+            String subject = ((X509Certificate) jdk.getCertificate(alias)).getSubjectX500Principal().getName();
+            if (!subjects.contains(subject)) {
+                problems.add("does not trust required root " + alias + " (" + subject + ")");
+            }
+        }
+        if (!new TreeSet<>(subjects).equals(expectedSubjects)) {
+            Set<String> extra = new TreeSet<>(subjects);
+            extra.removeAll(expectedSubjects);
+            Set<String> missing = new TreeSet<>(expectedSubjects);
+            missing.removeAll(subjects);
+            problems.add("subjects differ from the pruned store: extra " + extra + ", missing " + missing);
+        }
+        if (!problems.isEmpty()) {
+            fail(command.get(command.size() - 2) + " " + String.join("; ", problems));
+        }
+        System.out.printf("native trust anchors verified: the executable trusts %d roots, exactly %s, none distrusted, %d required present%n",
+                subjects.size(), storeFile, KEEP.size());
     }
 
     static Path binary(Path path) {

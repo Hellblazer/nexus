@@ -2027,6 +2027,24 @@
                                     </target>
                                 </configuration>
                             </execution>
+                            <!-- nexus-37n79: run the built executable as nexus-service
+                                 trust-anchors and require that its default TrustManager accepts
+                                 exactly the pruned store's roots: what the engine's TLS trusts,
+                                 not alias strings. After verify, in the same phase. -->
+                            <execution>
+                                <id>verify-native-trust-anchors</id>
+                                <phase>package</phase>
+                                <goals><goal>run</goal></goals>
+                                <configuration>
+                                    <target>
+                                        <exec executable="${java.home}/bin/java" failonerror="true">
+                                            <arg value="${project.basedir}/src/build/java/NativeTrustStore.java"/>
+                                            <arg value="anchors"/>
+                                            <arg value="${project.build.directory}"/>
+                                        </exec>
+                                    </target>
+                                </configuration>
+                            </execution>
                         </executions>
                     </plugin>
                 </plugins>
