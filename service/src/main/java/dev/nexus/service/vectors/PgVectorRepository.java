@@ -42,6 +42,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE_BOUNDED;
 import static dev.nexus.service.jooq.nexus.Tables.QUARANTINE_RESTORE_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
@@ -252,9 +253,9 @@ public final class PgVectorRepository {
 
     /**
      * Test-only seam (RDR-222 Phase 1, bead nexus-yye8l.5): invoked INSIDE the one {@code withTenant}
-     * transaction of {@link #quarantineOrphansBounded}, {@link #quarantineOrphansFloored} and
-     * {@link #restoreRereferencedBounded}, after the SQL function call has returned and before the ledger
-     * marker runs, so a test can hold a sweep open (its row moves uncommitted, its ledger row still
+     * transaction of {@link #quarantineOrphansBounded}, {@link #quarantineOrphansFloored},
+     * {@link #restoreRereferencedBounded} and {@link #expireQuarantineBounded}, after the SQL function call has
+     * returned and before the ledger marker runs, so a test can hold a sweep open (its row moves uncommitted, its ledger row still
      * {@code in_flight}) while it reads the status route or sends a second same-key request.
      * Default {@code null}: one null-check per sweep, nothing when unset. Never read or written by
      * production code.
@@ -6135,6 +6136,80 @@ FROM scope s
                .fetchOne();
         });
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
+    }
+
+    /**
+     * One bounded expiry page (RDR-222 Amendment A1, nexus-1579m): {@code expired} is the rows this page deleted
+     * (one per model row of a chash), {@code refused} describes the sibling as of this page and is {@code null}
+     * when it was not counted ({@code countRefused} false, no floor scan), {@code more} says the page found
+     * eligible chashes past its own, and {@code floorRefused} says the floor fired and nothing was deleted.
+     * {@code refused} is a {@link Long}, never a primitive: SQL NULL must reach the response as JSON null.
+     */
+    public record ExpireBoundedOutcome(long expired, Long refused, boolean more, boolean floorRefused) {}
+
+    /**
+     * {@link #expireQuarantine} in pages: at most {@code rowLimit} (clamped to 5,000 by the function) distinct
+     * chashes per call, in chash order, one commit and one {@code gc_audit} row per call. The statement bound
+     * (25 s) and lock bound (2 s) are set HERE as their own statements before the call, for the reason
+     * {@link #quarantineOrphansBounded} gives. {@code floorFraction} 1.0 or more skips the floor scan (it can
+     * never fire), which is what both client callers send.
+     */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    /**
+     * As the default-bound form, with the {@link LedgerMarker} the keyed route passes and the origin collection's
+     * dimension it already resolved before claiming its ledger row. The marker runs in the page's own
+     * transaction, after the function call, so the page's delete and audit row roll back with a lost lease.
+     */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused, int dim,
+                                                         LedgerMarker<ExpireBoundedOutcome> marker) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                       PgSession.DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS, dim, marker);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                         String originCollection, String cutoff,
+                                                         double floorFraction, int floorMinChunks, boolean force,
+                                                         int rowLimit, boolean countRefused,
+                                                         int statementTimeoutMs, int lockTimeoutMs) {
+        return expireQuarantineBounded(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                       floorMinChunks, force, rowLimit, countRefused,
+                                       statementTimeoutMs, lockTimeoutMs,
+                                       dimForCollection(tenant, originCollection), LedgerMarker.none());
+    }
+
+    private ExpireBoundedOutcome expireQuarantineBounded(String tenant, String quarantineCollection,
+                                                          String originCollection, String cutoff,
+                                                          double floorFraction, int floorMinChunks, boolean force,
+                                                          int rowLimit, boolean countRefused,
+                                                          int statementTimeoutMs, int lockTimeoutMs, int dim,
+                                                          LedgerMarker<ExpireBoundedOutcome> marker) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            var rec = ctx.selectFrom(GC_EXPIRE_QUARANTINE_BOUNDED.call(
+                    dim, tenant, quarantineCollection, originCollection, cutoff,
+                    floorFraction, floorMinChunks, force, rowLimit, countRefused))
+               .fetchOne();
+            runAfterSweepSqlHook();
+            var outcome = new ExpireBoundedOutcome(
+                rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.REFUSED),
+                rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.MORE), rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.FLOOR_REFUSED));
+            marker.mark(ctx, outcome);
+            return outcome;
+        });
     }
 
     /**

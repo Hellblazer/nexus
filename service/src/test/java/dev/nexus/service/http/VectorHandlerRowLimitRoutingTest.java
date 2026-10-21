@@ -62,4 +62,30 @@ class VectorHandlerRowLimitRoutingTest {
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("row_limit must be a positive integer");
     }
+
+    // ── RDR-222 Amendment A1 (nexus-1579m): the bounded expire form's route pieces ──
+
+    @Test
+    void expireRowLimitCeiling_isTheAuditCeiling_theFunctionsOwnClamp() {
+        // vectors-035 clamps a page at 5,000 distinct chashes so its audit row lists every chash it deleted;
+        // the route echoes row_limit, so the two numbers must agree. The function side is pinned by
+        // GcExpireQuarantineBoundedTest.anOversizedRowLimitIsClamped...
+        assertThat(VectorHandler.GC_EXPIRE_ROW_LIMIT_MAX).isEqualTo(5_000)
+            .isEqualTo(dev.nexus.service.db.CatalogRepository.GC_AUDIT_MAX_CHASHES);
+    }
+
+    @Test
+    void boundedExpireBody_carriesANullRefused_andFixedKeyOrder() throws Exception {
+        var counted = VectorHandler.boundedExpireBody(
+            new dev.nexus.service.vectors.PgVectorRepository.ExpireBoundedOutcome(7L, 3L, true, false), 2000);
+        var uncounted = VectorHandler.boundedExpireBody(
+            new dev.nexus.service.vectors.PgVectorRepository.ExpireBoundedOutcome(7L, null, false, false), 5000);
+
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        assertThat(mapper.writeValueAsString(counted))
+            .isEqualTo("{\"expired\":7,\"refused\":3,\"more\":true,\"row_limit\":2000,\"floor_refused\":false}");
+        assertThat(mapper.writeValueAsString(uncounted))
+            .as("a null refused is JSON null, not absent and not 0")
+            .isEqualTo("{\"expired\":7,\"refused\":null,\"more\":false,\"row_limit\":5000,\"floor_refused\":false}");
+    }
 }

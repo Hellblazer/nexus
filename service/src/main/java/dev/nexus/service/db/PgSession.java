@@ -514,6 +514,15 @@ public final class PgSession {
     }
 
     /**
+     * Bounds for one bounded expiry page ({@code gc_expire_quarantine_bounded}, RDR-222 Amendment A1,
+     * nexus-1579m), the same pair as the restore's and set as their own statements before the call for the
+     * identical reason: the function body's own {@code set_config('statement_timeout', ...)} is inert for the
+     * statement already running it. The 25 s includes the sweep gate wait.
+     */
+    public static final int DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS = 25_000;
+    public static final int DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS = 2_000;
+
+    /**
      * Bound every later statement in this transaction to {@code statementTimeoutMs}
      * and every lock wait to {@code lockTimeoutMs}. Two {@code set_config} calls,
      * each its own top-level statement, so the statement bound applies to the

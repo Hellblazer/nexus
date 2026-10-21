@@ -1429,6 +1429,15 @@ public final class VectorHandler implements HttpHandler {
 
     static final String QUARANTINE_ROUTE = "/v1/vectors/gc/quarantine-orphans";
     static final String RESTORE_ROUTE = "/v1/vectors/gc/restore-rereferenced";
+    static final String EXPIRE_ROUTE = "/v1/vectors/gc/expire-quarantine";
+
+    /**
+     * The most distinct chashes one bounded expire page takes: {@code gc_audit}'s chash ceiling, equal to the
+     * clamp inside {@code nexus.gc_expire_quarantine_bounded} (vectors-035), so the response echoes the
+     * {@code row_limit} the function applied. Pinned by {@code VectorHandlerRowLimitRoutingTest} and the
+     * function's own clamp test.
+     */
+    static final int GC_EXPIRE_ROW_LIMIT_MAX = 5_000;
 
     /**
      * The body of the bounded, floor-less quarantine form. One function for the keyed and the unkeyed call, so
@@ -1467,6 +1476,21 @@ public final class VectorHandler implements HttpHandler {
             "restored", bounded.restored(),
             "remaining", bounded.remaining(),
             "row_limit", rowLimit);
+    }
+
+    /**
+     * The body of the bounded expire form. {@code refused} is {@code null} when the page did not count it
+     * ({@code count_refused} false and no floor scan); the map is insertion-ordered and null-tolerant, so a
+     * first body, a replayed body and the stored copy are one shape.
+     */
+    static Map<String, Object> boundedExpireBody(PgVectorRepository.ExpireBoundedOutcome out, int rowLimit) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("expired", out.expired());
+        body.put("refused", out.refused());
+        body.put("more", out.more());
+        body.put("row_limit", rowLimit);
+        body.put("floor_refused", out.floorRefused());
+        return body;
     }
 
     // The keyed forms resolve their collection's dimension BEFORE keyedSweep.run claims a ledger row: an unknown
@@ -1711,6 +1735,12 @@ public final class VectorHandler implements HttpHandler {
      * floor (see catalog-023 changelog): {@code refused &gt; 0} means the
      * floor fired and nothing was deleted this call.
      *
+     * <p>RDR-222 Amendment A1 (nexus-1579m): an optional {@code row_limit} (a positive integer; 400
+     * otherwise) selects the BOUNDED form, one page of at most that many chashes (clamped to 5,000), with an
+     * optional {@code count_refused} (default true). Its response is {"expired": N, "refused": M|null,
+     * "more": bool, "row_limit": L, "floor_refused": bool}, and it accepts an {@code Idempotency-Key}; a key
+     * on the unbounded form is 400 {@code idempotency_key_unsupported}.
+     *
      * <p>Since vectors-026 this route expires only the rows a CLIENT moved: chunks the engine
      * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
      * {@code force}, and the floor counts only the untagged rows. The engine expires its own
@@ -1720,13 +1750,39 @@ public final class VectorHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
+        KeyedRequest keyed = keyedRequest(ex);   // RDR-222 Amendment A1, as handleGcRestoreRereferenced
+        byte[] raw = readBodyBytes(ex);
+        Map<String, Object> body = parseBody(raw);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
         String cutoff                = requireString(body, "cutoff");
         double floorFraction        = optDouble(body, "floor_fraction", 0.5);
         int floorMinChunks          = optInt(body, "floor_min_chunks", 50);
         boolean force                = optBool(body, "force", false);
+
+        // An optional `row_limit` selects the BOUNDED expire, as on restore-rereferenced: absent is the
+        // unbounded form exactly as before, present must be a positive integer.
+        int rowLimit = resolveRowLimit(body);
+        if (rowLimit > 0) {
+            final int limit = Math.min(rowLimit, GC_EXPIRE_ROW_LIMIT_MAX);
+            final boolean countRefused = optBool(body, "count_refused", true);
+            if (keyed != null) {
+                final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, EXPIRE_ROUTE, raw);
+                this.<PgVectorRepository.ExpireBoundedOutcome>runKeyed(ex, keyed, tenant, EXPIRE_ROUTE, raw,
+                    dev.nexus.service.db.PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
+                    marker -> repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
+                        cutoff, floorFraction, floorMinChunks, force, limit, countRefused, dim, marker),
+                    out -> boundedExpireBody(out, limit));
+                return;
+            }
+            var bounded = repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
+                cutoff, floorFraction, floorMinChunks, force, limit, countRefused);
+            HttpUtil.send(ex, 200, json(boundedExpireBody(bounded, limit)));
+            return;
+        }
+        if (keyed != null) {
+            refuseKey(ex, "idempotency_key_unsupported");
+        }
 
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);

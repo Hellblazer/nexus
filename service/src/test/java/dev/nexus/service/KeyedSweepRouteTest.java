@@ -50,9 +50,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-222 Phase 1 (bead nexus-yye8l.5): keyed handling on the three bounded sweep forms, over real HTTP
  * through the RLS-subject service role against real Postgres.
  *
- * <p>The three keyed shapes are {@code quarantine-orphans} with {@code row_limit} and no floor
- * ({@link Form#BOUNDED}), the same with {@code floor_fraction} ({@link Form#FLOORED}), and
- * {@code restore-rereferenced} with {@code row_limit} ({@link Form#RESTORE}). A sweep is held open with
+ * <p>The four keyed shapes are {@code quarantine-orphans} with {@code row_limit} and no floor
+ * ({@link Form#BOUNDED}), the same with {@code floor_fraction} ({@link Form#FLOORED}),
+ * {@code restore-rereferenced} with {@code row_limit} ({@link Form#RESTORE}) and, from RDR-222 Amendment A1
+ * (nexus-1579m), {@code expire-quarantine} with {@code row_limit} ({@link Form#EXPIRE}). A sweep is held open with
  * {@link PgVectorRepository#setAfterSweepSqlHookForTests}, which blocks inside the sweep's transaction after
  * the SQL function returned, so a second request and the status route can be sent while the ledger row is
  * {@code in_flight}.
@@ -70,12 +71,15 @@ class KeyedSweepRouteTest {
     private static final String STAMP = "2026-10-18T00:00:00Z";
     private static final String QUARANTINE_PATH = "/v1/vectors/gc/quarantine-orphans";
     private static final String RESTORE_PATH = "/v1/vectors/gc/restore-rereferenced";
+    private static final String EXPIRE_PATH = "/v1/vectors/gc/expire-quarantine";
+    private static final String EXPIRE_CUTOFF = "2099-01-01T00:00:00Z";
 
-    /** The three keyed shapes. */
+    /** The four keyed shapes (RDR-222 Amendment A1 added {@link #EXPIRE}, nexus-1579m). */
     enum Form {
         BOUNDED(QUARANTINE_PATH, "moved"),
         FLOORED(QUARANTINE_PATH, "moved"),
-        RESTORE(RESTORE_PATH, "restored");
+        RESTORE(RESTORE_PATH, "restored"),
+        EXPIRE(EXPIRE_PATH, "expired");
 
         final String path;
         final String movedKey;
@@ -85,8 +89,19 @@ class KeyedSweepRouteTest {
             this.movedKey = movedKey;
         }
 
+        /** The two quarantine-orphans shapes, which move rows out of the origin. */
         boolean quarantine() {
+            return this == BOUNDED || this == FLOORED;
+        }
+
+        /** The sweep gate (503 sweep_gate_busy) applies to the quarantine shapes and to expire. */
+        boolean takesTheGate() {
             return this != RESTORE;
+        }
+
+        /** The terminator field a replay carries: {@code remaining}, or {@code more} for expire. */
+        String restField() {
+            return this == EXPIRE ? "more" : "remaining";
         }
     }
 
@@ -192,7 +207,9 @@ class KeyedSweepRouteTest {
     /** A fixture: the collection a sweep reads from ({@code source}) and the one it moves rows into ({@code target}). */
     private record Fx(Form form, String origin, String quarantine, int total) {
         String source() { return form.quarantine() ? origin : quarantine; }
-        String target() { return form.quarantine() ? quarantine : origin; }
+        String target() { return form.quarantine() ? quarantine : form == Form.EXPIRE ? null : origin; }
+        /** The collection whose sweep gate the form takes: the origin's for quarantine, the sibling's for expire. */
+        String gateKey() { return form == Form.EXPIRE ? quarantine : origin; }
     }
 
     private void su(java.util.function.Consumer<DSLContext> work) throws Exception {
@@ -202,7 +219,31 @@ class KeyedSweepRouteTest {
     }
 
     private Fx fixture(Form form, int n) throws Exception {
-        return form.quarantine() ? seedOrphans(form, n, "t") : seedRestore(form, n);
+        return form.quarantine() ? seedOrphans(form, n, "t")
+            : form == Form.EXPIRE ? seedExpire(form, n) : seedRestore(form, n);
+    }
+
+    /** {@code n} client-moved rows in the quarantine sibling, tagged for the origin and past any cutoff. */
+    private Fx seedExpire(Form form, int n) throws Exception {
+        int id = seq.incrementAndGet();
+        String origin = "code__kse" + id + "__minilm-l6-v2-384__v1";
+        String quarantine = "quarantine-" + origin;
+        List<String> hashes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            hashes.add(Chash.ofText(quarantine + "/" + i).toHex());
+            texts.add("expiring " + i);
+            vecs.add(new float[384]);
+            metas.add(Map.of("quarantined_at", "2026-07-01T00:00:00Z", "origin_collection", origin));
+        }
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, origin);
+            PgContainerHelper.insertCollection(ctx, TENANT, quarantine);
+            PgContainerHelper.insertChunks(ctx, TENANT, quarantine, hashes, texts, vecs, metas);
+        });
+        return new Fx(form, origin, quarantine, n);
     }
 
     /** {@code n} chunks aged past the grace with no manifest row: every one is a quarantine victim. */
@@ -284,6 +325,13 @@ class KeyedSweepRouteTest {
 
     private static Map<String, Object> body(Fx f, int rowLimit) {
         var m = new LinkedHashMap<String, Object>();
+        if (f.form() == Form.EXPIRE) {
+            m.put("quarantine_collection", f.quarantine());
+            m.put("origin_collection", f.origin());
+            m.put("cutoff", EXPIRE_CUTOFF);
+            m.put("row_limit", rowLimit);
+            return m;
+        }
         if (f.form() == Form.RESTORE) {
             m.put("quarantine_collection", f.quarantine());
             m.put("origin_collection", f.origin());
@@ -429,7 +477,13 @@ class KeyedSweepRouteTest {
         JsonNode firstBody = json(first, 200);
         assertThat(sqlCalls.get()).isEqualTo(1);
         assertThat(firstBody.get("row_limit").asInt()).isEqualTo(2);
-        assertThat(firstBody.get("remaining").asInt()).isEqualTo(3);
+        if (form == Form.EXPIRE) {
+            assertThat(firstBody.get("more").asBoolean()).as("3 of 5 eligible chashes are still there").isTrue();
+            assertThat(firstBody.get("floor_refused").asBoolean()).isFalse();
+            assertThat(firstBody.get("refused").asInt()).as("counted by default: no manifest row names any").isZero();
+        } else {
+            assertThat(firstBody.get("remaining").asInt()).isEqualTo(3);
+        }
         if (form == Form.FLOORED) {
             assertThat(firstBody.get("floor").get("given").asBoolean()).isTrue();
             assertThat(firstBody.get("refused").asBoolean()).isFalse();
@@ -512,17 +566,21 @@ class KeyedSweepRouteTest {
     // ── sweep_gate_busy: the two quarantine forms ────────────────────────────
 
     private Connection holdGate(Fx f) throws Exception {
+        return holdGateOn(f.gateKey());
+    }
+
+    private Connection holdGateOn(String collection) throws Exception {
         Connection holder = pg.createConnection("");
         holder.setAutoCommit(false);
         DSL.using(holder, SQLDialect.POSTGRES)
            .select(DSL.function("pg_advisory_xact_lock", Object.class,
-                   DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + TENANT + "/" + f.origin()))))
+                   DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + TENANT + "/" + collection))))
            .fetch();
         return holder;
     }
 
     @ParameterizedTest
-    @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED"})
+    @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED", "EXPIRE"})
     void aGateWaitThatTimesOutAnswers503SweepGateBusy_marksItsRowFailed_andATakeoverMeetingTheHeldGateAnswersTheSame(
             Form form) throws Exception {
         Fx f = fixture(form, 3);
@@ -547,12 +605,12 @@ class KeyedSweepRouteTest {
             holder.close();
         }
         HttpResponse<String> ok = sweep(f, 2, key);
-        assertThat(json(ok, 200).get("moved").asInt()).as("the gate released, the same key now runs").isEqualTo(2);
+        assertThat(json(ok, 200).get(form.movedKey).asInt()).as("the gate released, the same key now runs").isEqualTo(2);
         assertThat(status(key).get("state").asText()).isEqualTo("committed");
     }
 
     @ParameterizedTest
-    @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED"})
+    @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED", "EXPIRE"})
     void aRowLockTimeoutKeepsTodaysError_neverSweepGateBusy(Form form) throws Exception {
         Fx f = fixture(form, 3);
         String key = newKey();
@@ -560,7 +618,7 @@ class KeyedSweepRouteTest {
         holder.setAutoCommit(false);
         try {
             DSL.using(holder, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.METADATA, CHUNKS.METADATA)
-               .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(f.origin()))).execute();
+               .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(f.source()))).execute();
 
             HttpResponse<String> unkeyed = sweep(f, 2, null);
             HttpResponse<String> keyed = sweep(f, 2, key);
@@ -589,6 +647,19 @@ class KeyedSweepRouteTest {
         try {
             HttpResponse<String> r = sweep(f, 2, newKey());
             assertThat(json(r, 200).get("restored").asInt()).isEqualTo(2);
+        } finally {
+            holder.rollback();
+            holder.close();
+        }
+    }
+
+    @Test
+    void expireTakesTheSiblingsGateNotTheOrigins_aHeldOriginGateDoesNotBlockIt() throws Exception {
+        Fx f = fixture(Form.EXPIRE, 3);
+        Connection holder = holdGateOn(f.origin());
+        try {
+            HttpResponse<String> r = sweep(f, 2, newKey());
+            assertThat(json(r, 200).get("expired").asInt()).isEqualTo(2);
         } finally {
             holder.rollback();
             holder.close();
@@ -705,6 +776,15 @@ class KeyedSweepRouteTest {
                 m.put("reapable_count", got.get("reapable_count"));
                 m.put("total_count", got.get("total_count"));
                 m.put("floor", Map.of("given", true, "fraction", 1.0, "min_chunks", 1, "force", false));
+                expected = MAPPER.writeValueAsString(m);
+            }
+            case EXPIRE -> {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("expired", got.get("expired"));
+                m.put("refused", got.get("refused"));
+                m.put("more", got.get("more"));
+                m.put("row_limit", 2);
+                m.put("floor_refused", false);
                 expected = MAPPER.writeValueAsString(m);
             }
             default -> expected = MAPPER.writeValueAsString(Map.of(
@@ -1066,6 +1146,83 @@ class KeyedSweepRouteTest {
         assertThat(count(f.source())).as("nothing moved").isEqualTo(2);
     }
 
+    // ── expire-quarantine specifics (RDR-222 Amendment A1) ───────────────────
+
+    @Test
+    void anExpireRowLimitMustBeAPositiveInteger_andAnUnboundedCallKeepsItsExactBody() throws Exception {
+        Fx f = fixture(Form.EXPIRE, 3);
+        for (Object bad : new Object[] {0, -1, "5"}) {
+            var req = body(f, 2);
+            req.put("row_limit", bad);
+            HttpResponse<String> r = post(EXPIRE_PATH, req, null);
+            assertThat(r.statusCode()).as("row_limit=%s: %s", bad, r.body()).isEqualTo(400);
+        }
+        assertThat(count(f.source())).as("nothing ran").isEqualTo(3);
+
+        var unbounded = body(f, 2);
+        unbounded.remove("row_limit");
+        HttpResponse<String> r = post(EXPIRE_PATH, unbounded, null);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(MAPPER.readValue(r.body(), Map.class).keySet()).as("byte-compatible with the pre-A1 route")
+            .containsExactlyInAnyOrder("expired", "refused");
+        assertThat(count(f.source())).as("the unbounded form expired everything").isZero();
+    }
+
+    @Test
+    void anOversizedExpireRowLimitIsEchoedAsTheClampedFiveThousand() throws Exception {
+        Fx f = fixture(Form.EXPIRE, 3);
+
+        JsonNode b = json(sweep(f, 6_000, null), 200);
+
+        assertThat(b.get("row_limit").asInt()).as("the function clamps at 5,000 and the route echoes what applied")
+            .isEqualTo(5_000);
+        assertThat(b.get("expired").asInt()).isEqualTo(3);
+        assertThat(b.get("more").asBoolean()).isFalse();
+    }
+
+    @Test
+    void anUncountedRefusedIsJsonNullEndToEnd_storedReplayedAndReadFromTheStatusRoute() throws Exception {
+        Fx f = fixture(Form.EXPIRE, 4);
+        var req = body(f, 2);
+        // The inert floor both client callers send: with the route's own defaults (0.5 / 50) the function runs
+        // its floor scan, which answers refused whatever count_refused says.
+        req.put("floor_fraction", 1.0);
+        req.put("floor_min_chunks", 1);
+        req.put("count_refused", false);
+        String key = newKey();
+        repo.setAfterSweepSqlHookForTests(sqlCalls::incrementAndGet);
+        sqlCalls.set(0);
+
+        HttpResponse<String> first = post(EXPIRE_PATH, req, key);
+        JsonNode live = json(first, 200);
+        assertThat(live.has("refused")).as("the field is present").isTrue();
+        assertThat(live.get("refused").isNull()).as("and null, not 0: %s", first.body()).isTrue();
+        assertThat(live.get("expired").asInt()).isEqualTo(2);
+        assertThat(live.get("more").asBoolean()).isTrue();
+
+        HttpResponse<String> replay = post(EXPIRE_PATH, req, key);
+        assertThat(json(replay, 200)).isEqualTo(live);
+        assertThat(header(replay, "Idempotency-Replayed")).isEqualTo("true");
+        assertThat(sqlCalls.get()).as("the replay did not run the SQL function").isEqualTo(1);
+        JsonNode st = status(key);
+        assertThat(st.get("state").asText()).isEqualTo("committed");
+        assertThat(st.get("response").get("refused").isNull()).as("the stored copy carries the null").isTrue();
+    }
+
+    @Test
+    void aKeyWithoutRowLimitIsRefusedOnExpireAsOnTheUnboundedRestore() throws Exception {
+        Fx f = fixture(Form.EXPIRE, 2);
+        var unbounded = body(f, 2);
+        unbounded.remove("row_limit");
+        String key = newKey();
+
+        HttpResponse<String> r = post(EXPIRE_PATH, unbounded, key);
+
+        assertThat(json(r, 400).get("error").asText()).isEqualTo("idempotency_key_unsupported");
+        assertThat(ledgerRows(key)).isZero();
+        assertThat(count(f.source())).as("nothing ran").isEqualTo(2);
+    }
+
     // ── census: every route the guard lets a key through is wired to the keyed path ──
 
     @Test
@@ -1076,6 +1233,7 @@ class KeyedSweepRouteTest {
         Map<String, Fx> keyable = new LinkedHashMap<>();
         keyable.put(QUARANTINE_PATH, seedOrphans(Form.BOUNDED, 2, "t"));
         keyable.put(RESTORE_PATH, seedRestore(Form.RESTORE, 2));
+        keyable.put(EXPIRE_PATH, seedExpire(Form.EXPIRE, 2));
 
         var routes = dev.nexus.service.http.IdempotencyKeyGuard.KEYED_ROUTES;
         assertThat(routes).as("the census must see the guard's routes").isNotEmpty();

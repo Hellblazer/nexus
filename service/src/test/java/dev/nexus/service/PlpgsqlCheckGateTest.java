@@ -235,6 +235,20 @@ class PlpgsqlCheckGateTest {
         }
     }
 
+    /**
+     * RDR-222 Amendment A1 (nexus-1579m): {@code nexus.gc_expire_quarantine_bounded} is defined by vectors-035, not
+     * vectors-030, so the all-levels test above does not cover it and the test below checks it at {@code error}
+     * only. It is new code with no legacy lines to carry, so it is held to the stricter standard here: no finding
+     * at any level. It is not vacuous: its first run reported {@code v_rows bigint := 0} (an int literal into a
+     * bigint, a "target type is different type than source type" finding) in the body, which the body now avoids.
+     */
+    @Test
+    void gcExpireQuarantineBounded_hasNoFindingAtAnyLevel() throws Exception {
+        var mine = findings.stream().filter(f -> f.function().equals("gc_expire_quarantine_bounded"))
+            .map(PlpgsqlCheck.Finding::describe).toList();
+        assertThat(mine).as("plpgsql_check findings in nexus.gc_expire_quarantine_bounded (all_warnings on)").isEmpty();
+    }
+
     @Test
     void everyOtherLivePlpgsqlRoutineInNexus_hasNoFindingAtLevelError() throws Exception {
         var v030 = vectors030Functions();
