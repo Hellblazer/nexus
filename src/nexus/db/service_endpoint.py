@@ -443,9 +443,9 @@ def _supervisor_registered_for_login() -> bool:
     the start hint, so the worst case is one extra retry."""
     try:
         from nexus.commands.daemon import _service_autostart_unit_serves  # noqa: PLC0415 — deferred: CLI module, loaded only on the failure path
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import; module attribute so a setattr on nexus_config_dir reaches it
 
-        return _service_autostart_unit_serves(nexus_config_dir())
+        return _service_autostart_unit_serves(_config.nexus_config_dir())
     except Exception:  # noqa: BLE001 — the unit lookup must never replace the endpoint error
         return False
 
