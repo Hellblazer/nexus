@@ -50,17 +50,13 @@ nexus-7zhag doctrine). Otherwise exit 1 when any sampled document reads
 indeterminate check (a timeout, a permissions error, a deferred scheme) is
 not evidence of a real problem, only of an inconclusive one.
 
-**Residual limitation, user-facing** (round-2 critique, nexus-0ne1m/
-nexus-tb2yj, significant #S2): a server that mints a FRESH ``ETag`` on
-every response, with no stable ``Last-Modified`` either, makes the
-``https://`` comparison read 'stale' on EVERY run regardless of whether
-the underlying content ever changed. ``nx catalog backfill-etags`` does
-NOT fix this case — it only records another fresh ``ETag`` that will
-mismatch again on the very next check. There is no way from here to
-distinguish that host shape from a real content change; the operator's
-only recourse is to treat a document that reads 'stale' on every run
-against the SAME host as effectively 'unknown' rather than a real
-staleness signal.
+**A host with no stable validator** (round-2 critique, nexus-0ne1m/
+nexus-tb2yj, significant #S2; fixed by nexus-ltrjf): a server that mints a
+FRESH ``ETag`` on every response, with no ``Last-Modified``, used to read
+'stale' on EVERY run. ``nx catalog backfill-etags`` cannot fix that. The
+``https://`` stat now confirms an ETag mismatch with one more HEAD: an ETag
+that changes again while ``Content-Length`` holds is an unstable validator
+and reads 'unknown', which never fails this check.
 """
 from __future__ import annotations
 

@@ -1576,13 +1576,10 @@ def _strip_weak_etag_prefix(etag: str) -> str:
     """Strip a leading ``W/`` weak-validator prefix (RFC 7232 §2.3), so a
     weak and a strong ETag naming the same value compare equal.
 
-    Limitation named here rather than re-derived at each call site: a
-    server that mints a FRESH ETag on every response (no stable validator
-    at all — some dynamically-rendered pages do this) makes this
-    comparison read 'stale' on every check regardless of whether the
-    underlying content actually changed. Stripping ``W/`` narrows false
-    stale reports from the weak/strong distinction; it cannot fix a
-    server with no stable validator to compare in the first place.
+    Stripping ``W/`` narrows false stale reports from the weak/strong
+    distinction only. A server that mints a FRESH ETag on every response
+    (no stable validator at all) is caught by :func:`_stat_https_uri`'s
+    confirming HEAD instead (nexus-ltrjf).
     """
     return etag.removeprefix("W/") if etag else etag
 
@@ -1730,9 +1727,27 @@ def _stat_https_uri(
         # strips a leading W/ weak-validator prefix from BOTH sides first,
         # so W/"x" and "x" compare equal — the raw header value is still
         # what record_https_etag stores; only the COMPARISON normalises.
-        # See _strip_weak_etag_prefix's docstring for the residual
-        # limitation (a server minting a fresh ETag every response).
         is_stale = _strip_weak_etag_prefix(recorded_etag) != _strip_weak_etag_prefix(etag)
+        if is_stale:
+            # nexus-ltrjf: a host that mints a fresh ETag per response reads
+            # stale on every run. One confirming HEAD tells it apart: an ETag
+            # that changes again while Content-Length holds is no validator.
+            again = _confirm_head(uri, None if own_client else http_client)
+            if (
+                again is not None
+                and not again.headers.get("last-modified")
+                and (again_etag := again.headers.get("etag"))
+                and _strip_weak_etag_prefix(again_etag) != _strip_weak_etag_prefix(etag)
+                and again.headers.get("content-length") == response.headers.get("content-length")
+            ):
+                return StatFail(
+                    reason="error",
+                    detail=(
+                        f"HTTP {status} from {uri!r}: unstable validator, the ETag changed "
+                        f"between two consecutive HEADs ({etag!r}, {again_etag!r}) with the "
+                        "same Content-Length and no Last-Modified, so it cannot show a change"
+                    ),
+                )
         return StatOk(current_mtime=None, etag_stale=is_stale)
     return StatFail(
         reason="error",
@@ -1748,6 +1763,23 @@ def _stat_https_uri(
             )
         ),
     )
+
+
+def _confirm_head(uri: str, http_client: Any) -> Any:
+    """One more HEAD of *uri*, no retry: the 2xx/3xx response, else ``None``.
+    *http_client* ``None`` builds a short-lived client with the stat timeout."""
+    own_client = http_client is None
+    if own_client:
+        import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+    try:
+        response = http_client.head(uri)
+    except Exception:  # noqa: BLE001 — no confirmation; the caller keeps its first verdict
+        return None
+    finally:
+        if own_client:
+            http_client.close()
+    return response if response.status_code < 400 else None
 
 
 # ── https:// ETag capture at register/refresh time (nexus-0ne1m) ────────────
