@@ -499,10 +499,16 @@ class _ModeT3:
         )
         monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
         monkeypatch.setattr(client.__class__, "supports_per_collection_search", False)
+
+        def _no_stored_vectors(self, collection_name, ids, on_progress=None):
+            # The ranking these tests pin never needs stored vectors; the fetch fails and search
+            # logs it, as it did against the engine (nothing stored), without reaching storage.
+            raise RuntimeError("no stored vectors in this fixture")
+
+        monkeypatch.setattr(client.__class__, "get_embeddings", _no_stored_vectors)
         return client
 
 
-@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "mode, voyage_filtered, bge_filtered",
     [
@@ -524,7 +530,6 @@ def test_threshold_follows_the_collection_model_not_the_engine_mode(
     assert {"voy-near", "bge-near"} <= ids
 
 
-@pytest.mark.t2_tenant
 def test_an_explicit_threshold_override_still_applies_to_every_family(monkeypatch):
     t3 = _ModeT3.make(monkeypatch, "onnx-local")
     results = search_cross_corpus(
@@ -592,7 +597,6 @@ def test_threshold_for_collection_model_legacy_name_by_engine_kind() -> None:
     assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=False) is None
 
 
-@pytest.mark.t2_tenant
 @pytest.mark.parametrize(
     "mode, legacy_filtered",
     [
@@ -614,7 +618,6 @@ def test_legacy_name_threshold_by_engine_mode(monkeypatch, mode, legacy_filtered
     assert "bge-far" in ids
 
 
-@pytest.mark.t2_tenant
 def test_an_explicit_override_still_filters_a_legacy_name_on_a_dual_engine(monkeypatch):
     t3 = _legacy_t3(monkeypatch, "dual")
     results = search_cross_corpus("q", [LEGACY], 10, t3, threshold_override=0.5)
