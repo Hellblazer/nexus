@@ -146,6 +146,7 @@ def test_the_plugin_records_a_real_split_that_the_check_accepts(
     written = json.loads(target.read_text())
     assert set(written) == set().union(*ran) | {"tests/test_gone.py::test_kept"}, written
     assert written["tests/test_gone.py::test_kept"] == 7.0 and written["test_many.py::test_0"] < 99.0
+    assert all(round(v, 3) == v for v in written.values()), "rounded to the millisecond"
     assert all(isinstance(v, float) and v >= 0 for v in written.values())
 
 
@@ -216,7 +217,14 @@ def test_durations_are_written_only_from_a_whole_checked_run(tmp_path: Path) -> 
 
     _write(reports, 2, IDS, IDS[1::3])
     _durations(reports, 3, {})
-    assert sc.merge_durations(reports, 3)[0][0].startswith("group 3: 0 durations for 4 tests kept")
+    assert sc.merge_durations(reports, 3)[0][0].startswith("group 3: its 0 durations are not the 4 tests it kept")
+    _durations(reports, 3, {i: 2.5 for i in IDS[2::3][:-1] + [IDS[0]]})  # right count, one wrong id
+    assert sc.merge_durations(reports, 3)[0][0].startswith("group 3: its 4 durations are not the 4 tests it kept")
+    rec = json.loads((reports / "ddl-report-shard-3" / "nx-shard-collection-gw0.json").read_text())
+    (reports / "ddl-report-shard-3" / "nx-shard-collection-gw0.json").write_text(json.dumps({**rec, "run_attempt": "2"}))
+    _durations(reports, 3, {i: 2.5 for i in IDS[2::3]})
+    assert any("different run attempts" in p for p in sc.merge_durations(reports, 3)[0])
+    (reports / "ddl-report-shard-3" / "nx-shard-collection-gw0.json").write_text(json.dumps(rec))
     _durations(reports, 3, {i: 2.5 for i in IDS[2::3]})
     twin = reports / "ddl-report-shard-3-again"
     twin.mkdir()

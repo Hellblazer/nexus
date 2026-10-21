@@ -109,6 +109,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     full = sorted(kept + (batches[-1] if batches else []), key=lambda item: order.get(id(item), len(order)))
     rec = report((i.nodeid for i in full), (i.nodeid for i in kept), group, splits)
     rec["verified"] = _split_again(config, full, splits, group) == [i.nodeid for i in kept]
+    # Which attempt of the CI run this is; a refresh refuses to mix attempts (tests/_shard_collection.py).
+    rec["run_attempt"] = os.environ.get("GITHUB_RUN_ATTEMPT")
     # The worker id from xdist's own config, not PYTEST_XDIST_WORKER: a serial pytest started from an xdist
     # worker inherits that variable (PR #1615 run 39623937382 named a serial child gw1).
     worker = getattr(config, "workerinput", {}).get("workerid", "main")

@@ -117,6 +117,7 @@ def merge_durations(directory: Path, shards: int) -> tuple[list[str], dict[str, 
     problems: list[str] = []
     merged: dict[str, float] = {}
     groups: set[int] = set()
+    attempts: set[object] = set()
     for path in sorted(directory.rglob(DURATIONS_NAME)):
         siblings = sorted(path.parent.glob(REPORT_GLOB))
         try:
@@ -128,14 +129,18 @@ def merge_durations(directory: Path, shards: int) -> tuple[list[str], dict[str, 
         group = sibling.get("group")
         if group is None:
             problems.append(f"{path}: no collection report beside it names its group")
-        elif len(seconds) != sibling.get("selected"):
-            # A green shard times every test it kept; fewer means the file is not that run's.
-            problems.append(f"group {group}: {len(seconds)} durations for {sibling.get('selected')} tests kept ({path})")
+        elif digest(seconds) != (sibling.get("selected"), sibling.get("selected_xor")):
+            # A green shard times exactly the tests it kept; anything else is not that run's file.
+            problems.append(f"group {group}: its {len(seconds)} durations are not the {sibling.get('selected')} tests it kept ({path})")
         elif group in groups:
             problems.append(f"group {group}: more than one durations file ({path})")
         else:
             groups.add(group)
+            attempts.add(sibling.get("run_attempt"))
             merged.update(seconds)
+    if len(attempts) > 1:
+        # A re-run job ran alone on the host, so its timings are not on the other groups' scale.
+        problems.append(f"the groups come from different run attempts {sorted(map(str, attempts))}: take a run with no re-run job")
     missing = sorted(set(range(1, shards + 1)) - groups)
     if missing:
         problems.append(f"no durations from group(s) {missing}")
@@ -163,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     target: Path = args.write_durations
     current = json.loads(target.read_text()) if target.exists() else {}
-    current.update(merged)
+    current.update({k: round(v, 3) for k, v in merged.items()})
     target.write_text(json.dumps(current, sort_keys=True, indent=4))
     print(f"durations: {len(merged)} measured tests merged into {target} ({len(current)} entries)")
     return 0
