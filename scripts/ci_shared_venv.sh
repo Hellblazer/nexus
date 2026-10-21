@@ -262,12 +262,18 @@ print(max(0, int(time.time() - newest)))
 }
 
 hold_lock() {
+  # held is set only once the owner is written: release_lock removes a lock only when its owner
+  # names us, so a lock we made and could not write into is removed here, not left owner-less.
+  if ! touch -- "$lockdir/heartbeat" 2>/dev/null || ! printf '%s\n' "$me" > "$lockdir/owner" 2>/dev/null; then
+    remove_tree "$lockdir"
+    warn_fallback "cannot write into the build lock $lockdir"
+  fi
   held=1
-  touch -- "$lockdir/heartbeat" 2>/dev/null || warn_fallback "cannot write into the build lock $lockdir"
-  printf '%s\n' "$me" > "$lockdir/owner" 2>/dev/null || warn_fallback "cannot write into the build lock $lockdir"
   # The heartbeat loop dies with this script (kill -0 on its pid), so a SIGKILLed builder's lock
   # goes stale instead of being refreshed for ever. One-second sleeps: a killed loop leaves at most
-  # one behind.
+  # one behind. It stops only when the lock names another owner: a lock that is momentarily gone
+  # is a waiter's take_over_lock moving it aside to measure it, and the waiter puts a live lock
+  # back, which must go on being refreshed (nexus-6xlce).
   (
     n=0
     while kill -0 "$$" 2>/dev/null; do
@@ -275,8 +281,9 @@ hold_lock() {
       n=$((n + 1))
       if [ "$n" -ge "$hb_interval" ]; then
         n=0
-        [ "$(cat "$lockdir/owner" 2>/dev/null || true)" = "$me" ] || exit 0
-        touch -- "$lockdir/heartbeat" 2>/dev/null || exit 0
+        owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
+        [ -z "$owner" ] || [ "$owner" = "$me" ] || exit 0
+        [ -z "$owner" ] || touch -- "$lockdir/heartbeat" 2>/dev/null || true
       fi
     done
   ) </dev/null >/dev/null 2>&1 &
@@ -292,7 +299,8 @@ take_over_lock() {
   age="$(lock_age "$gone" 2>/dev/null || echo 0)"
   if [ "$age" -le "$dead_after" ]; then
     # We caught a lock that was refreshed or re-taken between our look and the move: put it back.
-    [ -e "$lockdir" ] || mv -- "$gone" "$lockdir" 2>/dev/null || true
+    # If a fresh lock took its place meanwhile, the one we hold is no one's any more: drop it.
+    if [ -e "$lockdir" ] || ! mv -- "$gone" "$lockdir" 2>/dev/null; then remove_tree "$gone"; fi
     return 0
   fi
   echo "::notice::build lock for $key is dead (no heartbeat for ${age}s, owner $owner); taking it over"
@@ -405,6 +413,10 @@ while :; do
     build_entry
   fi
   entry_complete || warn_fallback "entry $entry is not complete"
+  # The entry's identity as validated: the rename below moves it aside only if it is still that
+  # directory, never one another job republished in the meantime (nexus-6xlce).
+  ident="$("$py" -I -c 'import os, sys; s = os.stat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$entry" 2>/dev/null)" \
+    || ident=""
   # Before validating, so a concurrent prune sees a young entry.
   touch -- "$entry/last-used" 2>/dev/null || echo "::notice::could not touch $entry/last-used"
   if entry_healthy; then break; fi
@@ -412,9 +424,18 @@ while :; do
   attempt=2
   aside="$venvs/.gone.$key.$(date +%s)"
   echo "::warning::shared venv entry $key failed validation; moving it to ${aside##*/} and rebuilding once"
-  "$py" -I -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$entry" "$aside" 2>/dev/null \
-    || echo "::notice::could not move $entry aside (another job did?)"
-  touch -- "$aside" 2>/dev/null || true       # young, so the 12 h sweep leaves it to its readers
+  if "$py" -I -c '
+import os, sys
+entry, aside, ident = sys.argv[1:]
+s = os.stat(entry)
+if f"{s.st_dev}:{s.st_ino}" != ident:
+    sys.exit(3)
+os.rename(entry, aside)
+' "$entry" "$aside" "$ident" 2>/dev/null; then
+    touch -- "$aside" 2>/dev/null || true     # young, so the 12 h sweep leaves it to its readers
+  else
+    echo "::notice::did not move $entry aside: it was moved or replaced since it was validated"
+  fi
 done
 
 "$thin/bin/python" -I - "$thin" "$shared" "$entry/BUILD_PATH" "$purelib_rel" "$platlib_rel" <<'PY' || warn_fallback "cannot layer the shared site-packages"

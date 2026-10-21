@@ -537,6 +537,62 @@ def test_a_sigkilled_builder_goes_stale_and_the_next_job_takes_over(
     assert tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == [], "the ghost's tmp dir or lock survived"
 
 
+def test_the_heartbeat_outlives_a_lock_moved_aside_and_put_back(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """take_over_lock moves a lock aside to measure its age and puts a live one back. The holder's
+    heartbeat must keep refreshing the restored lock, or it goes stale in NX_SHARED_VENV_DEAD and a
+    second job builds; it stops only for a lock naming another owner (nexus-6xlce)."""
+    real_uv = shutil.which("uv")
+    assert real_uv
+    stop = tmp_path / "stop-the-fake-sync"
+    shim = _path_shim(tmp_path, "uv",
+                      'if [ "$1" = sync ]; then\n'
+                      f"  while [ ! -e {stop} ]; do sleep 0.2; done\n"
+                      "  exit 1\n"
+                      "fi\n"
+                      f'exec {real_uv} "$@"\n')
+    builder = Job(tmp_path, project_template, "builder", lab_root)
+    proc = _spawn(builder, {**builder.env, **shim})
+
+    def mtime(lock: Path) -> int:
+        return (lock / "heartbeat").stat().st_mtime_ns
+
+    try:
+        deadline = time.monotonic() + 120
+        locks: list[Path] = []
+        while time.monotonic() < deadline:
+            locks = [lk for lk in lock_dirs(lab_root) if (lk / "owner").exists() and (lk / "owner").read_text()]
+            if locks:
+                break
+            time.sleep(0.2)
+        assert locks, "the builder never took the lock"
+        [lock] = locks
+        aside = lock.with_name(".lock-dead.measuring")
+        lock.rename(aside)
+        time.sleep(2.5)                    # one-second beats: at least two find no lock
+        aside.rename(lock)
+        before = mtime(lock)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and mtime(lock) == before:
+            time.sleep(0.2)
+        assert mtime(lock) != before, "the heartbeat stopped while its lock was aside and never refreshed it again"
+        (lock / "owner").write_text("someone-else\n")
+        time.sleep(4)                      # the next beat sees the foreign owner and ends the loop
+        last = mtime(lock)
+        time.sleep(2.5)
+        assert mtime(lock) == last, "the heartbeat refreshed a lock that names another owner"
+    finally:
+        stop.touch()
+        try:
+            proc.communicate(timeout=120)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    assert proc.returncode == 0
+    assert (lock / "owner").read_text() == "someone-else\n", "release_lock removed a lock it does not own"
+
+
 def test_a_builder_that_loses_the_publish_race_uses_the_winner_and_cleans_up(
     tmp_path: Path, project_template: Path, lab_root: Path
 ) -> None:
@@ -823,6 +879,20 @@ def test_a_failing_mktemp_falls_back_and_never_touches_another_builders_dir(
     assert lock_dirs(lab_root) == [] and not job.thin.exists()
 
 
+def test_a_lock_it_cannot_write_into_is_removed_not_left_ownerless(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    """A lock made by mkdir whose heartbeat or owner write fails is this job's to remove: left
+    behind without an owner, release_lock would skip it and every other job wait it out (nexus-6xlce)."""
+    real_touch = shutil.which("touch")
+    assert real_touch
+    shim = _path_shim(tmp_path, "touch", 'case "$*" in */heartbeat) exit 1 ;; esac\n'
+                      f'exec {real_touch} "$@"\n')
+    res = job.run(env={**job.env, **shim})
+    _assert_fell_back_cleanly(job, res, lab_root)
+    assert "cannot write into the build lock" in res.stdout, res.stdout
+
+
 def test_a_failing_chmod_of_the_built_venv_falls_back_and_leaves_nothing(
     job: Job, lab_root: Path, tmp_path: Path
 ) -> None:
@@ -908,6 +978,38 @@ def test_an_entry_that_fails_validation_is_renamed_aside_once_and_rebuilt(
     [entry] = entries(lab_root)
     assert list((entry / "venv").rglob("*.dist-info")), "the rebuilt entry has no dependencies"
     assert _build_count([res.stdout]) == 1
+
+
+def test_an_entry_replaced_after_validation_is_not_moved_aside(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """Another job moved the unhealthy entry aside and republished a healthy one between this job's
+    validation and its rename. A `date` shim (the aside name is taken right before the rename) makes
+    that swap; the rename must leave the new entry alone, and the job use it unbuilt (nexus-6xlce)."""
+    key, hidden = _prime(tmp_path, project_template, lab_root)
+    venvs = _venvs(lab_root)
+    entry = venvs / key
+    subprocess.run(["cp", "-a", str(hidden), str(entry)], check=True, env=_clean_env())
+    _unhealthy(entry)
+    real_date = shutil.which("date")
+    assert real_date
+    marker = tmp_path / "swapped"
+    other_aside = venvs / f".gone.{key}.other-job"
+    shim = _path_shim(tmp_path, "date",
+                      f'if [ "$1" = +%s ] && [ ! -e {marker} ]; then\n'
+                      f"  : > {marker}\n"
+                      f"  mv {entry} {other_aside} && mv {hidden} {entry} || exit 99\n"
+                      "fi\n"
+                      f'exec {real_date} "$@"\n')
+    job = Job(tmp_path, project_template, "job", lab_root)
+    res = job.run(env={**job.env, **shim})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert marker.exists(), "the shim never swapped the entry"
+    assert "failed validation" in res.stdout, res.stdout
+    assert _build_count([res.stdout]) == 0, res.stdout
+    assert job.used and job.outputs["key"] == key
+    assert entries(lab_root) == [entry] and list((entry / "venv").rglob("*.dist-info"))
+    assert _dots(lab_root, f".gone.{key}.") == [other_aside], "the republished entry was moved aside"
 
 
 def test_an_entry_that_is_unhealthy_after_its_rebuild_falls_back_instead_of_looping(
