@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.83.0] - 2026-10-21
+
+Plugin version aligned with conexus 7.83.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
+
+- **Subagent git-state integrity check, report only** (nexus-i93tz). A new routing hook snapshots the project repository's shared git state (config, hooks, `info/*`, `HEAD` and the checked-out branch) before a subagent's Bash call and diffs it after. A change is reported to the subagent, the user and the orchestrator's next Bash call; branch-tracking keys and `HEAD` movement are logged only. The per-call Bash hook count is now 4, the RDR-121 cap.
+- **Subagent git-write guard** (nexus-7mgnd, nexus-0l6zh, nexus-gvg6t, nexus-dsr6a, nexus-13wz1, nexus-k66o5). Read-only `git merge-base` and `merge-tree` shapes pass; `git config` writes, verbs that write `.git/config` as a side effect, unsafe `help.autocorrect` settings and brace-expanded verbs are denied in a shared checkout.
+- **Stdlib MCP servers share one stdio loop and survive hostile input** (nexus-rwv5i, nexus-ing7a). `launch/_stdio_loop.py` is new; sequential-thinking and the setup stand-in decode each line as strict UTF-8, answer a bad line with a parse error and a null id, and report an unexpected handler error as `-32603`.
+- **Descriptions without angle brackets** (nexus-0nskc). Five skill, agent and command descriptions drop angle-bracket placeholders, which Claude Desktop's plugin sync rejects.
+- **Setup and lockstep** (nexus-36qyh, nexus-0ky29, nexus-ehg1y). A missing git no longer fails setup, and only after `nx doctor`'s sweep finished; the lockstep hook's behaviour with a missing or stale marker is documented.
+- **Endpoint userinfo refused** (nexus-ujbf8). The plugin's endpoint resolver, the routing telemetry and the mailbox drain refuse a `service_url` carrying `user:password@`, as the CLI does.
+- **Docs** (nexus-6g218, nexus-y67n5, nexus-mcfaj, nexus-nt76j). The upgrade skill's 6.18.1-against-managed and RDR-192 census wording; what a hook `ask` does with no human present; `ERROR_HANDLING.md` no longer names the retired `HttpVectorClient.put`.
+
 ## [7.82.0] - 2026-10-17
 
 Plugin version aligned with conexus 7.82.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied):
