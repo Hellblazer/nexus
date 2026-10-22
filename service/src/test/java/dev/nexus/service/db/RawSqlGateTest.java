@@ -368,6 +368,12 @@ class RawSqlGateTest {
                 ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1,
                 ".prepareStatement( \"SELECT NOT convalidated FROM pg_constraint WHERE conname = ?\")", 1,
                 ".prepareStatement( \"SELECT COUNT(*) FROM nexus.\" + table + \" WHERE length(chash) != 32\")", 1))),
+        Map.entry("WalkLockPreflight.java", Map.of(
+            // nexus-vxmcl: the lock preflight counts the walk's tenants with FORCE ROW LEVEL SECURITY off on
+            // nexus.chunks and nexus.taxonomy_centroids, in a transaction it rolls back. The toggle is DDL with
+            // no jOOQ typed-DSL form, the same category as preflightChashConstraints above.
+            "tenants", Map.of(
+                ".execute(\"ALTER TABLE nexus.\" + table + \" NO FORCE ROW LEVEL SECURITY\")", 1))),
         // SchemaMigrator.java's "migrate" entry: REMOVED (nexus-zrcj7 step 4 critic
         // follow-up, T2 [24242]). The SET TIME ZONE 'UTC' statement is retired onto
         // its Postgres-documented equivalent, set_config('TimeZone', 'UTC', false),

@@ -29,6 +29,7 @@ P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-0
 SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk back to a tag and re-walks, asserting what each rollback leaves
 SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
 SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks
+WalkLockPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's lock-capacity preflight and the walk's own lock count, both only while vectors-030-1 is still pending
 P225DiskPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's disk preflight, which fires only while vectors-030-1 is still pending
 GrantsNexusDiagViewAccessIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and connects as it to prove the grants a full walk gives it
 Taxonomy011ForeignOwnedDiagViewTest	startEmptyDatabase	OWNERSHIP	replays taxonomy-011-1 against a pre-existing foreign-owned view, a state only a database before the walk can hold

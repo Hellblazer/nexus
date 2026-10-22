@@ -84,11 +84,14 @@ started this work were addressed by RDR-227's per-collection indexes.
 
 4. **The lock table bounds tenants per migration.** A walk that creates
    leaves for many tenants in one transaction holds relation locks per leaf to
-   the commit: about 27 measured on 2026-10-06, 30.6 in the cloud walk (979
-   locks for 32 leaves). With four models and two parents a tenant is about
-   245 locks, so the default lock table (`max_locks_per_transaction` 64 x 100
-   connections) covers about 26 tenants. The local walk has no lock-capacity
-   check and was never run populated at 768 dimensions (nexus-vxmcl). Found while measuring tenant creation
+   the commit. The first figures (27 per leaf on 2026-10-06, 30.6 in the cloud
+   walk's 979 locks for 32 leaves) divided a fixed part in too: walks counted
+   end to end fit about 18.5 per leaf, about 80 per model and about 60 fixed,
+   so at four models and two parents the default lock table
+   (`max_locks_per_transaction` 64 x 100 connections) covers about 39 tenants.
+   The engine now refuses to start the walk past its lock table, and a
+   populated 768-dimension local walk (100k chunks) ran in 135 s
+   (nexus-vxmcl). Found while measuring tenant creation
    (TS1), not in the design.
    *Drift class: missing failure mode.*
 

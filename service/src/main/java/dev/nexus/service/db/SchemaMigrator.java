@@ -539,6 +539,8 @@ public final class SchemaMigrator {
             // RDR-225 P1.4 (nexus-3wh8d.9): refuse early, naming the shortfall, rather than fill the disk mid-walk.
             // A refusal is a MigrationException, so Main exits non-zero exactly as for a failed walk.
             LocalDiskPreflight.check(conn, dataDirFreeBytes);
+            // nexus-vxmcl: the same for the shared lock table, which the walk's one transaction fills with leaf locks.
+            WalkLockPreflight.check(conn);
 
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));
