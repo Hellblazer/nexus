@@ -4,9 +4,13 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.db.CatalogRepository.CollectionScopedTable;
 import dev.nexus.service.db.CatalogRepository.CrossModelDisposition;
+import dev.nexus.service.jooq.nexus.Nexus;
+import org.jooq.Field;
+import org.jooq.Table;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -77,10 +81,23 @@ class CrossModelDispositionParityTest {
                 CatalogRepository.CROSS_MODEL_DISPOSITIONS, outside))
             .as("a CROSS_MODEL_DISPOSITIONS line for a table that is no longer registered")
             .isEmpty();
-        assertThat(staleDispositions(CatalogRepository.COLLECTION_SCOPED_TABLES,
-                CatalogRepository.CROSS_MODEL_DISPOSITIONS_OUTSIDE_REGISTRY, outside))
-            .as("the outside-the-registry entries are the documented exclusions only")
-            .isEmpty();
+        // The previous third assertion here ran staleDispositions over OUTSIDE_REGISTRY with that same map's
+        // own key set as the known set, so it could not fail; it is removed. This one compares against an
+        // independent source, the jOOQ schema generated from the migrations: every outside-the-registry
+        // entry must name a table that exists and carries a collection-named column. It does not compare
+        // against the Python _DOCUMENTED_EXCLUSIONS (a different language; the hand-kept agreement of the
+        // two lists is not checked by this class).
+        Set<String> schemaTables = new TreeSet<>();
+        for (Table<?> t : Nexus.NEXUS.getTables()) schemaTables.add(t.getName());
+        for (String key : outside) {
+            assertThat(schemaTables).as("outside-the-registry entry '" + key + "' names a table in the schema")
+                .contains(key);
+            Table<?> table = Nexus.NEXUS.getTables().stream().filter(t -> t.getName().equals(key)).findFirst().orElseThrow();
+            assertThat(Arrays.stream(table.fields()).map(Field::getName).toList())
+                .as("outside-the-registry table '" + key + "' has a collection-named column")
+                .anyMatch(n -> n.contains("collection"));
+        }
+        assertThat(outside).as("non-vacuity: the outside-the-registry list is not empty").isNotEmpty();
     }
 
     @Test

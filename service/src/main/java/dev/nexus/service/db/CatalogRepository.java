@@ -4825,6 +4825,41 @@ public final class CatalogRepository {
             }
             expectedChashes = Map.copyOf(copy);
         }
+
+        /**
+         * A caller bug, not a client race: the rows the caller supplies for a document must be exactly
+         * the chashes it says it read, in position order, since the move writes those rows and the
+         * precondition then compares the CURRENT manifest to the same list. A document with no entry, or
+         * rows that disagree with its entry, is refused before anything is embedded or written.
+         */
+        @SuppressWarnings("unchecked")
+        void requireRowsMatchExpected(List<Map<String, Object>> docs) {
+            if (docs == null) return;
+            for (Map<String, Object> d : docs) {
+                String docId = s(d, "doc_id");
+                List<String> want = expectedChashes.get(docId);
+                if (want == null) {
+                    throw new IllegalArgumentException("move precondition missing for document: " + docId);
+                }
+                List<Map<String, Object>> rows = d.get("rows") instanceof List<?> l
+                    ? (List<Map<String, Object>>) l : List.of();
+                List<Map<String, Object>> byPosition = new ArrayList<>(rows);
+                for (Map<String, Object> r : byPosition) {
+                    if (i(r, "position") == null || s(r, "chash") == null) {
+                        throw new IllegalArgumentException("move rows for " + docId
+                            + " need a position and a chash on every row");
+                    }
+                }
+                byPosition.sort(java.util.Comparator.comparingInt(r -> i(r, "position")));
+                List<String> have = new ArrayList<>(byPosition.size());
+                for (Map<String, Object> r : byPosition) have.add(s(r, "chash").toLowerCase(java.util.Locale.ROOT));
+                if (!want.equals(have)) {
+                    throw new IllegalArgumentException("move rows for " + docId
+                        + " do not match the chashes the caller read (" + have.size() + " rows, "
+                        + want.size() + " expected)");
+                }
+            }
+        }
     }
 
     /**
@@ -4926,6 +4961,34 @@ public final class CatalogRepository {
     /** Test-only: install (or clear with {@code null}) the previous-manifest read hook. */
     public void setBeforeReadHookForTests(java.util.function.Consumer<String> hook) {
         this.beforeReadHookForTests = hook;
+    }
+
+    /**
+     * Test-only seam (RDR-210 Phase 6 Step 1): invoked with the doc id of a document MOVE immediately
+     * after {@link #requireMovePrecondition} returned, inside the still-open transaction. Placed at the
+     * precondition itself (not at the later previous-manifest read) so a test can start a competing
+     * writer at exactly the point the precondition was decided and see whether it is held out by the
+     * document's write locks; moving the precondition above {@link #acquireIndexRunLock} puts this
+     * call before the lock too. Null (a no-op) in production, and only ever called for a move.
+     */
+    private volatile java.util.function.Consumer<String> afterMovePreconditionHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the after-move-precondition hook. */
+    public void setAfterMovePreconditionHookForTests(java.util.function.Consumer<String> hook) {
+        this.afterMovePreconditionHookForTests = hook;
+    }
+
+    /**
+     * Test-only seam (RDR-210 Phase 6 Step 1): invoked with the doc id of a document MOVE after {@link
+     * #completeMove} (which sets {@code physical_collection} first, then re-homes the satellites), still
+     * inside the transaction, so a test can throw from it and assert the whole document rolled back.
+     * Null (a no-op) in production.
+     */
+    private volatile java.util.function.Consumer<String> afterMoveCompletedHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the after-move-completed hook. */
+    public void setAfterMoveCompletedHookForTests(java.util.function.Consumer<String> hook) {
+        this.afterMoveCompletedHookForTests = hook;
     }
 
     /**
@@ -5771,6 +5834,9 @@ public final class CatalogRepository {
         if (move != null && move.sourceCollection().equals(collection)) {
             throw new IllegalArgumentException("a document move needs a target other than its source collection");
         }
+        if (move != null) {
+            move.requireRowsMatchExpected(docs);
+        }
         refuseRowsUnderSupersededCollection(tenant, collection, docs);
         // nexus-h6d89: write_manifest_many_timing — the manifest-write twin
         // of register_many_timing (line ~1469). tMethodStart/tMethodEnd
@@ -5882,6 +5948,8 @@ public final class CatalogRepository {
                         // committed before them is seen and one that comes after waits for this commit.
                         if (move != null) {
                             requireMovePrecondition(ctx, tenant, docId, move);
+                            java.util.function.Consumer<String> afterPrecondition = afterMovePreconditionHookForTests;
+                            if (afterPrecondition != null) afterPrecondition.accept(docId);
                         }
                         // nexus-eslkl: the sweep's "before" read MUST happen before
                         // writeManifestRows deletes doc_id's current rows below —
@@ -5933,6 +6001,8 @@ public final class CatalogRepository {
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
+                                java.util.function.Consumer<String> afterCompleted = afterMoveCompletedHookForTests;
+                                if (afterCompleted != null) afterCompleted.accept(docId);
                             }
                             if (beforeReadFailed) {
                                 // Nothing to compute — the before-read itself is what
@@ -7154,6 +7224,12 @@ public final class CatalogRepository {
      */
     public int purgeManifest(String tenant, String docId) {
         return manifestWriteTxn(tenant, "catalog.purgeManifest", ctx -> {
+            // RDR-210 Phase 6 Step 1: a manifest writer takes the document's index-run lock like the
+            // others. Without it a purge that commits between a document MOVE's precondition and its
+            // manifest INSERT is undone: the move deletes nothing, writes the target rows, and the
+            // purged document is back. No sweep gate: a purge names no collection (it deletes the
+            // document's rows whichever collection they name), and the gate is per collection.
+            acquireIndexRunLock(ctx, tenant, docId);
             int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
             // nexus-eldyi: guarded, fail loud. *deleted* counts
@@ -11525,10 +11601,14 @@ public final class CatalogRepository {
             requireDocumentExists(ctx, tenant, docId);
             // nexus-11gh6 rev 2 §2.2: gate BEFORE the insert loop below —
             // one acquisition per transaction is enough (pg_advisory_xact_lock_shared
-            // is re-entrant within a transaction; this ETL leg has no
-            // acquireIndexRunLock call to order against). ONE collection for
+            // is re-entrant within a transaction; the index-run lock follows it
+            // below, as in writeManifestRows). ONE collection for
             // the whole call now (RDR-191).
             acquireSweepGateShared(ctx, tenant, collection);
+            // RDR-210 Phase 6 Step 1: this leg writes manifest rows (UPSERT_IMPORT), so it takes the
+            // document's index-run lock after the gate, in writeManifestRows's order; a document move
+            // for the same document then either precedes it or waits for it.
+            acquireIndexRunLock(ctx, tenant, docId);
 
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -11548,6 +11628,7 @@ public final class CatalogRepository {
                                 Map<String, Object> row) {
         requireDocumentExists(ctx, tenant, docId);
         acquireSweepGateShared(ctx, tenant, collection);
+        acquireIndexRunLock(ctx, tenant, docId);
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
     }
 

@@ -289,13 +289,20 @@ public final class CombinedWriteService {
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, List<String>> expectedChashes) {
         requireModelSiblings(tenant, sourceCollection, targetCollection);
+        CatalogRepository.DocumentMove move = new CatalogRepository.DocumentMove(sourceCollection, expectedChashes);
+        // a caller bug is refused before anything is embedded or written
+        move.requireRowsMatchExpected(docs);
         ResolvedBatch batch = resolveChunks(tenant, targetCollection, chunks, false, MetadataMode.REPLACE);
         Map<String, Object> response = catalogRepo.writeManifestMany(tenant, docs, targetCollection, null, false,
-            batch.resolved(), new CatalogRepository.DocumentMove(sourceCollection, expectedChashes));
+            batch.resolved(), move);
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
         return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    private static boolean isUnset(String v) {
+        return v == null || v.isBlank();
     }
 
     /** A move goes between model siblings only: same content type and owner, a different embedding model. */
@@ -305,7 +312,10 @@ public final class CombinedWriteService {
         }
         CollectionRow from = CollectionRegistry.lookup(tenantScope, tenant, source);
         CollectionRow to = CollectionRegistry.lookup(tenantScope, tenant, target);
-        if (!Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
+        // Null (or blank) content type or owner on either side is no sibling: two nulls are equal to
+        // Objects.equals, and a move between collections whose owner nobody knows is not a model move.
+        if (isUnset(from.contentType()) || isUnset(from.ownerId()) || isUnset(to.contentType()) || isUnset(to.ownerId())
+                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
                 || Objects.equals(from.embeddingModel(), to.embeddingModel())) {
             throw new IllegalArgumentException("a document move goes between model siblings: " + source
                 + " and " + target + " are not the same content type and owner under different models");

@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedResult;
@@ -32,7 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
@@ -43,6 +51,7 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * RDR-210 Phase 6 Step 1 (bead nexus-0khi2): the engine-internal per-document MOVE into the model
@@ -420,10 +429,25 @@ class DocumentMoveTest {
         // such a row cannot be written, and the move matches by doc_id alone. If this ever stops failing,
         // the move needs the path arm (and a test that seeds it).
         Fx fx = pair("nodocless");
+        // '' fails the composite foreign key (23503). NULL would pass a MATCH SIMPLE foreign key, so it is
+        // the NOT NULL half (23502) that keeps it out: pinned separately.
         assertThatThrownBy(() -> seedAspect(fx.src(), "", "p/orphan.md", "v1"))
             .hasMessageContaining("violates foreign key constraint");
         assertThatThrownBy(() -> seedQueue(fx.src(), "", "p/orphan.md", "pending"))
             .hasMessageContaining("violates foreign key constraint");
+        assertThat(sqlState(catchThrowable(() -> seedAspect(fx.src(), "", "p/orphan.md", "v1")))).isEqualTo("23503");
+        assertThat(sqlState(catchThrowable(() -> seedQueue(fx.src(), "", "p/orphan.md", "pending")))).isEqualTo("23503");
+        assertThat(sqlState(catchThrowable(() -> seedAspect(fx.src(), null, "p/orphan.md", "v1"))))
+            .as("NULL doc_id on document_aspects: not_null_violation").isEqualTo("23502");
+        assertThat(sqlState(catchThrowable(() -> seedQueue(fx.src(), null, "p/orphan.md", "pending"))))
+            .as("NULL doc_id on aspect_extraction_queue: not_null_violation").isEqualTo("23502");
+    }
+
+    static String sqlState(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se) return se.getSQLState();
+        }
+        return null;
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
@@ -591,10 +615,10 @@ class DocumentMoveTest {
     @Test
     void clientWriteBackIntoTheSource_barManifestWriteLeavesPhysicalCollectionOnTheTarget_nextPassMovesAgain() {
         // RDR-210 :927-930 inferred, not read: whether a client write into the source also sets
-        // physical_collection back. Read and measured here: the manifest write (writeManyCombined, the
-        // path a client takes for a document it already registered) does NOT; it replaces the manifest
-        // rows and folds chunk_count and nothing else. So the two disagree until something registers
-        // the document again (next test) or the job moves it.
+        // physical_collection back. Read in CatalogRepository.writeManifestRows: the manifest write
+        // (writeManyCombined, the path a client takes for a document it already registered) does NOT; it
+        // replaces the manifest rows and folds chunk_count and nothing else. This test pins that. So the
+        // two disagree until something registers the document again (next test) or the job moves it.
         Fx fx = pair("writeback");
         String doc = seedDocs(fx, 1, 3).get(0);
         assertThat(failedIds(move(fx, List.of(doc)))).isEmpty();
@@ -603,7 +627,7 @@ class DocumentMoveTest {
         clientWrite(fx.src(), doc, docTexts.get(doc));
 
         assertThat(manifestCollections(doc)).as("the manifest moved back").containsExactly(fx.src());
-        assertThat(physical(doc)).as("MEASURED: the bare manifest write leaves physical_collection on the target")
+        assertThat(physical(doc)).as("pinned: the bare manifest write leaves physical_collection on the target")
             .isEqualTo(fx.tgt());
 
         Map<String, Object> next = move(fx, List.of(doc));
@@ -678,5 +702,305 @@ class DocumentMoveTest {
             ids.add((String) row.get("id"));
         }
         return ids;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // lock ordering: the precondition is decided under the document's write locks
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /** What happened to a writer started from inside a move, at the point the move had decided its precondition. */
+    record Concurrent(Map<String, Object> moveResponse, boolean sawWaiter, boolean doneInsideTheMove, Future<?> future) {}
+
+    /**
+     * Runs the move of {@code doc} and, from the seam that fires right after the move's precondition was
+     * decided (still inside the move's transaction), starts {@code concurrent} on another thread. The
+     * move waits there, with a bounded poll of pg_locks, until the other thread shows up as a waiter on an
+     * advisory lock or finishes; then it carries on and commits. The caller joins {@code future()}.
+     */
+    Concurrent moveWith(Fx fx, String doc, Runnable concurrent) {
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        AtomicReference<Future<?>> started = new AtomicReference<>();
+        AtomicBoolean sawWaiter = new AtomicBoolean();
+        AtomicBoolean doneInside = new AtomicBoolean();
+        Plan plan = readPlan(fx, List.of(doc));
+        catalog.setAfterMovePreconditionHookForTests(id -> {
+            if (!id.equals(doc)) return;
+            Future<?> f = pool.submit(concurrent);
+            started.set(f);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            try (Connection probe = pg.createConnection("")) {
+                var probeCtx = DSL.using(probe, SQLDialect.POSTGRES);
+                while (!f.isDone() && System.nanoTime() < deadline) {
+                    if (PgCatalogProbes.advisoryLockWaiters(probeCtx) > 0) {
+                        sawWaiter.set(true);
+                        break;
+                    }
+                    Thread.sleep(20); // polling an observable state under a deadline, not a sync
+                }
+            } catch (java.sql.SQLException | InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            doneInside.set(f.isDone());
+        });
+        Map<String, Object> response;
+        try {
+            response = execute(fx, plan);
+        } finally {
+            catalog.setAfterMovePreconditionHookForTests(null);
+            pool.shutdown();
+        }
+        return new Concurrent(response, sawWaiter.get(), doneInside.get(), started.get());
+    }
+
+    @Test
+    void clientManifestWriteDuringAMove_waitsOnTheIndexRunLock_untilTheMoveCommits() throws Exception {
+        // The seam fires right after requireMovePrecondition returned. A client manifest write of the same
+        // document started there must be held out by the move's index-run lock (it is the only advisory
+        // lock an exclusive holder contends on), and must run after the move commits. Were the
+        // precondition moved above acquireIndexRunLock, the seam would fire before the move held the lock
+        // (it is placed at the precondition, not at the later read), the write would complete inside the
+        // move, and sawWaiter / doneInsideTheMove below would flip: that is the failure this test pins.
+        Fx fx = pair("lockorder");
+        String doc = seedDocs(fx, 1, 2).get(0);
+        List<String> original = List.copyOf(docTexts.get(doc));
+        List<String> client = List.of("client rewrite one " + fx.tag(), "client rewrite two " + fx.tag());
+
+        Concurrent c = moveWith(fx, doc, () -> clientWrite(fx.src(), doc, client));
+
+        assertThat(c.sawWaiter()).as("the client write is parked on the index-run lock while the move is open").isTrue();
+        assertThat(c.doneInsideTheMove()).as("the client write did not complete before the move committed").isFalse();
+        assertThat(failedIds(c.moveResponse())).isEmpty();
+        assertThat(c.moveResponse().get("docs")).isEqualTo(1);
+        c.future().get(30, TimeUnit.SECONDS);
+        // the move committed first (the original chunks are in the target), the client wrote after it
+        for (String t : original) assertThat(chunkIn(fx.tgt(), ch(t))).isTrue();
+        assertThat(catalog.getManifest(TENANT, doc).stream().map(m -> (String) m.get("chash")).toList())
+            .containsExactlyElementsOf(client.stream().map(DocumentMoveTest::ch).toList());
+        assertThat(manifestCollections(doc)).containsExactly(fx.src());
+        assertThat(physical(doc)).as("the bare manifest write leaves physical_collection on the target").isEqualTo(fx.tgt());
+        // consistent: the next pass reads the client's rows and moves them
+        assertThat(failedIds(move(fx, List.of(doc)))).isEmpty();
+        assertThat(manifestCollections(doc)).containsExactly(fx.tgt());
+        assertThat(catalog.getManifest(TENANT, doc).stream().map(m -> (String) m.get("chash")).toList())
+            .containsExactlyElementsOf(client.stream().map(DocumentMoveTest::ch).toList());
+        assertThat(physical(doc)).isEqualTo(fx.tgt());
+    }
+
+    @Test
+    void purgeDuringAMove_waitsForTheMove_andPurgesWhatTheMoveWrote_nothingIsResurrected() throws Exception {
+        // purgeManifest takes the document's index-run lock. Started at the seam, it waits for the move to
+        // commit and then purges the rows the move wrote (the target's). Without the lock it would delete
+        // the SOURCE rows and commit inside the move's window, and the move would then write the target
+        // rows over the purge: manifestRows would be 2 and chunk_count 2, not 0.
+        Fx fx = pair("purge");
+        String doc = seedDocs(fx, 1, 2).get(0);
+
+        Concurrent c = moveWith(fx, doc, () -> catalog.purgeManifest(TENANT, doc));
+
+        assertThat(c.sawWaiter()).as("the purge is parked on the index-run lock while the move is open").isTrue();
+        assertThat(c.doneInsideTheMove()).isFalse();
+        assertThat(failedIds(c.moveResponse())).isEmpty();
+        c.future().get(30, TimeUnit.SECONDS);
+        assertThat(manifestRows(doc)).as("the purge ran after the move and removed the rows it wrote").isZero();
+        assertThat(manifestCollections(doc)).isEmpty();
+        assertThat(physical(doc)).isEqualTo(fx.tgt());
+        Integer folded = su(ctx -> ctx.select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+            .fetchOne(CATALOG_DOCUMENTS.CHUNK_COUNT));
+        assertThat(folded).as("chunk_count folded to 0 by the purge").isEqualTo(0);
+    }
+
+    @Test
+    void importChunksBatchDuringAMove_waitsForTheMove() throws Exception {
+        // importChunk / importChunksBatch write manifest rows (UPSERT_IMPORT), so they take the same lock.
+        // The row re-points position 0 at the SOURCE chunk (still there: the source's chunks are LEAVE);
+        // after the move that is the ETL leg's convergent upsert, and it lands after the move, not inside it.
+        Fx fx = pair("importbatch");
+        String doc = seedDocs(fx, 1, 2).get(0);
+        String first = ch(docTexts.get(doc).get(0));
+
+        Concurrent c = moveWith(fx, doc, () -> catalog.importChunksBatch(TENANT, doc, fx.src(),
+            List.of(Map.of("position", 0, "chash", first, "chunk_index", 0))));
+
+        assertThat(c.sawWaiter()).isTrue();
+        assertThat(c.doneInsideTheMove()).isFalse();
+        assertThat(failedIds(c.moveResponse())).isEmpty();
+        c.future().get(30, TimeUnit.SECONDS);
+        assertThat(catalog.getManifest(TENANT, doc).stream().map(m -> (String) m.get("collection")).toList())
+            .containsExactly(fx.src(), fx.tgt());
+    }
+
+    @Test
+    void importChunkDuringAMove_waitsForTheMove() throws Exception {
+        Fx fx = pair("importone");
+        String doc = seedDocs(fx, 1, 2).get(0);
+        String first = ch(docTexts.get(doc).get(0));
+
+        Concurrent c = moveWith(fx, doc, () -> catalog.importChunk(TENANT, doc, fx.src(),
+            Map.of("position", 0, "chash", first, "chunk_index", 0)));
+
+        assertThat(c.sawWaiter()).isTrue();
+        assertThat(c.doneInsideTheMove()).isFalse();
+        assertThat(failedIds(c.moveResponse())).isEmpty();
+        c.future().get(30, TimeUnit.SECONDS);
+        assertThat(catalog.getManifest(TENANT, doc).stream().map(m -> (String) m.get("collection")).toList())
+            .containsExactly(fx.src(), fx.tgt());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // the rows the caller supplies are the chashes it says it read
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void suppliedRowsThatDisagreeWithExpectedChashes_areRefusedAsACallerBug_nothingEmbeddedOrWritten() {
+        Fx fx = pair("rowsmismatch");
+        String doc = seedDocs(fx, 1, 3).get(0);
+        Plan plan = readPlan(fx, List.of(doc));
+        List<String> order = plan.expected().get(doc);
+        int embedBefore = tgtEmbed.calls.get();
+
+        List<String> reversed = new ArrayList<>(order);
+        java.util.Collections.reverse(reversed);
+        for (Map<String, List<String>> bad : List.of(
+                Map.of(doc, reversed),
+                Map.of(doc, order.subList(0, 2)),
+                Map.<String, List<String>>of())) {
+            assertThatThrownBy(() -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), plan.chunks(), plan.docs(), bad))
+                .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThat(tgtEmbed.calls.get()).as("nothing was embedded").isEqualTo(embedBefore);
+        assertThat(chunkCount(fx.tgt())).isZero();
+        assertThat(physical(doc)).isEqualTo(fx.src());
+        assertThat(manifestCollections(doc)).containsExactly(fx.src());
+
+        // the rows may arrive in any list order: they are compared and written by position
+        List<Map<String, Object>> shuffled = new ArrayList<>(((List<?>) plan.docs().get(0).get("rows")).stream()
+            .map(o -> {
+                @SuppressWarnings("unchecked") Map<String, Object> m = (Map<String, Object>) o;
+                return m;
+            }).toList());
+        java.util.Collections.reverse(shuffled);
+        Plan reordered = new Plan(plan.chunks(), List.of(Map.of("doc_id", doc, "rows", shuffled)), plan.expected());
+        assertThat(failedIds(execute(fx, reordered))).isEmpty();
+        assertThat(catalog.getManifest(TENANT, doc).stream().map(m -> (String) m.get("chash")).toList())
+            .containsExactlyElementsOf(order);
+        assertThat(physical(doc)).isEqualTo(fx.tgt());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // siblings need a content type and an owner
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void collectionsWithoutAnOwnerOrContentType_areNotSiblings_evenUnderDifferentModels() {
+        // The columns are NOT NULL, so a null cannot be read from the table; the registry cache is the
+        // seam that can hand the check a row with one (CollectionRegistry#markKnown is its test door).
+        Fx fx = pair("nullowner");
+        try {
+            CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow("knowledge", null, BGE, 768, "live", ""));
+            CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow("knowledge", null, MINI, 384, "live", ""));
+            assertThatThrownBy(() -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))
+                .as("two null owners are equal to Objects.equals and are still not siblings")
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("model siblings");
+
+            CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow(null, "o", BGE, 768, "live", ""));
+            CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow(null, "o", MINI, 384, "live", ""));
+            assertThatThrownBy(() -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("model siblings");
+        } finally {
+            CollectionRegistry.evict(TENANT, fx.src());
+            CollectionRegistry.evict(TENANT, fx.tgt());
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // one transaction per document: a failure after physical_collection changed leaves nothing
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void failureAfterPhysicalCollectionIsUpdated_rollsTheWholeDocumentBack() {
+        Fx fx = pair("rollback");
+        List<String> docs = seedDocs(fx, 2, 3);
+        String failing = docs.get(0);
+        String fine = docs.get(1);
+        seedAspect(fx.src(), failing, "p/f.md", "v1");
+        seedQueue(fx.src(), failing, "p/f.md", "pending");
+        seedHighlight(fx.src(), failing);
+        List<String> chashesBefore = catalog.getManifest(TENANT, failing).stream().map(m -> (String) m.get("chash")).toList();
+        // the seam fires after completeMove: physical_collection and the satellites are already updated
+        catalog.setAfterMoveCompletedHookForTests(id -> {
+            if (id.equals(failing)) throw new IllegalStateException("planted failure after physical_collection was updated");
+        });
+        Map<String, Object> r;
+        try {
+            r = move(fx, docs);
+        } finally {
+            catalog.setAfterMoveCompletedHookForTests(null);
+        }
+
+        assertThat(failedIds(r)).containsExactly(failing);
+        assertThat(r.get("docs")).isEqualTo(1);
+        assertThat(physical(failing)).isEqualTo(fx.src());
+        assertThat(manifestCollections(failing)).containsExactly(fx.src());
+        assertThat(catalog.getManifest(TENANT, failing).stream().map(m -> (String) m.get("chash")).toList())
+            .containsExactlyElementsOf(chashesBefore);
+        assertThat(aspectRows(failing)).containsExactly(fx.src() + "|p/f.md|v1");
+        assertThat(queueRows(failing)).containsExactly(fx.src() + "|p/f.md|pending");
+        assertThat(highlightCollections(failing)).containsExactly(fx.src());
+        for (String text : docTexts.get(failing)) assertThat(chunkIn(fx.tgt(), ch(text))).as("no target chunk for the rolled-back document").isFalse();
+        assertThat(chunkCount(fx.tgt())).as("only the other document's three chunks").isEqualTo(3);
+        // the other document is not affected by its neighbour's failure
+        assertThat(physical(fine)).isEqualTo(fx.tgt());
+        assertThat(manifestCollections(fine)).containsExactly(fx.tgt());
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // a document with no manifest rows is compared by physical_collection
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    String registerEmptyDoc(Fx fx, String name, String physicalCollection) {
+        String docId = "dm." + fx.tag() + "." + name;
+        catalog.upsertDocument(TENANT, Map.of("tumbler", docId, "title", "title-" + docId, "content_type", "knowledge",
+            "corpus", "knowledge", "physical_collection", physicalCollection, "chunk_count", 0));
+        return docId;
+    }
+
+    Map<String, Object> moveEmpty(Fx fx, List<String> docIds) {
+        List<Map<String, Object>> docs = new ArrayList<>();
+        Map<String, List<String>> expected = new LinkedHashMap<>();
+        for (String d : docIds) {
+            docs.add(Map.of("doc_id", d, "rows", List.of()));
+            expected.put(d, List.of());
+        }
+        return moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), docs, expected).response();
+    }
+
+    @Test
+    void documentWithNoManifestRows_physicalCollectionNamesSource_moves() {
+        Fx fx = pair("emptymatch");
+        String doc = registerEmptyDoc(fx, "e", fx.src());
+
+        Map<String, Object> r = moveEmpty(fx, List.of(doc));
+
+        assertThat(failedIds(r)).isEmpty();
+        assertThat(r.get("docs")).isEqualTo(1);
+        assertThat(physical(doc)).isEqualTo(fx.tgt());
+        assertThat(manifestRows(doc)).isZero();
+    }
+
+    @Test
+    void documentWithNoManifestRows_physicalCollectionNamesAnotherCollection_isSkipped() {
+        Fx fx = pair("emptymismatch");
+        Fx other = pair("emptyother");
+        String inTarget = registerEmptyDoc(fx, "t", fx.tgt());
+        String elsewhere = registerEmptyDoc(fx, "x", other.src());
+
+        Map<String, Object> r = moveEmpty(fx, List.of(inTarget, elsewhere));
+
+        assertThat(failedIds(r)).containsExactlyInAnyOrder(inTarget, elsewhere);
+        for (Map<String, Object> f : failed(r)) assertThat(f.get("reason")).isEqualTo(MOVE_PRECONDITION_FAILED);
+        assertThat(r.get("docs")).isEqualTo(0);
+        assertThat(physical(inTarget)).isEqualTo(fx.tgt());
+        assertThat(physical(elsewhere)).isEqualTo(other.src());
     }
 }
