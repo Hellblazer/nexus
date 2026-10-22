@@ -2966,14 +2966,18 @@ public final class PgVectorRepository {
         String[] colls = new String[] {collection};
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         try {
+            // The gate probe, the rank and an exact re-run are separate statements; each is bounded by
+            // what remains of the three budgets when it starts, as runArm's statement and re-run are.
+            java.util.function.IntSupplier bound = () -> {
+                ArmBound b = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(), searchBoundMs);
+                run.limiter = b.limiter();
+                run.boundMs = b.timeoutMs();
+                return b.timeoutMs();
+            };
             return plainSearchCandidates(tenantScope.withTenant(tenant, ctx -> {
-                ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
-                                          searchBoundMs);
-                run.limiter = bound.limiter();
-                run.boundMs = bound.timeoutMs();
-                PgSession.setSearchStatementTimeout(ctx, bound.timeoutMs());
+                PgSession.setSearchStatementTimeout(ctx, bound.getAsInt());
                 return hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model,
-                                  tenant);
+                                  tenant, bound);
             }));
         } finally {
             armGate.release();
@@ -3286,7 +3290,7 @@ public final class PgVectorRepository {
             // trips so the rest run under its network bound too (nexus-u9zkn).
             PgSession.setSearchStatementTimeout(ctx);
             return hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
-                              model, tenant);
+                              model, tenant, null);
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -3303,10 +3307,15 @@ public final class PgVectorRepository {
      * bounded (its {@code statement_timeout} is already set): the gate probe, then the selective
      * by-chash rank or the HNSW-first rank. Shared by {@link #hybridSearch} and the lexical arm of
      * {@link #searchPerCollection} (nexus-xd2rc), which sets the arm's own bound first.
+     *
+     * @param rebindTimeoutMs {@code null} keeps the caller's bound for every statement; otherwise it is
+     *        evaluated again, and set, before the rank and before an exact re-run, so a fan-out arm's later
+     *        statements are bounded by the budget that remains, as {@link #runArm}'s are
      */
     private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String gateQueryText,
                                                 String[] colls, WherePlan wherePlan, int nResults,
-                                                int selectiveGateMax, String model, String tenant) {
+                                                int selectiveGateMax, String model, String tenant,
+                                                java.util.function.IntSupplier rebindTimeoutMs) {
         // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l
         // selectivity-aware two-branch dispatch (bounded gate probe -> chash-ranked
         // selective path vs HNSW-first fallback) as three generated schema functions,
@@ -3341,6 +3350,9 @@ public final class PgVectorRepository {
         };
         Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
         int matches = probeResult.size();
+        if (rebindTimeoutMs != null) {
+            PgSession.setSearchStatementTimeout(ctx, rebindTimeoutMs.getAsInt());
+        }
 
         if (matches <= selectiveGateMax) {
             // Selective: rank ONLY the probe's own chash set + scope, no text-gate
@@ -3384,7 +3396,7 @@ public final class PgVectorRepository {
         // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
         // is already exact (ranks the complete materialized gate), so it never needed
         // the fallback.
-        return exactSelectFrom(ctx, nResults, hnswFirstFn);
+        return exactSelectFrom(ctx, nResults, hnswFirstFn, rebindTimeoutMs);
     }
 
     /**

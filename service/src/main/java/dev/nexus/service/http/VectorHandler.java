@@ -842,7 +842,8 @@ public final class VectorHandler implements HttpHandler {
         // nexus-mz9jv: the request's total beside the search_per_collection line's split (query embed, fan-out,
         // enrich, embedding fill): repo_ms covers those, the rest of handler_ms is rerank, serialisation, the write.
         log.info("event=search_per_collection_request collections={} rows={} bytes={} repo_ms={} serialize_ms={} "
-                 + "handler_ms={}", collections.size(), result.rows().size(), envelopeBody.length(), repoMs,
+                 + "handler_ms={}", collections.size(), result.rows().size() + result.lexicalRows().size(),
+                 envelopeBody.length(), repoMs,
                  serializeMs, (System.nanoTime() - handlerStartNanos) / 1_000_000L);
     }
 

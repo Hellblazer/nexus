@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.PgVectorRepository.ArmErrorKind;
+import dev.nexus.service.vectors.PgVectorRepository.FanoutSettings;
 import dev.nexus.service.vectors.PgVectorRepository.LexicalStat;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionResult;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionStat;
@@ -55,6 +56,8 @@ class PgVectorSearchPerCollectionLexicalIntegrationTest {
     TenantScope scope;
     PgVectorRepositoryContractTest.FakeEmbedder embedder;
     PgVectorRepository repo;
+    ArmProbeDataSource probe;
+    PgVectorRepository probeRepo;
 
     String near;
     String far;
@@ -74,6 +77,8 @@ class PgVectorSearchPerCollectionLexicalIntegrationTest {
         embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         embedder.register(QUERY, 1f, 0f);
         repo = new PgVectorRepository(scope, embedder, embedder);
+        probe = new ArmProbeDataSource(ds);
+        probeRepo = new PgVectorRepository(new TenantScope(probe.dataSource()), embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -231,5 +236,26 @@ class PgVectorSearchPerCollectionLexicalIntegrationTest {
         assertThat(lexical(r, C).ids()).isEmpty();
         assertThat(r.lexicalRows()).noneSatisfy(row -> assertThat(row.get("collection")).isEqualTo(C));
         assertThat(lexical(r, A).ids()).containsExactly(near, far);
+    }
+
+    @Test
+    void lexicalArmsTheBudgetNeverLaunched_areReportedPerCollection_andServeNoRows() {
+        probeRepo.searchPerCollection(TENANT, QUERY, List.of(A, B), K, 1200, null, null, false, false, true,
+            new FanoutSettings(1, 30_000, 30_000));   // warm
+        probe.reset();
+        probe.borrowDelayMs = 300;   // each arm queues 300 ms; the budget is 500 ms
+        PerCollectionResult r = probeRepo.searchPerCollection(TENANT, QUERY, List.of(A, B), K, 1200, null, null,
+            false, false, true, new FanoutSettings(1, 500, 30_000));
+        // One worker, vector arms first: A's vector arm is served, B's is refused at the budget, and neither
+        // lexical arm is launched. Each lexical arm is reported with its kind, never silently empty.
+        assertThat(vector(r, A).error()).isNull();
+        assertThat(vector(r, B).errorKind()).isEqualTo(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED);
+        for (String c : List.of(A, B)) {
+            assertThat(lexical(r, c).errorKind()).as("lexical arm of %s", c)
+                .isEqualTo(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED);
+            assertThat(lexical(r, c).error()).contains("500 ms").contains("lexical");
+            assertThat(lexical(r, c).ids()).isEmpty();
+        }
+        assertThat(r.lexicalRows()).isEmpty();
     }
 }
