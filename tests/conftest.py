@@ -996,10 +996,13 @@ def _split_appends_from_state(
     NOT the b2eaw argument: a lock's bytes are written only when it is
     created, and every later mint, a test's included, only touches its mtime
     (nexus-ndfc1), so unchanged bytes do not prove no test reused it. What
-    the rule stands on is the creator: a lock first created under pytest
-    names its test (develop source always writes the line, nexus-28bzt) and
-    is never exempt, so a leak fails on every run, not just the first. A
-    created, rewritten or removed lock stays state.
+    the rule stands on is the creator: a lock first created while a pytest
+    test runs names that test (develop source always writes the line,
+    nexus-28bzt) and is never exempt, so such a leak fails on every run, not
+    just the first. A writer that had PYTEST_CURRENT_TEST scrubbed (a child
+    with a clean env, a session hook) records null: it fails the run that
+    creates the lock (ADDED) and is exempt after that. A created, rewritten or
+    removed lock stays state.
 
     nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
     this function also exempted ``last_seen_version`` whenever its content
