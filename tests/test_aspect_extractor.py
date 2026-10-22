@@ -2051,3 +2051,115 @@ def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -
     monkeypatch.setattr("nexus.config.load_config", _broken)
     assert select_config("docs__anything") is None
     assert select_config("knowledge__delos").extractor_name == "scholarly-paper-v1"
+
+
+# ── nexus-95qz4: the extractor input is bounded ─────────────────────────────
+
+
+class TestContentBound:
+    """A document whose text overflows the model's context window got
+    null-fields on every run (``Prompt is too long``, ~252k tokens). The
+    extractor input is now cut to a character budget, head first, with a
+    marker; a batch is split so no single call exceeds the budget."""
+
+    @staticmethod
+    def _batch_response(source_paths: list[str]) -> str:
+        return _wrap_inner(json.dumps({"papers": [
+            {
+                "source_path": sp,
+                "problem_formulation": f"P {sp}",
+                "proposed_method": "M",
+                "experimental_datasets": [],
+                "experimental_baselines": [],
+                "experimental_results": "R",
+                "extras": {},
+                "confidence": 0.9,
+            }
+            for sp in source_paths
+        ]}))
+
+    def test_an_oversized_document_is_cut_head_first_with_a_marker(self, monkeypatch) -> None:
+        from nexus import aspect_extractor as mod
+
+        cap = mod._EXTRACTOR_CONTENT_CHAR_BUDGET
+        head = _PAPER_SHAPED_CONTENT
+        content = head + "x" * cap + "TAIL-SENTINEL"
+        prompts: list[str] = []
+
+        def fake_run(prompt, **kwargs):
+            prompts.append(prompt)
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        record = mod.extract_aspects(content, "/long.pdf", "knowledge__delos")
+
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+        [prompt] = prompts
+        assert head in prompt
+        assert "TAIL-SENTINEL" not in prompt
+        assert f"truncated to the first {cap} of {len(content)} characters" in prompt
+        assert len(prompt) < cap + 20_000
+
+    def test_a_document_within_the_budget_reaches_the_prompt_whole(self, monkeypatch) -> None:
+        from nexus import aspect_extractor as mod
+
+        content = _PAPER_SHAPED_CONTENT + "body TAIL-SENTINEL"
+        prompts: list[str] = []
+
+        def fake_run(prompt, **kwargs):
+            prompts.append(prompt)
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        mod.extract_aspects(content, "/short.pdf", "knowledge__delos")
+
+        [prompt] = prompts
+        assert "TAIL-SENTINEL" in prompt
+        assert "truncated to the first" not in prompt
+
+    def test_a_batch_over_the_budget_is_split_and_each_call_fits(self, monkeypatch) -> None:
+        from nexus import aspect_extractor as mod
+
+        cap = mod._EXTRACTOR_CONTENT_CHAR_BUDGET
+        third = cap // 3 + 1  # two fit in one call, three do not
+        items = [
+            ("knowledge__delos", f"/p{i}.pdf", _PAPER_SHAPED_CONTENT + str(i) * third)
+            for i in range(3)
+        ]
+        prompts: list[str] = []
+
+        def fake_run(prompt, **kwargs):
+            prompts.append(prompt)
+            in_call = [sp for _c, sp, _t in items if f"source_path: {sp}\n" in prompt]
+            return _make_completed(self._batch_response(in_call))
+
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        records = mod.extract_aspects_batch(items)
+
+        assert len(prompts) == 2
+        assert all(len(p) < cap + 20_000 for p in prompts)
+        assert [r.source_path for r in records] == ["/p0.pdf", "/p1.pdf", "/p2.pdf"]
+        assert [r.problem_formulation for r in records] == ["P /p0.pdf", "P /p1.pdf", "P /p2.pdf"]
+
+    def test_an_oversized_document_in_a_batch_is_cut_and_runs_alone(self, monkeypatch) -> None:
+        from nexus import aspect_extractor as mod
+
+        cap = mod._EXTRACTOR_CONTENT_CHAR_BUDGET
+        items = [
+            ("knowledge__delos", "/small.pdf", _PAPER_SHAPED_CONTENT + "small"),
+            ("knowledge__delos", "/huge.pdf", _PAPER_SHAPED_CONTENT + "y" * (2 * cap) + "TAIL-SENTINEL"),
+        ]
+        prompts: list[str] = []
+
+        def fake_run(prompt, **kwargs):
+            prompts.append(prompt)
+            in_call = [sp for _c, sp, _t in items if f"source_path: {sp}\n" in prompt]
+            return _make_completed(self._batch_response(in_call))
+
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        records = mod.extract_aspects_batch(items)
+
+        assert all(len(p) < cap + 20_000 for p in prompts)
+        assert not any("TAIL-SENTINEL" in p for p in prompts)
+        assert any("source_path: /huge.pdf\n" in p and "truncated to the first" in p for p in prompts)
+        assert [r.problem_formulation for r in records] == ["P /small.pdf", "P /huge.pdf"]

@@ -740,6 +740,50 @@ def _parse_rdr_alternatives(text: str) -> list[str]:
     return titles
 
 
+#: nexus-95qz4: the most document text one extractor call carries, per document
+#: and per batch call. A whole PDF once overflowed the model's 200k-token context
+#: (~252k tokens), so that document got null-fields on every run. 300k characters
+#: stays under 100k tokens even for dense PDF text (about 3 characters a token).
+_EXTRACTOR_CONTENT_CHAR_BUDGET: int = 300_000
+
+
+def _bound_content(content: str, source_path: str) -> str:
+    """Cut ``content`` to the extractor budget, head first (abstract and
+    introduction lead), and say so in the text the model reads. Content
+    within the budget passes through unchanged."""
+    if len(content) <= _EXTRACTOR_CONTENT_CHAR_BUDGET:
+        return content
+    _log.warning(
+        "aspect_extractor_content_truncated",
+        source_path=source_path,
+        chars=len(content),
+        kept=_EXTRACTOR_CONTENT_CHAR_BUDGET,
+    )
+    return (
+        content[:_EXTRACTOR_CONTENT_CHAR_BUDGET]
+        + f"\n\n[document truncated to the first {_EXTRACTOR_CONTENT_CHAR_BUDGET}"
+        + f" of {len(content)} characters for aspect extraction]\n"
+    )
+
+
+def _split_by_budget(
+    group: list[tuple[int, str, str, str]],
+) -> list[list[tuple[int, str, str, str]]]:
+    """Split a batch group, in order, so no sub-batch's document text exceeds
+    the extractor budget. Each document is already bounded, so a sub-batch
+    always holds at least one."""
+    batches: list[list[tuple[int, str, str, str]]] = []
+    size = 0
+    for item in group:
+        if batches and size + len(item[3]) <= _EXTRACTOR_CONTENT_CHAR_BUDGET:
+            batches[-1].append(item)
+            size += len(item[3])
+        else:
+            batches.append([item])
+            size = len(item[3])
+    return batches
+
+
 def _truncate(text: str, cap: int) -> str:
     """Cap a long section to ``cap`` characters; append an ellipsis
     when truncation occurs. Empty strings pass through unchanged."""
@@ -1395,7 +1439,7 @@ def extract_aspects(
         # No subprocess, no retry budget, no Claude API cost.
         return _extract_via_parser_fn(config, content, source_path, collection)
 
-    prompt = config.prompt_template.format(content=content)
+    prompt = config.prompt_template.format(content=_bound_content(content, source_path))
     parsed = _retry_subprocess(prompt, config)
     if parsed is None:
         return _empty_record(source_path, collection, config)
@@ -1571,7 +1615,9 @@ def extract_aspects_batch(
                 item_config, content, source_path, collection,
             )
             continue
-        callable_inputs.append((idx, collection, source_path, content, item_config))
+        callable_inputs.append(
+            (idx, collection, source_path, _bound_content(content, source_path), item_config),
+        )
 
     if not callable_inputs:
         return out
@@ -1585,7 +1631,14 @@ def extract_aspects_batch(
         bucket = by_config.setdefault(cfg.extractor_name, (cfg, []))
         bucket[1].append((idx, collection, source_path, content))
 
-    for cfg, group in by_config.values():
+    # nexus-95qz4: a group whose documents together exceed the extractor budget
+    # runs as several calls, so no prompt overflows the model's context.
+    sub_batches = [
+        (cfg, sub)
+        for cfg, group in by_config.values()
+        for sub in _split_by_budget(group)
+    ]
+    for cfg, group in sub_batches:
         prompt = _build_batch_prompt(group, cfg)
         timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
         parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
