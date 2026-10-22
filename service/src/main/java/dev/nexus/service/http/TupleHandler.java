@@ -408,8 +408,8 @@ public final class TupleHandler implements HttpHandler {
      * {@code out} accepts, MINUS the nonce (RDR-206 Phase 1 Step 2).
      *
      * <p>A {@code nonce} key here is REFUSED rather than ignored. The engine sets a
-     * reply's nonce to {@code hex(consumed request id)} so a retried ack lands on the
-     * same reply row, and no caller, tool or flag carries one (Sam's decision
+     * reply's nonce to {@code hex(consumed request id)}, which makes the reply's id a
+     * function of the request it answers, and no caller, tool or flag carries one (Sam's decision
      * 2026-09-11). Silently dropping a supplied nonce would leave a caller believing it
      * had chosen the reply's identity, which is exactly the kind of ignored input that
      * only surfaces as a mystery much later. {@code validateOut} cannot catch this: it
@@ -430,7 +430,7 @@ public final class TupleHandler implements HttpHandler {
         if (r.containsKey("nonce")) {
             throw new SchemaViolationException("reply.nonce",
                     "must not be supplied: the engine sets a reply's nonce to the id of the "
-                    + "request it answers, so a retried ack lands on the same reply row");
+                    + "request it answers, so the reply's id follows from that request");
         }
         return new TupleRepository.ReplySpec(
                 requireString(r, "subspace"),

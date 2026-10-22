@@ -212,6 +212,21 @@ class TupleAckWithReplyTest {
                 .containsExactlyInAnyOrder("forged", "the answer");
     }
 
+    /** The reply's nonce is the request's id: two requests answered with identical reply
+     *  keys and dims are two rows. A constant engine nonce would collapse them into one. */
+    @Test
+    void twoRequestsAnsweredWithIdenticalReplyKeysAndDims_areTwoReplyRows() {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        String first = requestAndClaim(answerer, "worker-1");
+        byte[] firstId = repo.ackWithReply(TENANT, first, "worker-1", reply(asker, "same", null));
+        String second = requestAndClaim(answerer, "worker-1");
+        byte[] secondId = repo.ackWithReply(TENANT, second, "worker-1", reply(asker, "same", null));
+
+        assertThat(secondId).isNotEqualTo(firstId);
+        assertThat(rowCount("mailbox/" + asker)).isEqualTo(2);
+    }
+
     @Test
     void anOutAfterTheReply_withTheRequestIdAsNonce_isASeparateRow() {
         String asker = addr("asker");

@@ -822,6 +822,26 @@ public final class TupleRepository {
     }
 
     /**
+     * The label digested before the nonce: {@code out} digests {@code "nonce"}, and
+     * {@code ackWithReply} digests {@code "reply-nonce"} in its place (bead nexus-b747g).
+     * A reply's nonce is hex(request id), which any tenant caller can read through rd; under
+     * the shared label an {@code out} carrying that nonce computed the reply's id first and
+     * took it. {@link #digestField} length-prefixes every field, so a stream carrying this
+     * label never equals one carrying {@code "nonce"}, and no {@code out} can produce a
+     * reply id whatever nonce it sends.
+     */
+    private enum NonceLabel {
+        OUT("nonce"),
+        REPLY("reply-nonce");
+
+        private final String wire;
+
+        NonceLabel(String wire) {
+            this.wire = wire;
+        }
+    }
+
+    /**
      * {@code sha256(canonical(tenant, subspace, keys [, id_dims, nonce | body]))} per the
      * template's {@code id_from} (RDR-205 §Technical Design). Every input is caller-
      * supplied and the field ORDER is the template's own declared order (deterministic —
@@ -841,22 +861,13 @@ public final class TupleRepository {
     private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
                                      Map<String, String> keys, Map<String, String> dims,
                                      String nonce, String body) {
-        return computeId(tenant, subspace, t, keys, dims, NONCE_FIELD, nonce, body);
+        return computeId(tenant, subspace, t, keys, dims, NonceLabel.OUT, nonce, body);
     }
 
-    /**
-     * The label {@code ackWithReply} digests in place of {@code "nonce"} (bead nexus-b747g).
-     * A reply's nonce is hex(request id), which any tenant caller can read through rd; under
-     * the shared label an {@code out} carrying that nonce computed the reply's id first and
-     * took it. {@link #digestField} length-prefixes every field, so a stream carrying this
-     * label never equals one carrying {@code "nonce"}, and no {@code out} can produce a
-     * reply id whatever nonce it sends.
-     */
-    private static final String REPLY_NONCE_LABEL = "reply-nonce";
-
+    /** {@link #computeId} with the {@link NonceLabel} digested before the nonce. */
     private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
                                      Map<String, String> keys, Map<String, String> dims,
-                                     String nonceLabel, String nonce, String body) {
+                                     NonceLabel nonceLabel, String nonce, String body) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             digestField(md, tenant);
@@ -874,7 +885,7 @@ public final class TupleRepository {
                     // nothing further
                 }
                 case KEYS_NONCE -> {
-                    digestField(md, nonceLabel);
+                    digestField(md, nonceLabel.wire);
                     digestField(md, nonce);
                 }
                 case KEYS_BODY -> {
@@ -2066,7 +2077,7 @@ public final class TupleRepository {
             TuplesRecord consumed = consumeClaim(ctx, tenant, claimId, claimant);
             String nonce = HexFormat.of().formatHex(consumed.getId());
             byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
-                    prepared.keys(), prepared.dims(), REPLY_NONCE_LABEL, nonce, reply.body());
+                    prepared.keys(), prepared.dims(), NonceLabel.REPLY, nonce, reply.body());
             return writeOut(ctx, tenant, prepared, reply.body(), id);
         });
         // Signal AFTER the commit, and only for the reply's subspace: a parked reader

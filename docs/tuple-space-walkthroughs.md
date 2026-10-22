@@ -162,7 +162,7 @@ sequenceDiagram
     E-->>C: the request tuple, claim c9
     C->>C: deploy engine, re-gate
     C->>E: ack c9 reply: subspace mailbox/nexus-a6, keys {to nexus-a6}, dims {kind ack, correlation_id r-41}
-    Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206). The reply's nonce is the engine's own, hex(request tuple id), never the caller's
+    Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206). The reply's nonce is the engine's own, hex(request tuple id), never the caller's, and its id is digested under its own label, so no out can reproduce it (nexus-b747g)
     E->>E: signal waiters on mailbox/nexus-a6
     E-->>N: the ack tuple, claim c10
     N->>E: ack c10
