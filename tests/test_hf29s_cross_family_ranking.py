@@ -723,7 +723,7 @@ def test_a_legacy_name_whose_row_says_voyage_is_filtered_on_a_dual_engine(monkey
     """The case the interim rule (nexus-ndr0t S3) drops: the row names the
     family, so the Voyage threshold applies to the legacy name again."""
     _seed_rows(monkeypatch, LEGACY_VOY)
-    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-context-3")})
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-model-b")})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
     results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3)
     ids = {r.id for r in results}
@@ -744,7 +744,8 @@ def test_a_legacy_voyage_row_groups_with_the_conformant_voyage_family(monkeypatc
     """One combined request for the Voyage family, one for the bge family: the
     legacy name no longer sits alone in a singleton batch."""
     _seed_rows(monkeypatch, LEGACY_VOY)
-    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-context-3")})
+    # The row names the conformant sibling's own model, read off its name, so they group.
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, _ModeT3.VOY.split("__")[2])})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
     search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY, _ModeT3.BGE], 10, t3)
     assert sorted(map(sorted, t3.batches)) == sorted(
@@ -770,7 +771,7 @@ def test_a_row_without_a_model_is_authoritative_and_not_guessed_from_the_name(mo
     dual engine it gets no threshold rather than the name's."""
     _seed_rows(monkeypatch, _ModeT3.VOY)
     monkeypatch.setitem(_ModeT3.ROWS, _ModeT3.VOY, list(_LEGACY_ROWS))
-    row = _row(_ModeT3.VOY, "voyage-context-3")
+    row = _row(_ModeT3.VOY, "voyage-model-b")
     del row["embedding_model"]
     t3 = _recording_t3(monkeypatch, "dual", _RowCatalog({_ModeT3.VOY: row}))
     assert {r.id for r in search_cross_corpus("q", [_ModeT3.VOY], 10, t3)} == {"leg-near", "leg-far"}
@@ -780,7 +781,7 @@ def test_conformant_names_are_unchanged_and_each_name_is_looked_up_once(monkeypa
     """No request multiplication: one lookup per distinct collection per
     search, however many batches, groups and threshold reads follow."""
     catalog = _RowCatalog({
-        _ModeT3.VOY: _row(_ModeT3.VOY, "voyage-context-3"),
+        _ModeT3.VOY: _row(_ModeT3.VOY, "voyage-model-b"),
         _ModeT3.BGE: _row(_ModeT3.BGE, BGE),
     })
     t3 = _recording_t3(monkeypatch, "dual", catalog)
@@ -820,7 +821,7 @@ def test_the_doctor_probe_reads_the_family_from_the_row_too(monkeypatch):
 
     cfg = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
     monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: cfg)
-    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-context-3")})
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-model-b")})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
     assert _default_threshold_for(LEGACY_VOY, t3) == pytest.approx(0.65)
     assert _default_threshold_for(LEGACY, t3) is None
@@ -832,7 +833,7 @@ def test_the_default_tenant_reads_rows_from_the_cache_already_held_and_fetches_n
     from nexus.db.http_vector_client import HttpVectorClient
 
     monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
-    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-context-3")])
+    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-model-b")])
 
     def _no_fetch(*a, **k):
         raise AssertionError("a row read must not fetch")
@@ -840,7 +841,7 @@ def test_the_default_tenant_reads_rows_from_the_cache_already_held_and_fetches_n
     monkeypatch.setattr(HttpVectorClient, "list_collections", _no_fetch)
     monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", _no_fetch)
     got = HttpVectorClient()._resolve_collection_rows([LEGACY_VOY, "docs__cold"])
-    assert got[LEGACY_VOY]["embedding_model"] == "voyage-context-3"
+    assert got[LEGACY_VOY]["embedding_model"] == "voyage-model-b"
     assert got["docs__cold"] is None      # not in the cache: the name answers
 
 
@@ -850,7 +851,7 @@ def test_a_non_default_tenant_client_reads_the_listing_once_not_once_per_name(mo
     from nexus.db.http_vector_client import HttpVectorClient
 
     listings: list[int] = []
-    rows = [_row(LEGACY_VOY, "voyage-context-3"), _row(_ModeT3.BGE, BGE)]
+    rows = [_row(LEGACY_VOY, "voyage-model-b"), _row(_ModeT3.BGE, BGE)]
 
     def _list(self, *a, **k):
         listings.append(1)
@@ -861,7 +862,7 @@ def test_a_non_default_tenant_client_reads_the_listing_once_not_once_per_name(mo
     client = HttpVectorClient(tenant="other")
     got = client._resolve_collection_rows([LEGACY_VOY, _ModeT3.BGE, "docs__absent"])
     assert len(listings) == 1
-    assert got[LEGACY_VOY]["embedding_model"] == "voyage-context-3"
+    assert got[LEGACY_VOY]["embedding_model"] == "voyage-model-b"
     assert got[_ModeT3.BGE]["embedding_model"] == BGE
     assert got["docs__absent"] is None
 
@@ -875,7 +876,7 @@ def test_a_default_tenant_client_filters_a_legacy_voyage_row_from_the_primed_cac
 
     _seed_rows(monkeypatch, LEGACY_VOY)
     monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
-    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-context-3"), _row(_ModeT3.BGE, BGE)])
+    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-model-b"), _row(_ModeT3.BGE, BGE)])
 
     def _no_fetch(*a, **k):
         raise AssertionError("the search must not list or refresh")
