@@ -9,7 +9,7 @@
 #   1. With the key absent from EVERY source in the credential chain (environment
 #      NX_VOYAGE_API_KEY and VOYAGE_API_KEY, the repo .env, credentials.voyage_api_key
 #      in config.yml) the gate exits non-zero with a message naming the key, BEFORE
-#      it creates a scratch dir or runs uv, nx or a build. Run for real, with a
+#      it creates a scratch dir or runs uv, a build or the supervisor. Run for real, with a
 #      shimmed PATH whose uv and nx record every call: the shim log stays empty.
 #      Positive controls: the key present in any ONE source gets past the check
 #      (the shim is called), so the refusal is not a gate that always refuses; and
@@ -49,7 +49,7 @@ fail_loud_and_exit() {
 # call is possible. env -i, so no key leaks in from the caller's environment.
 SHIMS="$WORKDIR/shims"
 mkdir -p "$SHIMS"
-for tool in uv nx mvnw; do
+for tool in uv mvnw nx; do
   cat > "$SHIMS/$tool" <<'SHIM'
 #!/bin/sh
 echo "$(basename "$0") $*" >> "$SHIM_LOG"
@@ -85,7 +85,7 @@ assert_refused_before_anything() {  # <label>
     || bad "$label: message does not name VOYAGE_API_KEY: $OUT"
   [[ "$OUT" == *FAIL* && "$OUT" != *SKIP* ]] && ok "$label: reads as a FAIL, not a skip" \
     || bad "$label: message is not a clear FAIL: $OUT"
-  [[ ! -s "$LOG" ]] && ok "$label: no uv, nx or mvnw was run (no engine started)" \
+  [[ ! -s "$LOG" ]] && ok "$label: no shimmed tool was run (no engine started)" \
     || bad "$label: tools were run before the key check: $(cat "$LOG")"
   [[ -z "$(ls -A "$T")" ]] && ok "$label: no scratch dir was created" \
     || bad "$label: scratch left behind in TMPDIR: $(ls -A "$T")"
@@ -93,7 +93,7 @@ assert_refused_before_anything() {  # <label>
 
 assert_got_past_the_key_check() {  # <label>
   local label="$1"
-  [[ -s "$LOG" ]] && ok "$label: reached the engine bring-up (uv was called)" \
+  grep -q 'nx init' "$LOG" && ok "$label: reached the engine bring-up (nx init was called)" \
     || bad "$label: never got past the key check: $OUT"
   [[ "$OUT" != *"no Voyage API key"* ]] && ok "$label: no missing-key message" \
     || bad "$label: refused for a missing key although one was supplied: $OUT"
@@ -169,6 +169,13 @@ refuse_line="$(line_of "$GATE" '^if[[:space:]]+\[[[:space:]]+-z[[:space:]]+"\$GA
 [[ -n "$refuse_line" && "$refuse_line" -lt "$first_start_line" ]] \
   && ok "the refusal on an empty key sits before any engine-side line" \
   || bad "no refusal on an empty GATE_VOYAGE_KEY found before the engine-side lines"
+
+# The key stays out of argv, logs and files: in code it appears only in its assignment, the empty-key test
+# and the one export inside the engine-start subshell (nexus-8x0tg review).
+key_uses="$(code_of "$GATE" | grep -n 'GATE_VOYAGE_KEY' | grep -vE '^[0-9]+:(GATE_VOYAGE_KEY="\$\(dg_resolve_voyage_key\)"|if \[ -z "\$GATE_VOYAGE_KEY" \]; then|[[:space:]]*export NX_VOYAGE_API_KEY="\$GATE_VOYAGE_KEY")[[:space:]]*$' || true)"
+[[ -z "$key_uses" ]] \
+  && ok "GATE_VOYAGE_KEY appears only in its assignment, the empty-key test and the one export" \
+  || bad "GATE_VOYAGE_KEY is used elsewhere: $key_uses"
 
 pass1_line="$(line_of "$GATE" '^dg_run_pass[[:space:]]+1[[:space:]]*$')"
 restart_line="$(line_of "$GATE" '^dg_restart_engine[[:space:]]*$')"
