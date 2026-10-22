@@ -10564,7 +10564,10 @@ async def nx_answer(
     structured: Annotated[bool, Field(
         description=(
             "Return an envelope dict ({final_text, chunks, plan_id, "
-            "step_count, answer_shape, ...}) instead of a bare string."
+            "step_count, answer_shape, ...}) instead of a bare string. "
+            "The envelope's plan_id is the matched library plan or, on a "
+            "miss, the plan this call grew and saved; 0 when no row exists "
+            "(ttl 0, or the save failed)."
         ),
     )] = False,
     min_confidence: Annotated[float | None, Field(
@@ -10604,7 +10607,9 @@ async def nx_answer(
 
     Returns the final step's output as a string, or a structured envelope
     (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
-    `structured=True`.
+    `structured=True`. The envelope's `plan_id` is the matched library plan
+    or, on a miss, the plan this call grew and saved, and 0 when no row
+    exists (ttl 0, or the save failed).
 
     Constraints:
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and

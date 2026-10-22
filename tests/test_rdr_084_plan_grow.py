@@ -344,7 +344,14 @@ class TestAdHocTtlConfig:
 
 @pytest.mark.t2_tenant
 class TestLiveSqliteRoundTrip:
-    """End-to-end against a real on-disk SQLite T2Database.
+    """End-to-end against the engine-backed T2Database (the class name predates
+    the move off SQLite and is kept so test ids stay stable).
+
+    ``T2Database(path)`` builds HTTP stores over the engine's PG tables for the
+    session tenant; ``path`` is only mkdir'd for its parent and no ``.db`` file
+    is ever created (verified: a run under ``--basetemp`` leaves none). So the
+    ``tmp_path / "memory.db"`` below is a vestigial argument, not a SQLite
+    substrate, and this class adds no SQLite (AGENTS.md NO-SQLITE rule).
 
     The other suites in this file mock ``_t2_ctx`` — that catches
     call-shape regressions but cannot catch cross-transaction bugs

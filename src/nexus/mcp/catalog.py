@@ -239,9 +239,18 @@ def catalog_search(
         entries = matches[offset:offset + limit + 1]
         if not entries:
             # An empty list renders as nothing, which reads as a broken tool
-            # (nexus-r88er F12); say what this tool matches and where
-            # content search lives.
-            return [{"note": _ZERO_MATCH_NOTE}]
+            # (nexus-r88er F12). At offset 0 nothing matched: say what this
+            # tool matches and where content search lives. Past offset 0 the
+            # search may well have matches, all before the page asked for:
+            # "0 matches" would be false there. len(matches) is exact here,
+            # since entries is empty only when len(matches) <= offset.
+            if offset == 0:
+                return [{"note": _ZERO_MATCH_NOTE}]
+            return [{"note": (
+                f"No rows at offset {offset}: this search has "
+                f"{len(matches)} match{'' if len(matches) == 1 else 'es'}, "
+                "all before that offset."
+            )}]
         has_more = len(entries) > limit
         result = [e.to_dict() for e in entries[:limit]]
         if has_more:

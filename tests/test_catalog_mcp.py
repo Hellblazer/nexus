@@ -232,6 +232,41 @@ def test_search_nonempty_result_carries_no_note(cat) -> None:
     assert all("note" not in r for r in rows)
 
 
+def test_search_past_the_end_does_not_claim_zero_matches(cat) -> None:
+    """An offset past the last row used to return the "0 matches" note while
+    matches existed (F12 review). The note must be true: at offset > 0 it says
+    there are no rows at that offset and gives the real match count."""
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    catalog_register(title="authentication tests", owner="1.1", content_type="code")
+
+    # full-text branch, offset beyond the 2 matches
+    rows = catalog_search("authentication", offset=5)
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    note = rows[0]["note"]
+    assert "0 matches" not in note
+    assert "No rows at offset 5" in note and "2 matches" in note
+
+    # filter branch, offset exactly at the end
+    rows = catalog_search(content_type="code", offset=2)
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    assert "0 matches" not in rows[0]["note"]
+    assert "2 matches" in rows[0]["note"]
+
+    # singular
+    rows = catalog_search("module", offset=1)
+    assert "1 match," in rows[0]["note"]
+
+
+def test_search_last_page_still_returns_rows_and_zero_still_says_zero(cat) -> None:
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    catalog_register(title="authentication tests", owner="1.1", content_type="code")
+    last = catalog_search("authentication", offset=1, limit=5)
+    assert len(last) == 1 and "note" not in last[0]
+    # offset 0 with nothing matching is the real zero
+    zero = catalog_search("tuple space mailbox", offset=0)
+    assert zero[0]["note"].startswith("0 matches")
+
+
 def test_search_query_param_description_states_the_scope() -> None:
     from nexus.mcp.catalog import mcp as catalog_mcp
     import asyncio

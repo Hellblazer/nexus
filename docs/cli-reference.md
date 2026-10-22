@@ -5122,6 +5122,12 @@ toward `fallback`, and the per-row listing renders it `fallback` rather
 than the misleading `plan=0`. (This per-row display convention is separate
 from the `--steps` by-plan grouping key — see below.)
 
+The run log's `plan_id` is the MATCHED plan only. A run that missed and grew
+a plan shows `plan_id = 0` here, while the `nx_answer` `structured=True`
+envelope for the same call carries the id of the plan it saved (0 only when
+no row was saved: ttl 0 or a failed save). The two agree on a library match
+and differ on a grown-on-miss run by design (nexus-wvz8i).
+
 `created_at` is stamped by the ENGINE's clock, not this machine's. A run
 recorded moments ago may not appear for a sub-second-precision `--since`
 value if this machine's clock and the engine's have drifted by even a few
@@ -5207,7 +5213,10 @@ executed-failed with `--include-failed`; see above):
 - **by plan** (keyed by `plan_id` as a string, or `"fallback"` for a
   genuine planner-error miss with no `plan_id` at all — `plan_id=0`, the
   ad-hoc inline-planner sentinel, gets its OWN `"0"` key, distinct from
-  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`.
+  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. The
+  key is the run log's matched plan, so a run that grew and saved a plan
+  still lands under `"0"` even though its `nx_answer` envelope reported the
+  saved id.
 - **cost-consistency violations**: rows where a row's own `cost_usd`
   disagrees with `sum(steps.cost_usd)` beyond a relative epsilon (0.5%,
   sub-cent absolute floor — a literal to-the-cent tolerance is too loose
