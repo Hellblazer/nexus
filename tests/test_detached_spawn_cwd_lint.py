@@ -30,6 +30,9 @@ pytestmark = pytest.mark.lint
 SRC = pathlib.Path(__file__).parent.parent / "src" / "nexus"
 
 #: Calls whose result is the stable-cwd kwargs (or contains them).
+#: `operators/dispatch.claude_dispatch` passes `cwd=` the caller's directory while it exists and
+#: `stable_daemon_cwd()` once it was deleted (nexus-x6qc7): its file-tool operators read the
+#: project relative to it, the one deliberate exception to the root rule (daemon/AGENTS.md).
 _CWD_HELPERS = frozenset({"detached_spawn_kwargs", "_supervisor_popen_kwargs", "stable_daemon_cwd"})
 #: Calls whose result is a detaching kwargs dict.
 _DETACH_HELPERS = frozenset({

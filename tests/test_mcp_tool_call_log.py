@@ -351,8 +351,13 @@ class TestDeletedCwdHeal:
         gone.mkdir()
         monkeypatch.chdir(gone)
         gone.rmdir()
+        again = tmp_path / "plugin_x.old.2"
         with capture_logs() as logs:
             result = _call(server, "echo")
+            # A second deletion heals again; the event still logs once per process.
+            again.mkdir()
+            os.chdir(again)
+            again.rmdir()
             _call(server, "echo")
         assert result.root.isError is False
         assert os.getcwd() == stable_daemon_cwd()

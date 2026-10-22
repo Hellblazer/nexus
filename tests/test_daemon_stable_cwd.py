@@ -546,3 +546,27 @@ def test_heal_deleted_cwd_moves_the_process_off_a_deleted_directory(
         os.getcwd()
     assert stable_cwd.heal_deleted_cwd() is True
     assert os.getcwd() == stable_cwd.stable_daemon_cwd()
+
+
+def test_heal_deleted_cwd_leaves_a_non_missing_getcwd_failure_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _eacces() -> str:
+        raise PermissionError(13, "Permission denied")
+
+    moved: list = []
+    monkeypatch.setattr(stable_cwd.os, "getcwd", _eacces)
+    monkeypatch.setattr(stable_cwd.os, "chdir", lambda p: moved.append(p))
+    assert stable_cwd.heal_deleted_cwd() is False
+    assert not moved
+
+
+def test_heal_deleted_cwd_rewrites_no_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", "relative/cfg")
+    monkeypatch.delenv(stable_cwd.REPO_ROOT_ENV, raising=False)
+    assert stable_cwd.heal_deleted_cwd() is True
+    assert os.environ["NEXUS_CONFIG_DIR"] == "relative/cfg"
+    assert stable_cwd.REPO_ROOT_ENV not in os.environ
+

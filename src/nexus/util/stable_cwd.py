@@ -131,8 +131,21 @@ def heal_deleted_cwd() -> bool:
     servers keep running (nexus-x6qc7, shakeout F19: every ``claude -p`` the
     server spawned then exited 1, "The current working directory was deleted").
     A directory that still exists is left alone, so a Claude Code server keeps
-    its project directory. Returns ``True`` when it moved the process.
+    its project directory, and so does one whose ``getcwd`` fails for any reason
+    other than the directory being gone (``EACCES``). Unlike
+    :func:`enter_stable_daemon_cwd` it rewrites no environment: with the old
+    directory gone, a relative ``NEXUS_CONFIG_DIR`` has no referent to pin.
+    Returns ``True`` when it moved the process.
     """
-    if current_project_root() is not None:
+    try:
+        os.getcwd()
         return False
-    return bool(enter_stable_daemon_cwd())
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        os.chdir(stable_daemon_cwd())
+    except OSError:
+        return False
+    return True

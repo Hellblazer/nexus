@@ -1352,6 +1352,30 @@ async def claude_dispatch(
         or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
         or read_claude_session_id()
     )
+    from nexus.util.stable_cwd import current_project_root, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
+
+    # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
+    # caller's directory while that exists, deliberately not the stable cwd
+    # the detached-process rule (nexus-x3m8e) gives a daemon: the operators
+    # granted Read/Grep/Glob (nx_enrich_beads, nx_plan_audit) explore the
+    # project's files relative to it, the Claude Code server's project
+    # directory. When the host deleted it (Claude Desktop removes a plugin's
+    # install directory on update while its MCP servers keep running there),
+    # an operator with no file tools runs in the stable cwd, since `claude`
+    # exits 1 before starting in a deleted directory; one with file tools is
+    # refused rather than left to search the filesystem root.
+    child_cwd = current_project_root()
+    if child_cwd is None:
+        if set(allowed_tools or ()) & {"Read", "Grep", "Glob"}:
+            raise OperatorError(
+                f"operator {operator or 'claude -p'} reads the project's files, but this server's "
+                "working directory was deleted (Claude Desktop removes a plugin's install directory "
+                "when it updates the plugin), so it has no project to read; run it from a Claude "
+                "Code session in the project, or restart the host"
+            )
+        child_cwd = stable_daemon_cwd()
+        _log.warning("operator_dispatch_cwd_deleted", operator=operator, cwd=child_cwd)
+
     # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
     # three-mode helper. The operator-dispatch caller is the
     # canonical stateless one-shot, so default to ``ephemeral=True``.
@@ -1493,18 +1517,7 @@ async def claude_dispatch(
     _dispatch_job: int | None = None
     try:
         from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
-        from nexus.util.stable_cwd import current_project_root, stable_daemon_cwd  # noqa: PLC0415 - deferred, matches the import above
 
-        # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
-        # caller's directory while that exists (a Claude Code server's project
-        # directory, as before); when the host deleted it (Claude Desktop removes
-        # a plugin's install directory on update while its MCP servers keep
-        # running there), it is the stable cwd, since `claude` exits 1 before
-        # starting in a deleted directory.
-        child_cwd = current_project_root()
-        if child_cwd is None:
-            child_cwd = stable_daemon_cwd()
-            _log.warning("operator_dispatch_cwd_deleted", operator=operator, cwd=child_cwd)
         prompt_path = _write_prompt_file(prompt)
         proc = await _spawn_with_prompt_file(
             argv,
