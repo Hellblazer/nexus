@@ -223,8 +223,10 @@ class ReembedPlanCountsTest extends ReembedFixture {
         assertThat(n.documents()).as("its manifest names only the target").isZero();
         assertThat(n.chunks()).isZero();
         assertThat(n.liveHomedElsewhere()).as("the cutover's delete removes its catalog row: residue").isEqualTo(1);
-        assertThat(n.liveHomedElsewhere()).as("the plan agrees with the cutover's own residue count")
-            .isEqualTo(reader.residue(fx.tenant(), fx.src()).liveHomedElsewhere());
+        assertThat(n.liveHomedElsewhere()).as("the plan agrees with the cutover's own parity count (this source has "
+                + "no candidate, so every live document homed here is one whose chunks are elsewhere)")
+            .isEqualTo(reader.parity(fx.tenant(), fx.src(), fx.tgt(), java.util.UUID.randomUUID(), 0)
+                .liveHomedAtSource());
     }
 
     @Test
@@ -351,7 +353,8 @@ class ReembedPlanCountsTest extends ReembedFixture {
         assertThat(reader.planCounts(fx.tenant(), fx.src())).as("the first tenant's counts, unchanged")
             .isEqualTo(before);
         assertThat(theirs).isNotEqualTo(before);
-        assertThat(reader.residue(fx.tenant(), fx.src()).liveHomedElsewhere()).isEqualTo(before.liveHomedElsewhere());
+        assertThat(reader.deleteCounts(fx.tenant(), fx.src()).unmatchedSatelliteRows())
+            .isEqualTo(before.unmatchedSatelliteRows());
 
         // Row-level security already hides the other tenant from the service role, so the check above cannot see a
         // dropped tenant_id predicate. Read through the container's superuser (RLS does not apply to it): then the

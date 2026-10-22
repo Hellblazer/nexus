@@ -1885,10 +1885,10 @@ def _wait_and_report(db: object, jobs: list[dict]) -> None:
     """``--wait``: poll until every job in *jobs* is done, done_with_skips, aborted, failed or paused; name each state.
 
     Runs taxonomy discover for the target of each job that ended ``done`` or ``done_with_skips`` (once per target).
-    Exits 1 unless every job finished: aborted, failed and paused jobs stopped short and need a person. A Ctrl-C
+    Exits 1 unless every job finished and every discover ran: aborted, failed, paused and blocked-in-cutover jobs stopped short and need a person, and a failed discover is told with its retry command. A Ctrl-C
     leaves the jobs running (the engine owns them) and says how to look again.
     """
-    from nexus.reembed_job import FINISHED_STATES, DISCOVER_STATES, WaitError, wait_for_jobs  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import DISCOVER_STATES, FINISHED_STATES, WaitError, is_blocked, wait_for_jobs  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     ids = [str(j.get("job_id")) for j in jobs]
     if not ids:
@@ -1914,10 +1914,12 @@ def _wait_and_report(db: object, jobs: list[dict]) -> None:
         raise _reembed_job_error(exc) from exc
     discovered: set[str] = set()
     stopped_short = False
+    discover_failed = False
     for job_id in ids:
         row = final[job_id]
         state = str(row.get("state"))
-        click.echo(f"{_job_line(row)}\n  -> {state}")
+        blocked = " (blocked: the job waits for a person; its last error says why)" if is_blocked(row) else ""
+        click.echo(f"{_job_line(row)}\n  -> {state}{blocked}")
         if state not in FINISHED_STATES:
             stopped_short = True
         if state in DISCOVER_STATES:
@@ -1925,8 +1927,9 @@ def _wait_and_report(db: object, jobs: list[dict]) -> None:
             if target not in discovered:
                 discovered.add(target)
                 click.echo(f"Discovering topics for {target}...")
-                _run_taxonomy_discover(target)
-    if stopped_short:
+                if not _run_taxonomy_discover(target):
+                    discover_failed = True
+    if stopped_short or discover_failed:
         raise click.exceptions.Exit(1)
 
 
@@ -2225,6 +2228,21 @@ def _reembed_all(
     )
 
 
+def _kept_tombstoned_job(db: object, name: str, row: dict) -> dict | None:
+    """The newest job on *name* when it ended ``done``/``kept_tombstoned`` and *name* is still superseded by its target."""
+    try:
+        jobs = db.reembed_status()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — a hint only: an unreadable status leaves the plain refusal
+        return None
+    newest = next((j for j in jobs if j.get("source_collection") == name), None)
+    if (
+        newest is not None and newest.get("state") == "done" and newest.get("disposition") == "kept_tombstoned"
+        and newest.get("target_collection") == row.get("superseded_by")
+    ):
+        return newest
+    return None
+
+
 def _reembed_cross_model(
     db: object, name: str, target_model: str, *, dry_run: bool, yes: bool, keep_source: bool,
     force_delete: bool, token_cap: int | None, wait: bool = False,
@@ -2242,6 +2260,12 @@ def _reembed_cross_model(
         raise _reembed_job_error(exc) from exc
     if row is None:
         raise click.ClickException(f"collection {name!r} has no catalog row; there is nothing to move.")
+    if row.get("lifecycle_state") == "live" and is_superseded(row) and _kept_tombstoned_job(db, name, row) is not None:
+        raise click.ClickException(
+            f"collection {name!r} is the superseded source of a re-embed job that kept it because tombstoned "
+            f"documents still held it. Once they are purged or restored, `nx collection re-embed --all` re-enters "
+            f"that job; NAME --to MODEL starts new jobs only."
+        )
     if row.get("lifecycle_state") != "live" or is_superseded(row):
         raise click.ClickException(
             f"collection {name!r} is not a live, current collection ({row.get('lifecycle_state')}"

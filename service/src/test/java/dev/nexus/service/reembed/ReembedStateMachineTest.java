@@ -36,7 +36,7 @@ import java.util.stream.Stream;
 class ReembedStateMachineTest {
 
     private static final int STATES = 8;
-    private static final int EVENTS = 13;
+    private static final int EVENTS = 14;
 
     /** Allowed edges, from the "Leaves to" column of the RDR's state table. */
     private static final Map<State, Map<Event, State>> EXPECTED = new EnumMap<>(State.class);
@@ -61,6 +61,7 @@ class ReembedStateMachineTest {
         edge(State.CUTOVER, Event.CUTOVER_DONE, State.DONE);
         edge(State.CUTOVER, Event.CUTOVER_SKIPS, State.DONE_WITH_SKIPS);
         edge(State.CUTOVER, Event.PARITY_FAILED, State.FAILED);
+        edge(State.CUTOVER, Event.CUTOVER_RESCAN, State.RUNNING);
         edge(State.CUTOVER, Event.ABORT, State.ABORTED);
 
         edge(State.DONE, Event.REENTER_RUNNING, State.RUNNING);
@@ -110,16 +111,16 @@ class ReembedStateMachineTest {
     @Test
     void theTableCoversAllPairsAndEachKindHasTheCountTheRdrImplies() {
         List<Arguments> pairs = everyPair().toList();
-        // Non-vacuity: 8 states x 13 events, none skipped.
+        // Non-vacuity: 8 states x 14 events, none skipped.
         assertThat(State.values()).hasSize(STATES);
         assertThat(Event.values()).hasSize(EVENTS);
         assertThat(pairs).hasSize(STATES * EVENTS);
 
         Map<Object, Long> byKind = pairs.stream()
             .collect(Collectors.groupingBy(a -> a.get()[2], Collectors.counting()));
-        assertThat(byKind.get("applied")).isEqualTo(18L);
+        assertThat(byKind.get("applied")).isEqualTo(19L);
         assertThat(byKind.get("unchanged")).isEqualTo(3L);
-        assertThat(byKind.get("refused")).isEqualTo(83L);
+        assertThat(byKind.get("refused")).isEqualTo(90L);
 
         // The code's own table has exactly the edges the independent expectation has, per state.
         assertThat(ReembedStateMachine.TRANSITIONS).hasSize(STATES);
@@ -128,7 +129,7 @@ class ReembedStateMachineTest {
                 .as("edges out of %s", s)
                 .isEqualTo(EXPECTED.getOrDefault(s, Map.of()));
         }
-        assertThat(ReembedStateMachine.TRANSITIONS.values().stream().mapToInt(Map::size).sum()).isEqualTo(18);
+        assertThat(ReembedStateMachine.TRANSITIONS.values().stream().mapToInt(Map::size).sum()).isEqualTo(19);
     }
 
     @Test

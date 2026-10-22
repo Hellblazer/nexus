@@ -256,3 +256,16 @@ class TestWaitForJobs:
         assert rj.DISCOVER_STATES == {"done", "done_with_skips"}
         assert rj.WAIT_STATES == {"done", "done_with_skips", "aborted", "failed", "paused"}
         assert rj.discover_command("docs__t") == "nx taxonomy discover --collection docs__t"
+
+    def test_a_job_parked_in_a_blocked_cutover_returns_instead_of_polling_forever(self):
+        blocked = _job("a", "s", "t", "cutover")
+        blocked["last_error"] = "cutover is blocked: the source is already superseded by x, not by t"
+        sleeps: list[float] = []
+        final = rj.wait_for_jobs(self._walk([blocked]), ["a"], sleep=sleeps.append)
+        assert final["a"] is blocked and sleeps == []
+        assert rj.is_blocked(blocked)
+
+    def test_a_cutover_without_the_blocked_message_is_still_waited_on(self):
+        moving = _job("a", "s", "t", "cutover")
+        moving["last_error"] = "something else"
+        assert not rj.is_blocked(moving) and not rj.is_blocked(_job("a", "s", "t", "running"))

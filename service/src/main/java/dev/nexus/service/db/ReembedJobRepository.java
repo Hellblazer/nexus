@@ -239,31 +239,7 @@ public final class ReembedJobRepository {
         return retryingOnLock(tenant, jobId, () -> source, () ->
             scope.withTenant(tenant, ctx -> {
                 takeStartGuard(ctx, tenant, source);
-                // A source that is the TARGET of a job still in a lock state is being filled by that job;
-                // moving documents out of it would race that job. The unique index covers only same-source jobs,
-                // so this is the refusal that names the job holding the collection from the other side.
-                var intoSource = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
-                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                    .and(REEMBED_JOBS.TARGET_COLLECTION.eq(source))
-                    .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
-                    .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
-                    .limit(1)
-                    .fetchOne();
-                if (intoSource != null) {
-                    throw JobLockHeld.targetOf(source, intoSource.value1(), intoSource.value2());
-                }
-                // The reverse: a target that is the SOURCE of a job still in a lock state is being drained by
-                // that job; filling it from a new job would race the drain.
-                var outOfTarget = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
-                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                    .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(target))
-                    .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
-                    .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
-                    .limit(1)
-                    .fetchOne();
-                if (outOfTarget != null) {
-                    throw JobLockHeld.sourceOf(target, outOfTarget.value1(), outOfTarget.value2());
-                }
+                requireNotHeldFromTheOtherSide(ctx, tenant, source, target);
                 hook("after_start_reads", 0);
                 return Job.from(ctx.insertInto(REEMBED_JOBS)
                 .set(REEMBED_JOBS.TENANT_ID, tenant)
@@ -279,6 +255,35 @@ public final class ReembedJobRepository {
                 .returning()
                 .fetchOne());
             }));
+    }
+
+    /**
+     * The cross-job reads of a start, which the source-lock index (same-source jobs only) cannot make. A source that
+     * is the TARGET of a job still in a lock state is being filled by that job; moving documents out of it would race
+     * that job. A target that is the SOURCE of a job still in a lock state is being drained by it; filling it from
+     * another job would race the drain. Either is {@link JobLockHeld} naming that job.
+     */
+    private static void requireNotHeldFromTheOtherSide(DSLContext ctx, String tenant, String source, String target) {
+        var intoSource = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.TARGET_COLLECTION.eq(source))
+            .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
+            .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+            .limit(1)
+            .fetchOne();
+        if (intoSource != null) {
+            throw JobLockHeld.targetOf(source, intoSource.value1(), intoSource.value2());
+        }
+        var outOfTarget = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(target))
+            .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
+            .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+            .limit(1)
+            .fetchOne();
+        if (outOfTarget != null) {
+            throw JobLockHeld.sourceOf(target, outOfTarget.value1(), outOfTarget.value2());
+        }
     }
 
     /**
@@ -403,22 +408,63 @@ public final class ReembedJobRepository {
             throw new IllegalArgumentException("a kept_tombstoned job re-enters running or cutover, not " + to);
         }
         return retryingOnLock(tenant, jobId, () -> sourceOf(tenant, jobId), () ->
-            scope.withTenant(tenant, ctx -> ctx.update(REEMBED_JOBS)
-                .set(REEMBED_JOBS.STATE, to)
-                .set(REEMBED_JOBS.PASS_NUMBER, (short) 1)
-                .set(REEMBED_JOBS.DOC_CURSOR, "")
-                .setNull(REEMBED_JOBS.DISPOSITION)
-                .setNull(REEMBED_JOBS.FAILURE_REASON)
-                .setNull(REEMBED_JOBS.LAST_ERROR)
-                .setNull(REEMBED_JOBS.FINISHED_AT)
-                .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                .and(REEMBED_JOBS.JOB_ID.eq(jobId))
-                .and(REEMBED_JOBS.STATE.eq(DONE))
-                .and(REEMBED_JOBS.DISPOSITION.eq("kept_tombstoned"))
-                .returning()
-                .fetchOptional()
-                .map(Job::from)));
+            scope.withTenant(tenant, ctx -> {
+                var row = ctx.select(REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION)
+                    .from(REEMBED_JOBS)
+                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                    .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                    .and(REEMBED_JOBS.STATE.eq(DONE))
+                    .and(REEMBED_JOBS.DISPOSITION.eq("kept_tombstoned"))
+                    .fetchOne();
+                if (row == null) {
+                    return Optional.<Job>empty();
+                }
+                // The guards a start takes (see start): the rename/rehome guard, and neither end of this job in a
+                // lock state as the other end of another job. The source-lock index covers only same-source jobs.
+                takeStartGuard(ctx, tenant, row.value1());
+                requireNotHeldFromTheOtherSide(ctx, tenant, row.value1(), row.value2());
+                return ctx.update(REEMBED_JOBS)
+                    .set(REEMBED_JOBS.STATE, to)
+                    .set(REEMBED_JOBS.PASS_NUMBER, (short) 1)
+                    .set(REEMBED_JOBS.DOC_CURSOR, "")
+                    .setNull(REEMBED_JOBS.DISPOSITION)
+                    .setNull(REEMBED_JOBS.FAILURE_REASON)
+                    .setNull(REEMBED_JOBS.LAST_ERROR)
+                    .setNull(REEMBED_JOBS.FINISHED_AT)
+                    .set(REEMBED_JOBS.UPDATED_AT, clock())
+                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                    .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                    .and(REEMBED_JOBS.STATE.eq(DONE))
+                    .and(REEMBED_JOBS.DISPOSITION.eq("kept_tombstoned"))
+                    .returning()
+                    .fetchOptional()
+                    .map(Job::from);
+            }));
+    }
+
+    /**
+     * Send a job in {@code cutover} back to {@code running} for a fresh walk of its source: a live document arrived
+     * in a source the job had already superseded (the cutover found it after a parity failure and a resume, or a
+     * re-entry). Pass 1, cursor at the start, the marker kept (the source stays superseded). A compare-and-set on
+     * {@code cutover} and the marker the caller decided from, so an abort or another actor that got there first
+     * applies nothing.
+     *
+     * @return the updated row, or empty when the job is no longer in {@code cutover} with that marker
+     */
+    public Optional<Job> rescan(String tenant, UUID jobId, String expectedCutoverStep) {
+        return scope.withTenant(tenant, ctx -> ctx.update(REEMBED_JOBS)
+            .set(REEMBED_JOBS.STATE, RUNNING)
+            .set(REEMBED_JOBS.PASS_NUMBER, (short) 1)
+            .set(REEMBED_JOBS.DOC_CURSOR, "")
+            .setNull(REEMBED_JOBS.FAILURE_REASON)
+            .set(REEMBED_JOBS.UPDATED_AT, clock())
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+            .and(REEMBED_JOBS.STATE.eq(CUTOVER))
+            .and(REEMBED_JOBS.CUTOVER_STEP.isNotDistinctFrom(expectedCutoverStep))
+            .returning()
+            .fetchOptional()
+            .map(Job::from));
     }
 
     /**
@@ -575,6 +621,16 @@ public final class ReembedJobRepository {
      * @throws IllegalArgumentException for a step that is not a cutover marker
      */
     public boolean setCutoverStep(String tenant, UUID jobId, String step) {
+        return setCutoverStep(tenant, jobId, step, null);
+    }
+
+    /**
+     * {@link #setCutoverStep(String, UUID, String)} that also records {@code note} in {@code last_error} in the same
+     * statement when the marker moves (a null note leaves {@code last_error} alone, an empty one clears it). The cutover writes what a
+     * restart past {@code delete_started} would otherwise lose, such as the {@code --force-delete} note, with the
+     * marker that makes the delete irreversible.
+     */
+    public boolean setCutoverStep(String tenant, UUID jobId, String step, String note) {
         int rank = CUTOVER_STEPS.indexOf(step);
         if (rank < 0) {
             throw new IllegalArgumentException("not a cutover step: " + step);
@@ -585,9 +641,13 @@ public final class ReembedJobRepository {
             if (!behind.isEmpty()) {
                 markerBehind = markerBehind.or(REEMBED_JOBS.CUTOVER_STEP.in(behind));
             }
-            int set = ctx.update(REEMBED_JOBS)
+            var update = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.CUTOVER_STEP, step)
-                .set(REEMBED_JOBS.UPDATED_AT, clock())
+                .set(REEMBED_JOBS.UPDATED_AT, clock());
+            if (note != null) {
+                update = update.set(REEMBED_JOBS.LAST_ERROR, note.isEmpty() ? null : note);
+            }
+            int set = update
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                 .and(REEMBED_JOBS.STATE.eq(CUTOVER))

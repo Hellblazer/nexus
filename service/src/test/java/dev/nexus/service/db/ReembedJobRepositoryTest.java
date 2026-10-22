@@ -837,6 +837,57 @@ class ReembedJobRepositoryTest {
         }
     }
 
+    private Job keptTombstonedJob(String t) {
+        Job first = repo.start(t, SRC, TGT, null, false, false);
+        return repo.applyTransition(t, first.jobId(), PLANNED, null, DONE, Transition.disposition("kept_tombstoned"))
+            .orElseThrow();
+    }
+
+    @Test
+    void reenter_whenARenameHoldsTheGuardPastTheBound_isARetryableLockContention_andChangesNothing() throws Exception {
+        String t = tenant();
+        Job done = keptTombstonedJob(t);
+        var held = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        try {
+            Future<?> rename = renameHoldingTheGuard(pool, t, held, release);
+            assertThat(held.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+            Throwable refused = catchThrowable(() -> repo.reenter(t, done.jobId(), RUNNING));
+
+            assertThat(refused).isInstanceOf(LockContention.class).hasMessageContaining("rename");
+            assertThat(repo.get(t, done.jobId()).orElseThrow().state()).isEqualTo(DONE);
+
+            release.countDown();
+            rename.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(repo.reenter(t, done.jobId(), RUNNING).orElseThrow().state()).isEqualTo(RUNNING);
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void reenter_isRefusedWhileAnotherJobHoldsEitherEndFromTheOtherSide_theGuardAStartTakes() {
+        String t = tenant();
+        Job done = keptTombstonedJob(t);
+        // a job draining the re-entered job's TARGET: re-entering would fill what it drains
+        Job draining = repo.start(t, TGT, "other-target", null, false, false);
+        assertThatThrownBy(() -> repo.reenter(t, done.jobId(), CUTOVER))
+            .isInstanceOfSatisfying(JobLockHeld.class, e -> assertThat(e.existingJobId()).isEqualTo(draining.jobId()));
+        repo.applyTransition(t, draining.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
+
+        // a job filling the re-entered job's SOURCE: re-entering would move documents out of what it fills
+        Job filling = repo.start(t, "other-source", SRC, null, false, false);
+        assertThatThrownBy(() -> repo.reenter(t, done.jobId(), CUTOVER))
+            .isInstanceOfSatisfying(JobLockHeld.class, e -> assertThat(e.existingJobId()).isEqualTo(filling.jobId()));
+        assertThat(repo.get(t, done.jobId()).orElseThrow().state()).as("refused, so unchanged").isEqualTo(DONE);
+
+        repo.applyTransition(t, filling.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
+        assertThat(repo.reenter(t, done.jobId(), CUTOVER).orElseThrow().state()).isEqualTo(CUTOVER);
+    }
+
     @Test
     void takeStartGuard_putsTheLockTimeoutBackOnceItHoldsTheGuard() {
         String t = tenant();

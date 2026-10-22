@@ -504,23 +504,40 @@ public final class ReembedRunner {
      *   <li>marker {@code delete_started} (abort is refused from here), delete the source only if its registry row
      *       still exists, then {@code done} with disposition {@code deleted}.</li>
      * </ol>
-     * The checks run once, just before the marker is written, and not again once the marker says the delete began
-     * (abort is refused from there, so the decision stands). A manifest write that lands after the supersede is
-     * refused by the engine (nexus-mp8ys); a document registered against the source in the instants between the
-     * parity check and the delete itself is not caught here. An exception from a step leaves the job in {@code
-     * cutover} for the next tick.
+     * Step 1 differs once the source is superseded (a marker, or the row names this job's target): a live document
+     * this job has not already tried sends the job back to {@code running} to move it ({@code CUTOVER_RESCAN});
+     * only documents it tried and could not move end {@code done_with_skips}. Steps 3 to 6 run once, before the
+     * marker is written. A restart past {@code delete_started} does not repeat them, but the parity check and the
+     * trash count run again immediately before {@code deleteCollection}, marker or not, and a source that fails
+     * them goes to {@code failed/parity_mismatch} (abort is allowed from {@code failed}) instead of being deleted.
+     * A manifest write that lands after the supersede is refused by the engine (nexus-mp8ys); a document registered
+     * against the source in the instants between that last look and the delete itself is the one window left. An
+     * exception from a step leaves the job in {@code cutover} for the next tick.
      */
     private void cutover(String tenant, Job job) {
         String source = job.sourceCollection();
         boolean deleteBegun = ReembedStateMachine.CUTOVER_STEP_DELETE_STARTED.equals(job.cutoverStep());
         String forceNote = null;
         if (!deleteBegun) {
+            Map<String, Object> row = catalog.getCollection(tenant, source);
             if (reader.anyCandidate(tenant, source)) {
-                transition(tenant, job, Event.CUTOVER_SKIPS, Transition.NONE);
+                boolean superseded = job.cutoverStep() != null
+                    || (row != null && job.targetCollection().equals(String.valueOf(row.get("superseded_by"))));
+                if (!superseded) {
+                    transition(tenant, job, Event.CUTOVER_SKIPS, Transition.NONE);
+                } else if (reader.anyUntriedCandidate(tenant, source, job.jobId())) {
+                    rescan(tenant, job);
+                } else {
+                    // Every live document left is one this job already tried and could not move. The source is
+                    // already superseded, so say where they are rather than leave a bare done_with_skips.
+                    transition(tenant, job, Event.CUTOVER_SKIPS, new Transition(null,
+                        "live document(s) this job could not move are still in the superseded source " + source
+                            + "; nothing routes to them there. Fix what blocks them and move them by hand, or "
+                            + "nx collection delete " + source + " discards them", null, null));
+                }
                 return;
             }
             phase("before_supersede");
-            Map<String, Object> row = catalog.getCollection(tenant, source);
             if (row == null) {
                 blocked(tenant, job, "the source is no longer registered; abort the job");
                 return;
@@ -575,23 +592,111 @@ public final class ReembedRunner {
                         "kept_residue", null));
                     return;
                 }
-                forceNote = "--force-delete deleted " + what + " that named the source and belonged to no moved document";
+                forceNote = forceNoteOf(what);
                 log.warn("event=reembed_force_delete tenant={} job={} source={} rows=\"{}\"", tenant, job.jobId(),
                     source, what);
             }
         }
-        if (!jobs.setCutoverStep(tenant, job.jobId(), ReembedStateMachine.CUTOVER_STEP_DELETE_STARTED)) {
+        // The marker and the note a restart would lose go in one statement: an empty note clears what an earlier
+        // failure left in last_error, a force note replaces it.
+        if (!jobs.setCutoverStep(tenant, job.jobId(), ReembedStateMachine.CUTOVER_STEP_DELETE_STARTED,
+                forceNote == null ? "" : forceNote)) {
             return;
         }
         phase("before_delete");
+        Map<String, Integer> removed = null;
         if (catalog.getCollection(tenant, source) != null) {
+            // Checked again right before the delete, whatever the marker says: the marker stops the checks above
+            // from repeating on a restart, and a document registered at the source since (a registration the engine
+            // does not refuse, unlike a manifest write) would die with it. A source already deleted needs none.
+            String refusal = refusalBeforeDelete(tenant, job);
+            if (refusal != null) {
+                log.warn("event=reembed_delete_refused tenant={} job={} source={} reason=\"{}\"", tenant, job.jobId(),
+                    source, refusal);
+                finishCutover(tenant, job.jobId(), Event.PARITY_FAILED, Transition.failed(null, truncate(refusal)));
+                return;
+            }
+            if (deleteBegun) {
+                // A resume or restart past the marker did not run the residue check, and last_error may still hold
+                // the refusal that failed the job before: record what this delete takes (nothing, when no
+                // force_delete), replacing it. A fresh run wrote its note with the marker.
+                jobs.setLastError(tenant, job.jobId(), ReembedJobRepository.CUTOVER,
+                    forceNote != null ? forceNote : forceNoteNow(tenant, job));
+            }
             phase("delete");
-            Map<String, Integer> removed = catalog.deleteCollection(tenant, source);
+            removed = catalog.deleteCollection(tenant, source);
             log.info("event=reembed_source_deleted tenant={} job={} source={} removed={}", tenant, job.jobId(), source,
                 removed);
         }
         phase("after_delete");
-        finishCutover(tenant, job.jobId(), Event.CUTOVER_DONE, new Transition(null, forceNote, "deleted", null));
+        finishDeleted(tenant, job.jobId(), removed);
+    }
+
+    /**
+     * The last look before {@code deleteCollection}: the parity check again, and the trash. Null when the delete may
+     * run; else the {@code last_error} of the {@code parity_mismatch} that refuses it.
+     */
+    private String refusalBeforeDelete(String tenant, Job job) {
+        Job now = jobs.get(tenant, job.jobId()).orElse(null);
+        if (now == null) {
+            return "the job row is gone";
+        }
+        ReembedSourceReader.Parity parity = reader.parity(tenant, job.sourceCollection(), job.targetCollection(),
+            job.jobId(), now.documentsMoved());
+        long tombstoned = reader.tombstonedDocuments(tenant, job.sourceCollection());
+        if (parity.holds() && tombstoned == 0) {
+            return null;
+        }
+        String why = parity.holds() ? "the delete was refused at the last check" : parity.describe(job.sourceCollection());
+        if (tombstoned > 0) {
+            why += " " + tombstoned + " tombstoned document(s) also hold the source.";
+        }
+        return why;
+    }
+
+    /** The note for a {@code force_delete} job whose delete will take satellite rows with it, or null. */
+    private String forceNoteNow(String tenant, Job job) {
+        if (!job.forceDelete()) {
+            return null;
+        }
+        ReembedSourceReader.Residue residue = reader.residue(tenant, job.sourceCollection());
+        return residue.satelliteRows() == 0 ? null : forceNoteOf(residue.describeSatellites());
+    }
+
+    private static String forceNoteOf(String what) {
+        return "--force-delete deleted " + what + " that named the source and belonged to no moved document";
+    }
+
+    /** Finish a delete: {@code deleted}, with what the delete removed after whatever note the marker step recorded. */
+    private void finishDeleted(String tenant, UUID jobId, Map<String, Integer> removed) {
+        String removedNote = null;
+        if (removed != null) {
+            StringBuilder sb = new StringBuilder();
+            removed.forEach((table, n) -> {
+                if (n != null && n > 0) {
+                    sb.append(sb.length() == 0 ? "" : ", ").append(table).append('=').append(n);
+                }
+            });
+            removedNote = sb.length() == 0 ? null : "the delete removed " + sb;
+        }
+        String note = null;
+        if (removedNote != null) {
+            Job now = jobs.get(tenant, jobId).orElse(null);
+            String prior = now == null || now.lastError() == null || now.lastError().startsWith(BLOCKED_PREFIX)
+                ? null : now.lastError();
+            note = truncate(prior == null ? removedNote : prior + "; " + removedNote);
+        }
+        finishCutover(tenant, jobId, Event.CUTOVER_DONE, new Transition(null, note, "deleted", null));
+    }
+
+    /** A live document arrived in a superseded source: walk it again (the state machine's {@code CUTOVER_RESCAN}). */
+    private void rescan(String tenant, Job job) {
+        if (!(ReembedStateMachine.decide(State.CUTOVER, Event.CUTOVER_RESCAN, job.cutoverStep()) instanceof Applied)) {
+            return;
+        }
+        Optional<Job> back = jobs.rescan(tenant, job.jobId(), job.cutoverStep());
+        log.info("event=reembed_state_changed tenant={} job={} from=cutover to=running cause=cutover_rescan applied={}",
+            tenant, job.jobId(), back.isPresent());
     }
 
     /**

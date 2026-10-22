@@ -122,25 +122,14 @@ public final class ReembedSourceReader {
     }
 
     /**
-     * What still names the source. The delete removes every document row homed at the source (live or tombstoned,
-     * whether or not a manifest names it) and every aspect, queue and highlight row naming it, so anything counted
-     * here is lost if the delete runs. The cutover reads the satellite rows ({@link Residue#satelliteRows}) for its residue
-     * check (a {@code force_delete} lets them go); the tombstoned and live-homed documents it meets earlier, as
-     * {@code kept_tombstoned} and the parity check ({@link Parity}), which no flag lifts.
-     *
-     * @param liveCandidates       whether a live candidate document remains (a client wrote one after the pass)
-     * @param tombstoned           soft-deleted documents whose manifest names the source or that are homed at it
-     *                             (the delete removes them, trash included)
-     * @param liveHomedElsewhere   live documents homed at the source whose manifest names only other collections
-     *                             (not a candidate, so never moved; the delete removes their catalog row)
-     * @param aspects              {@code document_aspects} rows naming the source
-     * @param queue                {@code aspect_extraction_queue} rows naming the source
-     * @param highlights           {@code document_highlights} rows naming the source
+     * The aspect, queue and highlight rows naming the source, which the source's delete takes with it. The cutover's
+     * residue check reads them; a {@code force_delete} lets them go. (The tombstoned and live-homed documents the
+     * delete would also take are met earlier, as {@code kept_tombstoned} and the parity check ({@link Parity}),
+     * which no flag lifts.)
      */
-    public record Residue(boolean liveCandidates, long tombstoned, long liveHomedElsewhere, long aspects,
-                          long queue, long highlights) {
+    public record Residue(long aspects, long queue, long highlights) {
 
-        /** The aspect, queue and highlight rows still naming the source: what {@code force_delete} lets the delete take. */
+        /** The rows still naming the source: what {@code force_delete} lets the delete take. */
         public long satelliteRows() {
             return aspects + queue + highlights;
         }
@@ -155,21 +144,30 @@ public final class ReembedSourceReader {
         }
     }
 
-    /** What {@code source} still holds that deleting it would destroy; see {@link Residue}. One snapshot per statement. */
     public Residue residue(String tenant, String source) {
+        return scope.withTenant(tenant, ctx -> new Residue(
+            ctx.fetchCount(DOCUMENT_ASPECTS,
+                DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(source))),
+            ctx.fetchCount(ASPECT_EXTRACTION_QUEUE,
+                ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))),
+            ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
+                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source)))));
+    }
+
+    /**
+     * Whether {@code source} has a live candidate this job has not already recorded as skipped: a document that
+     * arrived since the job last looked. A candidate the job tried and could not move stays a recorded skip, so
+     * the cutover does not send the job round the pass loop again for it.
+     */
+    public boolean anyUntriedCandidate(String tenant, String source, UUID jobId) {
         return scope.withTenant(tenant, ctx -> {
             var d = CATALOG_DOCUMENTS;
-            boolean live = ctx.fetchExists(ctx.selectOne().from(d)
-                .where(d.TENANT_ID.eq(tenant)).and(d.DELETED_AT.isNull()).and(candidateShape(ctx, tenant, source)));
-            long tombstoned = ctx.fetchCount(d, tombstonedShape(ctx, tenant, source));
-            long liveElsewhere = ctx.fetchCount(d, liveHomedElsewhereShape(ctx, tenant, source));
-            long aspects = ctx.fetchCount(DOCUMENT_ASPECTS,
-                DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(source)));
-            long queue = ctx.fetchCount(ASPECT_EXTRACTION_QUEUE,
-                ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source)));
-            long highlights = ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
-                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source)));
-            return new Residue(live, tombstoned, liveElsewhere, aspects, queue, highlights);
+            var m = REEMBED_JOB_MOVES;
+            return ctx.fetchExists(ctx.selectOne().from(d)
+                .where(d.TENANT_ID.eq(tenant)).and(d.DELETED_AT.isNull()).and(candidateShape(ctx, tenant, source))
+                .and(DSL.notExists(ctx.selectOne().from(m)
+                    .where(m.TENANT_ID.eq(tenant)).and(m.JOB_ID.eq(jobId)).and(m.DOC_ID.eq(d.TUMBLER))
+                    .and(m.OUTCOME.eq(ReembedJobRepository.OUTCOME_SKIPPED)))));
         });
     }
 

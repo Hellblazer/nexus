@@ -23,7 +23,8 @@ import java.util.Set;
  *   <li>{@code paused} leaves to {@code running} or {@code aborted};</li>
  *   <li>{@code failed} leaves to {@code running} (resume) or {@code aborted};</li>
  *   <li>{@code cutover} leaves to {@code done}; {@code done_with_skips}; {@code failed} (the parity check refused
- *       the delete); {@code aborted}, but only before the delete step starts;</li>
+ *       the delete); {@code running} (a live document arrived in an already superseded source, {@code
+ *       CUTOVER_RESCAN}); {@code aborted}, but only before the delete step starts;</li>
  *   <li>{@code done} leaves to {@code running} or {@code cutover} only for a {@code kept_tombstoned} source
  *       re-listed by {@code --all}; {@code aborted} and {@code done_with_skips} leave to nothing.</li>
  * </ul>
@@ -80,6 +81,13 @@ public final class ReembedStateMachine {
         CUTOVER_SKIPS,
         /** The parity check refused the delete. */
         PARITY_FAILED,
+        /**
+         * Cutover found a live document that arrived in a source it had already superseded (after a parity failure
+         * and a resume, or a re-entry): the job walks the source again rather than strand it. Not in the RDR's
+         * state table, which sends the cutover of a source with a live document to {@code done_with_skips}; that
+         * leaves the document in a superseded source nothing routes to.
+         */
+        CUTOVER_RESCAN,
         /** {@code --all} re-listed a {@code kept_tombstoned} source that now holds a live document. */
         REENTER_RUNNING,
         /** {@code --all} re-listed a {@code kept_tombstoned} source whose tombstones are gone. */
@@ -121,6 +129,7 @@ public final class ReembedStateMachine {
             Event.CUTOVER_DONE, State.DONE,
             Event.CUTOVER_SKIPS, State.DONE_WITH_SKIPS,
             Event.PARITY_FAILED, State.FAILED,
+            Event.CUTOVER_RESCAN, State.RUNNING,
             Event.ABORT, State.ABORTED)),
         entry(State.DONE, Map.of(
             Event.REENTER_RUNNING, State.RUNNING,

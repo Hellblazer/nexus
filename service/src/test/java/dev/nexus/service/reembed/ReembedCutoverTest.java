@@ -858,4 +858,289 @@ class ReembedCutoverTest extends ReembedFixture {
         assertThat(jobs.reenter(fx.tenant(), started.jobId(), RUNNING)).isEmpty();
         assertThat(job(fx, started.jobId()).state()).isEqualTo(DONE);
     }
+
+    // ── review fold-in: the delete window, the superseded rescan, the notes, the order ─────────────────
+
+    /** A client's manifest and chunk write into the source; the outcome as text ("accepted" or "refused: ..."). */
+    private String attemptClientWrite(Fx fx, String doc, List<String> texts) {
+        List<java.util.Map<String, Object>> chunks = new ArrayList<>();
+        List<java.util.Map<String, Object>> rows = new ArrayList<>();
+        for (int k = 0; k < texts.size(); k++) {
+            chunks.add(java.util.Map.of("chash", ch(texts.get(k)), "text", texts.get(k), "metadata", java.util.Map.of("k", k)));
+            rows.add(java.util.Map.of("position", k, "chash", ch(texts.get(k)), "chunk_index", k));
+        }
+        try {
+            var r = srcSvc.writeManyCombined(fx.tenant(), fx.src(), chunks,
+                List.of(java.util.Map.of("doc_id", doc, "rows", rows)), null, false, false);
+            return ((List<?>) r.response().get("failed_doc_ids")).isEmpty() ? "accepted"
+                : "refused: failed " + r.response().get("failed_doc_ids");
+        } catch (RuntimeException e) {
+            return "refused: " + e;
+        }
+    }
+
+    @Test
+    void aManifestAndChunkWriteIntoTheSourceAfterTheSupersedeIsRefused_soNoSourceCopyCanAppearBeforeTheDelete() {
+        // The premise the post-supersede design rests on (nexus-mp8ys): only a bare registration can reach a
+        // superseded source, so only that needs the last look before the delete.
+        Fx fx = pair("mp8ys");
+        List<String> docs = seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        java.util.concurrent.atomic.AtomicReference<String> outcome = new java.util.concurrent.atomic.AtomicReference<>();
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                outcome.set(attemptClientWrite(fx, docs.get(0), seededTexts(fx, 0, 3)));
+            }
+        });
+
+        runner.tick();
+
+        assertThat(outcome.get()).startsWith("refused");
+        assertThat(manifestCollections(fx, docs.get(0))).as("no manifest row appeared at the source").containsExactly(fx.tgt());
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+    }
+
+    @Test
+    void aDocumentRegisteredAfterDeleteStarted_blocksTheDelete_andResumeMovesItAndFinishes() {
+        Fx fx = pair("afterfloor");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        AtomicInteger registered = new AtomicInteger();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("before_delete") && registered.getAndIncrement() == 0) {
+                registerBare(fx, "late", fx.src());     // after the marker, before the delete
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.cutoverStep()).as("the marker was already written").isEqualTo("delete_started");
+        assertThat(failed.lastError()).contains("1 live document(s) are homed at the source");
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNotNull();
+
+        // abort is allowed from failed even past the marker; resume instead walks the source again
+        force(fx, failed, RUNNING, Transition.NONE);
+        runner.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(physical(fx, "rr." + fx.tag() + ".late")).isEqualTo(fx.tgt());
+        assertThat(done.lastError()).as("a finished delete does not keep the refusal").doesNotContain("parity");
+    }
+
+    @Test
+    void aRestartPastDeleteStartedStillLooksAgain_aDocumentRegisteredWhileTheEngineWasDownBlocksTheDelete() {
+        Fx fx = pair("restartfloor");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        ReembedRunner first = runner(fx, ONE_DOC_PER_BATCH);
+        first.setPhaseHookForTests(probe.hook(Set.of("before_delete")));
+        first.tick();
+        assertThat(job(fx, started.jobId()).cutoverStep()).isEqualTo("delete_started");
+        registerBare(fx, "late", fx.src());                 // while the engine was down
+
+        ReembedRunner second = runner(fx, ONE_DOC_PER_BATCH);
+        second.setPhaseHookForTests(probe.hook(Set.of()));
+        second.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNotNull();
+    }
+
+    @Test
+    void aTombstoneThatAppearsAfterDeleteStartedBlocksTheDeleteToo() {
+        Fx fx = pair("tombfloor");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        AtomicInteger once = new AtomicInteger();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("before_delete") && once.getAndIncrement() == 0) {
+                String trash = registerBare(fx, "trash", fx.src());
+                assertThat(catalog.deleteDocument(fx.tenant(), trash)).isEqualTo(1);
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.lastError()).contains("1 tombstoned document(s) also hold the source");
+        assertThat(probe.deletes).hasValue(0);
+    }
+
+    @Test
+    void aSourceAlreadyDeletedIsNotLookedAtAgain_theRestartAfterTheDeleteStaysIdempotent() {
+        // restartAfterTheDeleteCommitted_finishesWithoutASecondDelete covers the call count; this pins that a document
+        // row that appears at the (now unregistered) name afterwards cannot turn the finish into a failure.
+        Fx fx = pair("deleted2");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        ReembedRunner first = runner(fx, ONE_DOC_PER_BATCH);
+        first.setPhaseHookForTests(probe.hook(Set.of("after_delete")));
+        first.tick();
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+
+        ReembedRunner second = runner(fx, ONE_DOC_PER_BATCH);
+        second.setPhaseHookForTests(probe.hook(Set.of()));
+        second.tick();
+
+        assertThat(job(fx, started.jobId()).state()).isEqualTo(DONE);
+        assertThat(probe.deletes).hasValue(1);
+    }
+
+    // a live document in a superseded source
+
+    @Test
+    void aLiveDocumentThatArrivesInASupersededSourceSendsTheJobBackToRunning_notDoneWithSkips() {
+        Fx fx = pair("rescan");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job kept = keptTombstoned(fx, docs);
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant()))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docs.get(1))).execute());
+        jobs.reenter(fx.tenant(), kept.jobId(), CUTOVER).orElseThrow();
+        String late = registerBare(fx, "late", fx.src());
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job back = job(fx, kept.jobId());
+        assertThat(back.state()).as("the cutover found a live document in a source it had superseded").isEqualTo(RUNNING);
+        assertThat(back.cutoverStep()).isEqualTo("superseded");
+        assertThat(back.passNumber()).isEqualTo(1);
+        assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, kept.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(physical(fx, late)).isEqualTo(fx.tgt());
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+    }
+
+    @Test
+    void aLiveDocumentThisJobTriedAndCouldNotMove_inASupersededSource_endsDoneWithSkipsAndSaysWhere() {
+        // the loop guard: a rescan only for a document the job has not already recorded as skipped
+        Fx fx = pair("rescanstuck");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job kept = keptTombstoned(fx, docs);
+        assertThat(catalog.restoreDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
+        String victim = ch("doc " + fx.tag() + " d1 chunk 0 lorem ipsum");
+        su(ctx -> ctx.update(CHUNKS).set(CHUNKS.CHUNK_TEXT, (String) null).set(CHUNKS.RETENTION, "reference-only")
+            .where(CHUNKS.TENANT_ID.eq(fx.tenant())).and(CHUNKS.COLLECTION.eq(fx.src()))
+            .and(CHUNKS.CHASH.eq(Chash.fromHex(victim).toBytes())).execute());
+        jobs.reenter(fx.tenant(), kept.jobId(), RUNNING).orElseThrow();
+        ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+
+        runner.tick();      // three passes, the leftover recorded as skips, then the cutover
+        runner.tick();      // would be the second lap of a rescan loop
+
+        Job done = job(fx, kept.jobId());
+        assertThat(done.state()).isEqualTo(DONE_WITH_SKIPS);
+        assertThat(done.lastError()).contains("superseded source").contains("nx collection delete " + fx.src());
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNotNull();
+    }
+
+    // the note a restart must not lose, and what the delete removed
+
+    @Test
+    void theForceNoteIsWrittenWithTheMarker_soARestartPastDeleteStartedKeepsIt_andTheRemovedCountsFollow() {
+        Fx fx = pair("forcenote");
+        seedDocs(fx, 2, 3);
+        String other = registerBare(fx, "other", fx.tgt());
+        seedSatellite(SAT_ASPECTS, fx, fx.src(), other);
+        Job started = jobs.start(fx.tenant(), fx.src(), fx.tgt(), null, false, true);
+        Probe probe = new Probe();
+        ReembedRunner first = runner(fx, ONE_DOC_PER_BATCH);
+        first.setPhaseHookForTests(probe.hook(Set.of("before_delete")));
+        first.tick();
+        Job crashed = job(fx, started.jobId());
+        assertThat(crashed.cutoverStep()).isEqualTo("delete_started");
+        assertThat(crashed.lastError()).as("written with the marker").contains("--force-delete deleted")
+            .contains("1 document_aspects row(s)");
+
+        ReembedRunner second = runner(fx, ONE_DOC_PER_BATCH);
+        second.setPhaseHookForTests(probe.hook(Set.of()));
+        second.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(done.lastError()).contains("--force-delete deleted").contains("the delete removed")
+            .contains("document_aspects=1").contains("chunks=");
+        assertThat(satelliteRows(SAT_ASPECTS, fx, fx.src())).isZero();
+    }
+
+    @Test
+    void anOrdinaryDeleteRecordsWhatItRemoved_andNothingStaleFromAnEarlierState() {
+        Fx fx = pair("removed");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.lastError()).startsWith("the delete removed ").contains("chunks=6");
+    }
+
+    // the order of the checks, pinned
+
+    @Test
+    void parityOutranksResidue_andForceDeleteDoesNotHelp() {
+        Fx fx = pair("parityresidue");
+        seedDocs(fx, 2, 3);
+        String other = registerBare(fx, "other", fx.tgt());
+        seedSatellite(SAT_ASPECTS, fx, fx.src(), other);                // a residue row ...
+        Job started = jobs.start(fx.tenant(), fx.src(), fx.tgt(), null, false, true);
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                registerBare(fx, "late", fx.src());                      // ... and a parity failure
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(satelliteRows(SAT_ASPECTS, fx, fx.src())).as("the residue row is untouched").isEqualTo(1);
+    }
+
+    @Test
+    void keepSourceEndsTheJobBeforeTheParityCheckIsAsked() {
+        // Pinned, not argued: the RDR's order puts keep_source (step 4) before the parity check (step 5), so a
+        // --keep-source job ends kept_by_flag even when parity would have failed. Nothing is deleted either way.
+        Fx fx = pair("keepparity");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, true);
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                registerBare(fx, "late", fx.src());
+            }
+        });
+
+        runner.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("kept_by_flag");
+        assertThat(probe.deletes).hasValue(0);
+    }
 }

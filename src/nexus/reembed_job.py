@@ -258,8 +258,18 @@ DISCOVER_STATES: frozenset[str] = frozenset({"done", "done_with_skips"})
 #: The states ``--wait`` exits 0 on. The other three stopped before the job finished.
 FINISHED_STATES: frozenset[str] = DISCOVER_STATES
 
+#: What the engine's ``last_error`` starts with while a job sits in ``cutover`` unable to proceed (the source is no
+#: longer registered, or was superseded by another collection). The job is not failed and does not move on its own,
+#: so a wait that polled for it would never return.
+CUTOVER_BLOCKED_PREFIX: str = "cutover is blocked: "
+
 #: Seconds between status polls. A re-embed runs minutes to hours; a poll is one cheap read.
 WAIT_POLL_S: float = 2.0
+
+
+def is_blocked(row: dict) -> bool:
+    """Whether *row* is a job parked in ``cutover`` with the engine's blocked message in ``last_error``."""
+    return row.get("state") == "cutover" and str(row.get("last_error") or "").startswith(CUTOVER_BLOCKED_PREFIX)
 
 
 def discover_command(target: str) -> str:
@@ -279,7 +289,8 @@ def wait_for_jobs(
     poll_s: float = WAIT_POLL_S,
     on_change: Callable[[dict], None] | None = None,
 ) -> dict[str, dict]:
-    """Poll ``fetch`` (the engine's status rows) until every job in ``job_ids`` is in a :data:`WAIT_STATES` state.
+    """Poll ``fetch`` (the engine's status rows) until every job in ``job_ids`` is in a :data:`WAIT_STATES` state
+    or parked in a blocked ``cutover`` (:func:`is_blocked`: it waits for a person, not for time).
 
     Returns ``{job_id: final row}``. ``on_change`` is called with a row each time its state changes (the first
     sight of a job included), so a caller can print progress without printing every poll. A job missing from a
@@ -300,7 +311,7 @@ def wait_for_jobs(
                 last_state[job_id] = state
                 if on_change is not None:
                     on_change(row)
-            if state in WAIT_STATES:
+            if state in WAIT_STATES or is_blocked(row):
                 final[job_id] = row
                 pending.remove(job_id)
         if not pending:

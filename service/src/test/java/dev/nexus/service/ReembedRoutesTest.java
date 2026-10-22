@@ -1279,4 +1279,18 @@ class ReembedRoutesTest {
         advance(t, pending, "aborted");
         assertThat(statusJobs(get(t, "/status?counts=true")).get(0)).containsEntry("delete_counts", null);
     }
+
+    @Test
+    void aReEntryIsRefusedWhileAnotherJobDrainsTheTarget_theGuardAStartTakes() throws Exception {
+        Tn t = tenant("reentdrain");
+        UUID first = keptTombstonedLeg(t);
+        // a job started directly on the re-entered job's TARGET as its source
+        Job draining = jobs.start(t.tenant(), t.tgt(), "knowledge__elsewhere__" + MINI + "__v1", null, false, false);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r)).containsEntry("job_id", draining.jobId().toString());
+        assertThat(job(t, first).state()).as("the refused re-entry changed nothing").isEqualTo("done");
+    }
 }

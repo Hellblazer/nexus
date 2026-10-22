@@ -807,13 +807,26 @@ class TestWait:
         assert result.exit_code == 0, result.output
         discover.assert_called_once_with("docs__t")
 
-    def test_a_failed_discover_is_told_but_does_not_fail_the_finished_job(self, runner):
+    def test_a_failed_discover_exits_one_though_the_job_itself_finished(self, runner):
         db, cat = self._world("done")
         with patch_time("nexus.commands.collection", "sleep"), patch("nexus.commands.collection._run_taxonomy_discover",
-                                        return_value=False) as discover:
+                                                                      return_value=False) as discover:
             result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
+        assert "-> done" in result.output
         discover.assert_called_once()
+
+    def test_a_job_parked_in_a_blocked_cutover_returns_with_its_last_error_and_exit_one(self, runner):
+        db, cat = self._world("cutover", polls=())
+        blocked = _job(JOB, source=self.SRC_A, state="cutover", target="docs__t",
+                       last_error="cutover is blocked: the source is no longer registered; abort the job")
+        db.reembed_status.side_effect = [[], [blocked]]
+        result, sleep, discover = self._run(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
+        assert result.exit_code == 1, result.output
+        assert "cutover is blocked: the source is no longer registered" in result.output
+        assert "-> cutover (blocked" in result.output
+        sleep.assert_not_called()
+        discover.assert_not_called()
 
     def test_a_dry_run_has_nothing_to_wait_for_and_says_so(self, runner):
         db, cat = self._world("done")
@@ -891,3 +904,23 @@ class TestRunTaxonomyDiscover:
         self._wire(monkeypatch, boom)
         assert _run_taxonomy_discover("docs__t") is False
         assert "nx taxonomy discover --collection docs__t" in capsys.readouterr().err
+
+
+class TestCrossModelOnAKeptTombstonedSource:
+    SRC2, TGT2 = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-3__v1"
+
+    def _run(self, runner, jobs):
+        cat = FakeCatalog([_row(self.SRC2, superseded_by=self.TGT2)], {"docs": "voyage-3"})
+        return _invoke(runner, _engine(jobs=jobs), cat, [self.SRC2, "--to", "voyage-3"])
+
+    def test_it_points_at_all_for_the_reentry(self, runner):
+        jobs = [_job(JOB, source=self.SRC2, target=self.TGT2, state="done", disposition="kept_tombstoned")]
+        result = self._run(runner, jobs)
+        assert result.exit_code != 0
+        assert "nx collection re-embed --all" in result.output and "tombstoned" in result.output
+
+    def test_any_other_superseded_source_keeps_the_plain_refusal(self, runner):
+        jobs = [_job(JOB, source=self.SRC2, target=self.TGT2, state="done", disposition="kept_by_flag")]
+        result = self._run(runner, jobs)
+        assert result.exit_code != 0
+        assert "not a live, current collection" in result.output and "--all" not in result.output
