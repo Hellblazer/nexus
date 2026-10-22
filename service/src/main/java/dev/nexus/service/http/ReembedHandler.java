@@ -52,10 +52,13 @@ import java.util.function.Predicate;
  *   <li>{@code POST /plan} {@code {source_collection, target_collection?}}: what a job on the source would do, with
  *       every refusal a start would make, writing nothing (200). The plan states the chosen target and what would
  *       happen to it ({@code existing}, {@code revive} or {@code register}), the documents and chunks it moves, the
- *       token estimate, and the counts the source's delete would destroy (RDR-210 Cutover).</li>
+ *       token estimate, the counts the source's delete would destroy (RDR-210 Cutover), and {@code token_cap}, the
+ *       cap a start that sends none would apply (null for a local target).</li>
  *   <li>{@code GET /status}: every job row of the tenant, newest first, as {@code {"jobs": [...]}}.</li>
  *   <li>{@code POST /jobs} {@code {source_collection, target_collection?, token_cap?, keep_source?, force_delete?}}:
- *       plan the target, then start the job (201 with the job row).</li>
+ *       plan the target, then start the job (201 with the job row). A start that sends no {@code token_cap} gets
+ *       {@link #DEFAULT_TOKEN_CAP} when the target model is a billed (Voyage) one and no cap when it is a local one;
+ *       a value sent is kept as sent, higher or lower than the default.</li>
  *   <li>{@code POST /jobs/{id}/pause}, {@code /resume} ({@code {token_cap?}}), {@code /abort}: 200 with the job
  *       row; a repeat of what the job already is answers 200 with {@code "unchanged": true} and touches nothing; a
  *       transition the state machine refuses is 409 naming the state.</li>
@@ -95,6 +98,9 @@ import java.util.function.Predicate;
 public final class ReembedHandler implements HttpHandler {
 
     public static final String PATH = "/v1/vectors/reembed";
+
+    /** The token cap of a start on a billed (Voyage) target that sends none: 10 million (RDR-210 Cost). */
+    public static final long DEFAULT_TOKEN_CAP = 10_000_000L;
 
     private static final Logger log = LoggerFactory.getLogger(ReembedHandler.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -346,12 +352,14 @@ public final class ReembedHandler implements HttpHandler {
             "quarantine_rows", n.quarantineRows(),
             "foreign_topic_assignments", n.foreignTopicAssignments(),
             "topic_links", n.topicLinks(),
-            "unmatched_satellite_rows", n.unmatchedSatelliteRows());
+            "unmatched_satellite_rows", n.unmatchedSatelliteRows(),
+            "live_homed_elsewhere", n.liveHomedElsewhere(),
+            "token_cap", defaultTokenCap(r.profileModel()));
         log.info("event=reembed_plan tenant={} source={} target={} target_action={} documents={} chunks={} "
                 + "token_estimate={} quarantine_rows={} foreign_topic_assignments={} topic_links={} "
-                + "unmatched_satellite_rows={}", tenant, source, target, action, n.documents(), n.chunks(),
-            n.tokenEstimate(), n.quarantineRows(), n.foreignTopicAssignments(), n.topicLinks(),
-            n.unmatchedSatelliteRows());
+                + "unmatched_satellite_rows={} live_homed_elsewhere={} token_cap={}", tenant, source, target, action,
+            n.documents(), n.chunks(), n.tokenEstimate(), n.quarantineRows(), n.foreignTopicAssignments(),
+            n.topicLinks(), n.unmatchedSatelliteRows(), n.liveHomedElsewhere(), out.get("token_cap"));
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 
@@ -359,11 +367,14 @@ public final class ReembedHandler implements HttpHandler {
         Map<String, Object> body = readBody(exchange, START_FIELDS);
         String source = requireString(body, "source_collection");
         String requestedTarget = optionalString(body, "target_collection");
-        Long tokenCap = optionalPositiveLong(body, "token_cap");
+        Long requestedCap = optionalPositiveLong(body, "token_cap");
         boolean keepSource = optionalBoolean(body, "keep_source");
         boolean forceDelete = optionalBoolean(body, "force_delete");
 
         Resolved resolved = resolve(tenant, source, requestedTarget);
+        // An explicit cap wins, higher or lower; none on a billed target is the RDR's default; none on a local one
+        // stays none. The runner and the repository read null as "no cap", so the default is applied here.
+        Long tokenCap = requestedCap != null ? requestedCap : defaultTokenCap(resolved.profileModel());
         TargetSelection.Decision decision = resolved.decision();
         String contentType = resolved.contentType();
         String owner = resolved.owner();
@@ -401,6 +412,16 @@ public final class ReembedHandler implements HttpHandler {
         out.put("target_action", action);
         earlier.ifPresent(j -> out.put("revived_job_id", j.jobId().toString()));
         HttpUtil.send(exchange, 201, MAPPER.writeValueAsString(out));
+    }
+
+    /**
+     * The cap a start applies when the request sends none (RDR-210 Cost): {@link #DEFAULT_TOKEN_CAP} for a billed
+     * target model, null (no cap) for a model embedded on this machine, which bills nothing. Billed means a Voyage
+     * model, the same family test {@code EmbedderRouter} and the client's {@code model_family} make; any other
+     * model (bge, the bundled MiniLM) bills nothing.
+     */
+    static Long defaultTokenCap(String targetModel) {
+        return targetModel != null && targetModel.startsWith("voyage-") ? DEFAULT_TOKEN_CAP : null;
     }
 
     private static String needOf(String contentType, String owner, String profileModel) {

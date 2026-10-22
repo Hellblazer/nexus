@@ -1876,10 +1876,20 @@ def _plan_lines(p: _Planned) -> list[str]:
     )
     lines.append(
         f"  satellite rows naming it that match no live document: {plan.get('unmatched_satellite_rows', 0)} "
-        f"(the delete is refused while any remain unless --force-delete). The plan does not predict every "
-        f"refusal: the cutover also counts a live document homed here whose chunks sit in another collection as "
-        f"residue, and the plan does not count those"
+        f"(the delete is refused while any remain unless --force-delete)"
     )
+    homed = plan.get("live_homed_elsewhere")
+    if homed is None:
+        # An engine that predates the field: say what the plan cannot, rather than print a zero it did not count.
+        lines.append(
+            "  this engine's plan does not count live documents homed here whose chunks sit in another collection; "
+            "the cutover counts them as residue and holds the delete"
+        )
+    else:
+        lines.append(
+            f"  live documents homed here whose chunks sit in another collection: {homed} "
+            f"(not moved; the cutover holds the delete while any remain)"
+        )
     return lines
 
 

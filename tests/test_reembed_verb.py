@@ -535,12 +535,21 @@ class TestOwnerlessTargetName:
 
 
 class TestPlanWording:
-    def test_the_satellite_line_says_the_plan_does_not_predict_every_refusal(self, runner):
-        db = _engine({SRC: _plan()})
+    def test_the_plan_states_the_live_documents_homed_here_whose_chunks_are_elsewhere(self, runner):
+        db = _engine({SRC: _plan(live_homed_elsewhere=3)})
         result = _invoke(runner, db, FakeCatalog([_row(SRC)], {"docs": VA}), ["--all"])
         assert result.exit_code == 0, result.output
-        assert "does not predict every refusal" in result.output
-        assert "homed here whose chunks sit in another collection" in result.output
+        assert "live documents homed here whose chunks sit in another collection: 3" in result.output
+        assert "does not predict" not in result.output and "does not count" not in result.output
+
+    def test_an_engine_that_sends_no_count_is_not_shown_as_zero(self, runner):
+        plan = _plan()
+        assert "live_homed_elsewhere" not in plan
+        db = _engine({SRC: plan})
+        result = _invoke(runner, db, FakeCatalog([_row(SRC)], {"docs": VA}), ["--all"])
+        assert result.exit_code == 0, result.output
+        assert "chunks sit in another collection: 0" not in result.output
+        assert "does not count live documents homed here" in result.output
 
 
 class TestConfirmPrompt:

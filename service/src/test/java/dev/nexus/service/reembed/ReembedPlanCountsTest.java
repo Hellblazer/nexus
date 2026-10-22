@@ -38,7 +38,7 @@ class ReembedPlanCountsTest extends ReembedFixture {
     void anEmptySourcePlansZeroOfEverything() {
         Fx fx = pair("empty");
         assertThat(reader.planCounts(fx.tenant(), fx.src()))
-            .isEqualTo(new PlanCounts(0, 0, 0, 0, 0, 0, 0, 0, 0));
+            .isEqualTo(new PlanCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     @Test
@@ -222,5 +222,146 @@ class ReembedPlanCountsTest extends ReembedFixture {
 
         assertThat(n.documents()).as("its manifest names only the target").isZero();
         assertThat(n.chunks()).isZero();
+        assertThat(n.liveHomedElsewhere()).as("the cutover's delete removes its catalog row: residue").isEqualTo(1);
+        assertThat(n.liveHomedElsewhere()).as("the plan agrees with the cutover's own residue count")
+            .isEqualTo(reader.residue(fx.tenant(), fx.src()).liveHomedElsewhere());
+    }
+
+    @Test
+    void liveHomedElsewhereLeavesOutCandidatesTombstonesAndOtherCollectionsDocuments() {
+        Fx fx = pair("homed");
+        seedDoc(fx, "mover", List.of("a candidate " + fx.tag()));                       // names the source: a candidate
+        String bare = "rr." + fx.tag() + ".bare";                                       // homed here, no manifest: a candidate
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", bare, "title", "t", "content_type", CONTENT_TYPE,
+            "corpus", CONTENT_TYPE, "physical_collection", fx.src(), "chunk_count", 0));
+        String away = "rr." + fx.tag() + ".away";                                       // homed in the target: not ours
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", away, "title", "t", "content_type", CONTENT_TYPE,
+            "corpus", CONTENT_TYPE, "physical_collection", fx.tgt(), "chunk_count", 0));
+        String strayText = "stray " + fx.tag();
+        String stray = "rr." + fx.tag() + ".stray";                                     // homed here, manifest elsewhere
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", stray, "title", "t", "content_type", CONTENT_TYPE,
+            "corpus", CONTENT_TYPE, "physical_collection", fx.src(), "chunk_count", 0));
+        writeElsewhere(fx, stray, strayText);
+        String tomb = "rr." + fx.tag() + ".tomb";                                       // tombstoned stray: counted as a tombstone
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", tomb, "title", "t", "content_type", CONTENT_TYPE,
+            "corpus", CONTENT_TYPE, "physical_collection", fx.src(), "chunk_count", 0));
+        writeElsewhere(fx, tomb, "tombstoned stray " + fx.tag());
+        assertThat(catalog.deleteDocument(fx.tenant(), tomb)).isEqualTo(1);
+
+        PlanCounts n = reader.planCounts(fx.tenant(), fx.src());
+
+        assertThat(n.documents()).isEqualTo(2);
+        assertThat(n.tombstonedDocuments()).isEqualTo(1);
+        assertThat(n.liveHomedElsewhere()).isEqualTo(1);
+    }
+
+    private void writeElsewhere(Fx fx, String docId, String text) {
+        var written = moveSvc.writeManyCombined(fx.tenant(), fx.tgt(),
+            List.of(Map.of("chash", ch(text), "text", text, "metadata", Map.of("k", 0))),
+            List.of(Map.of("doc_id", docId, "rows", List.of(Map.of("position", 0, "chash", ch(text), "chunk_index", 0)))),
+            null, false, false);
+        assertThat((List<?>) written.response().get("failed_doc_ids")).isEmpty();
+    }
+
+    /**
+     * Every count the plan states, seeded with at least one row, in {@code fx}'s tenant. The seeded sizes grow with
+     * {@code scale}, so two tenants seeded at different scales cannot produce equal counts by accident.
+     */
+    private void seedEveryCount(Fx fx, int scale) {
+        seedDocs(fx, scale, 2);                                                  // live candidates, 2 chunks each
+        String tomb = seedDoc(fx, "tomb", List.of("tombstoned " + fx.tag()));
+        assertThat(catalog.deleteDocument(fx.tenant(), tomb)).isEqualTo(1);
+        String orphan = "ownerless " + fx.tag();
+        String stray = "rr." + fx.tag() + ".stray";
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", stray, "title", "t", "content_type", CONTENT_TYPE,
+            "corpus", CONTENT_TYPE, "physical_collection", fx.src(), "chunk_count", 0));
+        writeElsewhere(fx, stray, "stray " + fx.tag());
+        String sibling = "quarantine-" + fx.src();
+        long topicA = 9_100_000L + Math.abs((long) (fx.tenant() + "ta").hashCode());
+        long topicB = topicA + 1;
+        long topicElsewhere = topicA + 2;
+        String foreignText = "foreign " + fx.tag();
+        su(ctx -> {
+            PgContainerHelper.insertChunks(ctx, fx.tenant(), fx.src(), List.of(ch(orphan)), List.of(orphan),
+                List.of(new float[768]), List.of(Map.of()));
+            PgContainerHelper.insertCollection(ctx, fx.tenant(), sibling);
+            for (int i = 0; i < scale; i++) {
+                String q = "quarantined " + i + " " + fx.tag();
+                PgContainerHelper.insertChunks(ctx, fx.tenant(), sibling, List.of(ch(q)), List.of(q),
+                    List.of(new float[768]), List.of(Map.of("origin_collection", fx.src())));
+            }
+            PgContainerHelper.insertChunks(ctx, fx.tenant(), fx.tgt(), List.of(ch(foreignText)), List.of(foreignText),
+                List.of(new float[384]), List.of(Map.of()));
+            for (var spec : List.of(new Object[] {topicA, fx.src()}, new Object[] {topicB, fx.src()},
+                                    new Object[] {topicElsewhere, fx.tgt()})) {
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values((Long) spec[0], fx.tenant(), "t" + spec[0], (String) spec[1], 0, OffsetDateTime.now(),
+                        "pending")
+                    .execute();
+            }
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(fx.tenant(), Chash.fromHex(ch(foreignText)).toBytes(), topicA, "projection", fx.tgt(),
+                    OffsetDateTime.now(), MINI)
+                .execute();
+            ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                .values(fx.tenant(), topicA, topicB).execute();
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(fx.tenant(), fx.src(), "/p/tomb.md", OffsetDateTime.now(), "v1", "docling", tomb,
+                    "file:///p/tomb.md").execute();
+            return null;
+        });
+    }
+
+    @Test
+    void anotherTenantsSameNamedSourceChangesNoCount() {
+        Fx fx = pair("xtenant");
+        seedEveryCount(fx, 2);
+        PlanCounts before = reader.planCounts(fx.tenant(), fx.src());
+        assertThat(before.documents()).isEqualTo(2);
+        assertThat(before.tombstonedDocuments()).isEqualTo(1);
+        assertThat(before.liveHomedElsewhere()).isEqualTo(1);
+        assertThat(before.ownerlessChunks()).isPositive();
+        assertThat(before.quarantineRows()).isEqualTo(2);
+        assertThat(before.foreignTopicAssignments()).isEqualTo(1);
+        assertThat(before.topicLinks()).isEqualTo(1);
+        assertThat(before.unmatchedSatelliteRows()).isEqualTo(1);
+        assertThat(before.tokenEstimate()).isPositive();
+
+        // A second tenant with a source and a target of the very same names, document ids and chunk texts,
+        // holding more of everything.
+        Fx other = new Fx(fx.tenant() + "-other", fx.tag(), fx.src(), fx.tgt());
+        register(other.tenant(), other.src());
+        register(other.tenant(), other.tgt());
+        setProfile(other.tenant(), MINI, 384);
+        seedEveryCount(other, 5);
+        PlanCounts theirs = reader.planCounts(other.tenant(), other.src());
+        assertThat(theirs.documents()).as("the other tenant's rows are really there").isEqualTo(5);
+
+        assertThat(reader.planCounts(fx.tenant(), fx.src())).as("the first tenant's counts, unchanged")
+            .isEqualTo(before);
+        assertThat(theirs).isNotEqualTo(before);
+        assertThat(reader.residue(fx.tenant(), fx.src()).liveHomedElsewhere()).isEqualTo(before.liveHomedElsewhere());
+
+        // Row-level security already hides the other tenant from the service role, so the check above cannot see a
+        // dropped tenant_id predicate. Read through the container's superuser (RLS does not apply to it): then the
+        // predicates are the only thing keeping the tenants apart.
+        var cfg = new com.zaxxer.hikari.HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(pg.getUsername());
+        cfg.setPassword(pg.getPassword());
+        cfg.setMaximumPoolSize(2);
+        cfg.setAutoCommit(true);
+        try (var suDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+            var unguarded = new dev.nexus.service.db.ReembedSourceReader(new dev.nexus.service.db.TenantScope(suDs));
+            assertThat(unguarded.planCounts(other.tenant(), other.src())).as("superuser read, other tenant")
+                .isEqualTo(theirs);
+            assertThat(unguarded.planCounts(fx.tenant(), fx.src())).as("superuser read, first tenant: predicates only")
+                .isEqualTo(before);
+        }
     }
 }

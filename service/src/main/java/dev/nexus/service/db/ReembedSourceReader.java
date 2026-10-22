@@ -170,10 +170,14 @@ public final class ReembedSourceReader {
      * @param unmatchedSatelliteRows  aspect, queue and highlight rows naming the source whose document the job does not
      *                                move (a tombstoned document's, or one homed here whose chunks are elsewhere):
      *                                the delete refuses to run while any remain unless the job's {@code force_delete} is set
+     * @param liveHomedElsewhere      live documents homed at the source whose manifest names only other collections:
+     *                                never candidates, so never moved, and the delete removes their catalog row; the
+     *                                same count as {@link Residue#liveHomedElsewhere}, so a source that plans clean
+     *                                here cannot end {@code kept_residue} for this reason (nexus-bi56e)
      */
     public record PlanCounts(long documents, long tombstonedDocuments, long chunks, long ownerlessChunks,
                              long tokenEstimate, long quarantineRows, long foreignTopicAssignments, long topicLinks,
-                             long unmatchedSatelliteRows) {
+                             long unmatchedSatelliteRows, long liveHomedElsewhere) {
     }
 
     public PlanCounts planCounts(String tenant, String source) {
@@ -188,6 +192,8 @@ public final class ReembedSourceReader {
             long documents = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(candidateShape));
             long tombstoned = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
                 .and(namesSource.or(d.PHYSICAL_COLLECTION.eq(source))));
+            long liveElsewhere = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull())
+                .and(d.PHYSICAL_COLLECTION.eq(source)).and(DSL.not(candidateShape)));
 
             // Chunks a live document owns by a manifest row naming the source: what the job embeds.
             var oc = CATALOG_DOCUMENT_CHUNKS.as("plan_owner_chunks");
@@ -238,7 +244,7 @@ public final class ReembedSourceReader {
                     .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))));
 
             return new PlanCounts(documents, tombstoned, chunks, Math.max(0, stored - chunks),
-                tokens == null ? 0 : tokens.longValue(), quarantine, foreignAssignments, links, unmatched);
+                tokens == null ? 0 : tokens.longValue(), quarantine, foreignAssignments, links, unmatched, liveElsewhere);
         });
     }
 

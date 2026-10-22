@@ -816,10 +816,97 @@ class ReembedRoutesTest {
         assertThat(job(theirs, jobId).state()).isEqualTo("running");
     }
 
+    // ── token cap: the engine's default for a billed target (nexus-8zzjh) ─────────────────────────────
+
+    private static final String VOYAGE = "voyage-context-3";
+
+    /** A tenant whose profile model for the content type is {@code model} and whose live sibling of that model exists. */
+    private Tn tenantWithProfile(String tag, String model, int dimension) {
+        Tn t = tenant(tag);
+        register(t, name(t, model, 1));
+        setProfile(t.tenant(), model, dimension);
+        return t;
+    }
+
+    @Test
+    void aStartOnABilledTargetWithNoTokenCapGetsTheTenMillionDefault() throws Exception {
+        Tn t = tenantWithProfile("capdefault", VOYAGE, 1024);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        Map<String, Object> body = json(r);
+        assertThat(body).containsEntry("target_collection", name(t, VOYAGE, 1));
+        assertThat(((Number) body.get("token_cap")).longValue()).isEqualTo(10_000_000L);
+        assertThat(job(t, id(body)).tokenCap()).as("the default is stored on the row").isEqualTo(10_000_000L);
+    }
+
+    @Test
+    void anExplicitTokenCapOverridesTheDefaultOnABilledTarget_higherOrLower() throws Exception {
+        Tn lower = tenantWithProfile("caplow", VOYAGE, 1024);
+        var low = post(lower, "/jobs", "{\"source_collection\":\"" + lower.src() + "\",\"token_cap\":5000}");
+        assertThat(low.statusCode()).as(low.body()).isEqualTo(201);
+        assertThat(job(lower, id(json(low))).tokenCap()).isEqualTo(5000L);
+
+        Tn higher = tenantWithProfile("caphigh", VOYAGE, 1024);
+        var high = post(higher, "/jobs", "{\"source_collection\":\"" + higher.src() + "\",\"token_cap\":50000000}");
+        assertThat(high.statusCode()).as(high.body()).isEqualTo(201);
+        assertThat(job(higher, id(json(high))).tokenCap()).as("a higher cap is not clamped to the default")
+            .isEqualTo(50_000_000L);
+    }
+
+    @Test
+    void aStartOnALocalTargetWithNoTokenCapStaysUncapped_andAnExplicitCapStillApplies() throws Exception {
+        // The minilm sibling as the source, the bge sibling as the target: a local model bills nothing.
+        Tn t = tenant("capbge");
+        setProfile(t.tenant(), BGE, 768);
+        var r = post(t, "/jobs", startBody(t.tgt()));
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(json(r)).containsEntry("target_collection", t.src()).containsEntry("token_cap", null);
+        assertThat(job(t, id(json(r))).tokenCap()).isNull();
+
+        Tn u = tenant("capbgeexplicit");
+        setProfile(u.tenant(), BGE, 768);
+        var capped = post(u, "/jobs", "{\"source_collection\":\"" + u.tgt() + "\",\"token_cap\":777}");
+        assertThat(capped.statusCode()).as(capped.body()).isEqualTo(201);
+        assertThat(job(u, id(json(capped))).tokenCap()).isEqualTo(777L);
+    }
+
+    @Test
+    void theEngineDefaultIsAppliedWhenTheBilledTargetIsRegisteredByTheStart() throws Exception {
+        Tn t = tenant("capregister");
+        setProfile(t.tenant(), VOYAGE, 1024);
+        String fresh = name(t, VOYAGE, 1);
+
+        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + fresh + "\"}");
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(json(r)).containsEntry("target_action", "registered");
+        assertThat(job(t, id(json(r))).tokenCap()).isEqualTo(10_000_000L);
+    }
+
     // ── plan: the start's decision and refusals, the counts, and no write (nexus-cnxjk) ──────────────
 
     private static String planBody(String source) {
         return "{\"source_collection\":\"" + source + "\"}";
+    }
+
+    @Test
+    void planReportsTheCapAStartWithNoTokenCapWouldApply() throws Exception {
+        Tn billed = tenantWithProfile("plancapvoyage", VOYAGE, 1024);
+        var v = post(billed, "/plan", planBody(billed.src()));
+        assertThat(v.statusCode()).as(v.body()).isEqualTo(200);
+        assertThat(((Number) json(v).get("token_cap")).longValue()).isEqualTo(10_000_000L);
+
+        Tn local = tenant("plancapbge");
+        setProfile(local.tenant(), BGE, 768);
+        var b = post(local, "/plan", planBody(local.tgt()));
+        assertThat(b.statusCode()).as(b.body()).isEqualTo(200);
+        assertThat(json(b)).as("a local target has no cap").containsEntry("token_cap", null);
+
+        // The plan and the start agree.
+        var started = post(billed, "/jobs", startBody(billed.src()));
+        assertThat(job(billed, id(json(started))).tokenCap()).isEqualTo(10_000_000L);
     }
 
     @Test
@@ -837,7 +924,8 @@ class ReembedRoutesTest {
             .containsEntry("documents", 0).containsEntry("tombstoned_documents", 0).containsEntry("chunks", 0)
             .containsEntry("ownerless_chunks", 0).containsEntry("token_estimate", 0)
             .containsEntry("quarantine_rows", 0).containsEntry("foreign_topic_assignments", 0)
-            .containsEntry("topic_links", 0).containsEntry("unmatched_satellite_rows", 0);
+            .containsEntry("topic_links", 0).containsEntry("unmatched_satellite_rows", 0)
+            .containsEntry("live_homed_elsewhere", 0);
         assertThat(jobs.listAll(t.tenant())).as("a plan starts nothing").isEmpty();
         assertThat(wakeUps()).as("and wakes nothing").isEqualTo(wakes);
         assertThat(get(t, "/plan").statusCode()).as("a GET on the plan route").isEqualTo(405);
