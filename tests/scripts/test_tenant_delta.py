@@ -110,3 +110,12 @@ def test_a_tenant_free_change_is_quiet_under_quiet_if_zero(repo: Path) -> None:
     _commit(repo, {"tests/test_b.py": "def test_free():\n    pass\n\ndef test_more():\n    pass\n"}, "head")
     quiet = _run(repo, "--quiet-if-zero")
     assert quiet.returncode == 0 and quiet.stdout == ""
+
+
+def test_a_module_that_fails_to_collect_is_refused_not_counted_as_zero(repo: Path) -> None:
+    """A collection error must not read as a module with no tenant tests."""
+    _commit(repo, {"tests/test_b.py": "import no_such_module_anywhere\n\ndef test_free():\n    pass\n"},
+            "head")
+    proc = _run(repo)
+    assert proc.returncode == 2
+    assert "could not count" in proc.stderr

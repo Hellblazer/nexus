@@ -469,9 +469,12 @@ fi
 # PUSH_TENANT_HINT lines on stderr. A hint, never a refusal: any failure of the
 # count is ignored. NX_PUSH_TENANT_CHECK=0 skips it.
 _tenant_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+# The changed names are captured first, not piped to `grep -q`: under pipefail a
+# grep that exits on its first match SIGPIPEs git diff and reads as no match.
+_tenant_changed="$(git diff --name-only "refs/remotes/$remote/$branch" "$tip" -- tests 2>/dev/null || true)"
 if [[ "${NX_PUSH_TENANT_CHECK:-1}" != "0" && -n "$_tenant_root" && -f "$_tenant_root/scripts/tenant_delta.py" ]] \
    && [[ "$tip" == "$(git rev-parse -q --verify HEAD 2>/dev/null || true)" ]] \
-   && git diff --name-only "refs/remotes/$remote/$branch" "$tip" -- tests 2>/dev/null | grep -q '\.py$' \
+   && [[ "$_tenant_changed" == *.py* ]] \
    && command -v uv >/dev/null 2>&1; then
   if _tenant_out="$(cd "$_tenant_root" && uv run --no-sync --quiet python scripts/tenant_delta.py \
         --base "refs/remotes/$remote/$branch" --quiet-if-zero 2>/dev/null)" && [[ -n "$_tenant_out" ]]; then

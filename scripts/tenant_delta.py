@@ -59,8 +59,10 @@ def census(root: Path, modules: list[str]) -> dict[str, int]:
              *present],
             cwd=root, env=env, capture_output=True, text=True, timeout=180,
         )
-        if not out.is_file():
-            raise RuntimeError(f"collection under {root} wrote no census (rc {proc.returncode}): "
+        # rc 0 or 5 (nothing collected) is a census; anything else means a module failed to
+        # collect, which would read as zero tenant tests, so the count is refused instead.
+        if proc.returncode not in (0, 5) or not out.is_file():
+            raise RuntimeError(f"collection under {root} failed (rc {proc.returncode}): "
                                f"{(proc.stdout + proc.stderr)[-800:]}")
         return json.loads(out.read_text(encoding="utf-8"))
 
