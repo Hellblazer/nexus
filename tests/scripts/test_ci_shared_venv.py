@@ -506,7 +506,11 @@ def test_a_sigkilled_builder_goes_stale_and_the_next_job_takes_over(
     try:
         deadline = time.monotonic() + 120
         locks: list[Path] = []
-        while time.monotonic() < deadline and not (locks := lock_dirs(lab_root)):
+        # hold_lock writes heartbeat then owner after its mkdir; a lock seen before then has neither
+        while time.monotonic() < deadline:
+            locks = [lk for lk in lock_dirs(lab_root) if (lk / "owner").exists() and (lk / "owner").read_text()]
+            if locks:
+                break
             time.sleep(0.2)
         assert locks, "the builder never took the lock"
         [lock] = locks
