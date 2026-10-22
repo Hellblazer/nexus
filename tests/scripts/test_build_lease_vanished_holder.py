@@ -24,24 +24,25 @@ _REPO = Path(__file__).resolve().parents[2]
 _LEASE_LIB = _REPO / "scripts" / "lib" / "build-lease.sh"
 
 # Call N of the claim (counted in $CALLS, since each call runs in a command
-# substitution) is the interleave when N == $VANISH_ON: a holder creates the
+# substitution) is the interleave when N is listed in $VANISH_ON: a holder creates the
 # directory, our mkdir fails EEXIST, and the holder releases. Every other call
 # is the real claim.
 _STUB = r'''
 _build_lease_claim() {
     echo x >> "$CALLS"
-    if [ "$(wc -l < "$CALLS" | tr -d ' ')" = "$VANISH_ON" ]; then
+    case " $VANISH_ON " in *" $(wc -l < "$CALLS" | tr -d ' ') "*)
         mkdir "$1" 2>/dev/null
         mkdir "$1"; local rc=$?
         rm -rf "$1"
-        return $rc
-    fi
+        return $rc ;;
+    esac
     mkdir "$1" && (set -C; printf '%s\n' "$$" > "$1/pid") 2>/dev/null
 }
 '''
 
 
-def _acquire(tmp_path: Path, vanish_on: int, prelude: str = "") -> tuple[int, str, str, int]:
+def _acquire(tmp_path: Path, vanish_on: int | str, prelude: str = "") -> tuple[int, str, str, int]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     root = tmp_path / "leases"
     calls = tmp_path / "calls"
     script = (
@@ -94,3 +95,14 @@ def test_a_real_filesystem_error_is_still_74(tmp_path: Path) -> None:
         root.chmod(0o700)
     assert "rc=74" in p.stdout, p.stdout + p.stderr
     assert "not because it already exists" in p.stderr, p.stderr
+    assert "ermission denied" in p.stderr, f"mkdir's own error is not in the message: {p.stderr}"
+
+
+def test_two_vanishes_still_claim_and_three_are_reported_as_an_error(tmp_path: Path) -> None:
+    """The retry bound, _BUILD_LEASE_CLAIM_ATTEMPTS=3: a holder that comes and
+    goes on every attempt is indistinguishable from a filesystem error."""
+    rc, _, err, n_calls = _acquire(tmp_path / "two", vanish_on="1 2")
+    assert (rc, n_calls) == (0, 3), err
+    rc, _, err, n_calls = _acquire(tmp_path / "three", vanish_on="1 2 3")
+    assert (rc, n_calls) == (74, 3), err
+    assert "not because it already exists" in err, err
