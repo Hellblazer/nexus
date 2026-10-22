@@ -709,7 +709,9 @@ _SENDER_LEGEND = (
 
 
 def _labelled(text: str) -> bool:
-    """Whether a rendered block's first line (its from= line) carries a sender label."""
+    """Whether a rendered block's first line (its from= line) carries a sender label. Used only for a
+    block recovered from the pending record, which keeps the rendered text and not the row; every
+    other caller passes the label it computed from the row, since from= and kind= are sender text."""
     return " [unverified" in text.split("\n", 1)[0]
 
 
@@ -741,11 +743,11 @@ class _Out:
         if not stream(text):
             self._unstreamed.append(text)
 
-    def block(self, text: str) -> None:
+    def block(self, text: str, labelled: bool | None = None) -> None:
         if not self._opened:
             self._write("## Mailbox (RDR-205): delivered at this prompt\n")
             self._opened = True
-        if not self._legend_shown and _labelled(text):
+        if not self._legend_shown and (_labelled(text) if labelled is None else labelled):
             self._write(_SENDER_LEGEND)
             self._legend_shown = True
         self._write(text)
@@ -1007,7 +1009,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             seen = _read_seen(config_dir, address)
             fresh = [r for r in dead_rows if str(r.get("id")) not in seen]
             for row in fresh:
-                out.block(_render_dead(address, row))
+                out.block(_render_dead(address, row), labelled=bool(_sender_tag(row, _dims_of(row))))
                 seen.add(str(row.get("id")))
             if fresh:
                 # Keep only ids still present, so the file cannot grow forever.
@@ -1070,7 +1072,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
                 # by id, so no other row's record is disturbed.
                 _clear_pending(config_dir, address, row_id)
                 return "ack_refused"
-            out.block(rendered)
+            out.block(rendered, labelled=bool(_sender_tag(row, _dims_of(row))))
             _clear_pending(config_dir, address, row_id)
             delivered += 1
         return "cap"

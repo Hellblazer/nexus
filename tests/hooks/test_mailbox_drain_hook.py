@@ -2258,9 +2258,35 @@ class TestSenderLabel:
         res = _run(tmp_path=tmp_path, argv=argv)
         assert res.returncode == 0, res.stderr
         out = res.stdout
-        assert out.count("A bracketed [unverified] after from= means") == 1, out
+        assert out.count(self._LEGEND) == 1, out
         assert out.index("honest first") < out.index("A bracketed [unverified]") < out.index("forged second"), out
         assert "JDR-002" in out
+
+    _LEGEND = "A bracketed [unverified] after from= means"
+
+    @_ENTRY_POINTS
+    def test_a_sender_field_spelling_the_mark_on_an_unlabelled_row_prints_no_legend(
+            self, tmp_path, engine, argv) -> None:
+        """from= and kind= are sender text: an honest row whose kind spells the mark gets no legend."""
+        row = _row("sl13", sender=self._S, kind="note [unverified]", body="honest but odd")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "honest but odd" in out and self._LEGEND not in out
+
+    @_ENTRY_POINTS
+    def test_a_labelled_row_whose_from_breaks_the_line_still_prints_the_legend(
+            self, tmp_path, engine, argv) -> None:
+        row = _row("sl14", sender="peer\nsecond line", body="split from")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "split from" in out and out.count(self._LEGEND) == 1
+
+    @_ENTRY_POINTS
+    def test_a_labelled_dead_lettered_row_prints_the_legend(self, tmp_path, engine, argv) -> None:
+        row = _row("sl15", sender=self._S2, body="poison", claim_state="dead")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "UNDELIVERABLE" in out and out.count(self._LEGEND) == 1
 
     @_ENTRY_POINTS
     def test_a_row_without_the_key_renders_no_label(self, tmp_path, engine, argv) -> None:
