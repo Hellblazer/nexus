@@ -2917,7 +2917,7 @@ class TestSenderLabel:
 
     @pytest.mark.asyncio
     async def test_a_board_batch_of_ci_posts_with_no_session_reads_unattested_batch_wide(self) -> None:
-        """Sam, 2026-10-22: a CI board post carries no session (a board-ci token mints none), so a
+        """Sam, 2026-10-22: a CI board post is expected to carry no session (inferred, not measured: a board-ci token is not known to mint one), so a
         batch of them reads unattested, and the batch-wide word is that one word."""
         session_id = str(uuid.uuid4())
         subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))

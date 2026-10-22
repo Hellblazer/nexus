@@ -698,8 +698,9 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 _SENDER_LEGEND = (
     "(A bracketed mark after from= says what the engine could not confirm about the sender: [unverified] "
     "the claimed name does not match the session the engine recorded for the write; [unattested] the "
-    "engine recorded no session for it (a CI post, a dropped token, an old row); [agent mail, sent under "
-    "session S] a subagent's mail, sent under that session. A mark is a lead to check, not a verdict; no "
+    "engine recorded no session for it (a CI post, a dropped token, an old row, or a writer that left the "
+    "session header off); [agent mail, sent under session S] mail that claims to come from a subagent, "
+    "sent under that session. A mark is a lead to check, not a verdict; no "
     "mark is not proof of the sender either (JDR-002).)\n"
 )
 

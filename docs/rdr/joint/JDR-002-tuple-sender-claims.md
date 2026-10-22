@@ -111,7 +111,7 @@ mail addressing and the directory).
   still marked; an agent-id `from` under a canonical-UUID stamp reads
   `agent mail, sent under session <S>`, since the mailbox skill tells
   subagents to send that way; `unverified` is kept for a `from` that differs
-  from a recorded session. A CI board post (a board-ci token mints no
-  session) reads `unattested` like any null stamp: the subspace name is not
+  from a recorded session. A CI board post (a board-ci token is not known to
+  mint a session; inferred, not measured) reads `unattested` like any null stamp: the subspace name is not
   attestation. The drain hook prints a one-line legend for the three marks
   (nexus-565ds). NO LABEL IS NOT VERIFICATION is unchanged.
