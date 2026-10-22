@@ -2570,6 +2570,13 @@ _SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
+# nexus-2nxoo: FastMCP bound its call_tool handler inside __init__, so the
+# per-call `mcp_tool_call` debug event (tool name + sorted `_meta` keys) wraps
+# the constructed server's registry. Never raises; main() reports the status.
+from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
+
+_SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
+
 # RDR-215: register any ported hook_<name> tool-tier tools -- see
 # nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
 _register_hook_tools(mcp)
