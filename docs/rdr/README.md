@@ -242,7 +242,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Accepted | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
-| [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Accepted | 2026-10-05 |
+| [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Closed | 2026-10-05 |
 | [RDR-226](rdr-226-one-statement-per-leaf-search.md) | Per-Collection Search in One Statement per Leaf | Architecture | Abandoned | 2026-10-08 |
 | [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Closed | 2026-10-09 |
 | [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |

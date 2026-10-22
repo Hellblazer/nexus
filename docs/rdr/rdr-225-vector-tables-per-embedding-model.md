@@ -2,7 +2,8 @@
 title: "One Vector Table per Embedding Model, with Tenant Isolation"
 id: RDR-225
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-22
 priority: high
 author: Sam
 reviewed-by: self

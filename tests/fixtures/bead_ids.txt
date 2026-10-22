@@ -809,6 +809,10 @@ nexus-3wh8d.30
 nexus-3wh8d.31
 nexus-3wh8d.32
 nexus-3wh8d.33
+nexus-3wh8d.34
+nexus-3wh8d.35
+nexus-3wh8d.36
+nexus-3wh8d.37
 nexus-3wh8d.4
 nexus-3wh8d.5
 nexus-3wh8d.6
@@ -7204,6 +7208,7 @@ nexus-vx7a0
 nexus-vx7a0.1
 nexus-vxgnh
 nexus-vxgnh.1
+nexus-vxmcl
 nexus-vxsun
 nexus-vxz3
 nexus-vyg07
