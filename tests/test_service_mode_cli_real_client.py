@@ -338,12 +338,14 @@ def test_collection_reembed_dry_run_service_mode_real_client(
 
 
 def test_collection_reembed_cross_model_rejected_service_mode(
-    runner, real_client, monkeypatch,
+    runner, real_client, monkeypatch, cloud_mode,
 ):
     """nexus-u37lw: server-side embedding routes by the COLLECTION NAME's
     model segment, so a cross-model --to can never take effect in service
     mode — pre-fix it silently no-opped with the old model, stamped the new
-    model into metadata, and printed success. Must fail loud, post nothing."""
+    model into metadata, and printed success. Must fail loud, post nothing.
+    Outside local mode only: in local mode a cross-model --to is a re-embed job
+    (RDR-210 Phase 6), covered by tests/test_reembed_verb.py."""
     posted = []
 
     def fake_post(path, body, **kw):
