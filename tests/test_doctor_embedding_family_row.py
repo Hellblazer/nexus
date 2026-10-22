@@ -61,9 +61,9 @@ def test_a_malformed_embedding_models_warns_as_unreadable_never_as_served() -> N
     ("profile", "models"),
     [
         ("bge", [_BGE]),
-        ("bge", [_BGE, "voyage-code-3", "voyage-context-3"]),
-        ("voyage", ["voyage-code-3", "voyage-context-3"]),
-        ("voyage", [_BGE, "voyage-code-3", "voyage-context-3"]),
+        ("bge", [_BGE, "voyage-model-a", "voyage-model-b"]),
+        ("voyage", ["voyage-model-a", "voyage-model-b"]),
+        ("voyage", [_BGE, "voyage-model-a", "voyage-model-b"]),
     ],
 )
 def test_a_served_profile_family_is_green_and_names_the_profile(profile, models) -> None:
@@ -81,7 +81,7 @@ def test_a_voyage_profile_without_voyage_models_warns_and_points_at_the_key() ->
 
 
 def test_a_bge_profile_without_bge_models_warns_and_points_at_the_files() -> None:
-    r = _row({"embedding_profile": "bge", "embedding_models": ["voyage-code-3", "voyage-context-3"]})
+    r = _row({"embedding_profile": "bge", "embedding_models": ["voyage-model-a", "voyage-model-b"]})
     assert r.ok is False and r.warn is True
     assert "bge" in r.detail and "degraded" in r.detail
     assert any("nx init --service" in s for s in r.fix_suggestions)
@@ -94,12 +94,12 @@ def test_an_engine_serving_no_model_at_all_warns() -> None:
 
 def test_the_engines_own_profile_decides_over_the_clients() -> None:
     """The engine seeded what it reports; the client's intent against it is the profile-vs-intent row's job."""
-    r = _row({"embedding_profile": "voyage", "embedding_models": ["voyage-code-3"]}, client_profile="bge")
+    r = _row({"embedding_profile": "voyage", "embedding_models": ["voyage-model-a"]}, client_profile="bge")
     assert r.ok is True and not r.warn
 
 
 def test_an_engine_that_does_not_report_a_profile_is_read_against_the_clients_in_local_mode() -> None:
-    body = {"embedding_models": ["voyage-code-3", "voyage-context-3"]}
+    body = {"embedding_models": ["voyage-model-a", "voyage-model-b"]}
     assert _row(body, client_profile="voyage").ok is True
     r = _row(body, client_profile="bge")
     assert r.ok is False and r.warn is True
@@ -108,13 +108,13 @@ def test_an_engine_that_does_not_report_a_profile_is_read_against_the_clients_in
 def test_a_voyage_only_engine_that_reports_no_profile_is_not_read_against_the_clients_bge() -> None:
     """A pre-profile engine in voyage mode serves Voyage whatever this client intends: the client's
     profile is no evidence about what that engine was told, so the row cannot tell (never warn)."""
-    body = {"embedding_mode": "voyage", "embedding_models": ["voyage-code-3", "voyage-context-3"]}
+    body = {"embedding_mode": "voyage", "embedding_models": ["voyage-model-a", "voyage-model-b"]}
     r = _row(body, client_profile="bge")
     assert r.ok is True and not r.warn and "not applicable" in r.detail
 
 
 def test_the_clients_profile_still_reads_an_engine_in_another_mode_that_reports_no_profile() -> None:
-    body = {"embedding_mode": "onnx-local", "embedding_models": ["voyage-code-3", "voyage-context-3"]}
+    body = {"embedding_mode": "onnx-local", "embedding_models": ["voyage-model-a", "voyage-model-b"]}
     r = _row(body, client_profile="bge")
     assert r.ok is False and r.warn is True
 
@@ -164,7 +164,7 @@ def test_a_hung_endpoint_reads_not_applicable_quickly(monkeypatch) -> None:
 
 def test_a_managed_engine_that_reports_no_profile_is_not_applicable() -> None:
     """The client's local profile says nothing about a managed engine, which has no bge files by design."""
-    r = _row({"embedding_models": ["voyage-code-3", "voyage-context-3"]}, local=False, client_profile="bge")
+    r = _row({"embedding_models": ["voyage-model-a", "voyage-model-b"]}, local=False, client_profile="bge")
     assert r.ok is True and not r.warn and "not applicable" in r.detail
 
 

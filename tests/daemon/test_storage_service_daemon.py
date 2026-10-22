@@ -2148,7 +2148,7 @@ class TestSpawnServiceDualKeyAndProfile:
 
     def test_an_ambient_profile_does_not_override_a_voyage_choice(self, config_dir, clock, monkeypatch) -> None:
         env = self._spawn(
-            config_dir, clock, monkeypatch, choice="voyage-context-3", explicit_profile="bge",
+            config_dir, clock, monkeypatch, choice="voyage-model-b", explicit_profile="bge",
         )
         assert env["NX_EMBED_PROFILE"] == "voyage"
 

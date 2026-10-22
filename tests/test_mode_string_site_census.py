@@ -30,6 +30,7 @@ REVIEWED: dict[str, tuple[int, str]] = {
     "db/http_vector_client.py": (6, "onnx-local keeps the engine-wide memory cap; voyage and dual decide by the collection's model (_collection_is_bge); the memo and probe seeding accept dual"),
     "db/managed_endpoint.py": (5, "the capabilities dataclass carries embedding_mode verbatim; no decision is made on it"),
     "errors.py": (1, "serving_mode is a diagnostic in the profile-mismatch error; the remedy is chosen by the collection's family"),
+    "health.py": (3, "the Embedding family doctor row (nexus-wypwq): voyage mode only suppresses the client-profile fallback (the engine serves Voyage whatever the client intends); dual and onnx-local are read against the profile, and the 'voyage' compare is the profile (bge or voyage), not an engine mode; display and warning only"),
     "mcp_infra.py": (3, "a warm-up probe step named embedding_mode; no decision"),
     "search_engine.py": (3, "the threshold gate is embedding_mode() in _THRESHOLD_ENGINE_MODES (voyage and dual; P1.5, nexus-hf29s); _engine_is_dual reads the same embedding_mode() so a model-less name gets no threshold on a dual engine (nexus-ndr0t S3); the rest is the serving_mode diagnostic"),
 }
