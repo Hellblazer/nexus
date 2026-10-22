@@ -470,7 +470,37 @@ dg_require_tally() {
   echo "[dual-gate] tally: bge searches=$DG_BGE_SEARCHES voyage searches=$DG_VOY_SEARCHES combined hits (bge/voyage)=$DG_COMBINED_BGE_HITS/$DG_COMBINED_VOY_HITS over $DG_PASSES passes; $DG_PASSED checks passed"
 }
 
-# ── 3-5. Start the keyed engine, then run both passes around a restart ───────
+# dg_set_embed_choice MODEL: record the install's embedder choice in the scratch config (no key is
+# written; the supervisor derives the engine's NX_EMBED_PROFILE from this choice and ignores a caller's
+# environment). The engine seeds its profile rows from the profile at EVERY boot and refuses to register a
+# new collection of any other family, so a bge-profile install can hold a Voyage collection only when that
+# collection was registered while the profile was Voyage (first live run, 2026-10-22: the registration of a
+# Voyage collection under the bge profile answered 422).
+dg_set_embed_choice() {
+  NEXUS_CONFIG_DIR="$SCRATCH" uv run python -c "import pathlib, sys, yaml; p = pathlib.Path('$SCRATCH/config.yml'); d = (yaml.safe_load(p.read_text()) if p.exists() else None) or {}; d.setdefault('local', {})['embed_model'] = sys.argv[1]; p.write_text(yaml.safe_dump(d))" "$1"
+}
+
+# dg_seed_voyage_collection: the realistic route to a mixed install. Boot under the Voyage profile and
+# register the Voyage collection; the switch to the bge profile follows.
+dg_seed_voyage_collection() {
+  local body
+  echo "[dual-gate] seeding: a Voyage-profile boot registers the Voyage collection"
+  dg_set_embed_choice voyage-context-3
+  dg_start_engine
+  dg_read_lease
+  body="$("$E2E_PYTHON" -c "import json;print(json.dumps({'tumbler_prefix':'$DG_OWNER_PREFIX','name':'gate-dual-owner','owner_type':'gate_dual'}))")"
+  dg_request POST /v1/catalog/owners/upsert "$body"
+  dg_expect_200 "POST /v1/catalog/owners/upsert (seed boot)"
+  body="$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$DG_VOY_COLL','content_type':'knowledge','owner_id':'gate-dual','embedding_model':'voyage-context-3'}))")"
+  dg_request POST /v1/catalog/collections/upsert "$body"
+  dg_expect_200 "POST /v1/catalog/collections/upsert (voyage-context-3, Voyage profile)"
+  dg_check "register the Voyage collection under the Voyage profile -> ok" "d.get('ok') is True"
+  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
+  dg_set_embed_choice bge-base-en-v15-768
+}
+
+# ── 3-5. Seed the Voyage collection, boot the bge-profile keyed engine, then run both passes around a restart ──
+dg_seed_voyage_collection
 dg_start_engine
 dg_read_lease
 dg_version_check
