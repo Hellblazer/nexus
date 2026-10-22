@@ -641,8 +641,8 @@ def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
     }
-    # nexus-ztwp4 (F3 step 2): null = written with no live session; omitted when
-    # the engine predates the stamp.
+    # nexus-ztwp4 (F3 step 2): null = no stamp: no live minted session at write time, a reply row (until nexus-g2ckl), or a row that predates the column;
+    # omitted when the engine renders no such key.
     if row.sender_session_known:
         out["sender_session"] = row.sender_session
     return out

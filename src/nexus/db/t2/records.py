@@ -155,12 +155,13 @@ class TupleRow:
 
     ``sender_session`` (bead nexus-ztwp4, F3 step 2) is the session id the
     engine stamped on ``out`` from the writer's minted T1 session token, or
-    ``None`` when the write carried no live token (unstamped). A ``None`` is
-    ambiguous on its own: an engine predating the stamp renders no key at all.
-    ``sender_session_known`` tells the two apart -- ``True`` when the engine
-    rendered the key (so ``None`` means "unstamped"), ``False`` when it did not
-    (so ``None`` means "this engine cannot say"). A row built by hand defaults
-    to ``False``: unknown is the safe reading.
+    ``None`` for no stamp: no live minted session at write time, a reply row
+    (until nexus-g2ckl), or a row that predates the column. A ``None`` is
+    ambiguous on its own: an engine that renders no such key gives no key at
+    all. ``sender_session_known`` tells the two apart -- ``True`` when the
+    engine rendered the key (so ``None`` means "no stamp"), ``False`` when it
+    did not (so ``None`` means "this engine cannot say"). A row built by hand
+    defaults to ``False``: unknown is the safe reading.
     """
 
     id: str

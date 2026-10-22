@@ -12,7 +12,9 @@ engine's own tests.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 
 import httpx
 import pytest
@@ -20,6 +22,7 @@ import structlog
 from structlog.testing import capture_logs
 
 from nexus.commands.tuple_cmd import _row_dict
+from nexus.db.t2 import _refreshable_client
 from nexus.db.t2._refreshable_client import build_shared_t2_client
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_tuple_store import HttpTupleStore, _body_to_tuple_row
@@ -51,6 +54,17 @@ def info_logs():
     capture_logs sees them; lower the filter for the body and put it back."""
     old = structlog.get_config()["wrapper_class"]
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    try:
+        yield
+    finally:
+        structlog.configure(wrapper_class=old)
+
+
+@pytest.fixture
+def debug_logs():
+    """Like ``info_logs`` but down to DEBUG, for the second-drop-of-one-token event."""
+    old = structlog.get_config()["wrapper_class"]
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
     try:
         yield
     finally:
@@ -100,6 +114,27 @@ class TestHeader:
 
         _store(handler).out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
         assert HEADER not in seen[0].headers
+
+    @pytest.mark.parametrize(
+        "value", ["t\u00f6k", "a\x01b", "a b", "a\tb", "tok\x7f", "tok\u200b", "a\nb"],
+    )
+    def test_a_token_that_is_not_printable_ascii_without_whitespace_sends_no_header(
+        self, monkeypatch, value,
+    ) -> None:
+        """A non-ASCII value would raise UnicodeEncodeError inside httpx on every
+        tuple call; a control or whitespace value is not a header token either.
+        Send nothing, so the call works as it did before F3 step 2."""
+        monkeypatch.setenv("NX_T1_SESSION", value)
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return _ok(request)
+
+        store = _store(handler)
+        assert store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n") == "b" * 64
+        assert len(store.rd("mailbox/x", {"to": "x"})) == 1
+        assert [HEADER in r.headers for r in seen] == [False, False]
 
     def test_token_is_read_per_call_so_a_handoff_swap_is_seen(self, monkeypatch) -> None:
         seen: list[str | None] = []
@@ -166,13 +201,23 @@ class TestStaleTokenFallback:
         assert len(rows) == 1
         assert [HEADER in r.headers for r in seen] == [True, False]
 
-    def test_the_drop_does_not_stick_to_the_next_call(self, monkeypatch) -> None:
+    def test_the_drop_does_not_stick_past_a_changed_token(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_T1_SESSION", TOKEN)
         seen: list[httpx.Request] = []
-        store = _store(self._gated(seen))
+        gated = self._gated(seen)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # TOKEN is stale; "fresh" is live.
+            if request.headers.get(HEADER) == "fresh":
+                seen.append(request)
+                return _ok(request)
+            return gated(request)
+
+        store = _store(handler)
         store.rd("mailbox/x", {"to": "x"})
+        monkeypatch.setenv("NX_T1_SESSION", "fresh")
         store.rd("mailbox/x", {"to": "x"})
-        assert [HEADER in r.headers for r in seen] == [True, False, True, False]
+        assert [r.headers.get(HEADER) for r in seen] == [TOKEN, None, "fresh"]
 
     def test_a_401_that_survives_the_drop_goes_down_the_data_token_path(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_T1_SESSION", TOKEN)
@@ -251,3 +296,188 @@ def test_the_cli_text_output_prints_it_only_when_the_engine_rendered_the_key(cap
     assert "sender_session" not in text(dict(_ROW))
     assert "  sender_session: None" in text({**_ROW, "sender_session": None})
     assert "  sender_session: S1" in text({**_ROW, "sender_session": "S1"})
+
+
+class TestStaleTokenMemo:
+    """A rejected token is remembered (as a hash) and not sent again until
+    NX_T1_SESSION changes, so a stale token costs one 401, not one per call."""
+
+    @staticmethod
+    def _gated(seen: list[httpx.Request], live: str | None = None):
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            sent = request.headers.get(HEADER)
+            if sent is not None and sent != live:
+                return httpx.Response(401, json={"error": "session_not_minted"})
+            return _ok(request)
+        return handler
+
+    def test_a_rejected_token_is_not_sent_again(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        store = _store(self._gated(seen))
+        for _ in range(3):
+            store.rd("mailbox/x", {"to": "x"})
+        assert [HEADER in r.headers for r in seen] == [True, False, False, False]
+
+    def test_a_changed_token_is_sent_and_a_live_one_is_not_dropped(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        store = _store(self._gated(seen, live="fresh"))
+        store.rd("mailbox/x", {"to": "x"})
+        monkeypatch.setenv("NX_T1_SESSION", "fresh")
+        store.rd("mailbox/x", {"to": "x"})
+        store.rd("mailbox/x", {"to": "x"})
+        assert [r.headers.get(HEADER) for r in seen] == [TOKEN, None, "fresh", "fresh"]
+
+    def test_a_second_stale_token_is_dropped_and_remembered_in_its_turn(self, monkeypatch) -> None:
+        seen: list[httpx.Request] = []
+        store = _store(self._gated(seen))
+        for tok in ("stale-one", "stale-one", "stale-two", "stale-two"):
+            monkeypatch.setenv("NX_T1_SESSION", tok)
+            store.rd("mailbox/x", {"to": "x"})
+        assert [r.headers.get(HEADER) for r in seen] == [
+            "stale-one", None, None, "stale-two", None, None,
+        ]
+
+    def test_the_memo_is_per_store_instance(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        assert [HEADER in r.headers for r in seen] == [True, False, True, False]
+
+    def test_the_store_keeps_a_hash_never_the_raw_token(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        store = _store(self._gated([]))
+        store.rd("mailbox/x", {"to": "x"})
+        digest = hashlib.sha256(TOKEN.encode()).hexdigest()
+        assert store._rejected_session_hash == digest  # type: ignore[attr-defined]
+        assert TOKEN not in repr(vars(store))
+
+    def test_a_401_that_is_not_the_sessions_sets_no_memo(self, monkeypatch) -> None:
+        """The headerless retry also fails (the data token is bad): the session
+        token is not the culprit, so it is not memoised."""
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "bad data token"})
+
+        store = _store(handler)
+        with pytest.raises(httpx.HTTPStatusError):
+            store.rd("mailbox/x", {"to": "x"})
+        assert store._rejected_session_hash is None  # type: ignore[attr-defined]
+
+    def test_info_log_once_per_token_and_none_for_the_suppressed_calls(
+        self, monkeypatch, info_logs,
+    ) -> None:
+        seen: list[httpx.Request] = []
+        store = _store(self._gated(seen))
+        with capture_logs() as logs:
+            monkeypatch.setenv("NX_T1_SESSION", "stale-one")
+            store.rd("mailbox/x", {"to": "x"})
+            store.rd("mailbox/x", {"to": "x"})
+            monkeypatch.setenv("NX_T1_SESSION", "stale-two")
+            store.rd("mailbox/x", {"to": "x"})
+        dropped = [e for e in logs if e["event"] == "tuple_session_header_dropped"]
+        assert [e["log_level"] for e in dropped] == ["info", "info"]
+        assert "stale-one" not in repr(logs) and "stale-two" not in repr(logs)
+
+    def test_a_repeat_drop_of_the_same_token_logs_at_debug(self, monkeypatch, debug_logs) -> None:
+        """Two threads both send the stale token before either has memoised it.
+        Both get a 401 and drop; the first logs INFO, the second DEBUG."""
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        both_sent = threading.Barrier(2, timeout=5)
+        a_done = threading.Event()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if HEADER in request.headers:
+                both_sent.wait()
+                return httpx.Response(401, json={"error": "session_not_minted"})
+            if b'"B"' in request.content:
+                a_done.wait(5)  # B's headerless retry lands after A has memoised
+            return httpx.Response(200, json={"id": "c" * 64})
+
+        store = _store(handler)
+        errors: list[BaseException] = []
+
+        def run(who: str) -> None:
+            try:
+                store.out("mailbox/x", {"to": who}, {"from": "y"}, nonce="n")
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+                errors.append(exc)
+            finally:
+                if who == "A":
+                    a_done.set()
+
+        with capture_logs() as logs:
+            threads = [threading.Thread(target=run, args=(w,)) for w in ("A", "B")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        assert errors == []
+        dropped = [e for e in logs if e["event"] == "tuple_session_header_dropped"]
+        assert sorted(e["log_level"] for e in dropped) == ["debug", "info"]
+
+
+class TestConcurrentCallers:
+    def test_a_call_parked_in_its_headerless_retry_does_not_strip_another_calls_header(
+        self, monkeypatch,
+    ) -> None:
+        """Thread A is inside its headerless retry (parked); thread B makes a fresh
+        call on the same store and must still send the header. The drop is per
+        call, not per instance, and the memo is set only once A's retry lands."""
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        a_in_retry = threading.Event()
+        b_done = threading.Event()
+        b_sent: list[bool] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if b'"A"' in request.content:
+                if HEADER in request.headers:
+                    return httpx.Response(401, json={"error": "session_not_minted"})
+                a_in_retry.set()
+                assert b_done.wait(5)  # park A's headerless retry
+                return httpx.Response(200, json={"id": "a" * 64})
+            b_sent.append(HEADER in request.headers)
+            b_done.set()
+            return httpx.Response(200, json={"id": "b" * 64})
+
+        store = _store(handler)
+        a = threading.Thread(
+            target=lambda: store.out("mailbox/x", {"to": "A"}, {"from": "y"}, nonce="n"),
+        )
+        a.start()
+        assert a_in_retry.wait(5)
+        store.out("mailbox/x", {"to": "B"}, {"from": "y"}, nonce="n")
+        a.join(10)
+        assert not a.is_alive()
+        assert b_sent == [True]
+
+    def test_a_headerless_503_after_the_401_resends_the_header_on_the_gateway_retry(
+        self, monkeypatch,
+    ) -> None:
+        """Pinned design: the memo is set only when the headerless retry SUCCEEDS.
+        401 (headered) -> headerless 503 leaves no memo, so the mixin's gateway
+        retry sends the header again, is 401'd again, drops again, and only
+        then, on success, memoises."""
+        monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        headerless_calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if HEADER in request.headers:
+                return httpx.Response(401, json={"error": "session_not_minted"})
+            headerless_calls.append(1)
+            if len(headerless_calls) == 1:
+                return httpx.Response(503, json={"error": "busy"})
+            return _ok(request)
+
+        store = _store(handler)
+        assert len(store.rd("mailbox/x", {"to": "x"})) == 1
+        assert [HEADER in r.headers for r in seen] == [True, False, True, False]
+        store.rd("mailbox/x", {"to": "x"})
+        assert [HEADER in r.headers for r in seen][4:] == [False]

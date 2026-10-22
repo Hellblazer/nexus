@@ -89,9 +89,11 @@ timeout could fire on its own.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import os
 import re
+import threading
 from collections.abc import Sequence
 from datetime import datetime
 from dataclasses import dataclass
@@ -157,14 +159,25 @@ _ROUTE_PREFIX: str = "/v1/tuples"
 _SESSION_ENV: str = "NX_T1_SESSION"
 _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 
-#: Per-request state for the stale-token fallback, in a ContextVar so concurrent
-#: callers of one shared store never see each other's flags.
+#: The header value must be printable ASCII with no whitespace or control
+#: characters. Anything else (a non-ASCII value would raise UnicodeEncodeError
+#: inside httpx on every tuple call) is not sent, so the call works as it did
+#: before F3 step 2.
+_HEADER_TOKEN_RE: re.Pattern[str] = re.compile(r"[\x21-\x7e]+")
+
+#: Per-call "send this request without the session header" flag, in a ContextVar
+#: so concurrent callers of one shared store never see each other's flag. Only
+#: ``HttpTupleStore._request_once`` sets it, around its single headerless retry;
+#: ``_auth_headers`` only reads it.
 _drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "nexus_tuple_drop_session_header", default=False,
 )
-_session_header_sent: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "nexus_tuple_session_header_sent", default=False,
-)
+
+
+def _token_hash(token: str) -> str:
+    """SHA-256 hex of a session token. A rejected token is remembered only as
+    this, never as the raw value."""
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
 # ── Typed errors (mirrors dev.nexus.service.db.TupleException's thirteen subtypes) ──
@@ -621,15 +634,32 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Session header (nexus-ztwp4, F3 step 2) ──────────────────────────────
 
+    #: SHA-256 of the last session token the engine rejected (a headered 401 whose
+    #: headerless retry succeeded), or None. That token is not sent again until
+    #: ``NX_T1_SESSION`` changes. Instance state, one writer path
+    #: (``_request_once``); the lock makes the first-rejection test atomic.
+    _rejected_session_hash: str | None = None
+    _rejected_session_lock: threading.Lock = threading.Lock()
+
     def _auth_headers(self) -> dict[str, str]:
         """The mixin's headers plus ``X-Nexus-T1-Session`` when ``NX_T1_SESSION``
-        is set. Read per request (the T1 handoff swaps the env on ``/clear``),
-        and added here per request, never on the shared T2 client's defaults,
-        which nine stores ride."""
+        is set, is printable ASCII without whitespace, and is not the token the
+        engine last rejected. Read per request (the T1 handoff swaps the env on
+        ``/clear``), and added here per request, never on the shared T2 client's
+        defaults, which nine stores ride.
+
+        Pure: it reads the drop flag and the memo and changes nothing. The mixin
+        calls it once per HTTP round trip; whether a failed request carried the
+        header is answered from ``exc.request.headers``, not from here."""
         headers = super()._auth_headers()
-        token = "" if _drop_session_header.get() else os.environ.get(_SESSION_ENV, "").strip()
-        _session_header_sent.set(bool(token))
-        if token:
+        if _drop_session_header.get():
+            return headers
+        token = os.environ.get(_SESSION_ENV, "").strip()
+        if (
+            token
+            and _HEADER_TOKEN_RE.fullmatch(token)
+            and _token_hash(token) != self._rejected_session_hash
+        ):
             headers[_HEADER_T1_SESSION] = token
         return headers
 
@@ -637,20 +667,32 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """One round trip. AuthFilter 401s any request whose session header is
         present but not live, on every route, and its body does not say which
         credential failed. A tuple write must not fail for a stale session, so a
-        401 to a request that carried the header is retried ONCE without it,
-        before the mixin's data-token re-mint path sees the 401. A 401 that
-        survives the drop is the data token's and goes down that path unchanged."""
+        401 to a request that carried the header (read off ``exc.request``) is
+        retried ONCE without it, before the mixin's data-token re-mint path sees
+        the 401. If that retry succeeds the session token was the culprit: it is
+        remembered by hash and not sent again until ``NX_T1_SESSION`` changes. A
+        401 that survives the drop is the data token's and goes down that path
+        unchanged, with no memo."""
         try:
             return super()._request_once(method, path, **kwargs)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 401 or not _session_header_sent.get():
+            if exc.response.status_code != 401 or _HEADER_T1_SESSION not in exc.request.headers:
                 raise
-            _log.info("tuple_session_header_dropped", method=method, path=path)
+            rejected = _token_hash(exc.request.headers[_HEADER_T1_SESSION])
             reset = _drop_session_header.set(True)
             try:
-                return super()._request_once(method, path, **kwargs)
+                result = super()._request_once(method, path, **kwargs)
             finally:
                 _drop_session_header.reset(reset)
+            with self._rejected_session_lock:
+                first = self._rejected_session_hash != rejected
+                self._rejected_session_hash = rejected
+            # Never the token or its hash; INFO once per token, DEBUG for a repeat
+            # (two in-flight calls that both sent it before either memoised it).
+            (_log.info if first else _log.debug)(
+                "tuple_session_header_dropped", method=method, path=path,
+            )
+            return result
 
     # ── Internal transport (route prefix + 8 KB guard + typed errors) ───────
 
