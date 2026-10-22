@@ -183,6 +183,16 @@ class TestCoreMainWiring:
         )
         # reset any instructions a prior test left on the shared module server
         core.mcp._mcp_server.instructions = None
+        # main() installs the stale-host hook over the shared server's
+        # CallToolRequest handler; restore it at teardown, or a later test in
+        # the worker sees the stale-host wrapper, not the tool-call-log one
+        # (test_mcp_tool_call_log.py::TestCoreWiring, develop CI 39836696552).
+        from mcp import types
+
+        handlers = core.mcp._mcp_server.request_handlers
+        monkeypatch.setitem(
+            handlers, types.CallToolRequest, handlers[types.CallToolRequest]
+        )
 
         class _Stop(Exception):
             pass
