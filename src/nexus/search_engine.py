@@ -1790,14 +1790,20 @@ def search_cross_corpus(
         a pool of 8, instead of failing the group, and the group is remembered
         for 10 minutes so later searches go straight to per-collection.
 
-        ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
-        the batched path runs it (same batches, same per-batch size). Its rows
-        are unioned in here, threshold-exempt, with the vector copy winning a
-        tie; a lexical row counts toward ``kept`` only (nexus-079ly): ``raw``
-        and ``dropped`` stay the engine's per-collection counts. ``kept`` is
-        the rows the collection holds after the engine's pool-limit cut and
-        the lexical union (before the topic filter, the enrichment cap and the
-        page cut); the pool limit is at least 300 rows, not ``--limit``.
+        ``--lexical`` (nexus-xd2rc): the request asks the engine for each
+        collection's lexical arm too (``lexical: true``), so the leg costs no
+        second round trip. The engine unions those rows in, threshold-exempt
+        and outside its ``limit`` cut, with the vector copy winning a tie, and
+        names each collection's lexical ids. A lexical arm that failed raises
+        :class:`LexicalLegUnavailableError`, as the batched path does. An
+        engine that does not echo ``lexical`` predates it: the leg then runs
+        on ``/hybrid-search`` as the batched path runs it (same batches, same
+        per-batch size), unioned in here the same way. Either way a lexical row
+        counts toward ``kept`` only (nexus-079ly): ``raw`` and ``dropped``
+        stay the engine's per-collection vector counts. ``kept`` is the rows
+        the collection holds after the engine's pool-limit cut and the lexical
+        union (before the topic filter, the enrichment cap and the page cut);
+        the pool limit is at least 300 rows, not ``--limit``.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
             chunks = [
@@ -1848,6 +1854,8 @@ def search_cross_corpus(
                 **rerank_cap_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
+                # nexus-xd2rc: the lexical arms ride the same request; absent keeps it byte-identical.
+                **({"lexical": True} if lexical else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(
@@ -1892,6 +1900,22 @@ def search_cross_corpus(
                 if row_embeddings is not None and row_embeddings[i] is not None:
                     emb_by_col[name][r["id"]] = row_embeddings[i]
         stats = {e["collection"]: e for e in envelope["per_collection"]}
+        served_lexical = lexical and envelope.get("lexical") is True
+        if served_lexical:
+            lex_failed = {
+                c: e["lexical_error"] or e["lexical_error_kind"]
+                for c, e in stats.items()
+                if (e["lexical_error"] is not None or e["lexical_error_kind"] is not None)
+                and e["error"] is None and e["error_kind"] is None
+            }
+            if lex_failed:
+                raise LexicalLegUnavailableError(
+                    f"the lexical leg failed for {sorted(lex_failed)}: "
+                    f"{next(iter(lex_failed.values()))}. Refusing rather than returning "
+                    "vector-only rows, which would look like an answer while the leg you "
+                    "asked for never ran. The vector search itself succeeded, so retrying "
+                    "without --lexical will return results."
+                )
 
         parts = []
         for col in group:
@@ -1914,6 +1938,10 @@ def search_cross_corpus(
             else:
                 raw_count, dropped = stat["raw_count"], stat["dropped"]
                 min_raw, min_dropped = stat["min_raw_distance"], stat["min_dropped_distance"]
+            lexical_ids: set[str] = set()
+            if served_lexical and stat is not None:
+                returned = set(stat["lexical_ids"])
+                lexical_ids = {x.id for x in results if x.id in returned}
             parts.append({
                 "col": col,
                 "error": None,
@@ -1925,11 +1953,11 @@ def search_cross_corpus(
                 "min_dropped_distance": min_dropped,
                 "min_raw_distance": min_raw,
                 "rerank_meta": rerank_meta,
-                "lexical_ids": set(),
+                "lexical_ids": lexical_ids,
                 "embeddings": emb_by_col[col],
             })
 
-        if lexical:
+        if lexical and not served_lexical:
             desired = _desired_candidate_count(group, n_results, deep=True)
             if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
                 n_batches = min(len(group), -(-desired // QUOTAS.MAX_QUERY_RESULTS))

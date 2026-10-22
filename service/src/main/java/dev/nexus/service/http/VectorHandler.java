@@ -666,7 +666,8 @@ public final class VectorHandler implements HttpHandler {
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
      *   "rerank_top_k":       null,             // optional; requires rerank
      *   "rerank_max_candidates": null,          // optional; requires rerank; score at most this many rows
-     *   "content_chars": 300                    // optional (nexus-tao37); cap each row's text at N code points
+     *   "content_chars": 300,                   // optional (nexus-tao37); cap each row's text at N code points
+     *   "lexical": false                        // optional (nexus-xd2rc); add each collection's text-gated rows, see below
      * }
      * </pre>
      *
@@ -707,7 +708,20 @@ public final class VectorHandler implements HttpHandler {
      * cut can no longer be rescued by rerank. Accepted in the design of record (T2
      * {@code nexus/design-tu8wp-engine-per-collection-topk-2026-10-04-part2}, Q3).
      *
-     * <p>Lexical/hybrid search stays on {@code /hybrid-search}.
+     * <p><strong>{@code lexical} (nexus-xd2rc).</strong> Opt-in, default {@code false}: the response is then
+     * byte-identical to before. When {@code true}, each collection also runs the {@code /hybrid-search} text-gated
+     * statement as its own arm (top-{@code per_collection_k} by vector distance among the rows the text gate
+     * admits), through the same workers, arm gate and bounds as the vector arms. Its rows are unioned in: a row
+     * both arms returned keeps its vector copy, and a lexical row is exempt from its collection's threshold and
+     * from the {@code limit} cut, so {@code results} can hold more than {@code limit} rows (the lexical rows the
+     * vector rows do not hold follow them, best first, before any rerank). With {@code rerank} those extra rows are
+     * scored in calls of their own, not capped by {@code rerank_max_candidates}, and ordered with the vector rows
+     * by score ({@link RerankStage#applyUnion}). The envelope echoes {@code "lexical": true}, so a client detects an
+     * engine that ignored the field by its absence, and each {@code per_collection} entry gains
+     * {@code lexical_count}, {@code lexical_ids} (every id the collection's lexical arm returned, all of them in
+     * {@code results}; empty when the collection failed), {@code lexical_error} and {@code lexical_error_kind}
+     * (the {@code error_kind} values). {@code raw_count}, {@code dropped} and the distances stay the vector
+     * arm's.
      */
     private void handleSearchPerCollection(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -738,6 +752,7 @@ public final class VectorHandler implements HttpHandler {
                     "rerank_top_k requires \"rerank\": true — set both or neither");
         }
         Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
+        boolean lexical             = optBool(body, "lexical", false);
         Integer contentChars        = optInteger(body, "content_chars");
         if (contentChars != null && contentChars < 1) {
             throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
@@ -750,19 +765,26 @@ public final class VectorHandler implements HttpHandler {
 
         long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
-                                              thresholds, where, includeSourceUri, includeEmbeddings);
+                                              thresholds, where, includeSourceUri, includeEmbeddings, lexical);
         long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
 
         Map<String, Object> envelope = new LinkedHashMap<>();
         if (rerank) {
-            envelope.putAll(rerankStage.apply(queryText, result.rows(), rerankTopK, rerankMaxCandidates));
-        } else {
+            envelope.putAll(rerankStage.applyUnion(queryText, result.rows(), result.lexicalRows(), rerankTopK,
+                    rerankMaxCandidates, dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST));
+        } else if (result.lexicalRows().isEmpty()) {
             envelope.put("results", result.rows());
+        } else {
+            List<Map<String, Object>> union = new ArrayList<>(result.rows().size() + result.lexicalRows().size());
+            union.addAll(result.rows());
+            union.addAll(result.lexicalRows());
+            envelope.put("results", union);
         }
         List<Map<String, Object>> perCollection = new ArrayList<>(result.perCollection().size());
-        for (var stat : result.perCollection()) {
+        for (int i = 0; i < result.perCollection().size(); i++) {
+            var stat = result.perCollection().get(i);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("collection", stat.collection());
             m.put("raw_count", stat.rawCount());
@@ -771,6 +793,13 @@ public final class VectorHandler implements HttpHandler {
             m.put("min_dropped_distance", stat.minDroppedDistance());
             m.put("error", stat.error());
             m.put("error_kind", stat.errorKind() == null ? null : stat.errorKind().wire());
+            if (lexical) {
+                var lex = result.lexical().get(i);
+                m.put("lexical_count", lex.count());
+                m.put("lexical_ids", lex.ids());
+                m.put("lexical_error", lex.error());
+                m.put("lexical_error_kind", lex.errorKind() == null ? null : lex.errorKind().wire());
+            }
             perCollection.add(m);
         }
         if (includeEmbeddings && embeddingsLimit != null && envelope.get("results") instanceof List<?> finalRows) {
@@ -796,6 +825,9 @@ public final class VectorHandler implements HttpHandler {
         envelope.put("per_collection", perCollection);
         envelope.put("per_collection_k", perK);
         envelope.put("limit", limit);
+        if (lexical) {
+            envelope.put("lexical", true);
+        }
         if (contentChars != null) {
             envelope.put("content_chars", contentChars);
         }

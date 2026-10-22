@@ -4009,6 +4009,7 @@ class HttpVectorClient:
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
         content_chars: int | None = None,
+        lexical: bool = False,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -4077,6 +4078,17 @@ class HttpVectorClient:
         route returns (``limit`` is 1000 under rerank) does not pay to transfer the
         vectors of rows it will drop. The rest come back without one, and the caller
         fetches those by id like any other row without a vector.
+
+        *lexical* (nexus-xd2rc) asks the engine to run each collection's
+        text-gated ``/hybrid-search`` statement as its own arm in the same
+        request. Its rows are unioned into ``results`` (the vector copy wins a
+        row both arms returned; a lexical row is exempt from the threshold and
+        from the *limit* cut, so ``results`` can exceed *limit*), and the
+        envelope then carries ``"lexical": True`` with ``lexical_ids``,
+        ``lexical_count``, ``lexical_error`` and ``lexical_error_kind`` on each
+        ``per_collection`` entry. ``"lexical"`` is absent when the engine did
+        not echo the field (it predates it and ignored it): the caller then
+        runs the lexical leg on ``/hybrid-search`` itself.
         """
         if self._per_collection_written_off():
             return None
@@ -4105,6 +4117,8 @@ class HttpVectorClient:
             # nexus-tao37: the engine caps each row's text after its rerank; an engine that
             # predates the field ignores it and answers the full text.
             body["content_chars"] = int(content_chars)
+        if lexical:
+            body["lexical"] = True
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -4217,7 +4231,9 @@ class HttpVectorClient:
         object, names a collection that was not requested, repeats one, or
         carries a count or distance of the wrong type; a requested collection
         that has neither an entry nor a place in the skipped-collections
-        header.
+        header; under a ``"lexical": true`` echo, an entry whose
+        ``lexical_ids`` is not a list of non-empty strings or whose
+        ``lexical_count`` is not a count.
         """
         def refuse(why: str) -> PerCollectionEnvelopeError:
             return PerCollectionEnvelopeError(
@@ -4265,6 +4281,7 @@ class HttpVectorClient:
                 raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a number")
             return v
 
+        lexical = payload.get("lexical") is True
         wanted = set(requested)
         seen: set[str] = set()
         entries: list[dict] = []
@@ -4284,19 +4301,34 @@ class HttpVectorClient:
                 "error": entry.get("error"),
                 "error_kind": entry.get("error_kind"),
             })
+            if lexical:
+                lexical_ids = entry.get("lexical_ids")
+                if not isinstance(lexical_ids, list) or not all(
+                    isinstance(i, str) and i for i in lexical_ids
+                ):
+                    raise refuse(f"'lexical_ids' of '{name}' is not a list of ids")
+                entries[-1].update({
+                    "lexical_ids": lexical_ids,
+                    "lexical_count": count(entry, "lexical_count"),
+                    "lexical_error": entry.get("lexical_error"),
+                    "lexical_error_kind": entry.get("lexical_error_kind"),
+                })
         unaccounted = wanted - seen - set(skipped)
         if unaccounted:
             raise refuse(
                 f"{len(unaccounted)} requested collection(s) have no 'per_collection' "
                 f"entry and were not reported skipped, e.g. '{sorted(unaccounted)[0]}'"
             )
-        return {
+        envelope: dict[str, Any] = {
             "results": rows,
             "per_collection": entries,
             "per_collection_k": payload["per_collection_k"],
             "limit": payload["limit"],
             "skipped_collections": skipped,
         }
+        if lexical:
+            envelope["lexical"] = True
+        return envelope
 
     def search_metadata_scoped(
         self,

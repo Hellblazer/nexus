@@ -352,4 +352,86 @@ class RerankStageTest {
         assertThat(env.get("rerank_degraded")).isEqualTo(true);
         assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("a", "b");
     }
+
+    // ── applyUnion: the per-collection route's lexical rows (nexus-xd2rc) ────
+
+    /** Scores each document by a fixed table and records every call's documents. */
+    private static final class TableReranker implements Reranker {
+        final Map<String, Double> scores;
+        final List<List<String>> calls = new ArrayList<>();
+        String failOnDocument;
+
+        TableReranker(Map<String, Double> scores) {
+            this.scores = scores;
+        }
+
+        @Override
+        public String modelToken() {
+            return "table-rerank";
+        }
+
+        @Override
+        public List<Scored> rerank(String query, List<String> documents, Integer topK) {
+            calls.add(List.copyOf(documents));
+            if (failOnDocument != null && documents.contains(failOnDocument)) {
+                throw new RerankUpstreamException("scorer refused the lexical call");
+            }
+            List<Scored> out = new ArrayList<>();
+            for (int i = 0; i < documents.size(); i++) {
+                out.add(new Scored(i, scores.get(documents.get(i))));
+            }
+            out.sort((x, y) -> Double.compare(y.relevanceScore(), x.relevanceScore()));
+            return out;
+        }
+    }
+
+    @Test
+    void applyUnion_scoresBothLegs_andOrdersEveryScoredRowTogether() {
+        var scorer = new TableReranker(Map.of("v1", 0.4, "v2", 0.1, "x1", 0.9, "x2", 0.2));
+        Map<String, Object> env = new RerankStage(scorer).applyUnion("q",
+            List.of(row("v1", "v1", 0.1), row("v2", "v2", 0.2)),
+            List.of(row("x1", "x1", 0.7), row("x2", "x2", 0.8)), null, null, 1000);
+
+        assertThat(env.get("rerank_degraded")).isEqualTo(false);
+        assertThat(env.get("rerank_model")).isEqualTo("table-rerank");
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("x1", "v1", "x2", "v2");
+        assertThat(scorer.calls).containsExactly(List.of("v1", "v2"), List.of("x1", "x2"));
+    }
+
+    @Test
+    void applyUnion_maxCandidatesCapsTheVectorRowsOnly_andTheExtrasAreScoredInCallsOfTheGivenSize() {
+        var scorer = new TableReranker(Map.of("v1", 0.5, "v2", 0.6, "x1", 0.9, "x2", 0.8, "x3", 0.7));
+        Map<String, Object> env = new RerankStage(scorer).applyUnion("q",
+            List.of(row("v1", "v1", 0.1), row("v2", "v2", 0.2)),
+            List.of(row("x1", "x1", 0.7), row("x2", "x2", 0.8), row("x3", "x3", 0.9)), null, 1, 2);
+
+        // v2 was beyond rerank_max_candidates: unscored, after every scored row. Every extra was scored.
+        assertThat(scorer.calls).containsExactly(List.of("v1"), List.of("x1", "x2"), List.of("x3"));
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("x1", "x2", "x3", "v1", "v2");
+        assertThat(results(env).get(4)).doesNotContainKey("rerank_score");
+    }
+
+    @Test
+    void applyUnion_aDegradeInTheLexicalCallDegradesTheResult_andKeepsEveryRow() {
+        var scorer = new TableReranker(Map.of("v1", 0.5, "x1", 0.9));
+        scorer.failOnDocument = "x1";
+        Map<String, Object> env = new RerankStage(scorer).applyUnion("q",
+            List.of(row("v1", "v1", 0.1)), List.of(row("x1", "x1", 0.7)), null, null, 1000);
+
+        assertThat(env.get("rerank_degraded")).isEqualTo(true);
+        assertThat((String) env.get("rerank_error")).contains("scorer refused the lexical call");
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("v1", "x1");
+    }
+
+    @Test
+    void applyUnion_withNoExtrasIsApply_andTopKCutsTheUnion() {
+        var scorer = new TableReranker(Map.of("v1", 0.4, "v2", 0.1, "x1", 0.9));
+        var stage = new RerankStage(scorer);
+        var primary = List.of(row("v1", "v1", 0.1), row("v2", "v2", 0.2));
+        assertThat(stage.applyUnion("q", primary, List.of(), null, null, 1000))
+            .isEqualTo(stage.apply("q", primary, null, null));
+
+        Map<String, Object> cut = stage.applyUnion("q", primary, List.of(row("x1", "x1", 0.7)), 2, null, 1000);
+        assertThat(results(cut)).extracting(r -> r.get("id")).containsExactly("x1", "v1");
+    }
 }
