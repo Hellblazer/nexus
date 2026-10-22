@@ -23,9 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 2026-10-21 section 3 Option B, non-strict). {@code out} stamps a server-written
  * {@code sender_session} on INSERT only; null when the caller had no minted session. A
  * refire or a retry never overwrites the first writer's stamp, and the claim paths
- * ({@code inp}/{@code in}) return it on the claimed row. {@code ackWithReply} is NOT
- * stamped here (nexus-g2ckl owns that): its reply row stays null, which this class pins
- * so the follow-up bead has a visible red to flip.
+ * ({@code inp}/{@code in}) return it on the claimed row. {@code ackWithReply} stamps its
+ * reply row with the acker's session (nexus-g2ckl), and the four-argument form stamps null.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TupleSenderSessionTest {

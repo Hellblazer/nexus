@@ -504,3 +504,55 @@ class TestConcurrentCallers:
         assert [HEADER in r.headers for r in seen] == [True, False, True, False]
         store.rd("mailbox/x", {"to": "x"})
         assert [HEADER in r.headers for r in seen][4:] == [False]
+
+
+class TestDefaultReplyFrom:
+    """nexus-g2ckl: ``tuple_ack`` fills a missing ``from`` on a mailbox reply with
+    this session's own id, and nothing else."""
+
+    OWN = "5a9c3e1f-2d7b-4e6a-8c0d-9b1f4a7e3c52"
+
+    @pytest.fixture(autouse=True)
+    def _own(self, monkeypatch) -> None:
+        import nexus.mcp.core as core
+
+        monkeypatch.setattr(core, "resolve_default_from", lambda: self.OWN)
+
+    def _fill(self, reply):
+        from nexus.mcp.core import _default_reply_from
+
+        return _default_reply_from(reply)
+
+    def test_a_mailbox_reply_without_from_gets_this_session(self) -> None:
+        reply = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"kind": "ack"}}
+        out = self._fill(reply)
+        assert out["dims"] == {"kind": "ack", "from": self.OWN}
+        assert "from" not in reply["dims"], "the caller's dict is not mutated"
+
+    def test_no_dims_at_all_gets_this_session(self) -> None:
+        out = self._fill({"subspace": "mailbox/x", "keys": {"to": "x"}})
+        assert out["dims"] == {"from": self.OWN}
+
+    def test_a_given_from_is_never_overridden(self) -> None:
+        reply = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"from": "a0123456789abcdef"}}
+        assert self._fill(reply) is reply
+
+    def test_a_non_mailbox_reply_is_untouched(self) -> None:
+        reply = {"subspace": "board/topic", "keys": {"topic": "t"}, "dims": {}}
+        assert self._fill(reply) is reply
+
+    def test_none_and_malformed_pass_through(self) -> None:
+        assert self._fill(None) is None
+        weird = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": "nope"}
+        assert self._fill(weird) is weird
+
+    def test_no_resolvable_session_passes_through(self, monkeypatch) -> None:
+        import nexus.mcp.core as core
+        from nexus.tuple_directory import DirectoryResolutionError
+
+        def _raise():
+            raise DirectoryResolutionError("no session")
+
+        monkeypatch.setattr(core, "resolve_default_from", _raise)
+        reply = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"kind": "ack"}}
+        assert self._fill(reply) is reply

@@ -93,8 +93,10 @@ mail addressing and the directory).
   engine before nexus-g2ckl (v0.1.163 and later stamp the acker's session on
   an ack reply row), a row that predates the column, or any raw-HTTP writer
   (no header). A missing `from` gets no label: there is nothing to compare.
-  The label therefore must ride with or after the engine that carries
-  nexus-g2ckl, or every ack reply reads unverified. A session id appears in a
+  The label rides with or after the engine that carries nexus-g2ckl: an
+  engine at v0.1.162 or earlier renders no stamp, so nothing is labelled,
+  and only a build that stamps `out` rows but not replies (none was
+  released) would read every ack reply unverified. A session id appears in a
   label only when the stamp is a canonical UUID; the stamp is attacker-chosen
   text, so any other stamp reads a bare `unverified`. The channel text words
   the cases apart (mismatch, null, agent id) and tells the reader not to act
