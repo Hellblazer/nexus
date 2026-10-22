@@ -380,6 +380,57 @@ class TestAllCandidacy:
         assert result.exit_code != 0 and "takes no NAME or --to" in result.output
 
 
+class TestAllSkip:
+    """nexus-kyzmw: ``--all --skip NAME`` leaves a source out of the run, so one permanent refusal no longer makes
+    --all unusable. The default stays all-or-nothing: a refused plan still starts nothing."""
+
+    A = "docs__1-1__bge-base-en-v15-768__v1"
+    B = "docs__2-2__bge-base-en-v15-768__v1"
+
+    def _cat(self):
+        return FakeCatalog([_row(self.A, owner="1.1"), _row(self.B, owner="2.2")], {"docs": VA})
+
+    def test_a_skipped_source_over_the_cap_no_longer_stops_the_rest(self, runner):
+        db = _engine({self.A: _plan(token_estimate=10), self.B: _plan(token_estimate=99_999_999)})
+        result = _invoke(runner, db, self._cat(), ["--all", "--skip", self.B, "--no-dry-run", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert [c.args[0] for c in db.reembed_plan.call_args_list] == [self.A], "a skipped source is not planned"
+        assert [c.args[0] for c in db.reembed_start.call_args_list] == [self.A]
+        assert f"{self.B}: skipped (--skip)" in result.output
+
+    def test_without_skip_the_same_refusal_still_starts_nothing(self, runner):
+        db = _engine({self.A: _plan(token_estimate=10), self.B: _plan(token_estimate=99_999_999)})
+        result = _invoke(runner, db, self._cat(), ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code != 0
+        db.reembed_start.assert_not_called()
+
+    def test_skip_is_repeatable_and_skipping_everything_says_so(self, runner):
+        db = _engine()
+        result = _invoke(runner, db, self._cat(), ["--all", "--skip", self.A, "--skip", self.B])
+        assert result.exit_code == 0, result.output
+        db.reembed_plan.assert_not_called()
+        assert f"{self.A}: skipped (--skip)" in result.output and f"{self.B}: skipped (--skip)" in result.output
+        assert "No collection is off the profile" not in result.output
+
+    def test_a_name_all_would_not_plan_is_an_error_and_nothing_is_planned(self, runner):
+        db = _engine()
+        result = _invoke(runner, db, self._cat(), ["--all", "--skip", "docs__nope"])
+        assert result.exit_code != 0
+        assert "docs__nope" in result.output and self.A in result.output and self.B in result.output
+        db.reembed_plan.assert_not_called()
+
+    def test_a_held_source_can_be_skipped(self, runner):
+        jobs = [_job(JOB, source=self.B, target="docs__held-t", state="running")]
+        db = _engine({self.A: _plan()}, jobs=jobs)
+        result = _invoke(runner, db, self._cat(), ["--all", "--skip", self.B])
+        assert result.exit_code == 0, result.output
+        assert "held by job" not in result.output and f"{self.B}: skipped (--skip)" in result.output
+
+    def test_skip_goes_with_all_only(self, runner):
+        result = _invoke(runner, _engine(), self._cat(), [self.A, "--to", BGE, "--skip", self.B])
+        assert result.exit_code != 0 and "--skip goes with --all" in result.output
+
+
 # ── the controls ─────────────────────────────────────────────────────────────
 
 

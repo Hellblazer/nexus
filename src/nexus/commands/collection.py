@@ -1954,6 +1954,7 @@ def _reembed_jobs(
     keep_source: bool,
     force_delete: bool,
     token_cap: int | None,
+    skipped: list[str] | None = None,
 ) -> None:
     """Plan each source and, with ``--no-dry-run``, start one job per source.
 
@@ -1979,13 +1980,15 @@ def _reembed_jobs(
             f"{r.source_row.get('name')}: re-entry of job {r.job.get('job_id')} ({r.kind}): the source's "
             f"tombstones are gone; the engine's re-entry route is not available yet, so it is listed and not started."
         )
+    for name in skipped or ():
+        click.echo(f"{name}: skipped (--skip)")
     refused = [p for p in planned if p.refusal]
     if refused:
         for p in refused:
             click.echo(f"refused: {p.refusal}", err=True)
         raise click.exceptions.Exit(1)
     if not planned:
-        if not held and not reentries:
+        if not held and not reentries and not skipped:
             click.echo("No collection is off the profile.")
         return
     if dry_run:
@@ -2033,8 +2036,14 @@ def _reembed_jobs(
 
 def _reembed_all(
     db: object, *, dry_run: bool, yes: bool, keep_source: bool, force_delete: bool, token_cap: int | None,
+    skip: tuple[str, ...] = (),
 ) -> None:
-    """``--all``: every live collection off the engine's profile, one job each."""
+    """``--all``: every live collection off the engine's profile, one job each, less any ``--skip`` NAME.
+
+    nexus-kyzmw: a skipped source is not planned and is listed as skipped, so a source that is refused for
+    good (a held target name, a target collision) does not make ``--all`` unusable. Without ``--skip`` the
+    run stays all-or-nothing: a refused plan starts nothing. A NAME ``--all`` would not plan is an error.
+    """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.reembed_job import candidates, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -2061,9 +2070,25 @@ def _reembed_all(
         return count
 
     found = candidates(rows, profile, jobs, doc_count(False), doc_count(True))
+    skipped = sorted(set(skip))
+    if skipped:
+        known = sorted(
+            {str(r.get("name")) for r in found.stale}
+            | {str(row.get("name")) for row, _job in found.held}
+            | {str(r.source_row.get("name")) for r in found.reentries}
+        )
+        unknown = [n for n in skipped if n not in known]
+        if unknown:
+            raise click.ClickException(
+                f"--skip names {', '.join(unknown)}, which --all would not plan; its candidates are: "
+                f"{', '.join(known) or '(none)'}."
+            )
     _reembed_jobs(
-        db, found.stale, profile=profile, held=found.held, reentries=found.reentries,
+        db, [r for r in found.stale if str(r.get("name")) not in skipped], profile=profile,
+        held=[(row, j) for row, j in found.held if str(row.get("name")) not in skipped],
+        reentries=[r for r in found.reentries if str(r.source_row.get("name")) not in skipped],
         dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete, token_cap=token_cap,
+        skipped=skipped,
     )
 
 
@@ -2118,6 +2143,9 @@ def _reembed_cross_model(
 @click.option("--all", "all_collections", is_flag=True, default=False,
               help="Plan every live collection off the engine's profile; with --no-dry-run --yes, start one "
                    "job per collection (local engine only).")
+@click.option("--skip", "skip", multiple=True, metavar="NAME",
+              help="With --all: leave NAME out of the run (repeatable). It is listed as skipped; a NAME --all "
+                   "would not plan is an error. Without it, one refused plan starts nothing.")
 @click.option("--keep-source", is_flag=True, default=False,
               help="Job only: keep the emptied source collection (superseded, with its quarantine rows and "
                    "topic data) instead of deleting it.")
@@ -2139,7 +2167,7 @@ def _reembed_cross_model(
 @click.option("--yes", is_flag=True, default=False,
               help="Skip the destructive-action confirmation prompt.")
 def reembed_cmd(
-    name: str | None, target_model: str | None, all_collections: bool, keep_source: bool,
+    name: str | None, target_model: str | None, all_collections: bool, skip: tuple[str, ...], keep_source: bool,
     force_delete: bool, token_cap: int | None, status_job: str | None, pause_job: str | None,
     resume_job: str | None, abort_job: str | None, dry_run: bool, yes: bool,
 ) -> None:
@@ -2148,6 +2176,7 @@ def reembed_cmd(
     \b
       nx collection re-embed NAME --to MODEL    in place when MODEL is NAME's model; else a job
       nx collection re-embed --all              plan every collection off the profile
+      nx collection re-embed --all --skip NAME  the same, leaving NAME out (repeatable)
       nx collection re-embed --status [JOB]     jobs; --pause/--resume/--abort JOB act on one
 
     nexus-bw65: rebuild embeddings for every chunk in NAME that has a
@@ -2178,6 +2207,8 @@ def reembed_cmd(
       - The in-place form does NOT rename the collection; run
         ``nx collection rename`` if the name needs to track the new model.
     """
+    if skip and not all_collections:
+        raise click.UsageError("--skip goes with --all.")
     controls = [c for c in (status_job, pause_job, resume_job, abort_job) if c is not None]
     if controls:
         if len(controls) > 1 or name or all_collections or target_model or keep_source or force_delete:
@@ -2199,7 +2230,7 @@ def reembed_cmd(
             )
         _reembed_all(
             _t3(), dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete,
-            token_cap=token_cap,
+            token_cap=token_cap, skip=skip,
         )
         return
     if not name or not target_model:
