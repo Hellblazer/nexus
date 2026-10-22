@@ -88,6 +88,7 @@ sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 
 [provisioning]
 "tests/e2e/benchmark-corpus.sh::sh_nx_init" = 1
+"tests/e2e/dual-embedder-gate.sh::sh_nx_init" = 1
 "tests/e2e/fresh-install-mvv.sh::sh_nx_init" = 1
 "tests/e2e/hook-surface-shakeout/shakeout_in_container.sh::sh_nx_init" = 1
 "tests/e2e/local-service-gate.sh::sh_nx_init" = 1
