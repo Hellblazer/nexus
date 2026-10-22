@@ -223,6 +223,11 @@ else
     echo "[dual-gate] ERROR: no build_ref in the build output, or $DG_JAR is missing" >&2
     exit 2
   fi
+  # Boot from a private copy. The battery's gate group runs this leg beside local-service-gate.sh in one
+  # worktree, and that leg rebuilds service/target/ between this leg's two boots (nexus-i5mbq, 7.84.0 battery:
+  # the second boot found its NEXUS_SERVICE_JAR missing). The copy carries the stamp the version check reads.
+  cp "$DG_JAR" "$SCRATCH/engine.jar"
+  DG_JAR="$SCRATCH/engine.jar"
 fi
 
 # ── Engine start, stop and lease ─────────────────────────────────────────────
