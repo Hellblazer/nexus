@@ -2301,10 +2301,8 @@ public final class CatalogHandler implements HttpHandler {
         // reader does not have to re-derive it (1232585d shipped this one silently, which
         // is what produced this bead): the rename SOURCE guard a few lines below (nexus-
         // c29vr) and the rename TARGET guard (nexus-cecqy/nexus-v6za0) already read
-        // getCollection()+superseded_by directly, not collectionExists; the cross_model
-        // converse guard (nexus-tnx48, keyed on !tgtLive) is the opposite polarity on
-        // purpose — it demands the target be LIVE — and is correct as written. This was
-        // the last remaining direct repo.collectionExists call in this handler.
+        // getCollection()+superseded_by directly, not collectionExists. This was the last
+        // remaining direct repo.collectionExists call in this handler.
         Map<String, Object> targetRow = repo.getCollection(tenant, supersededBy);
         if (targetRow == null) {
             HttpUtil.send(exchange, 404,
@@ -2514,28 +2512,18 @@ public final class CatalogHandler implements HttpHandler {
         // a new name. (The engine must not depend on which CLI verb the operator typed:
         // rename_collection_cmd checks superseded_by, rename_collection_data_plane — the
         // unattended indexer path — checks only T3 chunk presence.)
-        //
-        // Scoped to !crossModel (review of 351874c5): the rationale above is a CANONICAL-branch
-        // fact. The cross_model COPY branch returns after two UPDATEs — it never runs step 1,
-        // never inserts a registry row, never touches superseded_by — so a retired source is
-        // harmless there, and repointing a dead collection's documents onto its live successor
-        // is exactly the repair the RDR-162 flow exists for. Blocking it would degrade
-        // the cross_model repoint to a warn-and-continue that leaves catalog_documents
-        // pointing at the dead source.
-        boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
         String srcSuperseded = (String) srcRow.get("superseded_by");
-        if (!crossModel && srcSuperseded != null && !srcSuperseded.isEmpty()) {
+        if (srcSuperseded != null && !srcSuperseded.isEmpty()) {
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString("source collection " + oldName
                     + " is retired (superseded by " + srcSuperseded + "); renaming it would carry the "
                     + "supersession onto the new name. Rename " + srcSuperseded + " instead, or clear the "
                     + "supersession first.") + "}"); return;
         }
-        // nexus-gaou3: if new_name is ALREADY a registered collection, renameCollection silently
-        // takes the RDR-162 cross-model COPY branch (repoints catalog_documents ONLY; chunks/
-        // taxonomy/aspects are NOT moved). That is correct ONLY for the deliberate cross-model
-        // migrate. A plain rename onto an existing collection is a collision: fail loud with 409
-        // unless the caller opts into the COPY branch via cross_model:true.
+        // nexus-gaou3: a rename onto a LIVE collection is a collision: fail loud with 409. The
+        // RDR-162 cross_model flag that opted into a documents-only COPY repoint is gone
+        // (nexus-avjrb): no released client sends it on a production path, and a body that still
+        // carries it gets this same 409.
         Map<String, Object> tgtRow = repo.getCollection(tenant, newName);
         String tgtSuperseded = tgtRow == null ? null : (String) tgtRow.get("superseded_by");
         boolean tgtRetired = tgtRow != null && tgtSuperseded != null && !tgtSuperseded.isEmpty();
@@ -2546,10 +2534,10 @@ public final class CatalogHandler implements HttpHandler {
         // its branch on a LIVE target, and the disagreement made undoing a rename
         // impossible over HTTP: rename X->Y, then rename Y->X, and the tombstone left at X
         // by the first call 409'd the second.
-        if (!crossModel && tgtLive) {
+        if (tgtLive) {
             HttpUtil.send(exchange, 409,
-                "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName
-                    + " (pass cross_model:true only for a deliberate cross-model repoint)") + "}"); return;
+                "{\"error\":" + MAPPER.writeValueAsString("target collection already exists: " + newName) + "}");
+            return;
         }
         // nexus-v6za0 — NOT every tombstone is empty, and only ONE kind may be revived.
         // A tombstone has two provenances:
@@ -2564,7 +2552,7 @@ public final class CatalogHandler implements HttpHandler {
         // (erasing the chain unaudited), then step 2 re-homes the source's chunks ON TOP of the
         // target's existing rows — two collections merged under one name, across two vector
         // spaces. Gate the revive on the tombstone's IDENTITY, not merely its non-liveness.
-        if (!crossModel && tgtRetired) {
+        if (tgtRetired) {
             // TWO conditions, and the EMPTINESS one is the load-bearing half.
             //
             // Identity alone was the 351874c5 fix and it was WRONG: superseded_by is written
@@ -2599,22 +2587,6 @@ public final class CatalogHandler implements HttpHandler {
                               + ", so reviving it here would erase that supersession unaudited. "
                               + "Unwind the rename chain one hop at a time.")) + "}"); return;
             }
-        }
-        // The converse mismatch (nexus-tnx48). cross_model:true means the RDR-162 COPY branch,
-        // whose whole premise is that the target already exists AND IS LIVE (the ETL just
-        // populated it) so only catalog_documents needs repointing. Any NON-LIVE target —
-        // absent or retired — makes renameCollection take the canonical FULL-REHOME branch
-        // instead, moving chunks, taxonomy and aspects that the flag promises not to touch.
-        // Fail loud rather than silently do the more destructive thing under a flag that says
-        // otherwise. (Guarding on !tgtLive, not on "retired AND present": the absent case took
-        // the same destructive branch and was not covered.)
-        if (crossModel && !tgtLive) {
-            HttpUtil.send(exchange, 409,
-                "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
-                    + (tgtRetired ? " is retired (superseded)" : " does not exist")
-                    + ", not a live cross-model target. cross_model:true repoints documents onto an "
-                    + "existing LIVE collection; it cannot revive a tombstone or create a collection. "
-                    + "Drop cross_model for a plain rename.") + "}"); return;
         }
         // nexus-2sovp: thread OUR observation of the target's superseded_by into the
         // transaction's additive identity belt, rather than let the txn re-derive it —

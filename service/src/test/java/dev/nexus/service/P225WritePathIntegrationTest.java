@@ -47,7 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * repositories and as the production role. Chunk, manifest, topic-assignment and centroid writers supply the
  * collection's model and conflict on the four-column keys; a model with no partition is refused before any SQL, naming
  * the model; a model or dimension that disagrees with its collection is refused; a re-home across models is refused,
- * and the cross-model COPY rename sets the manifest's model. (The quarantine, restore, GC and purge families, and the
+ * and a rename onto a live target is refused. (The quarantine, restore, GC and purge families, and the
  * deferred FKs, are exercised by their own suites on the same layout.)
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -445,30 +445,6 @@ class P225WritePathIntegrationTest {
         assertThat(chash.renameCollection(TA, x3, y)).isZero();
         assertThat(countIn(x3)).isZero();
         assertThat(countIn(y)).isEqualTo(1);
-    }
-
-    @Test
-    void catalogRename_copyBranchAcrossModels_setsTheManifestModelToTheTargets() throws Exception {
-        String x = "code__w9x__voyage-code-3__v1";
-        String y = "docs__w9y__voyage-context-3__v1";
-        register(x, CODE_3);
-        register(y, CONTEXT_3);
-        chunk(repo(1024), x, 71, "re-embedded");
-        chunk(repo(1024), y, 71, "re-embedded");   // the cross-model re-embed preserved the chash
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.ownChunks(dsl(su), TA, x, h(71));
-        }
-        Map<String, Integer> counts = catalog.renameCollection(TA, x, y);   // y is live: the COPY branch
-        assertThat(counts).containsKey("catalog_document_chunks");
-        try (Connection su = pg.createConnection("")) {
-            var row = dsl(su).select(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TA))
-                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("own-" + x)).fetchOne();
-            assertThat(row.value1()).isEqualTo(y);
-            assertThat(row.value2()).as("the target's model, or the foreign key to the target's chunk would not hold").isEqualTo(CONTEXT_3);
-            assertThat(dsl(su).fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TA), CHUNKS.COLLECTION.eq(x))).as("the source's chunk is untouched").isEqualTo(1);
-        }
     }
 
     @Test

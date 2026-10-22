@@ -618,34 +618,6 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void theCrossModelCopyBranchDoesNotRetag_theRowsStayWithTheLiveSource_andItsLaterDeleteTakesThem()
-            throws Exception {
-        // RDR-162 COPY: the source X stays registered and live; Y is a different model and width. X's quarantine
-        // rows carry X-model vectors, so they stay X's. Retagged to Y they would restore only into Y as a
-        // dim_conflict (or wrong-model vectors), and outlive X's delete.
-        String t = newTenant();
-        String x = col("c3x");
-        String y = "knowledge__c3y" + seq.incrementAndGet() + "__bge-base-en-v15-768__v1";
-        register(t, x);
-        register(t, y);
-        String hex = qrow(t, reaperSibling(x), "copy-branch", x);
-        String untagged = qrow(t, reaperSibling(x), "copy-branch-untagged", null);
-
-        repo.renameCollection(t, x, y);
-
-        assertThat(registered(t, x)).as("the COPY branch leaves the source registered").isTrue();
-        assertThat(tag(t, reaperSibling(x), hex)).as("still X's").isEqualTo(x);
-        assertThat(tag(t, reaperSibling(x), untagged)).as("an untagged row is not given to the target").isNull();
-        assertThat(audit(t, RETAG_OP)).as("no retag audit row").isEmpty();
-        assertThat(vectors.resolveQuarantineSiblings(t, x)).containsExactly(reaperSibling(x));
-
-        Map<String, Integer> counts = repo.deleteCollection(t, x);
-
-        assertThat(counts.get("quarantine_chunks")).as("X's own delete takes them, audited").isEqualTo(2);
-        assertThat(only(audit(t, DELETE_OP), reaperSibling(x)).get("chash_count")).isEqualTo(2);
-    }
-
-    @Test
     void theChashRenameRetagsWhenTheSourceIsNotALiveRegisteredCollection() throws Exception {
         String t = newTenant();
         String x = col("c4x");
@@ -664,7 +636,7 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
 
     @Test
     void theChashRenameDoesNotRetagWhenTheSourceIsStillALiveRegisteredCollection() throws Exception {
-        // The same route serves the RDR-162 cross-model cascade, where the source stays live (see the COPY test).
+        // The same route serves the RDR-162 cross-model cascade, where the source stays live (the chash cascade keeps its own copy semantics).
         String t = newTenant();
         String x = col("c4lx");
         String y = col("c4ly");

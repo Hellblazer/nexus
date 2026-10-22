@@ -43,8 +43,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code ON UPDATE NO ACTION} FKs, it re-homes every in-Postgres denorm-collection table X-&gt;Y
  * by INSERT-new-registry / re-home-children / DELETE-old-registry (never UPDATEs
  * catalog_collections.name), returns per-table counts, leaves no orphan under the old name,
- * round-trips X-&gt;Y-&gt;X, is tenant-isolated via RLS, and preserves the RDR-162 cross-model
- * COPY branch (target already registered → repoint documents only, both registry rows kept).
+ * round-trips X-&gt;Y-&gt;X and is tenant-isolated via RLS. (A live target is refused; the RDR-162
+ * cross-model COPY branch is gone, nexus-avjrb.)
  * The chunks-present case is the one the pre-P3 bare-UPDATE rename could not satisfy.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -361,87 +361,6 @@ class CatalogRenameCollectionTest {
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(c2))
                     .fetchOne(0, int.class))
                 .as("the source must be untouched: no half-done rename").isEqualTo(1);
-        }
-    }
-
-    @Test @Order(50)
-    void renameCollection_crossModelCopyBranch_targetExists_repointsDocsAndManifests() throws Exception {
-        // RDR-162 regression: pre-register the TARGET (simulating the bge-768 cross-model
-        // chunk upsert), then rename. catalog_documents.physical_collection repoints AND
-        // (nexus-x6kdz critique HIGH) the manifest's denormalized collection re-homes with
-        // it — the old docs-only pin actively green-lit the silent-empty combined-query
-        // state (docs at the target, manifests at the source). Both registry rows remain.
-        final String src = "code__ren-xm__minilm-l6-v2-384__v1";
-        final String tgt = "code__ren-xm__bge-768__v1";
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // source registry + a document pointing at it
-            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
-            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-               .values(TENANT_A, "xm-doc-1", "XM Doc", src)
-               .execute();
-            // target registry already exists (cross-model copy registered it)
-            PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
-            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
-            // a matching nexus.chunks row for the manifest insert below, at BOTH
-            // ends: the pre-rename manifest row needs a chunk under src, and
-            // renameCollectionTxn's COPY branch (target pre-registered) never
-            // touches nexus.chunks itself -- only catalog_documents +
-            // catalog_document_chunks (containsOnlyKeys assertion below) -- so the
-            // post-rename manifest row (now pointing at tgt) needs its OWN
-            // same-chash chunk under tgt too, matching what the REAL cross-model
-            // copy this branch models would already have written there.
-            byte[] xmChash = "e".repeat(32).getBytes(StandardCharsets.US_ASCII);
-            insertChunk384(ctx, TENANT_A, src, xmChash, vector(384));
-            insertChunk768(ctx, TENANT_A, tgt, xmChash, vector(768));
-            // a manifest row still homed at the SOURCE (the pre-rename state)
-            // ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY has no jOOQ typed-DSL form
-            // (Postgres-only RLS DDL extension; verified against jOOQ 3.21's manual,
-            // which models only ENABLE/DISABLE ROW LEVEL SECURITY-adjacent constraint
-            // enforcement, not the FORCE flag) -- runs through
-            // nexus_test.set_force_rls via PgContainerHelper#setForceRls
-            // (nexus-cbo4a batch 10 review fold-in).
-            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, false);
-            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                           CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                           CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(TENANT_A, "xm-doc-1", 0, xmChash, src, PgContainerHelper.collectionModel(ctx, TENANT_A, src))
-               .execute();
-            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, true);
-        }
-        Map<String, Integer> c = repo.renameCollection(TENANT_A, src, tgt);
-        assertThat(c).as("cross-model branch re-homes docs AND manifests")
-            .containsOnlyKeys("catalog_documents", "catalog_document_chunks");
-        assertThat(c.get("catalog_documents")).as("one doc repointed").isEqualTo(1);
-        assertThat(c.get("catalog_document_chunks")).as("one manifest row re-homed").isEqualTo(1);
-        try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(src))
-                    .fetchOne(0, int.class))
-                .as("source registry row KEPT").isEqualTo(1);
-            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(tgt))
-                    .fetchOne(0, int.class))
-                .as("target registry row KEPT").isEqualTo(1);
-            assertThat(ctx.selectCount().from(CATALOG_DOCUMENTS)
-                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(tgt))
-                    .fetchOne(0, int.class))
-                .as("doc now under target").isEqualTo(1);
-            assertThat(ctx.selectCount().from(CATALOG_DOCUMENTS)
-                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(src))
-                    .fetchOne(0, int.class))
-                .as("no doc left under source").isZero();
-            assertThat(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
-                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(tgt))
-                    .fetchOne(0, int.class))
-                .as("manifest row homed at target").isEqualTo(1);
-            assertThat(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
-                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(src))
-                    .fetchOne(0, int.class))
-                .as("no manifest row left under source").isZero();
         }
     }
 

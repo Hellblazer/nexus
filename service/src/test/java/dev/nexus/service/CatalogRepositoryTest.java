@@ -2725,32 +2725,23 @@ class CatalogRepositoryTest {
     }
 
     @Test @Order(66)
-    void collection_rename_crossModel_targetPreRegistered_repointsDocsNoCollision() {
-        // RDR-162 cross-model migrate is COPY-not-move: the bge-768 TARGET is ALREADY
-        // registered in catalog_collections (the vector upsert pre-registers it so its
-        // chunks' FK is satisfied). Renaming the SOURCE registry row into that name
-        // would collide on the (tenant_id, name) PK -> 500 (the bug the cross-model
-        // ref-remap hit). The rename must instead repoint the catalog documents only,
-        // leaving the (already-correct) target registry row untouched.
+    void collection_rename_ontoALivePreRegisteredTarget_isRefused_andMovesNothing() {
+        // nexus-avjrb: the RDR-162 cross-model COPY branch (repoint documents only onto a live,
+        // pre-registered target) is gone. A live target is an occupied name, refused in the
+        // transaction for any caller, not only by the handler's 409.
         String src = "knowledge__xmrn__minilm-l6-v2-384__v1";
         String tgt = "knowledge__xmrn__bge-base-en-v15-768__v1";
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "xmrn.1", "title", "Cross-model Rename",
             "content_type", "knowledge", "corpus", "knowledge",
             "physical_collection", src));
-        // The target is pre-registered (simulating the vector upsert's auto-registration).
         repo.upsertCollection(TENANT_A, Map.of(
             "name", tgt, "content_type", "knowledge", "owner_id", "nexus-1-1",
             "embedding_model", "bge-base-en-v15-768", "model_version", "v1"));
 
-        // Pre-RDR-162 this threw a 500 (PK collision on the registry rename). The cross-model
-        // COPY branch (target exists) repoints catalog_documents only and returns just that key.
-        var counts = repo.renameCollection(TENANT_A, src, tgt);
-        // nexus-x6kdz: the branch now ALSO re-homes the manifest join key.
-        assertThat(counts).as("cross-model branch re-homes docs and manifests")
-            .containsOnlyKeys("catalog_documents", "catalog_document_chunks");
-        assertThat(counts.get("catalog_documents")).isEqualTo(1);
-        assertThat(repo.getDocument(TENANT_A, "xmrn.1").get("physical_collection")).isEqualTo(tgt);
-        // The pre-registered target row is intact (not collided, not duplicated).
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .hasMessageContaining("target collection already exists");
+        assertThat(repo.getDocument(TENANT_A, "xmrn.1").get("physical_collection")).isEqualTo(src);
         assertThat(repo.getCollection(TENANT_A, tgt)).isNotNull();
     }
 
