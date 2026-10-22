@@ -491,6 +491,10 @@ public class TenantKeyedStateGateTest {
             + "(ChunkReaper.lastRun); it can name a reset tenant until the next pass and nothing in the engine "
             + "decides on it, so it is not a cache a reset must clear";
 
+        private static final String SINGLETON_LOCK = "the engine's one-engine-per-database lock (nexus-5tykh): its "
+            + "own JDBC connection and the two callbacks Main hands it; one per process, tenant-independent. Its "
+            + "regain hook is what clears CollectionRegistry for every tenant";
+
         private static final String TOKEN_CACHE_REF = "a reference to the TokenCache, which is evicted under "
             + "TokenCache.map";
 
@@ -890,6 +894,9 @@ public class TenantKeyedStateGateTest {
             }
             notKeyed.put("PciReconciler.failures", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
+            notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.onFatal", SINGLETON_LOCK);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);

@@ -85,7 +85,10 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * old engine before the new one starts (RDR-007's single-host design, per conexus, 2026-10-22); a
  * rehearsal fork runs its own engine against its own database. Replicas or a blue/green overlap on
  * one database would leave the other JVM serving a stale row (a renamed-away name still writable
- * there) and need a TTL or shared invalidation (LISTEN/NOTIFY) first.
+ * there) and need a TTL or shared invalidation (LISTEN/NOTIFY) first. The assumption is enforced since
+ * nexus-5tykh: {@link EngineSingletonLock} takes a session advisory lock at boot, so a second engine on the same
+ * database refuses to start, and an engine that loses the lock and finds another holder exits. An engine that
+ * loses it and takes it back calls {@link #evictAll}, because another engine may have run in the gap.
  */
 public final class CollectionRegistry {
 
@@ -208,6 +211,23 @@ public final class CollectionRegistry {
             });
         }
         return removed[0];
+    }
+
+    /**
+     * Forget every cached pair, for every tenant (nexus-5tykh). {@link EngineSingletonLock} calls it after the engine
+     * lost its one-engine-per-database lock and took it back: another engine may have served the database in the
+     * gap and changed or superseded rows this cache still holds. Bumps the eviction count, so a miss whose read
+     * began before this call caches nothing.
+     *
+     * @return the number of cached pairs removed
+     */
+    public static int evictAll() {
+        synchronized (FILL_LOCK) {
+            evictions++;
+            int removed = KNOWN.size();
+            KNOWN.clear();
+            return removed;
+        }
     }
 
     /** Test-only: clears all cached entries. */

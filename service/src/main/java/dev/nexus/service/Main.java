@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.EngineSingletonLock;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Bge768Embedder;
@@ -195,6 +196,13 @@ public final class Main {
             log.error("event=pg_session_env_invalid error=\"{}\"", cause.getMessage(), t);
             System.exit(1);
         }
+
+        // ── One engine per database (nexus-5tykh) ────────────────────────────────
+        // A session advisory lock on a connection of its own, taken BEFORE the schema migration so a second engine
+        // never migrates either. Waits up to NX_ENGINE_SINGLETON_LOCK_WAIT_SECONDS (30) for a holder that is still
+        // shutting down, then refuses: the ERROR names the holder's pid and client address. The pool above is already
+        // open, so a refusal closes it first, as every other boot refusal here does.
+        final EngineSingletonLock singletonLock = bootSingletonLock(ds, dbUrl, dbUser, dbPass, applicationName);
 
         // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
         // Run Liquibase BEFORE the HTTP server binds so the service never serves
@@ -639,10 +647,56 @@ public final class Main {
             docEmbedRouter.close();
             qryEmbedRouter.close();
             ds.close();
+            // nexus-5tykh: last, so a successor engine cannot take the lock while this one still ends backends.
+            if (singletonLock != null) {
+                singletonLock.close();
+            }
         }));
 
         // Block main thread until shutdown
         Thread.currentThread().join();
+    }
+
+    // ── One engine per database (nexus-5tykh) ────────────────────────────────
+
+    /**
+     * The singleton lock, or null when the operator opted out or a pooler is configured (both logged at WARN).
+     * Exits 1 (after closing the pool) on an invalid setting, an unreachable database or a holder that outlasts the
+     * wait. On success the monitor is running: a lock lost and taken back clears the {@code CollectionRegistry}
+     * cache; a lock lost to another engine exits the process with {@link EngineSingletonLock#EXIT_STATUS}.
+     */
+    private static EngineSingletonLock bootSingletonLock(HikariDataSource ds, String dbUrl, String dbUser,
+                                                         String dbPass, String poolApplicationName) {
+        String lockApplicationName = poolApplicationName + "/singleton-lock";
+        try {
+            var settings = EngineSingletonLock.Settings.fromEnv(System::getenv);
+            var lock = EngineSingletonLock.acquireAtBoot(settings,
+                EngineSingletonLock.jdbcOpener(dbUrl, dbUser, dbPass, lockApplicationName), lockApplicationName)
+                .orElse(null);
+            if (lock != null) {
+                lock.startMonitor(settings.checkInterval(), dev.nexus.service.db.CollectionRegistry::evictAll,
+                    // Its own thread: System.exit blocks on the shutdown hook, and the hook closes the lock, which
+                    // stops the very thread that called exit.
+                    message -> new Thread(() -> System.exit(EngineSingletonLock.EXIT_STATUS),
+                        "engine-singleton-lock-exit").start());
+            }
+            return lock;
+        } catch (IllegalArgumentException e) {
+            ds.close();
+            log.error("event=engine_singleton_lock_env_invalid error=\"{}\"", e.getMessage());
+        } catch (EngineSingletonLock.HeldElsewhereException e) {
+            ds.close();
+            log.error(e.getMessage());
+        } catch (java.sql.SQLException e) {
+            ds.close();
+            log.error("event=engine_singleton_lock_connect_failed error=\"{}\"", e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            ds.close();
+            log.error("event=engine_singleton_lock_interrupted");
+        }
+        System.exit(1);
+        return null;
     }
 
     // ── Migration datasource factory ─────────────────────────────────────────

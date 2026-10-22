@@ -93,6 +93,9 @@ final class EgressGuardCensus {
         m.put("dev/nexus/service/db/PoolerModeCheck.java", new Allow(
             Set.of("DriverManager.getConnection"), 1,
             "JDBC to the engine's own database (NX_DB_URL): the pooler-mode probe."));
+        m.put("dev/nexus/service/db/EngineSingletonLock.java", new Allow(
+            Set.of("DriverManager.getConnection"), 1,
+            "JDBC to the engine's own database (NX_DB_URL): the one-engine-per-database lock connection, outside the pool."));
         m.put("dev/nexus/service/db/BackendReaper.java", new Allow(
             Set.of("DriverManager.getConnection"), 1,
             "JDBC to the engine's own database (NX_DB_URL): the stale-backend reaper."));
