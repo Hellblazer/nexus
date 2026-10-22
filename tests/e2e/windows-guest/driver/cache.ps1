@@ -142,14 +142,17 @@ function Save-Keys($mine, $before) {
         # .NET calls throw on failure, so a failed write leaves keys.txt as it was and fails the harvest loudly.
         [System.IO.File]::WriteAllLines("$keys.tmp", [string[]]@($merged | Sort-Object -Unique), (New-Object System.Text.UTF8Encoding $true))
         # Windows PowerShell 5.1 (.NET Framework) throws "path is not of a legal form" for a $null backup name, so the swap
-        # names one and removes it (2026-10-22: the warm run's harvest wrote its payloads but never keys.txt).
+        # names one and removes it afterwards (2026-10-22: the warm run's harvest wrote its payloads but never keys.txt).
         # A seed's unlocked read can hold keys.txt open without delete-share for a moment; retry the swap briefly.
         for ($j = 0; ; $j++) {
             try {
-                if (Test-Path -LiteralPath $keys) { [System.IO.File]::Replace("$keys.tmp", $keys, "$keys.bak"); [System.IO.File]::Delete("$keys.bak") } else { [System.IO.File]::Move("$keys.tmp", $keys) }
+                if (Test-Path -LiteralPath $keys) { [System.IO.File]::Replace("$keys.tmp", $keys, "$keys.bak") } else { [System.IO.File]::Move("$keys.tmp", $keys) }
                 break
             } catch { if ($j -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
         }
+        # Outside the retry: a swap that landed must not be retried because the backup is held (an indexer or a scanner);
+        # a leftover .bak is overwritten by the next swap.
+        try { [System.IO.File]::Delete("$keys.bak") } catch { }
     } finally { $lock.Dispose() }
 }
 function ClaudeBin($v) { Join-Path $root "claude-$v-win32-x64.exe" }

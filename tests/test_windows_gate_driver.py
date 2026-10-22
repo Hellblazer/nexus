@@ -1330,6 +1330,8 @@ def test_keys_txt_is_written_only_under_an_exclusive_lock_that_re_reads_and_merg
     assert re.search(r"catch \{ if \(\$j -ge \d+\) \{ throw \}; Start-Sleep", held)
     # File.Replace with a $null backup name throws on Windows PowerShell 5.1 (the 2026-10-22 harvest never wrote keys.txt)
     assert not re.search(r"::Replace\([^)]*\$null", held) and '::Replace("$keys.tmp", $keys, "$keys.bak")' in held
+    # the backup is deleted after the retry loop, in its own try, so a held backup cannot fail a swap that landed
+    assert held.index("Start-Sleep -Milliseconds 250 }\n        }") < held.index('try { [System.IO.File]::Delete("$keys.bak") } catch { }')
     # the merge keeps another harvest's line for every kind this run did not touch, and this run's line for the rest
     for line in (
         "$added = @($mine | Where-Object { $before -notcontains $_ })",
