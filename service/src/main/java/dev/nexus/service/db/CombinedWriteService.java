@@ -589,6 +589,8 @@ public final class CombinedWriteService {
         // instead of the RDR-156-era auto-stub. A combined write against an
         // unregistered collection now fails loud (UnregisteredCollectionException,
         // mapped to 422) rather than silently registering a blank-attribute row.
+        // nexus-i15oc: plain on purpose. The lookupWritable above is the superseded refusal and runs just
+        // before this with no round trip between; a cache hit (isKnown) is always a live row.
         ensureCollectionRegistered(tenant, collection);
 
         List<Map<String, Object>> src = chunks != null ? chunks : List.of();

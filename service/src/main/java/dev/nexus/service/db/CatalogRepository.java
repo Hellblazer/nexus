@@ -5416,6 +5416,10 @@ public final class CatalogRepository {
         // RDR-204 Phase 2 (bead nexus-ft04v.16): the row's dimension, read through
         // the ALREADY-OPEN ctx (require, not lookup — a nested withTenant here
         // would borrow a second pooled connection mid-transaction for no reason).
+        // nexus-i15oc: plain on purpose. Both callers write this doc's manifest rows in the same transaction,
+        // through insertManifestChunkRows' requireWritable, so a retire that lands in the embed window rolls
+        // the chunk rows back with the refusal; the up-front lookupWritable in CombinedWriteService is the
+        // first line.
         CollectionRow collectionRow = CollectionRegistry.require(ctx, tenant, collection);
         int dim = collectionRow.dimension();
         // RDR-225 (nexus-3wh8d.13): the chunk rows carry the collection's model; a model with no

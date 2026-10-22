@@ -1161,9 +1161,13 @@ public final class PgVectorRepository {
         // full-suite failure) rather than inline in the batch transaction below —
         // kept for symmetry with that history even though a read-only check has no
         // lock-hold duration to bound.
+        // nexus-i15oc: this is the re-check AFTER the embed round trip, the slow gap in which a supersede can
+        // commit. The supersede evicts the cached row, so isKnown is false and the read below sees the tombstone;
+        // plain requireRegistered would pass it and file the batch under the retired name. A cache hit is
+        // always a live row, so the common case stays free.
         if (!CollectionRegistry.isKnown(tenant, collection)) {
             tenantScope.withTenant(tenant, ctx -> {
-                CollectionRegistry.requireRegistered(ctx, tenant, collection);
+                CollectionRegistry.requireWritable(ctx, tenant, collection);
                 return null;
             });
         }
