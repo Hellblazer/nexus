@@ -7519,14 +7519,16 @@ def tuple_rd(
     )] = "",
     since_id: Annotated[str, Field(description="See since_created_at.")] = "",
     timeout_s: Annotated[int, Field(
-        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
+                    "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
     )] = 0,
 ) -> list[dict]:
     """Read a subspace without claiming rows (`rd`); use `tuple_in` instead to claim one.
 
     A probe (never blocks) when `timeout_s=0` (the default); parks up to
-    `timeout_s` seconds (capped by the engine) when nothing matches
-    immediately. Matches on equality over whatever subset of the pinned
+    `timeout_s` seconds when nothing matches immediately. The engine
+    refuses a `timeout_s` above its cap (25 s by default), so a longer
+    wait is a loop of parks. Matches on equality over whatever subset of the pinned
     keys `keys_pattern` supplies.
 
     Returns a list of matching tuples, including dead-lettered rows
@@ -7556,13 +7558,16 @@ def tuple_in(
         description="Claim lease length in seconds; refused above the template's max_lease_seconds.",
     )],
     timeout_s: Annotated[int, Field(
-        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
+                    "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
     )] = 0,
 ) -> dict | None:
     """Claim a tuple from a subspace (`in`); use `tuple_rd` instead for a non-destructive read.
 
     A probe (never blocks) when `timeout_s=0` (the default); parks up to
-    `timeout_s` seconds when nothing matches immediately. Unlike
+    `timeout_s` seconds when nothing matches immediately; the engine
+    refuses a `timeout_s` above its cap (25 s by default), so a longer
+    wait is a loop of parks. Unlike
     `tuple_rd`, every key in `keys_pattern` must be pinned (no subset
     match) and dead-lettered rows are never returned.
 
