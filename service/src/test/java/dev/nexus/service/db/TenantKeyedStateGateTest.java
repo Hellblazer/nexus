@@ -650,6 +650,8 @@ public class TenantKeyedStateGateTest {
             // TEST_HOOK (21)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
+                "CatalogRepository.afterMoveCompletedHookForTests",
+                "CatalogRepository.afterMovePreconditionHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
                 "ChunkReaper.testOnlyAfterNoteTimeout",
                 "CombinedWriteService.afterExistencePartitionHookForTests",
@@ -675,6 +677,7 @@ public class TenantKeyedStateGateTest {
             }
             // RESULT (73)
             for (String f : List.of(
+                "CatalogRepository.DocumentMove.expectedChashes",
                 "ChunksLeafAutovacuumCheck.LeafRel.options",
                 "LeafBloatCatalog.Snapshot.leaves",
                 "LeafBloatSweep.Status.leaves",
