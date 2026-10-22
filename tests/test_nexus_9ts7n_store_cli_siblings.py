@@ -194,3 +194,57 @@ def test_store_get_catalog_title_in_two_siblings_picks_the_named_one(t3, monkeyp
     out = mcp_core.store_get(doc_id="cat", collection=ODD)
     assert f"Collection: {ODD}" in out and "in the odd sibling" in out, out
     assert f"Also titled in: {t3.primary}" in out, out
+
+
+
+# ── nexus-jald5: delete --title and the MCP store_delete name the holding sibling ──
+
+
+@pytest.mark.parametrize("yes", [True, False], ids=["yes", "prompted"])
+def test_delete_by_title_names_the_sibling_that_holds_it_and_deletes_nothing(t3, monkeypatch, yes):
+    t3.docs[ODD]["e" * 64] = {"id": "e" * 64, "title": "odd-only", "content": "x"}
+    title_reaps: list[str] = []
+    monkeypatch.setattr(
+        store_hook, "reap_catalog_documents_by_title", lambda col, *a, **k: title_reaps.append(col),
+    )
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: None)
+    argv = ["store", "delete", "--collection", "art", "--title", "odd-only"] + (["--yes"] if yes else [])
+    result = CliRunner().invoke(main, argv)
+    assert result.exit_code != 0
+    assert f"--collection {ODD}" in result.output, result.output
+    assert t3.deleted == [] and t3.reaped == []
+    assert set(title_reaps) <= {t3.primary}, "a title reap reached into a sibling"
+
+
+def test_no_holder_means_no_hint_on_either_surface(t3, monkeypatch):
+    """The negative control: an id or title no collection holds gets the plain answer."""
+    monkeypatch.setattr(store_hook, "reap_catalog_documents_by_title", lambda *a, **k: None)
+    by_id = CliRunner().invoke(main, ["store", "delete", "--collection", "art", "--id", "f" * 64, "--yes"])
+    by_title = CliRunner().invoke(main, ["store", "delete", "--collection", "art", "--title", "nowhere", "--yes"])
+    mcp = mcp_core.store_delete(doc_id="f" * 64, collection="art")
+    for out in (by_id.output, by_title.output, mcp):
+        assert "it is in" not in out, out
+
+
+def test_mcp_store_delete_names_the_sibling_that_holds_the_id(t3):
+    out = mcp_core.store_delete(doc_id=H_ODD, collection="art")
+    assert out.startswith(f"Not found: {H_ODD!r} in {t3.primary}"), out
+    assert f"collection={ODD!r}" in out, out
+    assert t3.deleted == []
+
+
+def test_a_hint_probe_that_fails_leaves_the_plain_not_found(t3, monkeypatch):
+    real = t3.get_by_id
+
+    def _sibling_down(name, doc_id):
+        if name == ODD:
+            raise RuntimeError("the engine does not serve this family")
+        return real(name, doc_id)
+
+    monkeypatch.setattr(t3, "get_by_id", _sibling_down)
+    result = CliRunner().invoke(main, ["store", "delete", "--collection", "art", "--id", H_ODD, "--yes"])
+    assert result.exit_code != 0 and "Traceback" not in result.output
+    assert result.output.strip().endswith(f"not found in {t3.primary}"), result.output
+    out = mcp_core.store_delete(doc_id=H_ODD, collection="art")
+    assert out == f"Not found: {H_ODD!r} in {t3.primary}", out
+
