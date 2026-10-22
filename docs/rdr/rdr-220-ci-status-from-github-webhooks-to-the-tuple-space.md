@@ -233,9 +233,8 @@ fold the posts with a repo script. No workflow file changes.
   board behaviour on the template name). It ships in an engine tag.
 - **Per-post lifetime**: the adapter sets `ttl_seconds` per state as a
   second guard: about 6 hours for `queued` and `in_progress`, the template
-  retention for `completed`. Amended 2026-10-22, pending conexus PR #582
-  (conexus-efk8, open; the adapter keeps three days until it deploys): `completed` gets 24
-  hours, because at the template retention the topic held about 4,600 of its
+  retention for `completed`. Amended 2026-10-22 (conexus-efk8, conexus PR
+  #582, live from 2026-10-22 12:13Z): `completed` gets 24 hours, because at the template retention the topic held about 4,600 of its
   5,000 live rows and bursts over the cap were refused and lost. The sizing
   above ("sized from the measured volume") did not hold in production; see the
   Revision History entry of that date.
@@ -282,9 +281,8 @@ fold the posts with a repo script. No workflow file changes.
   shows the age of each state, so a gap is visible.
 - **Replay**: GitHub signs no timestamp, so a captured delivery can be
   replayed. The delivery-id nonce makes an exact replay land on the same
-  tuple while that tuple lives (three days for a completed post, 24 hours
-  once conexus PR #582 deploys; queued and in-progress posts expire after 6
-  hours). A replay after that writes a stale post the fold ranks below newer
+  tuple while that tuple lives (24 hours for a completed post, three days
+  before 2026-10-22; queued and in-progress posts expire after 6 hours). A replay after that writes a stale post the fold ranks below newer
   states; once those newer states have expired too, nothing outranks it, and
   the post's age is what shows it is stale.
 - **Branches**: the allow-list defaults to `develop` and `main` and may not
@@ -307,8 +305,8 @@ fold the posts with a repo script. No workflow file changes.
   `scripts/ci_board_post.py`, deliberately NOT an `nx` command or MCP
   tool (Sam, 2026-09-26). A session reads CI posts with `tuple_rd` like
   any other board. A read finds a sha's completed posts only while they
-  live: three days, or 24 hours once conexus PR #582 deploys, after which
-  it returns nothing for that sha.
+  live, 24 hours (three days before 2026-10-22), after which it returns
+  nothing for that sha.
 - **Coexistence**: the nexus-dotwy jobs keep running until the adapter is
   live, then retire.
 
@@ -650,4 +648,4 @@ records carry the detail. No section needs trimming before acceptance.
 - 2026-09-26: Gate round 1 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `3059b5110`; critique `nexus_rdr/220-gate-critique-2026-09-26-r1`.
 - 2026-09-26: Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `0538478bc`; critique `nexus_rdr/220-gate-critique-2026-09-26-r2`.
 - 2026-09-26: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `e575f38d8`; critique `nexus_rdr/220-gate-critique-2026-09-26-r3`.
-- 2026-10-22: Post-accept amendment (conexus-efk8, conexus PR #582, open when written; the adapter keeps three days until it deploys): the adapter sets `ttl_seconds` 86400 on completed posts instead of the template's three-day retention. `board/ci/nexus-develop` sat at about 4,600 of its 5,000 live-row cap (about 1,300 completed posts a day held three days, plus 6 hours of in-flight posts), so the template sizing in Technical Design and Critical Assumption 3 did not hold, and bursts over the cap were refused: 104 posts lost on 2026-10-20 and 626 on 2026-10-21 (counts from the conexus session), which GitHub does not redeliver. Consequences: completed history readable on the board (the reader fold, `tuple_rd`), and the exact-replay window for a completed post, become one day. The template's own retention and cap are unchanged (the comment in `board-ci.yaml` still describes the old sizing). The alternative conexus named is raising the template cap in an engine release, after which it would restore the three-day TTL.
+- 2026-10-22: Post-accept amendment (conexus-efk8, conexus PR #582, merged as afe4c0e85 and live from 2026-10-22 12:13Z; the first CI burst after it posted 63 tuples with 0 failures, per the conexus session): the adapter sets `ttl_seconds` 86400 on completed posts instead of the template's three-day retention. `board/ci/nexus-develop` sat at about 4,600 of its 5,000 live-row cap (about 1,300 completed posts a day held three days, plus 6 hours of in-flight posts), so the template sizing in Technical Design and Critical Assumption 3 did not hold, and bursts over the cap were refused: 104 posts lost on 2026-10-20 and 626 on 2026-10-21 (counts from the conexus session), which GitHub does not redeliver. Consequences: completed history readable on the board (the reader fold, `tuple_rd`), and the exact-replay window for a completed post, become one day. The template's own retention and cap are unchanged (the comment in `board-ci.yaml` still describes the old sizing). The alternative conexus named is raising the template cap in an engine release, after which it would restore the three-day TTL.
