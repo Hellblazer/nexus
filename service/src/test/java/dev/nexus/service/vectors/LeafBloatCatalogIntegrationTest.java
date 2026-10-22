@@ -274,6 +274,53 @@ class LeafBloatCatalogIntegrationTest {
         assertThat(l.pciIndexBytes()).isEqualTo(l.pciIndexes().get(0).bytes());
     }
 
+    /**
+     * nexus-i827c review: {@code pg_relation_size} takes an ACCESS SHARE lock on the index, so a non-concurrent
+     * {@code DROP INDEX} or {@code REINDEX} (ACCESS EXCLUSIVE on it) would stall the read and fail the aggregate view
+     * with it. The size read has a lock bound of its own and its failure costs the sizes only: the counts of every
+     * leaf are still read, the index is listed with an unknown size (never 0), and the next read after the lock ends
+     * has the size again. The statement bound is 3 s here against a 300 ms lock bound, so a read that waited on the
+     * lock instead of giving up on it fails this test on the bound.
+     */
+    @Test
+    void aLockHeldOnAPciIndexCostsTheSizesNotTheAggregateRead() throws Exception {
+        String tenant = newTenant("pcilock");
+        String collection = collectionName("pcilock");
+        List<String> hex = rows(tenant, collection, 100);
+        String leaf = leafName(tenant);
+        awaitStats(leaf, 100, 0);
+        deleteRows(tenant, collection, hex.subList(0, 30));
+        awaitStats(leaf, 70, 30);
+        String pci = PciCatalog.indexName(M384, tenant, collection);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, pci, "embedding_384", collection);
+        }
+        var bounded = new LeafBloatCatalog(svcDs, Duration.ofSeconds(3), Duration.ofMillis(300));
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            // An uncommitted DROP INDEX holds ACCESS EXCLUSIVE on the index until it ends.
+            PgContainerHelper.dropIndex(holder, DSL.name("nexus", pci));
+            long start = System.nanoTime();
+            LeafBloatCatalog.Snapshot snapshot = bounded.read();
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            holder.rollback();
+
+            assertThat(elapsedMs).as("the read gave up on the lock, it did not wait for the statement bound")
+                .isLessThan(2_500);
+            LeafBloatCatalog.Leaf l = snapshot.leaves().stream().filter(x -> x.name().equals(leaf)).findFirst().orElseThrow();
+            assertThat(l.liveRows()).as("the aggregate read still ran").isEqualTo(70);
+            assertThat(l.deadRows()).isEqualTo(30);
+            assertThat(snapshot.leaves()).as("leaves examined").hasSizeGreaterThanOrEqualTo(8);
+            assertThat(l.pciIndexes()).extracting(LeafBloatCatalog.PciIndex::name).containsExactly(pci);
+            assertThat(l.pciIndexes().get(0).bytes()).as("the size that could not be read is unknown, not 0").isNull();
+            assertThat(l.pciIndexBytes()).isNull();
+        }
+        // With the lock released, the next read has the size again (and the lock bound did not leak into the pool).
+        LeafBloatCatalog.Leaf after = bounded.read().leaves().stream().filter(x -> x.name().equals(leaf)).findFirst().orElseThrow();
+        assertThat(after.pciIndexBytes()).isPositive();
+    }
+
     @Test
     void anEmptyLeaf_hasDeadFractionZero_notNaN() throws Exception {
         String tenant = newTenant("empty");

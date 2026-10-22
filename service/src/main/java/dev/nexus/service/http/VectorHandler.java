@@ -1752,6 +1752,7 @@ public final class VectorHandler implements HttpHandler {
                 // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
                 final int limit = rowLimit;
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, RESTORE_ROUTE, raw);
+                if (replayAnswered(ex, keyed, tenant, RESTORE_ROUTE, raw, resolveSiblings)) return;
                 final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
@@ -1834,6 +1835,7 @@ public final class VectorHandler implements HttpHandler {
             final boolean countRefused = optBool(body, "count_refused", true);
             if (keyed != null) {
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, EXPIRE_ROUTE, raw);
+                if (replayAnswered(ex, keyed, tenant, EXPIRE_ROUTE, raw, resolveSiblings)) return;
                 final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.ExpireBoundedOutcome>runKeyed(ex, keyed, tenant, EXPIRE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
@@ -1876,6 +1878,19 @@ public final class VectorHandler implements HttpHandler {
         return resolved.timedOut()
             ? Map.of("sibling_resolution", "timed_out")
             : Map.of("quarantine_collections", resolved.names());
+    }
+
+    /**
+     * nexus-wbfpw.64 (review): a keyed request that already COMMITTED is answered from the ledger, so the sibling read
+     * that a fresh page needs before it claims its row would be thrown away; this answers the replay first and returns
+     * true, having written the response, so the read is skipped. It asks only when the request asked for siblings (the
+     * one case it saves anything), and only a committed row answers: an in-flight or failed one still reads, then claims,
+     * as before. The answer is the one {@link KeyedSweep#run} gives a committed key (the stored body, or 422 for a key
+     * reused with another body).
+     */
+    private boolean replayAnswered(HttpExchange ex, KeyedRequest keyed, String tenant, String route, byte[] raw,
+                                   boolean resolveSiblings) throws IOException {
+        return resolveSiblings && keyedSweep.answerCommitted(ex, tenant, keyed.id(), keyed.header(), route, raw);
     }
 
     /** {@code body} with {@code siblings} appended, in a map that keeps the key order and tolerates null values. */

@@ -216,6 +216,20 @@ class ChunksLeavesRouteTest {
     }
 
     @Test
+    void aLeafWhoseIndexSizeCouldNotBeReadAnswersNullBytesNeverZero() throws Exception {
+        var unknown = new LeafBloatCatalog.Leaf(PINNED_LEAF, 100_000, 30_000, 0, Instant.parse("2026-10-22T09:00:00Z"), 5,
+            true, true, List.of(new LeafBloatCatalog.PciIndex("pci_" + PINNED_LEAF, true, null)));
+        var status = new LeafBloatSweep.Status(true, NOW, null, 0, false, List.of(
+            new LeafBloatSweep.LeafStatus(unknown, NOW.minusSeconds(7200), 3, 7200)));
+        bind(() -> status);
+        JsonNode body = MAPPER.readTree(get("/v1/admin/chunks-leaves", ROOT).body());
+        JsonNode r = row(body.path("leaves"), PINNED_LEAF);
+        assertThat(r.has("pci_index_bytes")).isTrue();
+        assertThat(r.path("pci_index_bytes").isNull()).as("an unread size is null, not a small number: " + r).isTrue();
+        assertThat(r.path("pci_index_count").asInt()).isEqualTo(1);
+    }
+
+    @Test
     void beforeTheSweepIsBoundTheRouteAnswers503() throws Exception {
         service.chunksLeaves(() -> null, () -> null);
         HttpResponse<String> r = get("/v1/admin/chunks-leaves", ROOT);

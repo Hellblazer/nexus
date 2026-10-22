@@ -432,3 +432,42 @@ def test_the_doctor_verbose_flag_reaches_the_sweep(monkeypatch) -> None:
     assert seen == {"verbose": False}
     assert runner.invoke(main, ["doctor", "--verbose"]).exit_code == 0
     assert seen == {"verbose": True}
+
+
+# ── a stale listing says so (nexus-i827c review): the body carries expired / last_read_at / consecutive_failures ──
+
+
+def test_an_expired_view_marks_the_listing_stale_and_names_the_last_read(store) -> None:
+    store.outcome = {"expired": True, "last_read_at": "2026-10-20T08:00:00Z", "consecutive_failures": 0,
+                     "leaves": [_leaf("chunks_m0a90d9bc_t_aaaa", ["pinned"])]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "STALE" in r.detail and "2026-10-20T08:00:00Z" in r.detail
+    assert "chunks_m0a90d9bc_t_aaaa: pinned" in r.detail, "the stale names are still listed"
+
+
+def test_an_empty_listing_from_an_expired_view_does_not_say_the_leaves_recovered(store) -> None:
+    store.outcome = {"expired": True, "last_read_at": "2026-10-20T08:00:00Z", "leaves": []}
+    r = _verbose_row(_status(total=2, expired=True))
+    assert "STALE" in r.detail and "2026-10-20T08:00:00Z" in r.detail
+    assert "recovered" not in r.detail, "an expired view cannot say a leaf recovered"
+
+
+def test_the_row_s_own_expired_flag_marks_the_listing_stale_even_if_the_body_does_not(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-20T08:00:00Z", "leaves": []}
+    r = _verbose_row(_status(total=2, expired=True))
+    assert "STALE" in r.detail and "recovered" not in r.detail
+
+
+def test_failed_reads_after_a_good_one_are_named_on_a_fresh_listing(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-22T09:00:00Z", "consecutive_failures": 2,
+                     "leaves": [_leaf("chunks_leaf_a", ["starved"])]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "the last 2 reads failed" in r.detail and "2026-10-22T09:00:00Z" in r.detail
+    assert "STALE" not in r.detail
+
+
+def test_a_fresh_empty_listing_keeps_the_recovered_wording(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-22T09:00:00Z", "consecutive_failures": 0, "leaves": []}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "names no leaf that needs attention" in r.detail and "may have recovered" in r.detail
+    assert "STALE" not in r.detail

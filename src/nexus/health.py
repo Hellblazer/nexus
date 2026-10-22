@@ -4889,7 +4889,7 @@ def _human_bytes(n: object) -> str:
     return "?"
 
 
-def _leaf_listing_lines() -> list[str]:
+def _leaf_listing_lines(*, row_expired: bool = False) -> list[str]:
     """The leaves of ``nexus.chunks`` that need attention, one indented line each, read from the engine's
     operator-only ``GET /v1/admin/chunks-leaves`` (nexus-i827c); ``nx doctor --verbose`` appends them to the leaf
     bloat row. Never raises: every way the read can fail is one line saying why, and none is an error.
@@ -4897,6 +4897,10 @@ def _leaf_listing_lines() -> list[str]:
     * the engine predates the route (404): one line, naming the engine log as the place the names are;
     * the credential is refused (401, 403): the route needs the operator (root) token, and the line says where to set it;
     * anything else (unreachable, a body this client cannot read): the reason, in one line.
+
+    The body says how old its read is (``expired``, ``last_read_at``, ``consecutive_failures``). A listing from an
+    expired view (the body's, or the row's own *row_expired*) is headed STALE with the time of the last read, and an
+    empty one says nothing about now rather than that a leaf recovered; failed reads after a good one are named.
     """
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
 
@@ -4923,10 +4927,24 @@ def _leaf_listing_lines() -> list[str]:
     rows = body.get("leaves")
     if not isinstance(rows, list):
         return [f"      leaf listing unreadable (no leaves list in the answer); {log_hint}"]
+    last_read = body.get("last_read_at") if isinstance(body.get("last_read_at"), str) else None
+    read_at = f"read at {last_read}" if last_read else "no read time given"
+    stale = body.get("expired") is True or row_expired
+    failed = body.get("consecutive_failures")
+    failed_note = (f"; the last {failed} read{'s' if failed != 1 else ''} failed, so this is from the last good read"
+                   if isinstance(failed, int) and not isinstance(failed, bool) and failed > 0 else "")
     if not rows:
+        if stale:
+            return [f"      leaf listing STALE: the engine's view is expired ({read_at}) and its last read named no "
+                    "leaf that needs attention, which says nothing about the leaves now" + failed_note]
         return ["      leaf listing: the engine names no leaf that needs attention (it may have recovered since "
-                "the status counts were read)"]
-    out = ["      leaves needing attention (from the engine, newest read; rows is what the overdue rule scales by):"]
+                f"the status counts were read; {read_at}){failed_note}"]
+    if stale:
+        head = (f"leaves needing attention, STALE: the engine's view is expired ({read_at}), so these may no longer "
+                f"be true{failed_note} (rows is what the overdue rule scales by):")
+    else:
+        head = f"leaves needing attention (from the engine, {read_at}{failed_note}; rows is what the overdue rule scales by):"
+    out = [f"      {head}"]
     for row in rows[:_LEAF_LISTING_MAX]:
         if not isinstance(row, dict):
             continue
@@ -5075,7 +5093,7 @@ def _check_chunks_leaf_bloat(
         if n_disabled:
             parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
         starved_after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
-        listing = "".join(f"\n{line}" for line in _leaf_listing_lines()) if verbose else ""
+        listing = "".join(f"\n{line}" for line in _leaf_listing_lines(row_expired=expired)) if verbose else ""
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "

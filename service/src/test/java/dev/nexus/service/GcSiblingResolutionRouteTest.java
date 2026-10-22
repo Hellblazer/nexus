@@ -222,6 +222,177 @@ class GcSiblingResolutionRouteTest {
             .containsExactly(s.reaper(), s.renamed());
     }
 
+    @Test
+    void aLockWaitThatRunsOutBeforeTheStatementBoundIsTimedOutToo() throws Exception {
+        Siblings s = siblings();
+        // The default bounds are both 2 s, so which one fires first is a race. A statement bound well past the lock
+        // bound (the lock bound is fixed at its 2 s default) makes the lock wait the one that ends the read: SQLSTATE
+        // 55P03, which resolveQuarantineSiblingsBounded must answer as timedOut, not throw.
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            PgContainerHelper.lockTable(holder, CHUNKS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            long start = System.nanoTime();
+            var resolved = repo.resolveQuarantineSiblingsBounded(TENANT, s.origin(), 30_000);
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            holder.rollback();
+            assertThat(resolved.timedOut()).as("a lock wait that ran out is reported, not thrown or answered as none").isTrue();
+            assertThat(resolved.names()).isEmpty();
+            assertThat(elapsedMs).as("the 2 s lock bound ended it, not the 30 s statement bound")
+                .isBetween(1_500L, 15_000L);
+        }
+    }
+
+    // ── a read that cannot finish: the route says so and the page still runs ──
+
+    /**
+     * POSTs {@code body} with the sibling read blocked until it runs out its bound, then lets the page through.
+     *
+     * <p>Another session holds ACCESS EXCLUSIVE on {@code nexus.chunks}, which the sibling read's EXISTS scans. The
+     * page needs it too, so the lock cannot be held for the whole request (the page would wait on it, and the holder
+     * waits on the page). A releaser thread watches {@code pg_stat_activity} for the sibling read waiting on the lock,
+     * remembers which statement it is, and drops the lock only once THAT statement is gone: the read has by then ended
+     * on its bound, and the page's own wait is over as soon as the lock goes. (The table is not the catalog's collection
+     * table: a keyed request reads the origin's dimension from it before the sibling read, and would wait there.)
+     */
+    private JsonNode postWithTheSiblingReadBlocked(String path, Map<String, Object> body, String key) throws Exception {
+        try (Connection holder = pg.createConnection("");
+             Connection probe = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            PgContainerHelper.lockTable(holder, CHUNKS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            var seenWaiting = new java.util.concurrent.atomic.AtomicBoolean();
+            var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread releaser = new Thread(() -> {
+                try {
+                    var ctx = DSL.using(probe, SQLDialect.POSTGRES);
+                    String tracked = null;   // "pid/query_start" of the sibling read once seen waiting
+                    long deadline = System.nanoTime() + 60_000_000_000L;
+                    while (System.nanoTime() < deadline) {
+                        var waiting = new ArrayList<String>();
+                        var act = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+                        var pid = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "pid"), Integer.class);
+                        var usename = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "usename"), String.class);
+                        var startedAt = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "query_start"),
+                            java.time.OffsetDateTime.class);
+                        var query = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "query"), String.class);
+                        var waitType = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "wait_event_type"), String.class);
+                        for (var r : ctx.select(pid, usename, startedAt, query).from(act).where(waitType.eq("Lock")).fetch()) {
+                            String q = r.get(query);
+                            // The sibling read: a catalog scan for quarantine collections with the EXISTS over chunks.
+                            if (SVC_ROLE.equals(r.get(usename)) && q != null && q.contains("catalog_collections")
+                                    && q.contains("lifecycle_state") && q.contains("exists")) {
+                                waiting.add(r.get(pid) + "/" + r.get(startedAt));
+                            }
+                        }
+                        if (tracked == null && !waiting.isEmpty()) {
+                            tracked = waiting.get(0);
+                            seenWaiting.set(true);
+                        } else if (tracked != null && !waiting.contains(tracked)) {
+                            break;
+                        }
+                        Thread.sleep(25);
+                    }
+                } catch (Throwable t) {
+                    failure.set(t);
+                } finally {
+                    try {
+                        holder.rollback();
+                    } catch (Exception ignored) {
+                        // the holder is closed by the test on its way out
+                    }
+                }
+            }, "sibling-read-lock-releaser");
+            releaser.start();
+            try {
+                return ok(post(path, body, key));
+            } finally {
+                releaser.join(70_000);
+                assertThat(failure.get()).as("the releaser thread").isNull();
+                assertThat(seenWaiting.get()).as("the sibling read was seen waiting on the lock, so it timed out").isTrue();
+            }
+        }
+    }
+
+    private static Map<String, Object> expireNow(Map<String, Object> body) {
+        var m = new LinkedHashMap<String, Object>(body);
+        m.put("cutoff", "2100-01-01T00:00:00Z");   // later than every quarantined_at: the page expires the chunk
+        return m;
+    }
+
+    private long chunksIn(String collection) throws Exception {
+        var n = new java.util.concurrent.atomic.AtomicLong();
+        su(ctx -> n.set(ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection))));
+        return n.get();
+    }
+
+    @Test
+    void anExpiryWhoseSiblingReadTimesOutAnswersTimedOutWithNoListAndStillExpiresOnEveryShape() throws Exception {
+        record Shape(String name, Integer rowLimit, String key) {}
+        for (Shape shape : List.of(new Shape("unbounded", null, null), new Shape("bounded", 100, null),
+                                   new Shape("keyed", 100, UUID.randomUUID().toString()))) {
+            Siblings s = siblings();
+            assertThat(chunksIn(s.reaper())).as(shape.name()).isEqualTo(1);
+            JsonNode body = postWithTheSiblingReadBlocked(EXPIRE_PATH, expireNow(expireBody(s, shape.rowLimit(), true)),
+                shape.key());
+            assertThat(body.path("sibling_resolution").asText()).as(shape.name() + " " + body).isEqualTo("timed_out");
+            assertThat(body.has("quarantine_collections"))
+                .as(shape.name() + ": no list at all, never [] standing in for none: " + body).isFalse();
+            assertThat(body.path("expired").asLong()).as(shape.name() + ": the page's own count " + body).isEqualTo(1);
+            assertThat(body.has("refused")).as(shape.name() + " " + body).isTrue();
+            if (shape.rowLimit() != null) {
+                assertThat(body.has("more")).as(shape.name() + " " + body).isTrue();
+            }
+            assertThat(chunksIn(s.reaper())).as(shape.name() + ": the page's effect landed").isZero();
+        }
+    }
+
+    @Test
+    void aRestoreWhoseSiblingReadTimesOutAnswersTimedOutWithNoListAndStillRunsOnEveryShape() throws Exception {
+        record Shape(String name, Integer rowLimit, String key) {}
+        for (Shape shape : List.of(new Shape("unbounded", null, null), new Shape("bounded", 100, null),
+                                   new Shape("keyed", 100, UUID.randomUUID().toString()))) {
+            Siblings s = siblings();
+            JsonNode body = postWithTheSiblingReadBlocked(RESTORE_PATH, restoreBody(s, shape.rowLimit(), true), shape.key());
+            assertThat(body.path("sibling_resolution").asText()).as(shape.name() + " " + body).isEqualTo("timed_out");
+            assertThat(body.has("quarantine_collections")).as(shape.name() + " " + body).isFalse();
+            assertThat(body.has("restored")).as(shape.name() + ": the page ran " + body).isTrue();
+            if (shape.rowLimit() != null) {
+                assertThat(body.has("remaining")).as(shape.name() + " " + body).isTrue();
+            }
+        }
+    }
+
+    /**
+     * A keyed request the ledger already committed is answered from the ledger, so the sibling read, which a fresh page
+     * runs before it claims its row, would be thrown away; the route skips it. With ACCESS EXCLUSIVE held on
+     * {@code nexus.chunks} that read waits out its 2 s bound, so a replay that answers at once did not run it. The
+     * answer is the stored body, the sibling list the first run read included, and it carries the replayed header.
+     */
+    @Test
+    void aCommittedKeyedReplayDoesNotReadTheSiblingsAgain() throws Exception {
+        record Shape(String name, String path, boolean expire) {}
+        for (Shape shape : List.of(new Shape("expire", EXPIRE_PATH, true), new Shape("restore", RESTORE_PATH, false))) {
+            Siblings s = siblings();
+            String key = UUID.randomUUID().toString();
+            Map<String, Object> request = shape.expire() ? expireBody(s, 100, true) : restoreBody(s, 100, true);
+            JsonNode first = ok(post(shape.path(), request, key));
+            assertThat(names(first)).as(shape.name()).containsExactly(s.reaper(), s.renamed());
+            try (Connection holder = pg.createConnection("")) {
+                holder.setAutoCommit(false);
+                PgContainerHelper.lockTable(holder, CHUNKS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+                long start = System.nanoTime();
+                HttpResponse<String> replay = post(shape.path(), request, key);
+                long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+                holder.rollback();
+                assertThat(replay.statusCode()).as(replay.body()).isEqualTo(200);
+                assertThat(replay.headers().firstValue("Idempotency-Replayed")).as(shape.name()).hasValue("true");
+                assertThat(MAPPER.readTree(replay.body())).as(shape.name() + ": the stored body, siblings included")
+                    .isEqualTo(first);
+                assertThat(elapsedMs).as(shape.name() + ": answered from the ledger, no 2 s sibling read")
+                    .isLessThan(1_500);
+            }
+        }
+    }
+
     // ── the six route shapes ──────────────────────────────────────────────────
 
     @Test
@@ -261,6 +432,41 @@ class GcSiblingResolutionRouteTest {
         assertThat(names(keyed)).containsExactly(third.reaper(), third.renamed());
     }
 
+    /**
+     * Why the client replaces its derived names with the engine's list instead of taking the union (nexus-i827c review,
+     * item 4). The engine's list holds every registered quarantine collection a derived name could mean, so a derived
+     * name the list lacks is not a registered collection and cannot hold a chunk. Two facts pin that:
+     * <ul>
+     *   <li>the reaper's name for the origin is listed when it is registered whether or not any chunk in it carries
+     *       the origin tag (an untagged chunk an older client moved there is still reached);
+     *   <li>a name that is not registered is answered as an empty page (below), so the union could only add empty round
+     *       trips (one restore page and one expire page per such name per run), never a chunk.
+     * </ul>
+     */
+    @Test
+    void theReapersNameIsListedWhenRegisteredEvenIfItsChunksCarryNoOriginTag() throws Exception {
+        String origin = origin();
+        String reaper = sibling("quarantine-" + origin, null);   // registered, one untagged chunk
+        var resolved = repo.resolveQuarantineSiblingsBounded(TENANT, origin);
+        assertThat(resolved.names()).containsExactly(reaper);
+    }
+
+    @Test
+    void aNameThatIsNotARegisteredCollectionIsAnEmptyPageNotAnError() throws Exception {
+        Siblings s = siblings();
+        String ghost = "quarantine-code__never-registered-" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        var restore = new LinkedHashMap<String, Object>(restoreBody(s, 100, null));
+        restore.put("quarantine_collection", ghost);
+        JsonNode restored = ok(post(RESTORE_PATH, restore, null));
+        assertThat(restored.path("restored").asLong()).isZero();
+        assertThat(restored.path("remaining").asLong()).isZero();
+        var expire = new LinkedHashMap<String, Object>(expireNow(expireBody(s, 100, null)));
+        expire.put("quarantine_collection", ghost);
+        JsonNode expired = ok(post(EXPIRE_PATH, expire, UUID.randomUUID().toString()));
+        assertThat(expired.path("expired").asLong()).isZero();
+        assertThat(expired.path("more").asBoolean()).isFalse();
+    }
+
     // ── additive: a request that does not ask sees what it always saw ─────────
 
     @Test
@@ -271,7 +477,9 @@ class GcSiblingResolutionRouteTest {
                     ok(post(RESTORE_PATH, restoreBody(s, null, resolve), null)),
                     ok(post(RESTORE_PATH, restoreBody(s, 100, resolve), null)),
                     ok(post(EXPIRE_PATH, expireBody(s, null, resolve), null)),
-                    ok(post(EXPIRE_PATH, expireBody(s, 100, resolve), null)))) {
+                    ok(post(EXPIRE_PATH, expireBody(s, 100, resolve), null)),
+                    ok(post(RESTORE_PATH, restoreBody(s, 100, resolve), UUID.randomUUID().toString())),
+                    ok(post(EXPIRE_PATH, expireBody(s, 100, resolve), UUID.randomUUID().toString())))) {
                 assertThat(body.has("quarantine_collections")).as(body.toString()).isFalse();
                 assertThat(body.has("sibling_resolution")).as(body.toString()).isFalse();
             }

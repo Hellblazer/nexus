@@ -41,7 +41,8 @@ import java.util.function.Supplier;
  * {@code pinned} or {@code starved}, or lacks one of the four vectors-034 autovacuum settings, or has autovacuum
  * switched off. {@code rows} is the figure the overdue rule scales by ({@link LeafBloatCatalog.Leaf#rows()}),
  * {@code overdue_state} is {@code none}, {@code waiting}, {@code pinned} or {@code starved}, and
- * {@code pci_index_bytes} is the total size of the {@code pci_} indexes on the leaf, {@code pci_index_count} how many.
+ * {@code pci_index_bytes} is the total size of the {@code pci_} indexes on the leaf ({@code null} when a lock held on
+ * one of them kept its size from being read; unknown is never 0), {@code pci_index_count} how many.
  * A leaf that is merely {@code waiting} is not listed (a vacuum may be running); {@code leaves_total} says how many
  * the last read saw.
  */

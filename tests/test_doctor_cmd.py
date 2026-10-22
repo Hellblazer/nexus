@@ -1795,12 +1795,15 @@ class TestJsonUnsupportedModesExhaustive:
     #   - fail_on_violation: read inside the ``check_storage_boundary``
     #     mode's own body as an argument; has no ``if fail_on_violation:``
     #     of its own.
+    #   - verbose (nexus-i827c): a modifier of the main sweep only; passed to
+    #     run_health_checks so the Chunks leaf bloat row lists its leaves. The
+    #     --check-* modes ignore it, and it never returns on its own.
     # ``test_recognized_modes_plus_sweep_compatible_covers_every_flag``
     # below is the fail-loud floor: a new is_flag parameter that lands in
     # NEITHER this set NOR the AST-recognized set fails explicitly, naming
     # the parameter, instead of silently passing as an unclassified flag.
     _SWEEP_COMPATIBLE_MODE_PARAMS = frozenset({
-        "json_out", "dry_run", "fail_on_violation",
+        "json_out", "dry_run", "fail_on_violation", "verbose",
     })
 
     @staticmethod

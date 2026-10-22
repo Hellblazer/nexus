@@ -6161,12 +6161,19 @@ FROM scope s
      *
      * <p>No index backs the {@code origin_collection} tag, on purpose (nexus-wbfpw.64). The read walks the primary-key
      * prefix {@code (tenant_id, collection)} of each quarantine collection and filters the tag on the heap, so its cost
-     * is those collections' own rows and never the rest of the tenant's chunks. Measured on a populated test database
-     * (100,000 non-quarantine rows beside the quarantine rows, nothing tagged for the origin, the worst case): 6.8 to
-     * 9.5 ms over 12,800 quarantine rows in 8 siblings (production measured 7.77 ms), 96 to 162 ms over 140,000 in 18.
-     * A candidate expression index on {@code (tenant_id, collection, (metadata->>'origin_collection'))} took the second
-     * to 52 ms, but it is maintained on every write to {@code nexus.chunks}, not only on quarantine rows, and the
-     * statement bound covers about 2 million quarantine rows, roughly 150 times production's.
+     * is those collections' own rows and never the rest of the tenant's chunks. Measured through the service role under
+     * FORCE RLS (a superuser connection bypasses RLS and shows an index doing far better than it can in production:
+     * 0.05 to 0.1 ms, which is not what {@code nexus_svc} gets), on 100,000 non-quarantine rows beside the quarantine
+     * rows, none tagged for the origin, the worst case: 3 to 16 ms over 12,800 quarantine rows in 8 siblings
+     * (production measured 7.77 ms), 90 to 142 ms over 140,400 in 18. An expression index on
+     * {@code (tenant_id, collection, (metadata->>'origin_collection'))}, full or partial to the rows that carry the tag,
+     * took the second to 54 to 69 ms, about 1.6 times, because under RLS the tag test is a filter on the index scan and
+     * not an index condition ({@code jsonb ->> text} is not leakproof; see the master changelog's note on the removed
+     * {@code catalog-038}). The partial form is small (1.3 MB over the 140,400 rows) and costs the write of an untagged
+     * row nothing measurable; the full form added 15 to 25 percent to a 20,000-row bulk insert. Neither was added: a gain
+     * of 1.6 times on a read that runs once per collection per run does not pay for a migration that puts an index on every
+     * leaf of the partitioned table, and the statement bound already covers about 2 million quarantine rows, roughly 150
+     * times production's. Past about a million, add the partial index.
      */
     public SiblingResolution resolveQuarantineSiblingsBounded(String tenant, String originCollection) {
         return resolveQuarantineSiblingsBounded(tenant, originCollection,
