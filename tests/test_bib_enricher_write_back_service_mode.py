@@ -65,11 +65,18 @@ class _State:
     #: POST /update bodies received, in order — lets tests assert exactly
     #: what wire shape _enrich_apply produced.
     update_bodies: list[dict[str, Any]] = []
+    #: GET ops received, in order (``/by_title``, ``/search``, ...) — lets a test tell which
+    #: lookup a code path used, not only what it returned.
+    get_ops: list[str] = []
+    #: False plays an engine before engine-service-v0.1.163: ``/by_title`` answers 404.
+    by_title_available: bool = True
 
     @classmethod
     def reset(cls) -> None:
         cls.documents = {}
         cls.update_bodies = []
+        cls.get_ops = []
+        cls.by_title_available = True
 
     @classmethod
     def add_document(cls, tumbler: str, **fields: Any) -> str:
@@ -118,8 +125,10 @@ _UPDATABLE_DOC_COLUMNS = frozenset({
 class FakeBibCatalogHandler(BaseHTTPRequestHandler):
     """Minimal stateful fake — only the routes ``_enrich_apply`` touches:
     GET ``/list`` (list_by_collection), GET ``/resolve``
-    (lookup_doc_id_by_collection_and_path), GET ``/search`` (find);
-    POST ``/update``.
+    (lookup_doc_id_by_collection_and_path), GET ``/by_title`` (exact title,
+    nexus-gacz0), GET ``/search`` (find, token-ish: it matches a document whose
+    title CONTAINS the query, as the engine's full-text search matches tokens,
+    so a near title is a hit); POST ``/update``.
     """
 
     def log_message(self, *args: Any) -> None:
@@ -147,6 +156,7 @@ class FakeBibCatalogHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         op = path.removeprefix("/v1/catalog")
         params = self._query_params()
+        _State.get_ops.append(op)
 
         if op == "/list":
             docs = list(_State.documents.values())
@@ -163,12 +173,29 @@ class FakeBibCatalogHandler(BaseHTTPRequestHandler):
                 and (not collection or d.get("physical_collection") == collection)
             ]
             self._send_json({"documents": matches})
+        elif op == "/by_title":
+            if not _State.by_title_available:
+                self._send_json({"error": "not found"}, 404)
+                return
+            title = params.get("title", "")
+            owner = params.get("owner")
+            content_type = params.get("content_type")
+            matches = sorted(
+                (
+                    d for d in _State.documents.values()
+                    if d.get("title") == title
+                    and (not content_type or d.get("content_type") == content_type)
+                    and (not owner or d["tumbler"].startswith(owner + "."))
+                ),
+                key=lambda d: d["tumbler"],
+            )
+            self._send_json({"documents": matches, "count": len(matches)})
         elif op == "/search":
             q = params.get("q", "")
             content_type = params.get("content_type")
             matches = [
                 d for d in _State.documents.values()
-                if d.get("title") == q
+                if q.lower() in (d.get("title") or "").lower()
                 and (not content_type or d.get("content_type") == content_type)
             ]
             self._send_json({"documents": matches, "count": len(matches)})
@@ -353,9 +380,10 @@ class TestEnrichApplyServiceModeTitleFallback:
         assert len(_State.update_bodies) == 1
         assert _State.update_bodies[0]["tumbler"] == "1.1.1"
 
-    def test_last_resort_fts_search_across_catalog(self, reader, writer) -> None:
+    def test_last_resort_exact_title_lookup_across_catalog(self, reader, writer) -> None:
         """No collection_name / no source_paths match: falls through to
-        reader.find(title, content_type='paper')."""
+        reader.find_by_title_exact(title, content_type='paper'), which asks the
+        engine's exact-title route (nexus-gacz0), not the full-text search."""
         _State.add_document(
             "1.1.1", title="Global Paper", content_type="paper",
         )
@@ -365,6 +393,60 @@ class TestEnrichApplyServiceModeTitleFallback:
         )
         assert len(_State.update_bodies) == 1
         assert _State.update_bodies[0]["tumbler"] == "1.1.1"
+        assert "/by_title" in _State.get_ops
+        assert "/search" not in _State.get_ops
+
+    @pytest.mark.parametrize("route_available", [True, False], ids=["by_title route", "old engine fallback"])
+    def test_a_near_title_is_not_enriched(self, reader, writer, route_available) -> None:
+        """The last resort used to take the first hit of a full-text search, which
+        matches tokens: 'Global Paper' enriched 'Global Paper, Revisited'. An exact
+        title lookup writes nothing when only a near title exists. Falsifiable: the
+        fake's /search matches a title that CONTAINS the query, so a revert to
+        reader.find writes to 1.1.1 and fails this test, on either path."""
+        _State.by_title_available = route_available
+        _State.add_document(
+            "1.1.1", title="Global Paper, Revisited", content_type="paper",
+        )
+        _enrich_apply(
+            reader, writer, "", "Global Paper", [],
+            _S2_BIB_META, "s2", Tumbler,
+        )
+        assert _State.update_bodies == []
+        assert _State.documents["1.1.1"]["bib_venue"] == ""
+        # Non-vacuity: the lookup ran, it was not skipped.
+        assert ("/by_title" in _State.get_ops) if route_available else ("/search" in _State.get_ops)
+
+    def test_the_exact_title_wins_over_a_near_title(self, reader, writer) -> None:
+        _State.add_document("1.1.1", title="Global Paper, Revisited", content_type="paper")
+        _State.add_document("1.1.2", title="Global Paper", content_type="paper")
+        _enrich_apply(
+            reader, writer, "", "Global Paper", [],
+            _S2_BIB_META, "s2", Tumbler,
+        )
+        assert [b["tumbler"] for b in _State.update_bodies] == ["1.1.2"]
+
+    def test_several_exact_matches_enrich_the_first_and_warn_with_a_bounded_list(
+        self, reader, writer,
+    ) -> None:
+        from structlog.testing import capture_logs  # noqa: PLC0415 — test-local import
+
+        from nexus.commands import enrich as enrich_mod  # noqa: PLC0415 — test-local import
+
+        total = enrich_mod._TITLE_AMBIGUOUS_LOG_LIMIT + 4
+        for i in range(1, total + 1):
+            _State.add_document(f"1.1.{i}", title="Common Title", content_type="paper")
+        with capture_logs() as cap:
+            _enrich_apply(
+                reader, writer, "", "Common Title", [],
+                _S2_BIB_META, "s2", Tumbler,
+            )
+        assert [b["tumbler"] for b in _State.update_bodies] == ["1.1.1"]
+        warned = [e for e in cap if e["event"] == "catalog_enrich_hook_title_ambiguous"]
+        assert len(warned) == 1, cap
+        assert warned[0]["chose"] == "1.1.1"
+        assert len(warned[0]["others"]) == enrich_mod._TITLE_AMBIGUOUS_LOG_LIMIT
+        assert warned[0]["others_total"] == total - 1
+        assert "1.1.1" not in warned[0]["others"]
 
 
 class TestMetaMergeSemanticsDrift:

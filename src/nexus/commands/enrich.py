@@ -26,6 +26,10 @@ from nexus.catalog.membership import unknown_collection_message
 
 _log = structlog.get_logger(__name__)
 
+#: How many of the other exact-title matches ``_enrich_apply``'s ambiguity warning names
+#: (the rest are counted in ``others_total``).
+_TITLE_AMBIGUOUS_LOG_LIMIT = 5
+
 
 def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     """nexus-8g79.2: build a ``manifest_lookup(doc_id) -> list[ManifestRow]``
@@ -941,8 +945,10 @@ def _enrich_apply(
     # EXACT title: this used to take the first hit of a full-text search,
     # which matches tokens, so "Attention Is All You Need" could enrich
     # "Attention Is All You Need, Revisited" (nexus-gacz0). One target, as
-    # before: the first exact match in tumbler order, the others named in
-    # the log when there are several.
+    # before: the first exact match in catalog order (the reader's order, the
+    # text order of the tumbler under the database collation, which is not
+    # numeric order), the others named in the log when there are several, the
+    # first few and a count so a common title cannot write a huge line.
     if not target_tumblers:
         entries = reader.find_by_title_exact(title, content_type="paper")
         if entries:
@@ -952,7 +958,8 @@ def _enrich_apply(
                     "catalog_enrich_hook_title_ambiguous",
                     title=title,
                     chose=str(entries[0].tumbler),
-                    others=[str(e.tumbler) for e in entries[1:]],
+                    others=[str(e.tumbler) for e in entries[1:1 + _TITLE_AMBIGUOUS_LOG_LIMIT]],
+                    others_total=len(entries) - 1,
                 )
 
     if not target_tumblers:

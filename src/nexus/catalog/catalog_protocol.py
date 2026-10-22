@@ -101,7 +101,7 @@ class CatalogReader(Protocol):
     def find_all(self, query, *, content_type=...) -> object:  # canonical (nexus-3bafq)
         ...
 
-    def find_by_title_exact(self, title, *, content_type=..., owner=...) -> object:  # canonical (nexus-fgxmk; owner nexus-gacz0)
+    def find_by_title_exact(self, title, *, content_type=..., owner=..., chunk_count=...) -> object:  # canonical (nexus-fgxmk; owner, chunk_count nexus-gacz0)
         ...
 
     def find_by_file_path(self, file_path) -> object:  # canonical

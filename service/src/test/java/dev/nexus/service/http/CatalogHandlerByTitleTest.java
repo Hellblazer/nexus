@@ -87,6 +87,16 @@ class CatalogHandlerByTitleTest {
         repo.upsertDocument(tenant, d);
     }
 
+    private void doc(String tenant, String tumbler, String title, String contentType, int chunkCount) {
+        var d = new java.util.LinkedHashMap<String, Object>();
+        d.put("tumbler", tumbler);
+        d.put("title", title);
+        d.put("content_type", contentType);
+        d.put("corpus", "knowledge");
+        d.put("chunk_count", chunkCount);
+        repo.upsertDocument(tenant, d);
+    }
+
     @Test
     void titleMatchIsExact_notTokenwise() throws Exception {
         doc(TENANT, "7.1.1", "The Design of Things", "knowledge");
@@ -128,6 +138,34 @@ class CatalogHandlerByTitleTest {
         doc(TENANT, "9.1.2", "Typed Title", "paper");
         assertThat(tumblers(byTitle("title=Typed%20Title"))).containsExactly("9.1.1", "9.1.2");
         assertThat(tumblers(byTitle("title=Typed%20Title&content_type=paper"))).containsExactly("9.1.2");
+    }
+
+    @Test
+    void chunkCountZeroReturnsOnlyTheGhosts() throws Exception {
+        doc(TENANT, "14.1.1", "Ghost Filter Title", "knowledge", 0);
+        doc(TENANT, "14.1.2", "Ghost Filter Title", "knowledge", 3);
+        doc(TENANT, "14.1.3", "Ghost Filter Title", "knowledge");        // no chunk_count: stored as 0
+        doc(TENANT, "14.2.1", "Ghost Filter Title", "knowledge", 0);
+        doc(TENANT, "14.2.2", "Ghost Filter Title", "paper", 0);
+        String t = "title=Ghost%20Filter%20Title";
+        assertThat(tumblers(byTitle(t))).containsExactlyInAnyOrder("14.1.1", "14.1.2", "14.1.3", "14.2.1", "14.2.2");
+        assertThat(tumblers(byTitle(t + "&chunk_count=0"))).containsExactly("14.1.1", "14.1.3", "14.2.1", "14.2.2");
+        // Any non-negative count is an equality, not only the ghost case.
+        assertThat(tumblers(byTitle(t + "&chunk_count=3"))).containsExactly("14.1.2");
+        assertThat(tumblers(byTitle(t + "&chunk_count=7"))).isEmpty();
+        // Composes with the other two filters.
+        assertThat(tumblers(byTitle(t + "&chunk_count=0&owner=14.1&content_type=knowledge")))
+            .containsExactly("14.1.1", "14.1.3");
+        // A blank value is "no filter", as an absent one.
+        assertThat(byTitle(t + "&chunk_count=")).hasSize(5);
+    }
+
+    @Test
+    void aChunkCountThatIsNotANonNegativeInteger_is400() throws Exception {
+        assertThat(status("/v1/catalog/by_title?title=x&chunk_count=abc")).isEqualTo(400);
+        assertThat(status("/v1/catalog/by_title?title=x&chunk_count=-1")).isEqualTo(400);
+        assertThat(status("/v1/catalog/by_title?title=x&chunk_count=1.5")).isEqualTo(400);
+        assertThat(status("/v1/catalog/by_title?title=x&chunk_count=99999999999")).isEqualTo(400);
     }
 
     @Test

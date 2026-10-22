@@ -44,7 +44,7 @@ import java.util.*;
  *   GET   /v1/catalog/links              links from/to tumbler (BFS optional)
  *   GET   /v1/catalog/link_query         paginated link query with filters
  *   GET   /v1/catalog/resolve            resolve doc by file_path / source_uri / title
- *   GET   /v1/catalog/by_title           every live doc whose title equals ?title= exactly, optional ?owner=&content_type= (nexus-gacz0)
+ *   GET   /v1/catalog/by_title           every live doc whose title equals ?title= exactly, optional ?owner=&content_type=&chunk_count= (nexus-gacz0)
  *   GET   /v1/catalog/stats              per-tenant catalog statistics
  *   POST  /v1/catalog/traverse           BFS graph traversal
  *   POST  /v1/catalog/manifest/write     replace manifest
@@ -910,11 +910,14 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
-     * GET /v1/catalog/by_title?title=X[&owner=P][&content_type=C] — EVERY live document whose
-     * title equals X exactly (bead nexus-gacz0). Response shape mirrors {@link #handleList}:
-     * {@code {"documents": [...], "count": N}}. {@code owner} is a tumbler prefix (descendants
-     * only), {@code content_type} an equality filter; both optional. Unbounded, ordered by
-     * tumbler. An empty or absent {@code title} is 400, never "match everything". Tenant-scoped
+     * GET /v1/catalog/by_title?title=X[&owner=P][&content_type=C][&chunk_count=N] — EVERY live
+     * document whose title equals X exactly (bead nexus-gacz0). Response shape mirrors
+     * {@link #handleList}: {@code {"documents": [...], "count": N}}. {@code owner} is a tumbler
+     * prefix (descendants only), {@code content_type} an equality filter, {@code chunk_count} a
+     * non-negative integer equality filter ({@code 0}: the ghosts, documents with no chunks);
+     * all optional. Unbounded, ordered by tumbler (text order under the database collation). An
+     * empty or absent {@code title}, or a {@code chunk_count} that is not a non-negative
+     * integer, is 400, never "match everything". Tenant-scoped
      * like every route here; an engine without it answers 404 from the dispatcher's default arm,
      * which a client reads as "fall back".
      */
@@ -924,8 +927,20 @@ public final class CatalogHandler implements HttpHandler {
         if (title == null || title.isEmpty()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"title query param required\"}"); return;
         }
+        Integer chunkCount = null;
+        String rawChunkCount = queryParam(exchange, "chunk_count");
+        if (rawChunkCount != null && !rawChunkCount.isBlank()) {
+            try {
+                chunkCount = Integer.parseInt(rawChunkCount.trim());
+            } catch (NumberFormatException e) {
+                chunkCount = -1;
+            }
+            if (chunkCount < 0) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'chunk_count' must be a non-negative integer\"}"); return;
+            }
+        }
         var docs = repo.documentsByTitle(tenant, title,
-                queryParam(exchange, "owner"), queryParam(exchange, "content_type"));
+                queryParam(exchange, "owner"), queryParam(exchange, "content_type"), chunkCount);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs, "count", docs.size())));
     }
 

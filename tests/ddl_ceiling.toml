@@ -71,7 +71,9 @@ migration_wal_bytes_per_worker = 11038000
 # to a fresh migration; commit 6629bea44.
 # 2106 -> 2107 (2026-10-22): tuples-009-1 (nexus-x907o, nexus.tuples.claimed_at) adds one ALTER TABLE ADD COLUMN
 # to a fresh migration; commit b57270d7c.
-migration_ddl_per_worker = 2107
+# 2107 -> 2108 (2026-10-22): catalog-045-1 (nexus-gacz0, idx_catalog_documents_title_md5_live) adds one CREATE INDEX
+# to a fresh migration; commit <sha>.
+migration_ddl_per_worker = 2108
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

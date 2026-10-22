@@ -42,6 +42,8 @@ import org.jooq.DeleteConditionStep;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
+import org.jooq.Record;
+import org.jooq.ResultQuery;
 import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
@@ -3220,40 +3222,61 @@ public final class CatalogRepository {
 
     /**
      * Every live document whose {@code title} equals {@code title} exactly (byte for byte),
-     * optionally narrowed to the descendants of an owner tumbler prefix and to one
-     * {@code content_type} (bead nexus-gacz0). The exact-title lookup the full-text
-     * {@link #searchDocuments} cannot be: that matches tokens, so a title made of common
-     * words drags in every document sharing them and the caller has to page the lot to filter
-     * client-side.
+     * optionally narrowed to the descendants of an owner tumbler prefix, to one
+     * {@code content_type}, and to documents with exactly {@code chunkCount} chunks (bead
+     * nexus-gacz0; {@code 0} is the ghost filter {@code store_put}'s reconcile asks for). The
+     * exact-title lookup the full-text {@link #searchDocuments} cannot be: that matches tokens,
+     * so a title made of common words drags in every document sharing them and the caller has to
+     * page the lot to filter client-side.
      *
      * <p>Unbounded by design, like the other {@code documentsBy*} filters with no explicit
      * limit: the contract is "every" match, and an exact title under one owner is a handful of
-     * rows. Ordered by tumbler as text, the order {@link #searchDocuments} states, so a caller
-     * switching from one to the other sees the same sequence.
+     * rows. Ordered by tumbler, which is text order under the database's collation (a locale
+     * collation such as en_US.utf8 sorts across the dots), the order {@link #searchDocuments}
+     * states, so a caller switching from one to the other sees the same sequence.
      *
-     * <p>No index backs {@code title}: the scan is the tenant's live rows (RLS), cut to the
-     * owner's range first when {@code ownerPrefix} is given (a C-collation prefix {@code LIKE}
-     * on the {@code (tenant_id, tumbler)} key, as {@link #documentsByOwner}). A title index was
-     * not added: a btree on free text risks the row-size limit, and the owner-scoped caller this
-     * serves is already narrow. The owner prefix is LIKE-escaped, so a {@code %} or {@code _}
-     * in it matches itself.
+     * <p>Index: {@code idx_catalog_documents_title_md5_live} (catalog-045), a partial index on
+     * {@code (tenant_id, md5(title)) WHERE deleted_at IS NULL}. The query states
+     * {@code md5(title) = md5(?)} beside the exact equality so the planner can use it; the
+     * equality stays, so an md5 collision cannot widen a match. Measured on a tenant of
+     * 250,000 documents, 95 percent live, beside a second tenant a tenth the size: 22 to 35 ms
+     * as a parallel sequential scan without the index (3 to 4 ms at 25,000), 0.02 to 0.05 ms
+     * with it. The owner prefix does NOT narrow the scan by itself: {@code tumbler} is plain
+     * TEXT, the database collation is a locale one, and a {@code LIKE 'p.%'} prefix on a non-C
+     * collation cannot become a range on the {@code (tenant_id, tumbler)} key, so it is a filter
+     * over the title index's few rows.
+     * The owner prefix is LIKE-escaped, so a {@code %} or {@code _} in it matches itself.
      */
     public List<Map<String, Object>> documentsByTitle(
-            String tenant, String title, String ownerPrefix, String contentType) {
+            String tenant, String title, String ownerPrefix, String contentType, Integer chunkCount) {
         if (title == null || title.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx ->
+            documentsByTitleQuery(ctx, title, ownerPrefix, contentType, chunkCount)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    /**
+     * The statement {@link #documentsByTitle} runs, built once so a plan-shape test explains the
+     * product's own query and not a copy of it.
+     */
+    static ResultQuery<Record> documentsByTitleQuery(
+            DSLContext ctx, String title, String ownerPrefix, String contentType, Integer chunkCount) {
         Condition ownerCond = (ownerPrefix == null || ownerPrefix.isBlank())
             ? DSL.noCondition()
             : CATALOG_DOCUMENTS.TUMBLER.like(escapeLike(ownerPrefix) + ".%", '\\');
         Condition typeCond = (contentType == null || contentType.isBlank())
             ? DSL.noCondition()
             : CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType);
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TITLE.eq(title).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
-                   .and(ownerCond).and(typeCond))
-               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
-               .fetch().map(r -> docRowFromRecord(r.intoMap()))
-        );
+        // A NULL chunk_count reads as 0 on the wire (docRowFromRecord), so 0 must match it too.
+        Condition chunkCond = chunkCount == null
+            ? DSL.noCondition()
+            : DSL.coalesce(CATALOG_DOCUMENTS.CHUNK_COUNT, 0).eq(chunkCount);
+        Condition md5Cond = DSL.md5(CATALOG_DOCUMENTS.TITLE).eq(DSL.md5(DSL.val(title)));
+        return ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+            .where(md5Cond.and(CATALOG_DOCUMENTS.TITLE.eq(title)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .and(ownerCond).and(typeCond).and(chunkCond))
+            .orderBy(CATALOG_DOCUMENTS.TUMBLER);
     }
 
     private static String escapeLike(String s) {

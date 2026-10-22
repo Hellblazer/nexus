@@ -63,6 +63,12 @@ def test_ghost_ranked_past_the_first_page_is_reconciled(t2_service_env):
         assert [str(e.tumbler) for e in cat.find_by_title_exact(_TITLE, content_type="knowledge")] == [ghost]
         assert [str(e.tumbler) for e in cat.find_by_title_exact(_TITLE, owner=owner)] == [ghost]
         assert cat.find_by_title_exact(_TITLE, owner="9999") == []
+        # chunk_count is the engine's own predicate (the ghost filter store_put asks for): the
+        # ghost's actual count matches, any other count does not. Asked of the route directly so
+        # the client's defensive re-filter cannot stand in for the engine's.
+        count = int(raw["documents"][0]["chunk_count"])
+        assert [d["tumbler"] for d in cat._get("/by_title", title=_TITLE, chunk_count=count)["documents"]] == [ghost]
+        assert cat._get("/by_title", title=_TITLE, chunk_count=count + 1)["documents"] == []
         assert getattr(cat, "_by_title_backoff", None) is None, "the route must not have fallen back"
     finally:
         cat.close()

@@ -187,6 +187,71 @@ class TupleClaimedAtTest {
         assertThat(taken.get().tuple().claimedAt()).isAfter(held.claimedAt());
     }
 
+    /** Lapse the claim's lease (and optionally set attempts) the way the repo's own clock cannot. */
+    private void lapse(Claimed c, Integer attempts) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var upd = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+            if (attempts != null) {
+                upd.set(TUPLES.ATTEMPTS, attempts);
+            }
+            assertThat(upd.where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(c.subspace()))).execute())
+                    .as("the lapse touched the row").isEqualTo(1);
+        }
+    }
+
+    private org.jooq.Record2<String, OffsetDateTime> stateAndClaimedAt(Claimed c) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var rec = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(TUPLES.CLAIM_STATE, TUPLES.CLAIMED_AT)
+                    .from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(c.subspace())))
+                    .fetchOne();
+            assertThat(rec).isNotNull();
+            return rec;
+        }
+    }
+
+    @Test
+    void aClaimThatLapsesAtMaxAttempts_isDeadLetteredByTheClaimItself_andClearsClaimedAt() throws Exception {
+        // claimOnce's own dead-letter arm (not releaseOrDeadLetter): a lapsed row whose attempts,
+        // plus the lapse, reach the template's max_attempts (mailbox: 3) is parked as dead by the
+        // next claimant's inp, and the claim columns go with it.
+        Claimed c = outAndClaim("holder-dl", 60);
+        assertThat(stateAndClaimedAt(c).value2()).as("non-vacuity: the claim stamped claimed_at").isNotNull();
+        lapse(c, 2);
+        var taken = repo.inp(TENANT, c.subspace(), c.pattern(), "holder-next", 60);
+        assertThat(taken).as("a dead-lettered row is not handed out").isEmpty();
+        var after = stateAndClaimedAt(c);
+        assertThat(after.value1()).as("claim_state").isEqualTo("dead");
+        assertThat(after.value2()).as("claimed_at is cleared with claim_id").isNull();
+    }
+
+    @Test
+    void theSweepsReleaseArm_clearsClaimedAtOnALapsedClaim() throws Exception {
+        Claimed c = outAndClaim("holder-sweep", 60);
+        assertThat(stateAndClaimedAt(c).value2()).as("non-vacuity: the claim stamped claimed_at").isNotNull();
+        lapse(c, null);
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 300, null);
+        assertThat(result.released()).as("the sweep released the lapsed claim").isGreaterThanOrEqualTo(1);
+        var after = stateAndClaimedAt(c);
+        assertThat(after.value1()).as("claim_state").isNull();
+        assertThat(after.value2()).as("claimed_at is cleared with claim_id").isNull();
+    }
+
+    @Test
+    void theSweepsDeadLetterArm_clearsClaimedAtAtMaxAttempts() throws Exception {
+        Claimed c = outAndClaim("holder-sweep-dl", 60);
+        assertThat(stateAndClaimedAt(c).value2()).as("non-vacuity: the claim stamped claimed_at").isNotNull();
+        lapse(c, 2);
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 300, null);
+        assertThat(result.deadLettered()).as("the sweep dead-lettered the exhausted claim").isGreaterThanOrEqualTo(1);
+        var after = stateAndClaimedAt(c);
+        assertThat(after.value1()).as("claim_state").isEqualTo("dead");
+        assertThat(after.value2()).as("claimed_at is cleared with claim_id").isNull();
+    }
+
     @Test
     void anAckLeavesTheClaimColumnsAsTheyWere_claimedAtIncluded() {
         Claimed c = outAndClaim("holder-ack", 60);

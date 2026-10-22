@@ -11,11 +11,15 @@ failure is not mistaken for "route absent".
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
 import nexus.catalog.http_catalog_client as hcc
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.store_hook import _find_ghost_by_title
+from nexus.catalog.tumbler import Tumbler
 
 
 def _doc(tumbler: str, title: str, content_type: str = "knowledge") -> dict:
@@ -60,8 +64,6 @@ class TestTheRouteIsUsed:
         assert c.calls == [("/by_title", {"title": "The Note", "content_type": "knowledge"})]
 
     def test_the_owner_is_sent_as_its_string_form(self, monkeypatch) -> None:
-        from nexus.catalog.tumbler import Tumbler
-
         c = _Client(monkeypatch, {"/by_title": {"documents": [], "count": 0}})
         assert c.client.find_by_title_exact("The Note", owner=Tumbler.parse("1.1")) == []
         assert c.calls == [("/by_title", {"title": "The Note", "owner": "1.1"})]
@@ -73,6 +75,66 @@ class TestTheRouteIsUsed:
             _doc("1.1.1", "The Note"), _doc("1.1.2", "The Note, Part 2"),
         ]}})
         assert [str(e.tumbler) for e in c.client.find_by_title_exact("The Note")] == ["1.1.1"]
+
+
+class TestTheChunkCountFilter:
+    def test_chunk_count_zero_is_sent_to_the_route_not_dropped_as_falsy(self, monkeypatch) -> None:
+        c = _Client(monkeypatch, {"/by_title": {"documents": [], "count": 0}})
+        c.client.find_by_title_exact("The Note", content_type="knowledge", chunk_count=0)
+        assert c.calls == [("/by_title", {"title": "The Note", "content_type": "knowledge", "chunk_count": 0})]
+
+    def test_no_chunk_count_sends_no_chunk_count(self, monkeypatch) -> None:
+        c = _Client(monkeypatch, {"/by_title": {"documents": [], "count": 0}})
+        c.client.find_by_title_exact("The Note")
+        assert "chunk_count" not in c.calls[0][1]
+
+    def test_a_row_with_the_wrong_chunk_count_is_dropped_defensively(self, monkeypatch) -> None:
+        c = _Client(monkeypatch, {"/by_title": {"documents": [
+            {**_doc("1.1.1", "The Note"), "chunk_count": 0},
+            {**_doc("1.1.2", "The Note"), "chunk_count": 4},
+        ]}})
+        assert [str(e.tumbler) for e in c.client.find_by_title_exact("The Note", chunk_count=0)] == ["1.1.1"]
+
+    def test_the_fallback_filters_chunk_count_client_side(self, monkeypatch) -> None:
+        rows = [
+            {**_doc("1.1.1", "The Note"), "chunk_count": 0},
+            {**_doc("1.1.2", "The Note"), "chunk_count": 4},
+        ]
+        monkeypatch.setattr(hcc, "_monotonic", lambda: 1000.0)
+        c = _Client(monkeypatch, {"/by_title": _status_error(404), "/search": {"documents": rows}})
+        assert [str(e.tumbler) for e in c.client.find_by_title_exact("The Note", chunk_count=0)] == ["1.1.1"]
+        assert [str(e.tumbler) for e in c.client.find_by_title_exact("The Note", chunk_count=4)] == ["1.1.2"]
+        assert len(c.client.find_by_title_exact("The Note")) == 2
+
+
+class TestTheGhostReconcileAsksForGhostsOnly:
+    """``store_hook._find_ghost_by_title`` hands the ghost filter to the reader (nexus-gacz0)
+    and keeps its own checks as the guard."""
+
+    class _Reader:
+        def __init__(self, entries) -> None:
+            self.entries = entries
+            self.calls: list[tuple] = []
+
+        def find_by_title_exact(self, title, **kw):
+            self.calls.append((title, kw))
+            return self.entries
+
+    @staticmethod
+    def _entry(tumbler: str, chunk_count: int):
+        return SimpleNamespace(tumbler=Tumbler.parse(tumbler), chunk_count=chunk_count)
+
+    def test_the_reader_is_asked_for_the_owners_ghosts_of_that_title(self) -> None:
+        owner = Tumbler.parse("1.1")
+        ghost = self._entry("1.1.7", 0)
+        reader = self._Reader([ghost])
+        assert _find_ghost_by_title(reader, owner, "The Note") is ghost
+        assert reader.calls == [("The Note", {"content_type": "knowledge", "owner": owner, "chunk_count": 0})]
+
+    def test_a_reader_that_ignores_the_filters_cannot_widen_the_match(self) -> None:
+        owner = Tumbler.parse("1.1")
+        reader = self._Reader([self._entry("1.1.3", 5), self._entry("2.1.1", 0)])
+        assert _find_ghost_by_title(reader, owner, "The Note") is None
 
 
 class TestAnOldEngine:
@@ -91,8 +153,6 @@ class TestAnOldEngine:
         assert c.paths == ["/by_title", "/search"]
 
     def test_the_owner_filter_still_applies_on_the_fallback(self, monkeypatch) -> None:
-        from nexus.catalog.tumbler import Tumbler
-
         rows = [_doc("1.1.1", "The Note"), _doc("2.1.1", "The Note")]
         c = _Client(monkeypatch, {"/by_title": _status_error(404), "/search": {"documents": rows}})
         got = c.client.find_by_title_exact("The Note", owner=Tumbler.parse("1.1"))

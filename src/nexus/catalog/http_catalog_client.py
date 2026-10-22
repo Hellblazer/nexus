@@ -22,6 +22,8 @@ below maps to an exact ``case`` in the Java handler's switch:
   POST  /v1/catalog/delete              delete by {tumbler}  (also DELETE)
   POST  /v1/catalog/purge-trash         reclaim tombstoned rows {older_than_days, dry_run} (nexus-3ck2g)
   GET   /v1/catalog/resolve?...         resolve by file_path/source_uri/title
+  GET   /v1/catalog/by_title?title=X[&owner=P][&content_type=C][&chunk_count=N]
+                                        every live doc whose title equals X exactly (nexus-gacz0)
   GET   /v1/catalog/stats               per-tenant statistics
   POST  /v1/catalog/link               upsert link
   POST  /v1/catalog/unlink             delete link(s)
@@ -2101,7 +2103,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def find_by_title_exact(
         self, title: str, *, content_type: str | None = None,
-        owner: Tumbler | str | None = None,
+        owner: Tumbler | str | None = None, chunk_count: int | None = None,
     ) -> list[CatalogEntry]:
         """Every live document whose ``title`` equals *title* exactly.
 
@@ -2113,7 +2115,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         message.
 
         *owner* (a tumbler prefix) narrows the answer to that owner's
-        documents; *content_type* to one type. Both are optional.
+        documents; *content_type* to one type; *chunk_count* to documents with
+        exactly that many chunks (``0``: the ghosts a ``store_put`` reconcile
+        wants). All are optional.
 
         The engine answers it directly (``GET /v1/catalog/by_title``, nexus-gacz0):
         one request, every exact match, no page cap. An engine without the route
@@ -2133,6 +2137,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             try:
                 result = self._get(
                     "/by_title", title=title, owner=owner_prefix, content_type=content_type,
+                    chunk_count=chunk_count,
                 )
             except httpx.HTTPStatusError as exc:
                 if exc.response is None or exc.response.status_code not in (404, 405):
@@ -2141,13 +2146,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 _log.debug("http_catalog_client.by_title_route_absent")
             else:
                 self._by_title_backoff = None
-                # The engine matches exactly; the title test is kept as the sibling
-                # lookups keep theirs, so a regressed route cannot widen a match.
-                return [e for e in self._docs_from(result) if e.title == title]
+                # The engine matches exactly; the title and chunk-count tests are kept as
+                # the sibling lookups keep theirs, so a regressed route cannot widen a match.
+                return [
+                    e for e in self._docs_from(result)
+                    if e.title == title and (chunk_count is None or e.chunk_count == chunk_count)
+                ]
         entries = [e for e in self.find_all(title, content_type=content_type) if e.title == title]
         if owner_prefix:
             prefix = Tumbler.parse(owner_prefix)
             entries = [e for e in entries if prefix.is_prefix_of(e.tumbler)]
+        if chunk_count is not None:
+            entries = [e for e in entries if e.chunk_count == chunk_count]
         return entries
 
     def by_file_path(
