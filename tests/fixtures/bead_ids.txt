@@ -1672,6 +1672,7 @@ nexus-7h2
 nexus-7h2.1
 nexus-7h69i
 nexus-7he0t
+nexus-7hzb2
 nexus-7i31i
 nexus-7ibsd
 nexus-7jvlv
@@ -2456,6 +2457,7 @@ nexus-bbriq
 nexus-bbriq.1
 nexus-bbt
 nexus-bbt.1
+nexus-bbtc2
 nexus-bc0x7
 nexus-bc292
 nexus-bc6wu
@@ -5784,6 +5786,7 @@ nexus-pg7rp
 nexus-pgdcv
 nexus-pgdcv.1
 nexus-pgm7u
+nexus-pgsr1
 nexus-ph718
 nexus-php10
 nexus-php10.1
@@ -6887,6 +6890,7 @@ nexus-u73rf
 nexus-u7blf
 nexus-u7ek
 nexus-u7r0
+nexus-u839f
 nexus-u88vu
 nexus-u8n4r
 nexus-u8n4r.1

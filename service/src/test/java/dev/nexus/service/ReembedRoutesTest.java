@@ -1105,4 +1105,178 @@ class ReembedRoutesTest {
         assertThat(rows.get(1)).containsEntry("state", "aborted");
         assertThat(post(t, "/status", "").statusCode()).as("POST on status").isEqualTo(405);
     }
+
+    // ── a kept_tombstoned re-entry (a start whose source is a finished job's kept source) ───
+
+    /** A to B done/kept_tombstoned with A superseded by B, as a cutover leaves a source that held trash. */
+    private UUID keptTombstonedLeg(Tn t) throws Exception {
+        UUID first = id(startOk(t, t.src()));
+        advance(t, first, "running", "cutover");
+        assertThat(jobs.setCutoverStep(t.tenant(), first, "superseded")).isTrue();
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+        Job cutover = job(t, first);
+        jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
+            Transition.disposition("kept_tombstoned")).orElseThrow();
+        return first;
+    }
+
+    private void bareDocument(Tn t, String name, String home) {
+        catalog.upsertDocument(t.tenant(), Map.of("tumbler", "rt." + t.owner() + "." + name, "title", name,
+            "content_type", TYPE, "corpus", TYPE, "physical_collection", home, "chunk_count", 0));
+    }
+
+    @Test
+    void startOnAKeptTombstonedSourceWithNoDocumentRowReEntersCutover_theSameJob_andWakesTheRunner() throws Exception {
+        Tn t = tenant("reentcut");
+        UUID first = keptTombstonedLeg(t);
+        int before = wakeUps();
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        Map<String, Object> body = json(r);
+        assertThat(body).containsEntry("job_id", first.toString()).containsEntry("state", "cutover")
+            .containsEntry("target_action", "reentered").containsEntry("reentry", "cutover")
+            .containsEntry("disposition", null).containsEntry("cutover_step", "superseded");
+        assertThat(wakeUps()).isEqualTo(before + 1);
+        assertThat(jobs.listAll(t.tenant())).as("no second job").hasSize(1);
+    }
+
+    @Test
+    void startOnAKeptTombstonedSourceWithARestoredLiveDocumentReEntersRunning() throws Exception {
+        Tn t = tenant("reentrun");
+        UUID first = keptTombstonedLeg(t);
+        bareDocument(t, "restored", t.src());
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(json(r)).containsEntry("job_id", first.toString()).containsEntry("state", "running")
+            .containsEntry("reentry", "running");
+        Job back = job(t, first);
+        assertThat(back.passNumber()).isEqualTo(1);
+        assertThat(back.docCursor()).isEmpty();
+    }
+
+    @Test
+    void aReEntryWhileTheTrashIsStillThereIs409_andChangesNothing() throws Exception {
+        Tn t = tenant("reenttrash");
+        UUID first = keptTombstonedLeg(t);
+        bareDocument(t, "trash", t.src());
+        assertThat(catalog.deleteDocument(t.tenant(), "rt." + t.owner() + ".trash")).isEqualTo(1);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r).get("error").toString()).contains("1 tombstoned document(s)");
+        assertThat(job(t, first).state()).isEqualTo("done");
+        assertThat(job(t, first).disposition()).isEqualTo("kept_tombstoned");
+    }
+
+    @Test
+    void aReEntryWhileAnotherJobHoldsTheSourceIs409NamingThatJob() throws Exception {
+        Tn t = tenant("reentlock");
+        keptTombstonedLeg(t);
+        // a job started directly through the repository on the superseded source holds its lock
+        Job holder = jobs.start(t.tenant(), t.src(), t.tgt(), null, false, false);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r)).containsEntry("job_id", holder.jobId().toString());
+    }
+
+    @Test
+    void aReEntryTakesOnlyTheSource_theJobKeepsItsOwnTargetCapAndFlags() throws Exception {
+        Tn t = tenant("reentbody");
+        UUID first = keptTombstonedLeg(t);
+
+        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"keep_source\":true}");
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(400);
+        assertThat(json(r).get("error").toString()).contains("re-enters that job").contains("source_collection alone");
+        assertThat(job(t, first).state()).isEqualTo("done");
+    }
+
+    @Test
+    void aSourceKeptByFlagOrResidueOrRevivedIsNeverReEntered_theSupersededSourceStaysRefused() throws Exception {
+        for (String disposition : List.of("kept_by_flag", "kept_residue", "deleted", "revived")) {
+            Tn t = tenant("reentno" + disposition.replace("_", ""));
+            UUID first = id(startOk(t, t.src()));
+            advance(t, first, "running", "cutover");
+            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            Job cutover = job(t, first);
+            jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
+                Transition.disposition(disposition)).orElseThrow();
+
+            var r = post(t, "/jobs", startBody(t.src()));
+
+            assertThat(r.statusCode()).as(disposition + ": " + r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).as(disposition).contains("already superseded");
+            assertThat(job(t, first).state()).as(disposition).isEqualTo("done");
+        }
+    }
+
+    @Test
+    void aKeptTombstonedSourceWhoseSuccessorIsNotTheJobsTargetIsNotReEntered() throws Exception {
+        Tn t = tenant("reentother");
+        UUID first = id(startOk(t, t.src()));
+        advance(t, first, "running", "cutover");
+        // the source was superseded by something other than this job's target
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
+        Job cutover = job(t, first);
+        jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
+            Transition.disposition("kept_tombstoned")).orElseThrow();
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r).get("error").toString()).contains("already superseded by somewhere-else");
+        assertThat(job(t, first).state()).isEqualTo("done");
+    }
+
+    @Test
+    void aReEntryIntoATargetThatIsSupersededIsRefused() throws Exception {
+        Tn t = tenant("reenttgt");
+        UUID first = keptTombstonedLeg(t);
+        assertThat(catalog.supersedeCollection(t.tenant(), t.tgt(), "elsewhere", null)).isEqualTo(1);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r).get("error").toString()).contains("itself superseded by elsewhere");
+        assertThat(job(t, first).state()).isEqualTo("done");
+    }
+
+    // ── status: the counts the source's delete will take ─────────────────────
+
+    @Test
+    void statusWithCountsShowsWhatTheDeleteWillTakeForAJobWithADeleteAhead_andNothingWithoutTheFlag() throws Exception {
+        Tn t = tenant("statuscounts");
+        UUID pending = id(startOk(t, t.src()));
+        String sibling = "quarantine-" + t.src();
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, t.tenant(), sibling);
+            for (int i = 0; i < 2; i++) {
+                String text = "quarantined " + i + " " + t.owner();
+                PgContainerHelper.insertChunks(ctx, t.tenant(), sibling, List.of(dev.nexus.service.db.Chash.ofText(text).toHex()),
+                    List.of(text), List.of(new float[768]), List.of(Map.of("origin_collection", t.src())));
+            }
+            return null;
+        });
+
+        var plain = statusJobs(get(t, "/status"));
+        assertThat(plain.get(0)).as("no counts unless asked").doesNotContainKey("delete_counts");
+
+        var counted = statusJobs(get(t, "/status?counts=true"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> counts = (Map<String, Object>) counted.get(0).get("delete_counts");
+        assertThat(counts).containsEntry("quarantine_rows", 2).containsEntry("foreign_topic_assignments", 0)
+            .containsEntry("topic_links", 0).containsEntry("unmatched_satellite_rows", 0);
+        assertThat(counted.get(0)).containsEntry("job_id", pending.toString());
+
+        // an aborted job has no delete ahead of it
+        advance(t, pending, "aborted");
+        assertThat(statusJobs(get(t, "/status?counts=true")).get(0)).containsEntry("delete_counts", null);
+    }
 }

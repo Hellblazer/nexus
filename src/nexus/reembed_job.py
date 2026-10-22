@@ -11,7 +11,8 @@ client decides before it asks the engine to start one, and renders back what the
   degraded boot (Technical Design 2) leaves a family unserved and a job started into it moves nothing;
 * the token cap (a default for Voyage targets, none for the on-device bge model);
 * the one-line hint that names ``nx collection re-embed --all``, printed where a profile change leaves
-  collections on the previous model.
+  collections on the previous model;
+* ``--wait``: the states a wait returns on, and the poll loop (Step 4, nexus-09iho).
 
 Pure functions where possible, so the CLI tests do not need an engine.
 """
@@ -171,8 +172,8 @@ class Reentry:
     """A source a ``kept_tombstoned`` job left superseded, listed again as that job's re-entry (not a new job).
 
     ``kind`` is ``cutover`` when purge-trash has left the source with no document row, ``running`` when a
-    restore has made a document live in it. The engine route that performs the re-entry lands with Step 4
-    (nexus-09iho); the client lists the candidate and names the job.
+    restore has made a document live in it. The engine performs the re-entry on a start whose source is the kept
+    source (``HttpVectorClient.reembed_reenter``); the client lists the candidate, names the job and starts it.
     """
 
     job: dict
@@ -243,6 +244,68 @@ def candidates(
         jobs, {str(r.get("name")): r for r in rows}, live_docs, all_docs,
     )
     return result
+
+
+# ── --wait ───────────────────────────────────────────────────────────────────
+
+#: The states ``--wait`` returns on, naming the state (RDR-210 State table): the job finished (``done``,
+#: ``done_with_skips``) or stopped and needs a person (``aborted``, ``failed``, ``paused``).
+WAIT_STATES: frozenset[str] = frozenset({"done", "done_with_skips", "aborted", "failed", "paused"})
+
+#: The states after which ``--wait`` runs taxonomy discover for the target: the target holds the moved documents.
+DISCOVER_STATES: frozenset[str] = frozenset({"done", "done_with_skips"})
+
+#: The states ``--wait`` exits 0 on. The other three stopped before the job finished.
+FINISHED_STATES: frozenset[str] = DISCOVER_STATES
+
+#: Seconds between status polls. A re-embed runs minutes to hours; a poll is one cheap read.
+WAIT_POLL_S: float = 2.0
+
+
+def discover_command(target: str) -> str:
+    """The command that builds a target's topics, centroids and assignments in its own embedding space."""
+    return f"nx taxonomy discover --collection {target}"
+
+
+class WaitError(RuntimeError):
+    """A job being waited on is no longer in the engine's status (it was never there, or the engine lost it)."""
+
+
+def wait_for_jobs(
+    fetch: Callable[[], list[dict]],
+    job_ids: Iterable[str],
+    *,
+    sleep: Callable[[float], None],
+    poll_s: float = WAIT_POLL_S,
+    on_change: Callable[[dict], None] | None = None,
+) -> dict[str, dict]:
+    """Poll ``fetch`` (the engine's status rows) until every job in ``job_ids`` is in a :data:`WAIT_STATES` state.
+
+    Returns ``{job_id: final row}``. ``on_change`` is called with a row each time its state changes (the first
+    sight of a job included), so a caller can print progress without printing every poll. A job missing from a
+    poll is :class:`WaitError`: the verb never waits on a job the engine does not know.
+    """
+    pending = list(dict.fromkeys(job_ids))
+    final: dict[str, dict] = {}
+    last_state: dict[str, str] = {}
+    while True:
+        rows = {str(r.get("job_id")): r for r in fetch()}
+        _log.info("reembed_wait_poll", jobs=len(pending), seen=len(rows))
+        for job_id in list(pending):
+            row = rows.get(job_id)
+            if row is None:
+                raise WaitError(f"re-embed job {job_id} is not in the engine's status")
+            state = str(row.get("state"))
+            if last_state.get(job_id) != state:
+                last_state[job_id] = state
+                if on_change is not None:
+                    on_change(row)
+            if state in WAIT_STATES:
+                final[job_id] = row
+                pending.remove(job_id)
+        if not pending:
+            return final
+        sleep(poll_s)
 
 
 # ── the hint ─────────────────────────────────────────────────────────────────

@@ -64,10 +64,11 @@ import java.util.function.Supplier;
  * from the beginning, at most {@link Settings#maxPasses} passes in all; what is still there after the last pass is
  * recorded as skips with the reason {@value #REASON_PASS_LIMIT}.
  *
- * <p><b>Cutover</b> is {@link #cutover}: candidates left means {@code done_with_skips}; otherwise supersede the
- * source, then (unless {@code keep_source}) delete it, each irreversible step preceded by a monotone marker on the
- * job row so a restart repeats nothing it already did. Parity, the {@code kept_tombstoned} and residue
- * dispositions and {@code --wait} belong to nexus-09iho (Step 4) and are marked where they go.
+ * <p><b>Cutover</b> is {@link #cutover}, the RDR's ordered steps (Step 4, nexus-09iho): candidates left means
+ * {@code done_with_skips}; otherwise supersede the source, then end {@code kept_tombstoned}, {@code kept_by_flag},
+ * {@code failed/parity_mismatch} or {@code kept_residue} (unless {@code force_delete}) as each check finds, and
+ * only past all of them delete the source, each irreversible step preceded by a monotone marker on the job row so
+ * a restart repeats nothing it already did.
  *
  * <p><b>Locks.</b> A document's move takes the sweep gate shared, the index-run lock, then the job row; the runner
  * itself holds none between calls, and control routes take only the job row, so there is no cycle.
@@ -479,30 +480,40 @@ public final class ReembedRunner {
     // ── cutover ──────────────────────────────────────────────────────────────
 
     /**
-     * Finish a job whose pass completed. The order, with the marker committed before each irreversible step:
+     * Finish a job whose pass completed. RDR-210 Cutover, "Order inside cutover", with the marker committed before
+     * each irreversible step. Every step is safe to repeat, so a restart re-runs from the first:
      * <ol>
-     *   <li>a candidate still in the source: {@code done_with_skips} (nothing is superseded or deleted);</li>
+     *   <li>a live candidate still in the source (a skip, or a client's write since the pass): {@code
+     *       done_with_skips}, nothing superseded or deleted. A candidate is a live document with a manifest row
+     *       naming the source, so a write-back of a moved document is found here, before the supersede (nexus-6grho);</li>
      *   <li>supersede the source by the target (idempotent), then marker {@code superseded};</li>
-     *   <li>(Step 4, nexus-09iho) the {@code kept_tombstoned} disposition goes here;</li>
+     *   <li>a document row left in the source that is soft-deleted (trash): {@code done} with disposition {@code
+     *       kept_tombstoned}, no parity check, no delete. The delete would take the trash's rows with it; a later
+     *       re-entry ({@link ReembedStateMachine.Event#REENTER_RUNNING}, {@code REENTER_CUTOVER}) finishes the job
+     *       once they are purged or restored;</li>
      *   <li>{@code keep_source}: {@code done} with disposition {@code kept_by_flag};</li>
-     *   <li>(Step 4, nexus-09iho) the parity check goes here, before the delete;</li>
-     *   <li>the <b>delete guard</b>: if the source still holds a live candidate, a tombstoned document, a live
-     *       document homed there whose chunks are elsewhere, or an aspect, queue or highlight row, the delete would
-     *       destroy it, so the cutover stays in {@code cutover} with {@code last_error} saying what is left (see
-     *       {@link #blocked}) and the next tick looks again. This is a refusal, not Step 4's {@code kept_tombstoned}
-     *       and {@code kept_residue} dispositions, which replace it. The check runs once, just before the marker
-     *       is written, and not again once the marker says the delete began (abort is refused from there, so the
-     *       decision stands). A write that lands in the instants between this check and the delete itself is not
-     *       caught here; Step 4's parity-in-the-delete-transaction closes it;</li>
+     *   <li>the <b>parity check</b> ({@link ReembedSourceReader#parity}): no manifest row names the source, no live
+     *       document is homed there, and every document this job moved is in the target by both columns. A failure
+     *       deletes nothing, keeps the source superseded, and takes the job to {@code failed/parity_mismatch} with the
+     *       counts and the documents to inspect in {@code last_error}. {@code --resume} re-runs the pass and this
+     *       check; {@code --abort} leaves the source superseded and undeleted. {@code force_delete} does not reach
+     *       it: no flag deletes a live document's only copy;</li>
+     *   <li>the <b>residue check</b>: aspect, queue and highlight rows still naming the source belong to no document
+     *       the job moved, and the delete would take them. Unless {@code force_delete}, the job ends {@code done}
+     *       with disposition {@code kept_residue} and the counts in {@code last_error}; with it the delete proceeds;</li>
      *   <li>marker {@code delete_started} (abort is refused from here), delete the source only if its registry row
      *       still exists, then {@code done} with disposition {@code deleted}.</li>
      * </ol>
-     * A restart repeats from the top: a delete that committed leaves no row, so it is not issued again. An
-     * exception from a step leaves the job in {@code cutover} for the next tick.
+     * The checks run once, just before the marker is written, and not again once the marker says the delete began
+     * (abort is refused from there, so the decision stands). A manifest write that lands after the supersede is
+     * refused by the engine (nexus-mp8ys); a document registered against the source in the instants between the
+     * parity check and the delete itself is not caught here. An exception from a step leaves the job in {@code
+     * cutover} for the next tick.
      */
     private void cutover(String tenant, Job job) {
         String source = job.sourceCollection();
         boolean deleteBegun = ReembedStateMachine.CUTOVER_STEP_DELETE_STARTED.equals(job.cutoverStep());
+        String forceNote = null;
         if (!deleteBegun) {
             if (reader.anyCandidate(tenant, source)) {
                 transition(tenant, job, Event.CUTOVER_SKIPS, Transition.NONE);
@@ -524,23 +535,49 @@ public final class ReembedRunner {
                 return;
             }
             phase("after_supersede");
-            // Step 4 (nexus-09iho): the kept_tombstoned disposition, for a source that still holds tombstoned
-            // documents, goes here.
-            if (job.keepSource()) {
-                finishCutover(tenant, job.jobId(), Transition.disposition("kept_by_flag"));
+            long tombstoned = reader.tombstonedDocuments(tenant, source);
+            if (tombstoned > 0) {
+                finishCutover(tenant, job.jobId(), Event.CUTOVER_DONE, new Transition(null,
+                    tombstoned + " tombstoned document(s) still hold the source, so it was kept (superseded, not "
+                        + "deleted). Purge or restore them, then nx collection re-embed --all re-enters this job",
+                    ReembedStateMachine.DISPOSITION_KEPT_TOMBSTONED, null));
                 return;
             }
-            // Step 4 (nexus-09iho): the parity check (moved rows against the target's manifest) goes here, before
-            // the delete.
-        }
-        if (!deleteBegun) {
-            // The delete guard (see the method comment): the delete removes every document row homed at the source
-            // and every aspect, queue and highlight row naming it, none of which the pass moved if it is still here.
-            ReembedSourceReader.Residue residue = reader.residue(tenant, source);
-            if (!residue.isEmpty()) {
-                blocked(tenant, job, "the source still holds " + residue.describe()
-                    + "; deleting it would destroy them. Remove or move them, or abort the job");
+            if (job.keepSource()) {
+                finishCutover(tenant, job.jobId(), Event.CUTOVER_DONE, Transition.disposition("kept_by_flag"));
                 return;
+            }
+            // The counter the parity check compares is the row as it stands now, not the snapshot the tick began from.
+            Job now = jobs.get(tenant, job.jobId()).orElse(null);
+            if (now == null) {
+                return;
+            }
+            ReembedSourceReader.Parity parity = reader.parity(tenant, source, job.targetCollection(), job.jobId(),
+                now.documentsMoved());
+            if (!parity.holds()) {
+                String why = parity.describe(source);
+                log.warn("event=reembed_parity_mismatch tenant={} job={} source={} target={} manifest_rows_naming_source={} "
+                        + "live_homed_at_source={} moved_recorded={} moved_agreeing={} documents_moved={}", tenant,
+                    job.jobId(), source, job.targetCollection(), parity.manifestRowsNamingSource(),
+                    parity.liveHomedAtSource(), parity.movedRecorded(), parity.movedAgreeing(),
+                    parity.documentsMoved());
+                finishCutover(tenant, job.jobId(), Event.PARITY_FAILED, Transition.failed(null, truncate(why)));
+                return;
+            }
+            ReembedSourceReader.Residue residue = reader.residue(tenant, source);
+            if (residue.satelliteRows() > 0) {
+                String what = residue.describeSatellites();
+                if (!job.forceDelete()) {
+                    finishCutover(tenant, job.jobId(), Event.CUTOVER_DONE, new Transition(null,
+                        "the source was kept (superseded, not deleted): " + what + " still name it and belong to no "
+                            + "document this job moved. nx collection delete " + source + " deletes them with it; a "
+                            + "job started with --force-delete would have",
+                        "kept_residue", null));
+                    return;
+                }
+                forceNote = "--force-delete deleted " + what + " that named the source and belonged to no moved document";
+                log.warn("event=reembed_force_delete tenant={} job={} source={} rows=\"{}\"", tenant, job.jobId(),
+                    source, what);
             }
         }
         if (!jobs.setCutoverStep(tenant, job.jobId(), ReembedStateMachine.CUTOVER_STEP_DELETE_STARTED)) {
@@ -549,29 +586,34 @@ public final class ReembedRunner {
         phase("before_delete");
         if (catalog.getCollection(tenant, source) != null) {
             phase("delete");
-            catalog.deleteCollection(tenant, source);
+            Map<String, Integer> removed = catalog.deleteCollection(tenant, source);
+            log.info("event=reembed_source_deleted tenant={} job={} source={} removed={}", tenant, job.jobId(), source,
+                removed);
         }
         phase("after_delete");
-        finishCutover(tenant, job.jobId(), Transition.disposition("deleted"));
+        finishCutover(tenant, job.jobId(), Event.CUTOVER_DONE, new Transition(null, forceNote, "deleted", null));
     }
 
-    /** Move the job from {@code cutover} to {@code done}, from the marker as it stands now. */
-    private void finishCutover(String tenant, UUID jobId, Transition change) {
+    /**
+     * End the cutover with {@code event}, from the job row and marker as they stand now (the tick's snapshot
+     * predates the marker this cutover wrote). A block this cutover recorded earlier is cleared first, so a job that
+     * finishes does not keep saying it is blocked.
+     */
+    private void finishCutover(String tenant, UUID jobId, Event event, Transition change) {
         Job now = jobs.get(tenant, jobId).orElse(null);
         if (now != null) {
             if (now.lastError() != null && now.lastError().startsWith(BLOCKED_PREFIX)) {
-                // the block this cutover recorded has cleared; a finished job does not keep saying it is blocked
                 jobs.setLastError(tenant, jobId, ReembedJobRepository.CUTOVER, null);
             }
-            transition(tenant, now, Event.CUTOVER_DONE, change);
+            transition(tenant, now, event, change);
         }
     }
 
     /**
-     * The cutover cannot proceed and no state change fits (the state machine has no cutover-to-failed edge but the
-     * parity one, and it heals when the cause clears): log it and record the reason in {@code last_error}, where
-     * the status the routes show reads it. Repeating on every tick, it writes once (the repository skips an equal
-     * message).
+     * The cutover cannot proceed and no state change fits (the state machine has no cutover-to-failed edge for a
+     * missing or foreign-superseded source, and it heals when the cause clears): log it and record the reason in
+     * {@code last_error}, where the status the routes show reads it. Repeating on every tick, it writes once (the
+     * repository skips an equal message).
      */
     private void blocked(String tenant, Job job, String why) {
         log.warn("event=reembed_cutover_blocked tenant={} job={} source={} target={} reason=\"{}\"", tenant,

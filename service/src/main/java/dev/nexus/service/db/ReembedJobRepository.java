@@ -382,6 +382,46 @@ public final class ReembedJobRepository {
     }
 
     /**
+     * Take a {@code done} job whose disposition is {@code kept_tombstoned} back into a lock state (RDR-210 Cutover,
+     * "Tombstoned documents"): {@code running} when a document is live in the source again, {@code cutover} when
+     * the tombstones are gone. A compare-and-set on {@code done} and the disposition, so two re-entries, or a
+     * re-entry racing a start, cannot both win; the entry meets the source-lock index like any other.
+     *
+     * <p>The job starts a fresh walk: pass 1, cursor at the start, no failure, no old message, no disposition (the
+     * new end sets one), {@code finished_at} cleared. The cutover marker stays: the source is still superseded,
+     * and the marker only moves forward. The counters keep what the job has done, and so does its move record, which
+     * the parity check reads.
+     *
+     * @return the updated row, or empty when the job is absent, no longer {@code done}, or no longer
+     *         {@code kept_tombstoned}
+     * @throws JobLockHeld    when another job holds the source
+     * @throws LockContention when the index refused twice and the holder was gone each time it was looked up
+     * @throws IllegalArgumentException when {@code to} is neither {@code running} nor {@code cutover}
+     */
+    public Optional<Job> reenter(String tenant, UUID jobId, String to) {
+        if (!RUNNING.equals(to) && !CUTOVER.equals(to)) {
+            throw new IllegalArgumentException("a kept_tombstoned job re-enters running or cutover, not " + to);
+        }
+        return retryingOnLock(tenant, jobId, () -> sourceOf(tenant, jobId), () ->
+            scope.withTenant(tenant, ctx -> ctx.update(REEMBED_JOBS)
+                .set(REEMBED_JOBS.STATE, to)
+                .set(REEMBED_JOBS.PASS_NUMBER, (short) 1)
+                .set(REEMBED_JOBS.DOC_CURSOR, "")
+                .setNull(REEMBED_JOBS.DISPOSITION)
+                .setNull(REEMBED_JOBS.FAILURE_REASON)
+                .setNull(REEMBED_JOBS.LAST_ERROR)
+                .setNull(REEMBED_JOBS.FINISHED_AT)
+                .set(REEMBED_JOBS.UPDATED_AT, clock())
+                .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                .and(REEMBED_JOBS.STATE.eq(DONE))
+                .and(REEMBED_JOBS.DISPOSITION.eq("kept_tombstoned"))
+                .returning()
+                .fetchOptional()
+                .map(Job::from)));
+    }
+
+    /**
      * Fold one batch into a job, in one transaction: the batch's skips (a document skipped once in this job is
      * counted once; one that had moved and is in the source again becomes a skip, and stops counting as moved),
      * its chunk and token counters, and the cursor, kept

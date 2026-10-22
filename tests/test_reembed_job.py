@@ -214,3 +214,45 @@ class TestOffProfileHint:
         started = time.monotonic()
         assert rj.off_profile_hint(hang) is None
         assert time.monotonic() - started < 2
+
+
+class TestWaitForJobs:
+    def _walk(self, *polls):
+        it = iter(polls)
+        return lambda: next(it)
+
+    def test_returns_each_job_in_its_final_state_and_sleeps_between_polls(self):
+        sleeps: list[float] = []
+        seen: list[tuple[str, str]] = []
+        fetch = self._walk(
+            [_job("a", "s1", "t1", "running"), _job("b", "s2", "t2", "running")],
+            [_job("a", "s1", "t1", "done"), _job("b", "s2", "t2", "running")],
+            [_job("a", "s1", "t1", "done"), _job("b", "s2", "t2", "failed")],
+        )
+        final = rj.wait_for_jobs(fetch, ["a", "b"], sleep=sleeps.append, poll_s=0.5,
+                                 on_change=lambda r: seen.append((r["job_id"], r["state"])))
+        assert {k: v["state"] for k, v in final.items()} == {"a": "done", "b": "failed"}
+        assert sleeps == [0.5, 0.5]
+        assert seen == [("a", "running"), ("b", "running"), ("a", "done"), ("b", "failed")], "only changes are reported"
+
+    @pytest.mark.parametrize("state", sorted(rj.WAIT_STATES))
+    def test_every_stopping_state_returns_at_once(self, state):
+        sleeps: list[float] = []
+        final = rj.wait_for_jobs(self._walk([_job("a", "s", "t", state)]), ["a"], sleep=sleeps.append)
+        assert final["a"]["state"] == state and sleeps == []
+
+    @pytest.mark.parametrize("state", ["planned", "running", "cutover"])
+    def test_a_job_still_moving_is_waited_on(self, state):
+        sleeps: list[float] = []
+        final = rj.wait_for_jobs(
+            self._walk([_job("a", "s", "t", state)], [_job("a", "s", "t", "done")]), ["a"], sleep=sleeps.append)
+        assert final["a"]["state"] == "done" and len(sleeps) == 1
+
+    def test_a_job_the_engine_does_not_list_is_an_error(self):
+        with pytest.raises(rj.WaitError, match="job z"):
+            rj.wait_for_jobs(self._walk([_job("a", "s", "t", "done")]), ["z"], sleep=lambda s: None)
+
+    def test_the_discover_states_are_the_two_finished_ones(self):
+        assert rj.DISCOVER_STATES == {"done", "done_with_skips"}
+        assert rj.WAIT_STATES == {"done", "done_with_skips", "aborted", "failed", "paused"}
+        assert rj.discover_command("docs__t") == "nx taxonomy discover --collection docs__t"

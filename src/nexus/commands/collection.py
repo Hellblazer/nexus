@@ -2,6 +2,7 @@
 import fnmatch
 import re
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -1745,6 +1746,9 @@ _REEMBED_BGE_MODEL = "bge-base-en-v15-768"
 #: The ``--status`` value that means "every job", given when the flag carries no job id.
 _ALL_JOBS = "__all__"
 
+#: The states after which the target holds the moved documents and its topics are due (``--wait`` runs the discover).
+_DISCOVER_STATES = frozenset({"done", "done_with_skips"})
+
 
 #: The 404 bodies the re-embed handler itself sends (``ReembedHandler``): an unknown job, an unregistered source.
 #: These are answers, shown verbatim. Any other 404 (a route the engine does not have) means the engine is older
@@ -1804,18 +1808,35 @@ def _job_line(job: dict) -> str:
     )
     if job.get("last_error"):
         line += f"\n    last error: {job['last_error']}"
+    counts = job.get("delete_counts")
+    if isinstance(counts, dict):
+        line += (
+            "\n    the source's delete removes: "
+            f"{counts.get('quarantine_rows', 0)} quarantine row(s); "
+            f"{counts.get('foreign_topic_assignments', 0)} topic assignment(s) of other collections; "
+            f"{counts.get('topic_links', 0)} topic link(s); "
+            f"{counts.get('unmatched_satellite_rows', 0)} satellite row(s) that match no moved document"
+        )
+    if job.get("state") in _DISCOVER_STATES:
+        from nexus.reembed_job import discover_command  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        line += (
+            f"\n    next: {discover_command(str(job.get('target_collection')))} "
+            f"(topic search misses the moved documents until it has run; --wait runs it)"
+        )
     return line
 
 
 def _reembed_controls(
     db: object, *, status_job: str | None, pause_job: str | None, resume_job: str | None,
-    abort_job: str | None, token_cap: int | None,
+    abort_job: str | None, token_cap: int | None, wait: bool = False,
 ) -> None:
-    """``--status [JOB]``, ``--pause JOB``, ``--resume JOB`` (``--token-cap`` raises the cap), ``--abort JOB``."""
+    """``--status [JOB]``, ``--pause JOB``, ``--resume JOB`` (``--token-cap`` raises the cap; ``--wait`` waits on
+    it), ``--abort JOB``."""
     _require_local_engine(db)
     try:
         if status_job is not None:
-            jobs = db.reembed_status()  # type: ignore[attr-defined]
+            jobs = db.reembed_status(counts=True)  # type: ignore[attr-defined]
             _log.info("reembed_status_poll", jobs=len(jobs), job=None if status_job == _ALL_JOBS else status_job)
             if status_job != _ALL_JOBS:
                 jobs = [j for j in jobs if j.get("job_id") == status_job]
@@ -1838,6 +1859,75 @@ def _reembed_controls(
         raise _reembed_job_error(exc) from exc
     unchanged = " (already in that state; nothing changed)" if job.get("unchanged") else ""
     click.echo(_job_line(job) + unchanged)
+    if wait:
+        _wait_and_report(db, [job])
+
+
+def _run_taxonomy_discover(target: str) -> bool:
+    """``nx taxonomy discover --collection TARGET`` in-process (what ``nx index`` runs after indexing). True on success.
+
+    A seam: tests replace it. A failure is reported and returned, never raised: the job is done whether or not its
+    topics could be built, and the command to retry is in the message.
+    """
+    from nexus.commands.taxonomy_cmd import discover_cmd  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import discover_command  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    try:
+        discover_cmd.callback(collection=target, discover_all=False, force=False)  # type: ignore[misc]
+    except Exception as exc:  # noqa: BLE001 — boundary: the job finished; a failed discover is told, with its retry command
+        _log.warning("reembed_wait_discover_failed", target=target, error=str(exc))
+        click.echo(f"taxonomy discover for {target} failed ({exc}); run: {discover_command(target)}", err=True)
+        return False
+    return True
+
+
+def _wait_and_report(db: object, jobs: list[dict]) -> None:
+    """``--wait``: poll until every job in *jobs* is done, done_with_skips, aborted, failed or paused; name each state.
+
+    Runs taxonomy discover for the target of each job that ended ``done`` or ``done_with_skips`` (once per target).
+    Exits 1 unless every job finished: aborted, failed and paused jobs stopped short and need a person. A Ctrl-C
+    leaves the jobs running (the engine owns them) and says how to look again.
+    """
+    from nexus.reembed_job import FINISHED_STATES, DISCOVER_STATES, WaitError, wait_for_jobs  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    ids = [str(j.get("job_id")) for j in jobs]
+    if not ids:
+        return
+    click.echo(f"Waiting on {len(ids)} job(s); the engine keeps running them if this is interrupted.")
+
+    def changed(row: dict) -> None:
+        click.echo(f"{row.get('job_id')}: {row.get('state')}")
+
+    try:
+        final = wait_for_jobs(
+            lambda: db.reembed_status(),  # type: ignore[attr-defined]
+            ids, sleep=time.sleep, on_change=changed,
+        )
+    except KeyboardInterrupt:
+        click.echo("Stopped waiting. Look again with: nx collection re-embed --status", err=True)
+        raise click.exceptions.Exit(130) from None
+    except WaitError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — boundary: an unreadable engine is the whole answer
+        raise _reembed_job_error(exc) from exc
+    discovered: set[str] = set()
+    stopped_short = False
+    for job_id in ids:
+        row = final[job_id]
+        state = str(row.get("state"))
+        click.echo(f"{_job_line(row)}\n  -> {state}")
+        if state not in FINISHED_STATES:
+            stopped_short = True
+        if state in DISCOVER_STATES:
+            target = str(row.get("target_collection"))
+            if target not in discovered:
+                discovered.add(target)
+                click.echo(f"Discovering topics for {target}...")
+                _run_taxonomy_discover(target)
+    if stopped_short:
+        raise click.exceptions.Exit(1)
 
 
 class _Planned:
@@ -1875,20 +1965,21 @@ def _plan_lines(p: _Planned) -> list[str]:
         f"topics; {plan.get('topic_links', 0)} topic link(s)"
     )
     lines.append(
-        f"  satellite rows naming it that match no live document: {plan.get('unmatched_satellite_rows', 0)} "
-        f"(the delete is refused while any remain unless --force-delete)"
+        f"  satellite rows naming it that match no document the job moves: {plan.get('unmatched_satellite_rows', 0)} "
+        f"(the source is kept, not deleted, while any remain unless --force-delete)"
     )
     homed = plan.get("live_homed_elsewhere")
     if homed is None:
         # An engine that predates the field: say what the plan cannot, rather than print a zero it did not count.
         lines.append(
             "  this engine's plan does not count live documents homed here whose chunks sit in another collection; "
-            "the cutover counts them as residue and holds the delete"
+            "the cutover's parity check refuses to delete while any remain"
         )
     else:
         lines.append(
             f"  live documents homed here whose chunks sit in another collection: {homed} "
-            f"(not moved; the cutover holds the delete while any remain)"
+            f"(not moved; the cutover's parity check fails the job and deletes nothing while any remain, "
+            f"--force-delete does not lift it)"
         )
     return lines
 
@@ -1955,12 +2046,14 @@ def _reembed_jobs(
     force_delete: bool,
     token_cap: int | None,
     skipped: list[str] | None = None,
+    wait: bool = False,
 ) -> None:
-    """Plan each source and, with ``--no-dry-run``, start one job per source.
+    """Plan each source and, with ``--no-dry-run``, start one job per source and re-enter each ``kept_tombstoned`` job.
 
     Every source is planned before any is started, and a refusal on any (the cap, an engine that cannot serve
     the target, a source another job holds as a target) stops the whole run before a write: the RDR's "refused
-    before any write".
+    before any write". A re-entry is not planned: the engine's job keeps its own target, cap and flags, so
+    ``--keep-source``, ``--force-delete`` and ``--token-cap`` do not reach it (the run says so).
     """
     served = db.served_embedding_models()  # type: ignore[attr-defined]
     planned = [_plan_source(db, row, profile, served, token_cap) for row in sources]
@@ -1976,9 +2069,13 @@ def _reembed_jobs(
             f"not planned. nx collection re-embed --status {job.get('job_id')}"
         )
     for r in reentries:
+        what = (
+            "a document is live in the source again, so the job moves it and then finishes"
+            if r.kind == "running" else "the source's tombstones are gone, so the job finishes"
+        )
         click.echo(
-            f"{r.source_row.get('name')}: re-entry of job {r.job.get('job_id')} ({r.kind}): the source's "
-            f"tombstones are gone; the engine's re-entry route is not available yet, so it is listed and not started."
+            f"{r.source_row.get('name')}: re-entry of job {r.job.get('job_id')} ({r.kind}): {what}; the job keeps "
+            f"its own target, token cap, keep_source and force_delete."
         )
     for name in skipped or ():
         click.echo(f"{name}: skipped (--skip)")
@@ -1987,15 +2084,24 @@ def _reembed_jobs(
         for p in refused:
             click.echo(f"refused: {p.refusal}", err=True)
         raise click.exceptions.Exit(1)
-    if not planned:
-        if not held and not reentries and not skipped:
+    if not planned and not reentries:
+        if not held and not skipped:
             click.echo("No collection is off the profile.")
         return
     if dry_run:
         click.echo(
-            f"dry-run: {len(planned)} job(s) would start. Pass --no-dry-run --yes to start them."
+            f"dry-run: {len(planned)} job(s) would start"
+            + (f" and {len(reentries)} would be re-entered" if reentries else "")
+            + ". Pass --no-dry-run --yes to start them."
+            + (" --wait has nothing to wait for in a dry run." if wait else "")
         )
         return
+    if reentries and (keep_source or force_delete or token_cap is not None):
+        click.echo(
+            "--keep-source, --force-delete and --token-cap apply to the jobs started now, not to a re-entered job, "
+            "which keeps what it was started with.",
+            err=True,
+        )
     if not yes:
         billed = sum(int((p.plan or {}).get("token_estimate") or 0) for p in planned if p.cap is not None)
         caps = sorted({p.cap for p in planned if p.cap is not None})
@@ -2009,11 +2115,14 @@ def _reembed_jobs(
         if local_chunks:
             cost.append(f"{local_chunks:,} chunk(s) are embedded on this machine and bill nothing.")
         click.confirm(
-            f"Start {len(planned)} re-embed job(s)? Each moves its collection's documents to the profile's model "
+            f"Start {len(planned)} re-embed job(s)"
+            + (f" and re-enter {len(reentries)}" if reentries else "")
+            + f"? Each moves its collection's documents to the profile's model "
             f"and then {'keeps' if keep_source else 'deletes'} the source. {' '.join(cost)}".rstrip(),
             abort=True,
         )
     failures = 0
+    started: list[dict] = []
     for p in planned:
         name = str(p.row.get("name"))
         try:
@@ -2028,15 +2137,37 @@ def _reembed_jobs(
             failures += 1
             click.echo(f"{name}: not started: {_reembed_job_error(exc).message}", err=True)
             continue
+        started.append(job)
         click.echo(f"started {_job_line(job)}")
+    for r in reentries:
+        name = str(r.source_row.get("name"))
+        try:
+            job = db.reembed_reenter(name)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — boundary: one source's refusal must not stop the others
+            failures += 1
+            click.echo(f"{name}: not re-entered: {_reembed_job_error(exc).message}", err=True)
+            continue
+        started.append(job)
+        click.echo(f"re-entered {_job_line(job)}")
+    if wait and started:
+        _wait_and_report(db, started)
     if failures:
         raise click.exceptions.Exit(1)
-    click.echo("Watch with: nx collection re-embed --status")
+    if not wait:
+        click.echo("Watch with: nx collection re-embed --status")
+        from nexus.reembed_job import discover_command  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        targets = sorted({str(j.get("target_collection")) for j in started})
+        if targets:
+            click.echo(
+                "When a job is done, build its target's topics (topic search misses the moved documents until "
+                "then; --wait does it): " + "; ".join(discover_command(t) for t in targets)
+            )
 
 
 def _reembed_all(
     db: object, *, dry_run: bool, yes: bool, keep_source: bool, force_delete: bool, token_cap: int | None,
-    skip: tuple[str, ...] = (),
+    skip: tuple[str, ...] = (), wait: bool = False,
 ) -> None:
     """``--all``: every live collection off the engine's profile, one job each, less any ``--skip`` NAME.
 
@@ -2090,13 +2221,13 @@ def _reembed_all(
         held=[(row, j) for row, j in found.held if str(row.get("name")) not in skipped],
         reentries=[r for r in found.reentries if str(r.source_row.get("name")) not in skipped],
         dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete, token_cap=token_cap,
-        skipped=skipped,
+        skipped=skipped, wait=wait,
     )
 
 
 def _reembed_cross_model(
     db: object, name: str, target_model: str, *, dry_run: bool, yes: bool, keep_source: bool,
-    force_delete: bool, token_cap: int | None,
+    force_delete: bool, token_cap: int | None, wait: bool = False,
 ) -> None:
     """``NAME --to MODEL`` where MODEL differs from the collection's: the job, if MODEL is the profile's."""
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -2129,7 +2260,7 @@ def _reembed_cross_model(
         )
     _reembed_jobs(
         db, [row], profile=profile, held=[], reentries=[], dry_run=dry_run, yes=yes,
-        keep_source=keep_source, force_delete=force_delete, token_cap=token_cap,
+        keep_source=keep_source, force_delete=force_delete, token_cap=token_cap, wait=wait,
     )
 
 
@@ -2153,8 +2284,9 @@ def _reembed_cross_model(
               help="Job only: keep the emptied source collection (superseded, with its quarantine rows and "
                    "topic data) instead of deleting it.")
 @click.option("--force-delete", is_flag=True, default=False,
-              help="Job only: delete the source even when satellite rows that match no live document "
-                   "still name it.")
+              help="Job only: delete the source even when aspect, queue or highlight rows that match no moved "
+                   "document still name it (otherwise the job ends kept_residue and keeps the source). "
+                   "Does not lift a parity failure.")
 @click.option("--token-cap", type=click.IntRange(min=1), default=None,
               help="Job only: tokens a Voyage target may bill (default 10000000; none for the on-device "
                    "model). With --resume, raises the cap of a job that stopped on it.")
@@ -2165,6 +2297,11 @@ def _reembed_cross_model(
               help="Resume a paused or failed job (re-checks the profile).")
 @click.option("--abort", "abort_job", default=None, metavar="JOB",
               help="Abort a job; documents already moved stay moved.")
+@click.option("--wait", "wait", is_flag=True, default=False,
+              help="Job only: with a start (--all, or NAME --to MODEL with --no-dry-run) or --resume JOB, wait "
+                   "until every job is done, done_with_skips, aborted, failed or paused, naming the state; on "
+                   "the first two, run taxonomy discover for the target. Exits 1 on the other three. Without "
+                   "it, the done report names the discover command.")
 @click.option("--dry-run/--no-dry-run", default=True,
               help="Default dry-run. Pass --no-dry-run to actually write.")
 @click.option("--yes", is_flag=True, default=False,
@@ -2172,7 +2309,7 @@ def _reembed_cross_model(
 def reembed_cmd(
     name: str | None, target_model: str | None, all_collections: bool, skip: tuple[str, ...], keep_source: bool,
     force_delete: bool, token_cap: int | None, status_job: str | None, pause_job: str | None,
-    resume_job: str | None, abort_job: str | None, dry_run: bool, yes: bool,
+    resume_job: str | None, abort_job: str | None, wait: bool, dry_run: bool, yes: bool,
 ) -> None:
     """Re-embed a collection: in place with its own model, or into the profile's model with a job.
 
@@ -2206,6 +2343,17 @@ def reembed_cmd(
     model) and what the source's delete would remove, and a plan above the cap
     is refused before anything is written. Dry run is the default.
 
+    The source is deleted only when it holds no document row and the engine's
+    checks pass. It is kept, superseded, when a tombstoned document still
+    holds it (kept_tombstoned: --all re-enters the job once the trash is
+    purged or a document restored), with --keep-source, or when rows naming
+    it match no document the job moved (kept_residue; --force-delete deletes
+    them with it). A source the parity check refuses (failed, parity_mismatch)
+    is deleted by nothing: --resume re-runs the check, --abort leaves it
+    superseded and undeleted. --wait follows the jobs to done,
+    done_with_skips, aborted, failed or paused and runs taxonomy discover for
+    the target of the first two.
+
     Limitations:
       - The in-place form does NOT rename the collection; run
         ``nx collection rename`` if the name needs to track the new model.
@@ -2220,9 +2368,11 @@ def reembed_cmd(
             )
         if token_cap is not None and resume_job is None:
             raise click.UsageError("--token-cap with a job control goes with --resume.")
+        if wait and resume_job is None:
+            raise click.UsageError("--wait goes with a start (--all, NAME --to MODEL) or --resume JOB.")
         _reembed_controls(
             _t3(), status_job=status_job, pause_job=pause_job, resume_job=resume_job,
-            abort_job=abort_job, token_cap=token_cap,
+            abort_job=abort_job, token_cap=token_cap, wait=wait,
         )
         return
     job_flags = keep_source or force_delete or token_cap is not None
@@ -2233,7 +2383,7 @@ def reembed_cmd(
             )
         _reembed_all(
             _t3(), dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete,
-            token_cap=token_cap, skip=skip,
+            token_cap=token_cap, skip=skip, wait=wait,
         )
         return
     if not name or not target_model:
@@ -2261,7 +2411,7 @@ def reembed_cmd(
             if is_local_mode():
                 _reembed_cross_model(
                     db, name, target_model, dry_run=dry_run, yes=yes, keep_source=keep_source,
-                    force_delete=force_delete, token_cap=token_cap,
+                    force_delete=force_delete, token_cap=token_cap, wait=wait,
                 )
                 return
             raise click.ClickException(
@@ -2280,6 +2430,10 @@ def reembed_cmd(
         raise click.UsageError(
             "--keep-source, --force-delete and --token-cap belong to the re-embed job (a different --to MODEL, "
             "or --all); an in-place re-embed has none of them."
+        )
+    if wait:
+        raise click.UsageError(
+            "--wait belongs to the re-embed job (a different --to MODEL, or --all); an in-place re-embed has no job."
         )
 
     if not dry_run and not yes:

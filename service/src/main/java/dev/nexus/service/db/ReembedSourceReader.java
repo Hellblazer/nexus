@@ -17,6 +17,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
@@ -25,6 +26,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
@@ -55,8 +57,8 @@ public final class ReembedSourceReader {
         this.scope = scope;
     }
 
-    // The document shapes, defined once for the pass, the delete guard and the plan, so the plan cannot count a
-    // different set than the cutover refuses on. Each is a condition on CATALOG_DOCUMENTS (unaliased) rows.
+    // The document shapes, defined once for the pass, the cutover's checks and the plan, so the plan cannot count a
+    // different set than the cutover acts on. Each is a condition on CATALOG_DOCUMENTS (unaliased) rows.
 
     /** A manifest row of the document names {@code source}. */
     private static Condition namesSource(DSLContext ctx, String tenant, String source) {
@@ -120,9 +122,11 @@ public final class ReembedSourceReader {
     }
 
     /**
-     * What still names the source, read just before the cutover deletes it. The delete removes every document row
-     * homed at the source (live or tombstoned, whether or not a manifest names it) and every aspect, queue and
-     * highlight row naming it, so anything counted here is lost if the delete runs.
+     * What still names the source. The delete removes every document row homed at the source (live or tombstoned,
+     * whether or not a manifest names it) and every aspect, queue and highlight row naming it, so anything counted
+     * here is lost if the delete runs. The cutover reads the satellite rows ({@link Residue#satelliteRows}) for its residue
+     * check (a {@code force_delete} lets them go); the tombstoned and live-homed documents it meets earlier, as
+     * {@code kept_tombstoned} and the parity check ({@link Parity}), which no flag lifts.
      *
      * @param liveCandidates       whether a live candidate document remains (a client wrote one after the pass)
      * @param tombstoned           soft-deleted documents whose manifest names the source or that are homed at it
@@ -136,17 +140,14 @@ public final class ReembedSourceReader {
     public record Residue(boolean liveCandidates, long tombstoned, long liveHomedElsewhere, long aspects,
                           long queue, long highlights) {
 
-        public boolean isEmpty() {
-            return !liveCandidates && tombstoned == 0 && liveHomedElsewhere == 0 && aspects == 0 && queue == 0
-                && highlights == 0;
+        /** The aspect, queue and highlight rows still naming the source: what {@code force_delete} lets the delete take. */
+        public long satelliteRows() {
+            return aspects + queue + highlights;
         }
 
-        /** A sentence for {@code last_error}: what the source still holds. */
-        public String describe() {
+        /** A sentence for {@code last_error}: the satellite rows, by table. */
+        public String describeSatellites() {
             List<String> parts = new ArrayList<>();
-            if (liveCandidates) parts.add("a live document");
-            if (tombstoned > 0) parts.add(tombstoned + " tombstoned document(s)");
-            if (liveHomedElsewhere > 0) parts.add(liveHomedElsewhere + " live document(s) homed here whose chunks are elsewhere");
             if (aspects > 0) parts.add(aspects + " document_aspects row(s)");
             if (queue > 0) parts.add(queue + " aspect_extraction_queue row(s)");
             if (highlights > 0) parts.add(highlights + " document_highlights row(s)");
@@ -169,6 +170,102 @@ public final class ReembedSourceReader {
             long highlights = ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
                 DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source)));
             return new Residue(live, tombstoned, liveElsewhere, aspects, queue, highlights);
+        });
+    }
+
+    /** Documents soft-deleted whose manifest names {@code source} or that are homed there: what ends a job {@code kept_tombstoned}. */
+    public long tombstonedDocuments(String tenant, String source) {
+        return scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_DOCUMENTS, tombstonedShape(ctx, tenant, source)));
+    }
+
+    /** How many document ids a {@link Parity} names, so a message points at the rows without listing thousands. */
+    static final int PARITY_SAMPLE = 5;
+
+    /**
+     * The parity check before the source's delete (RDR-210 Cutover, "Parity before the delete"), as three counts.
+     * The delete is irreversible, so it runs only when {@link #holds()}:
+     * <ul>
+     *   <li>{@code manifestRowsNamingSource}: manifest rows (any document's) whose {@code collection} is the source.
+     *       The delete removes them whatever their document is, and each is the only copy of a chunk the source
+     *       still holds for that document;</li>
+     *   <li>{@code liveHomedAtSource}: live documents whose {@code physical_collection} is the source (a moved
+     *       document homed back by a client's registration, a document registered after the pass looked). The delete
+     *       removes their catalog row;</li>
+     *   <li>{@code movedAgreeing} against {@code documentsMoved}: the documents of this job's move record
+     *       (outcome {@code moved}) whose {@code physical_collection} is the target and all of whose manifest rows
+     *       (it may have none) name the target. A document purged since its move makes the counts differ, which errs toward keeping
+     *       the source.</li>
+     * </ul>
+     * The three {@code ...DocIds} lists are up to {@link #PARITY_SAMPLE} document ids each, for the message that tells an
+     * operator which manifest rows to inspect before any hand delete.
+     */
+    public record Parity(long manifestRowsNamingSource, long liveHomedAtSource, long movedRecorded,
+                         long movedAgreeing, long documentsMoved, String manifestDocIds,
+                         String homedDocIds, String disagreeingDocIds) {
+
+        public boolean holds() {
+            return manifestRowsNamingSource == 0 && liveHomedAtSource == 0 && movedRecorded == documentsMoved
+                && movedAgreeing == documentsMoved;
+        }
+
+        /** The counts and the rows to look at, for {@code last_error}. */
+        public String describe(String source) {
+            StringBuilder sb = new StringBuilder("parity check refused the delete: ")
+                .append(manifestRowsNamingSource).append(" manifest row(s) still name the source")
+                .append(sample(manifestDocIds)).append("; ")
+                .append(liveHomedAtSource).append(" live document(s) are homed at the source")
+                .append(sample(homedDocIds)).append("; ")
+                .append(movedAgreeing).append(" of ").append(documentsMoved)
+                .append(" moved document(s) have their manifest and physical collection on the target");
+            if (movedRecorded != documentsMoved) {
+                sb.append(" (the move record lists ").append(movedRecorded).append(")");
+            }
+            sb.append(sample(disagreeingDocIds))
+                .append(". Nothing was deleted and the source stays superseded. Inspect those documents' manifest "
+                    + "rows before any hand delete of ").append(source)
+                .append(": --resume re-runs the pass and the check, --abort leaves the source as it is.");
+            return sb.toString();
+        }
+
+        private static String sample(String docIds) {
+            return docIds.isEmpty() ? "" : " (" + docIds + ")";
+        }
+    }
+
+    /** The sampled ids as one string, {@code ", ..."} appended when the sample is full (there may be more). */
+    private static String sampleOf(List<String> ids) {
+        return String.join(", ", ids) + (ids.size() >= PARITY_SAMPLE ? ", ..." : "");
+    }
+
+    public Parity parity(String tenant, String source, String target, UUID jobId, long documentsMoved) {
+        return scope.withTenant(tenant, ctx -> {
+            var d = CATALOG_DOCUMENTS;
+            var c = CATALOG_DOCUMENT_CHUNKS;
+            var m = REEMBED_JOB_MOVES;
+            Condition namesSourceRow = c.TENANT_ID.eq(tenant).and(c.COLLECTION.eq(source));
+            long manifestRows = ctx.fetchCount(c, namesSourceRow);
+            List<String> manifestDocIds = ctx.selectDistinct(c.DOC_ID).from(c).where(namesSourceRow)
+                .orderBy(c.DOC_ID).limit(PARITY_SAMPLE).fetch(c.DOC_ID);
+
+            Condition homed = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(d.PHYSICAL_COLLECTION.eq(source));
+            long liveHomed = ctx.fetchCount(d, homed);
+            List<String> homedDocIds = ctx.select(d.TUMBLER).from(d).where(homed).orderBy(d.TUMBLER)
+                .limit(PARITY_SAMPLE).fetch(d.TUMBLER);
+
+            Condition moved = m.TENANT_ID.eq(tenant).and(m.JOB_ID.eq(jobId))
+                .and(m.OUTCOME.eq(ReembedJobRepository.OUTCOME_MOVED));
+            long recorded = ctx.fetchCount(m, moved);
+            // A moved document agrees when its row is homed at the target and every manifest row it has (a document
+            // with no chunks has none) names the target.
+            Condition agrees = DSL.exists(ctx.selectOne().from(d)
+                    .where(d.TENANT_ID.eq(tenant)).and(d.TUMBLER.eq(m.DOC_ID)).and(d.PHYSICAL_COLLECTION.eq(target)))
+                .and(DSL.notExists(ctx.selectOne().from(c)
+                    .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(m.DOC_ID)).and(c.COLLECTION.ne(target))));
+            long agreeing = ctx.fetchCount(m, moved.and(agrees));
+            List<String> disagreeing = ctx.select(m.DOC_ID).from(m).where(moved.and(DSL.not(agrees)))
+                .orderBy(m.DOC_ID).limit(PARITY_SAMPLE).fetch(m.DOC_ID);
+            return new Parity(manifestRows, liveHomed, recorded, agreeing, documentsMoved, sampleOf(manifestDocIds),
+                sampleOf(homedDocIds), sampleOf(disagreeing));
         });
     }
 
@@ -226,41 +323,66 @@ public final class ReembedSourceReader {
                 .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(source)).and(CHUNKS.CHASH.in(owned)))
                 .fetchOne(0, BigDecimal.class);
 
-            long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source);
-
-            Select<Record1<Long>> sourceTopics = ctx.select(TOPICS.ID).from(TOPICS)
-                .where(TOPICS.TENANT_ID.eq(tenant).and(TOPICS.COLLECTION.eq(source)));
-            long foreignAssignments = ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
-                .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(sourceTopics))
-                .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(source)));
-            long links = ctx.fetchCount(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID.eq(tenant)
-                .and(TOPIC_LINKS.FROM_TOPIC_ID.in(sourceTopics).or(TOPIC_LINKS.TO_TOPIC_ID.in(sourceTopics))));
-
-            // A satellite row belongs to a document by doc_id; one whose document the job does not move stays
-            // naming the source, and the delete would take it.
-            var md = CATALOG_DOCUMENTS.as("plan_matched_docs");
-            var mc = CATALOG_DOCUMENT_CHUNKS.as("plan_matched_chunks");
-            Condition matchedShape = DSL.exists(ctx.selectOne().from(mc)
-                    .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)).and(mc.COLLECTION.eq(source)))
-                .or(DSL.notExists(ctx.selectOne().from(mc)
-                    .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)))
-                    .and(md.PHYSICAL_COLLECTION.eq(source)));
-            Function<Field<String>, Condition> moved = docId -> DSL.exists(ctx.selectOne().from(md)
-                .where(md.TENANT_ID.eq(tenant)).and(md.TUMBLER.eq(docId)).and(md.DELETED_AT.isNull())
-                .and(matchedShape));
-            long unmatched =
-                ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
-                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
-                + ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
-                    .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
-                    .and(DSL.not(moved.apply(ASPECT_EXTRACTION_QUEUE.DOC_ID))))
-                + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
-                    .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
-                    .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))));
+            DeleteCounts removal = deleteCounts(ctx, tenant, source);
 
             return new PlanCounts(documents, tombstoned, chunks, Math.max(0, stored - chunks),
-                tokens == null ? 0 : tokens.longValue(), quarantine, foreignAssignments, links, unmatched, liveElsewhere);
+                tokens == null ? 0 : tokens.longValue(), removal.quarantineRows(), removal.foreignTopicAssignments(),
+                removal.topicLinks(), removal.unmatchedSatelliteRows(), liveElsewhere);
         });
+    }
+
+    /**
+     * What the source's delete takes besides the source's own documents and chunks (RDR-210 Cutover, "What that
+     * delete removes"): the four counts {@code --status} shows beside a job whose source still exists, and the
+     * plan shows before it starts. One snapshot per statement; nothing is written.
+     *
+     * @param quarantineRows          the source's rows in its quarantine siblings
+     * @param foreignTopicAssignments topic assignments of OTHER collections that point at the source's topics
+     * @param topicLinks              links of the source's topics
+     * @param unmatchedSatelliteRows  aspect, queue and highlight rows naming the source whose document the job does
+     *                                not move
+     */
+    public record DeleteCounts(long quarantineRows, long foreignTopicAssignments, long topicLinks,
+                               long unmatchedSatelliteRows) {
+    }
+
+    public DeleteCounts deleteCounts(String tenant, String source) {
+        return scope.withTenant(tenant, ctx -> deleteCounts(ctx, tenant, source));
+    }
+
+    private static DeleteCounts deleteCounts(DSLContext ctx, String tenant, String source) {
+        long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source);
+
+        Select<Record1<Long>> sourceTopics = ctx.select(TOPICS.ID).from(TOPICS)
+            .where(TOPICS.TENANT_ID.eq(tenant).and(TOPICS.COLLECTION.eq(source)));
+        long foreignAssignments = ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+            .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(sourceTopics))
+            .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(source)));
+        long links = ctx.fetchCount(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID.eq(tenant)
+            .and(TOPIC_LINKS.FROM_TOPIC_ID.in(sourceTopics).or(TOPIC_LINKS.TO_TOPIC_ID.in(sourceTopics))));
+
+        // A satellite row belongs to a document by doc_id; one whose document the job does not move stays
+        // naming the source, and the delete would take it.
+        var md = CATALOG_DOCUMENTS.as("plan_matched_docs");
+        var mc = CATALOG_DOCUMENT_CHUNKS.as("plan_matched_chunks");
+        Condition matchedShape = DSL.exists(ctx.selectOne().from(mc)
+                .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)).and(mc.COLLECTION.eq(source)))
+            .or(DSL.notExists(ctx.selectOne().from(mc)
+                .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)))
+                .and(md.PHYSICAL_COLLECTION.eq(source)));
+        Function<Field<String>, Condition> moved = docId -> DSL.exists(ctx.selectOne().from(md)
+            .where(md.TENANT_ID.eq(tenant)).and(md.TUMBLER.eq(docId)).and(md.DELETED_AT.isNull())
+            .and(matchedShape));
+        long unmatched =
+            ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
+                .and(DOCUMENT_ASPECTS.COLLECTION.eq(source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
+            + ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
+                .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
+                .and(DSL.not(moved.apply(ASPECT_EXTRACTION_QUEUE.DOC_ID))))
+            + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
+                .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
+                .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))));
+        return new DeleteCounts(quarantine, foreignAssignments, links, unmatched);
     }
 
     /**

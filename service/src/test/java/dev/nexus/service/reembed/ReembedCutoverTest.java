@@ -2,8 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
+import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ReembedJobRepository.Job;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
+import dev.nexus.service.db.ReembedSourceReader.DeleteCounts;
 import dev.nexus.service.reembed.ReembedStateMachine.Applied;
 import dev.nexus.service.reembed.ReembedStateMachine.Event;
 import dev.nexus.service.reembed.ReembedStateMachine.Refused;
@@ -20,11 +23,17 @@ import static dev.nexus.service.db.ReembedJobRepository.ABORTED;
 import static dev.nexus.service.db.ReembedJobRepository.CUTOVER;
 import static dev.nexus.service.db.ReembedJobRepository.DONE;
 import static dev.nexus.service.db.ReembedJobRepository.DONE_WITH_SKIPS;
+import static dev.nexus.service.db.ReembedJobRepository.FAILED;
 import static dev.nexus.service.db.ReembedJobRepository.RUNNING;
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -34,8 +43,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * count of the calls the runner makes to {@code deleteCollection} (its {@code delete} phase), together with the
  * tenant's {@code gc_audit} rows.
  *
- * <p>Parity, the {@code kept_tombstoned} and residue dispositions and {@code --wait} are Step 4 (nexus-09iho) and
- * have no tests here.
+ * <p>Step 4 (bead nexus-09iho, with nexus-6grho): the ordered steps after the supersede. A tombstoned document ends
+ * {@code kept_tombstoned} before any parity check; {@code keep_source} ends {@code kept_by_flag}; the parity check
+ * fails a source that still has a manifest row, a live homed document or a moved document that is not on the target
+ * (the job goes {@code failed/parity_mismatch}, nothing deleted, {@code --resume} fails the same way while the cause
+ * stands, {@code --abort} leaves the source superseded and undeleted); rows naming the source that match no moved
+ * document end {@code kept_residue} unless {@code force_delete}; and a {@code kept_tombstoned} job re-enters
+ * {@code cutover} or {@code running} once the trash is purged or restored.
  *
  * <p>Run: {@code -Dtest=ReembedCutoverTest}.
  */
@@ -322,86 +336,526 @@ class ReembedCutoverTest extends ReembedFixture {
         assertThat(blocked.lastError()).contains("cutover is blocked").contains("no longer registered");
     }
 
-    // ── the delete guard (the interim refusal before Step 4's dispositions) ──
 
-    @Test
-    void aLiveDocumentThatAppearsBetweenTheSupersedeAndTheDelete_blocksTheDelete_nothingIsDeleted() {
-        Fx fx = pair("late");
-        seedDocs(fx, 2, 3);
-        Job started = startJob(fx, null, false);
-        Probe probe = new Probe();
-        java.util.function.Consumer<String> base = probe.hook(Set.of());
+
+    // ── the ordered steps after the supersede (Step 4, nexus-09iho) ──────────
+
+    /** Bare registration of a document: no manifest, homed at {@code home}. */
+    private String registerBare(Fx fx, String name, String home) {
+        String docId = "rr." + fx.tag() + "." + name;
+        catalog.upsertDocument(fx.tenant(), java.util.Map.of("tumbler", docId, "title", "title-" + docId,
+            "content_type", CONTENT_TYPE, "corpus", CONTENT_TYPE, "physical_collection", home, "chunk_count", 0));
+        return docId;
+    }
+
+    /** The original chunk texts {@link #seedDocs} wrote for document number {@code d}. */
+    private static List<String> seededTexts(Fx fx, int d, int perDoc) {
+        List<String> texts = new ArrayList<>();
+        for (int k = 0; k < perDoc; k++) texts.add("doc " + fx.tag() + " d" + d + " chunk " + k + " lorem ipsum");
+        return texts;
+    }
+
+    private static final String SAT_ASPECTS = "document_aspects";
+    private static final String SAT_QUEUE = "aspect_extraction_queue";
+    private static final String SAT_HIGHLIGHTS = "document_highlights";
+
+    /** One satellite row of {@code table} naming {@code collection}, for document {@code doc}. */
+    private void seedSatellite(String table, Fx fx, String collection, String doc) {
+        su(ctx -> switch (table) {
+            case SAT_ASPECTS -> ctx.insertInto(DOCUMENT_ASPECTS,
+                    DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(fx.tenant(), collection, "p/" + doc, OffsetDateTime.now(), "m1", "docling", doc,
+                    "file:///p/" + doc).execute();
+            case SAT_QUEUE -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                    ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .values(fx.tenant(), collection, "p/" + doc, "pending", OffsetDateTime.now(), doc).execute();
+            case SAT_HIGHLIGHTS -> ctx.insertInto(DOCUMENT_HIGHLIGHTS,
+                    DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(fx.tenant(), doc, collection, "file:///hl/" + doc, "highlight", OffsetDateTime.now())
+                .execute();
+            default -> throw new IllegalArgumentException(table);
+        });
+    }
+
+    /** Rows of {@code table} naming {@code collection}. */
+    private int satelliteRows(String table, Fx fx, String collection) {
+        return su(ctx -> switch (table) {
+            case SAT_ASPECTS -> ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant()),
+                DOCUMENT_ASPECTS.COLLECTION.eq(collection));
+            case SAT_QUEUE -> ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(fx.tenant()),
+                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection));
+            case SAT_HIGHLIGHTS -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(fx.tenant()),
+                DOCUMENT_HIGHLIGHTS.COLLECTION.eq(collection));
+            default -> throw new IllegalArgumentException(table);
+        });
+    }
+
+    private static final List<String> SATELLITE_TABLES = List.of(SAT_ASPECTS, SAT_QUEUE, SAT_HIGHLIGHTS);
+
+    /** A runner whose hook counts deletes and runs {@code during} on every phase. */
+    private ReembedRunner probedRunner(Fx fx, Probe probe, java.util.function.Consumer<String> during) {
         ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+        java.util.function.Consumer<String> base = probe.hook(Set.of());
         runner.setPhaseHookForTests(p -> {
             base.accept(p);
-            if (p.equals("after_supersede")) {
-                // a document registered against the source after the pass looked and after the supersede
-                catalog.upsertDocument(fx.tenant(), java.util.Map.of("tumbler", "rr." + fx.tag() + ".late",
-                    "title", "late", "content_type", CONTENT_TYPE, "corpus", CONTENT_TYPE,
-                    "physical_collection", fx.src(), "chunk_count", 0));
+            during.accept(p);
+        });
+        return runner;
+    }
+
+    // kept_tombstoned and kept_by_flag
+
+    @Test
+    void aTombstoneOutranksKeepSource_theOrderIsTombstonedThenFlag() {
+        Fx fx = pair("tombflag");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job started = startJob(fx, null, true);
+        AtomicInteger moves = new AtomicInteger();
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("before_move") && moves.incrementAndGet() == 2) {
+                assertThat(catalog.deleteDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
             }
         });
 
         runner.tick();
 
-        Job blocked = job(fx, started.jobId());
-        assertThat(blocked.state()).as("not done: the delete would have destroyed the late document")
-            .isEqualTo(CUTOVER);
-        assertThat(blocked.cutoverStep()).as("the delete never began").isEqualTo("superseded");
-        assertThat(blocked.lastError()).contains("cutover is blocked").contains("a live document");
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).as("RDR order: kept_tombstoned (3) before keep_source (4)")
+            .isEqualTo("kept_tombstoned");
+        assertThat(probe.deletes).hasValue(0);
+    }
+
+    // the parity check
+
+    @Test
+    void aDocumentRegisteredAtTheSourceAfterTheSupersede_failsParity_deletesNothing_andResumeMovesItAndFinishes() {
+        Fx fx = pair("late");
+        List<String> docs = seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        String late = "rr." + fx.tag() + ".late";
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                registerBare(fx, "late", fx.src());   // after the pass looked and after the supersede
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).as("failed, not blocked: the parity check refused the delete").isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.lastError()).contains("1 live document(s) are homed at the source").contains(late)
+            .contains("Inspect those documents' manifest rows").contains("--abort");
+        assertThat(failed.cutoverStep()).as("the delete never began").isEqualTo("superseded");
         assertThat(probe.deletes).hasValue(0);
         assertThat(probe.phases).doesNotContain("before_delete");
         assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNotNull();
-        assertThat(physical(fx, "rr." + fx.tag() + ".late")).as("the late document survives").isEqualTo(fx.src());
+        assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
+        assertThat(physical(fx, late)).as("the late document survives").isEqualTo(fx.src());
 
-        // the next tick sees a live candidate at the top of the cutover, the existing rule: done with skips
+        // --resume re-runs the pass, which moves the late document (a candidate: homed here with no manifest)
         runner.setPhaseHookForTests(null);
+        force(fx, failed, RUNNING, Transition.NONE);
         runner.tick();
-        assertThat(job(fx, started.jobId()).state()).isEqualTo(DONE_WITH_SKIPS);
-        assertThat(catalog.getCollection(fx.tenant(), fx.src())).as("still nothing deleted").isNotNull();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).as(done.failureReason() + ": " + done.lastError()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(done.documentsMoved()).isEqualTo(3);
+        assertThat(physical(fx, late)).isEqualTo(fx.tgt());
+        for (String d : docs) assertThat(physical(fx, d)).isEqualTo(fx.tgt());
     }
 
     @Test
-    void rowsStillNamingTheSource_inAnySatelliteTable_blockTheDelete_andLastErrorNamesTheTable() {
-        record Case(String table, java.util.function.BiConsumer<Fx, String> seed) { }
-        List<Case> cases = List.of(
-            new Case("document_aspects", (fx, doc) -> su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS,
-                    DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
-                    DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                    DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(fx.tenant(), fx.src(), "p/" + doc, OffsetDateTime.now(), "m1", "docling", doc,
-                    "file:///p/" + doc).execute())),
-            new Case("aspect_extraction_queue", (fx, doc) -> su(ctx -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .values(fx.tenant(), fx.src(), "p/" + doc, "pending", OffsetDateTime.now(), doc).execute())),
-            new Case("document_highlights", (fx, doc) -> su(ctx -> ctx.insertInto(DOCUMENT_HIGHLIGHTS,
-                    DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
-                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                .values(fx.tenant(), doc, fx.src(), "file:///hl/" + doc, "highlight", OffsetDateTime.now())
-                .execute())));
-        for (Case c : cases) {
+    void aMovedDocumentHomedBackAtTheSource_failsParity_failsAgainOnResume_andAbortLeavesTheSourceSupersededAndUndeleted() {
+        Fx fx = pair("homedback");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                // a client registers a moved document again: physical_collection back to the source, manifest on the target
+                registerBare(fx, "d000", fx.src());
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.lastError()).contains("1 live document(s) are homed at the source").contains(docs.get(0))
+            .contains("2 of 3 moved document(s)");
+        assertThat(manifestCollections(fx, docs.get(0))).as("its manifest still names the target")
+            .containsExactly(fx.tgt());
+        int sourceChunks = chunkCount(fx, fx.src());
+        assertThat(sourceChunks).as("the moved documents' source chunks are still there").isPositive();
+
+        // --resume: the document is no candidate (its manifest names the target), so the pass ends and the same check fails again
+        runner.setPhaseHookForTests(probe.hook(Set.of()));
+        force(fx, failed, RUNNING, Transition.NONE);
+        runner.tick();
+
+        Job again = job(fx, started.jobId());
+        assertThat(again.state()).as("the same check fails the same way while its cause stands").isEqualTo(FAILED);
+        assertThat(again.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(again.lastError()).contains(docs.get(0));
+        assertThat(probe.deletes).hasValue(0);
+
+        // --abort: the source stays superseded and undeleted, for nx collection delete by hand
+        Job aborted = force(fx, again, ABORTED, Transition.NONE);
+        assertThat(aborted.state()).isEqualTo(ABORTED);
+        assertThat(aborted.failureReason()).as("an aborted job still says why it failed").isEqualTo("parity_mismatch");
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNotNull();
+        assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
+        assertThat(chunkCount(fx, fx.src())).as("nothing was deleted").isEqualTo(sourceChunks);
+        runner.tick();
+        assertThat(job(fx, started.jobId()).state()).as("an aborted job is left alone").isEqualTo(ABORTED);
+        assertThat(probe.deletes).hasValue(0);
+    }
+
+    @Test
+    void aMovedDocumentPurgedSinceItsMove_failsParity_becauseTheCountsDiffer() {
+        Fx fx = pair("purged");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docs.get(1))).execute());
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.lastError()).contains("0 manifest row(s) still name the source")
+            .contains("2 of 3 moved document(s)").contains(docs.get(1));
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).as("errs toward keeping the source").isNotNull();
+    }
+
+    @Test
+    void aManifestRowWrittenBackBeforeTheSupersede_holdsTheSupersede_nothingIsSupersededOrDeleted() {
+        // nexus-6grho: the cutover looks for manifest rows naming the source BEFORE it supersedes.
+        Fx fx = pair("prewrite");
+        List<String> docs = seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        ReembedRunner first = runner(fx, ONE_DOC_PER_BATCH);
+        first.setPhaseHookForTests(probe.hook(Set.of("before_supersede")));
+        first.tick();
+        Job crashed = job(fx, started.jobId());
+        assertThat(crashed.state()).as("crashed at the head of the cutover").isEqualTo(CUTOVER);
+        assertThat(crashed.cutoverStep()).isNull();
+        assertThat(supersededBy(fx, fx.src())).isNotEqualTo(fx.tgt());
+
+        clientWrite(fx, fx.src(), docs.get(0), seededTexts(fx, 0, 3));   // a client writes a moved document back
+
+        ReembedRunner second = runner(fx, ONE_DOC_PER_BATCH);
+        second.setPhaseHookForTests(probe.hook(Set.of()));
+        second.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE_WITH_SKIPS);
+        assertThat(done.cutoverStep()).isNull();
+        assertThat(supersededBy(fx, fx.src())).as("the source was not superseded").isNotEqualTo(fx.tgt());
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(manifestCollections(fx, docs.get(0))).as("the client's write is the live copy").containsExactly(fx.src());
+    }
+
+    @Test
+    void aManifestRowWrittenInTheWindowBeforeTheSupersede_failsParityNamingTheDocument_andResumeHealsItWithBothColumnsAgreeing() {
+        // nexus-6grho / S-R2-2: a write that lands between the candidate check and the supersede is not lost.
+        Fx fx = pair("window");
+        List<String> docs = seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        Probe probe = new Probe();
+        AtomicInteger writes = new AtomicInteger();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("before_supersede") && writes.getAndIncrement() == 0) {
+                clientWrite(fx, fx.src(), docs.get(0), seededTexts(fx, 0, 3));
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(failed.lastError()).contains("3 manifest row(s) still name the source").contains(docs.get(0));
+        assertThat(probe.deletes).hasValue(0);
+        assertThat(manifestCollections(fx, docs.get(0))).as("the write is intact").containsExactly(fx.src());
+        assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
+
+        // --resume: the document is a candidate again (its manifest names the source), moves, and the source is deleted
+        force(fx, failed, RUNNING, Transition.NONE);
+        runner.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        for (String d : docs) {
+            assertThat(manifestCollections(fx, d)).as("manifest of " + d).containsExactly(fx.tgt());
+            assertThat(physical(fx, d)).as("physical_collection of " + d).isEqualTo(fx.tgt());
+        }
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+    }
+
+    // the residue check
+
+    @Test
+    void rowsNamingTheSourceThatMatchNoMovedDocument_endKeptResidue_inAnySatelliteTable() {
+        for (String table : SATELLITE_TABLES) {
             Fx fx = pair("residue");
-            List<String> docs = seedDocs(fx, 2, 3);
+            seedDocs(fx, 2, 3);
+            String other = registerBare(fx, "other", fx.tgt());     // a document that is not the job's to move
+            seedSatellite(table, fx, fx.src(), other);
             Job started = startJob(fx, null, false);
             Probe probe = new Probe();
-            java.util.function.Consumer<String> base = probe.hook(Set.of());
-            ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
-            runner.setPhaseHookForTests(p -> {
-                base.accept(p);
-                if (p.equals("after_supersede")) {
-                    c.seed().accept(fx, docs.get(0));    // a row written against the source after its document moved
-                }
-            });
+            ReembedRunner runner = probedRunner(fx, probe, p -> { });
 
             runner.tick();
 
-            Job blocked = job(fx, started.jobId());
-            assertThat(blocked.state()).as(c.table()).isEqualTo(CUTOVER);
-            assertThat(blocked.lastError()).as(c.table()).contains("cutover is blocked").contains(c.table() + " row(s)");
-            assertThat(probe.deletes).as(c.table()).hasValue(0);
-            assertThat(catalog.getCollection(fx.tenant(), fx.src())).as(c.table()).isNotNull();
+            Job kept = job(fx, started.jobId());
+            assertThat(kept.state()).as(table).isEqualTo(DONE);
+            assertThat(kept.disposition()).as(table).isEqualTo("kept_residue");
+            assertThat(kept.lastError()).as(table).contains("1 " + table + " row(s)")
+                .contains("nx collection delete " + fx.src()).contains("--force-delete");
+            assertThat(probe.deletes).as(table).hasValue(0);
+            assertThat(supersededBy(fx, fx.src())).as(table).isEqualTo(fx.tgt());
+            assertThat(satelliteRows(table, fx, fx.src())).as(table + " row is intact").isEqualTo(1);
         }
+    }
+
+    @Test
+    void forceDeleteLetsTheResidueThrough_theRowsGoWithTheSource_andTheJobSaysSo() {
+        for (String table : SATELLITE_TABLES) {
+            Fx fx = pair("force");
+            seedDocs(fx, 2, 3);
+            String other = registerBare(fx, "other", fx.tgt());
+            seedSatellite(table, fx, fx.src(), other);
+            Job started = jobs.start(fx.tenant(), fx.src(), fx.tgt(), null, false, true);
+            Probe probe = new Probe();
+            ReembedRunner runner = probedRunner(fx, probe, p -> { });
+
+            runner.tick();
+
+            Job done = job(fx, started.jobId());
+            assertThat(done.state()).as(table).isEqualTo(DONE);
+            assertThat(done.disposition()).as(table).isEqualTo("deleted");
+            assertThat(done.forceDelete()).isTrue();
+            assertThat(done.lastError()).as(table).contains("--force-delete deleted").contains("1 " + table + " row(s)");
+            assertThat(probe.deletes).as(table).hasValue(1);
+            assertThat(catalog.getCollection(fx.tenant(), fx.src())).as(table).isNull();
+            assertThat(satelliteRows(table, fx, fx.src())).as(table + " row went with the source").isZero();
+        }
+    }
+
+    @Test
+    void forceDeleteDoesNotReachTheParityCheck_noFlagDeletesALiveDocumentsOnlyCopy() {
+        Fx fx = pair("forceparity");
+        seedDocs(fx, 2, 3);
+        Job started = jobs.start(fx.tenant(), fx.src(), fx.tgt(), null, false, true);
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("after_supersede")) {
+                registerBare(fx, "late", fx.src());
+            }
+        });
+
+        runner.tick();
+
+        Job failed = job(fx, started.jobId());
+        assertThat(failed.state()).isEqualTo(FAILED);
+        assertThat(failed.failureReason()).isEqualTo("parity_mismatch");
+        assertThat(probe.deletes).hasValue(0);
+    }
+
+    @Test
+    void afterTheDelete_noSatelliteRowOfAMovedDocumentNamesTheSource_andTheMovedDocumentsAspectsAreIntact() {
+        Fx fx = pair("satmoved");
+        List<String> docs = seedDocs(fx, 2, 3);
+        for (String table : SATELLITE_TABLES) seedSatellite(table, fx, fx.src(), docs.get(0));
+        Job started = startJob(fx, null, false);
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        assertThat(job(fx, started.jobId()).disposition()).isEqualTo("deleted");
+        for (String table : SATELLITE_TABLES) {
+            assertThat(satelliteRows(table, fx, fx.src())).as(table + " naming the source").isZero();
+            assertThat(satelliteRows(table, fx, fx.tgt())).as(table + " of the moved document is intact").isEqualTo(1);
+        }
+    }
+
+    // --status counts
+
+    @Test
+    void theCountsStatusShowsBeforeTheDelete_matchWhatTheDeleteRemoved() {
+        Fx fx = pair("counts");
+        seedDocs(fx, 2, 2);
+        String sibling = "quarantine-" + fx.src();
+        String otherText = "chunk of another collection " + fx.tag();
+        long topicA = 9_000_000L + Math.abs((long) (fx.tenant() + "a").hashCode());
+        long topicB = topicA + 1;
+        long topicElsewhere = topicA + 2;
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, fx.tenant(), sibling);
+            for (int i = 0; i < 3; i++) {
+                String text = "quarantined " + i + " " + fx.tag();
+                PgContainerHelper.insertChunks(ctx, fx.tenant(), sibling, List.of(ch(text)), List.of(text),
+                    List.of(new float[768]), List.of(java.util.Map.of("origin_collection", fx.src())));
+            }
+            PgContainerHelper.insertChunks(ctx, fx.tenant(), fx.tgt(), List.of(ch(otherText)), List.of(otherText),
+                List.of(new float[384]), List.of(java.util.Map.of()));
+            for (var spec : List.of(new Object[] {topicA, fx.src()}, new Object[] {topicB, fx.src()},
+                                    new Object[] {topicElsewhere, fx.tgt()})) {
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values((Long) spec[0], fx.tenant(), "t" + spec[0], (String) spec[1], 0, OffsetDateTime.now(),
+                        "pending")
+                    .execute();
+            }
+            // two assignments of ANOTHER collection to the source's topic A, and one to B
+            for (long topic : new long[] {topicA, topicB}) {
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    .values(fx.tenant(), Chash.fromHex(ch(otherText)).toBytes(), topic, "projection", fx.tgt(),
+                        OffsetDateTime.now(), MINI)
+                    .execute();
+            }
+            ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                .values(fx.tenant(), topicA, topicB).execute();
+            ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
+                .values(fx.tenant(), topicElsewhere, topicB).execute();
+            return null;
+        });
+        java.util.function.Supplier<int[]> present = () -> su(ctx -> new int[] {
+            ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(fx.tenant()), CHUNKS.COLLECTION.eq(sibling)),
+            ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(fx.tenant()),
+                TOPIC_ASSIGNMENTS.TOPIC_ID.in(topicA, topicB), TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(fx.src())),
+            ctx.fetchCount(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID.eq(fx.tenant()),
+                TOPIC_LINKS.FROM_TOPIC_ID.in(topicA, topicB).or(TOPIC_LINKS.TO_TOPIC_ID.in(topicA, topicB)))});
+        Job started = startJob(fx, null, false);
+        java.util.concurrent.atomic.AtomicReference<DeleteCounts> shown = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<int[]> before = new java.util.concurrent.atomic.AtomicReference<>();
+        Probe probe = new Probe();
+        ReembedRunner runner = probedRunner(fx, probe, p -> {
+            if (p.equals("before_delete")) {
+                shown.set(reader.deleteCounts(fx.tenant(), fx.src()));
+                before.set(present.get());
+            }
+        });
+
+        runner.tick();
+
+        assertThat(job(fx, started.jobId()).disposition()).isEqualTo("deleted");
+        int[] after = present.get();
+        assertThat(shown.get().quarantineRows()).as("quarantine-sibling rows shown").isEqualTo(3)
+            .isEqualTo(before.get()[0] - after[0]);
+        assertThat(shown.get().foreignTopicAssignments()).as("cross-collection assignments shown").isEqualTo(2)
+            .isEqualTo(before.get()[1] - after[1]);
+        assertThat(shown.get().topicLinks()).as("topic links shown").isEqualTo(2)
+            .isEqualTo(before.get()[2] - after[2]);
+        assertThat(shown.get().unmatchedSatelliteRows()).isZero();
+        assertThat(after).as("nothing of the three is left").containsExactly(0, 0, 0);
+    }
+
+    // re-entry of a kept_tombstoned job
+
+    private Job keptTombstoned(Fx fx, List<String> docs) {
+        Job started = startJob(fx, null, false);
+        AtomicInteger moves = new AtomicInteger();
+        ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+        runner.setPhaseHookForTests(p -> {
+            if (p.equals("before_move") && moves.incrementAndGet() == 2) {
+                assertThat(catalog.deleteDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
+            }
+        });
+        runner.tick();
+        Job kept = job(fx, started.jobId());
+        assertThat(kept.state()).isEqualTo(DONE);
+        assertThat(kept.disposition()).isEqualTo("kept_tombstoned");
+        return kept;
+    }
+
+    @Test
+    void aKeptTombstonedJob_onceTheTrashIsPurged_reentersCutover_andDeletesTheSource() {
+        Fx fx = pair("reentercut");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job kept = keptTombstoned(fx, docs);
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant()))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docs.get(1))).execute());
+
+        Job back = jobs.reenter(fx.tenant(), kept.jobId(), CUTOVER).orElseThrow();
+
+        assertThat(back.state()).isEqualTo(CUTOVER);
+        assertThat(back.disposition()).as("the new end sets one").isNull();
+        assertThat(back.lastError()).isNull();
+        assertThat(back.finishedAt()).isNull();
+        assertThat(back.cutoverStep()).as("the marker only moves forward").isEqualTo("superseded");
+        assertThat(jobs.reenter(fx.tenant(), kept.jobId(), CUTOVER)).as("no longer done: a second re-entry applies to nothing")
+            .isEmpty();
+
+        // the purged document was never moved, so this job's move record is 2 documents and the parity check holds
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, kept.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+        assertThat(done.documentsMoved()).isEqualTo(2);
+    }
+
+    @Test
+    void aKeptTombstonedJob_onceTheTombstoneIsRestored_reentersRunning_movesIt_andFinishes() {
+        Fx fx = pair("enterrun");
+        List<String> docs = seedDocs(fx, 3, 3);
+        Job kept = keptTombstoned(fx, docs);
+        assertThat(catalog.restoreDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
+
+        Job back = jobs.reenter(fx.tenant(), kept.jobId(), RUNNING).orElseThrow();
+
+        assertThat(back.state()).isEqualTo(RUNNING);
+        assertThat(back.passNumber()).as("a fresh walk").isEqualTo(1);
+        assertThat(back.docCursor()).isEmpty();
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, kept.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        assertThat(done.disposition()).isEqualTo("deleted");
+        assertThat(done.documentsMoved()).isEqualTo(3);
+        assertThat(done.documentsSkipped()).as("the skipped tombstone moved after its restore").isZero();
+        for (String d : docs) {
+            assertThat(manifestCollections(fx, d)).containsExactly(fx.tgt());
+            assertThat(physical(fx, d)).isEqualTo(fx.tgt());
+        }
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+    }
+
+    @Test
+    void aReentryOfAJobThatIsNotKeptTombstonedAppliesToNothing() {
+        Fx fx = pair("noreenter");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, true);   // kept_by_flag
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+        assertThat(job(fx, started.jobId()).disposition()).isEqualTo("kept_by_flag");
+
+        assertThat(jobs.reenter(fx.tenant(), started.jobId(), CUTOVER)).isEmpty();
+        assertThat(jobs.reenter(fx.tenant(), started.jobId(), RUNNING)).isEmpty();
+        assertThat(job(fx, started.jobId()).state()).isEqualTo(DONE);
     }
 }

@@ -15,6 +15,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from tests._module_seam import patch_time
 
 BGE = "bge-base-en-v15-768"
 VA = "voyage-model-a"
@@ -95,6 +96,7 @@ def _engine(plans=None, *, served=None, jobs=None):
 
     db.reembed_plan.side_effect = plan
     db.reembed_start.side_effect = lambda source, **kw: _job(source=source, state="planned", target="docs__t")
+    db.reembed_reenter.side_effect = lambda source: _job(source=source, state="cutover", target="docs__t")
     db.reembed_status.return_value = jobs if jobs is not None else []
     return db
 
@@ -123,7 +125,7 @@ class TestPlanOutput:
         assert "about 9,000 estimated, cap 10,000,000" in out
         assert "6 quarantine row(s)" in out
         assert "7 topic assignment(s) of other collections" in out and "8 topic link(s)" in out
-        assert "satellite rows naming it that match no live document: 9" in out
+        assert "satellite rows naming it that match no document the job moves: 9" in out
         assert "dry-run" in out
         db.reembed_start.assert_not_called()
 
@@ -658,3 +660,234 @@ class TestConfirmPrompt:
         result = self._decline(runner, db, cat, ["--all", "--no-dry-run"])
         assert "40 chunk(s) are embedded on this machine and bill nothing" in result.output
         assert "will be billed" not in result.output
+
+
+# ── cutover and source removal (nexus-09iho) ─────────────────────────────────
+
+
+KEPT_SRC, KEPT_TGT = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-model-a__v1"
+
+
+def _kept_tombstoned_world(*, live=0, total=0):
+    jobs = [_job(JOB, source=KEPT_SRC, target=KEPT_TGT, state="done", disposition="kept_tombstoned")]
+    cat = FakeCatalog([_row(KEPT_SRC, superseded_by=KEPT_TGT)], {"docs": VA},
+                      doc_counts={KEPT_SRC: live} if live else {}, all_doc_counts={KEPT_SRC: total} if total else {})
+    return jobs, cat
+
+
+class TestReentryStarts:
+    """``--all`` lists a kept_tombstoned source's re-entry and, with --no-dry-run, starts it through the engine's
+    start route with the source alone: the job keeps its own target, cap and flags."""
+
+    @pytest.mark.parametrize(("live", "total", "kind"), [(0, 0, "cutover"), (1, 2, "running")])
+    def test_the_reentry_is_started_with_the_source_alone(self, runner, live, total, kind):
+        jobs, cat = _kept_tombstoned_world(live=live, total=total)
+        db = _engine(jobs=jobs)
+        result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code == 0, result.output
+        db.reembed_reenter.assert_called_once_with(KEPT_SRC)
+        db.reembed_start.assert_not_called()
+        db.reembed_plan.assert_not_called()
+        assert f"re-entry of job {JOB} ({kind})" in result.output
+        assert "re-entered" in result.output
+
+    def test_a_dry_run_names_the_reentry_and_writes_nothing(self, runner):
+        jobs, cat = _kept_tombstoned_world()
+        db = _engine(jobs=jobs)
+        result = _invoke(runner, db, cat, ["--all"])
+        assert result.exit_code == 0, result.output
+        assert "1 would be re-entered" in result.output and "dry-run" in result.output
+        db.reembed_reenter.assert_not_called()
+
+    def test_a_refused_reentry_is_reported_and_exits_nonzero(self, runner):
+        jobs, cat = _kept_tombstoned_world()
+        db = _engine(jobs=jobs)
+        db.reembed_reenter.side_effect = VectorServiceError(
+            "HTTP 409", code=409, engine_body={"error": "source holds 1 tombstoned document(s) and no live one",
+                                               "job_id": JOB, "state": "done"})
+        result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code != 0
+        assert "not re-entered" in result.output and "1 tombstoned document(s)" in result.output
+
+    def test_job_flags_do_not_reach_a_reentry_and_the_run_says_so(self, runner):
+        jobs, cat = _kept_tombstoned_world()
+        db = _engine(jobs=jobs)
+        result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--keep-source"])
+        assert result.exit_code == 0, result.output
+        assert "not to a re-entered job" in result.output
+        db.reembed_reenter.assert_called_once_with(KEPT_SRC)
+
+    def test_a_stale_source_and_a_reentry_start_together(self, runner):
+        stale = "docs__2-2__bge-base-en-v15-768__v1"
+        jobs, _ = _kept_tombstoned_world()
+        cat = FakeCatalog([_row(stale, owner="2.2"), _row(KEPT_SRC, superseded_by=KEPT_TGT)], {"docs": VA})
+        db = _engine({stale: _plan()}, jobs=jobs)
+        result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert [c.args[0] for c in db.reembed_start.call_args_list] == [stale]
+        db.reembed_reenter.assert_called_once_with(KEPT_SRC)
+
+
+class TestWait:
+    """``--wait`` returns on done, done_with_skips, aborted, failed and paused, naming the state, and runs taxonomy
+    discover for the target on the first two."""
+
+    SRC_A = "docs__1-1__bge-base-en-v15-768__v1"
+
+    def _world(self, final_state, *, polls=("running", "cutover")):
+        """A fake engine whose status walks through ``polls`` and then ``final_state``."""
+        db = _engine({self.SRC_A: _plan()})
+        db.reembed_start.side_effect = lambda source, **kw: _job(JOB, source=source, state="planned", target="docs__t")
+        walk = [[_job(JOB, source=self.SRC_A, state=s, target="docs__t")] for s in (*polls, final_state)]
+        db.reembed_status.side_effect = [[], *walk]    # the first read is --all's candidacy: no job yet
+        return db, FakeCatalog([_row(self.SRC_A)], {"docs": VA})
+
+    def _run(self, runner, db, cat, args):
+        with patch_time("nexus.commands.collection", "sleep") as sleep, patch("nexus.commands.collection._run_taxonomy_discover",
+                                                 return_value=True) as discover:
+            result = _invoke(runner, db, cat, args)
+        return result, sleep, discover
+
+    @pytest.mark.parametrize("state", ["done", "done_with_skips"])
+    def test_a_finished_job_is_named_and_its_target_is_discovered(self, runner, state):
+        db, cat = self._world(state)
+        result, sleep, discover = self._run(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
+        assert result.exit_code == 0, result.output
+        assert f"-> {state}" in result.output
+        discover.assert_called_once_with("docs__t")
+        assert sleep.call_count == 2, "polled through running and cutover before it returned"
+
+    @pytest.mark.parametrize("state", ["aborted", "failed", "paused"])
+    def test_a_job_that_stopped_short_is_named_exits_one_and_runs_no_discover(self, runner, state):
+        db, cat = self._world(state)
+        result, _sleep, discover = self._run(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
+        assert result.exit_code == 1, result.output
+        assert f"-> {state}" in result.output
+        discover.assert_not_called()
+
+    def test_without_wait_the_start_names_the_discover_command_and_does_not_poll(self, runner):
+        db, cat = self._world("done")
+        result, sleep, discover = self._run(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "nx taxonomy discover --collection docs__t" in result.output
+        sleep.assert_not_called()
+        discover.assert_not_called()
+        db.reembed_status.assert_called_once()   # the --all candidacy read, nothing more
+
+    def test_a_done_job_in_status_names_the_discover_command(self, runner):
+        jobs = [_job(JOB, state="done", target="docs__t")]
+        result = _invoke(runner, _engine(jobs=jobs), FakeCatalog([], {}), ["--status"])
+        assert "next: nx taxonomy discover --collection docs__t" in result.output
+
+    def test_resume_wait_follows_the_resumed_job(self, runner):
+        db = _engine()
+        db.reembed_resume.return_value = _job(JOB, state="running", target="docs__t")
+        db.reembed_status.side_effect = [[_job(JOB, state="running")], [_job(JOB, state="done", target="docs__t")]]
+        with patch_time("nexus.commands.collection", "sleep"), patch("nexus.commands.collection._run_taxonomy_discover",
+                                        return_value=True) as discover:
+            result = _invoke(runner, db, FakeCatalog([], {}), ["--resume", JOB, "--wait"])
+        assert result.exit_code == 0, result.output
+        discover.assert_called_once_with("docs__t")
+
+    def test_two_jobs_with_one_target_discover_it_once(self, runner):
+        a, b = "docs__1-1__bge-base-en-v15-768__v1", "docs__2-2__bge-base-en-v15-768__v1"
+        db = _engine({a: _plan(), b: _plan()})
+        ids = {a: "j-a", b: "j-b"}
+        db.reembed_start.side_effect = lambda source, **kw: _job(ids[source], source=source, target="docs__t")
+        db.reembed_status.side_effect = [
+            [],
+            [_job("j-a", source=a, state="done", target="docs__t"), _job("j-b", source=b, state="running")],
+            [_job("j-a", source=a, state="done", target="docs__t"),
+             _job("j-b", source=b, state="done_with_skips", target="docs__t")],
+        ]
+        cat = FakeCatalog([_row(a, owner="1.1"), _row(b, owner="2.2")], {"docs": VA})
+        with patch_time("nexus.commands.collection", "sleep"), patch("nexus.commands.collection._run_taxonomy_discover",
+                                        return_value=True) as discover:
+            result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
+        assert result.exit_code == 0, result.output
+        discover.assert_called_once_with("docs__t")
+
+    def test_a_failed_discover_is_told_but_does_not_fail_the_finished_job(self, runner):
+        db, cat = self._world("done")
+        with patch_time("nexus.commands.collection", "sleep"), patch("nexus.commands.collection._run_taxonomy_discover",
+                                        return_value=False) as discover:
+            result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes", "--wait"])
+        assert result.exit_code == 0, result.output
+        discover.assert_called_once()
+
+    def test_a_dry_run_has_nothing_to_wait_for_and_says_so(self, runner):
+        db, cat = self._world("done")
+        result, sleep, _ = self._run(runner, db, cat, ["--all", "--wait"])
+        assert result.exit_code == 0, result.output
+        assert "nothing to wait for in a dry run" in result.output
+        sleep.assert_not_called()
+
+    @pytest.mark.parametrize("args", [["--status", "--wait"], ["--pause", JOB, "--wait"], ["--abort", JOB, "--wait"]])
+    def test_wait_goes_with_a_start_or_resume_only(self, runner, args):
+        result = _invoke(runner, _engine(), FakeCatalog([], {}), args)
+        assert result.exit_code != 0 and "--wait goes with a start" in result.output
+
+    def test_wait_on_an_in_place_reembed_is_a_usage_error(self, runner):
+        db = _engine()
+        db._resolve_collection_row.return_value = {"embedding_model": "voyage-3"}
+        result = _invoke(runner, db, FakeCatalog([], {}), ["docs__x", "--to", "voyage-3", "--wait"])
+        assert result.exit_code != 0 and "has no job" in result.output
+
+
+class TestStatusCounts:
+    def test_status_asks_for_counts_and_prints_what_the_delete_removes(self, runner):
+        counts = {"quarantine_rows": 6, "foreign_topic_assignments": 7, "topic_links": 8,
+                  "unmatched_satellite_rows": 9}
+        db = _engine(jobs=[_job(JOB, state="cutover", delete_counts=counts), _job("b-2", state="aborted",
+                                                                                  delete_counts=None)])
+        result = _invoke(runner, db, FakeCatalog([], {}), ["--status"])
+        assert result.exit_code == 0, result.output
+        db.reembed_status.assert_called_with(counts=True)
+        assert ("the source's delete removes: 6 quarantine row(s); 7 topic assignment(s) of other collections; "
+                "8 topic link(s); 9 satellite row(s) that match no moved document") in result.output
+        assert result.output.count("the source's delete removes") == 1, "a job with none shows none"
+
+    def test_an_engine_that_predates_the_counts_still_lists_its_jobs(self, runner):
+        result = _invoke(runner, _engine(jobs=[_job(JOB, state="running")]), FakeCatalog([], {}), ["--status"])
+        assert result.exit_code == 0 and "the source's delete removes" not in result.output
+
+
+class TestRunTaxonomyDiscover:
+    """``--wait``'s discover is ``nx taxonomy discover --collection TARGET`` run in-process, so it builds the target's
+    topics the way ``nx index`` does; a failure is told, with the command to retry, and never raised."""
+
+    def _wire(self, monkeypatch, discover):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_db(*_a, **_k):
+            class _Db:
+                taxonomy = object()
+
+            yield _Db()
+
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd._T2Database", fake_db)
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd._command_shared_t2_client", lambda: None)
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd._claude_available", lambda: False)
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd._run_discover_projection", lambda *a, **k: None)
+        monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+        monkeypatch.setattr("nexus.config.load_config", lambda: {"taxonomy": {"auto_label": False}})
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd.discover_for_collection", discover)
+
+    def test_discovers_exactly_the_target_collection(self, monkeypatch):
+        from nexus.commands.collection import _run_taxonomy_discover
+
+        seen = []
+        self._wire(monkeypatch, lambda name, store, t3, *, force=False: seen.append((name, force)) or 3)
+        assert _run_taxonomy_discover("docs__t") is True
+        assert seen == [("docs__t", False)]
+
+    def test_a_failure_is_told_with_the_retry_command_and_not_raised(self, monkeypatch, capsys):
+        from nexus.commands.collection import _run_taxonomy_discover
+
+        def boom(name, store, t3, *, force=False):
+            raise RuntimeError("no vectors")
+
+        self._wire(monkeypatch, boom)
+        assert _run_taxonomy_discover("docs__t") is False
+        assert "nx taxonomy discover --collection docs__t" in capsys.readouterr().err

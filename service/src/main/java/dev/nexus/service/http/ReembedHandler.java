@@ -54,12 +54,22 @@ import java.util.function.Predicate;
  *       happen to it ({@code existing}, {@code revive} or {@code register}), the documents and chunks it moves, the
  *       token estimate, the counts the source's delete would destroy (RDR-210 Cutover), and {@code token_cap}, the
  *       cap a start that sends none would apply (null for a local target).</li>
- *   <li>{@code GET /status}: every job row of the tenant, newest first, as {@code {"jobs": [...]}}.</li>
+ *   <li>{@code GET /status}: every job row of the tenant, newest first, as {@code {"jobs": [...]}}. With {@code
+ *       ?counts=true} each row also carries {@code delete_counts}: for a job with a delete ahead of it (a lock
+ *       state) or one that kept its source ({@code kept_by_flag}, {@code kept_tombstoned}, {@code kept_residue}) and
+ *       whose source still exists, the quarantine rows, cross-collection topic assignments, topic links and
+ *       unmatched satellite rows that source's delete takes; null for any other job. Off by default: the counts
+ *       read the source's tables, and {@code --wait} polls this route.</li>
  *   <li>{@code POST /jobs} {@code {source_collection, target_collection?, token_cap?, keep_source?, force_delete?}}:
  *       plan the target, then start the job (201 with the job row). A start that sends no {@code token_cap} gets
  *       {@link #DEFAULT_TOKEN_CAP} unless the target model is a local one (bge, MiniLM), which has no cap; a value
  *       sent is kept as sent, higher or lower than the default. A start whose plan's token estimate is above the cap
- *       it will carry is refused with a 409 before anything is written.</li>
+ *       it will carry is refused with a 409 before anything is written. A start whose {@code source_collection} is the
+ *       kept source of a {@code done}/{@code kept_tombstoned} job re-enters that job instead (RDR-210 Cutover,
+ *       "Tombstoned documents"): {@code running} when a live document is in the source, {@code cutover} when no
+ *       tombstone is left, 409 while only trash is; 201 with the same job row, {@code target_action}
+ *       {@code reentered} and {@code reentry}. The body is {@code source_collection} alone: the job keeps its target,
+ *       cap and flags.</li>
  *   <li>{@code POST /jobs/{id}/pause}, {@code /resume} ({@code {token_cap?}}), {@code /abort}: 200 with the job
  *       row; a repeat of what the job already is answers 200 with {@code "unchanged": true} and touches nothing; a
  *       transition the state machine refuses is 409 naming the state.</li>
@@ -233,11 +243,55 @@ public final class ReembedHandler implements HttpHandler {
     // ── GET /status ──────────────────────────────────────────────────────────
 
     private void status(HttpExchange exchange, String tenant) throws IOException {
+        boolean withCounts = queryFlag(exchange, "counts");
         List<Map<String, Object>> rows = new java.util.ArrayList<>();
         for (Job j : jobs.listAll(tenant)) {
-            rows.add(row(j));
+            Map<String, Object> m = row(j);
+            if (withCounts) {
+                m.put("delete_counts", deleteCounts(tenant, j));
+            }
+            rows.add(m);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(orderedMap("jobs", rows)));
+    }
+
+    /** The jobs whose source still exists and whose delete has not happened: the ones {@code delete_counts} describes. */
+    private static final Set<String> KEPT_DISPOSITIONS = Set.of("kept_by_flag", "kept_tombstoned", "kept_residue");
+
+    /**
+     * What the source's delete takes besides its own documents and chunks (RDR-210 Cutover), read now, for a job
+     * that has a delete ahead of it or kept the source it would have deleted; null for every other job (a finished
+     * delete has nothing left to count, an aborted or skipped job's source stays as it is). The numbers are the
+     * ones {@code POST /plan} shows and the delete removes.
+     */
+    private Map<String, Object> deleteCounts(String tenant, Job j) {
+        boolean pending = ReembedJobRepository.LOCK_STATES.contains(j.state());
+        boolean kept = ReembedJobRepository.DONE.equals(j.state()) && KEPT_DISPOSITIONS.contains(j.disposition());
+        if (!pending && !kept) {
+            return null;
+        }
+        if (catalog.getCollection(tenant, j.sourceCollection()) == null) {
+            return null;
+        }
+        ReembedSourceReader.DeleteCounts n = reader.deleteCounts(tenant, j.sourceCollection());
+        return orderedMap(
+            "quarantine_rows", n.quarantineRows(),
+            "foreign_topic_assignments", n.foreignTopicAssignments(),
+            "topic_links", n.topicLinks(),
+            "unmatched_satellite_rows", n.unmatchedSatelliteRows());
+    }
+
+    private static boolean queryFlag(HttpExchange exchange, String name) {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null) {
+            return false;
+        }
+        for (String pair : query.split("&")) {
+            if (pair.equals(name) || pair.equals(name + "=true")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ── POST /plan, POST /jobs ───────────────────────────────────────────────
@@ -372,6 +426,17 @@ public final class ReembedHandler implements HttpHandler {
         boolean keepSource = optionalBoolean(body, "keep_source");
         boolean forceDelete = optionalBoolean(body, "force_delete");
 
+        Job earlierJob = keptTombstonedJobOf(tenant, source);
+        if (earlierJob != null) {
+            if (body.size() > 1) {
+                throw new IllegalArgumentException("source " + source + " is the kept_tombstoned source of job "
+                    + earlierJob.jobId() + "; starting it re-enters that job, which keeps its own target, token cap, "
+                    + "keep_source and force_delete. Send source_collection alone");
+            }
+            reenter(exchange, tenant, earlierJob);
+            return;
+        }
+
         Resolved resolved = resolve(tenant, source, requestedTarget);
         // An explicit cap wins, higher or lower; none on a billed target is the RDR's default; none on a local one
         // stays none. The runner and the repository read null as "no cap", so the default is applied here.
@@ -423,6 +488,81 @@ public final class ReembedHandler implements HttpHandler {
         Map<String, Object> out = row(job);
         out.put("target_action", action);
         earlier.ifPresent(j -> out.put("revived_job_id", j.jobId().toString()));
+        HttpUtil.send(exchange, 201, MAPPER.writeValueAsString(out));
+    }
+
+    // ── a kept_tombstoned re-entry (a start whose source is a finished job's kept source) ───
+
+    /**
+     * The job a start on {@code source} would re-enter, or null when {@code source} is not that kind of source: the
+     * source's newest job is {@code done} with disposition {@code kept_tombstoned}, and the source is still
+     * superseded BY THAT JOB'S TARGET. A source a later job revived (it names no successor, or another one) and a
+     * job a later job marked {@code revived} are never re-entered: re-entering them could delete a live collection
+     * (nexus-f98bg critique, significant 2).
+     */
+    private Job keptTombstonedJobOf(String tenant, String source) {
+        Job newest = firstMatch(jobs.listAll(tenant), j -> j.sourceCollection().equals(source));
+        if (newest == null || !ReembedJobRepository.DONE.equals(newest.state())
+            || !ReembedStateMachine.DISPOSITION_KEPT_TOMBSTONED.equals(newest.disposition())) {
+            return null;
+        }
+        Map<String, Object> row = catalog.getCollection(tenant, source);
+        if (row == null || !newest.targetCollection().equals(String.valueOf(row.get("superseded_by")))) {
+            return null;
+        }
+        return newest;
+    }
+
+    /**
+     * Re-enter {@code earlier} ({@code done}, {@code kept_tombstoned}): {@code running} when a live document is in
+     * the source again (a restore), {@code cutover} when no tombstone is left, else 409: the trash is still there
+     * and nothing has changed. The source's lock and the profile re-check are the repository's and the runner's, as
+     * for any entry into a lock state. The job keeps its target and its stored cap and flags.
+     */
+    private void reenter(HttpExchange exchange, String tenant, Job earlier) throws IOException {
+        String source = earlier.sourceCollection();
+        List<Job> locked = jobs.listByStates(tenant, ReembedJobRepository.LOCK_STATES);
+        Job onSource = firstMatch(locked, j -> j.sourceCollection().equals(source) || j.targetCollection().equals(source));
+        if (onSource != null) {
+            throw heldBy(onSource, onSource.sourceCollection().equals(source)
+                ? "source " + source + " is held by"
+                : "source " + source + " is the target of");
+        }
+        Map<String, Object> targetRow = catalog.getCollection(tenant, earlier.targetCollection());
+        if (targetRow == null || !String.valueOf(targetRow.get("superseded_by")).isEmpty()) {
+            throw new Reply(409, jsonOf(orderedMap(
+                "error", "job " + earlier.jobId() + " kept " + source + " superseded by " + earlier.targetCollection()
+                    + ", which is "
+                    + (targetRow == null ? "no longer registered" : "itself superseded by " + targetRow.get("superseded_by"))
+                    + "; the source is not re-entered",
+                "job_id", earlier.jobId().toString(), "state", earlier.state())));
+        }
+        final Event event;
+        final State next;
+        if (reader.anyCandidate(tenant, source)) {
+            event = Event.REENTER_RUNNING;
+            next = State.RUNNING;
+        } else if (reader.tombstonedDocuments(tenant, source) == 0) {
+            event = Event.REENTER_CUTOVER;
+            next = State.CUTOVER;
+        } else {
+            throw new Reply(409, jsonOf(orderedMap(
+                "error", "source " + source + " still holds " + reader.tombstonedDocuments(tenant, source)
+                    + " tombstoned document(s) and no live one; purge or restore them first",
+                "job_id", earlier.jobId().toString(), "state", earlier.state())));
+        }
+        if (!(ReembedStateMachine.decide(State.DONE, event, earlier.cutoverStep(), earlier.disposition())
+            instanceof Applied)) {
+            throw new Reply(409, error("job " + earlier.jobId() + " cannot be re-entered"));
+        }
+        Job job = jobs.reenter(tenant, earlier.jobId(), next.wire()).orElseThrow(() ->
+            new Reply(409, error("job " + earlier.jobId() + " changed state while the re-entry was applied; retry")));
+        log.info("event=reembed_job_reentered tenant={} job={} source={} target={} to={}", tenant, job.jobId(), source,
+            job.targetCollection(), next.wire());
+        wakeRunner.run();
+        Map<String, Object> out = row(job);
+        out.put("target_action", "reentered");
+        out.put("reentry", next.wire());
         HttpUtil.send(exchange, 201, MAPPER.writeValueAsString(out));
     }
 

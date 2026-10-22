@@ -181,9 +181,11 @@ class ReembedRunnerTest extends ReembedFixture {
     }
 
     @Test
-    void aTombstonedDocument_isASkipWithTheReasonTombstoned_andTheCutoverIsBlockedNotDeleted() {
-        // Deleting the source would delete the tombstoned document's rows, restorable from trash until then. The
-        // kept_tombstoned disposition that handles this is Step 4 (nexus-09iho); until it lands the cutover refuses.
+    void aTombstonedDocument_isASkipWithTheReasonTombstoned_andTheSourceEndsKeptTombstoned_withNoParityCheck() {
+        // Deleting the source would delete the tombstoned document's rows, restorable from trash until then
+        // (RDR-210 Cutover): the job ends done/kept_tombstoned, the source superseded and kept. It does so BEFORE
+        // the parity check: a moved document purged since its move would fail parity (the counts differ), and here
+        // one is, so a job that ended failed/parity_mismatch would show the check ran.
         Fx fx = pair("tomb");
         List<String> docs = seedDocs(fx, 3, 3);
         Job started = startJob(fx, null, false);
@@ -197,57 +199,38 @@ class ReembedRunnerTest extends ReembedFixture {
                 assertThat(catalog.deleteDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
                 sourceChunksBeforeCutover.set(chunkCount(fx, fx.src()));
             }
+            if (p.equals("before_move") && moves.get() == 3) {
+                // a moved document purged since its move: parity would refuse (1 of 2 moved documents agree)
+                su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docs.get(0))).execute());
+            }
         });
 
         runner.tick();
 
-        Job blocked = job(fx, started.jobId());
-        assertThat(blocked.state()).as("not done: the delete was refused").isEqualTo(CUTOVER);
-        assertThat(blocked.documentsMoved()).isEqualTo(2);
-        assertThat(blocked.documentsSkipped()).isEqualTo(1);
-        assertThat(moves(fx, blocked.jobId())).containsEntry(docs.get(1), "skipped:tombstoned");
-        assertThat(blocked.passNumber()).as("a tombstoned document is no candidate for another pass").isEqualTo(1);
-        assertThat(blocked.lastError()).contains("cutover is blocked").contains("1 tombstoned document(s)");
-        assertThat(blocked.cutoverStep()).as("the delete never began").isEqualTo("superseded");
+        Job kept = job(fx, started.jobId());
+        assertThat(kept.state()).as("done, not failed: the tombstone decides before parity is asked").isEqualTo(DONE);
+        assertThat(kept.disposition()).isEqualTo("kept_tombstoned");
+        assertThat(kept.failureReason()).isNull();
+        assertThat(kept.documentsMoved()).isEqualTo(2);
+        assertThat(kept.documentsSkipped()).isEqualTo(1);
+        assertThat(moves(fx, kept.jobId())).containsEntry(docs.get(1), "skipped:tombstoned");
+        assertThat(kept.passNumber()).as("a tombstoned document is no candidate for another pass").isEqualTo(1);
+        assertThat(kept.lastError()).contains("1 tombstoned document(s)").contains("re-embed --all");
+        assertThat(kept.cutoverStep()).as("superseded, the delete never began").isEqualTo("superseded");
         assertThat(deletes).hasValue(0);
         assertThat(catalog.getCollection(fx.tenant(), fx.src())).as("the source row is intact").isNotNull();
+        assertThat(supersededBy(fx, fx.src())).as("kept superseded, out of the routing listing").isEqualTo(fx.tgt());
         assertThat(sourceChunksBeforeCutover.get()).isPositive();
         assertThat(chunkCount(fx, fx.src())).as("the source's chunks are intact: the cutover deleted none")
             .isEqualTo(sourceChunksBeforeCutover.get());
         assertThat(physical(fx, docs.get(1))).as("the tombstoned document is still homed at the source")
             .isEqualTo(fx.src());
 
-        // a blocked cutover is not a failure and not a terminal state: the next tick looks again, unchanged
+        // a finished job is not picked up again
         runner.tick();
-        assertThat(job(fx, started.jobId()).state()).isEqualTo(CUTOVER);
+        assertThat(job(fx, started.jobId()).state()).isEqualTo(DONE);
         assertThat(deletes).hasValue(0);
-    }
-
-    @Test
-    void aBlockedCutoverFinishesWhenTheCauseClears() {
-        Fx fx = pair("heal");
-        List<String> docs = seedDocs(fx, 3, 3);
-        Job started = startJob(fx, null, false);
-        ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
-        AtomicInteger moves = new AtomicInteger();
-        runner.setPhaseHookForTests(p -> {
-            if (p.equals("before_move") && moves.incrementAndGet() == 2) {
-                assertThat(catalog.deleteDocument(fx.tenant(), docs.get(1))).isEqualTo(1);
-            }
-        });
-        runner.tick();
-        assertThat(job(fx, started.jobId()).state()).isEqualTo(CUTOVER);
-
-        // the tombstoned document is purged from trash
-        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant()))
-            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docs.get(1))).execute());
-        runner.tick();
-
-        Job done = job(fx, started.jobId());
-        assertThat(done.state()).isEqualTo(DONE);
-        assertThat(done.disposition()).isEqualTo("deleted");
-        assertThat(done.lastError()).as("the block it recorded is cleared when the cutover finishes").isNull();
-        assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
     }
 
     @Test

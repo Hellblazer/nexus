@@ -5123,9 +5123,26 @@ class HttpVectorClient:
             body["token_cap"] = int(token_cap)
         return _post(f"{self._REEMBED}/jobs", body, tenant=self._tenant)
 
-    def reembed_status(self) -> list[dict]:
-        """GET /v1/vectors/reembed/status: every job row of the tenant, newest first."""
-        result = _get(f"{self._REEMBED}/status", tenant=self._tenant)
+    def reembed_reenter(self, source_collection: str) -> dict:
+        """POST /v1/vectors/reembed/jobs for a ``kept_tombstoned`` source: re-enter the job that kept it (201, its row).
+
+        The body is ``source_collection`` alone: the re-entered job keeps its own target, token cap, ``keep_source``
+        and ``force_delete`` (the engine answers 400 to any other field on this path). The row carries
+        ``target_action: "reentered"`` and ``reentry`` (``running`` when a live document is in the source,
+        ``cutover`` when no tombstone is left); 409 names the job that holds the source, or says trash remains.
+        """
+        return _post(f"{self._REEMBED}/jobs", {"source_collection": source_collection}, tenant=self._tenant)
+
+    def reembed_status(self, *, counts: bool = False) -> list[dict]:
+        """GET /v1/vectors/reembed/status: every job row of the tenant, newest first.
+
+        ``counts=True`` asks for each row's ``delete_counts`` (the quarantine rows, cross-collection topic
+        assignments, topic links and unmatched satellite rows the source's delete takes; ``None`` for a job with no
+        delete ahead of it). An engine that predates the parameter ignores it and sends rows without the key. Off
+        by default: the engine reads the source's tables for them, and ``--wait`` polls this route.
+        """
+        suffix = "?counts=true" if counts else ""
+        result = _get(f"{self._REEMBED}/status{suffix}", tenant=self._tenant)
         jobs = result.get("jobs") if isinstance(result, dict) else None
         if not isinstance(jobs, list):
             raise VectorServiceError(f"GET {self._REEMBED}/status answered a body with no jobs list: {result!r}")

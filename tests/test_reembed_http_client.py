@@ -70,7 +70,18 @@ class TestStart:
         assert wire.calls[0][2] == {"source_collection": "docs__s", "keep_source": False, "force_delete": False}
 
 
+class TestReenter:
+    def test_sends_the_source_alone_to_the_start_route(self, wire):
+        HttpVectorClient().reembed_reenter("docs__s")
+        assert wire.calls == [("POST", f"{BASE}/jobs", {"source_collection": "docs__s"})]
+
+
 class TestStatus:
+    def test_counts_asks_the_engine_for_each_jobs_delete_counts(self, wire):
+        wire.answers[f"{BASE}/status?counts=true"] = {"jobs": [{"job_id": JOB, "delete_counts": None}]}
+        assert HttpVectorClient().reembed_status(counts=True) == [{"job_id": JOB, "delete_counts": None}]
+        assert wire.calls == [("GET", f"{BASE}/status?counts=true", None)]
+
     def test_reads_every_job_row(self, wire):
         wire.answers[f"{BASE}/status"] = {"jobs": [{"job_id": JOB}]}
         assert HttpVectorClient().reembed_status() == [{"job_id": JOB}]
@@ -141,10 +152,11 @@ class TestProductionWriteGuard:
 
     @pytest.mark.parametrize("call", [
         lambda c: c.reembed_start("docs__s"),
+        lambda c: c.reembed_reenter("docs__s"),
         lambda c: c.reembed_pause(JOB),
         lambda c: c.reembed_resume(JOB),
         lambda c: c.reembed_abort(JOB),
-    ], ids=["start", "pause", "resume", "abort"])
+    ], ids=["start", "reenter", "pause", "resume", "abort"])
     def test_a_dev_checkout_is_refused_the_write_before_any_request(self, call):
         from nexus.db.service_endpoint import ProductionWriteGuardError
 
@@ -156,7 +168,11 @@ class TestProductionWriteGuard:
         client = HttpVectorClient()
         client.reembed_plan("docs__s")
         client.reembed_status()
-        assert self.sent == ["POST /v1/vectors/reembed/plan", "GET /v1/vectors/reembed/status"]
+        client.reembed_status(counts=True)
+        assert self.sent == [
+            "POST /v1/vectors/reembed/plan", "GET /v1/vectors/reembed/status",
+            "GET /v1/vectors/reembed/status?counts=true",
+        ]
 
     def test_a_reason_lets_the_write_through(self, monkeypatch):
         from nexus.db import service_endpoint
