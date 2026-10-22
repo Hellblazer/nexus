@@ -2358,7 +2358,7 @@ Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` dig
 
 Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row via a chash-keyed, best-effort reap, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. **The reap now runs BEFORE the T3 chunk delete, not after (RDR-191 F10c, nexus-o8dil.5).** The engine's delete is anti-join-scoped: it refuses to remove a chunk that any live catalog manifest row still references, including the note's own not-yet-tombstoned row, so reaping first is what lets the ordinary single-owner delete succeed at all.
 
-For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything.
+For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything. When a live model sibling of the corpus holds the id, the error adds `it is in S: pass --collection S` (nexus-9ts7n); the delete itself never reaches into a sibling.
 
 When the chash's catalog lookup is ambiguous (more than one candidate catalog document shares it), the reap deliberately declines to tombstone anything: nothing is guessed (nexus-5axey). That is no longer a benign no-op: with no live-manifest-row retracted, the engine's anti-join then refuses the chunk delete, and the command exits non-zero instead of silently leaving a ghost catalog row behind:
 
@@ -2977,7 +2977,7 @@ on whether the key is configured yet, not just on `local.embed_model`:
 | bge/minilm (default) | — | bge/minilm collection, as always | bge/minilm collection, as always |
 | voyage-* | absent | finds the existing bge/minilm collection | **grandfathers onto the existing bge/minilm collection** (the engine has no key yet, so it's still serving bge — writing there still works) |
 | voyage-* | present, no voyage collection yet | finds the existing bge/minilm collection | **targets the voyage collection — a NEW sibling**, never the old bge/minilm one |
-| voyage-* | present, voyage collection already exists | **finds ONLY the voyage collection** — the bge/minilm one is no longer checked, even if it still holds data (see caveat below) | targets the (already-existing) voyage collection |
+| voyage-* | present, voyage collection already exists | picks the voyage collection; reads also look in every live sibling of the corpus, the bge/minilm one included (see caveat below) | targets the (already-existing) voyage collection |
 
 The "targets a new sibling" row is the one to plan around: once the key is
 configured (whether or not the engine has been restarted yet), a write
@@ -2991,17 +2991,18 @@ through it entirely (not just unwritable) until you reindex — so switch
 before you have a corpus you care about, or budget time to reindex it
 into the new voyage collection.
 
-**Caveat — `nx store` verbs stop checking bge once a voyage sibling exists.**
-The "finds the existing bge/minilm collection" read behavior above holds only
-*until* the first keyed write creates the voyage collection. The MCP
-`search`, `query`, `store_get`, `store_list` and `store_get_many` tools now read
-every live sibling of a shorthand name such as `art` or `knowledge__art`
-(found by the collections' catalog rows, nexus-50uw6), and `nx search --corpus`
-already matched both. `nx store list`, `nx store get` and `nx store delete`
-still resolve ONE physical collection per corpus, the voyage one, so anything
-left in the old bge collection is invisible to them until you reindex it
-(merging their listings is nexus-u378j). The engine's voyage-only-mode-flip
-after restart is tracked in nexus-ddmfg.
+**Caveat — once a voyage sibling exists, a shorthand name picks it, and only reads look further.**
+The first keyed write creates the voyage collection, and the single-name
+resolver picks it from then on. Reads look in every live sibling of a
+shorthand name such as `art` or `knowledge__art` (found by the collections'
+catalog rows): the MCP `search`, `query`, `store_get`, `store_list` and
+`store_get_many` tools (nexus-50uw6), `nx search --corpus`, and `nx store get`,
+which names the sibling it found the entry in, and `nx store list`, which pages
+the picked collection and names its siblings so you can list one by name
+(nexus-9ts7n). `nx store delete` and MCP `store_delete` stay in the one
+collection they resolve; when an `--id` is not there but a sibling holds it, the
+error names the `--collection` to pass. The engine's voyage-only-mode-flip after
+restart is tracked in nexus-ddmfg.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
 already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision

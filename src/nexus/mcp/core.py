@@ -5774,6 +5774,7 @@ def store_get(
         # never a title. Anything else is tried as an exact title.
         looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
         entry = None
+        also_titled: list[str] = []  # nexus-xkc4n: the other collections holding a title an exact name narrowed
         if looks_like_hash or len(scope) == 1:
             for candidate in scope:
                 entry = t3.get_by_id(candidate, doc_id)
@@ -5784,6 +5785,13 @@ def store_get(
             from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
             matches = [(c, found) for c in scope if (found := t3.find_ids_by_title(c, doc_id))]
+            if len(matches) > 1:
+                # nexus-xkc4n: naming one of the collections the message below lists
+                # picks it, also a sibling whose name the read resolver expands again.
+                named = [m for m in matches if m[0] == collection.strip()]
+                if named:
+                    also_titled = [c for c, _ in matches if c != named[0][0]]
+                    matches = named
             if len(matches) > 1:
                 return (
                     f"Title {doc_id!r} matches documents in {len(matches)} collections: "
@@ -5812,6 +5820,9 @@ def store_get(
             from nexus.catalog.store_hook import catalog_chashes_for_title  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
             found = [(c, docs) for c in scope if (docs := catalog_chashes_for_title(c, doc_id))]
+            if len(found) > 1 and (named := [f for f in found if f[0] == collection.strip()]):
+                also_titled = [c for c, _ in found if c != named[0][0]]
+                found = named  # nexus-xkc4n, as for the chunk-title matches above
             if len(found) == 1 and len(found[0][1]) == 1:
                 col_name, (chashes,) = found[0]
                 entry = t3.get_by_id(col_name, chashes[0])
@@ -5869,6 +5880,8 @@ def store_get(
             lines.append(f"Extractor:  {extraction_method}")
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
+        if also_titled:
+            lines.append(f"Also titled in: {', '.join(also_titled)}")
         lines.append("")
         lines.append(split[1] if split is not None else entry.get("content", ""))
         return "\n".join(lines)
@@ -6427,11 +6440,21 @@ def store_list(
             total = info["count"]
         except KeyError:
             return f"Collection not found: {col_name}"
+        # Named for the siblings the read scope holds (nexus-50uw6), also on an empty
+        # page and in the docs view: an empty pick is the case they matter most (nexus-9ts7n).
+        also = (
+            f"  also in this corpus: {', '.join(scope[1:])} (pass one as collection= to page it)"
+            if len(scope) > 1 else ""
+        )
         if total == 0:
-            return f"No entries in {col_name}."
+            return f"No entries in {col_name}." + (f"\n{also}" if also else "")
 
         if docs:
-            return _store_list_docs(t3, col_name, total)
+            listed = _store_list_docs(t3, col_name, total)
+            if not also:
+                return listed
+            head, _, rest = listed.partition("\n")
+            return f"{head}\n{also}" + (f"\n{rest}" if rest else "")
 
         page = t3.list_store(col_name, limit=limit, offset=offset)
         if not page:
@@ -6448,10 +6471,8 @@ def store_list(
         lines: list[str] = [
             f"{col_name}  (showing {offset + 1}-{offset + len(page)}; {total} stored)"
         ]
-        if len(scope) > 1:
-            lines.append(
-                f"  also in this corpus: {', '.join(scope[1:])} (pass one as collection= to page it)"
-            )
+        if also:
+            lines.append(also)
         from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip

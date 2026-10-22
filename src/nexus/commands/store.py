@@ -8,7 +8,12 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError, t3_collection_name
+from nexus.corpus import (
+    EmbeddingProfileMismatchError,
+    LocalVoyageCredentialMissingError,
+    t3_collection_name,
+    t3_collection_names_for_read,
+)
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import PutOversizedError
@@ -231,19 +236,26 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
         if docs or offset:
             raise click.UsageError("--reapable cannot be combined with --docs or --offset.")
     db = _t3()
-    col_name = t3_collection_name(collection, t3=db)
+    # nexus-9ts7n: the named collection is paged and its live model siblings are
+    # named, as the MCP store_list does (nexus-50uw6); naming a sibling pages it.
+    scope = t3_collection_names_for_read(collection, t3=db)
+    col_name = scope[0]
+    also = (
+        f"  also in this corpus: {', '.join(scope[1:])} (pass one as --collection to list it)\n"
+        if len(scope) > 1 else ""
+    )
 
     if reapable:
         _list_reapable(db, col_name, limit)
         return
 
     if docs:
-        _list_documents(db, col_name)
+        _list_documents(db, col_name, also=also)
         return
 
     entries = db.list_store(col_name, limit=limit, offset=offset)
     if not entries:
-        click.echo(f"No entries in {col_name} at offset {offset}.")
+        click.echo(f"No entries in {col_name} at offset {offset}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
     # Get total count for page info
@@ -257,7 +269,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # nexus-sis0m.3: `total` is the collection's STORED chunk count (the
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
-    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n")
+    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
     from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -376,7 +388,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
         click.echo(f"\n  More reapable chunks exist than --limit {limit}; raise --limit to see them.")
 
 
-def _list_documents(db: T3Database, col_name: str) -> None:
+def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
     """List documents in a collection, grouped by the catalog manifest.
 
     Grouping is :func:`nexus.catalog.store_hook.group_documents`, shared
@@ -399,17 +411,17 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         # way plain `store list` reports it, at exit 0. Every other failure,
         # a stopped service among them, used to print "Collection not found"
         # too, which reads as data loss; those now propagate.
-        click.echo(f"No documents in {col_name}.")
+        click.echo(f"No documents in {col_name}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
     from nexus.catalog.store_hook import group_documents  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
     docs, degraded = group_documents(db, col_name, total_chunks)
     if not docs:
-        click.echo(f"No documents in {col_name}.")
+        click.echo(f"No documents in {col_name}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
-    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n")
+    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n" + also)
     if degraded:
         click.echo(
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
@@ -448,10 +460,17 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
       nx store get a1b2c3d4e5f6789012345678901234abcdef0123456789abcdef0123456789ab --collection code__myrepo --json
     """
     db = _t3()
-    col_name = t3_collection_name(collection, t3=db)
-    entry = db.get_by_id(col_name, doc_id)
+    # nexus-9ts7n: every live model sibling of the corpus, as the MCP store_get
+    # reads (nexus-50uw6); a fully-qualified name is that one collection.
+    scope = t3_collection_names_for_read(collection, t3=db)
+    col_name, entry = scope[0], None
+    for candidate in scope:
+        entry = db.get_by_id(candidate, doc_id)
+        if entry is not None:
+            col_name = candidate
+            break
     if entry is None:
-        raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+        raise click.ClickException(f"Entry {doc_id!r} not found in {', '.join(scope)}")
     # nexus-spujb: a note split to its model's token window reads back whole.
     split = _split_note_text(db, col_name, [entry["id"]])
     if split is not None:
@@ -459,7 +478,7 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
 
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local
-        click.echo(json.dumps(entry, indent=2))
+        click.echo(json.dumps({**entry, "collection": col_name}, indent=2))
     else:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
@@ -560,7 +579,15 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # collection-scoped itself (nexus-r3cdg); this check stays as the
         # primary layer.
         if db.get_by_id(col_name, doc_id) is None:
-            raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+            # nexus-9ts7n: a delete stays in the one collection it names (reads span
+            # the corpus's siblings, a delete does not), so say which sibling has it.
+            holder = next(
+                (s for s in t3_collection_names_for_read(collection, t3=db)[1:]
+                 if db.get_by_id(s, doc_id) is not None),
+                None,
+            )
+            hint = f"; it is in {holder}: pass --collection {holder}" if holder else ""
+            raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}{hint}")
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
         # after. PgVectorRepository#delete's anti-join refuses to delete a
