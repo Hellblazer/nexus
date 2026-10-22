@@ -2571,8 +2571,9 @@ _SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
 # nexus-2nxoo: FastMCP bound its call_tool handler inside __init__, so the
-# per-call `mcp_tool_call` debug event (tool name + sorted `_meta` keys) wraps
-# the constructed server's registry. Never raises; main() reports the status.
+# per-call `mcp_tool_call` event (tool name + sorted `_meta` keys; INFO the first
+# time a key-set is seen in this process, DEBUG after) wraps the constructed
+# server's registry. Never raises; main() reports the status.
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
@@ -13298,7 +13299,7 @@ def main():
     # rather than a grep (nexus-dgvsz).
     from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
 
-    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp")
+    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp", pid=os.getpid())
 
     log.info(
         "mcp_server_starting",

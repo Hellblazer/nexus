@@ -23,6 +23,13 @@ from nexus.mcp_infra import (
 
 mcp = FastMCP("nexus-catalog")
 
+# nexus-2nxoo: this server's own FastMCP is not the one core wraps, so it gets
+# its own per-call `mcp_tool_call` hook, and main() reports ITS status, not
+# core's. Import-time SDK patches stay transitive (core applies them).
+from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
+
+_TOOL_CALL_LOG_STATUS: str = _install_tool_call_log(mcp)
+
 _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
@@ -961,7 +968,12 @@ def main():
 
     from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
 
-    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp-catalog")
+    report_sdk_patches(
+        log,
+        {**_SDK_PATCH_RESULTS, "tool_call_log": _TOOL_CALL_LOG_STATUS},
+        server="nx-mcp-catalog",
+        pid=os.getpid(),
+    )
 
     log.info(
         "mcp_server_starting",
