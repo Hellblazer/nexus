@@ -697,8 +697,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 #: so the label is glossed where it is read and not only in the mailbox skill.
 _SENDER_LEGEND = (
     "(A bracketed [unverified] after from= means the sender's claimed name does not match the session "
-    "the engine recorded for the write, the engine recorded none, or the name is an agent id. No label "
-    "is not proof of who sent it either: the tenant is the security boundary, JDR-002.)\n"
+    "the engine recorded for the write, the engine recorded none, or the name is an agent id. A label is "
+    "a lead to check, not a verdict; no label is not proof of the sender either (JDR-002).)\n"
 )
 
 
