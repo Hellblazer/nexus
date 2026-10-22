@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -42,6 +43,44 @@ class CrossEncoderRerankerTest {
 
         Files.delete(model);
         assertThat(reranker.available()).as("a file removed again: flips back").isFalse();
+    }
+
+    @Test
+    void filesThatFailToLoadReadUnavailableUntilTheyChange(@TempDir Path dir) throws Exception {
+        // nexus-vk1l1: present files that cannot load read true until a rerank tries them; after the
+        // failed load they read false for as long as the files are the ones that failed, and true again
+        // once either file is replaced, so a re-provision is picked up without a restart.
+        Path model = dir.resolve("model.onnx");
+        Path tokenizer = dir.resolve("tokenizer.json");
+        Files.writeString(model, "not an onnx model");
+        Files.writeString(tokenizer, "not a tokenizer");
+        var reranker = new CrossEncoderReranker(model.toString(), tokenizer.toString());
+        assertThat(reranker.available()).as("never tried: presence is all it knows").isTrue();
+
+        assertThatThrownBy(() -> reranker.rerank("q", List.of("a"), null))
+                .isInstanceOf(RerankUpstreamException.class)
+                .hasMessageContaining("failed to initialise");
+        assertThat(reranker.available()).as("the files that failed to load are still there").isFalse();
+        assertThatThrownBy(() -> reranker.rerank("q", List.of("a"), null))
+                .as("every rerank retries the load, whatever available() says")
+                .isInstanceOf(RerankUpstreamException.class);
+        assertThat(reranker.available()).as("the same files failed again").isFalse();
+
+        Files.writeString(model, "a re-provisioned model of another size");
+        assertThat(reranker.available()).as("the model was replaced: worth another try").isTrue();
+
+        assertThatThrownBy(() -> reranker.rerank("q", List.of("a"), null))
+                .isInstanceOf(RerankUpstreamException.class);
+        assertThat(reranker.available()).as("the replacement failed too").isFalse();
+
+        Files.writeString(tokenizer, "a re-provisioned tokenizer, longer than before");
+        assertThat(reranker.available()).as("the tokenizer was replaced").isTrue();
+
+        assertThatThrownBy(() -> reranker.rerank("q", List.of("a"), null))
+                .isInstanceOf(RerankUpstreamException.class);
+        assertThat(reranker.available()).isFalse();
+        Files.setLastModifiedTime(model, FileTime.fromMillis(Files.getLastModifiedTime(model).toMillis() + 60_000));
+        assertThat(reranker.available()).as("same size, new mtime: a same-size replacement still counts").isTrue();
     }
 
     @Test

@@ -11,6 +11,7 @@ import ai.onnxruntime.OrtSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.LongBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -83,6 +84,8 @@ public final class CrossEncoderReranker implements Reranker {
     private OrtSession           session;
     private HuggingFaceTokenizer tokenizer;
     private boolean              wantsTokenTypeIds;
+    /** nexus-vk1l1: {@link #fingerprint()} of the artifacts when init last failed, or null. */
+    private volatile String      failedFingerprint;
 
     /** Construct with the canonical artifact paths. Touches no I/O (lazy init). */
     public CrossEncoderReranker() {
@@ -101,15 +104,39 @@ public final class CrossEncoderReranker implements Reranker {
     }
 
     /**
-     * File presence, read live (nexus-yuh4a): true once the session is loaded, else true only while
-     * BOTH the model and the tokenizer are regular files on disk now. Two stats, no ONNX runtime, so a
-     * status poll is cheap. It says the files are there, not that a rerank would succeed: files that are
-     * present but cannot be loaded still read true.
+     * Read live (nexus-yuh4a): true once the session is loaded, else true only while BOTH the model
+     * and the tokenizer are regular files on disk now, and they are not the files a load already
+     * failed on (nexus-vk1l1). A failed init records the artifacts' size and mtime, taken before the
+     * load; while both are unchanged this reads false, and replacing either file reads true again.
+     * This only answers status: every rerank retries the load whatever this says, so a failure for a
+     * reason outside the files (native memory, say) reads false only until a rerank loads them. A
+     * replacement with the same size and mtime is not seen, and a native {@link Error} from ONNX
+     * Runtime is not recorded. Stats only, no ONNX runtime, so a status poll stays cheap. Files never
+     * tried still read true: presence is all that is known until a rerank loads them.
      */
     @Override
     public boolean available() {
-        return initialized
-                || (Files.isRegularFile(Path.of(modelPath)) && Files.isRegularFile(Path.of(tokenizerPath)));
+        if (initialized) return true;
+        if (!(Files.isRegularFile(Path.of(modelPath)) && Files.isRegularFile(Path.of(tokenizerPath)))) {
+            return false;
+        }
+        String failed = failedFingerprint;
+        return failed == null || !failed.equals(fingerprint());
+    }
+
+    /** Size and mtime of both artifacts, or null when either cannot be read. */
+    private String fingerprint() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (String p : new String[]{modelPath, tokenizerPath}) {
+                Path path = Path.of(p);
+                sb.append(Files.size(path)).append(':')
+                  .append(Files.getLastModifiedTime(path).toMillis()).append(';');
+            }
+            return sb.toString();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     @Override
@@ -169,6 +196,9 @@ public final class CrossEncoderReranker implements Reranker {
             }
             OrtSession          sess = null;
             HuggingFaceTokenizer tok = null;
+            // nexus-vk1l1: taken before the load, so a file replaced while a load fails is not
+            // recorded as the failed one.
+            String attempted = fingerprint();
             try (var sessionOpts = new OrtSession.SessionOptions()) {
                 // nexus-00wsf: the intra-op width of this SHARED session comes from one
                 // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
@@ -185,12 +215,15 @@ public final class CrossEncoderReranker implements Reranker {
                 this.session = sess;
                 this.tokenizer = tok;
                 this.wantsTokenTypeIds = sess.getInputNames().contains("token_type_ids");
+                this.failedFingerprint = null;
                 this.initialized = true;
                 log.info("event=cross_encoder_reranker_loaded model={} tokenizer={} token_type_ids={}",
                         modelPath, tokenizerPath, wantsTokenTypeIds);
             } catch (Exception e) {
                 if (tok != null)  { try { tok.close();  } catch (Exception ignored) {} }
                 if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
+                failedFingerprint = attempted;
+                log.warn("event=cross_encoder_reranker_init_failed model={} error={}", modelPath, e.toString());
                 throw new RerankUpstreamException(
                         "local cross-encoder failed to initialise from " + modelPath + ": "
                         + e.getMessage() + ". Re-provision via `" + BootPlan.PROVISION_COMMAND

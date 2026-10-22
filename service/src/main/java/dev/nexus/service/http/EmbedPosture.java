@@ -31,8 +31,8 @@ import java.util.function.BooleanSupplier;
  *
  * <p>{@code reranker_available} (nexus-yuh4a) is a bare boolean read LIVE on every response, never a boot
  * snapshot: {@code reranker} names the CHOSEN reranker even when its files are absent and every rerank degrades,
- * and {@code reranker_available} says whether the reranker's model files are present. It is a file-presence
- * answer, not a promise that a rerank would succeed. It carries no path or probe text; {@code false} also
+ * and {@code reranker_available} says whether the reranker's model files are present and not the ones a load
+ * already failed on (nexus-vk1l1). It is not a promise that a rerank would succeed: files never tried read true. It carries no path or probe text; {@code false} also
  * covers "no reranker configured".
  *
  * @param profile           the wire value of the resolved profile ({@code voyage} or {@code bge})
