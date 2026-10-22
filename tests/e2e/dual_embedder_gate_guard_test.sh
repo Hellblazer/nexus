@@ -251,7 +251,10 @@ SCEN="$WORKDIR/scenario"
 REQS="$WORKDIR/requests.log"
 mkdir -p "$SCEN" "$WORKDIR/fn-shims"
 : > "$REQS"
-python3 "$HERE/lib/dual_gate_fake_engine.py" "$SCEN" "$WORKDIR/engine.port" "$REQS" &
+# shellcheck source=lib/python.sh disable=SC1091
+source "$HERE/lib/python.sh"
+e2e_python_resolve || fail_loud_and_exit "no usable python for the canned engine (tests/e2e/lib/python.sh)"
+"$E2E_PYTHON" "$HERE/lib/dual_gate_fake_engine.py" "$SCEN" "$WORKDIR/engine.port" "$REQS" &
 ENGINE_PID=$!
 for _ in $(seq 1 100); do [[ -s "$WORKDIR/engine.port" ]] && break; sleep 0.1; done
 [[ -s "$WORKDIR/engine.port" ]] || fail_loud_and_exit "the canned engine never wrote its port"
@@ -276,7 +279,7 @@ fn_run() {
   rm -rf "$WORKDIR/fn-scratch"
   mkdir -p "$WORKDIR/fn-scratch"
   : > "$SLEEPS"
-  OUT="$(SCRATCH="$WORKDIR/fn-scratch" SCEN="$SCEN" SLEEPS="$SLEEPS" E2E_PYTHON=python3 \
+  OUT="$(SCRATCH="$WORKDIR/fn-scratch" SCEN="$SCEN" SLEEPS="$SLEEPS" E2E_PYTHON="$E2E_PYTHON" \
         NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 \
         PATH="$WORKDIR/fn-shims:$PATH" bash -c '
     set -euo pipefail
