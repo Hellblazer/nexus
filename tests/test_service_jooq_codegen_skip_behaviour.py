@@ -32,9 +32,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +66,36 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+#: nexus-9st84: Maven Central answered a transient 404 for this pinned, existing artifact once in
+#: thirty develop runs (CI 39720885850), and one bare urlopen errored the whole module at setup. The
+#: download now tries each host up to three times with a short wait; the pinned sha256 still decides.
+_CENTRAL_HOSTS = ("https://repo.maven.apache.org/maven2", "https://repo1.maven.org/maven2")
+_FETCH_ATTEMPTS = 3
+_FETCH_WAIT_S = 2.0
+_urlopen = urllib.request.urlopen  # module-local seam: a test replaces this, never urllib's own
+
+
+def _download(rel: str, dest: Path, *, wait=time.sleep) -> None:
+    """Fetch *rel* from Maven Central into *dest* (via a per-process part file), retrying a
+    transient failure. The caller checks the digest."""
+    errors: list[str] = []
+    for attempt in range(_FETCH_ATTEMPTS):
+        for host in _CENTRAL_HOSTS:
+            try:
+                with _urlopen(f"{host}/{rel}", timeout=60) as r:
+                    data = r.read()
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                errors.append(f"{host} attempt {attempt + 1}: {exc}")
+                continue
+            part = dest.with_suffix(f".part.{os.getpid()}")
+            part.write_bytes(data)
+            part.replace(dest)
+            return
+        if attempt + 1 < _FETCH_ATTEMPTS:
+            wait(_FETCH_WAIT_S * (attempt + 1))
+    raise AssertionError(f"could not download {rel} from Maven Central: " + "; ".join(errors))
+
+
 def _ant_jar(name: str) -> Path:
     jar = f"{name}-{_ANT_VERSION}.jar"
     rel = f"org/apache/ant/{name}/{_ANT_VERSION}/{jar}"
@@ -73,12 +105,68 @@ def _ant_jar(name: str) -> Path:
     cached = Path(tempfile.gettempdir()) / f"nexus-ant-{_ANT_VERSION}" / jar
     if not (cached.is_file() and _sha256(cached) == _ANT_JARS[name]):
         cached.parent.mkdir(parents=True, exist_ok=True)
-        part = cached.with_suffix(".part")
-        with urllib.request.urlopen(f"https://repo.maven.apache.org/maven2/{rel}", timeout=60) as r:
-            part.write_bytes(r.read())
-        part.replace(cached)
+        _download(rel, cached)
     assert _sha256(cached) == _ANT_JARS[name], f"{jar}: digest differs from the pinned one"
     return cached
+
+
+class _FakeResponse:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def _scripted_urlopen(outcomes: list, seen: list[str]):
+    """An urlopen stand-in: each call pops the next outcome, an exception to raise or bytes to return."""
+    def fake(url: str, timeout: float) -> _FakeResponse:
+        seen.append(url)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _FakeResponse(outcome)
+    return fake
+
+
+def _http_404(url: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+
+def test_a_transient_central_failure_is_retried_and_the_jar_lands(tmp_path, monkeypatch) -> None:
+    """nexus-9st84: a 404 from one host, then a refused connection from the other, then the bytes."""
+    seen: list[str] = []
+    waits: list[float] = []
+    monkeypatch.setattr(
+        sys.modules[__name__], "_urlopen",
+        _scripted_urlopen([_http_404("a"), urllib.error.URLError("refused"), b"jar-bytes"], seen),
+    )
+    dest = tmp_path / "ant.jar"
+    _download("org/apache/ant/ant/1.10.12/ant-1.10.12.jar", dest, wait=waits.append)
+    assert dest.read_bytes() == b"jar-bytes"
+    assert [u.split("/org/apache/")[0] for u in seen] == list(_CENTRAL_HOSTS) + [_CENTRAL_HOSTS[0]]
+    assert waits == [_FETCH_WAIT_S]
+    assert not list(tmp_path.glob("*.part.*")), "the part file is renamed into place, not left behind"
+
+
+def test_a_download_that_never_succeeds_fails_loud_after_every_attempt(tmp_path, monkeypatch) -> None:
+    seen: list[str] = []
+    waits: list[float] = []
+    calls = _FETCH_ATTEMPTS * len(_CENTRAL_HOSTS)
+    monkeypatch.setattr(
+        sys.modules[__name__], "_urlopen", _scripted_urlopen([_http_404("x")] * calls, seen),
+    )
+    with pytest.raises(AssertionError, match="could not download org/apache/ant"):
+        _download("org/apache/ant/ant/1.10.12/ant-1.10.12.jar", tmp_path / "ant.jar", wait=waits.append)
+    assert len(seen) == calls
+    assert waits == [_FETCH_WAIT_S * n for n in range(1, _FETCH_ATTEMPTS)]
+    assert not (tmp_path / "ant.jar").exists()
 
 
 @pytest.fixture(scope="module")
