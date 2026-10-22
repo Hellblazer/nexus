@@ -394,30 +394,134 @@ class CollectionRegistryTest {
     }
 
     @Test
-    void supersedeCollection_doesNotLeaveAStaleRowInTheCache() {
+    void supersedeCollection_evictsTheCachedRow_andTheFreshReadCarriesTheSuccessor() {
+        // nexus-mp8ys: this test used to pin supersede's DELIBERATE non-invalidation (the cached
+        // row held no superseded_by, so it could not go stale). CollectionRow now carries
+        // superseded_by and a write path refuses on it, so a cached live row would let a write to
+        // the retired name pass; supersede evicts post-commit instead.
         String name = "code__cr-supersede__voyage-code-3__v1";
         String target = "code__cr-supersede-target__voyage-code-3__v2";
         seedRegisteredWithAttributes(name, "code", "cr-supersede", "voyage-code-3", 1024, "live");
         CollectionRow cachedBefore = tenantScope.withTenant(TENANT,
             ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        assertThat(cachedBefore.supersededBy()).isEmpty();
+        assertThat(CollectionRegistry.cached(TENANT, name)).isPresent();
 
         catalogRepo.supersedeCollection(TENANT, name, target, "");
 
-        // supersedeCollection touches ONLY superseded_by/superseded_at — none of the
-        // five attributes CollectionRow caches — so the row must read identically
-        // whether served from the (deliberately unevicted) cache or freshly
-        // re-fetched: neither path may disagree with the other, and neither may
-        // disagree with what was true before the supersede.
-        CollectionRow cachedAfter = CollectionRegistry.cached(TENANT, name).orElseThrow();
-        assertThat(cachedAfter).isEqualTo(cachedBefore);
-
-        CollectionRegistry.evict(TENANT, name);
+        assertThat(CollectionRegistry.cached(TENANT, name))
+            .as("the supersede commit must evict the live row it made stale")
+            .isEmpty();
         CollectionRow freshAfter = tenantScope.withTenant(TENANT,
             ctx -> CollectionRegistry.require(ctx, TENANT, name));
-        assertThat(freshAfter)
-            .as("a fresh re-read after supersede must agree with the never-invalidated cached "
-                + "value -- supersede must never leave a caller reading a stale/mismatched row, "
-                + "cached or freshly fetched")
-            .isEqualTo(cachedBefore);
+        assertThat(freshAfter.supersededBy()).isEqualTo(target);
+        assertThat(freshAfter.isSuperseded()).isTrue();
+        assertThat(freshAfter.dimension()).isEqualTo(cachedBefore.dimension());
+        assertThat(CollectionRegistry.cached(TENANT, name))
+            .as("a tombstone read is never cached")
+            .isEmpty();
+    }
+
+    // -------------------------------------------------------------------------
+    // nexus-mp8ys: a chunk write to a retired (superseded) name is refused, naming the successor.
+    // -------------------------------------------------------------------------
+
+    @Test
+    void markKnown_aSupersededRow_isNeverCached_andDropsAnEarlierLiveEntry() {
+        String name = "code__cr-mk-tombstone__voyage-code-3__v1";
+        CollectionRegistry.markKnown(TENANT, name,
+            new CollectionRow("code", "cr-mk", "voyage-code-3", 1024, "live"));
+        assertThat(CollectionRegistry.isKnown(TENANT, name)).isTrue();
+
+        CollectionRegistry.markKnown(TENANT, name,
+            new CollectionRow("code", "cr-mk", "voyage-code-3", 1024, "live", "code__cr-mk__voyage-code-3__v2"));
+
+        assertThat(CollectionRegistry.isKnown(TENANT, name))
+            .as("a tombstone is never cached, and it must not leave the live entry it replaces readable")
+            .isFalse();
+    }
+
+    @Test
+    void collectionRow_normalisesNullSupersededByToNotSuperseded() {
+        var row = new CollectionRow("code", "o", "voyage-code-3", 1024, "live", null);
+        assertThat(row.supersededBy()).isEmpty();
+        assertThat(row.isSuperseded()).isFalse();
+        assertThat(new CollectionRow("code", "o", "voyage-code-3", 1024, "live").isSuperseded()).isFalse();
+    }
+
+    @Test
+    void requireWritable_aLiveRow_isReturnedAndCached() {
+        String name = "code__cr-writable-live__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-writable-live", "voyage-code-3", 1024, "live");
+
+        CollectionRow row = tenantScope.withTenant(TENANT,
+            ctx -> CollectionRegistry.requireWritable(ctx, TENANT, name));
+
+        assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
+        assertThat(CollectionRegistry.lookupWritable(tenantScope, TENANT, name)).isEqualTo(row);
+        assertThat(CollectionRegistry.isKnown(TENANT, name)).isTrue();
+    }
+
+    @Test
+    void requireWritable_aSupersededRow_throwsNamingTheSuccessor_andCachesNothing() {
+        String name = "code__cr-writable-dead__voyage-code-3__v1";
+        String successor = "code__cr-writable-dead__voyage-code-3__v2";
+        seedRegisteredWithAttributes(name, "code", "cr-writable-dead", "voyage-code-3", 1024, "live");
+        catalogRepo.supersedeCollection(TENANT, name, successor, "");
+
+        assertThatThrownBy(() -> tenantScope.withTenant(TENANT,
+                ctx -> CollectionRegistry.requireWritable(ctx, TENANT, name)))
+            .isInstanceOfSatisfying(CollectionSupersededException.class, e -> {
+                assertThat(e.supersededBy()).isEqualTo(successor);
+                assertThat(e.collection()).isEqualTo(name);
+                assertThat(e.tenant()).isEqualTo(TENANT);
+                assertThat(e.getMessage()).contains(name).contains(successor);
+            })
+            .isNotInstanceOf(UnregisteredCollectionException.class);
+        assertThat(CollectionRegistry.isKnown(TENANT, name)).isFalse();
+        assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
+            .isInstanceOf(CollectionSupersededException.class);
+    }
+
+    @Test
+    void lookupWritable_aLiveRowCachedBeforeTheSupersede_isRefusedAfterIt() {
+        // The scenario the engine refusal exists for: the registry already holds the live row
+        // (an earlier write warmed it), then the name is retired. Served from the cache this
+        // would pass and strand the chunk. Fails if supersedeCollection stops evicting.
+        String name = "code__cr-warm-then-dead__voyage-code-3__v1";
+        String successor = "code__cr-warm-then-dead__voyage-code-3__v2";
+        seedRegisteredWithAttributes(name, "code", "cr-warm-then-dead", "voyage-code-3", 1024, "live");
+        CollectionRegistry.lookupWritable(tenantScope, TENANT, name);
+        assertThat(CollectionRegistry.isKnown(TENANT, name)).isTrue();
+
+        catalogRepo.supersedeCollection(TENANT, name, successor, "");
+
+        assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
+            .isInstanceOfSatisfying(CollectionSupersededException.class,
+                e -> assertThat(e.supersededBy()).isEqualTo(successor));
+    }
+
+    @Test
+    void lookupWritable_aRevivedName_isWritableAgain_becauseTheTombstoneWasNeverCached() {
+        String name = "code__cr-revive__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-revive", "voyage-code-3", 1024, "live");
+        catalogRepo.supersedeCollection(TENANT, name, "code__cr-revive__voyage-code-3__v2", "");
+        assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
+            .isInstanceOf(CollectionSupersededException.class);
+
+        // An explicit registration clears superseded_by without touching the cache.
+        tenantScope.withTenant(TENANT, ctx -> ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+            .execute());
+
+        assertThat(CollectionRegistry.lookupWritable(tenantScope, TENANT, name).isSuperseded()).isFalse();
+    }
+
+    @Test
+    void requireWritable_anUnregisteredName_isStillTheUnregisteredRefusal_notTheSupersededOne() {
+        assertThatThrownBy(() -> tenantScope.withTenant(TENANT,
+                ctx -> CollectionRegistry.requireWritable(ctx, TENANT, "code__cr-never__voyage-code-3__v1")))
+            .isInstanceOf(UnregisteredCollectionException.class);
     }
 }

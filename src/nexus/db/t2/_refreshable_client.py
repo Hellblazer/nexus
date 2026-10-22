@@ -67,6 +67,7 @@ import structlog
 # additionally pins this module's and http_vector_client's values equal
 # against a future local-redefinition drift.
 from nexus._log_safe_url import log_endpoint
+from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
@@ -1401,8 +1402,20 @@ class RefreshableHttpStoreMixin:
             detail = resp.json().get("error", resp.text)
         except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             detail = resp.text
-        raise httpx.HTTPStatusError(
+        failure = httpx.HTTPStatusError(
             f"{type(self).__name__}.{op} failed: HTTP {resp.status_code}: {detail}",
             request=resp.request,
             response=resp,
         )
+        # nexus-mp8ys: the engine refused a chunk write (the combined write_many /
+        # append / append_many) to a retired collection name. Typed, naming the
+        # successor. It is not an HTTPStatusError, so neither retry ladder in
+        # this mixin (both key on that type) can resend it.
+        if resp.status_code == 409:
+            try:
+                superseded = superseded_write_error_from_body(409, resp.json())
+            except Exception:  # noqa: BLE001 — an unreadable body is never this error; the generic 409 stands
+                superseded = None
+            if superseded is not None:
+                raise superseded from failure
+        raise failure

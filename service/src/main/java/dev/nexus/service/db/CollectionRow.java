@@ -38,11 +38,32 @@ package dev.nexus.service.db;
  *                        {@code embedding_models.dimension} for {@code
  *                        embeddingModel}
  * @param lifecycleState {@code catalog_collections.lifecycle_state}
+ * @param supersededBy   {@code catalog_collections.superseded_by}, normalised: {@code ""} when the
+ *                        row is not superseded (the column's own not-superseded value, as NULL is).
+ *                        A superseded row is the product of a rename or supersede, and a write to
+ *                        it is refused (nexus-mp8ys, {@link CollectionSupersededException}); such a
+ *                        row is never cached, see {@link CollectionRegistry#markKnown}
  */
 public record CollectionRow(
         String contentType,
         String ownerId,
         String embeddingModel,
         int dimension,
-        String lifecycleState) {
+        String lifecycleState,
+        String supersededBy) {
+
+    public CollectionRow {
+        supersededBy = supersededBy == null ? "" : supersededBy;
+    }
+
+    /** A row that is not superseded; the shape every caller before nexus-mp8ys built. */
+    public CollectionRow(String contentType, String ownerId, String embeddingModel, int dimension,
+                         String lifecycleState) {
+        this(contentType, ownerId, embeddingModel, dimension, lifecycleState, "");
+    }
+
+    /** True when the row names a successor: it was renamed away or superseded. */
+    public boolean isSuperseded() {
+        return !supersededBy.isEmpty();
+    }
 }

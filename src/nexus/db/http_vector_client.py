@@ -54,6 +54,7 @@ from nexus.db.gateway_backoff import (
     is_non_idempotent_sweep_path,
 )
 from nexus.db.client_identity import client_identity_headers
+from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
@@ -1878,6 +1879,12 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
+        # nexus-mp8ys: the engine refused a chunk write to a retired name. Typed,
+        # naming the successor, and not a VectorServiceError: no caller's degrade
+        # path or retry ladder may treat it as a transient engine failure.
+        _superseded = superseded_write_error_from_body(e.code, err)
+        if _superseded is not None:
+            raise _superseded from e
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"

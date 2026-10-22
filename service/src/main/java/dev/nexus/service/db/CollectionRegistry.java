@@ -3,7 +3,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.Record6;
+import org.jooq.Record7;
 
 import java.util.Map;
 import java.util.Optional;
@@ -113,6 +113,14 @@ public final class CollectionRegistry {
      * cache miss).
      */
     public static void markKnown(String tenant, String collection, CollectionRow row) {
+        if (row.isSuperseded()) {
+            // nexus-mp8ys: a retired name is never cached. The cache answers "may this write
+            // proceed without a read", and a revive (POST /collections/upsert) clears
+            // superseded_by without touching the cache, so a cached tombstone would go on
+            // refusing a name that was revived. Uncached, every read of a tombstone re-reads it.
+            KNOWN.remove(key(tenant, collection));
+            return;
+        }
         KNOWN.put(key(tenant, collection), row);
     }
 
@@ -201,10 +209,11 @@ public final class CollectionRegistry {
         if (hit.isPresent()) {
             return hit.get();
         }
-        Record6<String, String, String, Integer, String, Integer> r = ctx.select(
+        Record7<String, String, String, Integer, String, Integer, String> r = ctx.select(
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
-                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION)
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .from(CATALOG_COLLECTIONS)
             .leftJoin(EMBEDDING_MODELS)
                 .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
@@ -229,7 +238,7 @@ public final class CollectionRegistry {
                 + "dimension: catalog_collections.dimension is NULL and its embedding_model '"
                 + r.value3() + "' has no nexus.embedding_models row to fall back to");
         }
-        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5());
+        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5(), r.value7());
         markKnown(tenant, collection, row);
         return row;
     }
@@ -260,5 +269,34 @@ public final class CollectionRegistry {
             return hit.get();
         }
         return scope.withTenant(tenant, ctx -> require(ctx, tenant, collection));
+    }
+
+    /**
+     * {@link #require}, for a caller that is about to WRITE chunks into {@code collection}
+     * (nexus-mp8ys): refuses a retired name instead of returning it. Reads, listings and the
+     * quarantine paths keep using {@link #require} / {@link #lookup}, which hand a tombstone back
+     * with {@link CollectionRow#supersededBy()} set.
+     *
+     * @throws UnregisteredCollectionException if no row exists for the pair
+     * @throws CollectionSupersededException if the row names a successor
+     */
+    public static CollectionRow requireWritable(DSLContext ctx, String tenant, String collection) {
+        return refuseIfSuperseded(tenant, collection, require(ctx, tenant, collection));
+    }
+
+    /**
+     * {@link #requireWritable}, for callers OUTSIDE an open transaction; the write-path twin of
+     * {@link #lookup}. A cache hit is always a live row (see {@link #markKnown}), so the hot path
+     * costs what {@link #lookup} costs.
+     */
+    public static CollectionRow lookupWritable(TenantScope scope, String tenant, String collection) {
+        return refuseIfSuperseded(tenant, collection, lookup(scope, tenant, collection));
+    }
+
+    private static CollectionRow refuseIfSuperseded(String tenant, String collection, CollectionRow row) {
+        if (row.isSuperseded()) {
+            throw new CollectionSupersededException(tenant, collection, row.supersededBy());
+        }
+        return row;
     }
 }

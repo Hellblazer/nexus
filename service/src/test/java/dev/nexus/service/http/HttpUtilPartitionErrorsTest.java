@@ -9,8 +9,10 @@ import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.db.CollectionModelMismatchException;
+import dev.nexus.service.db.CollectionSupersededException;
 import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.TenantCreationBusyException;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
@@ -110,6 +112,41 @@ class HttpUtilPartitionErrorsTest {
         assertThat(body.get("source_collection").asText()).isEqualTo("code__a__voyage-code-3__v1");
         assertThat(body.get("target_collection").asText()).isEqualTo("docs__a__bge-base-en-v15-768__v1");
         assertThat(body.get("error").asText()).contains("voyage-code-3").contains("bge-base-en-v15-768");
+    }
+
+    @Test
+    void aWriteToASupersededName_is409_namingTheSuccessor_andIsNotTheRetryable422() throws Exception {
+        // nexus-mp8ys. The client's register-and-retry keys on the "not registered" 422; a retry here
+        // would re-register (revive) the retired name, so this refusal must be a different status
+        // AND must not carry that wording.
+        var ex = send(new CollectionSupersededException("acme", "code__a__voyage-code-3__v1",
+            "code__a__voyage-code-3__v2"));
+        assertThat(ex.status).isEqualTo(409);
+        JsonNode body = MAPPER.readTree(ex.body());
+        assertThat(body.get("error").asText()).isEqualTo("collection_superseded");
+        assertThat(body.get("reason").asText()).isEqualTo("collection_superseded");
+        assertThat(body.get("collection").asText()).isEqualTo("code__a__voyage-code-3__v1");
+        assertThat(body.get("superseded_by").asText()).isEqualTo("code__a__voyage-code-3__v2");
+        assertThat(body.get("message").asText())
+            .contains("code__a__voyage-code-3__v1").contains("code__a__voyage-code-3__v2")
+            .doesNotContain("is not registered").doesNotContain("register it first");
+        assertThat(ex.body()).doesNotContain("is not registered").doesNotContain("register it first");
+    }
+
+    @Test
+    void aSupersededRefusalWrappedByTheTransactionLayer_isStill409() throws Exception {
+        var ex = send(new RuntimeException("tx failed",
+            new CollectionSupersededException("acme", "c1", "c2")));
+        assertThat(ex.status).isEqualTo(409);
+        assertThat(MAPPER.readTree(ex.body()).get("superseded_by").asText()).isEqualTo("c2");
+    }
+
+    @Test
+    void anUnregisteredName_staysTheRetryable422_distinctFromTheSupersededRefusal() throws Exception {
+        var ex = send(new UnregisteredCollectionException("acme", "c1"));
+        assertThat(ex.status).isEqualTo(422);
+        assertThat(ex.body()).contains("is not registered");
+        assertThat(MAPPER.readTree(ex.body()).has("superseded_by")).isFalse();
     }
 
     @Test

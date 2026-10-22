@@ -6,6 +6,8 @@ importing the corpus module on every invocation.
 """
 from __future__ import annotations
 
+from typing import Any
+
 
 class SupersededCollectionWriteError(RuntimeError):
     """A write named a collection the catalog has retired (``superseded_by``
@@ -19,6 +21,13 @@ class SupersededCollectionWriteError(RuntimeError):
     registration issues clears ``superseded_by`` unconditionally, so
     proceeding would silently un-retire the collection; refusing names the
     successor instead. Exposes ``name`` and ``successor``.
+
+    Also raised from the engine's own refusal (nexus-mp8ys): a chunk write that
+    reaches the engine against a retired name is answered 409
+    ``collection_superseded`` naming the successor, which
+    :func:`superseded_write_error_from_body` turns into this error. That covers
+    the process that did not perform the rename and whose registration cache
+    still calls the name live.
     """
 
     def __init__(self, name: str, successor: str, *, remedy: str | None = None) -> None:
@@ -36,3 +45,25 @@ class SupersededCollectionWriteError(RuntimeError):
             f"collection {name!r} was superseded by {successor!r}, so a write to "
             f"{name!r} is refused. {advice}"
         )
+
+
+def superseded_write_error_from_body(
+    status: int | None, body: Any,
+) -> SupersededCollectionWriteError | None:
+    """The typed error for the engine's 409 ``collection_superseded`` body, else None.
+
+    Keyed on the status and the engine's ``reason`` (the body repeats the value
+    in ``error`` for a reader of that key). A body that names no collection or
+    no successor is not turned into the typed error: the caller keeps its
+    generic 409, which is no more retryable.
+    """
+    from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+
+    if status != 409 or not isinstance(body, dict):
+        return None
+    if error_reason(body) != COLLECTION_SUPERSEDED_REASON:
+        return None
+    name, successor = body.get("collection"), body.get("superseded_by")
+    if not (isinstance(name, str) and name and isinstance(successor, str) and successor):
+        return None
+    return SupersededCollectionWriteError(name, successor)

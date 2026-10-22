@@ -517,7 +517,7 @@ public final class CombinedWriteService {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
-        CollectionRow row = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        CollectionRow row = CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
         if (embeddingModel == null || embeddingModel.isBlank()) {
             throw new IllegalArgumentException("'embedding_model' is required when a chunk carries an"
                 + " 'embedding' (chunks[" + first + "] does); collection '" + collection
@@ -578,7 +578,9 @@ public final class CombinedWriteService {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
-        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        // nexus-mp8ys: a retired name (superseded_by set) is refused here, before the registration
+        // check, the embedder and every write, naming the successor; see CollectionSupersededException.
+        int dim = CollectionRegistry.lookupWritable(tenantScope, tenant, collection).dimension();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to

@@ -8550,7 +8550,7 @@ public final class CatalogRepository {
         Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
             ? DSL.currentOffsetDateTime()
             : DSL.val(tsOrNull(supersededAt));
-        return tenantScope.withTenant(tenant, ctx ->
+        int updated = tenantScope.withTenant(tenant, ctx ->
             ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
                // nexus-0svvu (a): the WHERE's same-target disjunct below (nexus-cecqy) is
@@ -8589,6 +8589,12 @@ public final class CatalogRepository {
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
                .execute()
         );
+        // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict). The cached row
+        // names no successor; left in place it would let an implicit chunk write to the retired
+        // name pass the registry check, which is the stranding this refusal exists to stop. The
+        // next write re-reads the row, finds the successor and is refused.
+        CollectionRegistry.evict(tenant, name);
+        return updated;
     }
 
     /**

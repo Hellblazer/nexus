@@ -967,7 +967,9 @@ public final class PgVectorRepository {
         // check, the embedder and every write statement, naming the model; the lookup is a cache hit
         // (dimForCollection just resolved the same row) and so is the partition answer after the first
         // write of a model.
-        final String embeddingModel = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+        // nexus-mp8ys: a retired name (superseded_by set) is refused here, before the ownership check,
+        // the embedder and every write, naming the successor; see CollectionSupersededException.
+        final String embeddingModel = CollectionRegistry.lookupWritable(tenantScope, tenant, collection).embeddingModel();
         ModelPartitions.require(tenantScope, tenant, ModelPartitions.CHUNKS, embeddingModel);
 
         // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership check runs here, after the

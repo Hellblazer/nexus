@@ -2358,6 +2358,18 @@ def write_with_registration_retry(
     ensure_collection_registered(name, registrar=registrar)
     try:
         return write_fn()
+    except SupersededCollectionWriteError:
+        # nexus-mp8ys: the ENGINE refused the write because the name is retired
+        # (409 collection_superseded; this process's cache still called it live).
+        # Neither retried nor re-registered: the re-registration below is an
+        # upsert and would revive the name. Expire the entry, kept and stale,
+        # so the next write takes the cheap revalidation READ and is refused
+        # here, before it uploads another body.
+        with _REGISTERED_COLLECTIONS_LOCK:
+            _registration_cache_set(getattr(registrar, "scope", None)).expire(
+                _registration_cache_key(getattr(registrar, "scope", None), name),
+            )
+        raise
     except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
         if not _looks_like_stale_registration_error(exc):
             raise

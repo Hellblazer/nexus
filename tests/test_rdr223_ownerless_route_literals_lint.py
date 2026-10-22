@@ -63,6 +63,7 @@ _ALLOWED: dict[str, str] = {
     "tests/test_gtl01_upsert_ack_coverage.py": _STUBBED,
     "tests/test_http_vector_client_deadline_header.py": _STUBBED,
     "tests/test_http_vector_client_parity.py": _STUBBED,
+    "tests/test_mp8ys_superseded_chunk_write.py": _STUBBED + " (_request is patched to raise the engine's 409 for a retired name)",
     "tests/test_local_daemon_client_embed.py": _STUBBED + " (T3Database over a MagicMock client)",
     "tests/test_local_mode.py": _STUBBED + " (in-memory T3Database)",
     "tests/test_service_mode_cli_real_client.py": _STUBBED,
