@@ -325,8 +325,9 @@ public final class ChashRepository {
         // verified it above), so lookup() below is a cache hit in the common case —
         // require() already cached it mid-transaction — and a cheap single-row read
         // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
-        CollectionRegistry.markKnown(tenant, newCollection,
-            CollectionRegistry.lookup(tenantScope, tenant, newCollection));
+        // nexus-hkh1y: the lookup itself caches (on a miss, through the guarded fill); a direct
+        // markKnown of its result would re-cache a read a concurrent evict had invalidated.
+        CollectionRegistry.lookup(tenantScope, tenant, newCollection);
         return updated;
     }
 

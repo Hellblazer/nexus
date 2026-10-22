@@ -133,6 +133,11 @@ public final class CollectionRegistry {
      * (see class doc) — unless {@code row} reflects a pair confirmed registered by
      * an EARLIER, already-committed transaction (as {@link #require} does on a
      * cache miss).
+     *
+     * <p>No production code outside this class calls it (nexus-hkh1y): an unguarded put of a
+     * row read before a concurrent evict re-caches the stale row. Production fills go through
+     * {@link #require}/{@link #lookup}, whose fill checks the eviction count; this stays public
+     * as the seeding seam tests in other packages use.
      */
     public static void markKnown(String tenant, String collection, CollectionRow row) {
         if (row.isSuperseded()) {
@@ -221,10 +226,10 @@ public final class CollectionRegistry {
      * this bead retires: those wrote a blank-attribute row on first write so their
      * own {@code (tenant, collection)} FK could never fail; this checks existence
      * instead and never writes anything. Checks the in-process cache first (skips
-     * a round trip once a pair is known-registered — {@code CatalogRepository
-     * .upsertCollection} and siblings mark it via {@link #markKnown} post-commit);
-     * on a cache miss, reads the row from the database directly and caches it so
-     * repeat writes to the same collection skip the SELECT too.
+     * a round trip once a pair is known-registered); on a cache miss, reads the row
+     * from the database directly and caches it so repeat writes to the same
+     * collection skip the SELECT too, unless an evict ran between the read and the
+     * fill (nexus-hkh1y), in which case the row is returned but not cached.
      *
      * @throws UnregisteredCollectionException if no row exists for the pair
      * @throws IllegalStateException if the row's own {@code dimension} is {@code NULL}

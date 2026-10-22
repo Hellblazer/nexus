@@ -419,6 +419,33 @@ class CollectionRegistryTest {
     }
 
     @Test
+    void aMissThatRacesATenantEvict_doesNotCache() {
+        // nexus-hkh1y: evictTenant (a profile write, the tenant reset route) counts as an evict too.
+        String name = "code__cr-race-tenant__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-race-tenant", "voyage-code-3", 1024, "live");
+        CollectionRegistry.afterMissReadForTests = () -> CollectionRegistry.evictTenant(TENANT);
+        try {
+            tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        } finally {
+            CollectionRegistry.afterMissReadForTests = null;
+        }
+        assertThat(CollectionRegistry.cached(TENANT, name)).as("a fill that raced evictTenant is dropped").isEmpty();
+    }
+
+    @Test
+    void aMissThatRacesAClear_doesNotCache() {
+        String name = "code__cr-race-clear__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-race-clear", "voyage-code-3", 1024, "live");
+        CollectionRegistry.afterMissReadForTests = CollectionRegistry::clearForTests;
+        try {
+            tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        } finally {
+            CollectionRegistry.afterMissReadForTests = null;
+        }
+        assertThat(CollectionRegistry.cached(TENANT, name)).as("a fill that raced clearForTests is dropped").isEmpty();
+    }
+
+    @Test
     void aMissWithNoEvictInFlight_stillCaches() {
         String name = "code__cr-race-control__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-race-control", "voyage-code-3", 1024, "live");

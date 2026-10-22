@@ -8837,12 +8837,13 @@ public final class CatalogRepository {
             // centroid write now takes its model from this cached row, so a lookup that answered from
             // a stale entry would file the next write under a model the row no longer has.
             CollectionRegistry.evict(tenant, newName);
-            // RDR-204 nexus-ft04v.14: markKnown now caches the row, not presence — read
-            // the row step 1 of the transaction just wrote (copied from oldName's
-            // metadata) so newName's cache entry carries its real attributes instead of
-            // forcing the next reader to pay a redundant SELECT.
-            CollectionRegistry.markKnown(tenant, newName,
-                CollectionRegistry.lookup(tenantScope, tenant, newName));
+            // RDR-204 nexus-ft04v.14: re-read the row step 1 of the transaction just wrote
+            // (copied from oldName's metadata) so newName's cache entry carries its real
+            // attributes instead of forcing the next reader to pay a redundant SELECT. The
+            // lookup's miss caches it through the guarded fill (nexus-hkh1y); a direct
+            // markKnown of the returned row would re-cache a read that a concurrent evict
+            // had already invalidated.
+            CollectionRegistry.lookup(tenantScope, tenant, newName);
         }
         return counts;
     }
