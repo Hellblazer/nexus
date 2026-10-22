@@ -545,6 +545,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("LocalTokenizers.warned", "model names already warned about, once per process; "
                 + "tenant-independent");
             notKeyed.put("OrtInitGate.active", "the live ONNX init scopes of this process; tenant-independent");
+            notKeyed.put("CollectionRegistry.afterMissReadForTests", "a test-only hook run between a cache "
+                + "miss's read and its fill (nexus-hkh1y); null in production, holds no state");
             notKeyed.put("ModelPartitions.KNOWN", "parent-and-model partition pairs already created; keyed by "
                 + "model, not by tenant");
             notKeyed.put("TenantScope.ADMISSION", "admission semaphore per DataSource identity; tenant-independent");
