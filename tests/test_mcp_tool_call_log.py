@@ -261,11 +261,20 @@ class TestComposesWithStaleHost:
 
 class TestCoreWiring:
     def test_nexus_server_handler_is_wrapped(self):
+        """Asserted by behaviour, not by the outermost handler's marker: core.main()
+        installs the stale-host hook OUTSIDE this wrap (production order), and any test
+        that ran core.main() earlier on the same worker leaves it there, so the
+        outermost handler is legitimately not ours. A call through whatever handler
+        is installed must still emit the event (7.84.0 PR CI shard 5, both Pythons)."""
         from nexus.mcp.core import _SDK_PATCH_RESULTS, mcp
 
-        handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
-        assert getattr(handler, "_nx_tool_call_log", False) is True
         assert _SDK_PATCH_RESULTS["tool_call_log"] == "applied"
+        with capture_logs() as logs:
+            _call(mcp, "nexus_no_such_tool_probe", {"claudecode/toolUseId": "t1"})
+        events = _events(logs)
+        assert len(events) == 1, logs
+        assert events[0]["tool"] == "nexus_no_such_tool_probe"
+        assert events[0]["meta_keys"] == ["claudecode/toolUseId"]
 
     def test_core_reports_pid_with_the_patch_statuses(self):
         assert _report_call_passes_pid("core.py")

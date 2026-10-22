@@ -673,7 +673,7 @@ from __future__ import annotations
 #: (IRREVERSIBLE). The
 #: store-put route answers 410 (nexus-nt76j, the one [not-additive] wire
 #: entry), so the engine deploys paired with this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 162)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 163)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

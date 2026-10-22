@@ -2979,10 +2979,16 @@ def test_search_refuses_a_limit_past_the_documented_cap():
                   structured=True)["error"].startswith("limit must be")
 
 
-def test_search_error_is_the_text():
+def test_search_error_is_the_text(monkeypatch):
     """nexus-zdzm5: a failed search rode out as empty ids in a success-shaped
     structuredContent, so a client reading structuredContent saw "no hits".
-    Since nexus-099mn there is no structuredContent; the error is the text."""
+    Since nexus-099mn there is no structuredContent; the error is the text.
+    The background fan-out counts refresh is stubbed: on a loaded runner it
+    outlived the 2 s teardown join, ran after the mock T3 was gone and reached
+    storage with no tenant (7.84.0 PR CI shard 1)."""
+    from nexus import mcp_infra  # noqa: PLC0415 — local, matches this file's per-test imports
+
+    monkeypatch.setattr(mcp_infra, "_start_fanout_counts_refresh", lambda: None)
     _mock_t3([{"name": "code__test", "count": 1}])
     result = search(query="zdzm5 error probe", corpus="no_such_corpus_zz")
     assert type(result) is str

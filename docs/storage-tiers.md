@@ -10,7 +10,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 |------|---------|------------|-----------|------------|-----|
 | T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`), PG-only — no in-process opt-out | nexus-service (`nx daemon service`) | nexus-service HTTP | Session only | Working notes, hypotheses |
 | T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (managed-cloud: always Voyage. local: bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service — nexus-umm29, one posture per boot, RDR-210 tracks dual-mode) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
+| T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (managed-cloud: always Voyage. local: bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service — nexus-umm29; an engine at or above v0.1.161 with a key and the bge files serves both, RDR-210) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
 | Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
@@ -215,10 +215,11 @@ service over HTTP `/v1/vectors`, reading `NX_SERVICE_URL` + `NX_SERVICE_TOKEN`
 with supervisor-lease discovery (`~/.config/nexus/storage_service_addr.<uid>`).
 Embedding happens **server-side**, so the choice of model is a property of the
 service, not of the client. Managed-cloud mode always runs Voyage. Local mode
-runs bge-768 by default, or Voyage instead when `NX_VOYAGE_API_KEY` reaches the
-service (nexus-umm29 carve-out): a local install can use either, but not both
-from the same boot (RDR-210 tracks a dual-mode engine that would end that
-limit):
+runs bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the
+service (nexus-umm29 carve-out). An engine at or above `engine-service-v0.1.161`
+that has both the key and the bge model files boots `dual` and serves both from
+the same boot (RDR-210); one with only one of them serves that family alone. The
+table below gives each single-family posture:
 
 | | Local mode, default | Local mode, keyed (`NX_VOYAGE_API_KEY`) | Managed-cloud mode |
 |---|---|---|---|
@@ -227,9 +228,9 @@ limit):
 | Credentials | none required | Voyage API key on the service | Voyage API key on the service |
 | Reranking | available: server-side `ms-marco-MiniLM` cross-encoder (RDR-188) | available: `rerank-2.5` | available: `rerank-2.5` |
 
-A collection embedded under the posture NOT running at the moment is refused
+On an engine that serves one family, a collection embedded under the other is refused
 with a 422 (RDR-204's "reads never refused" is the design intent, not today's
-behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and nothing checks what the switch strands first ([RDR-210](rdr/rdr-210-dual-mode-local-engine.md) tracks the dual-mode engine that serves both). Re-running `nx init` or the upgrade ladder's provision leg keeps a Voyage opt-in (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
+behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); changing what the engine can serve needs a service restart, and nothing checks what the change strands first. A dual engine ([RDR-210](rdr/rdr-210-dual-mode-local-engine.md)) has an embedder for both families, so it refuses neither family's collections for want of one; its `embedding_profile` (`voyage` or `bge`, from `NX_EMBED_PROFILE`, which the local supervisor sets) decides which family new collections are minted for, and `nx doctor`'s "Embedding family" row warns when the engine serves no model of that family. Re-running `nx init` or the upgrade ladder's provision leg keeps a Voyage opt-in (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
 
 Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder has no live production consumer since its salience caller was also retired at nexus-0hqez, 2026-09-23). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
 

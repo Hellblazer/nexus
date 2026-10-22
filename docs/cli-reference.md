@@ -652,6 +652,8 @@ Document rows (year, authors, venue, citation count, backend id), so
 
 Batch-extract structured aspects (problem formulation, proposed method, datasets, baselines, results, extras) for documents in a `knowledge__*` collection. Iterates the catalog (one entry per source document, NOT per chunk) and calls the synchronous extractor directly, bypassing the post-document hook chain to avoid double-firing on documents already triggered at ingest. Aspects land in T2 `document_aspects`.
 
+**Input bound (nexus-95qz4).** A model-backed extractor reads at most 150,000 characters of a document, the head first. A whole PDF once overflowed the model's context, and that document got null fields on every run. The text is cut there, the cut is marked in what the model reads (it is told to leave a field null when its evidence would come after the cut, and to lower its confidence), an `aspect_extractor_content_truncated` warning is logged, and the record carries `extras.input_truncated` with `kept_chars` and `total_chars` so a partial record can be told from a full one. A batch of documents is split into calls whose document text together stays within the same budget. The deterministic `rdr__` parser reads the whole file and has no bound.
+
 **GAP-FILL IS THE DEFAULT (7.18.0, `nexus-ym9ey`).** A bare invocation processes
 only documents with NO aspect row. Before 7.18.0 it re-extracted the entire
 collection every time: three consecutive runs over the same `rdr__` collection
@@ -1608,7 +1610,11 @@ A write that names the tombstoned collection directly is refused with an error
 naming its successor, and `nx index repo` stops the same way with the remedy
 (nexus-wwuzp). A long-running process that registered the old name before the
 rename checks its cached registration again within 60 s; before 7.67.0 it kept
-writing chunks under the tombstone.
+writing chunks under the tombstone. Since engine-service-v0.1.163 the engine itself
+refuses such a write with 409 `collection_superseded` naming the successor: chunk and
+manifest writes (nexus-mp8ys), and taxonomy, aspect, highlight and aspect-queue writes
+(nexus-i15oc). The client raises `SupersededCollectionWriteError` and never re-registers
+the retired name.
 
 ### nx catalog migrate-fallback
 
@@ -2680,7 +2686,7 @@ nx collection list
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). The new collection takes the content type and owner its name implies, and each note's `chroma://<old>/<title>` source URI is rewritten to the new name in the same transaction; a rewrite onto a URI a live document already holds is refused (nexus-sis0m.3; needs an engine carrying it, older engines copy the old owner and leave URIs) |
-| `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
+| `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the engine embeds by the model the collection's catalog row records (by the model its name encodes only when no row backs the name or the row records none), so a `--to` that differs from that model fails loud, `--dry-run` included, instead of stamping a model the engine did not use (nexus-dxifx); cross-model moves re-index from source into a collection named for the new model. `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `re-embed --all`, `re-embed NAME --to MODEL` (a different model), `re-embed --status [JOB]`, `--pause JOB`, `--resume JOB`, `--abort JOB` | The cross-model re-embed job (RDR-210 Phase 6, nexus-cnxjk), local engine only: it refuses in any other mode. See [re-embed job](#nx-collection-re-embed-job) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
@@ -2737,7 +2743,7 @@ takes ~25–70 minutes against the pgvector service. Maintenance-window operatio
 
 | Flag | Description |
 |------|-------------|
-| `--to MODEL` | Target embedding model (required): `voyage-3`, `voyage-code-3` or `voyage-context-3` (the last since nexus-tysei). In service mode it must be the model the collection name encodes |
+| `--to MODEL` | Target embedding model (required): `voyage-3`, `voyage-code-3` or `voyage-context-3` (the last since nexus-tysei). In service mode it must be the model the collection's catalog row records, or the model its name encodes when no row backs the name or the row records none |
 | `--dry-run` / `--no-dry-run` | Default `--dry-run`; pass `--no-dry-run` to actually write |
 | `--yes` | Skip the destructive-action confirmation prompt |
 
@@ -2929,9 +2935,11 @@ headless host where the unit can't activate) a session supervisor starts instead
 the service reads and records it in `~/.config/nexus/config.yml` under
 `local.embed_model`. The RDR-144 two-choice picker (bge-768 / minilm-384) was
 removed at RDR-174 P1.3, so `nx init` asks no embedder question. A keyless
-local engine serves bge-768 only and a keyed one serves Voyage only; MiniLM is
-never served locally, and a collection the running engine cannot embed for is
-refused (422). A fresh, bge or minilm
+local engine serves bge-768 only. A keyed one serves Voyage, and bge-768 beside
+it when the bge model files are present and the engine is at or above
+`engine-service-v0.1.161` (it boots `dual`); a key with no bge files serves
+Voyage only. MiniLM is never served locally, and a collection the running
+engine cannot embed for is refused (422). A fresh, bge or minilm
 `local.embed_model` is stamped `BAAI/bge-base-en-v1.5` (one-time ~140 MB model
 download). If `local.embed_model` already holds a `voyage-*` value, `nx init`
 keeps it and says so, adding a second line when no Voyage key is configured
@@ -2953,10 +2961,13 @@ In local mode `nx init` also:
    because the service cannot boot without the file; re-run when online.
 3. **Migrates nothing.** The safe 384-to-768 collection migration it once
    offered went with the picker (RDR-174 P1.3). `nx init` never re-embeds or
-   deletes a collection. The engine serves one embedding family per boot, so
-   collections embedded with the other family stop serving after a restart
-   until it is switched back or they are re-indexed; RDR-210 tracks the
-   dual-mode engine that serves both side by side. Details under "Local mode
+   deletes a collection. An engine that has both a Voyage key and the bge
+   files, at or above `engine-service-v0.1.161`, serves both families side
+   by side, so a restart strands neither. An engine with only one of them
+   (no key, no bge files, or an older tag) serves one family and answers 422
+   for collections of the other until the missing piece is supplied or they
+   are re-indexed; `nx doctor`'s "Embedding family" row warns when the
+   engine serves no model of its profile's family. Details under "Local mode
    with Voyage" below.
 
 **Cloud mode** is a no-op: embeddings run server-side via Voyage. `nx init`
@@ -2980,10 +2991,27 @@ The engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
 resolves it from the credential chain and injects it into the native
 binary's environment), so **a restart is required** after either command
 above for the change to take effect — `nx config set` alone does not
-reach an already-running engine. Once restarted, the engine boots into
-Voyage-only mode for every collection (no local ONNX fallback), and
-`nx index`/`nx store` mint `voyage-code-3`/`voyage-context-3` collection
-names to match, exactly like cloud mode.
+reach an already-running engine. Once restarted, the engine serves Voyage
+collections, and `nx index`/`nx store` mint `voyage-code-3`/`voyage-context-3`
+collection names to match, exactly like cloud mode. The supervisor also tells
+the engine this profile through `NX_EMBED_PROFILE`, taken from the same
+function the client's write model reads, and an `NX_EMBED_PROFILE` in your own
+environment is overridden. Whether the engine still serves bge-768
+collections beside the Voyage ones depends on the bge model files, which
+`nx init` fetches: with them, an engine at or above `engine-service-v0.1.161`
+boots `dual`; without them it serves Voyage only (no local ONNX fallback).
+
+**When the supervisor passes the key (nexus-wypwq).** The supervisor reads the
+tag of the engine binary it is about to spawn from the install receipt beside
+`nexus-service`. At or above `engine-service-v0.1.161` it passes the key from
+the credential chain whenever there is one, whatever `local.embed_model` says,
+so a bge choice with a key boots a dual engine too: Voyage-named collections
+are served, and a query that touches them calls Voyage. Below that tag, or
+with no verified receipt (a `NEXUS_SERVICE_BIN` or `NEXUS_SERVICE_JAR`
+launch, a missing or unreadable receipt), the older rule stands: the key
+passes only when `local.embed_model` names a Voyage model or records none
+(nexus-r5f3c), because a key flips an older engine Voyage-only. An explicit
+`NX_VOYAGE_API_KEY` in your environment always passes through.
 
 **What happens to a corpus you already indexed under bge/minilm** depends
 on whether the key is configured yet, not just on `local.embed_model`:
@@ -3001,11 +3029,13 @@ does not extend your existing bge/minilm corpus — it starts a separate
 `voyage-code-3`/`voyage-context-3` collection alongside it. Indexing
 without a configured `voyage_api_key` in this state fails loud at write
 time rather than silently falling back to bge. Pre-existing bge/minilm
-collections are never deleted or migrated automatically; once the engine
-is actually restarted and running voyage-only, they become unreadable
-through it entirely (not just unwritable) until you reindex — so switch
-before you have a corpus you care about, or budget time to reindex it
-into the new voyage collection.
+collections are never deleted or migrated automatically. On a dual engine
+(the usual case: `nx init` fetches the bge files) a bge-768 collection stays
+readable and writable through the restarted engine; only a Voyage-only
+engine (no bge files, or a tag below `engine-service-v0.1.161`) makes them
+unreadable through it entirely (not just unwritable) until you reindex, so
+if yours is one of those, budget time to reindex into the new voyage
+collection.
 
 **Caveat — once a voyage sibling exists, a shorthand name picks it, and only reads look further.**
 The first keyed write creates the voyage collection, and the single-name
@@ -3017,8 +3047,8 @@ which names the sibling it found the entry in, and `nx store list`, which pages
 the picked collection and names its siblings so you can list one by name
 (nexus-9ts7n). `nx store delete` and MCP `store_delete` stay in the one
 collection they resolve; when an `--id` or a `--title` is not there but a sibling
-holds it, the error names the `--collection` to pass. The engine's voyage-only-mode-flip after
-restart is tracked in nexus-ddmfg.
+holds it, the error names the `--collection` to pass. The Voyage-only flip after a restart
+(nexus-ddmfg) now applies only to an engine that cannot serve both families.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
 already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision
@@ -3026,9 +3056,12 @@ leg leave it alone and say so (with a second line when no Voyage key is
 configured); they used to write it back to
 bge-768, which stranded the Voyage collections at the next service restart. To
 go back to bge-768 on purpose, run `nx config set local.embed_model
-BAAI/bge-base-en-v1.5` and restart the service; nothing checks first, and the
-Voyage collections stop serving until you switch back. The engine still serves
-one posture per boot; RDR-210 tracks the dual-mode engine.
+BAAI/bge-base-en-v1.5` and restart the service; nothing checks first. New
+collections are then minted for bge. Whether the Voyage collections keep
+serving depends on the restarted engine: one that is dual (a tag of
+`engine-service-v0.1.161` or later read from the install receipt, a configured
+key, the bge files) serves both families, and any other boots with one family
+and answers 422 for the other's collections until you switch back.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on
@@ -4910,7 +4943,7 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea). Each row prints `sender_session` (text and JSON) when the engine sent the key: the session the engine recorded for the write, null when it recorded none, absent from an engine at v0.1.162 or earlier. It is the raw stamp, with no `unverified`/`unattested` mark; the drain hook and the channel apply those (see [Tuple Space](tuple-space.md)).
 
 ### nx tuple in
 
