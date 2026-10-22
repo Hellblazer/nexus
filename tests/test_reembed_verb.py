@@ -467,3 +467,109 @@ class TestInPlaceUnchanged:
     def test_the_choices_gain_the_bge_model(self, runner):
         result = runner.invoke(main, ["collection", "re-embed", "--help"])
         assert BGE in result.output
+
+
+# ── review fold-in (nexus-cnxjk) ─────────────────────────────────────────────
+
+
+class TestEngine404:
+    """A 404 means "upgrade the engine" only for a body the handler does not itself send."""
+
+    @pytest.mark.parametrize("flag", ["--pause", "--resume", "--abort"])
+    def test_an_unknown_job_is_shown_verbatim_not_as_an_upgrade_hint(self, runner, flag):
+        db = _engine()
+        err = VectorServiceError("HTTP 404", code=404, engine_body={"error": f"no re-embed job {JOB}"})
+        for method in ("reembed_pause", "reembed_resume", "reembed_abort"):
+            getattr(db, method).side_effect = err
+        result = _invoke(runner, db, FakeCatalog([], {}), [flag, JOB])
+        assert result.exit_code != 0
+        assert f"no re-embed job {JOB}" in result.output and "upgrade" not in result.output
+
+    def test_an_unregistered_source_is_shown_verbatim(self, runner):
+        err = VectorServiceError(
+            "HTTP 404", code=404, engine_body={"error": f"source collection {SRC} is not registered"},
+        )
+        db = _engine({SRC: err})
+        result = _invoke(runner, db, FakeCatalog([_row(SRC)], {"docs": VA}), ["--all"])
+        assert result.exit_code != 0
+        assert f"source collection {SRC} is not registered" in result.output and "upgrade" not in result.output
+
+    @pytest.mark.parametrize("body", [{"error": "not found: /plan"}, {"error": "not found"}, None])
+    def test_a_route_the_engine_lacks_still_says_upgrade(self, runner, body):
+        db = _engine({SRC: VectorServiceError("HTTP 404", code=404, engine_body=body)})
+        result = _invoke(runner, db, FakeCatalog([_row(SRC)], {"docs": VA}), ["--all"])
+        assert result.exit_code != 0 and "upgrade" in result.output
+
+
+class TestOwnerlessTargetName:
+    def test_a_row_with_no_owner_is_refused_before_the_plan_and_names_no_none(self, runner):
+        db = _engine()
+        row = _row(SRC)
+        row["owner_id"] = None
+        result = _invoke(runner, db, FakeCatalog([row], {"docs": VA}), ["--all", "--no-dry-run", "--yes"])
+        assert result.exit_code != 0
+        assert "no owner_id" in result.output and "None" not in result.output
+        db.reembed_plan.assert_not_called()
+        db.reembed_start.assert_not_called()
+
+    def test_a_row_whose_owner_is_the_tenant_id_is_refused(self, runner):
+        db = _engine()
+        db._tenant = "tenant-7"
+        row = _row(SRC, owner="tenant-7")
+        result = _invoke(runner, db, FakeCatalog([row], {"docs": VA}), ["--all"])
+        assert result.exit_code != 0 and "placeholder 'tenant-7'" in result.output
+        db.reembed_plan.assert_not_called()
+
+    def test_a_row_whose_own_tenant_id_column_is_its_owner_is_refused(self, runner):
+        db = _engine()
+        row = _row(SRC, owner="tenant-9")
+        row["tenant_id"] = "tenant-9"
+        result = _invoke(runner, db, FakeCatalog([row], {"docs": VA}), ["--all"])
+        assert result.exit_code != 0 and "placeholder" in result.output
+
+    def test_the_default_owner_is_refused(self, runner):
+        db = _engine()
+        result = _invoke(runner, db, FakeCatalog([_row(SRC, owner="default")], {"docs": VA}), ["--all"])
+        assert result.exit_code != 0 and "placeholder 'default'" in result.output
+        db.reembed_plan.assert_not_called()
+
+
+class TestPlanWording:
+    def test_the_satellite_line_says_the_plan_does_not_predict_every_refusal(self, runner):
+        db = _engine({SRC: _plan()})
+        result = _invoke(runner, db, FakeCatalog([_row(SRC)], {"docs": VA}), ["--all"])
+        assert result.exit_code == 0, result.output
+        assert "does not predict every refusal" in result.output
+        assert "homed here whose chunks sit in another collection" in result.output
+
+
+class TestConfirmPrompt:
+    def _decline(self, runner, db, cat, args):
+        with patch("nexus.commands.collection._t3", return_value=db), \
+                patch("nexus.catalog.factory.make_catalog_reader", return_value=cat):
+            return runner.invoke(main, ["collection", "re-embed", *args], input="n\n")
+
+    def test_the_all_prompt_states_the_total_estimate_and_the_per_job_cap(self, runner):
+        a, b = "docs__1-1__bge-base-en-v15-768__v1", "docs__2-2__bge-base-en-v15-768__v1"
+        db = _engine({a: _plan(token_estimate=9_000), b: _plan(token_estimate=4_000)})
+        cat = FakeCatalog([_row(a, owner="1.1"), _row(b, owner="2.2")], {"docs": VA})
+        result = self._decline(runner, db, cat, ["--all", "--no-dry-run"])
+        assert result.exit_code != 0
+        assert "Start 2 re-embed job(s)?" in result.output
+        assert "About 13,000 tokens will be billed in all" in result.output
+        assert "capped at 10,000,000 tokens on its own" in result.output
+        db.reembed_start.assert_not_called()
+
+    def test_a_raised_cap_is_the_cap_the_prompt_names(self, runner):
+        db = _engine({SRC: _plan(token_estimate=500)})
+        cat = FakeCatalog([_row(SRC)], {"docs": VA})
+        result = self._decline(runner, db, cat, ["--all", "--no-dry-run", "--token-cap", "777"])
+        assert "capped at 777 tokens on its own" in result.output
+
+    def test_an_on_device_target_bills_nothing_and_the_prompt_says_so(self, runner):
+        src = "docs__1-1__voyage-model-a__v1"
+        db = _engine({src: _plan(chunks=40, token_estimate=0)})
+        cat = FakeCatalog([_row(src, model=VA)], {"docs": BGE})
+        result = self._decline(runner, db, cat, ["--all", "--no-dry-run"])
+        assert "40 chunk(s) are embedded on this machine and bill nothing" in result.output
+        assert "will be billed" not in result.output

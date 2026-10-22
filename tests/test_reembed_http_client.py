@@ -116,3 +116,60 @@ class TestServedModels:
 
         monkeypatch.setattr("nexus.db.http_vector_client._get", boom)
         assert HttpVectorClient().served_embedding_models() is None
+
+
+class TestProductionWriteGuard:
+    """The start and the three controls mutate the engine's job table, so a dev-checkout process is refused them
+    unless it carries a reason (nexus-a2qhz); plan and status only read and are never refused."""
+
+    @pytest.fixture(autouse=True)
+    def _guard_engaged(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
+        from nexus.db import http_vector_client as hvc
+        from nexus.db import service_endpoint
+
+        monkeypatch.delenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, raising=False)
+        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
+        monkeypatch.setattr(service_endpoint, "_dev_checkout_root", lambda start=None: tmp_path)
+        monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://127.0.0.1:1", "tok"))
+        self.sent: list[str] = []
+
+        def fake_request(method, path, **kw):
+            self.sent.append(f"{method} {path}")
+            return {"jobs": []}
+
+        monkeypatch.setattr(hvc, "_request", fake_request)
+
+    @pytest.mark.parametrize("call", [
+        lambda c: c.reembed_start("docs__s"),
+        lambda c: c.reembed_pause(JOB),
+        lambda c: c.reembed_resume(JOB),
+        lambda c: c.reembed_abort(JOB),
+    ], ids=["start", "pause", "resume", "abort"])
+    def test_a_dev_checkout_is_refused_the_write_before_any_request(self, call):
+        from nexus.db.service_endpoint import ProductionWriteGuardError
+
+        with pytest.raises(ProductionWriteGuardError):
+            call(HttpVectorClient())
+        assert self.sent == []
+
+    def test_plan_and_status_only_read_and_are_not_refused(self):
+        client = HttpVectorClient()
+        client.reembed_plan("docs__s")
+        client.reembed_status()
+        assert self.sent == ["POST /v1/vectors/reembed/plan", "GET /v1/vectors/reembed/status"]
+
+    def test_a_reason_lets_the_write_through(self, monkeypatch):
+        from nexus.db import service_endpoint
+
+        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", "test: reason")
+        HttpVectorClient().reembed_pause(JOB)
+        assert self.sent == [f"POST /v1/vectors/reembed/jobs/{JOB}/pause"]
+
+    def test_write_path_predicate(self):
+        from nexus.db.http_vector_client import _is_t3_write_path
+
+        assert _is_t3_write_path("/v1/vectors/reembed/jobs")
+        assert _is_t3_write_path(f"/v1/vectors/reembed/jobs/{JOB}/abort")
+        assert not _is_t3_write_path("/v1/vectors/reembed/plan")
+        assert not _is_t3_write_path("/v1/vectors/reembed/status")
+        assert not _is_t3_write_path(f"/v1/vectors/reembed/jobs/{JOB}/other")

@@ -70,7 +70,18 @@ def effective_token_cap(target_model: str, flag: int | None) -> int | None:
     return flag if flag is not None else DEFAULT_TOKEN_CAP
 
 
-def target_collection_name(content_type: str, owner_id: str, target_model: str) -> str:
+class TargetNameError(ValueError):
+    """The source's row gives no usable owner to name its target sibling after; the message says why."""
+
+
+#: Owner values that name no one: hygiene-002's backfill wrote the row's own tenant id where it could find no
+#: owner, and ``default`` is the placeholder corpus (``collection_shape`` reports it as such).
+_PLACEHOLDER_OWNERS: frozenset[str] = frozenset({"", "default"})
+
+
+def target_collection_name(
+    content_type: str, owner_id: object, target_model: str, *, tenant_ids: Iterable[object] = (),
+) -> str:
     """The conformant name (``<content_type>__<owner>__<model>__v1``) the engine registers for the target sibling.
 
     Built from the source's catalog ROW, never parsed from its name (RDR-204): ``owner_id`` with ``.`` read as
@@ -78,8 +89,26 @@ def target_collection_name(content_type: str, owner_id: str, target_model: str) 
     The engine registers this name only when no live sibling of the same ``(content_type, owner_id, model)``
     exists; otherwise it uses that sibling and ignores the name. It checks the registered row's tuple either way,
     so the name is a label and never the authority.
+
+    Raises :class:`TargetNameError` rather than render a name that names no one: a null or blank owner, a
+    placeholder owner (``default``, or one of ``tenant_ids``: the row's own tenant id, hygiene-002's stand-in), or an
+    owner that does not make a conformant name.
     """
-    return f"{content_type}__{str(owner_id).replace('.', '-')}__{target_model}__v1"
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if owner_id is None or not str(owner_id).strip():
+        raise TargetNameError("its catalog row has no owner_id, so there is no owner to name the target after")
+    owner = str(owner_id).strip()
+    placeholders = _PLACEHOLDER_OWNERS | {str(t) for t in tenant_ids if t}
+    if owner in placeholders:
+        raise TargetNameError(
+            f"its owner_id is the placeholder {owner!r} (no real owner was recorded), so a target named after it "
+            "would belong to no one; give the collection an owner before re-embedding it"
+        )
+    name = f"{content_type}__{owner.replace('.', '-')}__{target_model}__v1"
+    if not is_conformant_collection_name(name):
+        raise TargetNameError(f"owner_id {owner!r} does not make a conformant collection name ({name!r})")
+    return name
 
 
 # ── the engine's side of "can it serve the target" ───────────────────────────

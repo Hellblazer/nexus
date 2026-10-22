@@ -58,6 +58,25 @@ class TestTargetName:
 
         assert is_conformant_collection_name(rj.target_collection_name("knowledge", "1.1", VB))
 
+    @pytest.mark.parametrize("owner", [None, "", "   "])
+    def test_a_null_or_blank_owner_is_refused_and_never_rendered_as_none(self, owner):
+        with pytest.raises(rj.TargetNameError) as raised:
+            rj.target_collection_name("docs", owner, VA)
+        assert "no owner_id" in str(raised.value) and "None" not in str(raised.value)
+
+    def test_the_default_placeholder_and_the_rows_tenant_id_are_refused(self):
+        with pytest.raises(rj.TargetNameError, match="placeholder 'default'"):
+            rj.target_collection_name("docs", "default", VA)
+        with pytest.raises(rj.TargetNameError, match="placeholder 'tenant-7'"):
+            rj.target_collection_name("docs", "tenant-7", VA, tenant_ids=(None, "tenant-7"))
+        # the same value is a fine owner when it is not this row's tenant
+        assert rj.target_collection_name("docs", "tenant-7", VA, tenant_ids=("other",)) == f"docs__tenant-7__{VA}__v1"
+
+    @pytest.mark.parametrize("owner", ["a b", "x__y", "a/b"])
+    def test_an_owner_that_makes_no_conformant_name_is_refused(self, owner):
+        with pytest.raises(rj.TargetNameError, match="conformant"):
+            rj.target_collection_name("docs", owner, VA)
+
 
 class TestMissingPiece:
     def test_served_model_is_no_problem(self):

@@ -33,6 +33,7 @@ import gzip
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -1789,6 +1790,20 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/quarantine-restore",
 )
 
+#: Write-shaped paths a bare suffix cannot name (RDR-210 Phase 6 Step 3, nexus-cnxjk): the re-embed job's start
+#: and its pause/resume/abort, which carry a job id before the verb. ``/reembed/plan`` and ``/reembed/status``
+#: only read. Kept apart from the suffix tuple, which other tripwires read as "chunk writes and sweeps".
+_T3_WRITE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"/v1/vectors/reembed/jobs(?:/[^/]+/(?:pause|resume|abort))?$"),
+)
+
+
+def _is_t3_write_path(path: str) -> bool:
+    """Whether *path* mutates server state (the guard's test): a write suffix or a write pattern."""
+    return any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES) or any(
+        pattern.search(path) for pattern in _T3_WRITE_PATH_PATTERNS
+    )
+
 
 #: Socket timeout (seconds) for the two ``/v1/vectors/upsert-chunks`` call
 #: sites below. nexus-8hdg9 phase 2 critique remediation (T2
@@ -1865,7 +1880,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
-    if any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES):
+    if _is_t3_write_path(path):
         from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the write-shaped-path branch, no circular import (service_endpoint imports no nexus.* modules)
 
         base_url, _ = _resolve_endpoint()
@@ -5125,7 +5140,10 @@ class HttpVectorClient:
         """
         try:
             body = _get("/version", tenant=self._tenant, timeout=10.0)
-        except Exception as exc:  # noqa: BLE001 — advisory read: the engine's own refusal at start is the backstop
+        except Exception as exc:  # noqa: BLE001 — advisory read, see below
+            # Nothing else checks that the engine can embed with the target model: neither the plan nor the start route
+            # does. When this read fails the client proceeds, the start registers the (empty) target sibling, and the job
+            # fails at its first batch with the engine's embed error; the registered empty target stays.
             _log.debug("served_embedding_models_unread", error=str(exc))
             return None
         models = body.get("embedding_models") if isinstance(body, dict) else None

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import fnmatch
+import re
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -1745,17 +1746,23 @@ _REEMBED_BGE_MODEL = "bge-base-en-v15-768"
 _ALL_JOBS = "__all__"
 
 
+#: The 404 bodies the re-embed handler itself sends (``ReembedHandler``): an unknown job, an unregistered source.
+#: These are answers, shown verbatim. Any other 404 (a route the engine does not have) means the engine is older
+#: than the routes.
+_ENGINE_404_MESSAGES = re.compile(r"^(?:no re-embed job \S+|source collection .+ is not registered)$")
+
+
 def _reembed_job_error(exc: Exception) -> click.ClickException:
     """A re-embed route's refusal as a ClickException that says what the engine said.
 
     503 is the engine's local-mode refusal (a managed engine, or one started without the supervisor's
-    ``NX_ENGINE_LOCAL``); 404 is an engine below the routes; 409 names the job that holds the source or the
+    ``NX_ENGINE_LOCAL``); 404 is an engine below the routes, unless its body is one the handler itself sends; 409 names the job that holds the source or the
     state a control was refused from.
     """
     code = getattr(exc, "code", None)
     body = getattr(exc, "engine_body", None)
     text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
-    if code == 404:
+    if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(
             f"this engine does not serve the re-embed routes ({text}); upgrade it "
             "(nx upgrade, then nx daemon service stop && nx daemon service start)."
@@ -1869,7 +1876,9 @@ def _plan_lines(p: _Planned) -> list[str]:
     )
     lines.append(
         f"  satellite rows naming it that match no live document: {plan.get('unmatched_satellite_rows', 0)} "
-        f"(the delete is refused while any remain unless --force-delete)"
+        f"(the delete is refused while any remain unless --force-delete). The plan does not predict every "
+        f"refusal: the cutover also counts a live document homed here whose chunks sit in another collection as "
+        f"residue, and the plan does not count those"
     )
     return lines
 
@@ -1880,6 +1889,7 @@ def _plan_source(
     """Plan one source: the profile's model, can the engine serve it, the engine's plan, the cap."""
     from nexus.reembed_job import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         effective_token_cap,
+        TargetNameError,
         missing_piece,
         target_collection_name,
     )
@@ -1894,7 +1904,14 @@ def _plan_source(
     if served is not None and (piece := missing_piece(target_model, served)):
         planned.refusal = f"{name}: {piece}"
         return planned
-    target_name = target_collection_name(content_type, str(row.get("owner_id")), target_model)
+    try:
+        target_name = target_collection_name(
+            content_type, row.get("owner_id"), target_model,
+            tenant_ids=(row.get("tenant_id"), getattr(db, "_tenant", None)),
+        )
+    except TargetNameError as exc:
+        planned.refusal = f"{name}: {exc}"
+        return planned
     try:
         planned.plan = db.reembed_plan(name, target_collection=target_name)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 — boundary: the engine's refusal is this source's reason
@@ -1967,9 +1984,20 @@ def _reembed_jobs(
         )
         return
     if not yes:
+        billed = sum(int((p.plan or {}).get("token_estimate") or 0) for p in planned if p.cap is not None)
+        caps = sorted({p.cap for p in planned if p.cap is not None})
+        local_chunks = sum(int((p.plan or {}).get("chunks") or 0) for p in planned if p.cap is None)
+        cost = []
+        if caps:
+            cost.append(
+                f"About {billed:,} tokens will be billed in all (each Voyage job is capped at "
+                f"{', '.join(f'{c:,}' for c in caps)} tokens on its own)."
+            )
+        if local_chunks:
+            cost.append(f"{local_chunks:,} chunk(s) are embedded on this machine and bill nothing.")
         click.confirm(
             f"Start {len(planned)} re-embed job(s)? Each moves its collection's documents to the profile's model "
-            f"and then {'keeps' if keep_source else 'deletes'} the source.",
+            f"and then {'keeps' if keep_source else 'deletes'} the source. {' '.join(cost)}".rstrip(),
             abort=True,
         )
     failures = 0
