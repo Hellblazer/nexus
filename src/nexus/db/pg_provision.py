@@ -1363,8 +1363,8 @@ def _init_cluster(
 #: ``max_locks_per_transaction`` the managed block sets (nexus-o26hs). The engine's
 #: RDR-225 walk creates models x tenants x 2 leaf partitions in one transaction, and
 #: its boot preflight (WalkLockPreflight) refuses when their locks would not fit the
-#: lock table: at PostgreSQL's default of 64 that is about 39 tenants at four models,
-#: at 128 about 81. Each step of 64 costs the cluster about 1.5 MB of shared memory.
+#: lock table: at PostgreSQL's default of 64 that is about 48 tenants at four models,
+#: at 128 about 99. Each step of 64 costs the cluster about 1.5 MB of shared memory.
 #: Takes effect at the next PostgreSQL start: every path that starts the cluster
 #: (provision, the supervisor's ``_ensure_pg_running``, the replace quiesce)
 #: rewrites the managed block first, so ``nx daemon service stop --with-pg`` then

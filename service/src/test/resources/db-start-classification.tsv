@@ -30,6 +30,7 @@ SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk ba
 SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
 SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks
 WalkLockPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's lock-capacity preflight and the walk's own lock count, both only while vectors-030-1 is still pending
+WalkLockPreflightIntegrationTest	startDedicated	CLUSTER_STATE	starts a cluster with a lowered max_locks_per_transaction and max_connections (postmaster settings) and walks the largest tenant count the lock preflight admits
 P225DiskPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's disk preflight, which fires only while vectors-030-1 is still pending
 GrantsNexusDiagViewAccessIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and connects as it to prove the grants a full walk gives it
 Taxonomy011ForeignOwnedDiagViewTest	startEmptyDatabase	OWNERSHIP	replays taxonomy-011-1 against a pre-existing foreign-owned view, a state only a database before the walk can hold

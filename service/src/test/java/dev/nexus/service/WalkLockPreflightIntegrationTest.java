@@ -182,11 +182,43 @@ class WalkLockPreflightIntegrationTest {
         }
     }
 
+    /**
+     * nexus-xzit5: the safe direction, on a real lock table. At a lowered max_locks_per_transaction the largest
+     * tenant count the estimate admits must walk, through migrate(ds), and hold no more locks than the table
+     * Postgres guarantees. (Measured at 64 and 20: past that table the walk still had shared-memory slack, about 2.4x,
+     * which Postgres does not promise; T2 nexus_rdr/225-xzit5-walk-lock-failure-boundary-2026-10-22.)
+     */
+    @Test
+    void theLargestTenantCountAdmittedAtALoweredLockTableWalks() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated(
+            List.of("-c", "max_locks_per_transaction=32", "-c", "max_connections=20"));
+        long capacity;
+        int tokenTenants = 0;
+        try {
+            capacity = lockTableCapacity(pg);
+            while (estimate(leaves(tokenTenants + 1)) <= capacity) {
+                tokenTenants++;
+            }
+            assertThat(tokenTenants).as("a lowered table still admits some tenants (capacity %d)", capacity).isPositive();
+        } catch (Throwable t) {
+            pg.stop();
+            throw t;
+        }
+        long held = walkAndCountLocks(pg, tokenTenants);   // stops pg
+        PartitionScratch.evidence("XZIT5 capacity=" + capacity + " admitted token tenants=" + tokenTenants
+            + " estimate=" + estimate(leaves(tokenTenants)) + " walk held=" + held);
+        assertThat(held).as("the admitted walk holds no more than the guaranteed table").isLessThanOrEqualTo(capacity);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /** A fresh pre-walk store with {@code tokenTenants} token tenants, walked through migrate(ds); the walk's count. */
     private static long walkAndCountLocks(int tokenTenants) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        return walkAndCountLocks(PgContainerHelper.startEmptyDatabase(), tokenTenants);
+    }
+
+    /** As {@link #walkAndCountLocks(int)} on the given (started) database, which this stops. */
+    private static long walkAndCountLocks(PostgreSQLContainer<?> pg, int tokenTenants) throws Exception {
         List<String> engineLog = new CopyOnWriteArrayList<>();
         java.util.logging.Logger jul = java.util.logging.Logger.getLogger("");
         java.util.logging.Handler capture = new java.util.logging.Handler() {
@@ -271,18 +303,29 @@ class WalkLockPreflightIntegrationTest {
         }
     }
 
-    /** max_locks_per_transaction x (max_connections + max_prepared_transactions), read off the server. */
+    /**
+     * The table Postgres guarantees, written out by hand: max_locks_per_transaction x (MaxBackends +
+     * max_prepared_transactions), MaxBackends = max_connections + autovacuum workers (autovacuum_worker_slots where
+     * the server has it) + 1 + max_worker_processes + max_wal_senders.
+     */
     private static long lockTableCapacity(PostgreSQLContainer<?> pg) throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            return setting(ctx, "max_locks_per_transaction")
-                * (setting(ctx, "max_connections") + setting(ctx, "max_prepared_transactions"));
+            long autovacuum = setting(ctx, "autovacuum_worker_slots");
+            if (autovacuum == 0) {
+                autovacuum = setting(ctx, "autovacuum_max_workers");
+            }
+            long backends = setting(ctx, "max_connections") + autovacuum + 1
+                + setting(ctx, "max_worker_processes") + setting(ctx, "max_wal_senders");
+            return setting(ctx, "max_locks_per_transaction") * (backends + setting(ctx, "max_prepared_transactions"));
         }
     }
 
+    /** An integer setting, 0 when this server version has none by that name. */
     private static long setting(DSLContext ctx, String name) {
-        return Long.parseLong(ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name)))
-            .fetchOne(0, String.class));
+        String v = ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name), DSL.val(true)))
+            .fetchOne(0, String.class);
+        return v == null || v.isBlank() ? 0 : Long.parseLong(v.strip());
     }
 
     private static boolean walkApplied(PostgreSQLContainer<?> pg) throws Exception {
