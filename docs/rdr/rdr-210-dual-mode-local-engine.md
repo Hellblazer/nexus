@@ -802,26 +802,39 @@ use, carrying the document's aspects and highlights with it.
     existing row is never re-pointed by the profile
     (`CatalogRepository.java:7906-7930`). A new engine test pins that behaviour so
     the client fix cannot drift from it.
-12. **Cross-family ranking (CA-2).** Each surface gets one rule:
+12. **Cross-family ranking (CA-2).** Each surface gets one rule, and the rules
+    differ because the measured behaviour differs (Phase 4 Step 3, nexus-t189m,
+    2026-10-22; T2 `nexus_rdr/210-p43-ca2-residuals-measured-2026-10-22`).
     - *Rerank-on surfaces* (`nx search` with more than one collection or
       `--lexical`, MCP `search` with `lexical=true`) keep merging per-model groups
-      by `rerank_score`. That is sound on a Voyage-profile engine
-      (210-research-16) and inferred sound on a bge-profile one (CA-2). When some
-      groups are reranked and others degrade, the merge stops sorting scored rows
-      ahead of unscored ones (`search_cmd.py:658-680`, `mcp/core.py:3089-3093`)
-      and orders every row by calibrated `hybrid_score` instead, keeping the
-      warning; otherwise one rate-limited group sinks a whole family.
+      by `rerank_score`. On a dual bge-profile engine the local cross-encoder's
+      split-merge ranking equals a single request (Kendall tau 1.0000 over 40
+      queries, noise floor 1.0000), and this surface has the fewest cross-family
+      inversions of the three (queries out of 20, irrelevant bge above the best
+      relevant Voyage chunk and the reverse): prose 4 and 1 at top-10, code 1 and
+      1. Voyage-profile soundness is 210-research-16. When some groups are
+      reranked and others degrade, the merge stops sorting scored rows ahead of
+      unscored ones (`search_cmd.py:658-680`, `mcp/core.py:3089-3093`) and orders
+      every row by calibrated `hybrid_score` instead, keeping the warning;
+      otherwise one rate-limited group sinks a whole family.
     - *Rerank-off surfaces* (MCP `query`'s plain path, the catalog-routed tools,
-      and so `nx_answer`) merge by calibrated distance. `scoring.py`'s table gains
-      `bge-base-en-v15-768` at an INTERIM factor of 1.30 (Sam, 2026-10-18; the
-      largest factor the record counted inversions for), not the derived 0.325
-      best-F1 threshold, which is a factor of 0.45/0.325 = 1.38; `_grouped_combined_query`
-      sorts across groups by distance times that factor, not raw distance. An
-      unmeasured model keeps the default and logs that it did. The record
-      reports inversion counts for 1.15 to 1.30 but not for 1.38, and the 20
-      per-query distance lists behind it are gone, so Phase 1 Step 5 could not
-      count 1.38. Phase 4 Step 3 (nexus-t189m) re-measures on real distances and
-      sets the final value; until then the table holds 1.30.
+      and so `nx_answer`) merge by calibrated distance, and a single scalar cannot
+      make that merge right (Sam, 2026-10-22: they stay on calibrated distance).
+      `scoring.py`'s table holds `bge-base-en-v15-768` at 1.37, the measured factor
+      (0.45 over a best-F1 threshold of 0.329; pooled bootstrap interval 1.24 to
+      1.45, overlapping the 210-research-17 record of 1.36 to 1.48);
+      `_grouped_combined_query` sorts across groups by distance times that factor,
+      not raw distance. Raising the factor trades one inversion direction for the
+      other: at top-20 on prose, factor 1.0 gives 4 and 1, 1.3 gives 3 and 7, 1.5
+      gives 1 and 6. No value meets 3 and 1 in both directions, so these surfaces
+      carry measured inversions, not a bound: at 1.37 on the 20 plus 20 query set,
+      top-20, prose 3 and 7 and code 3 and 4 (counted at 1.30, the table's value
+      then; the grid at 1.4 is 2 and 8, and 2 and 3). A caller who needs
+      cross-family precision uses a rerank-on surface. An unmeasured model keeps
+      the default and logs that it did. Both families held the same corpus in
+      this measurement and 210-research-17 used different corpora per family, so
+      the counts are comparable in kind only; relevance is "the chunk comes from
+      the query's target file", which likely overstates inversions somewhat.
     - *Thresholds* are chosen per collection by its model, not by the engine's
       mode (`search_engine.py:552-580`): a Voyage collection gets its Voyage
       threshold on any engine, and a bge collection gets none, as on a keyless
@@ -1547,19 +1560,19 @@ against a profile that names another model.
 
 Implement Technical Design 12. It is client-only and lands here, before any
 engine can return two families to one search. **Tests**:
-- `scoring.py`: the bge factor is the interim 1.30 within 1e-6 (threshold
-  0.45/1.30); an unlisted model still gets the default and logs it.
+- `scoring.py`: the bge factor is 1.37 within 1e-6 (threshold 0.45/1.37; it was
+  an interim 1.30 until Phase 4 Step 3); an unlisted model still gets the default
+  and logs it.
 - `apply_hybrid_scoring` over a fixture of one bge and one Voyage group (the
   210-research-17 distances, recorded as test data): count the queries where an
   irrelevant chunk of one family outranks the best relevant chunk of the other.
   The 20 per-query lists were not recorded, so this step tests the RECORDED
   QUANTILES through the real `apply_hybrid_scoring` and pins the two quantile
   cases (closest off-topic bge chunk against a median relevant Voyage chunk, and
-  a median off-topic Voyage chunk against a p90-relevant bge chunk) at 1.30. The
-  record measured 1.15 to 1.30 at 3 and 1 inversions and did not report 1.38; at
-  the derived 1.38 the second case inverts, which is why the table holds 1.30
-  until Phase 4 Step 3 (nexus-t189m) counts real distances and sets the value.
-  No observed count is pinned as a regression bound because none exists.
+  a median off-topic Voyage chunk against a p90-relevant bge chunk). The second
+  case inverts at 1.37 and not at the earlier interim 1.30; the test pins that as
+  a limit of a single scalar, not a goal. No observed count is pinned as a
+  regression bound because none exists.
 - `_grouped_combined_query`: rows from two groups interleave by calibrated
   distance, not raw distance.
 - Rerank-on merge: two groups both scored merge by `rerank_score`; one scored
@@ -1705,11 +1718,17 @@ stability of the cross-encoder on a bge-profile engine the way 210-research-16
 measured Voyage's (split-merge against one request, Kendall tau against the
 noise floor); and count cross-family inversions on each surface. **Pass**: the
 bge factor's bootstrap interval overlaps 1.36 to 1.48; the cross-encoder's
-split-merge tau is within 0.01 of its noise floor; inversions on every surface no
-worse than the 210-research-17 recorded counts at 1.15 to 1.30 (3 and 1 of 20; Phase 1
-Step 5 pinned no count of its own because the per-query lists are gone), and the
-value in `scoring.py` (interim 1.30) is set from this measurement. **Fail**: revise
-Technical Design 12 before Phase 6. Record the result as a research finding.
+split-merge tau is within 0.01 of its noise floor; the `scoring.py` value is set
+from the measurement; and the inversion counts per surface are recorded in the
+research finding and quoted in Technical Design 12. No inversion bound applies:
+the measurement showed no single factor meets 3 and 1 of 20 in both directions on
+the rerank-off surfaces. **Fail**: any of the first three. Revise Technical
+Design 12 before Phase 6. Record the result as a research finding.
+
+*Result, 2026-10-22: pass.* Factor 1.37 (interval 1.24 to 1.45), tau 1.0000
+against a floor of 1.0000, inversions as in Technical Design 12 (T2
+`nexus_rdr/210-p43-ca2-residuals-measured-2026-10-22`; harness
+`scripts/spikes/rdr210-p43`).
 
 ### Phase 5: Gates
 
@@ -1891,8 +1910,8 @@ None open. Resolved by Sam on 2026-10-17 (T2
   collection's model.
 - **Scenario**: a merged list from a bge and a Voyage collection on a rerank-off
   surface (MCP `query`, a catalog-routed tool) — **Verify**: ordered by calibrated
-  distance with the bge factor; cross-family inversions within the 210-research-17
-  recorded counts (3 and 1 of 20 at 1.15 to 1.30).
+  distance with the bge factor 1.37. Cross-family inversions are recorded, not bounded: see
+  Technical Design 12.
 - **Scenario**: one model group's rerank degrades, the other's does not —
   **Verify**: calibrated order with the warning; the degraded family is not sunk
   below every scored row.
@@ -2160,7 +2179,7 @@ and the per-table dispositions.
   (nexus-17jvq now a prerequisite); Gap 8 carries the CA-3 census. CA-1 verified
   on linux-amd64, its residuals turned into Phase 1 Step 1 checks with pass/fail
   criteria; CA-2 split by surface, with Technical Design 12 (bge factor 1.38,
-  per-collection thresholds, degrade fallback) and Phase 4 tests; CA-4 and CA-5
+  later set to the measured 1.37; per-collection thresholds, degrade fallback) and Phase 4 tests; CA-4 and CA-5
   verified. The per-document move is confirmed as the design, with a typed
   precondition reason and a disposition for every collection-scoped table: the
   aspect tables re-homed in the move transaction, topic assignments rebuilt by

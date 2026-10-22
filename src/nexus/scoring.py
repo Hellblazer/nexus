@@ -75,19 +75,18 @@ _FRECENCY_WEIGHT: float = 0.3
 # names keep the real per-content-type split. See that function's
 # docstring for the full design.
 #
-# RDR-210 Technical Design 12 (nexus-hf29s): ``bge-base-en-v15-768`` is
-# listed at an INTERIM factor of 1.30 (threshold 0.45/1.30; Sam, 2026-10-18),
-# the largest factor 210-research-17 measured inversion counts for. Its derived
-# best-F1 threshold, 0.325, is a factor of 0.45/0.325 = 1.38. It was an unlisted model before, so it fell
-# to the 0.55 default (0.818) and a bge hit and a Voyage hit competed on
-# scales that disagreed by ~1.7x. The inversion count at the derived 1.38 was
-# NOT run (the per-query distance lists behind 210-research-17 are gone), so
-# the value is held at the largest MEASURED factor until nexus-t189m (P4.3)
-# re-measures on real distances.
+# RDR-210 Technical Design 12 (nexus-hf29s, nexus-t189m, nexus-k1x5v):
+# ``bge-base-en-v15-768`` is listed at the MEASURED factor of 1.37 (threshold
+# 0.45/1.37 = 0.329, the best-F1 threshold; pooled bootstrap interval 1.24 to
+# 1.45, 2026-10-22, T2 nexus_rdr/210-p43-ca2-residuals-measured-2026-10-22).
+# It was an unlisted model before, so it fell to the 0.55 default (0.818) and a
+# bge hit and a Voyage hit competed on scales that disagreed by ~1.7x. No single
+# factor meets the P1.5 3-and-1 inversion bound on the rerank-off surfaces; the
+# measured counts are in Technical Design 12.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
-    "bge-base-en-v15-768": 0.45 / 1.30,
+    "bge-base-en-v15-768": 0.45 / 1.37,
 }
 _CALIBRATION_BASELINE: float = _CALIBRATION_THRESHOLDS_BY_MODEL["voyage-code-3"]
 _CALIBRATION_DEFAULT_THRESHOLD: float = 0.55  # matches config.py's "default" key
@@ -100,7 +99,7 @@ def _calibration_factor_for_model(model: str) -> float:
     ``raw_distance * factor`` rescales onto voyage-code-3's absolute
     range. voyage-code-3 itself gets 1.0 (the baseline, no change); a
     model with a more lenient threshold gets a factor < 1.0, shrinking
-    its distances proportionally, and a tighter one (bge, interim 1.30) a factor
+    its distances proportionally, and a tighter one (bge, 1.37) a factor
     > 1.0. An unrecognized model (anything this table does not list)
     falls, and logs once that it did, to the same "default" bucket ``search_engine._threshold_for_collection`` already
     uses for an unrecognized collection prefix.

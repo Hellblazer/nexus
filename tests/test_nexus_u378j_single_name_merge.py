@@ -57,8 +57,8 @@ def test_a_shorthand_corpus_over_a_bge_and_a_second_family_sibling_merges_in_cal
 
     rows = {
         BGE_ART: [
-            {"id": "b1", "collection": BGE_ART, "distance": 0.33},   # x1.30 = 0.429
-            {"id": "b2", "collection": BGE_ART, "distance": 0.50},   # x1.30 = 0.650
+            {"id": "b1", "collection": BGE_ART, "distance": 0.30},   # x1.37 = 0.411
+            {"id": "b2", "collection": BGE_ART, "distance": 0.50},   # x1.37 = 0.685
         ],
         OTHER_ART: [
             {"id": "v1", "collection": OTHER_ART, "distance": 0.63},  # x0.69 = 0.436
@@ -68,7 +68,7 @@ def test_a_shorthand_corpus_over_a_bge_and_a_second_family_sibling_merges_in_cal
     merged = mcp_core._grouped_combined_query(target, lambda group: list(rows[group[0]]))
     # Raw-distance order would be b1, b2, v1, v2: the bge rows would sit ahead of every other-family row.
     assert [r["id"] for r in merged] == ["b1", "v1", "v2", "b2"]
-    assert {r["id"]: r["distance"] for r in merged} == {"b1": 0.33, "b2": 0.50, "v1": 0.63, "v2": 0.70}
+    assert {r["id"]: r["distance"] for r in merged} == {"b1": 0.30, "b2": 0.50, "v1": 0.63, "v2": 0.70}
 
 
 def test_the_fully_qualified_name_reads_one_sibling(siblings):
