@@ -1670,7 +1670,6 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
     assert upsert_calls[0]["embeddings"] is None
 
 
-@pytest.mark.t2_tenant
 def test_reembed_to_reads_the_source_model_from_the_catalog_row(runner, env_creds, cloud_mode) -> None:
     """nexus-dxifx: the engine embeds by the catalog row's model, so the --to
     guard compares against the row, not the name. A legacy 2-segment name whose
@@ -1688,14 +1687,16 @@ def test_reembed_to_reads_the_source_model_from_the_catalog_row(runner, env_cred
     calls: list[str] = []
     fake_db.upsert_chunks.side_effect = lambda collection, *a, **k: calls.append(collection)
 
-    ok = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-context-3", "--no-dry-run", "--yes"])
+    # the row's model passes the guard; a dry run applies it without writing, so no post-store
+    # hook reaches storage and the test needs no tenant (the write path: test_reembed_no_dry_run_writes_via_server)
+    ok = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-context-3"])
     assert ok.exit_code == 0, ok.output
-    assert calls == [coll_name]
+    assert "dry-run" in ok.output
 
     refused = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-code-3", "--no-dry-run", "--yes"])
     assert refused.exit_code != 0
     assert "'voyage-context-3'" in refused.output and "catalog row" in refused.output
-    assert calls == [coll_name]  # the refused run wrote nothing
+    assert calls == []  # the refused run wrote nothing
 
     # the dry run runs the same check, so it does not promise a re-embed the real run refuses
     dry = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-code-3"])
