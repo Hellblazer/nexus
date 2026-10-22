@@ -9125,16 +9125,16 @@ def _check_embedding_profile() -> list[HealthResult]:
             if r.get("lifecycle_state") == state and not r.get("superseded_by")
         )
 
-    off_profile: list[str] = []
-    for r in rows:
-        if r.get("lifecycle_state") != "live":
-            continue
-        prow = by_ct.get(r.get("content_type"))
-        if prow is not None and r.get("embedding_model") != prow["embedding_model"]:
-            off_profile.append(
-                f"{r.get('name')} ({r.get('embedding_model')} vs profile {prow['embedding_model']})"
-            )
-    off_profile.sort()
+    # nexus-n6mh0: the hint and ``re-embed --all`` decide "off-profile" in the same function, so after
+    # ``re-embed --keep-source`` this row clears with the hint (a superseded source is not drift, except one a
+    # restore put a live document back in).
+    from nexus.reembed_job import off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    profile_model = {str(ct): str(prow["embedding_model"]) for ct, prow in by_ct.items()}
+    off_profile = sorted(
+        f"{r.get('name')} ({r.get('embedding_model')} vs profile {profile_model.get(str(r.get('content_type')))})"
+        for r in off_profile_collections(reader, rows=rows, profile=profile_model)
+    )
     if off_profile:
         results.append(HealthResult(
             label=_OFF_PROFILE_LABEL, ok=False, warn=True,

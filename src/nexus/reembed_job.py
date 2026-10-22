@@ -253,21 +253,103 @@ def profile_models(reader: Any) -> dict[str, str]:
     return {str(r["content_type"]): str(r["embedding_model"]) for r in reader.embedding_profile()}
 
 
-def has_off_profile_collection(reader: Any) -> bool:
-    """Whether any live collection is off the engine's profile: the doctor row's rule, with a superseded row
-    (a source ``--keep-source`` kept, or a rename's tombstone) left out because ``--all`` would never list it."""
-    profile = profile_models(reader)
+def off_profile_rows(
+    rows: Iterable[dict],
+    profile: dict[str, str],
+    jobs: Callable[[], Iterable[dict]],
+    live_docs: Callable[[str], int],
+    all_docs: Callable[[str], int],
+) -> list[dict]:
+    """THE off-profile predicate (nexus-n6mh0, RDR-210 Phase 6 Step 5, S-R2-5): the rows still owed a re-embed.
+
+    The doctor's off-profile row, the daemon-start and config hints, and ``--all`` all answer "is anything off
+    the profile". They answer it here, so they cannot disagree. A row is off-profile when it is
+
+    * live, not superseded, and under a model other than the profile's for its content type
+      (:func:`stale_rows`; a source a running job holds is still off-profile), or
+    * a source a ``kept_tombstoned`` job left superseded that holds a live document again (a restore): the
+      routing listing leaves a superseded source out, so nothing serves that document until ``--all`` moves it.
+      This is :func:`candidates`' ``running`` re-entry.
+
+    Everything else superseded is not: a ``--keep-source`` source (``kept_by_flag``), a ``kept_residue`` source,
+    a ``kept_tombstoned`` source with no live document (its re-entry is only the delete, so it is listed by
+    ``--all`` but strands nothing), and a rename's tombstone. After ``re-embed --keep-source`` the source is
+    therefore not drift: its successor carries the documents.
+
+    ``jobs`` is a thunk and is read only when some row is superseded, the one case that needs it. An unreadable
+    job table leaves the superseded rows out (the hint and the doctor are best effort) and keeps the rest.
+    """
+    rows = list(rows)
+    if not any(is_superseded(r) for r in rows):
+        return stale_rows(rows, profile)
+    try:
+        found = candidates(rows, profile, list(jobs()), live_docs, all_docs)
+    except Exception as exc:  # noqa: BLE001 — boundary: the exception needs the job table and counts; without them only the rows speak
+        _log.debug("off_profile_exception_unread", error=str(exc))
+        return stale_rows(rows, profile)
+    out = list(found.stale) + [row for row, _job in found.held]
+    out += [r.source_row for r in found.reentries if r.kind == "running"]
+    return sorted(out, key=lambda r: str(r.get("name", "")))
+
+
+def local_jobs() -> list[dict]:
+    """The tenant's re-embed jobs, newest first, for the hint and the doctor; ``[]`` outside local mode.
+
+    The job runs on the local engine only, so no other mode has one to read. Raises when the engine cannot
+    answer: :func:`off_profile_rows` treats that as no job table.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not is_local_mode():
+        return []
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return list(make_t3().reembed_status())  # type: ignore[attr-defined]
+
+
+def off_profile_collections(
+    reader: Any,
+    *,
+    rows: Iterable[dict] | None = None,
+    profile: dict[str, str] | None = None,
+    jobs: Callable[[], Iterable[dict]] | None = None,
+) -> list[dict]:
+    """:func:`off_profile_rows` over a catalog reader: what the hint and the doctor row call.
+
+    ``rows`` and ``profile`` are taken when the caller has already read them (the doctor has). The document
+    counts the re-entry check needs are read once each, and only if a job makes a superseded row a candidate.
+    """
+    if profile is None:
+        profile = profile_models(reader)
     if not profile:
-        return False
-    return bool(stale_rows(reader.list_collections(), profile))
+        return []
+    rows = list(reader.list_collections()) if rows is None else list(rows)
+    counts: dict[bool, dict[str, int]] = {}
+
+    def doc_count(deleted: bool) -> Callable[[str], int]:
+        def count(name: str) -> int:
+            if deleted not in counts:
+                counts[deleted] = reader.collection_doc_counts(include_deleted=deleted)
+            return counts[deleted].get(name, 0)
+        return count
+
+    return off_profile_rows(rows, profile, jobs or local_jobs, doc_count(False), doc_count(True))
 
 
-def off_profile_hint(reader_factory: Callable[[], Any] | None = None) -> str | None:
-    """:data:`REEMBED_HINT` when a live collection is off the profile, else ``None``.
+def has_off_profile_collection(reader: Any, jobs: Callable[[], Iterable[dict]] | None = None) -> bool:
+    """Whether any collection is off the engine's profile, by :func:`off_profile_rows`."""
+    return bool(off_profile_collections(reader, jobs=jobs))
+
+
+def off_profile_hint(
+    reader_factory: Callable[[], Any] | None = None,
+    jobs_reader: Callable[[], Iterable[dict]] | None = None,
+) -> str | None:
+    """:data:`REEMBED_HINT` when a collection is off the profile (:func:`off_profile_rows`), else ``None``.
 
     Best effort: any failure (the engine unreachable, an engine below the profile route) is no hint. The read
     runs on a thread that is abandoned after :data:`HINT_READ_TIMEOUT_S`, so a hung engine cannot hold the
-    caller (``nx daemon service start``).
+    caller (``nx daemon service start``). ``jobs_reader`` replaces the engine's job read (tests).
     """
     box: list[bool] = []
 
@@ -280,7 +362,7 @@ def off_profile_hint(reader_factory: Callable[[], Any] | None = None) -> str | N
                 factory = make_catalog_reader
             reader = factory()
             if reader is not None:
-                box.append(has_off_profile_collection(reader))
+                box.append(has_off_profile_collection(reader, jobs_reader))
         except Exception as exc:  # noqa: BLE001 — a courtesy line: no failure may reach the start command
             _log.debug("reembed_hint_read_failed", error=str(exc))
 

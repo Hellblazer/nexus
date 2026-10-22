@@ -194,7 +194,7 @@ class TestOffProfileHint:
 
     def test_a_superseded_off_profile_row_is_no_reason_for_the_hint(self):
         reader = _Reader([_row("docs__a", model=BGE, superseded_by="docs__t")], {"docs": VA})
-        assert rj.off_profile_hint(lambda: reader) is None
+        assert rj.off_profile_hint(lambda: reader, jobs_reader=lambda: []) is None
 
     def test_no_hint_without_an_engine_profile(self):
         assert rj.off_profile_hint(lambda: _Reader([_row("docs__a")], {})) is None
