@@ -19,13 +19,11 @@ signature edit (``dict`` -> ``dict[str, Any]``) silently reintroduce a
 wrap with no test noticing. This file makes every tool's disposition an
 explicit source-level fact instead of a return-annotation accident.
 
-nexus-6jlki's ``search()`` is the one tool with a DELIBERATE, non-empty
-structuredContent shape (a ``CallToolResult`` the tool body constructs by
-hand, wire wrapper at ``structured_output=False`` to suppress
-auto-detection so the union return annotation is never auto-wrapped
-either). Every other tool in this file's census keeps
-``structured_output=False`` and emits no structuredContent at all -- pure
-text over the wire, byte-identical to before this bead.
+nexus-6jlki gave ``search()`` a deliberate structuredContent envelope in
+default mode; nexus-099mn (shakeout F13) removed it, because Claude clients
+display structuredContent in place of the text. Every tool in this file's
+census keeps ``structured_output=False`` and emits no structuredContent at
+all -- pure text over the wire.
 
 Two layers:
 
@@ -37,8 +35,7 @@ Two layers:
    invoke the tool through FastMCP's own ``ToolManager``/``convert_result``
    machinery (``mcp.call_tool(name, arguments)``, the same path a real
    ``tools/call`` request drives) and assert the wire-level
-   structuredContent shape: present + deliberate for ``search``, entirely
-   absent for the rest.
+   structuredContent shape: absent for all of them.
 """
 from __future__ import annotations
 
@@ -220,17 +217,17 @@ async def _call_tool(name: str, **kwargs):
         "search()'s wire wrapper exercises a T2/service-endpoint-resolving "
         "path unrelated to this bead's scope -- confirmed (2026-08-22) that "
         "nexus-6jlki's OWN direct-call equivalent, "
-        "test_mcp_server.py::test_search_default_mode_returns_calltoolresult_"
-        "with_structured_content, fails identically under "
+        "test_mcp_server.py::test_search_default_mode_returns_the_text_on_"
+        "consecutive_calls, fails identically under "
         "NX_TEST_T2_SUBSTRATE=none with the same ServiceEndpointUnresolvableError "
         "(not something introduced or fixable by nexus-r90ao). Run this test "
         "with a built service jar / real engine substrate (drop "
         "NX_TEST_T2_SUBSTRATE=none) to exercise it."
     ),
 )
-def test_search_wire_call_has_deliberate_structured_content():
-    """search(): the one tool with an intentional, non-empty
-    structuredContent shape (nexus-6jlki)."""
+def test_search_wire_call_has_no_structured_content():
+    """search(): text only over the wire in default mode (nexus-099mn,
+    shakeout F13); the nexus-6jlki structuredContent envelope is gone."""
     _mock_t3([{"name": "code__test", "count": 1}])
     with patch(
         "nexus.search_engine.search_cross_corpus",
@@ -244,12 +241,12 @@ def test_search_wire_call_has_deliberate_structured_content():
     ), patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         result = asyncio.run(_call_tool("search", query="vector database", corpus="code__test"))
 
-    assert isinstance(result, CallToolResult)
-    assert result.structuredContent is not None
-    data = result.structuredContent
-    assert data["ids"] == ["r1"]
-    assert data["tumblers"] == ["1.1"]
-    assert data["collections"] == ["code__test"]
+    assert not isinstance(result, CallToolResult)
+    assert not isinstance(result, tuple), (
+        "convert_result returns (content, structuredContent) only when "
+        "output_schema is set -- a tuple here means a wrap is back"
+    )
+    assert "vector database internals" in result[0].text.lower()
 
 
 def test_query_wire_call_has_no_structured_content():

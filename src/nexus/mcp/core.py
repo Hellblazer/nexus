@@ -20,7 +20,6 @@ from typing import Annotated, Any
 import structlog
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
 try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
@@ -2987,7 +2986,6 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
-    _target_memo: dict | None = None,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2995,11 +2993,8 @@ def _search_render(
     plan-runner, ``nx doc cite`` (``_phase5_search``), and every direct
     in-process caller import and call; its ``str``/``dict`` return contract
     (keyed on the ``structured`` bool) is unchanged from before nexus-6jlki
-    and must stay that way — the wire-facing ``search()`` wrapper below is
-    the ONLY thing that changed shape. See ``search()``'s docstring for why
-    the split exists (structuredContent needs a ``CallToolResult`` return,
-    which is incompatible with the plain ``str`` this function's direct
-    callers depend on).
+    and must stay that way; the wire-facing ``search()`` wrapper below only
+    enforces the page cap and passes the result through (nexus-099mn).
 
     Ranking: with ``cluster_by=""`` (the default), results are ranked by
     ``hybrid_score`` — vector similarity blended with ``frecency_score``
@@ -3072,20 +3067,8 @@ def _search_render(
         # (nexus-hmxi) + resolve_corpus logic -- one implementation
         # instead of two that can drift (query()'s plain-corpus branch was
         # exactly that drift: nexus-z4j8d fix 1).
-        # nexus-vpa9q: the search() wrapper renders twice per request (text, then structured)
-        # and the second render is served by the page cache, whose key holds the resolved
-        # target. A target that changed in between (background fan-out counts landing, a names
-        # refresh) made the second render search the whole corpus again, so the wrapper passes
-        # one memo and both renders share one resolution.
-        if _target_memo is not None and "target" in _target_memo:
-            target = _target_memo["target"]
-            fanout_excluded = list(_target_memo["excluded"])
-        else:
-            fanout_excluded = []
-            target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
-            if _target_memo is not None:
-                _target_memo["target"] = target
-                _target_memo["excluded"] = list(fanout_excluded)
+        fanout_excluded = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3426,72 +3409,14 @@ def _search_render(
         return _mcp_tool_error("search", e)
 
 
-def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
-    """Detect whether ``_cap_text_result`` fired and recover the drop count.
-
-    ``_cap_text_result`` appends ``"[<tool>: result capped at N chars; D
-    chars dropped — ...]"`` as a trailing, never-prepended marker (house
-    doctrine: no silent truncation). This is the one place that marker
-    format is parsed back out, so a structuredContent consumer can see the
-    same truncation fact the text reader sees (nexus-6jlki: truncation must
-    be visible in BOTH shapes). A parse miss degrades to ``(True, 0)`` —
-    still flagged truncated, just without a char count — never silently
-    ``(False, 0)`` (that would hide a real truncation from the structured
-    shape).
-    """
-    marker = f"[{tool}: result capped at "
-    if marker not in capped_text:
-        return False, 0
-    try:
-        dropped = int(capped_text.rsplit("; ", 1)[1].split(" chars dropped", 1)[0])
-    except (IndexError, ValueError):
-        return True, 0
-    return True, dropped
-
-
-# HISTORY (nexus-6jlki spike; kept out of the tool description, which the
-# harness truncates at 2048 chars — see AGENTS.md § MCP tools).
-# ``structured_output=False`` on the ``@mcp.tool()`` registration turns OFF
-# FastMCP's own return-type auto-detection — left on, the ``str | dict``
-# return annotation gets silently auto-wrapped as
-# ``structuredContent: {"result": <value>}`` (verified against the pinned
-# mcp==1.27.1; the nexus-r90ao audit, T2 [23357], narrowed the affected set:
-# ``str``, ``str | dict`` unions, and ``list[...]`` returns were
-# auto-wrapped, while bare unparameterized ``dict`` returns never were —
-# nobody designed the wrapping, no client is documented to rely on it).
-# This tool is the first to replace that accident with a deliberate shape.
-#
-# Business logic lives in ``_search_render`` (unchanged since before this
-# tool existed) — plan-runner, ``nx doc cite``, and this repo's test suite
-# call ``_search_render`` directly and see EXACTLY the same ``str``/``dict``
-# contract as before. Only a real MCP-wire call (an actual ``tools/call``,
-# not an in-process Python call) goes through this wrapper and can observe
-# the new ``structuredContent`` field; the reason for the split is that a
-# ``CallToolResult`` return is the only SDK-level way to give a caller
-# byte-identical human text AND separate machine data in one response
-# (confirmed via spike — a bare-dict/str return ties ``content`` and
-# ``structuredContent`` to the SAME serialization, which would replace
-# today's human-readable rendering with a JSON dump).
-#
-# Default (``structured=False``): ``content`` is ``_search_render``'s
-# human-readable string, byte-identical to what this tool returned before
-# nexus-6jlki. ``structuredContent`` carries the same
-# ``{ids, tumblers, distances, collections, chunk_collections,
-# chunk_text_hash}`` shape ``structured=True`` has always returned (fetched
-# via the page-turn cache, no extra vector-store round trip), plus
-# ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
-# (``_cap_text_result``) fired.
-#
-# Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
-# ``content``/``structuredContent["text"]`` is the PRESENTATION channel and
-# carries the render-layer file-diversity cap (at most 2 chunks per file
-# lead the page); the ``ids``/``tumblers``/``distances`` arrays are the
-# MACHINE channel — identical to ``structured=True`` — and are deliberately
-# UNCAPPED. The two can disagree on order within a page by design.
-#
-# ``structured=True`` is UNCHANGED: bare dict, no ``CallToolResult``, no
-# ``structuredContent`` wrapping — the plan-runner's in-process contract
-# (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).
+# Wire shape (nexus-099mn, shakeout F13). ``structured_output=False`` keeps
+# FastMCP from auto-wrapping the ``str | dict`` return as
+# ``structuredContent: {"result": ...}`` (nexus-r90ao). Default mode returns
+# the text only. From nexus-6jlki to nexus-099mn it also sent a
+# ``structuredContent`` envelope, and Claude clients show a tool result's
+# structuredContent in place of its text, so the model read a JSON dump with
+# the render escaped inside it. ``structured=True`` returns the bare dict the
+# plan runner reads (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).
 @mcp.tool(
     title="Semantic Search",
     annotations={"readOnlyHint": True},
@@ -3545,7 +3470,7 @@ def search(
             "re-ranks."
         ),
     )] = False,
-) -> "str | dict | CallToolResult":
+) -> "str | dict":
     """Semantic search across T3 chunks; returns matching text fragments, not whole documents.
 
     Use `query` instead when the question is which DOCUMENTS match, not which
@@ -3553,28 +3478,22 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default, whose
-    structuredContent is `{ids, tumblers, distances, hybrid_scores,
-    collections, chunk_collections, chunk_text_hash, truncated,
-    truncated_chars, text}`. With `structured=True` it returns the bare
-    `{ids, tumblers, distances, hybrid_scores, collections,
-    chunk_collections, chunk_text_hash}` instead, with no text rendering and
-    so no `truncated`/`truncated_chars`/`text`. `distances` is the raw vector
-    distance (absolute, lower is better), `hybrid_scores` is what the page
-    was SORTED by (min-max normalised within this result window, higher is
-    better, so the best of two poor hits scores 1.0 and so does a lone poor
-    one -- read `distances` for a relevance floor). `truncated`/
-    `truncated_chars` say whether the text rendering cut the page and by how
-    much, and `text` is that rendering.
+    Returns a ranked, human-readable list of chunks by default. With
+    `structured=True` it returns the `{ids, tumblers, distances,
+    hybrid_scores, collections, chunk_collections, chunk_text_hash}` dict
+    instead. `distances` is the raw vector distance (absolute, lower is
+    better), `hybrid_scores` is what the page was SORTED by (min-max
+    normalised within this result window, higher is better, so the best of
+    two poor hits scores 1.0 and so does a lone poor one -- read `distances`
+    for a relevance floor).
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
     - `corpus="knowledge"` means every `knowledge__*` subject collection,
       the same scope the store read tools give `collection="knowledge"`.
     - `cluster_by` defaults to "" (no clustering).
-    - The text and `structuredContent` channels can disagree on ranking order
-      within a page: text applies a per-file diversity cap, structuredContent
-      does not.
+    - The text and `structured=True` can disagree on ranking order within a
+      page: text applies a per-file diversity cap, the dict does not.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.
@@ -3587,57 +3506,10 @@ def search(
         msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
         return {"error": msg} if structured else f"Error: {msg}"
-    target_memo: dict = {}
-    result = _search_render(
+    return _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold, lexical=lexical, _target_memo=target_memo,
-    )
-    if structured or not isinstance(result, str):
-        # structured=True, or an error string that already reads like one —
-        # unchanged wire behavior.
-        return result
-
-    truncated, dropped = _truncated_chars_dropped(result, "search")
-    data = _search_render(
-        query, corpus=corpus, limit=limit, offset=offset, where=where,
-        cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold, lexical=lexical, _target_memo=target_memo,
-    )
-    empty_shape = {
-        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
-        "collections": [], "chunk_collections": [], "chunk_text_hash": [],
-    }
-    structured_content = {
-        **(data if isinstance(data, dict) else empty_shape),
-        "truncated": truncated,
-        "truncated_chars": dropped,
-        # SELF-SUFFICIENCY (nexus-6jlki follow-up). A conforming MCP client
-        # may render structuredContent INSTEAD of the text block -- the
-        # protocol permits it and nexus's own client does exactly that
-        # (mcp_client/core.py::_parse_result prefers structuredContent over
-        # the first text block), as does Claude Code. The original design
-        # (T2 [23351]) modelled this field as purely additive -- "a new
-        # structuredContent field they can ignore or start consuming" -- so
-        # between c9762865d and this line a default-mode search delivered
-        # ids/tumblers/distances and NO paths, line numbers or snippets to
-        # a structuredContent-preferring client. Carrying the render here
-        # costs one duplicated string and makes the shape correct for
-        # whichever representation the client chooses to read.
-        "text": result,
-    }
-    # nexus-zdzm5: in structured mode _search_render returns a string only
-    # for an error (an unmatched corpus, or the tool's error boundary). It
-    # used to ride out as empty ids in a success-shaped structuredContent,
-    # the error visible only in the text block, so a structuredContent
-    # reader saw "no hits" for a failed call.
-    is_error = isinstance(data, str)
-    if is_error:
-        structured_content["error"] = data
-    return CallToolResult(
-        content=[TextContent(type="text", text=result)],
-        structuredContent=structured_content,
-        isError=is_error,
+        threshold=threshold, lexical=lexical,
     )
 
 

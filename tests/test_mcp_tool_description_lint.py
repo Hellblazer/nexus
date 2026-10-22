@@ -298,14 +298,13 @@ def test_planted_iso_date_is_detected() -> None:
 #
 # INDIRECTION (the bead's explicit escape hatch): a handful of tools thread
 # their return through another function -- `search()` returns
-# `_search_render()`'s result or wraps it in a `CallToolResult`,
+# `_search_render()`'s result,
 # `tuple_registry`/`tuple_stats` return an HTTP client method's result,
 # `catalog_show`'s owner-branch builds its dict via `**owner`, `nx_answer`
 # builds its envelope in a nested closure spanning ~2000 lines. `_resolve_
 # return_keys` chases what it safely can via one-hop AST derivation
 # (`_DERIVED_RETURN_KEY_RESOLVERS`: `search` -> `_search_render`'s
-# structured-branch literal unioned with `search()`'s own
-# `structured_content` assignment; `tuple_stats` -> `_tuple_census_to_dict`'s
+# structured-branch literal; `tuple_stats` -> `_tuple_census_to_dict`'s
 # literal; `nx_answer` -> its nested `_result` closure's literal), so a
 # future edit to any of those three's return shape is caught automatically
 # instead of silently drifting from a table nothing forces anyone to
@@ -583,8 +582,8 @@ def _assigned_dict_literal_keys(fn, var_name: str) -> frozenset[str] | None:
     """Union of string keys from every ``<var_name> = {...}`` dict-LITERAL
     assignment in *fn*'s own scope (see ``_iter_own_nodes`` for the
     non-leak rule). Used to resolve extra keys a tool adds to an
-    indirection's dict AFTER receiving it (``search()``'s
-    ``structured_content = {**data, "truncated": ..., ...}``) -- a shape
+    indirection's dict AFTER receiving it (``catalog_show``'s
+    ``d = {"kind": "owner", **owner}``) -- a shape
     ``_ast_return_keys`` cannot see because the assignment, not the
     ``return``, is where the literal lives. A ``**spread`` key contributes
     nothing statically knowable and is silently ignored, same convention
@@ -656,55 +655,13 @@ def _mcp_core_module():
 
 
 def _derive_search_return_keys() -> frozenset[str] | None:
-    """Two-hop AST derivation of ``search()``'s full return-key ground
-    truth, replacing what was a hand-typed override (nexus-dszac): the
-    ``_search_render`` structured-branch dict-literal (the 6 machine-
-    channel keys: ``ids``/``tumblers``/``distances``/``collections``/
-    ``chunk_collections``/``chunk_text_hash``), unioned with the extra keys
-    ``search()`` itself adds while building ``structured_content``
-    (``truncated``/``truncated_chars``/``text``) -- the ``**`` spread of
-    ``_search_render``'s own dict there contributes nothing statically
-    knowable, which is exactly why the first hop is needed at all. ``None``
-    on either hop failing to resolve, which fails the calling tool loud via
-    the existing "unresolvable -- add an override" path rather than
-    silently keeping a stale value.
-
-    nexus-dszac fix round 2 item 1: ``search()`` ALSO hand-types a SECOND
-    6-key literal, ``empty_shape`` -- the fallback used when
-    ``_search_render(structured=True)`` returns something other than a
-    dict (the zero-hit / off-page text-error paths). Nothing else checked
-    that literal against ``_search_render``'s own structured-branch keys,
-    so the two could silently drift apart from each other even while this
-    derivation stayed internally consistent. Asserted equal here (raises
-    ``AssertionError``, not a silent ``None``, on either an unreadable
-    ``empty_shape`` literal or a genuine mismatch) rather than merely
-    read and returned unchecked.
+    """One-hop AST derivation of ``search()``'s return-key ground truth:
+    ``search()`` returns ``_search_render()``'s result unchanged
+    (nexus-099mn), so the keys are that function's structured-branch dict
+    literal. ``None`` when it does not resolve, which fails the calling tool
+    loud via the existing "unresolvable -- add an override" path.
     """
-    core = _mcp_core_module()
-    render_keys = _ast_return_keys(core._search_render)
-    if render_keys is None:
-        return None
-    tool = core.mcp._tool_manager._tools.get("search")
-    if tool is None:
-        return None
-    extra_keys = _assigned_dict_literal_keys(tool.fn, "structured_content")
-    if extra_keys is None:
-        return None
-    empty_shape_keys = _assigned_dict_literal_keys(tool.fn, "empty_shape")
-    if empty_shape_keys is None:
-        raise AssertionError(
-            "search() no longer builds an `empty_shape = {...}` fallback "
-            "literal -- update this derivation (and the empty_shape pin "
-            "it enforces) or restore the literal"
-        )
-    if empty_shape_keys != render_keys:
-        raise AssertionError(
-            f"search()'s `empty_shape` fallback {sorted(empty_shape_keys)} "
-            f"no longer matches _search_render's structured-branch keys "
-            f"{sorted(render_keys)} -- the two 6-key literals drifted "
-            f"apart independently of each other"
-        )
-    return render_keys | extra_keys
+    return _ast_return_keys(_mcp_core_module()._search_render)
 
 
 def _derive_tuple_stats_return_keys() -> frozenset[str] | None:
@@ -1024,18 +981,6 @@ def test_planted_zero_parseable_claims_fails_the_applicability_floor() -> None:
     checked = _checked_tool_count(fake_tools)
     assert checked == 0
     assert checked < _MIN_CHECKED_RETURN_KEY_TOOLS
-
-
-def test_search_empty_shape_matches_structured_render_keys() -> None:
-    """Pin for ``search()``'s ``empty_shape`` fallback (nexus-dszac fix
-    round 2 item 1): a SECOND hand-typed 6-key literal alongside
-    ``_search_render``'s structured-branch literal, used only when
-    ``_search_render(structured=True)`` returns something other than a
-    dict. ``_derive_search_return_keys`` now asserts the two match
-    internally on every call; this test exercises that assertion in
-    isolation against the real live source, so a drift here fails on its
-    own line rather than only inside the larger census test."""
-    assert _derive_search_return_keys() is not None
 
 
 def test_tuple_registry_override_matches_http_store_contract() -> None:
