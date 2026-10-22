@@ -1672,7 +1672,7 @@ public final class PgVectorRepository {
     }
 
     /**
-     * The probe's statement, apart from running it, so the plan pin and the latency check in
+     * The probe's statement, apart from running it, so the plan pins and the count check in
      * {@code RouterProbeShapeIntegrationTest} read the plan of the statement the engine runs and not of a copy.
      *
      * <p>Shape. A leaf now holds one model, so a collection is a larger share of it than of the old single

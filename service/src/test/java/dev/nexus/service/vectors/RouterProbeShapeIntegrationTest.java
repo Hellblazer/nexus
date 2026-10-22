@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * ONE model's partition of one tenant, and keeps an index scan on the leaf's primary-key prefix when the
  * selected collection is a large share of that leaf.
  *
- * <p>Why a pin and a latency check. Before the table was partitioned by model, a collection was a small share of
+ * <p>Why a plan pin. Before the table was partitioned by model, a collection was a small share of
  * the tenant's one leaf. Now a leaf holds one model, so a scope is about twice the fraction of it (the P0.2
  * harness critique, 2026-10-06: at a 55k-row scope in a 300k-row leaf the prototype's probe took a Seq Scan where
  * the single-leaf layout used the primary-key prefix scan). The probe reads at most {@code limit + 1} rows, so an

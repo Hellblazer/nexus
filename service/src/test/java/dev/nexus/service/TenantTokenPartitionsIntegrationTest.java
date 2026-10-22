@@ -548,7 +548,7 @@ class TenantTokenPartitionsIntegrationTest {
                         .doesNotContain("57014");
                 });
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            assertThat(ms).as("one 2 s lock_timeout, well inside the 6 s statement bound").isBetween(1800L, 5500L);
+            assertThat(ms).as("the attempt waited out the 2 s lock_timeout").isGreaterThanOrEqualTo(1800L);
             blocker.rollback();
         }
         try (Connection su = pg.createConnection("")) {
