@@ -128,7 +128,7 @@ class NexusServiceTupleSweepCensusAgreementTest {
         assertThat(r.purged()).isEqualTo(11);
         assertThat(expiredOf(afterA)).as("tenant A expired_unpurged after sweep").isZero();
         assertThat(expiredOf(afterB)).as("tenant B expired_unpurged after sweep").isZero();
-        // The heartbeated lease is live and keeps its first created_at.
+        // The heartbeated lease is live: one row, not purged.
         assertThat(afterA.stream().filter(c -> c.subspace().equals("directory/nexus_live")).findFirst())
                 .hasValueSatisfying(c -> assertThat(c.total()).isEqualTo(1));
     }

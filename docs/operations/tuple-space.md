@@ -72,7 +72,8 @@ missing PG_PORT` / `psql binary not found` (local setup, not a sweep
 problem).
 
 **Cause**: this row reads `nexus.tuple_tenants.last_swept_at` alone. The
-sweep itself runs every `SWEEP_INTERVAL_HOURS` (six hours) as a second task
+sweep itself runs every `SWEEP_INTERVAL_HOURS` (six hours), with its first
+pass 60 seconds after engine boot (nexus-d94qm), as a second task
 on the same scheduler as the T1 crash-safety sweep, and this row's
 threshold (18 hours, three times the interval) is `NexusService.java`'s own
 slack budget before a single transient miss is worth reporting.

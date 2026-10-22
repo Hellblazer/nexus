@@ -8160,9 +8160,9 @@ def _check_tuple_sweep_freshness(
         return [HealthResult(
             label=label, ok=True,
             detail=(
-                f"{total} tenant(s), none swept yet (normal within the "
-                "first sweep interval after startup or first tuple "
-                "activity). Budget-exhaustion state is not persisted by "
+                f"{total} tenant(s), none swept yet (normal for about a "
+                "minute after engine startup, when the first pass runs, "
+                "or before a new tenant's first visit). Budget-exhaustion state is not persisted by "
                 "the engine (only logged); this row measures sweep "
                 "recency only."
             ),

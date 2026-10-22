@@ -133,7 +133,9 @@ class NexusServiceTupleSweepScheduleTest {
                         assertThat(r.initialDelay())
                                 .as("the first pass shortly after boot, like the reaper and the ledger retention: "
                                         + "an engine that restarts more often than every six hours must still purge")
-                                .isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds());
+                                .isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds())
+                                .as("an absolute bound, so raising the shared constant cannot restore the bug")
+                                .isLessThanOrEqualTo(300L);
                         assertThat(r.period()).isEqualTo(TimeUnit.HOURS.toSeconds(NexusService.SWEEP_INTERVAL_HOURS));
                     });
         } finally {
@@ -154,7 +156,8 @@ class NexusServiceTupleSweepScheduleTest {
                     .filteredOn(r -> r.task() == task)
                     .singleElement().satisfies(r -> {
                         assertThat(r.unit()).isEqualTo(TimeUnit.SECONDS);
-                        assertThat(r.initialDelay()).isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds());
+                        assertThat(r.initialDelay()).isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds())
+                                .isLessThanOrEqualTo(300L);
                         assertThat(r.period()).isEqualTo(TimeUnit.HOURS.toSeconds(NexusService.SWEEP_INTERVAL_HOURS));
                     });
         } finally {
