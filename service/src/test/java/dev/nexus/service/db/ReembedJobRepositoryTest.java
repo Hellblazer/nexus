@@ -572,6 +572,20 @@ class ReembedJobRepositoryTest {
     }
 
     @Test
+    void markRevived_isIdempotent_aJobAlreadyRevivedIsNotMarkedAgainNorTouched() {
+        String t = tenant();
+        Job earlier = repo.start(t, SRC, TGT, null, true, false);
+        repo.applyTransition(t, earlier.jobId(), PLANNED, null, DONE, Transition.disposition("kept_by_flag"))
+            .orElseThrow();
+        Job first = repo.markRevived(t, SRC, TGT).orElseThrow();
+
+        assertThat(repo.markRevived(t, SRC, TGT)).as("already revived: nothing to mark").isEmpty();
+        Job after = repo.get(t, earlier.jobId()).orElseThrow();
+        assertThat(after.disposition()).isEqualTo("revived");
+        assertThat(after.updatedAt()).as("the second call wrote nothing").isEqualTo(first.updatedAt());
+    }
+
+    @Test
     void markRevived_marksAnAbortedJob_andLeavesItAborted() {
         String t = tenant();
         Job earlier = repo.start(t, SRC, TGT, null, false, false);

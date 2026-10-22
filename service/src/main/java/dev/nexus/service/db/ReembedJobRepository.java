@@ -591,11 +591,15 @@ public final class ReembedJobRepository {
      * before this runs (TargetSelection encodes it); and a {@code done_with_skips} job never superseded
      * its source, so it cannot be the job the revive is taking back.
      *
-     * @return the updated row, or empty when there is no such job
+     * <p>Idempotent: when that most recent finished job is already {@code revived} nothing is written and the
+     * result is empty, so a retry of a start whose first attempt revived the target but lost the start or the mark
+     * heals the mark and a repeat changes nothing. An older finished job is never reached past a revived one.
+     *
+     * @return the updated row, or empty when there is no such job or it is already marked
      */
     public Optional<Job> markRevived(String tenant, String earlierSource, String earlierTarget) {
         return scope.withTenant(tenant, ctx -> {
-            Optional<UUID> latest = ctx.select(REEMBED_JOBS.JOB_ID).from(REEMBED_JOBS)
+            var latest = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.DISPOSITION).from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(earlierSource))
                 .and(REEMBED_JOBS.TARGET_COLLECTION.eq(earlierTarget))
@@ -603,15 +607,15 @@ public final class ReembedJobRepository {
                 .orderBy(REEMBED_JOBS.FINISHED_AT.desc().nullsLast(), REEMBED_JOBS.STARTED_AT.desc())
                 .limit(1)
                 .forUpdate()
-                .fetchOptional(REEMBED_JOBS.JOB_ID);
-            if (latest.isEmpty()) {
+                .fetchOptional();
+            if (latest.isEmpty() || "revived".equals(latest.get().get(REEMBED_JOBS.DISPOSITION))) {
                 return Optional.<Job>empty();
             }
             return ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.DISPOSITION, "revived")
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                .and(REEMBED_JOBS.JOB_ID.eq(latest.get()))
+                .and(REEMBED_JOBS.JOB_ID.eq(latest.get().get(REEMBED_JOBS.JOB_ID)))
                 .returning()
                 .fetchOptional()
                 .map(Job::from);

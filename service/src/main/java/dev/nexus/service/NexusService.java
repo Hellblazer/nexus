@@ -914,11 +914,12 @@ public final class NexusService {
 
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the re-embed job runner, local engine only. Its own thread
         // (a batch can run for minutes). The first pass runs a few seconds after boot, which is the boot pickup of
-        // any job left planned, running or in cutover; routes (Step 2, a later commit) wake it through kickReembed().
+        // any job left planned, running or in cutover; the control routes wake it through kickReembed().
         // Tenants are the reaper's: the default tenant plus every token-bearing one, since the job tables are FORCE RLS.
+        var reembedJobs = new dev.nexus.service.db.ReembedJobRepository(tenantScope);
         if (localEngineEnabled(env) && combinedWriteService != null) {
             var runner = new dev.nexus.service.reembed.ReembedRunner(
-                new dev.nexus.service.db.ReembedJobRepository(tenantScope),
+                reembedJobs,
                 new dev.nexus.service.db.ReembedSourceReader(tenantScope), catalogRepo, combinedWriteService,
                 this::reaperTenants,
                 reembedSettings != null ? reembedSettings : dev.nexus.service.reembed.ReembedRunner.Settings.DEFAULT);
@@ -943,6 +944,19 @@ public final class NexusService {
             log.info("event=reembed_runner_not_scheduled engine_local={} has_embedder={}",
                 localEngineEnabled(env), combinedWriteService != null);
         }
+
+        // The re-embed job control routes (nexus-f98bg, Step 2). Always registered, so an engine without a runner
+        // answers 503 naming local mode rather than a 404 that reads as an unknown route. The longest-prefix context
+        // wins over /v1/vectors above.
+        String reembedUnavailable = reembedRunner != null ? null
+            : !localEngineEnabled(env)
+                ? "re-embed jobs run only on a local engine: this engine was not started with " + ENGINE_LOCAL_ENV
+                    + "=1 (local mode)"
+                : "re-embed jobs need an embedder and this engine has none";
+        var reembedCtx = server.createContext(dev.nexus.service.http.ReembedHandler.PATH,
+                new dev.nexus.service.http.ReembedHandler(reembedJobs, catalogRepo, reembedUnavailable,
+                        this::kickReembed));
+        reembedCtx.getFilters().addAll(authFilter);
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.

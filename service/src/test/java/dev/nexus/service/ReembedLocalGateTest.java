@@ -22,11 +22,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -44,8 +49,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The wiring half follows {@code NexusServiceReaperWiringTest}: a recording executor sees the schedule call, and
  * the test runs THE {@link Runnable} the executor was handed against a real Postgres, so a schedule turned into a
- * no-op, or a task body that differs from the runner's tick, fails here. Routes answering 503 without the variable
- * belong to the next commit, which adds them.
+ * no-op, or a task body that differs from the runner's tick, fails here. The control routes on
+ * {@code /v1/vectors/reembed} are registered always and answer 503 naming local mode when there is no runner (the
+ * variable unset, or no embedder), never a 404; the last test group starts a real server on port 0 and pins that.
  *
  * <p>Run: {@code -Dtest=ReembedLocalGateTest}.
  */
@@ -225,6 +231,77 @@ class ReembedLocalGateTest {
         for (String v : new String[] {null, "", "0", "true", "TRUE", "yes", "11"}) {
             assertThat(NexusService.localEngineEnabled(envWith(v))).as("value " + v).isFalse();
         }
+    }
+
+    // ── the control routes are refused, not absent ───────────────────────────
+
+    private static final String GATE_TOKEN = "reembed-gate-routes-token";
+    private static final String BASE = "/v1/vectors/reembed";
+
+    private HttpResponse<String> call(NexusService s, String method, String path, String body) throws Exception {
+        var builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + s.getPort() + BASE + path))
+            .header("Authorization", "Bearer " + GATE_TOKEN).header("Content-Type", "application/json");
+        builder = "GET".equals(method) ? builder.GET() : builder.POST(HttpRequest.BodyPublishers.ofString(body));
+        return HttpClient.newHttpClient().send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private void seedGateToken() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), GATE_TOKEN, TENANT,
+                "reembed-gate-routes");
+        }
+    }
+
+    @Test
+    void withoutTheVariableEveryReembedRouteAnswers503NamingLocalMode_neverA404() throws Exception {
+        seedGateToken();
+        UUID someJob = UUID.randomUUID();
+        for (String value : new String[] {null, "", "0", "true"}) {
+            NexusService s = service(router, envWith(value), new RecordingExecutor());
+            s.start();
+            String[][] requests = {
+                {"POST", "/jobs", "{\"source_collection\":\"x\"}"}, {"POST", "/jobs", ""}, {"GET", "/jobs", ""},
+                {"POST", "/jobs/" + someJob + "/pause", ""}, {"POST", "/jobs/" + someJob + "/resume", ""},
+                {"POST", "/jobs/" + someJob + "/abort", ""}, {"POST", "/nope", ""}};
+            for (String[] req : requests) {
+                var r = call(s, req[0], req[1], req[2]);
+                assertThat(r.statusCode()).as("NX_ENGINE_LOCAL=" + value + " " + req[0] + " " + req[1] + " " + r.body())
+                    .isEqualTo(503);
+                assertThat(r.body()).contains("local engine").contains("NX_ENGINE_LOCAL=1");
+            }
+        }
+    }
+
+    @Test
+    void theVariableWithoutAnEmbedderIsRefusedToo_andTheMessageNamesTheEmbedder() throws Exception {
+        seedGateToken();
+        NexusService s = service(null, envWith("1"), new RecordingExecutor());
+        s.start();
+
+        var r = call(s, "POST", "/jobs", "{\"source_collection\":\"x\"}");
+
+        assertThat(r.statusCode()).isEqualTo(503);
+        assertThat(r.body()).contains("embedder");
+    }
+
+    @Test
+    void withTheVariableTheRoutesAreReachedAndTheOtherVectorRoutesAreNotShadowed() throws Exception {
+        seedGateToken();
+        NexusService s = service(router, envWith("1"), new RecordingExecutor());
+        s.start();
+
+        var reached = call(s, "POST", "/jobs", "{}");
+        assertThat(reached.statusCode()).as("the handler's own validation, not a 503 and not the vectors handler")
+            .isEqualTo(400);
+        assertThat(reached.body()).contains("source_collection");
+        var missingJob = call(s, "POST", "/jobs/" + UUID.randomUUID() + "/abort", "");
+        assertThat(missingJob.statusCode()).isEqualTo(404);
+
+        var other = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + s.getPort() + "/v1/vectors/stats"))
+            .header("Authorization", "Bearer " + GATE_TOKEN).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(other.body()).as("/v1/vectors/stats is still the vectors handler's").doesNotContain("re-embed");
     }
 
     // ── the scheduled task is the runner's tick ──────────────────────────────
