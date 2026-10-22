@@ -386,6 +386,11 @@ deselects them, so no census has said which of them touch storage.
   export `NX_STORAGE_TOUCH_SWEEP=1` (nexus-ey246), so each shard gates on the whole-run checks, late
   touches included; the docs-readers leg does not export it. Marks only get added, so when the count rises, drop marks a test
   no longer needs before raising the ceiling.
+  Before pushing, `uv run python scripts/tenant_delta.py` prints how many tests that mint a tenant your
+  branch adds against its merge base with origin/develop, per changed module (nexus-g37hn; the marker,
+  or `t2_tenant`/`t2_service_env` in the fixture closure, counted at collection). The push script runs
+  it as a `PUSH_TENANT_HINT` line on stderr when the pushed range changes a test module; it never
+  refuses (`NX_PUSH_TENANT_CHECK=0` skips it).
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
   (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
