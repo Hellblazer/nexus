@@ -284,10 +284,11 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # nexus-wbfpw.50, 2026-10-04), [L] the per-collection search route through the
 # edge (nexus-tu8wp.3, 2026-10-05), [M] gzip, the routing listing and include_embeddings through the
 # edge (nexus-tjyzn, nexus-mz9jv, nexus-92q1p, 2026-10-08), [N] the test-only tenant-reset route is absent
-# (nexus-0bl77, 2026-10-19; EXPECTED_LEGS 11 -> 12). Editing the battery means updating this
+# (nexus-0bl77, 2026-10-19; EXPECTED_LEGS 11 -> 12), [O] reranker_available present and true on
+# /v1/status (nexus-kyvfj, 2026-10-22; EXPECTED_LEGS 12 -> 13). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=12
+EXPECTED_LEGS=13
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
@@ -451,6 +452,39 @@ if errs:
     violation("; ".join(errs))
 print("ok [J]: reaper enabled, last completed pass %ds ago (limit %ds = 3 x %ds + %ds budget), failed_passes_total=0, %s"
       % (age, limit, interval, budget, lp_text))
+PY
+}
+
+# Leg O's judge (nexus-kyvfj): the reranker's availability on /v1/status, read
+# from the body leg B already fetched. Prints one line; exit 0 = reranker_available
+# is present and true, 1 = violation. An edge that strips the key makes `nx doctor`'s
+# Reranker row read "not applicable", which looks healthy, so absent is a failure;
+# false is a failure too, because the cloud reranks with Voyage, whose available()
+# is always true (nexus-vk1l1: the field now means "loadable", not "files present").
+_reranker_status_verdict() {
+    "$E2E_PYTHON" - "$1" <<'PY'
+import json
+import sys
+
+body = sys.argv[1]
+try:
+    doc = json.loads(body)
+    if not isinstance(doc, dict) or "embedding_mode" not in doc:
+        raise ValueError("not a status body")
+except Exception:
+    print("O: /v1/status through the edge returned no readable status body (a curl failure, or an edge "
+          "401/403/502/WAF page), so reranker_available could not be read")
+    sys.exit(1)
+if "reranker_available" not in doc:
+    print("O: /v1/status carries no `reranker_available` (the engine predates it, or the edge strips it); "
+          "`nx doctor`'s Reranker row then reads not applicable, which looks healthy")
+    sys.exit(1)
+value = doc["reranker_available"]
+if value is not True:
+    print("O: reranker_available is %r, expected true: the cloud reranks with Voyage, whose available() is "
+          "always true, so anything else means the reranker cannot serve" % (value,))
+    sys.exit(1)
+print("ok [O]: reranker_available=true on /v1/status through the edge (reranker=%r)" % (doc.get("reranker"),))
 PY
 }
 
@@ -1292,6 +1326,18 @@ if [ "$J_RC" -eq 0 ]; then
     echo "  $J_LINE"
 else
     _leg_fail "$J_LINE"
+fi
+
+# ── Leg O: reranker availability through the edge (nexus-kyvfj) ──────────
+# Judged on the same /v1/status body; no second request. The compare logic is
+# _reranker_status_verdict, above, unit-tested in tests/e2e/cloud_client_path_gate_b3_test.sh.
+_leg_enter O "reranker_available on /v1/status through the edge (present and true)"
+O_RC=0
+O_LINE="$(_reranker_status_verdict "$STATUS_BODY")" || O_RC=$?
+if [ "$O_RC" -eq 0 ]; then
+    echo "  $O_LINE"
+else
+    _leg_fail "$O_LINE"
 fi
 
 # ── Leg K: vector sweep routes through the edge (nexus-wbfpw.50) ─────────

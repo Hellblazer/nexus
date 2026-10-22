@@ -335,6 +335,36 @@ run_m "M3: absent asserted but served -> violation (1)" 1 "NX_EXPECTED_ENGINE_SU
 
 # Wiring: the not-run state reaches the final sentinel, a violation is a leg
 # failure, and the function is called with the bearer-resolved status body.
+# Leg O's compare logic (nexus-kyvfj): reranker_available on the status body.
+sed -n '/^_reranker_status_verdict() {/,/^}/p' "$GATE" > "$TMP/ofn.sh"
+if [ "$(head -n 1 "$TMP/ofn.sh")" != '_reranker_status_verdict() {' ] \
+   || [ "$(sed -n 'x;$p' "$TMP/ofn.sh")" != 'PY' ] || [ "$(tail -n 1 "$TMP/ofn.sh")" != '}' ]; then
+  echo "[FAIL] _reranker_status_verdict not found or not closed on its PY heredoc in $GATE"
+  echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
+  exit 1
+fi
+run_o() {
+  local label="$1" want_rc="$2" want_text="$3" body="$4" out rc
+  # shellcheck disable=SC1091
+  out="$(source "$TMP/ofn.sh"; _reranker_status_verdict "$body")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+run_o "O: reranker_available true -> ok (0)" 0 "ok [O]" \
+  '{"embedding_mode":"voyage","reranker":"voyage-rerank-2.5","reranker_available":true}'
+run_o "O: reranker_available false -> violation (1)" 1 "expected true" \
+  '{"embedding_mode":"voyage","reranker":"voyage-rerank-2.5","reranker_available":false}'
+run_o "O: key absent (an edge strips it) -> violation (1)" 1 "carries no \`reranker_available\`" \
+  '{"embedding_mode":"voyage","reranker":"voyage-rerank-2.5"}'
+run_o "O: a string 'true' is not true -> violation (1)" 1 "expected true" \
+  '{"embedding_mode":"voyage","reranker_available":"true"}'
+run_o "O: edge 502 page -> violation (1)" 1 "no readable status body" "<html>502 Bad Gateway</html>"
+
 check_wiring() {
   local label="$1" pattern="$2"
   if grep -Eq -- "$pattern" "$GATE"; then
@@ -346,8 +376,9 @@ check_wiring() {
 check_wiring "B3 return 3 sets B3_NOT_RUN" '3\) echo "  \$B3_LINE"; B3_NOT_RUN=1'
 check_wiring "B3 violation is a leg failure" '\*\) _leg_fail "\$B3_LINE"'
 check_wiring "J is judged on the status body leg B fetched" 'J_LINE="\$\(_reaper_status_verdict "\$STATUS_BODY"\)"'
+check_wiring "O is judged on the status body leg B fetched" 'O_LINE="\$\(_reranker_status_verdict "\$STATUS_BODY"\)"'
 check_wiring "J violation is a leg failure" '_leg_fail "\$J_LINE"'
-check_wiring "the leg battery expects 12 legs (A B C+D E F H I J K L M N)" '^EXPECTED_LEGS=12$'
+check_wiring "the leg battery expects 13 legs (A B C+D E F H I J K L M N O)" '^EXPECTED_LEGS=13$'
 check_wiring "L runs each probe through _route_probe, which judges with the real _route_probe_verdict and the expectation env" \
   'line="\$\(_route_probe_verdict "\$label" "\$EDGE_CODE" "\$EDGE_BODY" "\$fragment" "\$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE"\)" \|\| rc=\$\?'
 check_wiring "L: an unasserted old-engine 404 (exit 3) sets the not-served flag" '3\) echo "  \$line"; L_ABSENT=\$\(\(L_ABSENT \+ 1\)\); L_ROUTE_NOT_SERVED=1 ;;'
