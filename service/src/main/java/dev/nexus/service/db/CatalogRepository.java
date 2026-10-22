@@ -4779,6 +4779,54 @@ public final class CatalogRepository {
         }
     }
 
+    /** The closed {@code reason} a refused document move reports (RDR-210 Phase 6 Step 1). */
+    public static final String MOVE_PRECONDITION_FAILED = "move_precondition_failed";
+
+    /**
+     * RDR-210 Phase 6 Step 1: a document move was refused because the document is no longer what the
+     * caller read: its manifest chashes changed, or its manifest no longer names the source collection
+     * (a client re-indexed it, deleted it or wrote it elsewhere since). Typed, and listed in {@link
+     * #failureDetail}'s pass-through, so the response says {@link #MOVE_PRECONDITION_FAILED} instead
+     * of the generic "internal error"; the job counts that reason as a skip and any other as a failed
+     * batch. The message IS the reason; {@link #changed()} (closed vocabulary {@code manifest_changed},
+     * {@code collection_changed}) is for the server-side log only.
+     */
+    public static final class MovePreconditionFailedException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+        private final String changed;
+
+        MovePreconditionFailedException(String docId, String changed) {
+            super(MOVE_PRECONDITION_FAILED);
+            this.changed = changed;
+        }
+
+        /** Which half of the precondition failed. */
+        public String changed() {
+            return changed;
+        }
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 1, the internal parameter of the combined write that makes it a MOVE: the
+     * collection the documents leave, and per document the manifest chashes (in position order) the
+     * caller read. Engine-internal: no HTTP route builds one.
+     */
+    record DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes) {
+        DocumentMove {
+            requireNonBlank(sourceCollection, "sourceCollection");
+            if (expectedChashes == null) {
+                throw new IllegalArgumentException("'expectedChashes' is required for a document move");
+            }
+            Map<String, List<String>> copy = new LinkedHashMap<>();
+            for (var e : expectedChashes.entrySet()) {
+                List<String> hex = new ArrayList<>(e.getValue().size());
+                for (String c : e.getValue()) hex.add(c.toLowerCase(java.util.Locale.ROOT));
+                copy.put(e.getKey(), List.copyOf(hex));
+            }
+            expectedChashes = Map.copyOf(copy);
+        }
+    }
+
     /**
      * Does *docId* exist AND carry a non-null deleted_at (nexus-eldyi)? Used
      * ONLY after a guarded UPDATE already returned 0 rows — an extra read on
@@ -5698,7 +5746,31 @@ public final class CatalogRepository {
     public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection,
                                                   Map<String, String> complete, boolean sweep,
                                                   Map<String, ResolvedChunk> resolvedChunks) {
+        return writeManifestMany(tenant, docs, collection, complete, sweep, resolvedChunks, null);
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 1 — the combined write as a per-document MOVE into {@code collection}, the
+     * source collection's model sibling. Package-private: the only caller is {@link
+     * CombinedWriteService#moveDocsCombined}, and no public route reaches it. {@code move == null} is
+     * exactly the six-argument overload.
+     *
+     * <p>With a move, each document's OWN transaction (the one above, same locks, same chunk-then-manifest
+     * order) additionally (1) refuses the document unless its current manifest chashes and collection
+     * equal what the caller read ({@link MovePreconditionFailedException}), a tombstoned document
+     * ({@link TombstonedDocumentException}), (2) sets {@code catalog_documents.physical_collection} to
+     * {@code collection}, and (3) re-homes the document's {@code document_aspects},
+     * {@code aspect_extraction_queue} and {@code document_highlights} rows (see {@link #completeMove}).
+     * The response gains {@code move} ({@code source}, {@code satellites}) for the documents that
+     * committed. Sweep is not combined with a move: the source chunks are left for the job to delete.
+     */
+    Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection,
+                                           Map<String, String> complete, boolean sweep,
+                                           Map<String, ResolvedChunk> resolvedChunks, DocumentMove move) {
         requireNonBlank(collection, "collection");
+        if (move != null && move.sourceCollection().equals(collection)) {
+            throw new IllegalArgumentException("a document move needs a target other than its source collection");
+        }
         refuseRowsUnderSupersededCollection(tenant, collection, docs);
         // nexus-h6d89: write_manifest_many_timing — the manifest-write twin
         // of register_many_timing (line ~1469). tMethodStart/tMethodEnd
@@ -5720,6 +5792,8 @@ public final class CatalogRepository {
         int totalSwept = 0;
         int sweepSkipped = 0;
         int totalChunksWritten = 0;
+        // RDR-210 Phase 6 Step 1: satellite rows re-homed by the documents of this call that committed.
+        int[] moveSatelliteTotals = new int[MOVE_SATELLITE_KEYS.size()];
         List<String> failed = new ArrayList<>();
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
@@ -5766,6 +5840,7 @@ public final class CatalogRepository {
                 Set<String>[] beforeHolder = new Set[1];
                 int[] chunksWrittenHolder = new int[1];
                 List<String>[] newlyWrittenChashesHolder = new List[1];
+                int[] moveSatelliteHolder = new int[MOVE_SATELLITE_KEYS.size()];
                 // nexus-wbfpw.66: everything the per-doc transaction below produces for the
                 // caller lives in these holders, ZEROED AT THE TOP of each attempt (the
                 // transaction runs under DeadlockRetry and is re-run from scratch after a
@@ -5786,6 +5861,7 @@ public final class CatalogRepository {
                         beforeHolder[0] = null;
                         chunksWrittenHolder[0] = 0;
                         newlyWrittenChashesHolder[0] = null;
+                        java.util.Arrays.fill(moveSatelliteHolder, 0);
                         docRefused.clear();
                         docRaced.reset();
                         // RDR-223 P2.2 fix round (nexus-z0o2p.12): take the document's write
@@ -5802,6 +5878,11 @@ public final class CatalogRepository {
                         requireDocumentExists(ctx, tenant, docId);
                         acquireSweepGateShared(ctx, tenant, collection);
                         acquireIndexRunLock(ctx, tenant, docId);
+                        // RDR-210 Phase 6 Step 1: under the document's write locks, so a client write that
+                        // committed before them is seen and one that comes after waits for this commit.
+                        if (move != null) {
+                            requireMovePrecondition(ctx, tenant, docId, move);
+                        }
                         // nexus-eslkl: the sweep's "before" read MUST happen before
                         // writeManifestRows deletes doc_id's current rows below —
                         // it is the only way to learn which chashes THIS write drops.
@@ -5850,6 +5931,9 @@ public final class CatalogRepository {
                             writeManifestRows(ctx, tenant, docId, collection, rows,
                                     resolvedChunks, chunksWrittenHolder,
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
+                            if (move != null) {
+                                completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
+                            }
                             if (beforeReadFailed) {
                                 // Nothing to compute — the before-read itself is what
                                 // failed, so `dropped` was never determined. Reported
@@ -5891,6 +5975,7 @@ public final class CatalogRepository {
                     // nexus-wbfpw.66: the committed attempt's refusals and raced embeds, once.
                     completeRefused.addAll(docRefused);
                     docRaced.flush(collection);
+                    for (int i = 0; i < moveSatelliteTotals.length; i++) moveSatelliteTotals[i] += moveSatelliteHolder[i];
                     okDocs++;
                     totalRows += rows.size();
                     totalChunksWritten += chunksWrittenHolder[0];
@@ -5928,6 +6013,10 @@ public final class CatalogRepository {
                     Map<String, Object> detail = failureDetail(docId, e);
                     log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} reason={} sqlstate={}",
                               tenant, docId, detail.get("reason"), detail.get("sqlstate"));
+                    if (e instanceof MovePreconditionFailedException mp) {
+                        log.info("event=document_move_precondition_failed tenant={} doc_id={} source={} target={} changed={}",
+                                 tenant, docId, move == null ? "" : move.sourceCollection(), collection, mp.changed());
+                    }
                     failed.add(docId);
                     failedDetail.add(detail);
                     // nexus-wbfpw.66: the attempt that finally failed may have stamped a before_read_failed
@@ -6036,7 +6125,134 @@ public final class CatalogRepository {
         if (resolvedChunks != null) {
             result.put("chunks_written", totalChunksWritten);
         }
+        if (move != null) {
+            // RDR-210 Phase 6 Step 1: present only on a move. satellites counts rows re-homed to the target
+            // (*_moved) and source rows deleted because the target already held that unique key (*_replaced).
+            Map<String, Integer> satellites = new LinkedHashMap<>();
+            for (int i = 0; i < MOVE_SATELLITE_KEYS.size(); i++) satellites.put(MOVE_SATELLITE_KEYS.get(i), moveSatelliteTotals[i]);
+            Map<String, Object> moveOut = new LinkedHashMap<>();
+            moveOut.put("source", move.sourceCollection());
+            moveOut.put("target", collection);
+            moveOut.put("satellites", satellites);
+            result.put("move", moveOut);
+        }
         return result;
+    }
+
+    /** Keys of the satellite counters of a document move, in counter order. */
+    private static final List<String> MOVE_SATELLITE_KEYS = List.of(
+        "document_aspects_moved", "document_aspects_replaced",
+        "aspect_extraction_queue_moved", "aspect_extraction_queue_replaced",
+        "document_highlights_moved");
+
+    /**
+     * The precondition of a document move, read in the document's transaction: the document is live, its
+     * manifest rows are exactly the chashes the caller read (position order) and all name the source
+     * collection. A document with no manifest rows is compared by its {@code physical_collection}.
+     * Anything else is {@link MovePreconditionFailedException}: the next pass sees the document wherever
+     * the client put it.
+     */
+    private static void requireMovePrecondition(DSLContext ctx, String tenant, String docId, DocumentMove move) {
+        if (isTombstonedDocument(ctx, tenant, docId)) {
+            throw new TombstonedDocumentException(docId, "move refused: document is tombstoned: " + docId);
+        }
+        List<String> want = move.expectedChashes().get(docId);
+        if (want == null) {
+            throw new IllegalArgumentException("move precondition missing for document: " + docId);
+        }
+        var current = ctx.select(CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+                         .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                                .and(liveParentDoc(ctx, tenant)))
+                         .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                         .fetch();
+        List<String> have = new ArrayList<>(current.size());
+        boolean namesSource = true;
+        for (var r : current) {
+            have.add(r.value1() == null ? "" : r.value1().toLowerCase(java.util.Locale.ROOT));
+            namesSource &= move.sourceCollection().equals(r.value2());
+        }
+        if (current.isEmpty()) {
+            String physical = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+                                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                        .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                                 .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
+            namesSource = move.sourceCollection().equals(physical);
+        }
+        if (!namesSource) {
+            throw new MovePreconditionFailedException(docId, "collection_changed");
+        }
+        if (!want.equals(have)) {
+            throw new MovePreconditionFailedException(docId, "manifest_changed");
+        }
+    }
+
+    /**
+     * The rest of a document move, after {@link #writeManifestRows} replaced the manifest with rows
+     * naming {@code target}: point the document at {@code target} and re-home its satellites, in the same
+     * transaction (RDR-210 §"Every collection-scoped table's disposition": the three REPOINT satellites).
+     *
+     * <p>A satellite belongs to the document by {@code doc_id} equal to its tumbler. The RDR also named a
+     * second arm, an empty {@code doc_id} with a {@code source_path} equal to the document's path; it can
+     * match nothing: {@code document_aspects.doc_id} and {@code aspect_extraction_queue.doc_id} are NOT
+     * NULL with a composite foreign key to {@code catalog_documents} (fk-001, hygiene-001), so a row with
+     * no document cannot exist. {@code DocumentMoveTest#noDocLessSatelliteRowCanExist} pins that premise.
+     *
+     * <p>Where {@code target} already holds a row with the same unique key ({@code (tenant, collection,
+     * source_path)} for aspects and queue), the target row stands and the source row is deleted.
+     * {@code document_highlights} is unique on {@code (tenant, doc_id)}, collection not included, so it
+     * has no such case. {@code counts} receives the {@link #MOVE_SATELLITE_KEYS} counters.
+     */
+    private static void completeMove(DSLContext ctx, String tenant, String docId, String target, String source,
+                                     int[] counts) {
+        int pointed = ctx.update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, target)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .execute();
+        if (pointed == 0) {
+            throw new TombstonedDocumentException(docId, "move refused: document is tombstoned: " + docId);
+        }
+        var targetAspects = DOCUMENT_ASPECTS.as("move_target_aspects");
+        counts[1] = ctx.deleteFrom(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
+                   .and(DOCUMENT_ASPECTS.COLLECTION.eq(source))
+                   .and(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
+                   .and(DSL.exists(ctx.selectOne().from(targetAspects)
+                       .where(targetAspects.TENANT_ID.eq(tenant)
+                              .and(targetAspects.COLLECTION.eq(target))
+                              .and(targetAspects.SOURCE_PATH.eq(DOCUMENT_ASPECTS.SOURCE_PATH))))))
+            .execute();
+        counts[0] = ctx.update(DOCUMENT_ASPECTS)
+            .set(DOCUMENT_ASPECTS.COLLECTION, target)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
+                   .and(DOCUMENT_ASPECTS.COLLECTION.eq(source))
+                   .and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)))
+            .execute();
+        var targetQueue = ASPECT_EXTRACTION_QUEUE.as("move_target_queue");
+        counts[3] = ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
+            .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
+                   .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
+                   .and(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))
+                   .and(DSL.exists(ctx.selectOne().from(targetQueue)
+                       .where(targetQueue.TENANT_ID.eq(tenant)
+                              .and(targetQueue.COLLECTION.eq(target))
+                              .and(targetQueue.SOURCE_PATH.eq(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH))))))
+            .execute();
+        counts[2] = ctx.update(ASPECT_EXTRACTION_QUEUE)
+            .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, target)
+            .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
+                   .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
+                   .and(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId)))
+            .execute();
+        counts[4] = ctx.update(DOCUMENT_HIGHLIGHTS)
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target)
+            .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
+                   .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
+                   .and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)))
+            .execute();
     }
 
     /**
@@ -6445,7 +6661,7 @@ public final class CatalogRepository {
         // before catalog_document_chunks.collection went NOT NULL; the
         // message here says the same thing in our own words instead.
         if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException
-                || e instanceof DocumentNotFoundException)
+                || e instanceof DocumentNotFoundException || e instanceof MovePreconditionFailedException)
                 && e.getMessage() != null) {
             out.put("reason", e.getMessage());
         } else {
@@ -8934,6 +9150,54 @@ public final class CatalogRepository {
      * for each entry without a reflective or copied inventory.
      */
     record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
+
+    /**
+     * What a cross-model re-embed does with a table's rows that name the SOURCE collection (RDR-210
+     * §"Every collection-scoped table's disposition"): {@code REPOINT} rows move to the target inside
+     * each document's move transaction, {@code REBUILD} rows are made again for the target after the job
+     * (they are derived from the source model's vectors), {@code LEAVE} rows stay naming the source.
+     */
+    enum CrossModelDisposition { REPOINT, REBUILD, LEAVE }
+
+    /**
+     * RDR-210 Phase 6 Step 1: the disposition of every entry of {@link #COLLECTION_SCOPED_TABLES}, keyed by
+     * its {@code countKey}. Adding a table to the registry without a line here fails {@code
+     * CrossModelDispositionParityTest}, so a new collection-scoped table cannot reach a re-embed with the
+     * question unanswered (a table left out is deleted with the source, or kept naming a retired name).
+     *
+     * <p>{@code chunks} is LEAVE for the SOURCE rows: the move writes the target's chunks itself, and the
+     * source's stay until the job deletes the source, because the reaper's floor refuses a fully reapable
+     * source (210-research-18). {@code catalog_document_chunks} is REPOINT because the combined write
+     * replaces a document's manifest rows with rows naming the target.
+     */
+    static final Map<String, CrossModelDisposition> CROSS_MODEL_DISPOSITIONS = Map.ofEntries(
+        Map.entry("chunks",                  CrossModelDisposition.LEAVE),
+        Map.entry("catalog_document_chunks", CrossModelDisposition.REPOINT),
+        Map.entry("topic_assignments",       CrossModelDisposition.REBUILD),
+        Map.entry("topics",                  CrossModelDisposition.REBUILD),
+        Map.entry("taxonomy_meta",           CrossModelDisposition.REBUILD),
+        Map.entry("taxonomy_centroids",      CrossModelDisposition.REBUILD),
+        Map.entry("document_aspects",        CrossModelDisposition.REPOINT),
+        Map.entry("document_highlights",     CrossModelDisposition.REPOINT),
+        Map.entry("aspect_extraction_queue", CrossModelDisposition.REPOINT),
+        Map.entry("catalog_documents",       CrossModelDisposition.REPOINT),
+        Map.entry("relevance_log",           CrossModelDisposition.LEAVE),
+        Map.entry("search_telemetry",        CrossModelDisposition.LEAVE),
+        Map.entry("hook_failures",           CrossModelDisposition.LEAVE),
+        Map.entry("gc_audit",                CrossModelDisposition.LEAVE));
+
+    /**
+     * The collection-keyed tables that are deliberately NOT in {@link #COLLECTION_SCOPED_TABLES} (the
+     * schema-parity gate's {@code _DOCUMENTED_EXCLUSIONS}), with their cross-model disposition: {@code
+     * chunk_orphaned_at} goes with the source's chunks through the chunk foreign key's cascade,
+     * {@code pdf_pipeline} is a transient queue, {@code chash_remap} a permanent ledger (nexus-4nll0).
+     * The two job tables the RDR adds ({@code reembed_jobs}, {@code reembed_job_moves}, LEAVE) join this
+     * map with their changeset in Phase 6 Step 2.
+     */
+    static final Map<String, CrossModelDisposition> CROSS_MODEL_DISPOSITIONS_OUTSIDE_REGISTRY = Map.of(
+        "chunk_orphaned_at", CrossModelDisposition.LEAVE,
+        "pdf_pipeline",      CrossModelDisposition.LEAVE,
+        "chash_remap",       CrossModelDisposition.LEAVE);
 
     /**
      * The rename transaction refused to merge a populated retired target.

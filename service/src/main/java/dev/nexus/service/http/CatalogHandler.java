@@ -2476,7 +2476,7 @@ public final class CatalogHandler implements HttpHandler {
         // never inserts a registry row, never touches superseded_by — so a retired source is
         // harmless there, and repointing a dead collection's documents onto its live successor
         // is exactly the repair the RDR-162 flow exists for. Blocking it would degrade
-        // remap_collection_references to a warn-and-continue that leaves catalog_documents
+        // the cross_model repoint to a warn-and-continue that leaves catalog_documents
         // pointing at the dead source.
         boolean crossModel = Boolean.TRUE.equals(body.get("cross_model"));
         String srcSuperseded = (String) srcRow.get("superseded_by");

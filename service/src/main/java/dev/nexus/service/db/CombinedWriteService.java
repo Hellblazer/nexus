@@ -17,6 +17,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 
@@ -260,6 +261,55 @@ public final class CombinedWriteService {
         // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
         if (metadataMode.merge()) response.put("metadata_merge", true);
         return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 1 (bead nexus-0khi2) — move documents from {@code sourceCollection} into its
+     * model sibling {@code targetCollection}. Engine-internal: no HTTP route calls this, and the public
+     * routes are unchanged. The re-embed job's call.
+     *
+     * <p>The chunks are embedded OUTSIDE any transaction with the TARGET's model, through the same
+     * dedupe and existence partition as {@link #writeManyCombined}: a chash the target already holds
+     * with identical text is not embedded again, and a chunk two documents share is embedded once. Then
+     * ONE transaction per document writes the target chunks, replaces the document's manifest rows with
+     * rows naming the target, sets {@code physical_collection} to the target and re-homes the document's
+     * aspect, queue and highlight rows ({@link CatalogRepository#writeManifestMany(String, List, String,
+     * Map, boolean, Map, CatalogRepository.DocumentMove)}). A document that is no longer what the caller
+     * read is left where it is and reported in {@code failed} with the reason {@code
+     * move_precondition_failed}; the rest of the batch is unaffected.
+     *
+     * @param chunks          {@code {chash, text, metadata}} per chunk the documents' rows name, as read
+     *                        from the source
+     * @param docs            {@code {doc_id, rows}} per document, the rows as they will stand in the target
+     * @param expectedChashes per {@code doc_id}, the manifest chashes in position order the caller read
+     * @throws IllegalArgumentException when the two collections are not siblings: same content type and
+     *         owner, different embedding model
+     */
+    public CombinedWriteResult moveDocsCombined(String tenant, String sourceCollection, String targetCollection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, List<String>> expectedChashes) {
+        requireModelSiblings(tenant, sourceCollection, targetCollection);
+        ResolvedBatch batch = resolveChunks(tenant, targetCollection, chunks, false, MetadataMode.REPLACE);
+        Map<String, Object> response = catalogRepo.writeManifestMany(tenant, docs, targetCollection, null, false,
+            batch.resolved(), new CatalogRepository.DocumentMove(sourceCollection, expectedChashes));
+        response.put("chunks_deduped", batch.deduped());
+        response.put("embed_skipped", batch.skipped());
+        response.put("embed_embedded", batch.embedded());
+        return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /** A move goes between model siblings only: same content type and owner, a different embedding model. */
+    private void requireModelSiblings(String tenant, String source, String target) {
+        if (source == null || source.isBlank() || target == null || target.isBlank()) {
+            throw new IllegalArgumentException("a document move needs a source and a target collection");
+        }
+        CollectionRow from = CollectionRegistry.lookup(tenantScope, tenant, source);
+        CollectionRow to = CollectionRegistry.lookup(tenantScope, tenant, target);
+        if (!Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
+                || Objects.equals(from.embeddingModel(), to.embeddingModel())) {
+            throw new IllegalArgumentException("a document move goes between model siblings: " + source
+                + " and " + target + " are not the same content type and owner under different models");
+        }
     }
 
     /**
