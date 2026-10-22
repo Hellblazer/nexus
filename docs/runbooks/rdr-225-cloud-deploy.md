@@ -587,7 +587,9 @@ that the data survived.
    OR relname LIKE 'taxonomy_centroids%')` shows a `last_analyze` inside the walk's window for every leaf. A leaf without
    statistics turns the planner off HNSW (vectors-004 Step 5b, BUG-0148). Unverified: the view shows partitioned
    parents' statistics as expected.
-3. **The frozen query set on the live engine.** Placeholder `.27:` FROZEN_QUERY_SET names the set (real logged
+3. **The frozen query set on the live engine.** As run (2026-10-07, see § 9.1 FROZEN_QUERY_SET): the 12-search set
+   below replaced this design; the before-and-after comparison against pre-walk results was not run, and the recall
+   miss surfaced after the deploy (nexus-3wh8d.31). The original design, kept as history: placeholder `.27:` FROZEN_QUERY_SET names the set (real logged
    queries) and its runner; the same set ran on the fork before and after. The pass rule is fixed before the fork run,
    not here: top-k overlap floor against the pre-walk results, a latency ratio bound, and a cache protocol (restart
    and flush before each run) (critique, Significant 3). Placeholder `.27:` OVERLAP_FLOOR, LATENCY_RATIO. Each plan

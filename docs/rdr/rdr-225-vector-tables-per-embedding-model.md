@@ -22,6 +22,14 @@ Drafted 2026-10-05 against develop `a798f07ea`. No product code has changed. The
 research that decides the design is still running on forks of production; its
 open items are marked **Assumed** below.
 
+*Reconciled 2026-10-22 (nexus-3wh8d.33).* The text above and most of the
+sections below are the 2026-10-05 and 2026-10-06 design, kept as written.
+The design was built and deployed to the cloud on 2026-10-07 (`vectors-030-1`,
+engine-service-v0.1.150, nexus-3wh8d.20), and the retired tables were dropped
+on 2026-10-21 (`vectors-036-1`, engine-service-v0.1.162, nexus-3wh8d.22).
+Dated "as built" notes mark where the text below was corrected or where what
+shipped differs from what was planned. The Revision History lists them.
+
 **Provenance.** On 2026-10-05, investigating slow cloud searches, a literature
 review found that every 1024-dimension vector in the engine sits in one HNSW
 index, whichever model embedded it. Sam: "the mixing of embeddings is extremely
@@ -45,6 +53,9 @@ latency are compared. If they do not hold, the deploy does not go ahead, and
 rollback is a tag flip or a PITR restore. The shelved harness work is archived
 outside the repo (`~/nexus-evidence/rdr225-shelved-2026-10-06/`). The protocol
 text below is kept as history.
+
+*As built (2026-10-22).* The before-and-after check on real logged queries was
+not run; see Minimum Viable Validation for what was run instead.
 
 ## Problem Statement
 
@@ -158,8 +169,21 @@ work also surfaced the mixed-model graph.
   figures do not reconcile with the heap and index sizes above. conexus's
   post-resize size query settles which is right, and the disk preflight
   arithmetic below is not revised until it does.
-- Search settings: `hnsw.iterative_scan = relaxed_order`, `ef_search =
+  *As measured (2026-10-07 PITR-fork rehearsal, T2
+  `nexus_rdr/225-rehearsal-2026-10-07`).* `pg_total_relation_size` of `chunks`
+  plus `taxonomy_centroids`, indexes included: 8,891,383,808 bytes (8.89 GB).
+  The three referencing tables: 658,915,328 bytes. The database: 9,457 MB
+  (9.92 GB), close to conexus-eb's 9.7 GB. So 8.9 GB is the total for the two
+  vector tables with their indexes, and the "heap 8.9 GB" plus "1024 index
+  3.1 GB" above should not be added together. This note does not explain the
+  difference between the two sets of figures any further.
+- Search settings (2026-10-05): `hnsw.iterative_scan = relaxed_order`, `ef_search =
   max(200, k)`, `max_scan_tuples = 200000`, statement timeout 30 s, custom plans.
+  *As built (2026-10-07, nexus-3wh8d.31):* the default `ef_search` floor is 600
+  (`PgSession.DEFAULT_EF_SEARCH_FLOOR`, `PgSession.java:101`; the engine logs
+  `event=hnsw_ef_search_floor` at boot, `Main.java:157`), shipped in
+  engine-service-v0.1.151. The cloud serves at 600 too (nexus-3wh8d.31 close
+  reason).
 - A collection's model is recorded in `catalog_collections.embedding_model`
   (`CollectionRegistry`), not on the chunk row.
 - The cloud serves a handful of tenants (Sam, 2026-10-05). The `nexus` tenant
@@ -438,6 +462,8 @@ Every non-PASS outcome defers the per-model split only. Tenant partitioning proc
 
 **Overall:** the design is ready for acceptance when step 2 passes, step 3 passes (or the split is deferred and the tenant-only design is accepted instead), and step 4 passes.
 
+*As built (2026-10-22).* Steps 3 and 4 were dropped on 2026-10-06 (Decision note at the top). The RDR was accepted on 2026-10-05 (`accepted_date`) and built without them. What stands in for step 3's recall and latency check is the Phase 3 rehearsal's 12 searches and the cloud STEP-6 gate, which found a recall miss that the plan had no step to find (Minimum Viable Validation). What stands in for step 4 is the PITR-fork walk of the real changeset (T2 `nexus_rdr/225-rehearsal-2026-10-07`).
+
 **Thresholds, initialled by Sam 2026-10-05 ("accept as written"):**
 - non-inferiority margins: −0.02 recall@10 and 1.10 latency;
 - the H4 write-cost ceiling of 1.25;
@@ -563,6 +589,7 @@ The steps:
 1. Freeze writes.
 - The walk's role has no BYPASSRLS (vectors-004). Steps 2 to 6 therefore run with `NO FORCE ROW LEVEL SECURITY` on the tables they read and write, as earlier walks did (hygiene-002:155-158, vectors-004:225-227). FORCE is restored on every table, parent and leaf, in step 7.7, before the changeset commits.
 2. Create the partitioned `chunks_new` with its PK and constraints but without secondary indexes, its model partitions (each with its dimension CHECK), and the tenant leaves for `default`, every tenant with a token row, and every `tenant_id` present in `chunks` or `taxonomy_centroids` (one query). The same goes for `taxonomy_centroids_new`, so every tenant seen anywhere has a partition to copy into. `create_tenant_partitions` takes the target parent as a parameter, so it serves the migration (`_new` tables) and normal operation alike.
+   *As built (2026-10-22, nexus-3wh8d.7).* This step also creates the UNIQUE `(tenant_id, name, embedding_model)` on `catalog_collections` that the composite model FK of step 7.6 needs. It is in the changeset's PART A, the "step-2 objects", ahead of the walk proper: `ADD CONSTRAINT catalog_collections_tenant_name_model_uq UNIQUE (tenant_id, name, embedding_model)` at `vectors-030-model-tenant-partition-functions.xml:127`, guarded by an existence check so a re-apply after a partial rollback does not fail. The earlier step list did not name it.
 3. Copy per (model, tenant), with `embedding_model` taken from `catalog_collections`. Rows hidden by RDR-192's liveness rule (chunks that no live manifest row claims) are copied unchanged. A row whose vector column disagrees with its model fails the model partition's dimension CHECK, and the whole walk rolls back with PostgreSQL's own error; there is no pre-scan and no special message. Centroids are copied into `taxonomy_centroids_new` only when their collection has a registry row, with the model taken from that row. The others are derived data that taxonomy rebuilds; they are not copied and not logged, and they stay in `taxonomy_centroids_retired_225`.
 4. Add `embedding_model` to the referencing tables as nullable, backfill it, then SET NOT NULL. The manifest triggers keep their old text until step 7.8. Old `chunks` has no `embedding_model`, so their three-column joins still work over the backfill.
 5. Create the parent's indexes, which builds them on every leaf after the copy. Then ANALYZE every leaf and parent. Autovacuum never analyzes a partitioned parent, and a bulk-copied table without statistics turns the planner off HNSW (vectors-004 Step 5b, BUG-0148).
@@ -589,6 +616,7 @@ The steps:
   - **Local rollback** does not exist. `chunks_retired_225` is kept for 14 days only as a data-recovery source, and a later changeset drops it.
 - **The Liquibase rollback of `vectors-030-1` is not a recovery path (2026-10-06).** It exists to keep the rollback test chain executable (`SchemaRollbackRoundTripIntegrationTest` rolls older changesets back through a partitioned `chunks`). It restores table shape only, leaves the step 7.8 function bodies in their post-walk form, and discards every row written since the walk. The engine never calls it. The recovery for a committed walk is PITR.
 - **Local disk preflight.** Before the walk, the engine checks that free disk is at least 2.2x the chunks table plus its indexes: 1x for the copy, 0.2x headroom, and 1x for the WAL the copy generates (estimated as 1x the table). This is inferred, not measured, and the retired table already occupies its own space. If it is not, the engine refuses to start, naming the shortfall. Step 4 of the protocol measures the real peak.
+  *As built (2026-10-22).* Step 4 was dropped, and the factor in the engine is still the inferred 2.2 (`LocalDiskPreflight.java:35-40` and `:64`, whose javadoc still says "inferred, not measured"). The Phase 3 rehearsal measured a peak instead (T2 `nexus_rdr/225-rehearsal-2026-10-07`): the database grew 7.43 GB (9.92 to 17.34 GB, kept for the retired tables) and the walk wrote up to 6.39 GB of WAL, a 13.8 GB worst case. That is 1.55 times the 8.89 GB of the two vector tables, under the engine's 2.2 times (the growth also includes the referencing-table backfill, which the engine's factor does not count). The measurement is of the cloud estate on a fork with WAL archiving on; no local install was measured (see Test Plan item 13).
 - A local install has the `default` tenant (and any it creates), so it holds eight leaves per tenant (one per model partition of `chunks` and of `taxonomy_centroids`, four models each), mostly empty. It gains nothing in isolation and still migrates, so that every install runs one schema.
 
 *Moot since 2026-10-06: step 3 was dropped and the per-model split is built (Decision note at the top). Kept as history.*
@@ -704,9 +732,9 @@ already give.
 ### Prerequisites
 
 - [x] The cardinality router (`feature/nexus-tu8wp.6-cardinality-router`) is merged to develop (7f111743c, efd0d709d).
-- [ ] Protocol step 2 PASS, apart from what is still open: F7, H5 and TS1-TS3 as recorded in Step-2 results, and H4 on four paths.
-- ~~H4 bulk insert repeated on the step-3 fork.~~ Dropped with step 3 (2026-10-06); bulk-insert cost is measured on the Phase 3 rehearsal instead.
-- [ ] Taxonomy tenant-level pruning, TS1 to TS3 as written, and the orphaned-at FK and GC write families pass on the implementation substrate (Test Plan).
+- [x] Protocol step 2 PASS, apart from what is still open: F7, H5 and TS1-TS3 as recorded in Step-2 results, and H4 on four paths. *Ticked 2026-10-22.* TS1 was measured in implementation (nexus-3wh8d.7: p95 69 ms at 300 tenants, four models). F7 is pinned per search family and TS2 re-measured strictly (nexus-3wh8d.15: one-leaf pins per family, TS2 at 2x and 25 ms with no floor). H5's inventory was reverted; `PlpgsqlCheckGateTest` and the write-family tests guard the write sites instead (Technical Design, "Everything that names `nexus.chunks` changes"). The four-path H4 result is unchanged. Test validation: nexus-3wh8d.19, verdict PASS with gaps (T2 `nexus_rdr/225-test-validation-p2`).
+- ~~H4 bulk insert repeated on the step-3 fork.~~ Dropped with step 3 (2026-10-06); bulk-insert cost is measured on the Phase 3 rehearsal instead. <!-- H4 result: nexus-3wh8d.32 -->
+- [x] Taxonomy tenant-level pruning, TS1 to TS3 as written, and the orphaned-at FK and GC write families pass on the implementation substrate (Test Plan). *Ticked 2026-10-22.* Taxonomy and every other family are pinned to one (model, tenant) leaf (nexus-3wh8d.15); the orphaned-at FK has its own test (`98fe4501b`, nexus-3wh8d.19) and the GC, quarantine and restore families are among the roughly 40 mutation controls that validation falsified (T2 `nexus_rdr/225-test-validation-p2`). TS3 case (a), the purge shape, is built in `P225MigrationWalkIntegrationTest` (nexus-3wh8d.8, Step-2 results). Gaps that validation left open: WP6 is pinned by a unit classifier only, and the router-probe latency test cannot fail (the rehearsal measured the probe instead).
 - ~~Protocol step 3 outcome recorded.~~ Dropped (2026-10-06): the model level is kept; the tenant-only layout is not used.
 - ~~Protocol step 4 (H6, under write freeze) PASS.~~ Dropped (2026-10-06): the Phase 3 rehearsal of the real changeset covers it.
 - [x] conexus confirmed the cloud deploy topology and the freeze mechanism on 2026-10-06 (T2 `nexus_rdr/225-cloud-topology`): stop-start, so the freeze is inherent and no engine-side mechanism is needed while that holds.
@@ -719,6 +747,13 @@ The real changeset migrates a fork of production. On it (revised 2026-10-06):
 - Results and latency hold against the before run; a material loss stops the deploy.
 - Each plan touches one (model, tenant) leaf.
 - Row reconciliation per (model, tenant) is exact.
+
+*As built (2026-10-22): the MVV was reduced, and the regression it was meant to catch was found after the deploy.* What ran, item by item:
+- **Before-and-after run of real logged queries: not run.** The rehearsal record states "FROZEN_QUERY_SET not defined by nexus; not run" (T2 `nexus_rdr/225-rehearsal-2026-10-07`, § 9.1 values). The runbook replaced the set and the rule with a 12-search smoke test run after the walk only: 3 queries over {voyage-code-3, voyage-context-3} and {nexus, gate-xr789}, all HTTP 200 with 10 results, client latency at most 2x the fork's. That decision is in `docs/runbooks/rdr-225-cloud-deploy.md:693` (§ 9.1, FROZEN_QUERY_SET row). On the fork the 12 searches ran before and after a VACUUM, not before and after the walk, so no pre-walk result exists to compare against. The runbook's § 7.3 (`:590-593`) still describes the original before-and-after design.
+- **"A material loss stops the deploy": not tested by any comparison.** The stop rule had nothing to compare with. The smoke test checks that searches answer and return 10 rows, not that they return the same rows.
+- **The recall regression surfaced after the 2026-10-07 deploy.** conexus's STEP-6 gate on engine-service-v0.1.150 failed `recall_ac3` on `code-filtered-001` alone: recall@10 0.90 against 1.0 locally, at `ef_search` 200 (nexus-3wh8d.31). Each (model, tenant) leaf has its own graph, and one true neighbour (exact rank 9) was missed. A sweep on the production leaves restored 12/12 at ef 400 with latency flat up to 1000 (CHANGELOG, 7.74.0 entry for nexus-3wh8d.31). The fix is the engine's default `ef_search` floor of 600 (`7aaf2aa7b`), shipped in engine-service-v0.1.151 and flipped in the cloud at 21:59:49Z, after which STEP-6 showed recall@10 1.00 on all 12 queries.
+- **One leaf per plan:** pinned per search family in engine tests (nexus-3wh8d.15). Whether the 2026-10-07 fork run checked it with EXPLAIN is inferred, not read: the rehearsal record shows an index-only scan on one leaf's primary key for the router probe, and says nothing about the other families.
+- **Exact reconciliation per (model, tenant): done**, on the fork (chunks and centroids, T2 `nexus_rdr/225-rehearsal-2026-10-07`) and at the cloud walk ("counts exact", walk committed 16:15:55Z in 7 min 53 s; nexus-3wh8d.20 close reason).
 
 ### Phase 1: Schema
 
@@ -823,7 +858,7 @@ The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-t
 
 #### Step 3: Drop `chunks_retired_225` after 14 days
 
-2026-10-21 (as built, nexus-3wh8d.22): changeset `vectors-036-1` (`vectors-036-drop-retired-225.xml`, after `vectors-035`, before the runAlways grants) drops `chunks_retired_225` and `taxonomy_centroids_retired_225`, each with its `_retired_225` indexes, constraints and policies. For each table that exists it logs `vectors-036-1: dropping nexus.<table> (N row(s))` with `RAISE NOTICE` (counted with FORCE RLS switched off, since the migrating role has no BYPASSRLS) and runs `DROP TABLE IF EXISTS`, with no CASCADE, so a dependent view fails the drop and leaves both tables in place. An absent table is skipped. The changeset comment states the DATA EFFECT (irreversible) and the local window: the time between the engine release carrying `vectors-030-1` and the one carrying this changeset, zero for an install that crosses both in one boot. The rollback recreates both tables empty in the shape `vectors-030-1` leaves, because `vectors-030-1`'s rollback raises when `nexus.chunks` is partitioned and a retired table is missing; `P225DropRetiredIntegrationTest` compares columns, indexes, constraints, policies, RLS and FORCE, reloptions, owner and triggers between the walked state and the rolled-back one. The jOOQ exclude for the retired names and the two schema-parity inventory entries are removed in the same change. Not yet run: the PITR-fork walk of the changelog through this changeset, and the cloud deploy.
+2026-10-21 (as built, nexus-3wh8d.22): changeset `vectors-036-1` (`vectors-036-drop-retired-225.xml`, after `vectors-035`, before the runAlways grants) drops `chunks_retired_225` and `taxonomy_centroids_retired_225`, each with its `_retired_225` indexes, constraints and policies. For each table that exists it logs `vectors-036-1: dropping nexus.<table> (N row(s))` with `RAISE NOTICE` (counted with FORCE RLS switched off, since the migrating role has no BYPASSRLS) and runs `DROP TABLE IF EXISTS`, with no CASCADE, so a dependent view fails the drop and leaves both tables in place. An absent table is skipped. The changeset comment states the DATA EFFECT (irreversible) and the local window: the time between the engine release carrying `vectors-030-1` and the one carrying this changeset, zero for an install that crosses both in one boot. The rollback recreates both tables empty in the shape `vectors-030-1` leaves, because `vectors-030-1`'s rollback raises when `nexus.chunks` is partitioned and a retired table is missing; `P225DropRetiredIntegrationTest` compares columns, indexes, constraints, policies, RLS and FORCE, reloptions, owner and triggers between the walked state and the rolled-back one. The jOOQ exclude for the retired names and the two schema-parity inventory entries are removed in the same change. Not yet run when this paragraph was written: the PITR-fork walk of the changelog through this changeset, and the cloud deploy. *Both are done (nexus-3wh8d.22 close reason, 2026-10-21):* conexus's PITR-fork walk was clean (434,642 chunk rows and 804 centroids, 0 dependent objects), and the changeset was deployed to the cloud at 21:39:47Z in engine-service-v0.1.162 (tag on `47e23a841`), with boot NOTICEs matching the fork, conexus's STEP-6 green (`gate-report-20261021T214114Z-v011.json`) and the nexus Step 6.1 client-path gate 12/12. Local installs get it with conexus 7.83.1, which pins `REQUIRED_ENGINE_VERSION` 0.1.162 (CHANGELOG 7.83.0 and 7.83.1).
 
 ### Day 2 Operations
 
@@ -858,8 +893,12 @@ The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-t
   - the views and policies are on the new table;
   - an injected failure leaves every table unchanged.
   - a row whose vector dimension disagrees with its collection's model makes the walk fail and leaves every table unchanged;
-- **Recall and latency non-inferiority.** Verify: protocol step 3's rule.
-- **A local install.** Verify: the preflight, the migration and search.
+- **Recall and latency non-inferiority.** Verify: protocol step 3's rule. *Dropped (2026-10-06, Decision note at the top); no bead covers it (phase-review cross-walk, T2 `nexus_rdr/225-phase-review`).* Replaced in practice by the post-walk 12-search smoke test and the cloud STEP-6 gate, which is where the recall miss of nexus-3wh8d.31 was found (Minimum Viable Validation). Neither is a non-inferiority test.
+- **A local install.** Verify: the preflight, the migration and search. *Evidence as of 2026-10-22 is indirect (nexus-3wh8d.9 is the only bead mapped to this item, and the cross-walk marks it partial).* It rests on three things, none a walk of a populated local install at a stated scale:
+  - the preflight, in `P225DiskPreflightIntegrationTest` (`service/src/test/java/dev/nexus/service/`, nexus-3wh8d.9);
+  - the `--package-upgrade` convergence run in the release battery, which is toy scale. For conexus 7.73.0 it upgraded a container install holding one T1 scratch row and no chunks, so `vectors-030-1` ran over an empty estate (CHANGELOG 7.73.0, "What proves it, and at what scale"). The 7.83.0 release battery and the published-bytes rerun of 7.83.1 converged 7.82.0 plus engine v0.1.160 to v0.1.162, service healthy and T1 surviving, at the harness's toy seed (T2 nexus/release-7.83-battery-and-published-bytes-2026-10-21);
+  - the walk at fixture scale, `P225MigrationWalkIntegrationTest` (12 chunks, 5 tenants, per the runbook `:695`).
+  The runbook records "Not measured on a real local estate" (`docs/runbooks/rdr-225-cloud-deploy.md:695`), and the engine's 2.2x factor is unmeasured (Local disk preflight). The at-scale proof is the cloud fork walk, not a local one.
 
 ## Finalization Gate
 
@@ -889,6 +928,11 @@ Two things are open and recorded:
   - the taxonomy tenant-level pruning test;
   - TS1 to TS3 as written, and the orphaned-at FK and GC write families;
   - protocol steps 3 and 4.
+
+  *Status on 2026-10-22.*
+  - **Closed:** the taxonomy tenant-level pruning test (nexus-3wh8d.15); TS1 (nexus-3wh8d.7), TS2 (nexus-3wh8d.15) and TS3 case (a) (nexus-3wh8d.8); the orphaned-at FK test (nexus-3wh8d.19, `98fe4501b`). The GC write families are among the mutation controls of nexus-3wh8d.19, which passed with gaps (T2 `nexus_rdr/225-test-validation-p2`).
+  - **Dropped, with the decision recorded:** protocol steps 3 and 4 (2026-10-06). Step 4 is replaced by the PITR-fork walk (T2 `nexus_rdr/225-rehearsal-2026-10-07`). Step 3 has no replacement that tests non-inferiority (Test Plan item 12).
+  - **Still open:** H4 bulk insert. The step-3 fork it was to run on was dropped with step 3, and the Phase 3 rehearsal did not measure it. It is the subject of nexus-3wh8d.32.
 
 #### API Verification
 
@@ -978,3 +1022,7 @@ steps on a fork of its own and does not run the real changeset. Both are in scop
 - 2026-10-07: Phase 2 read path (nexus-3wh8d.15) and checks (.16) built; fix round after their code review and critique (nexus-3wh8d.17, .18). Recorded, with no change to a decision of Sam's: the read-path changesets `vectors-031-1` and `-2` (Phase 2 Step 2); the walk's expected counts (3 new, 15 pending); the unvacuumed-leaf state after the walk and the post-boot VACUUM; the local-only scope of the doctor rows (Day 2).
 - 2026-10-12: TS2's 2x rule amended on Sam's decision: it fails a family only when the 300-tenant p95 is also more than 2 ms above the 2-tenant p95 (Step-2 results, TS2). One row had failed at 2.05x on a 0.6 ms baseline. The 25 ms cap is unchanged.
 - 2026-10-14: Research finding 17 (pg_vectorsearch's PRISM index) recorded as documented, not adopted, on Sam's request. No change to a decision.
+- 2026-10-07: Built and deployed to the cloud (nexus-3wh8d.20). engine-service-v0.1.150 carried `vectors-030-1` to `-031-2`; the walk committed at 16:15:55Z in 7 min 53 s with exact counts. The PITR-fork rehearsal of the same changeset ran earlier that day (T2 `nexus_rdr/225-rehearsal-2026-10-07`: 449 s, 434,617 chunks, 32 leaves). Recorded 2026-10-22 under Minimum Viable Validation and Local disk preflight.
+- 2026-10-07: The cloud STEP-6 gate found recall@10 0.90 on one of twelve queries at `ef_search` 200 (nexus-3wh8d.31). The engine's default `ef_search` floor became 600 (engine-service-v0.1.151, flipped in the cloud at 21:59:49Z, STEP-6 then 1.00 on all 12). Recorded under Technical Environment and Minimum Viable Validation.
+- 2026-10-21: `vectors-036-1` dropped `chunks_retired_225` and `taxonomy_centroids_retired_225` (nexus-3wh8d.22), shipped in engine-service-v0.1.162 and deployed to the cloud at 21:39:47Z after a clean PITR-fork walk. Phase 3 Step 3 updated.
+- 2026-10-22: Reconciliation (nexus-3wh8d.33, text only; no decision changed and the frontmatter is untouched), from the phase-review cross-walk (T2 `nexus_rdr/225-phase-review`). Recorded: the MVV was reduced to a post-walk 12-search smoke test and the recall regression was found after the deploy; storage figures and the `ef_search` floor in Technical Environment; the measured disk peak against the inferred preflight factor; the UNIQUE on `catalog_collections` named in migration step 2 (`vectors-030:127`); Prerequisites ticked with their beads; Phase 3 Step 3 "not yet run" closed; Overall, Test Plan item 12 (dropped, no replacement test) and item 13 (indirect evidence, no measured local walk); the Assumption Verification list. The H4 bulk-insert lines are untouched and belong to nexus-3wh8d.32.
