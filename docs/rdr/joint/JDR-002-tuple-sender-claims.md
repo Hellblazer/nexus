@@ -49,11 +49,12 @@ What a reader may rely on beyond the tenant:
   against. This guards against a confused model, not a hostile caller.
 - Raw `tuple_out` and the dims of a `tuple_ack` reply are not guarded.
 
-Planned, not built: a server-written `sender_session` on `out`, taken from
-the request's minted T1 session token and `null` without one, rendered on
-`rd`, so the drain hook and the channel can label mail whose `from` does
-not match it as unverified (F3 step 2, nexus-fetre, nexus-ztwp4,
-nexus-ggmg7). It will be a label, never a refusal.
+Built in engine-service-v0.1.163 and conexus 7.84.0: a server-written
+`sender_session` on `out` (and on an ack's reply row), taken from the
+request's minted T1 session token and `null` without one, rendered on `rd`,
+so the drain hook and the channel label mail whose `from` the stamp does not
+confirm (F3 step 2, nexus-fetre, nexus-ztwp4, nexus-g2ckl, nexus-ggmg7). It
+is a label, never a refusal.
 
 Revisit this rule, in an RDR rather than here, when a tenant gains a second
 human principal or an agent class it does not trust: per-principal
