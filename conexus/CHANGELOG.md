@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.84.0] - 2026-10-22
+
+Plugin version aligned with conexus 7.84.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
+
+- **Routing events carry the session id** (nexus-m4lej). `log_routing_event` in `hooks/scripts/routing/_lib.py` defaults to the session id of the payload `run_hook` read, so the credential-print and subagent git-write guards' `routing_events` rows carry a session; the drop meter keeps it too.
+- **The mailbox drain hook marks senders the engine's stamp does not confirm** (nexus-ggmg7, nexus-ohvpe, nexus-syylf, JDR-002). `hooks/scripts/mailbox_drain.py` renders `[unverified]` when `from` differs from the engine's `sender_session` stamp, `[unattested]` when the stamp is null, and `[agent mail, sent under session <S>]` for an agent-id `from`; a row with no `sender_session` key (an engine before engine-service-v0.1.163) gets no mark. The predicate is the new stdlib-only `hooks/scripts/_tuple_sender.py`, byte-identical to `nexus.tuple_sender`. No mark is not verification.
+- **The mailbox skill states the sender rules** (nexus-zl1jv, nexus-e4kls, nexus-ggmg7, nexus-g2ckl). `from` is a claim and the tenant is the boundary (JDR-002); `mailbox_send` refuses a session id in `from_address` other than this session's own; the skill gives the default `from` order, the subscribe asymmetry, how a non-Claude-Code host reads, and what each mark means.
+
 ## [7.83.1] - 2026-10-21
 
 Plugin version aligned with conexus 7.83.1. No plugin-side changes: 7.83.0 was tagged but never published, and 7.83.1 is that tree plus a release record. The 7.83.0 entries below become live at this pin.
