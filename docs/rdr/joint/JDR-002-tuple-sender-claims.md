@@ -44,9 +44,19 @@ What a reader may rely on beyond the tenant:
 - `mailbox_send` refuses a session-shaped `from_address` that is not one of
   the calling server's own session ids (nexus-2mv7y). An agent id still
   passes, unchecked beyond its shape. A session id passes when no session
-  resolves (Claude Desktop, Cowork, or a Claude Code server whose T1 has
-  not published its id yet), because nothing exists there to compare
-  against. This guards against a confused model, not a hostile caller.
+  resolves on the server (a Claude Code server whose T1 has not published
+  its id yet, or Claude Desktop and Cowork), because nothing exists there to
+  compare against. This guards against a confused model, not a hostile
+  caller.
+- On Claude Desktop and Cowork the guard is a no-op. The conversation does
+  have a session id (its container carries `CLAUDE_CODE_SESSION_ID`), but the
+  Desktop-spawned nx-mcp on the Mac never sees it (F17, nexus-wkjqm). So any
+  session-shaped `from_address` passes there, another live session's
+  included. Protection on that surface is label-only: such a send carries no
+  session token, the engine stamps `sender_session` null, and the drain hook
+  and channel mark it `unattested` (engine-service-v0.1.163 and conexus
+  7.84.0). A bridge-carried session id would arm both this guard and T1 on
+  that surface, as a host-asserted label, not a credential.
 - Raw `tuple_out` and the dims of a `tuple_ack` reply are not guarded.
 
 Built in engine-service-v0.1.163 and conexus 7.84.0: a server-written
@@ -116,3 +126,4 @@ mail addressing and the directory).
   mint a session; inferred, not measured) reads `unattested` like any null stamp: the subspace name is not
   attestation. The drain hook prints a one-line legend for the three marks
   (nexus-565ds). NO LABEL IS NOT VERIFICATION is unchanged.
+- 2026-10-22: the `from_address` guard is recorded as a no-op on Claude Desktop and Cowork, where protection is the `unattested` label only; the conversation's own session id exists but does not reach the Mac nx-mcp (F17). Requested by the Cowork session, correlation F3-plan.
