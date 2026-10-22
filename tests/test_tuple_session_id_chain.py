@@ -94,6 +94,15 @@ class TestEnvChain:
         assert resolve_env_session_id() == _T1
 
 
+    def test_a_non_uuid_copied_into_nx_t1_session_id_by_the_mint_is_refused(self, monkeypatch) -> None:
+        """The T1 mint copies NX_SESSION_ID verbatim into NX_T1_SESSION_ID, so on a healthy service a
+        non-UUID NX_SESSION_ID arrives through the T1 tier; it must be refused there as well."""
+        monkeypatch.setenv("NX_T1_SESSION_ID", "desktop-session")
+        monkeypatch.setenv("NX_SESSION_ID", "desktop-session")
+        with pytest.raises(DirectoryResolutionError) as exc:
+            resolve_env_session_id()
+        assert str(exc.value) == invalid_env_session_id_message("desktop-session")
+
 class TestMailboxSender:
     def test_nx_session_id_is_the_sender_with_no_marker_and_no_t1_id(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NX_SESSION_ID", _DESKTOP)
@@ -277,3 +286,51 @@ class TestChannelWaiterWithOnlyNxSessionId:
         mcp_core._start_channel_waiter()
         asyncio.run(mcp_core._cancel_channel_waiter_task())
         assert _t1_calls == []
+
+
+class TestTheWaiterStartsWhenADeferredMintSucceeds:
+    """A session that started with the service down skips the waiter (above). When the first T1 call then
+    completes the deferred mint, the waiter must be started on the event loop, or the session never gets
+    channel push for its whole life."""
+
+    def test_a_successful_deferred_mint_schedules_the_waiter_on_the_loop(self, monkeypatch) -> None:
+        import nexus.db.t1 as t1_mod
+        from nexus import mcp_infra
+
+        sid = str(uuid.uuid4())
+        scheduled: list[object] = []
+
+        class _Loop:
+            def call_soon_threadsafe(self, fn, *args):
+                scheduled.append(fn)
+
+        monkeypatch.setenv("NX_T1_SESSION", "placeholder")
+        monkeypatch.setenv("NX_T1_SESSION_ID", sid)
+        monkeypatch.setattr(t1_mod, "_lock_guarded_mint_or_borrow", lambda s, c: ("token", False, None))
+        monkeypatch.setattr(mcp_core, "_note_t1_borrowed", lambda *a, **k: None)
+        monkeypatch.setattr(mcp_infra, "set_t1_pre_init_hook", lambda hook: None)
+        monkeypatch.setattr(
+            mcp_core, "_DEFERRED_T1_MINT", {"session_id": sid, "config_dir": None, "loop": _Loop()}
+        )
+        mcp_core._retry_deferred_t1_mint()
+        assert mcp_core._start_channel_waiter in scheduled
+
+    def test_a_failed_deferred_mint_schedules_nothing(self, monkeypatch) -> None:
+        import nexus.db.t1 as t1_mod
+
+        scheduled: list[object] = []
+
+        class _Loop:
+            def call_soon_threadsafe(self, fn, *args):
+                scheduled.append(fn)
+
+        def _down(s, c):
+            raise ConnectionError("service down")
+
+        monkeypatch.setattr(t1_mod, "_lock_guarded_mint_or_borrow", _down)
+        monkeypatch.setattr(
+            mcp_core, "_DEFERRED_T1_MINT", {"session_id": str(uuid.uuid4()), "config_dir": None, "loop": _Loop()}
+        )
+        with pytest.raises(RuntimeError):
+            mcp_core._retry_deferred_t1_mint()
+        assert scheduled == []

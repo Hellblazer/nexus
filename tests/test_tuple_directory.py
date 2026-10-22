@@ -178,12 +178,12 @@ class TestResolveDefaultFrom:
         assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
 
     def test_falls_back_to_env_when_no_marker_present(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", "env-session-id")
-        assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "env-session-id"
+        monkeypatch.setenv("NX_T1_SESSION_ID", "0b6f1d3e-2c4a-4e8b-9f7d-5a1c3e9b2d40")
+        assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "0b6f1d3e-2c4a-4e8b-9f7d-5a1c3e9b2d40"
 
     def test_marker_wins_over_a_stale_env_var(self, tmp_path, monkeypatch) -> None:
         write_session_marker(tmp_path, 4242, "marker-session-id")
-        monkeypatch.setenv("NX_T1_SESSION_ID", "stale-env-session-id")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "7d2e9a41-6b3c-4f0e-8a5d-1c9b4e7f2a63")
         assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
 
     def test_refuses_when_neither_marker_nor_env_is_present(self, tmp_path, monkeypatch) -> None:

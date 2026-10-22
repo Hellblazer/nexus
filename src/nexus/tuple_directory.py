@@ -235,15 +235,17 @@ def resolve_env_session_id() -> str:
     T1 resolves it too). Empty string when neither is set. The marker tier
     sits above both and is read by :func:`resolve_default_from`.
 
-    ``NX_SESSION_ID`` is set by a person, so it gets the same shape check
-    as ``from_address`` (a UUID) and a value that fails raises
-    :class:`DirectoryResolutionError`. ``NX_T1_SESSION_ID`` is written by
-    the T1 mint and is not re-checked here.
+    Whichever tier answers gets the same shape check as ``from_address`` (a
+    UUID), and a value that fails raises :class:`DirectoryResolutionError`.
+    ``NX_T1_SESSION_ID`` is checked too: the T1 mint copies the resolved id
+    into it verbatim, so a non-UUID ``NX_SESSION_ID`` reaches this function
+    through that tier on any healthy service, not only when the mint was
+    deferred. Every other writer of ``NX_T1_SESSION_ID`` (Claude Code's
+    session id, ``claude -p`` dispatch's ``uuid4``) writes a UUID.
     """
-    value = os.environ.get("NX_T1_SESSION_ID", "").strip()
-    if value:
-        return value
-    value = os.environ.get("NX_SESSION_ID", "").strip()
+    value = os.environ.get("NX_T1_SESSION_ID", "").strip() or os.environ.get(
+        "NX_SESSION_ID", ""
+    ).strip()
     if not value:
         return ""
     if not looks_like_session_id(value):

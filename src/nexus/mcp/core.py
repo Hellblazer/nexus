@@ -834,6 +834,14 @@ def _retry_deferred_t1_mint() -> None:
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 
     mcp_infra.set_t1_pre_init_hook(None)
+    # nexus-zl1jv: the lifespan skipped the channel waiter while this mint was
+    # deferred; start it now, on the event loop (where the lifespan starts it),
+    # after the T1 call that completed the mint has returned. Without this a
+    # session that started with the service down never gets channel push.
+    try:
+        state["loop"].call_soon_threadsafe(_start_channel_waiter)
+    except Exception as exc:  # noqa: BLE001 — the waiter is best-effort delivery; the drain hook is the floor
+        _log.warning("channel_waiter_not_scheduled_after_deferred_mint", error=str(exc))
 
 
 async def _t1_session_refresh_loop(session_id: str, interval: float) -> None:
@@ -1118,7 +1126,8 @@ def _start_channel_waiter() -> None:
         # below would run the pre-init hook's mint retry on the LIFESPAN
         # thread, blocking startup on a service that is down. No waiter
         # started here before either (NX_T1_SESSION_ID was unset), so
-        # skipping keeps that behaviour; the first scratch call brings T1 up.
+        # skipping keeps that behaviour; the first scratch call brings T1 up
+        # and `_retry_deferred_t1_mint` then schedules this function again.
         _log.info("channel_waiter_skipped_t1_mint_deferred")
         return
     session_id = _waiter_session_id()
