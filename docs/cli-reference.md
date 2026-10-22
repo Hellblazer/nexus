@@ -5124,8 +5124,8 @@ from the `--steps` by-plan grouping key — see below.)
 
 The run log's `plan_id` is the MATCHED plan only. A run that missed and grew
 a plan shows `plan_id = 0` here, while the `nx_answer` `structured=True`
-envelope for the same call carries the id of the plan it saved (0 only when
-no row was saved: ttl 0 or a failed save). The two agree on a library match
+envelope for the same call carries the id of the plan it saved (0 when
+no row was saved, for example ttl 0, a failed save, or a run that ended before a plan was grown). The two agree on a library match
 and differ on a grown-on-miss run by design (nexus-wvz8i).
 
 `created_at` is stamped by the ENGINE's clock, not this machine's. A run

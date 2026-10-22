@@ -208,6 +208,11 @@ def catalog_search(
                 return False
             return True
 
+        if limit < 1 or offset < 0:
+            # A negative offset or a limit below 1 slices oddly (matches[2:2]
+            # is empty with matches present), which would make the empty-page
+            # note below claim something false.
+            return [{"error": f"limit must be >= 1 and offset >= 0 (got limit={limit}, offset={offset})"}]
         if query.strip():
             if owner or corpus or file_path or author:
                 # Post-filtering a capped page reports absence for matches

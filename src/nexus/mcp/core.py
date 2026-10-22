@@ -10567,7 +10567,7 @@ async def nx_answer(
             "step_count, answer_shape, ...}) instead of a bare string. "
             "The envelope's plan_id is the matched library plan or, on a "
             "miss, the plan this call grew and saved; 0 when no row exists "
-            "(ttl 0, or the save failed)."
+            "(for example ttl 0, a failed save, or a run that ended before a plan was grown)."
         ),
     )] = False,
     min_confidence: Annotated[float | None, Field(
@@ -10609,7 +10609,7 @@ async def nx_answer(
     (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
     `structured=True`. The envelope's `plan_id` is the matched library plan
     or, on a miss, the plan this call grew and saved, and 0 when no row
-    exists (ttl 0, or the save failed).
+    exists (for example ttl 0, a failed save, or a run that ended before a plan was grown).
 
     Constraints:
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and

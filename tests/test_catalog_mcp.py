@@ -232,6 +232,20 @@ def test_search_nonempty_result_carries_no_note(cat) -> None:
     assert all("note" not in r for r in rows)
 
 
+def test_search_refuses_a_negative_offset_or_a_limit_below_one(cat) -> None:
+    """A negative limit slices to an empty page with matches present
+    (matches[2:2]), so the empty-page note would claim every match lies
+    before the offset. Such input is refused instead (F12 confirmation pass)."""
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    for kwargs in ({"limit": -1, "offset": 2}, {"limit": 0}, {"offset": -1}):
+        rows = catalog_search("authentication", **kwargs)
+        assert len(rows) == 1 and set(rows[0]) == {"error"}, kwargs
+        assert "limit must be >= 1 and offset >= 0" in rows[0]["error"]
+    # the find_all branch (query plus a filter) past the end gives the true count
+    rows = catalog_search("authentication", owner="1.1", offset=3)
+    assert "No rows at offset 3" in rows[0]["note"] and "1 match," in rows[0]["note"]
+
+
 def test_search_past_the_end_does_not_claim_zero_matches(cat) -> None:
     """An offset past the last row used to return the "0 matches" note while
     matches existed (F12 review). The note must be true: at offset > 0 it says
