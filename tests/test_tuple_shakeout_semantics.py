@@ -100,6 +100,33 @@ class TestLapsedClaimState:
         assert tuple_cmd._row_dict(row, fresh_claim=True)["claim_state"] == "claimed"
         assert tuple_cmd._row_dict(row)["claim_state"] == "lapsed"
 
+    @pytest.mark.parametrize("json_out", [True, False])
+    def test_nx_tuple_in_shows_its_own_fresh_claim_as_claimed(self, monkeypatch, json_out) -> None:
+        """Drives the real `nx tuple in` command: a claim whose lease_until is already past (client clock
+        behind the engine) must still print claimed, in JSON and in text, or the CLI contradicts the claim
+        it just made. Removing fresh_claim=True from tuple_in_cmd turns this red."""
+        import json as _json
+
+        from click.testing import CliRunner
+
+        row = _row("claimed", "2020-01-01T00:00:00Z")
+
+        class _Store:
+            def in_(self, *a, **k):
+                return row, "claim-1"
+
+        monkeypatch.setattr(tuple_cmd, "_store", lambda: _Store())
+        args = ["in", "queue/q", "--pattern", "name=q", "--claimant", "me", "--lease-s", "30"]
+        if json_out:
+            args.append("--json")
+        result = CliRunner().invoke(tuple_cmd.tuple_group, args)
+        assert result.exit_code == 0, result.output
+        if json_out:
+            assert _json.loads(result.output)["tuple"]["claim_state"] == "claimed"
+        else:
+            assert "lapsed" not in result.output
+            assert "claimed" in result.output
+
     def test_census_parses_lapsed_and_defaults_to_zero_from_an_older_engine(self) -> None:
         base = {"subspace": "s", "total": 3, "available": 1, "claimed": 2, "dead": 0, "consumed": 0}
         assert _body_to_census({**base, "lapsed": 1}).lapsed == 1
