@@ -68,7 +68,7 @@ migration_wal_bytes_per_worker = 11038000
 # 2103 -> 2105 (2026-10-21): vectors-036-1 (nexus-3wh8d.22, drop of the retired pre-walk tables) adds two DDL
 # statements to a fresh migration; measured by a scoped substrate run of this tree (ddl: migration=2105).
 # 2105 -> 2106 (2026-10-22): tuples-008-1 (nexus-fetre, nexus.tuples.sender_session) adds one ALTER TABLE ADD COLUMN
-# to a fresh migration; commit 9fcf1d22c.
+# to a fresh migration; commit b5f2e4112.
 migration_ddl_per_worker = 2106
 migration_ddl_per_worker_tolerance = 0.0
 

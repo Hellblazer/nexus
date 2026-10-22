@@ -142,7 +142,7 @@ class TupleSenderSessionTest {
     }
 
     @Test
-    void aLockResetAfterExpiry_takesTheResettingWritersStamp() throws Exception {
+    void aLockResetAfterExpiry_keepsTheFirstStamp_withTheBodyAndDimsItDescribes() throws Exception {
         String resource = addr("res");
         Map<String, String> keys = Map.of("resource", resource);
         String subspace = "lock/" + resource;
@@ -156,7 +156,7 @@ class TupleSenderSessionTest {
                     .execute()).as("the lock row is expired by hand").isEqualTo(1);
         }
         repo.out(TENANT, subspace, keys, Map.of("from", "h1"), null, null, null, "session-B");
-        assertThat(onlyRow(subspace, keys).senderSession()).isEqualTo("session-B");
+        assertThat(onlyRow(subspace, keys).senderSession()).isEqualTo("session-A");
     }
 
     @Test

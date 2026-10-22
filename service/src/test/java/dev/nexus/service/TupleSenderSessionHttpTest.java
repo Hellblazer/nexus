@@ -134,6 +134,17 @@ class TupleSenderSessionHttpTest {
         assertThat(row.get("sender_session").asText()).isEqualTo(sid);
     }
 
+    /** AuthFilter validates the session header on every route: a token that is not
+     *  live is 401 on /v1/tuples/out too (body {"error":"unauthorized"}; the reason,
+     *  session_not_minted, is logged only), on this engine and the
+     *  ones before it. The client drops the header and retries (nexus-ztwp4). */
+    @Test
+    void outWithASessionHeaderThatIsNotLive_is401() throws Exception {
+        String to = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        var out = send(TENANT_TOKEN, "not-a-minted-session-token", "/v1/tuples/out", mailboxOut(to, "n-1"));
+        assertThat(out.statusCode()).as(out.body()).isEqualTo(401);
+    }
+
     @Test
     void outWithNoSessionHeader_stampsNull_andIsNotRefused() throws Exception {
         String to = "http-" + UUID.randomUUID().toString().substring(0, 8);

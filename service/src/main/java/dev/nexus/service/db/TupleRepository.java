@@ -637,12 +637,11 @@ public final class TupleRepository {
     }
 
     /**
-     * {@code senderSession} (bead nexus-fetre) is set in the INSERT values, and by the
-     * lock template's reset of an EXPIRED row, which is a new write with a fresh
-     * created_at. It is absent from every other {@code DO UPDATE} (keys refire, a live
-     * lock's refire, keys+nonce sameWrite) and from the nonce {@code sameWrite}
-     * comparison, so the first writer's stamp stands and a retry from another session
-     * neither overwrites it nor turns an identical retry into a conflict.
+     * {@code senderSession} (bead nexus-fetre) is set in the INSERT values only. It is
+     * absent from every {@code DO UPDATE} (keys refire, lock refire and the lock's reset
+     * of an expired row, keys+nonce sameWrite) and from the nonce {@code sameWrite}
+     * comparison, so the stamp always names the writer of the stored body and dims: a
+     * retry from another session neither overwrites it nor turns into a conflict.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
                             String senderSession) {
@@ -714,11 +713,6 @@ public final class TupleRepository {
                     .set(TUPLES.LEASE_UNTIL,
                             DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
                                     .otherwise(TUPLES.LEASE_UNTIL))
-                    // nexus-fetre: the reset is a new write (fresh created_at), so its
-                    // stamp is the resetting writer's; a live lock keeps the first one.
-                    .set(TUPLES.SENDER_SESSION,
-                            DSL.when(expired, DSL.val(senderSession, TUPLES.SENDER_SESSION))
-                                    .otherwise(TUPLES.SENDER_SESSION))
                     .execute();
         } else {
             // A refire touches expires_at ONLY -- never body, claim state or
