@@ -1103,6 +1103,77 @@ class TestBatchPath:
                     is not None
                 )
 
+    def test_superseded_row_in_a_batch_is_failed_and_the_rest_of_the_batch_still_lands(
+        self,
+        _isolate_t2: Path,
+    ) -> None:
+        """nexus-i15oc: the engine now refuses an aspect write to a retired collection
+        name (409 collection_superseded -> SupersededCollectionWriteError). One such
+        refusal in ``_persist_all`` used to abort the loop: the rows after it were
+        never marked, ``reclaim_stale`` reset them without touching retry_count, and
+        the extractor re-ran them indefinitely. The refused row must reach the same
+        terminal ``mark_failed`` the single-row path gives it, and the other rows
+        of the batch must still be persisted and cleared."""
+        from nexus.aspect_extractor import AspectRecord
+        from nexus.aspect_worker import AspectExtractionWorker
+        from nexus.collection_errors import SupersededCollectionWriteError
+
+        paths = ["/papers/ok-before.pdf", "/papers/retired.pdf", "/papers/ok-after.pdf"]
+        with T2Database(_isolate_t2) as db:
+            for sp in paths:
+                db.aspect_queue.enqueue(
+                    "knowledge__delos", sp, content=f"content {sp}", doc_id=_shared_doc_id(),
+                )
+
+        def fake_batch(items, *_args, **_kwargs):
+            return [
+                AspectRecord(
+                    collection=c, source_path=sp, problem_formulation=f"P-{sp}",
+                    proposed_method="M", experimental_datasets=["d"],
+                    experimental_baselines=["b"], experimental_results="R", extras={},
+                    confidence=0.9, extracted_at="2026-04-26T00:00:00+00:00",
+                    model_version="claude-haiku-4-5-20251001",
+                    extractor_name="scholarly-paper-v1",
+                )
+                for c, sp, _content, *_ in items
+            ]
+
+        real_complete = T2Database.complete_aspect
+        refused: list[str] = []
+
+        def complete_refusing_one(self_db, record_fields):
+            if record_fields["source_path"] == "/papers/retired.pdf":
+                refused.append(record_fields["source_path"])
+                raise SupersededCollectionWriteError(
+                    "knowledge__delos", "knowledge__delos__v2",
+                )
+            return real_complete(self_db, record_fields)
+
+        with (
+            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
+            patch.object(T2Database, "complete_aspect", complete_refusing_one),
+        ):
+            worker = AspectExtractionWorker(poll_interval=0.05, batch_size=5)
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _row_status(_isolate_t2, "/papers/retired.pdf") == "failed"
+                    and _queue_size(_isolate_t2) == 0,
+                    timeout=_WAIT_S,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        assert refused == ["/papers/retired.pdf"], "the batch path must reach the refusing row exactly once"
+        with T2Database(_isolate_t2) as db:
+            for sp in ("/papers/ok-before.pdf", "/papers/ok-after.pdf"):
+                assert db.document_aspects.get("knowledge__delos", sp) is not None, (
+                    f"{sp} was dropped by its neighbour's refusal"
+                )
+            assert db.document_aspects.get("knowledge__delos", "/papers/retired.pdf") is None
+            failed = [r.source_path for r in db.aspect_queue.list_failed()]
+            assert failed == ["/papers/retired.pdf"]
+
     def test_worker_uses_single_path_when_only_one_row(
         self,
         _isolate_t2: Path,

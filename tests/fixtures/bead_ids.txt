@@ -563,6 +563,7 @@ nexus-2k66t.3
 nexus-2k66t.4
 nexus-2k66t.5
 nexus-2k66t.6
+nexus-2k8wi
 nexus-2kld
 nexus-2kld.1
 nexus-2kld.2
@@ -858,6 +859,7 @@ nexus-423yt.1
 nexus-423yt.1.1
 nexus-423yt.2
 nexus-425wu
+nexus-4278c
 nexus-429m
 nexus-42cwz
 nexus-43pq
@@ -1325,6 +1327,7 @@ nexus-5stxf.1
 nexus-5sy6
 nexus-5t1jp
 nexus-5tyhi
+nexus-5tykh
 nexus-5uj6t
 nexus-5umlb
 nexus-5umlb.1
@@ -2406,6 +2409,7 @@ nexus-b6enc.1
 nexus-b6qlf
 nexus-b6qlf.1
 nexus-b6rw2
+nexus-b747g
 nexus-b7mvp
 nexus-b7o1
 nexus-b7qat
@@ -4084,6 +4088,7 @@ nexus-i0cwh
 nexus-i0frt
 nexus-i0frt.1
 nexus-i0wsm
+nexus-i15oc
 nexus-i1mi1
 nexus-i1oh4
 nexus-i24r4

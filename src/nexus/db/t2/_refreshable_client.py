@@ -1407,8 +1407,9 @@ class RefreshableHttpStoreMixin:
             request=resp.request,
             response=resp,
         )
-        # nexus-mp8ys: the engine refused a chunk write (the combined write_many /
-        # append / append_many) to a retired collection name. Typed, naming the
+        # nexus-mp8ys, nexus-i15oc: the engine refused a write to a retired collection
+        # name: a chunk write (the combined write_many / append / append_many), or a
+        # taxonomy, aspect, highlight or aspect-queue write. Typed, naming the
         # successor. It is not an HTTPStatusError, so neither retry ladder in
         # this mixin (both key on that type) can resend it.
         if resp.status_code == 409:

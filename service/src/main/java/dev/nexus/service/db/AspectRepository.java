@@ -176,7 +176,10 @@ public final class AspectRepository {
     /**
      * {@link #ensureCollectionRegistered} for the writers that legitimately file rows under a tombstone
      * (nexus-i15oc): the fidelity-preserving {@code import*} verbs (as the manifest {@code UPSERT_IMPORT}
-     * carries tombstoned collections as they were) and the renames' own re-home onto their target.
+     * carries tombstoned collections as they were) and the renames' re-home onto their target. The target
+     * stays plain because a rename onto an EMPTY tombstone revives it: renaming B back onto A (the round
+     * trip that undoes a rename) lands on the tombstone the first rename left at A. The SOURCE needs no
+     * check, it is only read. Pinned by {@code AspectSupersededWriteTest}.
      */
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {

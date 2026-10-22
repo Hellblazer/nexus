@@ -42,8 +42,9 @@ QUARANTINE_RESTORE_BUSY_REASON: str = "quarantine_restore_busy"
 #: collection is a cross-model migration, never a rename.
 COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 
-#: A chunk write (``upsert-chunks``, or the combined ``manifest/write_many`` /
-#: ``append`` / ``append_many``) named a collection whose catalog row carries
+#: A write (a chunk write: ``upsert-chunks``, or the combined ``manifest/write_many`` /
+#: ``append`` / ``append_many``; or, since nexus-i15oc, a taxonomy, aspect, highlight
+#: or aspect-queue write) named a collection whose catalog row carries
 #: ``superseded_by`` (HTTP 409, nexus-mp8ys). The body repeats the value in
 #: ``error`` and also carries ``message``, ``collection`` and ``superseded_by``
 #: (the successor). Never retryable, and NOT the ``unregistered_collection`` 422

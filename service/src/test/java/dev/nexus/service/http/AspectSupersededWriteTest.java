@@ -23,8 +23,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Each test warms the registry with a LIVE write on the same route, retires the name through
  * {@code CatalogRepository#supersedeCollection} (which must evict the cached row), repeats the write and
- * demands the exact refusal body. The fidelity-import verbs and the rename re-homes stay plain on purpose;
- * {@link #importHighlights_ontoATombstone_isStillAccepted} pins that.
+ * demands the exact refusal body. The fidelity-import verbs and the rename re-homes onto their target stay
+ * plain on purpose (an import carries a tombstone as exported; a rename onto an EMPTY tombstone revives it,
+ * the B to A round trip that undoes a rename). Each of those sites has a test below that goes red if it is
+ * switched to the refusing check: {@code *_isStillAccepted} and {@code rename*OntoATombstone_*}.
  */
 class AspectSupersededWriteTest extends AtomicWriteTestBase {
 
@@ -186,5 +188,98 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
         int n = aspects.importHighlightsBatch(TENANT, List.of(highlightBody(f)));
 
         assertThat(n).isEqualTo(1);
+    }
+
+    // ── renames onto a tombstone: a revive, so the target stays on the plain check ─
+
+    @Test
+    void renameAspectsOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheRows() throws Exception {
+        // The B to A round trip that undoes a rename: A is a tombstone, and re-homing B's rows onto A revives
+        // it (CatalogHandlerRenameTest.post_renameBackOntoATombstonedName_revivesItInsteadOf409).
+        Fx src = fixture("as-rn-asp-src");
+        assertThat(post("/upsert", aspectBody(src, "moved.pdf")).status()).isEqualTo(200);
+        Fx tomb = fixture("as-rn-asp-tomb");
+        retire(tomb);
+
+        int n = aspects.renameAspectCollection(TENANT, src.collection(), tomb.collection());
+
+        assertThat(n).isEqualTo(1);
+        assertThat(aspects.getAspect(TENANT, tomb.collection(), "moved.pdf")).isPresent();
+        assertThat(aspects.getAspect(TENANT, src.collection(), "moved.pdf")).isEmpty();
+    }
+
+    @Test
+    void renameQueueOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheRows() throws Exception {
+        Fx src = fixture("as-rn-q-src");
+        assertThat(post("/queue/enqueue", queueBody(src, "moved.pdf")).status()).isEqualTo(200);
+        Fx tomb = fixture("as-rn-q-tomb");
+        retire(tomb);
+
+        int n = aspects.renameQueueCollection(TENANT, src.collection(), tomb.collection());
+
+        assertThat(n).isEqualTo(1);
+    }
+
+    @Test
+    void renameHighlightsOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheRows() throws Exception {
+        Fx src = fixture("as-rn-hl-src");
+        Resp w = post("/highlights/upsert", highlightBody(src));
+        assertThat(w.status()).as(w.body()).isEqualTo(200);
+        Fx tomb = fixture("as-rn-hl-tomb");
+        retire(tomb);
+
+        int n = aspects.renameHighlightsCollection(TENANT, src.collection(), tomb.collection());
+
+        assertThat(n).isEqualTo(1);
+    }
+
+    // ── imports onto a tombstone: every kind stays on the plain check ───────────
+
+    private Map<String, Object> queueImportBody(Fx f, String sourcePath) {
+        Map<String, Object> b = queueBody(f, sourcePath);
+        b.put("enqueued_at", "2026-10-22T00:00:00.000000Z");
+        return b;
+    }
+
+    @Test
+    void importAspect_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("as-imp-asp");
+        retire(f);
+
+        assertThat(aspects.importAspect(TENANT, aspectBody(f, "imported.pdf"))).isEqualTo(1);
+        assertThat(aspects.getAspect(TENANT, f.collection(), "imported.pdf")).isPresent();
+    }
+
+    @Test
+    void importAspectsBatch_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("as-impb-asp");
+        retire(f);
+
+        assertThat(aspects.importAspectsBatch(TENANT, List.of(aspectBody(f, "imported-b.pdf")))).isEqualTo(1);
+        assertThat(aspects.getAspect(TENANT, f.collection(), "imported-b.pdf")).isPresent();
+    }
+
+    @Test
+    void importHighlight_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("as-imp-hl");
+        retire(f);
+
+        assertThat(aspects.importHighlight(TENANT, highlightBody(f))).isEqualTo(1);
+    }
+
+    @Test
+    void importQueueRow_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("as-imp-q");
+        retire(f);
+
+        assertThat(aspects.importQueueRow(TENANT, queueImportBody(f, "imported.pdf"))).isEqualTo(1);
+    }
+
+    @Test
+    void importQueueBatch_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("as-impb-q");
+        retire(f);
+
+        assertThat(aspects.importQueueBatch(TENANT, List.of(queueImportBody(f, "imported-b.pdf")))).isEqualTo(1);
     }
 }

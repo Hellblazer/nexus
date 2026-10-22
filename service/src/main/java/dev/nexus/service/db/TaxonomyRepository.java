@@ -129,8 +129,10 @@ public final class TaxonomyRepository {
     /**
      * {@link #ensureCollectionRegistered} for the writers that legitimately file rows under a tombstone
      * (nexus-i15oc): the fidelity-preserving {@code /import/*} verbs (the same stance as the manifest
-     * {@code UPSERT_IMPORT}: an import carries tombstoned collections as they were) and the rename's own
-     * re-home onto its target, which is ordered against the supersede that retires the source.
+     * {@code UPSERT_IMPORT}: an import carries tombstoned collections as they were) and the rename's re-home
+     * onto its target. The target stays plain because a rename onto an EMPTY tombstone revives it: renaming
+     * B back onto A (the round trip that undoes a rename) lands on the tombstone the first rename left at A.
+     * The SOURCE needs no check, it is only read. Pinned by {@code TaxonomySupersededWriteTest}.
      */
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {

@@ -97,6 +97,50 @@ class TestEnqueueMany:
             assert queue.enqueue_many([]) == 0
         mock_post.assert_not_called()
 
+    def test_superseded_collection_refusal_is_raised_without_a_per_row_replay(
+        self, monkeypatch
+    ) -> None:
+        """nexus-i15oc: the engine answers a batch to a retired collection name 409
+        ``collection_superseded``. That is deterministic, so replaying every row through
+        ``enqueue`` only repeats N refusals and N tracebacks. The typed error goes to the
+        caller (the indexer's flush hook logs it and skips the worker spawn) after
+        exactly ONE request."""
+        import httpx
+
+        from nexus.collection_errors import SupersededCollectionWriteError
+
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url.path)
+            return httpx.Response(409, json={
+                "error": "collection_superseded",
+                "reason": "collection_superseded",
+                "message": "collection 'code__x' was superseded by 'code__y'",
+                "collection": "code__x",
+                "superseded_by": "code__y",
+            })
+
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+        queue = HttpAspectQueue(base_url="http://mock.test")
+        queue._client = httpx.Client(
+            base_url="http://mock.test", transport=httpx.MockTransport(handler),
+        )
+        rows = [
+            {"collection": "code__x", "source_path": "a.py"},
+            {"collection": "code__x", "source_path": "b.py"},
+            {"collection": "code__x", "source_path": "c.py"},
+        ]
+
+        with pytest.raises(SupersededCollectionWriteError) as caught:
+            queue.enqueue_many(rows)
+
+        assert caught.value.name == "code__x"
+        assert caught.value.successor == "code__y"
+        assert requests == ["/v1/aspects/queue/enqueue_many"], (
+            f"the refusal was replayed per row: {requests}"
+        )
+
     def test_batch_failure_falls_back_to_per_row_enqueue(self, queue: HttpAspectQueue) -> None:
         # nexus-nj4ch: the whole batch shares one Postgres transaction
         # server-side, so a single row's constraint violation fails the

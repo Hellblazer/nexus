@@ -22,12 +22,16 @@ class SupersededCollectionWriteError(RuntimeError):
     proceeding would silently un-retire the collection; refusing names the
     successor instead. Exposes ``name`` and ``successor``.
 
-    Also raised from the engine's own refusal (nexus-mp8ys): a chunk write that
-    reaches the engine against a retired name is answered 409
+    Also raised from the engine's own refusal (nexus-mp8ys, nexus-i15oc): a write
+    that reaches the engine against a retired name is answered 409
     ``collection_superseded`` naming the successor, which
     :func:`superseded_write_error_from_body` turns into this error. That covers
-    the process that did not perform the rename and whose registration cache
-    still calls the name live.
+    chunk writes (combined write, append), manifest and centroid writes, and,
+    since nexus-i15oc, the taxonomy, aspect, highlight and aspect-queue writes. It
+    reaches the process that did not perform the rename and whose registration
+    cache still calls the name live. The ``/import/*`` verbs and a rename's
+    re-home onto its target are not refused (a fidelity import; a rename onto an
+    empty tombstone revives it).
     """
 
     def __init__(self, name: str, successor: str, *, remedy: str | None = None) -> None:

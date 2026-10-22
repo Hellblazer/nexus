@@ -243,8 +243,9 @@ public final class ChashRepository {
             for (String c : java.util.stream.Stream.of(oldCollection, newCollection).sorted().distinct().toList()) {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
-            // nexus-i15oc: plain registration check on purpose. This is the rename's own re-home onto its target,
-            // which is ordered against the supersede that retires the source; it is not an implicit write.
+            // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
+            // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
+            // target may be superseded. The source needs no check, it is only read.
             ensureCollectionRegistered(ctx, tenant, newCollection);
             // RDR-225 (nexus-3wh8d.13): a chunk carries its collection's model, so this re-home can
             // only file rows under a target of the SAME model. The models are read from the

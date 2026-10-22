@@ -78,6 +78,7 @@ from nexus.aspect_extractor import (
     extract_aspects_batch as _extract_aspects_batch,
 )
 from nexus import config as _config
+from nexus.collection_errors import SupersededCollectionWriteError
 
 _log = structlog.get_logger(__name__)
 
@@ -715,7 +716,26 @@ class AspectExtractionWorker:
                         error="unattributable_identity",
                     )
                     continue
-                db.complete_aspect(dataclasses.asdict(attributed))
+                try:
+                    db.complete_aspect(dataclasses.asdict(attributed))
+                except SupersededCollectionWriteError as exc:
+                    # nexus-i15oc: the engine refuses an aspect write to a retired
+                    # collection name. That is a fact about THIS row's collection,
+                    # not a transient and not a verdict on its neighbours: take the
+                    # single-row path's terminal ``mark_failed`` (it is not
+                    # retryable there either) and go on with the rest of the
+                    # batch. Letting it abort the loop left every later row
+                    # unmarked, and ``reclaim_stale`` resets those without touching
+                    # retry_count, so the extractor re-ran them indefinitely.
+                    _log.warning(
+                        "aspect_worker_batch_row_superseded",
+                        collection=row.collection,
+                        source_path=row.source_path,
+                        successor=exc.successor,
+                    )
+                    db.aspect_queue.mark_failed(
+                        row.collection, row.source_path, error=str(exc),
+                    )
         try:
             t2_index_write(_persist_all)
         except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning

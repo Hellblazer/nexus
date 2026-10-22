@@ -33,20 +33,28 @@ import static org.assertj.core.api.Assertions.assertThat;
  * reverted to the plain check fails whether it stores the row (200) or trips an unrelated constraint
  * (a different 409 body or a 5xx).
  *
- * <p>The import verbs and the rename's re-home stay plain on purpose (fidelity import and rename ordering);
- * {@link #importMeta_ontoATombstone_isStillAccepted} pins that, and {@link #unassigned_readOfARetiredName_isStillServed}
- * pins the read side.
+ * <p>The import verbs and the rename's re-home onto its target stay plain on purpose: an import carries a
+ * tombstoned collection as exported, and a rename onto an EMPTY tombstone revives it (the B to A round trip
+ * that undoes a rename). Every one of those sites has a test below that goes red if it is switched to the
+ * refusing check ({@code *_isStillAccepted}, {@code renameOntoATombstone_*}), and
+ * {@link #unassigned_readOfARetiredName_isStillServed} pins the read side.
  */
 class TaxonomySupersededWriteTest extends AtomicWriteTestBase {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String MODEL_SEG = "__minilm-l6-v2-384__";
 
+    private static final String TS = "2026-10-22T00:00:00Z";
+
     private TaxonomyHandler handler;
+    private TaxonomyRepository taxonomy;
+    /** Explicit topic ids for the import verbs; far above anything the live inserts' sequence reaches. */
+    private final java.util.concurrent.atomic.AtomicLong importIds = new java.util.concurrent.atomic.AtomicLong(9_700_000L);
 
     @BeforeAll
     void wireHandler() {
-        handler = new TaxonomyHandler(new TaxonomyRepository(tenantScope), new TaxonomyCentroidRepository(tenantScope));
+        taxonomy = new TaxonomyRepository(tenantScope);
+        handler = new TaxonomyHandler(taxonomy, new TaxonomyCentroidRepository(tenantScope));
     }
 
     private record Resp(int status, String body) {
@@ -236,6 +244,115 @@ class TaxonomySupersededWriteTest extends AtomicWriteTestBase {
         Resp r = post("/import/meta", Map.of("collection", l.collection(), "last_discover_doc_count", 3));
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
+    }
+
+    // ── rename onto a tombstone: a revive, so the target stays on the plain check ─
+
+    @Test
+    void renameOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheTopics() throws Exception {
+        // The B to A round trip that undoes a rename: A is a tombstone (retired toward B), and renaming B's
+        // rows back onto A revives it (CatalogHandlerRenameTest.post_renameBackOntoATombstonedName_revivesItInsteadOf409).
+        // The target check must therefore accept a tombstone, or the store half of the revive 409s.
+        Live src = liveWithTopic("tx-rn-src");
+        Live tomb = new Live(fixture("tx-rn-tomb").collection(), -1);
+        retire(tomb);
+
+        Map<String, Integer> moved = taxonomy.renameCollection(TENANT, src.collection(), tomb.collection());
+
+        assertThat(moved.get("topics")).isEqualTo(1);
+        assertThat(topicCount(tomb.collection())).as("the topic moved onto the tombstoned name").isEqualTo(1);
+        assertThat(topicCount(src.collection())).isZero();
+    }
+
+    // ── imports onto a tombstone: every kind stays on the plain check ───────────
+
+    private Live tombstoned(String tag) {
+        Live l = new Live(fixture(tag).collection(), -1);
+        retire(l);
+        return l;
+    }
+
+    @Test
+    void importTopic_ontoATombstone_isStillAccepted() {
+        Live t = tombstoned("tx-imp-top");
+        long id = importIds.incrementAndGet();
+
+        long got = taxonomy.importTopic(TENANT, id, "imported", null, t.collection(), null, 0, TS, "pending", null);
+
+        assertThat(got).isEqualTo(id);
+        assertThat(taxonomy.getTopicById(TENANT, id)).isPresent();
+    }
+
+    @Test
+    void importAssignment_ontoATombstone_isStillAccepted() {
+        // A real chunk and a real topic, so the only thing that can refuse the row is the registration check.
+        Fx f = fixture("tx-imp-asg");
+        String chash = ch("imp-asg-" + f.collection());
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(chash, "imported chunk")),
+            List.of(doc(f.docId(), List.of(row(0, chash)))), null, false, false);
+        long topicId = importIds.incrementAndGet();
+        taxonomy.importTopic(TENANT, topicId, "imp-asg-topic", null, f.collection(), null, 0, TS, "pending", null);
+        retire(new Live(f.collection(), topicId));
+
+        boolean applied = taxonomy.importAssignment(TENANT, chash, topicId, "centroid", 0.5, TS, f.collection());
+
+        assertThat(applied).isTrue();
+    }
+
+    @Test
+    void importBatchTopic_ontoATombstone_isStillAccepted() {
+        Live t = tombstoned("tx-impb-top");
+        long id = importIds.incrementAndGet();
+
+        int n = taxonomy.importBatch(TENANT, "topic", List.of(batchTopic(id, "batch-topic", t.collection())));
+
+        assertThat(n).isEqualTo(1);
+        assertThat(taxonomy.getTopicById(TENANT, id)).isPresent();
+    }
+
+    @Test
+    void importBatchAssignment_ontoATombstone_isStillAccepted() {
+        Fx f = fixture("tx-impb-asg");
+        String chash = ch("impb-asg-" + f.collection());
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(chash, "batch-imported chunk")),
+            List.of(doc(f.docId(), List.of(row(0, chash)))), null, false, false);
+        long topicId = importIds.incrementAndGet();
+        taxonomy.importBatch(TENANT, "topic", List.of(batchTopic(topicId, "impb-asg-topic", f.collection())));
+        retire(new Live(f.collection(), topicId));
+
+        Map<String, Object> a = new LinkedHashMap<>();
+        a.put("doc_id", chash);
+        a.put("topic_id", topicId);
+        a.put("assigned_by", "centroid");
+        a.put("similarity", 0.5);
+        a.put("assigned_at", TS);
+        a.put("source_collection", f.collection());
+        int n = taxonomy.importBatch(TENANT, "assignment", List.of(a));
+
+        assertThat(n).isEqualTo(1);
+    }
+
+    @Test
+    void importBatchMeta_ontoATombstone_isStillAccepted() {
+        Live t = tombstoned("tx-impb-meta");
+
+        int n = taxonomy.importBatch(TENANT, "meta", List.of(Map.of(
+            "collection", t.collection(), "last_discover_doc_count", 3, "last_discover_at", TS)));
+
+        assertThat(n).isEqualTo(1);
+    }
+
+    private static Map<String, Object> batchTopic(long id, String label, String collection) {
+        Map<String, Object> t = new LinkedHashMap<>();
+        t.put("id", id);
+        t.put("label", label);
+        t.put("collection", collection);
+        t.put("centroid_hash", null);
+        t.put("doc_count", 0);
+        t.put("created_at", TS);
+        t.put("review_status", "pending");
+        t.put("terms", null);
+        return t;
     }
 
     @Test

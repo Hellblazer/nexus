@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 import structlog
 
+from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.db.t2.records import QueueRow
 
 _log = structlog.get_logger(__name__)
@@ -216,7 +217,10 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         catalog document that hasn't landed yet) fails the WHOLE batch,
         not just that row — unlike the per-row isolation
         ``updateDocumentsMany``/``register_many`` get from their looser
-        constraints. On any batch failure this falls back to per-row
+        constraints. A batch the engine refuses because a collection it names is
+        retired (:class:`~nexus.collection_errors.SupersededCollectionWriteError`)
+        is raised as is: the refusal is deterministic, so no per-row replay.
+        On any other batch failure this falls back to per-row
         :meth:`enqueue` calls, isolating the genuinely bad row from its
         batch-mates (mirrors :meth:`nexus.catalog.http_catalog_client.
         HttpCatalogClient.register_many`'s page-failure fallback).
@@ -229,6 +233,13 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             if enqueued:
                 self._signal_wake()
             return enqueued
+        except SupersededCollectionWriteError:
+            # nexus-i15oc: the engine refused the batch because a collection it names is
+            # retired (409 collection_superseded). That is deterministic, not one bad
+            # row: the per-row replay below would repeat the same refusal N times, each
+            # with a traceback. Raise it to the caller as it is; the one caller
+            # (indexer flush hook) is best-effort and logs any exception.
+            raise
         except Exception:  # noqa: BLE001 — batch unrecoverable (e.g. one row's constraint violation); per-row isolation fallback
             _log.warning(
                 "aspect_enqueue_many_failed_falling_back_per_row",
