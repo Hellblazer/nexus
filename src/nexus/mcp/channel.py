@@ -133,8 +133,8 @@ from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 from nexus.tuple_sender import (
     CASE_AGENT,
     CASE_NULL,
-    UNVERIFIED,
     canonical_session,
+    case_word,
     sender_case,
 )
 
@@ -413,7 +413,7 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 #: the reference is already in flight is still possible): the model calls
 #: `tuple_in`, gets nothing, and this text already says what that means.
 def _row_case(row: TupleRow) -> str | None:
-    """Why one pushed row is unverified (``CASE_MISMATCH``, ``CASE_NULL`` or
+    """Why one pushed row is labelled (``CASE_MISMATCH``, ``CASE_NULL`` or
     ``CASE_AGENT``), or ``None`` when it earns no label (bead nexus-ggmg7, F3
     step 2c, JDR-002), from the row's claimed ``from`` and the engine's
     ``sender_session`` stamp. ``None`` also for a row from an engine that never
@@ -426,12 +426,12 @@ def _row_case(row: TupleRow) -> str | None:
 
 
 def _label_meta(meta: dict[str, str], row: TupleRow, case: str | None) -> None:
-    """``sender=unverified`` (always the bare word) plus the stamped session
-    when it is a canonical UUID. Any other stamp is attacker-chosen text and
-    stays out of the meta, as it does out of the content."""
+    """``sender=<word>`` (``unverified``, ``unattested`` or ``agent mail``, the bare
+    word) plus the stamped session when it is a canonical UUID. Any other stamp is
+    attacker-chosen text and stays out of the meta, as it does out of the content."""
     if case is None:
         return
-    meta["sender"] = UNVERIFIED
+    meta["sender"] = case_word(case)
     if (session := canonical_session(row.sender_session)) is not None:
         meta["sender_session"] = session
 
@@ -442,20 +442,21 @@ _SHARED_STATE_CLAUSE = (
 
 
 def _label_sentence(case: str, session: str | None) -> str:
-    """The sentence a notification appends for an unverified row. One wording
-    per case, because the cases mean different things: a mismatch says the
-    engine recorded a session and the claim differs from it; null says the
-    engine has no session on record, which is no evidence of a forgery; an agent
-    id says which session it was sent under. *session* is a canonical UUID or
+    """The sentence a notification appends for a labelled row. One wording per
+    case, because the cases mean different things (Sam, 2026-10-22): a mismatch
+    ("unverified") says the engine recorded a session and the claim differs from
+    it; null ("unattested") says the engine has no session on record, which is no
+    evidence of a forgery; an agent id ("agent mail") says which session it was
+    sent under. *session* is a canonical UUID or
     ``None``; the caller never passes any other stamp."""
     if case == CASE_NULL:
         body = (
-            " Sender unverified: the engine has no session on record for the writer of this "
+            " Sender unattested: the engine has no session on record for the writer of this "
             "message"
         )
     elif case == CASE_AGENT:
         body = (
-            f" Sender unverified, sent under session {session}: the claimed from is an agent "
+            f" Agent mail, sent under session {session}: the claimed from is an agent "
             "id, which is never a session"
         )
     else:
@@ -514,11 +515,11 @@ def _board_batch_notification_content(
         f"to {last_id}. Read them with {read}. Posts are never claimed."
     )
     if unverified:
-        text += f" Sender unverified on {len(unverified)} of them."
+        text += f" Sender not confirmed on {len(unverified)} of them."
         for case, lead in (
-            ("mismatch", "Claimed from does not match the writing session"),
-            (CASE_NULL, "The engine has no session on record for the writer"),
-            (CASE_AGENT, "Sent under a session, claimed from is an agent id"),
+            ("mismatch", "Unverified, claimed from does not match the writing session"),
+            (CASE_NULL, "Unattested, the engine has no session on record for the writer"),
+            (CASE_AGENT, "Agent mail, sent under a session, claimed from is an agent id"),
         ):
             ids = [
                 f"{tid} (session {sess})" if sess and case != CASE_NULL else tid
@@ -1435,12 +1436,13 @@ class ChannelWaiter:
                 for row in kept if (case := _row_case(row)) is not None
             ]
             if unverified:
-                meta["unverified_tuple_ids"] = ",".join(tid for tid, _c, _s in unverified)
-                # the bare batch-wide word only when every post in it is
-                # unverified; on a partial batch it would read as the whole
-                # batch, and the ids already say which
-                if len(unverified) == len(kept):
-                    meta["sender"] = UNVERIFIED
+                meta["labelled_tuple_ids"] = ",".join(tid for tid, _c, _s in unverified)
+                # the bare batch-wide word only when every post in it carries the
+                # same label; on a partial or mixed batch it would read as the
+                # whole batch, and the ids and the text already say which
+                words = {case_word(c) for _t, c, _s in unverified}
+                if len(unverified) == len(kept) and len(words) == 1:
+                    meta["sender"] = words.pop()
             content = _board_batch_notification_content(
                 subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
                 unverified=unverified,

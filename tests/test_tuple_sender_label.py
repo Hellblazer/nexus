@@ -23,6 +23,8 @@ from nexus.tuple_sender import (
     CASE_AGENT,
     CASE_MISMATCH,
     CASE_NULL,
+    AGENT_MAIL,
+    UNATTESTED,
     UNVERIFIED,
     canonical_session,
     sender_case,
@@ -50,12 +52,14 @@ AGENT = "a0123456789abcdef"
         (S2, S, True, UNVERIFIED),
         # the stamp is null: no minted session, a dropped stale token, a
         # reply row from an engine before nexus-g2ckl (v0.1.163), or a pre-column
-        # row. All read unverified.
-        (S, None, True, UNVERIFIED),
-        (S, "", True, UNVERIFIED),
-        (AGENT, None, True, UNVERIFIED),
-        # an agent id can never equal a session; it names the session it was sent under.
-        (AGENT, S, True, f"{UNVERIFIED}, sent under session {S}"),
+        # row. All read unattested (Sam, 2026-10-22, nexus-syylf): still labelled, so a
+        # forger who omits the session header is still marked.
+        (S, None, True, UNATTESTED),
+        (S, "", True, UNATTESTED),
+        (AGENT, None, True, UNATTESTED),
+        # an agent id can never equal a session; it is agent mail and names the session it was
+        # sent under (Sam, 2026-10-22, nexus-ohvpe).
+        (AGENT, S, True, f"{AGENT_MAIL}, sent under session {S}"),
         # any other claimed name (an instance name, a free string) differs from the stamp.
         ("nexus-19", S, True, UNVERIFIED),
         ("peer-a", S, True, UNVERIFIED),
@@ -127,8 +131,8 @@ def test_canonical_session_admits_only_a_uuid(stamp, expected) -> None:
 
 
 @pytest.mark.parametrize("stamp", [5, [], {}, 0, 1.5, True])
-def test_a_non_string_stamp_reads_unverified_and_does_not_raise(stamp) -> None:
-    assert sender_label(S, stamp, stamp_known=True) == UNVERIFIED
+def test_a_non_string_stamp_reads_unattested_and_does_not_raise(stamp) -> None:
+    assert sender_label(S, stamp, stamp_known=True) == UNATTESTED
     assert sender_case(S, stamp, stamp_known=True) == CASE_NULL
 
 

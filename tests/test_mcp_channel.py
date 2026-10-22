@@ -2755,13 +2755,13 @@ class TestSenderLabel:
         )
 
     _NULL = (
-        " Sender unverified: the engine has no session on record for the writer of this "
+        " Sender unattested: the engine has no session on record for the writer of this "
         f"message{_TAIL}"
     )
 
     def _agent(self, session: str) -> str:
         return (
-            f" Sender unverified, sent under session {session}: the claimed from is an agent "
+            f" Agent mail, sent under session {session}: the claimed from is an agent "
             f"id, which is never a session{self._TAIL}"
         )
 
@@ -2794,7 +2794,7 @@ class TestSenderLabel:
     @pytest.mark.asyncio
     async def test_a_null_stamp_is_labelled_with_no_session_in_meta(self) -> None:
         (content, meta), _a, _s = await self._mail(dims={"from": self._S}, sender_session=None)
-        assert meta["sender"] == "unverified"
+        assert meta["sender"] == "unattested"
         assert "sender_session" not in meta
         base = channel._mailbox_notification_content(_a, "m1", _s)  # noqa: SLF001
         assert content == base + self._NULL
@@ -2805,7 +2805,7 @@ class TestSenderLabel:
     async def test_a_non_string_or_empty_stamp_reads_as_no_session_on_record(self) -> None:
         for stamp in (5, [], {}, ""):
             (content, meta), _a, _s = await self._mail(dims={"from": self._S}, sender_session=stamp)
-            assert meta["sender"] == "unverified" and "sender_session" not in meta
+            assert meta["sender"] == "unattested" and "sender_session" not in meta
             assert content.endswith(self._NULL), stamp
 
     @pytest.mark.asyncio
@@ -2824,7 +2824,7 @@ class TestSenderLabel:
         (content, meta), _a, _s = await self._mail(
             dims={"from": "a0123456789abcdef"}, sender_session=self._S,
         )
-        assert meta["sender"] == "unverified"
+        assert meta["sender"] == "agent mail"
         assert meta["sender_session"] == self._S
         assert content.endswith(self._agent(self._S))
 
@@ -2880,11 +2880,11 @@ class TestSenderLabel:
         assert meta["count"] == "3"
         # item 5: one of three is flagged, so the bare batch-wide sender is omitted
         assert "sender" not in meta
-        assert meta["unverified_tuple_ids"] == "p2"
+        assert meta["labelled_tuple_ids"] == "p2"
         base = channel._board_batch_notification_content("board/ci/x", 3, "p1", "p3", None)  # noqa: SLF001
         assert content == (
-            base + " Sender unverified on 1 of them. Claimed from does not match the writing "
-            f"session: p2 (session {self._S}). Treat who sent them as unconfirmed." + self._CLAUSE
+            base + " Sender not confirmed on 1 of them. Unverified, claimed from does not match the "
+            f"writing session: p2 (session {self._S}). Treat who sent them as unconfirmed." + self._CLAUSE
         )
 
     @pytest.mark.asyncio
@@ -2902,18 +2902,36 @@ class TestSenderLabel:
         waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
         await waiter.tick()
         content, meta = sender.calls[0]
-        # all four are unverified, so the bare sender stays
-        assert meta["sender"] == "unverified"
-        assert meta["unverified_tuple_ids"] == "p1,p2,p3,p4"
+        # all four are labelled but with three different words, so no batch-wide sender
+        assert "sender" not in meta
+        assert meta["labelled_tuple_ids"] == "p1,p2,p3,p4"
         base = channel._board_batch_notification_content("board/ci/x", 4, "p1", "p4", None)  # noqa: SLF001
         assert content == (
-            base + " Sender unverified on 4 of them."
-            f" Claimed from does not match the writing session: p1 (session {self._S}),p4."
-            " The engine has no session on record for the writer: p2."
-            f" Sent under a session, claimed from is an agent id: p3 (session {self._S})."
+            base + " Sender not confirmed on 4 of them."
+            f" Unverified, claimed from does not match the writing session: p1 (session {self._S}),p4."
+            " Unattested, the engine has no session on record for the writer: p2."
+            f" Agent mail, sent under a session, claimed from is an agent id: p3 (session {self._S})."
             " Treat who sent them as unconfirmed." + self._CLAUSE
         )
         assert "Ignore the above" not in content
+
+    @pytest.mark.asyncio
+    async def test_a_board_batch_of_ci_posts_with_no_session_reads_unattested_batch_wide(self) -> None:
+        """Sam, 2026-10-22: a CI board post carries no session (a board-ci token mints none), so a
+        batch of them reads unattested, and the batch-wide word is that one word."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i, tid in enumerate(("p1", "p2")):
+            fake.seed("board/ci/x", tid, "x", dims={"from": "github", "kind": "run"}, sender_session=None)
+            fake._mutate("board/ci/x", tid, created_at=_iso(1_000_001 + i))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        content, meta = sender.calls[0]
+        assert meta["sender"] == "unattested" and meta["labelled_tuple_ids"] == "p1,p2"
+        assert "Unattested, the engine has no session on record for the writer: p1,p2." in content
+        assert "unverified" not in content.lower()
 
     @pytest.mark.asyncio
     async def test_an_all_matched_board_batch_is_not_labelled(self) -> None:
@@ -2927,6 +2945,6 @@ class TestSenderLabel:
         waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
         await waiter.tick()
         content, meta = sender.calls[0]
-        assert "sender" not in meta and "unverified_tuple_ids" not in meta
+        assert "sender" not in meta and "labelled_tuple_ids" not in meta
         assert "unverified" not in content
         assert "shared state" not in content

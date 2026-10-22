@@ -105,3 +105,13 @@ mail addressing and the directory).
   from the request body), so a match shows only that the writer presented the
   claimed session's token. The tenant stays the security boundary. Scope gap:
   `tuple_in`, `tuple_rd` and `nx tuple` print the raw stamp and no label.
+- 2026-10-22: Label words revised by Sam (nexus-ohvpe, nexus-syylf; T2
+  `nexus/decision-sender-label-table-2026-10-22`). A null stamp reads
+  `unattested`, still a label, so a writer that omits the session header is
+  still marked; an agent-id `from` under a canonical-UUID stamp reads
+  `agent mail, sent under session <S>`, since the mailbox skill tells
+  subagents to send that way; `unverified` is kept for a `from` that differs
+  from a recorded session. A CI board post (a board-ci token mints no
+  session) reads `unattested` like any null stamp: the subspace name is not
+  attestation. The drain hook prints a one-line legend for the three marks
+  (nexus-565ds). NO LABEL IS NOT VERIFICATION is unchanged.

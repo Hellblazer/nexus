@@ -2228,18 +2228,20 @@ class TestSenderLabel:
         assert f"from={self._S2} [unverified]" in out
 
     @_ENTRY_POINTS
-    def test_a_null_stamp_renders_unverified(self, tmp_path, engine, argv) -> None:
+    def test_a_null_stamp_renders_unattested(self, tmp_path, engine, argv) -> None:
+        """Sam, 2026-10-22 (nexus-syylf): a null stamp has its own quieter word, so
+        'unverified' keeps meaning a claim that differs from a recorded session."""
         row = _row("sl04", sender=self._S, body="no minted session")
         row["sender_session"] = None
         out = self._drain(tmp_path, engine, argv, row)
-        assert f"from={self._S} [unverified]" in out
+        assert f"from={self._S} [unattested]" in out
 
     @_ENTRY_POINTS
     def test_an_agent_id_from_names_the_session_it_was_sent_under(self, tmp_path, engine, argv) -> None:
         row = _row("sl05", sender=self._AGENT, body="from a subagent")
         row["sender_session"] = self._S
         out = self._drain(tmp_path, engine, argv, row)
-        assert f"[unverified, sent under session {self._S}]" in out
+        assert f"from={self._AGENT} [agent mail, sent under session {self._S}]" in out
 
     @_ENTRY_POINTS
     def test_a_labelled_drain_prints_the_legend_once_before_the_first_labelled_message(
@@ -2259,10 +2261,10 @@ class TestSenderLabel:
         assert res.returncode == 0, res.stderr
         out = res.stdout
         assert out.count(self._LEGEND) == 1, out
-        assert out.index("honest first") < out.index("A bracketed [unverified]") < out.index("forged second"), out
+        assert out.index("honest first") < out.index(self._LEGEND) < out.index("forged second"), out
         assert "JDR-002" in out
 
-    _LEGEND = "A bracketed [unverified] after from= means"
+    _LEGEND = "A bracketed mark after from= says what the engine could not confirm"
 
     @_ENTRY_POINTS
     def test_a_sender_field_spelling_the_mark_on_an_unlabelled_row_prints_no_legend(
@@ -2315,13 +2317,13 @@ class TestSenderLabel:
     # after the claim and before the ack, and the poison row would loop.
     @_ENTRY_POINTS
     @pytest.mark.parametrize("stamp", [5, [], {}], ids=["int", "list", "object"])
-    def test_a_non_string_stamp_renders_unverified_and_does_not_crash(
+    def test_a_non_string_stamp_renders_unattested_and_does_not_crash(
         self, tmp_path, engine, argv, stamp,
     ) -> None:
         row = _row("sl09", sender=self._S, body="odd stamp")
         row["sender_session"] = stamp
         out = self._drain(tmp_path, engine, argv, row)
-        assert "odd stamp" in out and f"from={self._S} [unverified]" in out
+        assert "odd stamp" in out and f"from={self._S} [unattested]" in out
 
     @_ENTRY_POINTS
     @pytest.mark.parametrize("claim", [{}, 7], ids=["object", "int"])
@@ -2361,4 +2363,4 @@ class TestSenderLabel:
         row = _row("sl13", sender=self._S2, body="poison", claim_state="dead")
         row["sender_session"] = stamp
         out = self._drain(tmp_path, engine, argv, row)
-        assert f"from={self._S2} [unverified]" in out
+        assert f"from={self._S2} [unattested]" in out

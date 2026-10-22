@@ -702,17 +702,23 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 #: nexus-565ds: printed once per drain, before the first block whose from= line carries a sender label,
 #: so the label is glossed where it is read and not only in the mailbox skill.
 _SENDER_LEGEND = (
-    "(A bracketed [unverified] after from= means the sender's claimed name does not match the session "
-    "the engine recorded for the write, the engine recorded none, or the name is an agent id. A label is "
-    "a lead to check, not a verdict; no label is not proof of the sender either (JDR-002).)\n"
+    "(A bracketed mark after from= says what the engine could not confirm about the sender: [unverified] "
+    "the claimed name does not match the session the engine recorded for the write; [unattested] the "
+    "engine recorded no session for it (a CI post, a dropped token, an old row); [agent mail, sent under "
+    "session S] a subagent's mail, sent under that session. A mark is a lead to check, not a verdict; no "
+    "mark is not proof of the sender either (JDR-002).)\n"
 )
+
+#: The marks a rendered from= line can carry (tuple_sender.case_word), for _labelled().
+_LABEL_OPENERS = (" [unverified", " [unattested", " [agent mail")
 
 
 def _labelled(text: str) -> bool:
     """Whether a rendered block's first line (its from= line) carries a sender label. Used only for a
     block recovered from the pending record, which keeps the rendered text and not the row; every
     other caller passes the label it computed from the row, since from= and kind= are sender text."""
-    return " [unverified" in text.split("\n", 1)[0]
+    first = text.split("\n", 1)[0]
+    return any(opener in first for opener in _LABEL_OPENERS)
 
 
 class _Out:
@@ -779,7 +785,7 @@ def _dims_of(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
-    """`` [unverified]`` (or ``[unverified, sent under session <S>]``) after the
+    """`` [unverified]``, `` [unattested]`` or `` [agent mail, sent under session <S>]`` after the
     ``from=`` field, or "" when the row earns no label (bead nexus-ggmg7, F3
     step 2c, JDR-002). ``from`` is a claim the writer typed; ``sender_session``
     is the session the engine stamped. The decision is
