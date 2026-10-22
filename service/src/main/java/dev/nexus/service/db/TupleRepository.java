@@ -13,7 +13,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record1;
-import org.jooq.Record8;
+import org.jooq.Record9;
 import org.jooq.ResultQuery;
 import org.jooq.SelectLimitStep;
 import org.jooq.impl.DSL;
@@ -411,6 +411,16 @@ public final class TupleRepository {
      * announce-mode rows -- a row nothing has ever announced simply carries {@code
      * announcedAt=null, announceCount=0}, the column defaults. See {@link WaitSpec
      * .Announce} for the mechanism that stamps them.
+     *
+     * <p>{@code senderSession} (bead nexus-fetre, F3 step 2): the session id the engine
+     * resolved from a minted session token when the row was first written, or {@code
+     * null} when the writer (for an ack reply, the acker; nexus-g2ckl) presented none, or the
+     * row predates the column. Written on
+     * INSERT only; never overwritten by a refire.
+     *
+     * <p>{@code claimedAt} (bead nexus-x907o): when the CURRENT claim started, or {@code
+     * null} when the row is unclaimed or its claim predates the column. Set by the claim,
+     * cleared wherever {@code claimId} is cleared, never moved by renew.
      */
     public record TupleRow(
             byte[] id, String subspace, String template,
@@ -419,7 +429,8 @@ public final class TupleRepository {
             OffsetDateTime leaseUntil, int attempts,
             OffsetDateTime consumedAt, String consumedBy,
             OffsetDateTime expiresAt, OffsetDateTime createdAt,
-            OffsetDateTime announcedAt, int announceCount) {
+            OffsetDateTime announcedAt, int announceCount,
+            String senderSession, OffsetDateTime claimedAt) {
     }
 
     public record ClaimedTuple(TupleRow tuple, String claimId) {
@@ -461,7 +472,7 @@ public final class TupleRepository {
     public record SubspaceCensus(
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
-            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt) {
+            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt, long lapsed) {
     }
 
     /** {@code subspace_list}'s paged form (nexus-xapt8): {@code nextCursor} is
@@ -627,6 +638,18 @@ public final class TupleRepository {
      * usual.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
+        return writeOut(ctx, tenant, p, body, id, null);
+    }
+
+    /**
+     * {@code senderSession} (bead nexus-fetre) is set in the INSERT values only. It is
+     * absent from every {@code DO UPDATE} (keys refire, lock refire and the lock's reset
+     * of an expired row, keys+nonce sameWrite) and from the nonce {@code sameWrite}
+     * comparison, so the stamp always names the writer of the stored body and dims: a
+     * retry from another session neither overwrites it nor turns into a conflict.
+     */
+    private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
+                            String senderSession) {
         Long maxLiveRows = p.template().maxLiveRows();
         if (maxLiveRows != null) {
             // nexus-rplay.17 (code-review-expert finding 4): every other query in
@@ -661,11 +684,11 @@ public final class TupleRepository {
         var insertStep = ctx.insertInto(TUPLES,
                         TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                         TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
-                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT, TUPLES.SENDER_SESSION)
                 .values(DSL.val(id), DSL.val(tenant), DSL.val(p.subspace()), DSL.val(p.template().name()),
                         DSL.val(p.keysJsonb()), dimsField, DSL.val(body),
                         DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
-                        DSL.currentOffsetDateTime())
+                        DSL.currentOffsetDateTime(), DSL.val(senderSession, TUPLES.SENDER_SESSION))
                 .onConflict(TUPLES.ID)
                 .doUpdate();
         if (p.template().lock()) {
@@ -695,13 +718,40 @@ public final class TupleRepository {
                     .set(TUPLES.LEASE_UNTIL,
                             DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
                                     .otherwise(TUPLES.LEASE_UNTIL))
+                    // nexus-x907o: cleared with claim_id; a live lock's refire keeps it.
+                    .set(TUPLES.CLAIMED_AT,
+                            DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.CLAIMED_AT))
+                                    .otherwise(TUPLES.CLAIMED_AT))
                     .execute();
         } else {
             // A refire touches expires_at ONLY -- never body, claim state or
             // consumed state (every other column is simply absent from this
             // DO UPDATE's .set() list, so Postgres leaves it untouched). Unchanged
             // from before RDR-211 Phase 1 Step 1's lock flag above.
-            insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling)).execute();
+            var refire = insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling));
+            if (p.template().idFrom() == TemplateSchema.IdFrom.KEYS_NONCE) {
+                // Bead nexus-fzteh: a nonce names ONE write. The id does not include the
+                // body, so a changed body (or dims) under a used nonce landed on the
+                // existing row and was dropped without a word. The DO UPDATE now applies
+                // only when the stored row matches this write (null and empty body are the
+                // same write). A consumed row has had its body cleared by the ack, so its
+                // body is no longer comparable and a late retry of the write it came from
+                // passes on the dims alone; the dims are NOT cleared on ack, so a consumed
+                // row still refuses a write whose dims differ. Zero rows affected can only
+                // mean the guard failed, so it is a conflict; the guard sits in the same
+                // statement as the upsert, so two racing writers cannot both pass a
+                // separate read-then-write check.
+                Field<String> storedBody = DSL.coalesce(TUPLES.BODY, "");
+                Field<JSONB> storedDims = DSL.coalesce(TUPLES.DIMS, DSL.val(EMPTY_DIMS));
+                Condition sameBody = storedBody.eq(DSL.val(body == null ? "" : body));
+                Condition sameDims = storedDims.eq(DSL.val(p.dimsJsonb() == null ? EMPTY_DIMS : p.dimsJsonb()));
+                Condition sameWrite = sameDims.and(TUPLES.CONSUMED_AT.isNotNull().or(sameBody));
+                if (refire.where(sameWrite).execute() == 0) {
+                    throw new NonceReuseConflictException(HexFormat.of().formatHex(id), p.subspace());
+                }
+            } else {
+                refire.execute();
+            }
         }
         maintainTenant(ctx, tenant);
         return id;
@@ -710,10 +760,22 @@ public final class TupleRepository {
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
+        return out(tenant, subspace, keys, dims, body, nonce, ttlSecondsOrNull, null);
+    }
+
+    /**
+     * {@link #out(String, String, Map, Map, String, String, Long)} stamping {@code
+     * senderSession} (bead nexus-fetre) on the row it INSERTs. The caller passes the
+     * server-resolved minted session id, or null; a refire never overwrites it.
+     * It is not an input to {@code computeId}.
+     */
+    public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
+                       String body, String nonce, Long ttlSecondsOrNull, String senderSession) {
         PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
-        byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
+        byte[] result = tenantScope.withTenant(tenant,
+                ctx -> writeOut(ctx, tenant, prepared, body, id, senderSession));
         // Signal AFTER the transaction lambda returns (the commit) -- never from inside it.
         waitRegistry.signalAll(tenant, subspace);
         return result;
@@ -746,7 +808,10 @@ public final class TupleRepository {
         TreeSet<String> unknownKeys = new TreeSet<>(keys.keySet());
         unknownKeys.removeAll(t.keys());
         if (!unknownKeys.isEmpty()) {
-            throw new SchemaViolationException(unknownKeys.first(), "not a declared key for this template");
+            String first = unknownKeys.first();
+            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
+                    ? "not a key: the nonce is " + NONCE_OWN_FIELD
+                    : "not a declared key for this template");
         }
         for (String k : t.keys()) {
             String v = keys.get(k);
@@ -761,7 +826,10 @@ public final class TupleRepository {
         TreeSet<String> unknownDims = new TreeSet<>(dims.keySet());
         unknownDims.removeAll(t.dimensions().keySet());
         if (!unknownDims.isEmpty()) {
-            throw new SchemaViolationException(unknownDims.first(), "not a declared dimension for this template");
+            String first = unknownDims.first();
+            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
+                    ? "not a dimension: the nonce is " + NONCE_OWN_FIELD
+                    : "not a declared dimension for this template");
         }
         for (var e : t.dimensions().entrySet()) {
             String name = e.getKey();
@@ -776,10 +844,39 @@ public final class TupleRepository {
         }
     }
 
+    private static final JSONB EMPTY_DIMS = JSONB.valueOf("{}");
+    private static final String NONCE_FIELD = "nonce";
+    /** Bead nexus-jz3kh: what a refusal says about where the nonce goes. {@code nonce} is a
+     *  parameter of the write itself (the request's own {@code nonce} field, {@code tuple_out}'s
+     *  {@code nonce} argument); a caller who sees "nonce: required" and tries it as a key or a dim
+     *  is refused again, so every nonce-related refusal names the parameter. */
+    private static final String NONCE_OWN_FIELD = "its own field of the write (tuple_out's `nonce` parameter)";
+
     /** The nonce half of {@code out}'s validation. See {@link #validateOutShape}. */
     private void validateNonce(TemplateSchema t, String nonce) {
         if (t.idFrom() == TemplateSchema.IdFrom.KEYS_NONCE && (nonce == null || nonce.isBlank())) {
-            throw new SchemaViolationException("nonce", "required for id_from=keys+nonce");
+            throw new SchemaViolationException(NONCE_FIELD, "required for id_from=keys+nonce: the nonce is "
+                    + NONCE_OWN_FIELD + ", not a key or a dimension");
+        }
+    }
+
+    /**
+     * The label digested before the nonce: {@code out} digests {@code "nonce"}, and
+     * {@code ackWithReply} digests {@code "reply-nonce"} in its place (bead nexus-b747g).
+     * A reply's nonce is hex(request id), which any tenant caller can read through rd; under
+     * the shared label an {@code out} carrying that nonce computed the reply's id first and
+     * took it. {@link #digestField} length-prefixes every field, so a stream carrying this
+     * label never equals one carrying {@code "nonce"}, and no {@code out} can produce a
+     * reply id whatever nonce it sends.
+     */
+    private enum NonceLabel {
+        OUT(NONCE_FIELD),
+        REPLY("reply-nonce");
+
+        private final String wire;
+
+        NonceLabel(String wire) {
+            this.wire = wire;
         }
     }
 
@@ -803,6 +900,13 @@ public final class TupleRepository {
     private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
                                      Map<String, String> keys, Map<String, String> dims,
                                      String nonce, String body) {
+        return computeId(tenant, subspace, t, keys, dims, NonceLabel.OUT, nonce, body);
+    }
+
+    /** {@link #computeId} with the {@link NonceLabel} digested before the nonce. */
+    private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
+                                     Map<String, String> keys, Map<String, String> dims,
+                                     NonceLabel nonceLabel, String nonce, String body) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             digestField(md, tenant);
@@ -820,7 +924,7 @@ public final class TupleRepository {
                     // nothing further
                 }
                 case KEYS_NONCE -> {
-                    digestField(md, "nonce");
+                    digestField(md, nonceLabel.wire);
                     digestField(md, nonce);
                 }
                 case KEYS_BODY -> {
@@ -1808,6 +1912,7 @@ public final class TupleRepository {
                                 .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
                                 .set(TUPLES.CLAIMANT, (String) null)
                                 .set(TUPLES.CLAIM_ID, (String) null)
+                                .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
                                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                                 .set(TUPLES.ATTEMPTS, attempts)
                                 .where(TUPLES.ID.eq(row.getId()))
@@ -1840,10 +1945,15 @@ public final class TupleRepository {
                         ? now.plusSeconds(t.retentionSeconds()).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
                         : row.getExpiresAt();
                 OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, expiresAtForClaim);
+                // nexus-x907o: the claim's start, at the column's own (microsecond)
+                // precision so this response and a later read-back agree, as leaseUntil's
+                // truncation above does. Written ONLY here; renew never touches it.
+                OffsetDateTime claimedAt = now.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
                 var claimUpdate = ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
                         .set(TUPLES.CLAIMANT, claimant)
                         .set(TUPLES.CLAIM_ID, newClaimId)
+                        .set(TUPLES.CLAIMED_AT, claimedAt)
                         .set(TUPLES.LEASE_UNTIL, leaseUntil)
                         .set(TUPLES.ATTEMPTS, attempts);
                 if (t.lock()) {
@@ -1857,7 +1967,8 @@ public final class TupleRepository {
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
                         null, null, expiresAtForClaim, row.getCreatedAt(),
-                        row.getAnnouncedAt(), row.getAnnounceCount());
+                        row.getAnnouncedAt(), row.getAnnounceCount(), row.getSenderSession(),
+                        claimedAt);
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -1954,7 +2065,9 @@ public final class TupleRepository {
     /**
      * A reply to write in the same transaction that consumes the request. The nonce is
      * deliberately absent: the engine sets it to {@code hex(consumed row id)} and no
-     * caller, tool or flag may supply one (RDR-206, Sam's decision 2026-09-11).
+     * caller, tool or flag may supply one (RDR-206, Sam's decision 2026-09-11). It is
+     * digested under its own label, so an {@code out} carrying the same nonce gets a
+     * different id and cannot take the reply's (bead nexus-b747g).
      */
     public record ReplySpec(String subspace, Map<String, String> keys, Map<String, String> dims,
                             String body, Long ttlSeconds) {
@@ -1991,6 +2104,16 @@ public final class TupleRepository {
      * it is refused rather than documented.
      */
     public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
+        return ackWithReply(tenant, claimId, claimant, reply, null);
+    }
+
+    /**
+     * {@link #ackWithReply(String, String, String, ReplySpec)} stamping the reply row's
+     * {@code sender_session} with the acker's server-resolved minted session, or null
+     * (bead nexus-g2ckl), on INSERT only, exactly as {@code out} stamps its rows.
+     */
+    public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply,
+                               String senderSession) {
         checkClaimIdentifiers(claimId, claimant);
         if (reply == null) {
             ack(tenant, claimId, claimant);
@@ -2010,8 +2133,8 @@ public final class TupleRepository {
             TuplesRecord consumed = consumeClaim(ctx, tenant, claimId, claimant);
             String nonce = HexFormat.of().formatHex(consumed.getId());
             byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
-                    prepared.keys(), prepared.dims(), nonce, reply.body());
-            return writeOut(ctx, tenant, prepared, reply.body(), id);
+                    prepared.keys(), prepared.dims(), NonceLabel.REPLY, nonce, reply.body());
+            return writeOut(ctx, tenant, prepared, reply.body(), id, senderSession);
         });
         // Signal AFTER the commit, and only for the reply's subspace: a parked reader
         // there must not be woken by a transaction that rolled back.
@@ -2262,6 +2385,7 @@ public final class TupleRepository {
                 .set(TUPLES.CLAIM_STATE, dead ? CLAIM_STATE_DEAD : null)
                 .set(TUPLES.CLAIMANT, (String) null)
                 .set(TUPLES.CLAIM_ID, (String) null)
+                .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                 .set(TUPLES.ATTEMPTS, attempts)
                 .where(liveClaimCondition(tupleId, claimId))
@@ -2606,7 +2730,7 @@ public final class TupleRepository {
     // ── subspace_list / subspace_stats ──────────────────────────────────────
 
     /**
-     * {@code subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}}.
+     * {@code subspace_stats(subspace) -> {total, available, claimed, lapsed, dead, consumed, expired_unpurged}}.
      *
      * <p>RDR-205 follow-on (nexus-mvfm9): resolves the subspace against the
      * registry FIRST — before this fix an unknown subspace silently answered
@@ -2729,7 +2853,7 @@ public final class TupleRepository {
      * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Package-private for that
      * test.
      */
-    static SelectLimitStep<Record8<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime>>
+    static SelectLimitStep<Record9<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime, Long>>
             subspaceCensusQuery(DSLContext ctx, String tenant, String prefix, String after) {
         Condition cond = TUPLES.TENANT_ID.eq(tenant);
         if (prefix != null && !prefix.isBlank()) {
@@ -2753,7 +2877,9 @@ public final class TupleRepository {
                         DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
                                 .cast(Long.class),
                         DSL.min(TUPLES.CREATED_AT),
-                        DSL.max(TUPLES.CREATED_AT))
+                        DSL.max(TUPLES.CREATED_AT),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
                 .from(TUPLES)
                 .where(cond)
                 .groupBy(TUPLES.SUBSPACE)
@@ -2785,8 +2911,9 @@ public final class TupleRepository {
                 long expiredUnpurged = rec.get(5, Long.class);
                 OffsetDateTime oldest = rec.get(6, OffsetDateTime.class);
                 OffsetDateTime newest = rec.get(7, OffsetDateTime.class);
+                long lapsed = rec.get(8, Long.class);
                 out.add(new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                        consumed, expiredUnpurged, oldest, newest));
+                        consumed, expiredUnpurged, oldest, newest, lapsed));
             }
             return new SubspacePage(out, nextCursor);
         });
@@ -2809,7 +2936,9 @@ public final class TupleRepository {
                         DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
                                 .cast(Long.class),
                         DSL.min(TUPLES.CREATED_AT),
-                        DSL.max(TUPLES.CREATED_AT))
+                        DSL.max(TUPLES.CREATED_AT),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
                 .from(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(subspace)))
                 .fetchOne();
@@ -2821,8 +2950,9 @@ public final class TupleRepository {
         long expiredUnpurged = rec.value5();
         OffsetDateTime oldest = rec.value6();
         OffsetDateTime newest = rec.value7();
+        long lapsed = rec.value8();
         return new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                consumed, expiredUnpurged, oldest, newest);
+                consumed, expiredUnpurged, oldest, newest, lapsed);
     }
 
     // ── shared helpers ───────────────────────────────────────────────────────
@@ -2909,7 +3039,7 @@ public final class TupleRepository {
                 r.getLeaseUntil(), r.getAttempts(),
                 r.getConsumedAt(), r.getConsumedBy(),
                 r.getExpiresAt(), r.getCreatedAt(),
-                announcedAt, announceCount);
+                announcedAt, announceCount, r.getSenderSession(), r.getClaimedAt());
     }
 
     private static JSONB toJsonb(Map<String, String> map) {

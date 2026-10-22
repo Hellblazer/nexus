@@ -113,6 +113,7 @@ from tests.db._service_fixture import (
     with_substrate_sizing,
     build_in_progress_reason,
     build_lease_wait_seconds,
+    jar_checkout,
     wait_for_build_lease,
 )
 
@@ -2058,8 +2059,12 @@ def _jar_ready_reason(jar: Path) -> str | None:
     session-start preflight (tests/conftest.py ``_preflight_engine_substrate``)
     also calls it and must never block.
     """
-    if build_in_progress_reason():
-        wait_for_build_lease(build_lease_wait_seconds())
+    # Scoped to the jar's checkout, as jar_freshness_skip_reason is (nexus-m5vb3).
+    def building() -> str | None:
+        return build_in_progress_reason(repo_root=jar_checkout(jar))
+
+    if building():
+        wait_for_build_lease(build_lease_wait_seconds(), reason_fn=building)
     return jar_freshness_skip_reason(jar)
 
 

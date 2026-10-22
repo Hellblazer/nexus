@@ -168,6 +168,22 @@ public final class AspectRepository {
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null) return;
+        // nexus-i15oc: an aspect, highlight or queue row filed under a retired (superseded) name strands
+        // exactly as a chunk does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
+        CollectionRegistry.requireWritable(ctx, tenant, collection);
+    }
+
+    /**
+     * {@link #ensureCollectionRegistered} for the writers that legitimately file rows under a tombstone
+     * (nexus-i15oc): the fidelity-preserving {@code import*} verbs (as the manifest {@code UPSERT_IMPORT}
+     * carries tombstoned collections as they were) and the renames' re-home onto their target. The target
+     * stays plain because a rename onto an EMPTY tombstone revives it: renaming B back onto A (the round
+     * trip that undoes a rename) lands on the tombstone the first rename left at A. The SOURCE needs no
+     * check, it is only read. Pinned by {@code AspectSupersededWriteTest}.
+     */
+    private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
+                                                                     String collection) {
+        if (collection == null) return;
         CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
@@ -413,7 +429,7 @@ public final class AspectRepository {
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-164 P1a: register the new collection before re-pointing the denorm column
-            ensureCollectionRegistered(ctx, tenant, newColl);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             // Collision defense: delete conflicting new-side rows first
             ctx.deleteFrom(DOCUMENT_ASPECTS)
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(newColl)
@@ -514,7 +530,7 @@ public final class AspectRepository {
                 String c = (String) body.get("collection");
                 if (c != null) collections.add(c);
             }
-            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
             // Conflict key: (tenant_id, collection, source_path). tenant constant.
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
@@ -604,7 +620,7 @@ public final class AspectRepository {
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
 
         {
-            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, (String) body.get("collection"));
             return ctx.insertInto(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID,
                     DOCUMENT_ASPECTS.COLLECTION,
@@ -822,7 +838,7 @@ public final class AspectRepository {
             for (var body : kept) {
                 collections.add(nne((String) body.get("collection")));
             }
-            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
             for (var body : kept) unique.put((String) body.get("doc_id"), body);
@@ -874,7 +890,7 @@ public final class AspectRepository {
         {
             // hygiene-001: register the SAME nne()-defaulted collection value
             // the INSERT below binds, or a blank collection 404s the FK.
-            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, nne((String) body.get("collection")));
             return ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -1315,7 +1331,7 @@ public final class AspectRepository {
      */
     public int renameQueueCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, newColl);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
                .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(newColl)
                    .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.in(
@@ -1338,7 +1354,7 @@ public final class AspectRepository {
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, newColl);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             return ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION, newColl)
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
@@ -1375,7 +1391,7 @@ public final class AspectRepository {
 
             var collections = new java.util.LinkedHashSet<String>();
             for (var body : kept) collections.add((String) body.get("collection"));
-            for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
             for (var body : kept) {
@@ -1458,7 +1474,7 @@ public final class AspectRepository {
             ? ((Number) body.get("retry_count")).intValue() : 0;
 
         {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, collection);
             return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
                     ASPECT_EXTRACTION_QUEUE.TENANT_ID,
                     ASPECT_EXTRACTION_QUEUE.COLLECTION,

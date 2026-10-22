@@ -285,8 +285,10 @@ class SubscriptionSet:
     written before that. The value is a START POSITION, not a delivery
     cursor: the per-topic cursor this dict once held moved to the engine
     (bead nexus-q82tk), and the engine's per-subscriber stamp still
-    decides what was delivered. A fresh subscriber starts at now, the
-    way a new Kafka group, Redis Streams ``$`` consumer or NATS
+    decides what was delivered. A fresh subscriber starts at its subscribe
+    time minus ``DEFAULT_BOARD_START_SKEW_S`` (30 s, a clock-skew and
+    commit-race margin sent to the engine as the ``since`` watermark),
+    the way a new Kafka group, Redis Streams ``$`` consumer or NATS
     ``DeliverNew`` consumer does; posts older than that are read with
     ``tuple_rd``, never pushed (T2 nexus/zxthy-board-subscription-design-
     2026-09-27).
@@ -458,7 +460,9 @@ class SubscriptionSet:
         then board topics. No cursor: delivery position lives in the
         engine for every shape (beads nexus-vsipz, nexus-q82tk). A board
         entry carries ``since``, the topic's subscribe time (bead
-        nexus-zxthy): the waiter pushes only posts created after it.
+        nexus-zxthy): the waiter pushes only posts created after it
+        minus ``DEFAULT_BOARD_START_SKEW_S`` (30 s), so a post made in
+        that margin before the subscribe is pushed too.
 
         Deliberately never includes :attr:`leased_name` (RDR-208 Phase 3,
         bead nexus-galkv.20): a leased name arms a `directory/<name>` lease

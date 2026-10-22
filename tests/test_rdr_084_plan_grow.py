@@ -344,7 +344,14 @@ class TestAdHocTtlConfig:
 
 @pytest.mark.t2_tenant
 class TestLiveSqliteRoundTrip:
-    """End-to-end against a real on-disk SQLite T2Database.
+    """End-to-end against the engine-backed T2Database (the class name predates
+    the move off SQLite and is kept so test ids stay stable).
+
+    ``T2Database(path)`` builds HTTP stores over the engine's PG tables for the
+    session tenant; ``path`` is only mkdir'd for its parent and no ``.db`` file
+    is ever created (verified: a run under ``--basetemp`` leaves none). So the
+    ``tmp_path / "memory.db"`` below is a vestigial argument, not a SQLite
+    substrate, and this class adds no SQLite (AGENTS.md NO-SQLITE rule).
 
     The other suites in this file mock ``_t2_ctx`` — that catches
     call-shape regressions but cannot catch cross-transaction bugs
@@ -424,6 +431,82 @@ class TestLiveSqliteRoundTrip:
         )
         assert passed_row["query"] == saved["query"]
         assert passed_row["plan_json"] == saved["plan_json"]
+
+    @pytest.mark.asyncio
+    async def test_structured_envelope_reports_the_saved_grown_plan_id(
+        self, tmp_path,
+    ):
+        """nexus-wvz8i F14: a miss that grows a plan reports the saved id.
+
+        The save runs synchronously before the envelope is built, so the id
+        is in hand; the envelope used to report ``plan_id=0`` (the miss
+        match's synthetic id) while ``plan_search`` showed the row saved.
+        Real T2 store, no mock of the save.
+        """
+        from nexus.mcp.core import nx_answer
+
+        db_path = tmp_path / "memory.db"
+        match = _ad_hoc_match()
+
+        with patch(
+            "nexus.mcp_infra.default_db_path", return_value=db_path,
+        ), patch("nexus.plans.matcher.plan_match", return_value=[]), \
+           patch(
+               "nexus.mcp.core._nx_answer_plan_miss",
+               AsyncMock(return_value=match),
+           ), \
+           patch(
+               "nexus.plans.runner.plan_run",
+               AsyncMock(return_value=_plan_run_success()),
+           ), \
+           patch(
+               "nexus.mcp.core._generalize_grown_match_description",
+               AsyncMock(return_value=None),
+           ), \
+           patch("nexus.mcp.core.scratch", return_value="ok"), \
+           patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            envelope = await nx_answer(
+                question="what is nexus retrieval", structured=True,
+            )
+
+        from nexus.db.t2 import T2Database
+
+        with T2Database(db_path) as verify_db:
+            rows = verify_db.plans.list_active_plans(outcome="success")
+        saved = next(r for r in rows if "grown" in (r.get("tags") or ""))
+        assert envelope["plan_id"] == saved["id"]
+        assert envelope["plan_id"] > 0
+
+    @pytest.mark.asyncio
+    async def test_structured_envelope_without_a_save_reports_no_plan(
+        self, tmp_path,
+    ):
+        """ttl=0 saves nothing, so the envelope keeps the no-row sentinel."""
+        from nexus.mcp.core import nx_answer
+
+        db_path = tmp_path / "memory.db"
+        match = _ad_hoc_match()
+
+        with patch(
+            "nexus.mcp_infra.default_db_path", return_value=db_path,
+        ), patch("nexus.plans.matcher.plan_match", return_value=[]), \
+           patch(
+               "nexus.mcp.core._nx_answer_plan_miss",
+               AsyncMock(return_value=match),
+           ), \
+           patch(
+               "nexus.plans.runner.plan_run",
+               AsyncMock(return_value=_plan_run_success()),
+           ), \
+           patch("nexus.mcp.core.scratch", return_value="ok"), \
+           patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+           patch(
+               "nexus.mcp.core.load_config",
+               return_value={"plans": {"ad_hoc_ttl": 0}},
+           ):
+            envelope = await nx_answer(question="ttl-zero-q", structured=True)
+
+        assert envelope["plan_id"] == 0
 
     @pytest.mark.asyncio
     async def test_save_plan_ttl_zero_disables_growth(self, tmp_path):

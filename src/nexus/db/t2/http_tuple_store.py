@@ -47,7 +47,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its twelve RDR-205-family typed errors (``TupleException`` and its
+  each of its thirteen RDR-205-family typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -88,7 +88,12 @@ timeout could fire on its own.
 """
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import json
+import os
+import re
+import threading
 from collections.abc import Sequence
 from datetime import datetime
 from dataclasses import dataclass
@@ -147,12 +152,39 @@ _PARK_TIMEOUT_MARGIN_S: float = 5.0
 
 _ROUTE_PREFIX: str = "/v1/tuples"
 
+#: nexus-ztwp4 (F3 step 2): the T1 session TOKEN (the minted secret the MCP
+#: lifespan exports) rides this header on tuple requests so the engine can stamp
+#: ``sender_session`` on ``out``. Never the identifier ``NX_T1_SESSION_ID``.
+#: Same names ``HttpScratchStore`` uses.
+_SESSION_ENV: str = "NX_T1_SESSION"
+_HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 
-# ── Typed errors (mirrors dev.nexus.service.db.TupleException's twelve subtypes) ──
+#: The header value must be printable ASCII with no whitespace or control
+#: characters. Anything else (a non-ASCII value would raise UnicodeEncodeError
+#: inside httpx on every tuple call) is not sent, so the call works as it did
+#: before F3 step 2.
+_HEADER_TOKEN_RE: re.Pattern[str] = re.compile(r"[\x21-\x7e]+")
+
+#: Per-call "send this request without the session header" flag, in a ContextVar
+#: so concurrent callers of one shared store never see each other's flag. Only
+#: ``HttpTupleStore._request_once`` sets it, around its single headerless retry;
+#: ``_auth_headers`` only reads it.
+_drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_tuple_drop_session_header", default=False,
+)
+
+
+def _token_hash(token: str) -> str:
+    """SHA-256 hex of a session token. A rejected token is remembered only as
+    this, never as the raw value."""
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+# ── Typed errors (mirrors dev.nexus.service.db.TupleException's thirteen subtypes) ──
 
 
 class TupleError(RuntimeError):
-    """Base of the twelve RDR-205-family typed tuple-space client errors.
+    """Base of the thirteen RDR-205-family typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -217,6 +249,21 @@ class MaxLiveRowsExceededError(TupleError):
     code = "MaxLiveRowsExceeded"
 
 
+class NonceReuseConflictError(TupleError):
+    """``out`` on a ``keys+nonce`` template named a tuple id that already
+    exists, but the new write's body or dimensions differ from the stored
+    row's (bead nexus-fzteh). A nonce names ONE write: a byte-identical
+    retry still returns the same id, a changed payload under the same
+    nonce is a caller bug or a collision and is refused instead of being
+    dropped silently. 409: retrying the same request cannot succeed --
+    mint a fresh nonce for a new message, or resend the original body.
+    Never raised for a retry of a row already consumed whose dims match
+    (a late retry of the write that row came from; the ack clears the
+    body, not the dims)."""
+
+    code = "NonceReuseConflict"
+
+
 class TtlTooLongError(TupleError):
     """``out``'s explicit ``ttl_seconds`` exceeds the template's
     ``retention_seconds`` ceiling."""
@@ -253,6 +300,7 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         ClaimOwnershipError,
         ParkCapExceededError,
         MaxLiveRowsExceededError,
+        NonceReuseConflictError,
         TtlTooLongError,
         LeaseTooLongError,
         CensusTimeoutError,
@@ -386,7 +434,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the twelve typed :class:`TupleError`
+    """Re-raise *exc* as one of the thirteen typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 
@@ -434,6 +482,14 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         # genuine 0 (a row nothing has ever announced). See `TupleRow
         # .announce_count`'s own docstring for why that distinction matters.
         announce_count=body.get("announce_count"),
+        # nexus-ztwp4 (F3 step 2): a missing key (engine predates the stamp)
+        # stays distinct from a present null (written with no live session).
+        sender_session=body.get("sender_session"),
+        sender_session_known="sender_session" in body,
+        # nexus-x907o: the current claim's start. A missing key (an engine
+        # predating it) and a null both read as None, which a caller must treat
+        # as "unknown, use another source", so no known-flag is carried.
+        claimed_at=body.get("claimed_at"),
     )
 
 
@@ -448,6 +504,7 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
         expired_unpurged=int(body.get("expired_unpurged", 0)),
         oldest_created_at=body.get("oldest_created_at"),
         newest_created_at=body.get("newest_created_at"),
+        lapsed=int(body.get("lapsed", 0)),
     )
 
 
@@ -470,10 +527,46 @@ def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
     if since is None:
         return None
     created_at, cursor_id = since
+    _check_read_cursor(created_at, cursor_id)
     payload: dict[str, str] = {"created_at": created_at}
     if cursor_id:
         payload["id"] = cursor_id
     return payload
+
+
+_TUPLE_ID_HEX = re.compile(r"[0-9a-fA-F]{64}")
+#: The shape the engine's ``OffsetDateTime.parse`` accepts for a cursor ``created_at``:
+#: date, ``T``, time (seconds optional, as Java's own rendering drops a zero seconds),
+#: and a REQUIRED offset (``Z`` or ``+hh:mm``). Python's ``fromisoformat`` alone also
+#: takes a naive time, a date alone and a space separator, which the engine refuses.
+_CURSOR_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:[Zz]|[+-]\d{2}:\d{2})"
+)
+
+
+def _check_read_cursor(created_at: str, cursor_id: str) -> None:
+    """Refuse a malformed ``(created_at, id)`` read cursor before sending
+    (bead nexus-o9gt2). The pair is a position in a subspace, copied from
+    a row a prior read returned (``created_at`` and ``id``); a hand-typed
+    value used to reach the engine and come back as the JDK's raw
+    ``HTTP 400: string length not even: 1``. An empty ``cursor_id`` is the
+    per-subscriber watermark sentinel (see :func:`_since_payload`) and is
+    not checked."""
+    if cursor_id and not _TUPLE_ID_HEX.fullmatch(cursor_id):
+        raise SchemaViolationError(
+            f"field 'since_id': {cursor_id!r} is not a tuple id; it must be the 64-hex-character "
+            "'id' of a row from a prior read, paired with that row's 'created_at' as since_created_at"
+        )
+    try:
+        if not _CURSOR_TIMESTAMP.fullmatch(created_at):
+            raise ValueError(created_at)
+        datetime.fromisoformat(created_at.replace("Z", "+00:00").replace("z", "+00:00"))
+    except (ValueError, TypeError):
+        raise SchemaViolationError(
+            f"field 'since_created_at': {created_at!r} is not a timestamp with a UTC offset "
+            "(e.g. 2026-10-21T00:00:00Z); it must be the 'created_at' of a row from a prior read, "
+            "paired with that row's 'id' as since_id"
+        ) from None
 
 
 # ── HttpTupleStore ──────────────────────────────────────────────────────────
@@ -542,6 +635,75 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ``super()._post``/``_get`` (``RefreshableHttpStoreMixin._send``),
     never ``self._client`` directly.
     """
+
+    # ── Session header (nexus-ztwp4, F3 step 2) ──────────────────────────────
+
+    #: SHA-256 of the last session token the engine rejected (a headered 401 whose
+    #: headerless retry succeeded), or None. That token is not sent again until
+    #: ``NX_T1_SESSION`` changes. Instance state, one writer path
+    #: (``_request_once``); the lock makes the first-rejection test atomic.
+    _rejected_session_hash: str | None = None
+    _rejected_session_lock: threading.Lock = threading.Lock()
+
+    def _auth_headers(self) -> dict[str, str]:
+        """The mixin's headers plus ``X-Nexus-T1-Session`` when ``NX_T1_SESSION``
+        is set, is printable ASCII without whitespace, and is not the token the
+        engine last rejected. Read per request (the T1 handoff swaps the env on
+        ``/clear``), and added here per request, never on the shared T2 client's
+        defaults, which nine stores ride.
+
+        Pure: it reads the drop flag and the memo and changes nothing. The mixin
+        calls it once per HTTP round trip; whether a failed request carried the
+        header is answered from ``exc.request.headers``, not from here."""
+        headers = super()._auth_headers()
+        if _drop_session_header.get():
+            return headers
+        token = os.environ.get(_SESSION_ENV, "").strip()
+        if (
+            token
+            and _HEADER_TOKEN_RE.fullmatch(token)
+            and _token_hash(token) != self._rejected_session_hash
+        ):
+            headers[_HEADER_T1_SESSION] = token
+        return headers
+
+    def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
+        """One round trip. AuthFilter 401s any request whose session header is
+        present but not live, on every route, and its body does not say which
+        credential failed. A tuple write must not fail for a stale session, so a
+        401 to a request that carried the header (read off ``exc.request``) is
+        retried ONCE without it, before the mixin's data-token re-mint path sees
+        the 401. If that retry succeeds under the same data token, the session
+        token was the culprit: it is remembered by hash and not sent again until ``NX_T1_SESSION`` changes. A
+        401 that survives the drop is the data token's and goes down that path
+        unchanged, with no memo."""
+        try:
+            return super()._request_once(method, path, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401 or _HEADER_T1_SESSION not in exc.request.headers:
+                raise
+            rejected = _token_hash(exc.request.headers[_HEADER_T1_SESSION])
+            reset = _drop_session_header.set(True)
+            try:
+                result = super()._request_once(method, path, **kwargs)
+            finally:
+                _drop_session_header.reset(reset)
+            # The retry proves the session token was the culprit only if it went
+            # out under the same data token as the failed request: a concurrent
+            # re-mint between the two would make a live session token look
+            # rejected. A changed bearer sets no memo (conservative; the header
+            # is simply sent again next call).
+            if exc.request.headers.get("Authorization") != f"Bearer {self._token}":
+                return result
+            with self._rejected_session_lock:
+                first = self._rejected_session_hash != rejected
+                self._rejected_session_hash = rejected
+            # Never the token or its hash; INFO once per token, DEBUG for a repeat
+            # (two in-flight calls that both sent it before either memoised it).
+            (_log.info if first else _log.debug)(
+                "tuple_session_header_dropped", method=method, path=path,
+            )
+            return result
 
     # ── Internal transport (route prefix + 8 KB guard + typed errors) ───────
 
@@ -868,7 +1030,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the twelve recognised codes, so ``_raise_typed`` finds no class for
+        of the thirteen recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
@@ -916,7 +1078,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Against an engine predating ``/release`` the unknown route answers
         404 with ``{"error": "unknown tuples op: /release"}`` (the route
         switch's default branch) -- the body's ``error`` field is not one
-        of the twelve recognised codes, so ``_raise_typed`` finds no class
+        of the thirteen recognised codes, so ``_raise_typed`` finds no class
         for it and re-raises the bare ``httpx.HTTPStatusError``, loud by
         design, exactly as :meth:`renew` behaves against the same old
         engine: a silent no-op here would let a caller believe a claim was

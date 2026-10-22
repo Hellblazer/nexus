@@ -25,7 +25,7 @@ import nexus.db.http_vector_client as hvc
 import nexus.search_engine as se
 from nexus.db.http_vector_client import PerCollectionEnvelopeError, VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
-from nexus.search_engine import SearchDiagnostics, search_cross_corpus
+from nexus.search_engine import LexicalLegUnavailableError, SearchDiagnostics, search_cross_corpus
 
 _ROUTE = "/v1/vectors/search-per-collection"
 _SEARCH = "/v1/vectors/search"
@@ -90,6 +90,11 @@ class _FakeEngine:
         self.on_route = None
         #: lexical rows /hybrid-search returns: list of row dicts
         self.lexical_rows: list[dict] = []
+        #: nexus-xd2rc: when True the route serves ``lexical: true`` itself, each
+        #: collection's lexical arm returning its rows of ``lexical_rows``
+        self.serve_lexical = False
+        #: collection -> (lexical_error_kind, text) for a served lexical arm
+        self.lexical_errors: dict[str, tuple[str | None, str]] = {}
         self.client = hvc.HttpVectorClient()
         monkeypatch.setattr(hvc, "_request", self._request)
         monkeypatch.setattr(
@@ -154,12 +159,42 @@ class _FakeEngine:
         survivors.sort(key=lambda r: (r["distance"], r["id"], r["collection"]))
         envelope = {"results": survivors[:limit], "per_collection": stats,
                     "per_collection_k": k, "limit": limit}
+        if self.serve_lexical and body.get("lexical"):
+            self._serve_lexical(envelope)
         if self.mutate is not None:
             envelope = self.mutate(envelope)
         hvc._response_header_capture.skipped_collections = (
             ",".join(skipped) if skipped else None
         )
         return envelope
+
+    def _serve_lexical(self, envelope: dict) -> None:
+        """The engine's union (nexus-xd2rc): the vector copy wins, a lexical row
+        is outside the threshold and the limit cut, a failed collection serves
+        none of its lexical rows."""
+        held = {(r["collection"], r["id"]) for r in envelope["results"]}
+        extras: list[dict] = []
+        for stat in envelope["per_collection"]:
+            col = stat["collection"]
+            mine = [r for r in self.lexical_rows if r["collection"] == col]
+            if col in self.lexical_errors:
+                kind, text = self.lexical_errors[col]
+                stat.update(lexical_count=0, lexical_ids=[], lexical_error=text,
+                            lexical_error_kind=kind)
+                continue
+            failed = stat["error"] is not None
+            stat.update(lexical_count=len(mine),
+                        lexical_ids=[] if failed else [r["id"] for r in mine],
+                        lexical_error=None, lexical_error_kind=None)
+            if failed:
+                continue
+            for r in mine:
+                if (col, r["id"]) not in held:
+                    held.add((col, r["id"]))
+                    extras.append(dict(r))
+        extras.sort(key=lambda r: (r["distance"], r["id"], r["collection"]))
+        envelope["results"] = envelope["results"] + extras
+        envelope["lexical"] = True
 
     def _serve_flat(self, body: dict) -> list[dict]:
         merged = [
@@ -1113,6 +1148,93 @@ class TestLexicalLeg:
         # the threshold is sent to the route, so the vector leg's far row is
         # dropped there and only the lexical copy survives
         assert engine.route_calls()[0]["thresholds"] == {cols[0]: 0.5, cols[1]: 0.5}
+        # nexus-xd2rc: the field was asked; this engine ignored it (no echo), so
+        # the leg ran on /hybrid-search instead
+        assert engine.route_calls()[0]["lexical"] is True
+
+    def test_an_engine_that_serves_lexical_answers_in_the_one_route_request(self, monkeypatch):
+        # nexus-xd2rc: same fixture, the engine runs the lexical arms itself
+        cols = _cols("code", _BGE, 2)
+        data = {cols[0]: [("v-near", 0.1), ("both-far", 0.9)], cols[1]: [("v-mid", 0.3)]}
+        engine = _FakeEngine(monkeypatch, data)
+        engine.serve_lexical = True
+        engine.lexical_rows = [
+            {"id": "both-far", "content": "t", "distance": 0.9, "collection": cols[0]},
+            {"id": "lex-only", "content": "t", "distance": 0.8, "collection": cols[1]},
+            {"id": "v-near", "content": "t", "distance": 0.1, "collection": cols[0]},
+        ]
+        results = _search(engine, cols, threshold_override=0.5, lexical=True)
+
+        assert engine.paths() == [_ROUTE]
+        ids = [r.id for r in results]
+        assert sorted(ids) == ["both-far", "lex-only", "v-mid", "v-near"]
+        assert len(ids) == len(set(ids))
+
+    def test_a_lexical_row_beyond_the_route_limit_is_kept(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        data = {cols[0]: _rows("v", 5, 0.1)}
+        engine = _FakeEngine(monkeypatch, data)
+        engine.serve_lexical = True
+        engine.lexical_rows = [{"id": "deep", "content": "t", "distance": 0.95, "collection": cols[0]}]
+        _shrink_limit(monkeypatch, 2)
+        results = _search(engine, cols, n=5, lexical=True)
+
+        assert "deep" in [r.id for r in results]
+        assert engine.paths() == [_ROUTE]
+
+    def test_a_failed_lexical_arm_refuses_rather_than_answering_vector_only(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.lexical_errors[cols[1]] = (None, "lexical arm failed")
+        with pytest.raises(LexicalLegUnavailableError, match="lexical arm failed"):
+            _search(engine, cols, lexical=True)
+        assert _HYBRID not in engine.paths()
+
+    @pytest.mark.parametrize("kind", ["statement_timeout", "fanout_budget_exhausted"])
+    def test_a_lexical_arm_the_route_ran_out_of_time_for_runs_on_hybrid_search(self, monkeypatch, kind):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.lexical_errors[cols[1]] = (kind, "ran out of time")
+        engine.lexical_rows = [
+            {"id": "served", "content": "t", "distance": 0.9, "collection": cols[0]},
+            {"id": "retried", "content": "t", "distance": 0.9, "collection": cols[1]},
+        ]
+        results = _search(engine, cols, n=10, threshold_override=0.5, lexical=True)
+
+        hybrid = [b for p, b in engine.calls if p == _HYBRID]
+        assert [b["collections"] for b in hybrid] == [[cols[1]]]
+        ids = {r.id for r in results}
+        # threshold-exempt either way: the route served one, /hybrid-search the other
+        assert {"served", "retried"} <= ids
+
+    def test_a_lexical_arm_of_a_failed_collection_is_that_collections_failure_only(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.errors[cols[1]] = ("statement_timeout", "vector statement timed out")
+        engine.lexical_rows = [{"id": "lex", "content": "t", "distance": 0.5, "collection": cols[1]}]
+        results = _search(engine, cols, lexical=True)
+
+        assert results and all(r.collection == cols[0] for r in results)
+
+    def test_a_lexical_echo_with_malformed_ids_is_refused(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
+        engine.mutate = lambda env: {
+            **env, "lexical": True,
+            "per_collection": [{**e, "lexical_ids": "r0"} for e in env["per_collection"]],
+        }
+        with pytest.raises(PerCollectionEnvelopeError, match="lexical_ids"):
+            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, lexical=True)
+
+    def test_without_lexical_the_request_does_not_carry_the_field(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        _search(engine, cols)
+        assert "lexical" not in engine.route_calls()[0]
 
 
 # ── nexus-079ly: raw and dropped are the engine's facts, kept is explicit ────

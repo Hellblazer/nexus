@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * ONE model's partition of one tenant, and keeps an index scan on the leaf's primary-key prefix when the
  * selected collection is a large share of that leaf.
  *
- * <p>Why a pin and a latency check. Before the table was partitioned by model, a collection was a small share of
+ * <p>Why a plan pin. Before the table was partitioned by model, a collection was a small share of
  * the tenant's one leaf. Now a leaf holds one model, so a scope is about twice the fraction of it (the P0.2
  * harness critique, 2026-10-06: at a 55k-row scope in a 300k-row leaf the prototype's probe took a Seq Scan where
  * the single-leaf layout used the primary-key prefix scan). The probe reads at most {@code limit + 1} rows, so an
@@ -218,37 +218,27 @@ class RouterProbeShapeIntegrationTest {
     }
 
     /**
-     * Latency of the probe itself, as the engine runs it, at scopes just under, at and just over the threshold.
-     * The bound is a catastrophe guard (a sequential scan of the leaf's heap is far over it on a cold leaf);
-     * the measured medians are recorded in the bead's record.
+     * The probe, as the engine runs it, counts {@code min(scope, limit + 1)} rows at scopes just under, at and
+     * just over the threshold.
      *
-     * <p>What it does NOT cover. At this scale (a leaf of about 100 pages) even a sequential scan finishes in a
-     * few milliseconds, so this check cannot fail on the regression it names; the EXPLAIN pin above does that
-     * work. Both cover a VACUUMED leaf only. The state the cloud walk leaves every leaf in (loaded, analyzed,
-     * never vacuumed: the walk is one transaction and cannot VACUUM) is measured on the PITR fork before and after
-     * a VACUUM (docs/runbooks/rdr-225-cloud-deploy.md, § 7.2 and the .27 placeholders), not here.
+     * <p>No latency bound (nexus-3wh8d.35, review M4). This test used to assert a 100 ms p50, which could not
+     * fail on the regression it named: at this scale (a leaf of about 100 pages) even a sequential scan finishes
+     * in a few milliseconds. The EXPLAIN pins above are what fail on a sequential scan. Both cover a VACUUMED leaf
+     * only. The state the cloud walk leaves every leaf in (loaded, analyzed, never vacuumed: the walk is one
+     * transaction and cannot VACUUM) is measured on the PITR fork before and after a VACUUM
+     * (docs/runbooks/rdr-225-cloud-deploy.md, § 7.2 and the .27 placeholders), not here.
      */
     @Test
-    void probe_latency_atScopesNearTheThreshold() {
+    void probe_countsMinOfScopeAndLimitPlusOne_atScopesNearTheThreshold() {
         for (int i = 0; i < SCOPE_ROWS.length; i++) {
             final String coll = scopes.get(i);
-            long[] ms = new long[15];
-            for (int run = 0; run < ms.length; run++) {
-                long t0 = System.nanoTime();
-                int counted = tenantScope.withTenant(TENANT, ctx -> {
-                    PgSession.setSearchPlanCacheMode(ctx);
-                    return PgVectorRepository.probeSelectedRowsQuery(
-                        ctx, DIM, new String[] {coll}, MODEL, TENANT, LIMIT).fetchOne(0, Integer.class);
-                });
-                ms[run] = (System.nanoTime() - t0) / 1_000L;
-                assertThat(counted).as("the probe counts min(scope, limit + 1) rows")
-                    .isEqualTo(Math.min(SCOPE_ROWS[i], LIMIT + 1));
-            }
-            java.util.Arrays.sort(ms);
-            long p50us = ms[ms.length / 2];
-            System.out.println("router-probe scope=" + SCOPE_ROWS[i] + " leaf=" + leafRows + " limit=" + LIMIT
-                + " p50_us=" + p50us + " max_us=" + ms[ms.length - 1]);
-            assertThat(p50us / 1000.0).as("probe p50 ms at scope %d", SCOPE_ROWS[i]).isLessThan(100.0);
+            int counted = tenantScope.withTenant(TENANT, ctx -> {
+                PgSession.setSearchPlanCacheMode(ctx);
+                return PgVectorRepository.probeSelectedRowsQuery(
+                    ctx, DIM, new String[] {coll}, MODEL, TENANT, LIMIT).fetchOne(0, Integer.class);
+            });
+            assertThat(counted).as("the probe counts min(scope, limit + 1) rows at scope %d", SCOPE_ROWS[i])
+                .isEqualTo(Math.min(SCOPE_ROWS[i], LIMIT + 1));
         }
     }
 }

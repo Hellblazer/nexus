@@ -491,6 +491,11 @@ public class TenantKeyedStateGateTest {
             + "(ChunkReaper.lastRun); it can name a reset tenant until the next pass and nothing in the engine "
             + "decides on it, so it is not a cache a reset must clear";
 
+        private static final String SINGLETON_LOCK = "the engine's one-engine-per-database lock (nexus-5tykh): its "
+            + "own JDBC connection, the two callbacks Main hands it and a test-adjustable wait; one per process, "
+            + "tenant-independent. Its "
+            + "regain hook is what clears CollectionRegistry for every tenant";
+
         private static final String TOKEN_CACHE_REF = "a reference to the TokenCache, which is evicted under "
             + "TokenCache.map";
 
@@ -545,6 +550,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("LocalTokenizers.warned", "model names already warned about, once per process; "
                 + "tenant-independent");
             notKeyed.put("OrtInitGate.active", "the live ONNX init scopes of this process; tenant-independent");
+            notKeyed.put("CollectionRegistry.afterMissReadForTests", "a test-only hook run between a cache "
+                + "miss's read and its fill (nexus-hkh1y); null in production, holds no state");
             notKeyed.put("ModelPartitions.KNOWN", "parent-and-model partition pairs already created; keyed by "
                 + "model, not by tenant");
             notKeyed.put("TenantScope.ADMISSION", "admission semaphore per DataSource identity; tenant-independent");
@@ -554,12 +561,19 @@ public class TenantKeyedStateGateTest {
                 + "is sent; request-scoped");
             notKeyed.put("PgVectorRepository.FanoutMerger.worstOnTop", "the merge heap of one fan-out search; "
                 + "dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.rows", "the lexical arms' rows of one fan-out search "
+                + "(nexus-xd2rc); dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.Union.extras", "the lexical rows one fan-out search "
+                + "returns beside its vector rows; dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.Union.stats", "per-collection lexical stats of one "
+                + "fan-out search; dies with the request");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.pendingSubspaces", "wake bookkeeping of one parked wait; "
                 + "dies when that request ends");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.tenant", "the tenant of one parked wait, immutable; "
                 + "dies when that request ends");
             notKeyed.put("TenantCreationBusyException.tenant", "payload of an exception thrown to one caller");
             notKeyed.put("UnregisteredCollectionException.tenant", "payload of an exception thrown to one caller");
+            notKeyed.put("CollectionSupersededException.tenant", "payload of an exception thrown to one caller (nexus-mp8ys)");
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");
@@ -573,12 +587,14 @@ public class TenantKeyedStateGateTest {
                 + "once at construction from stateless lambdas");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
-            // CONFIG (13)
+            // CONFIG (15)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",
                 "ChunkReaper.Settings.floorExemptCollections",
                 "HttpUtil.gzipper",
                 "NexusService.chunksLeafBloat",
+                "NexusService.chunksLeavesSweepSeconds",
+                "NexusService.chunksLeavesView",
                 "NexusService.embedPosture",
                 "NexusService.perCollectionIndexes",
                 "OwnerlessWriteMode.envReader",
@@ -641,6 +657,8 @@ public class TenantKeyedStateGateTest {
             // TEST_HOOK (21)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
+                "CatalogRepository.afterMoveCompletedHookForTests",
+                "CatalogRepository.afterMovePreconditionHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
                 "ChunkReaper.testOnlyAfterNoteTimeout",
                 "CombinedWriteService.afterExistencePartitionHookForTests",
@@ -664,10 +682,13 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, TEST_HOOK);
             }
-            // RESULT (70)
+            // RESULT (75)
             for (String f : List.of(
+                "CatalogRepository.DocumentMove.expectedChashes",
                 "ChunksLeafAutovacuumCheck.LeafRel.options",
+                "LeafBloatCatalog.Leaf.pciIndexes",
                 "LeafBloatCatalog.Snapshot.leaves",
+                "PgVectorRepository.SiblingResolution.names",
                 "LeafBloatSweep.Status.leaves",
                 "CatalogRepository.AppendOutcome.sweep",
                 "CatalogRepository.DanglingEndpointException.missing",
@@ -709,6 +730,9 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.MetadataUpdateOutcome.missing",
                 "PgVectorRepository.NeedEmbedResolution.needEmbedIdx",
                 "PgVectorRepository.NeedEmbedResolution.originalAbsentIdx",
+                "PgVectorRepository.LexicalStat.ids",
+                "PgVectorRepository.PerCollectionResult.lexical",
+                "PgVectorRepository.PerCollectionResult.lexicalRows",
                 "PgVectorRepository.PerCollectionResult.perCollection",
                 "PgVectorRepository.PerCollectionResult.rows",
                 "PgVectorRepository.PerCollectionResult.skippedCollections",
@@ -875,6 +899,10 @@ public class TenantKeyedStateGateTest {
             }
             notKeyed.put("PciReconciler.failures", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
+            notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.onFatal", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.staleTerminationWait", SINGLETON_LOCK);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);

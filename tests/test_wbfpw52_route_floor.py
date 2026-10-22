@@ -180,7 +180,7 @@ class _PruneDb:
     def __init__(self, move: dict) -> None:
         self.move, self.calls, self.floor = move, [], None
 
-    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit):
+    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
         self.calls.append("restore")
         return {"restored": 0, "remaining": 0}
 

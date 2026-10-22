@@ -1146,7 +1146,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         23502/23503/23514 here would be a real defect that must propagate. A
         409 body WITHOUT a readable sqlstate is treated as the race (older
         engines predating the typed ladder — the only known 409 producer on
-        this endpoint there). Fixed engines never return 409 here.
+        this endpoint there). Fixed engines return no race 409 here; their one
+        409 is ``collection_superseded`` (nexus-i15oc), which ``_post`` raises as
+        :class:`SupersededCollectionWriteError` before this branch can see it.
         Deliberately scoped to THIS endpoint only: rebuild/split are
         REPLACE-semantics, where a conflict would mean a genuinely lost
         write — those must keep propagating.

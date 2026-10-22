@@ -5,9 +5,9 @@ in a child pytest for the two values nothing else runs through it.
 ``tests/test_storage_touch_guard.py`` proves the guard against a stand-in conftest, and
 ``tests/test_optin_tenant_end_to_end.py`` runs the real one only for an explicit ``optin``
 and only where the service jar is built. Neither pins what an UNSET
-``NX_TEST_T2_SUBSTRATE`` does (the default every contributor and CI shard runs) or the
-``per-test`` escape hatch, so flipping the default or breaking the hatch changed nothing
-red. The child here loads the real conftest as a plugin and runs a tiny generated module;
+``NX_TEST_T2_SUBSTRATE`` does (the default every contributor and CI shard runs) or that
+the retired ``per-test`` hatch is refused (nexus-llo7w), so flipping the default or
+reviving the hatch changed nothing red. The child here loads the real conftest as a plugin and runs a tiny generated module;
 two things differ from a plain run, both stated in the child's ``conftest.py``: the
 session-start gates (built jar, box lease, build lease) are no-ops and the two tenant
 fixtures are stubs that log the request instead of booting an engine. The decision under
@@ -128,16 +128,16 @@ def test_an_unset_substrate_mints_only_for_a_marked_test_and_pins_the_local_post
     assert "storage-touch guard" in out, "the guard runs under the default substrate"
 
 
-def test_the_per_test_hatch_asks_every_test_for_a_tenant_and_leaves_the_guard_off(tmp_path: Path) -> None:
-    proc, log = _child(tmp_path, "per-test")
+@pytest.mark.parametrize("substrate", ["per-test", "engine"])
+def test_the_retired_per_test_hatch_is_refused_by_name(tmp_path: Path, substrate: str) -> None:
+    """The escape hatch is retired (nexus-llo7w): every test errors at setup naming the
+    variable and the bead, and none asks for a tenant on the way."""
+    proc, log = _child(tmp_path, substrate)
     out = proc.stdout + proc.stderr
-    assert proc.returncode == 0, out[-3000:]
-    assert "3 passed" in out, out[-3000:]
-    requested = sorted(line for line in log if line.startswith("t2_"))
-    assert requested == [
-        "t2_service_env:test_integration_marked", "t2_service_env:test_marked", "t2_service_env:test_plain",
-    ], log
-    assert "storage-touch guard" not in out, "the guard is inert under per-test"
+    assert proc.returncode != 0 and "3 error" in out, out[-3000:]
+    assert f"NX_TEST_T2_SUBSTRATE={substrate}: the per-test escape hatch" in out, out[-3000:]
+    assert "nexus-llo7w" in out and "pytest.mark.t2_tenant" in out, out[-3000:]
+    assert [line for line in log if line.startswith("t2_")] == [], log
 
 
 def test_none_asks_no_test_for_a_tenant(tmp_path: Path) -> None:

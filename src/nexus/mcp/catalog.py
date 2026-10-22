@@ -23,6 +23,13 @@ from nexus.mcp_infra import (
 
 mcp = FastMCP("nexus-catalog")
 
+# nexus-2nxoo: this server's own FastMCP is not the one core wraps, so it gets
+# its own per-call `mcp_tool_call` hook, and main() reports ITS status, not
+# core's. Import-time SDK patches stay transitive (core applies them).
+from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
+
+_TOOL_CALL_LOG_STATUS: str = _install_tool_call_log(mcp)
+
 _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
@@ -129,6 +136,21 @@ def _file_path_candidates(cat, wanted: str) -> list:
     )
 
 
+_QUERY_DESC = (
+    "Free-text query, full-text matched against document titles and "
+    "metadata only, never document content. A topical phrase that appears "
+    "only in document text matches nothing here; for content search use "
+    "the nexus server's mcp__plugin_conexus_nexus__search or "
+    "mcp__plugin_conexus_nexus__query."
+)
+_ZERO_MATCH_NOTE = (
+    "0 matches. This tool matches titles and metadata, not document "
+    "content; content search is the nexus server's "
+    "mcp__plugin_conexus_nexus__search and "
+    "mcp__plugin_conexus_nexus__query tools."
+)
+
+
 # Note: core server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
 # mcp__plugin_conexus_nexus__search).
@@ -139,7 +161,7 @@ def _file_path_candidates(cat, wanted: str) -> list:
     structured_output=False,
 )
 def catalog_search(
-    query: Annotated[str, Field(description="Free-text query, matched by full-text search.")] = "",
+    query: Annotated[str, Field(description=_QUERY_DESC)] = "",
     content_type: Annotated[str, Field(description="Exact content_type filter (e.g. \"code\", \"paper\", \"rdr\").")] = "",
     author: Annotated[str, Field(description="Author substring filter, case-insensitive.")] = "",
     corpus: Annotated[str, Field(description="Exact corpus filter.")] = "",
@@ -186,6 +208,11 @@ def catalog_search(
                 return False
             return True
 
+        if limit < 1 or offset < 0:
+            # A negative offset or a limit below 1 slices oddly (matches[2:2]
+            # is empty with matches present), which would make the empty-page
+            # note below claim something false.
+            return [{"error": f"limit must be >= 1 and offset >= 0 (got limit={limit}, offset={offset})"}]
         if query.strip():
             if owner or corpus or file_path or author:
                 # Post-filtering a capped page reports absence for matches
@@ -215,6 +242,20 @@ def catalog_search(
         else:
             return [{"error": "query or at least one filter required"}]
         entries = matches[offset:offset + limit + 1]
+        if not entries:
+            # An empty list renders as nothing, which reads as a broken tool
+            # (nexus-r88er F12). At offset 0 nothing matched: say what this
+            # tool matches and where content search lives. Past offset 0 the
+            # search may well have matches, all before the page asked for:
+            # "0 matches" would be false there. len(matches) is exact here,
+            # since entries is empty only when len(matches) <= offset.
+            if offset == 0:
+                return [{"note": _ZERO_MATCH_NOTE}]
+            return [{"note": (
+                f"No rows at offset {offset}: this search has "
+                f"{len(matches)} match{'' if len(matches) == 1 else 'es'}, "
+                "all before that offset."
+            )}]
         has_more = len(entries) > limit
         result = [e.to_dict() for e in entries[:limit]]
         if has_more:
@@ -961,7 +1002,12 @@ def main():
 
     from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
 
-    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp-catalog")
+    report_sdk_patches(
+        log,
+        {**_SDK_PATCH_RESULTS, "tool_call_log": _TOOL_CALL_LOG_STATUS},
+        server="nx-mcp-catalog",
+        pid=os.getpid(),
+    )
 
     log.info(
         "mcp_server_starting",

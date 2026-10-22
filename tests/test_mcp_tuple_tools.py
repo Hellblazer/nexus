@@ -23,6 +23,7 @@ it.
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import datetime
@@ -87,6 +88,83 @@ class TestTupleOutRd:
         assert not rows[0]["error"].startswith("Error:"), rows[0]["error"]
 
 
+class TestShakeoutTupleSemantics:
+    """The 2026-10-21 shakeout findings, end to end through the real engine
+    (beads nexus-jz3kh F7, nexus-fzteh F9, nexus-5fpkh F10, nexus-o9gt2 F11)."""
+
+    def test_f7_a_keys_nonce_board_write_without_nonce_names_the_nonce_parameter(self, t2_service_env) -> None:
+        topic = _uniq("topic")
+        out = tuple_out(f"board/{topic}", {"topic": topic}, {"from": "s"}, "hi")
+        assert "field 'nonce'" in out
+        assert "its own field of the write" in out
+        assert "tuple_out's `nonce` parameter" in out
+
+    def test_f7_the_nonce_tried_as_a_key_or_a_dim_is_told_where_it_goes(self, t2_service_env) -> None:
+        topic = _uniq("topic")
+        as_key = tuple_out(f"board/{topic}", {"topic": topic, "nonce": "n"}, {"from": "s"}, "hi", nonce="n")
+        as_dim = tuple_out(f"board/{topic}", {"topic": topic}, {"from": "s", "nonce": "n"}, "hi", nonce="n")
+        assert "not a key" in as_key and "its own field of the write" in as_key
+        assert "not a dimension" in as_dim and "its own field of the write" in as_dim
+
+    def test_f9_same_nonce_different_body_is_refused_naming_the_id_and_the_first_body_stands(
+        self, t2_service_env,
+    ) -> None:
+        topic = _uniq("topic")
+        sub = f"board/{topic}"
+        first = tuple_out(sub, {"topic": topic}, {"from": "s"}, "one", nonce="n-1")
+        assert re.fullmatch(r"[0-9a-f]{64}", first)
+        assert tuple_out(sub, {"topic": topic}, {"from": "s"}, "one", nonce="n-1") == first  # byte-identical retry
+
+        clash = tuple_out(sub, {"topic": topic}, {"from": "s"}, "two", nonce="n-1")
+        assert clash.startswith("Error:")
+        assert first in clash
+        assert "fresh nonce" in clash
+
+        rows = tuple_rd(sub, {"topic": topic})
+        assert [r["body"] for r in rows] == ["one"]
+
+    def test_f10_a_lapsed_lease_reads_as_lapsed_with_the_stale_holder_and_is_counted(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tuple_out(sub, {"to": addr}, {"from": "s"}, "work", nonce=_uniq("nonce"))
+        claimant = _uniq("claimant")
+        claim = tuple_in(sub, {"to": addr}, claimant=claimant, lease_s=1)
+        assert claim is not None
+
+        live = tuple_rd(sub, {"to": addr})
+        assert live[0]["claim_state"] == "claimed"
+        assert tuple_stats(sub)["lapsed"] == 0
+
+        time.sleep(1.6)  # the 1 s lease passes; nothing re-takes it, so the row is still stored as claimed
+
+        row = tuple_rd(sub, {"to": addr})[0]
+        assert row["claim_state"] == "lapsed"
+        assert row["claimant"] == claimant
+        assert row["lease_until"]
+        stats = tuple_stats(sub)
+        assert (stats["claimed"], stats["lapsed"]) == (1, 1)
+        listed = tuple_list(sub)
+        assert (listed[0]["claimed"], listed[0]["lapsed"]) == (1, 1)
+
+    def test_f11_a_made_up_cursor_is_refused_naming_since_id_not_a_raw_http_400(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "s"}, "x", nonce=_uniq("nonce"))
+        out = tuple_rd(f"mailbox/{addr}", {"to": addr}, since_created_at="2026-10-21T00:00:00Z", since_id="0")
+        err = out[0]["error"]
+        assert "since_id" in err and "prior read" in err
+        assert "HTTP 400" not in err and "string length not even" not in err
+
+    def test_f11_a_real_cursor_from_a_returned_row_resumes_after_it(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        for i in range(2):
+            tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "s"}, f"m{i}", nonce=_uniq("nonce"))
+        first = tuple_rd(f"mailbox/{addr}", {"to": addr}, n=1)[0]
+        rest = tuple_rd(
+            f"mailbox/{addr}", {"to": addr}, n=5, since_created_at=first["created_at"], since_id=first["id"],
+        )
+        assert [r["body"] for r in rest] == ["m1"]
+
+
 class TestTupleInAckNack:
     def test_in_then_ack_removes_the_row(self, t2_service_env) -> None:
         addr = _uniq("addr")
@@ -148,9 +226,22 @@ class TestTupleInAckNack:
         assert msg == f"Acked claim {claim['claim_id']}"
         assert "reply" not in msg.lower()
 
-    def test_ack_with_reply_writes_reply_in_one_transaction(self, t2_service_env) -> None:
+    def test_ack_with_reply_writes_reply_in_one_transaction(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
         """RDR-206: ``tuple_ack(reply=...)`` consumes the request
-        and writes the reply together, and the tool reports the reply id."""
+        and writes the reply together, and the tool reports the reply id.
+
+        nexus-g2ckl end to end, in the same test so the tenant count stays
+        flat: the reply's dims omit ``from``, so the tool fills this session's
+        own id; the engine stamps the acker's session; the label predicate the
+        drain hook and the channel use gives no label."""
+        import os
+
+        from nexus.tuple_sender import sender_label
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        session_id = os.environ["NX_T1_SESSION_ID"]
         req_addr = _uniq("req")
         reply_addr = _uniq("reply")
         tuple_out(
@@ -166,7 +257,7 @@ class TestTupleInAckNack:
             reply={
                 "subspace": f"mailbox/{reply_addr}",
                 "keys": {"to": reply_addr},
-                "dims": {"from": claimant},
+                "dims": {"kind": "ack"},
                 "body": "the answer",
             },
         )
@@ -179,6 +270,9 @@ class TestTupleInAckNack:
         reply_rows = tuple_rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)  # n=2: n=1 would hide a duplicate
         assert len(reply_rows) == 1
         assert reply_rows[0]["body"] == "the answer"
+        assert reply_rows[0]["dims"]["from"] == session_id
+        assert reply_rows[0]["sender_session"] == session_id
+        assert sender_label(reply_rows[0]["dims"]["from"], reply_rows[0]["sender_session"]) is None
 
     def test_ack_reply_to_keys_only_subspace_leaves_request_claimed(self, t2_service_env) -> None:
         """RDR-206: a reply target that resolves to a ``keys``-only
@@ -586,6 +680,7 @@ class TestMailboxSend:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         dest = str(uuid.uuid4())
         result = mailbox_send(dest, body="x")
@@ -628,12 +723,14 @@ class TestMailboxSend:
         assert len(rows) == 1
         assert rows[0]["dims"]["from"] == agent_id
 
-    def test_session_id_from_address_overrides_the_session_marker(
+    def test_from_address_must_be_this_sessions_own_session_id(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
-        """A live, correctly-read session marker is armed here too, so this
-        proves from_address WINS over it -- not merely that from_address
-        works when nothing else is set."""
+        """F3 step 1 (nexus-2mv7y, JDR-002): this used to pin that a foreign
+        session id WINS over the live marker, which let a model send as any
+        session. Under a live marker a foreign id is refused before any
+        write, and the marker's own id still sends with that from. One test,
+        so the tenant count stays where the old one left it."""
         import nexus.session as session_mod
         from nexus.session_marker import write_session_marker
 
@@ -642,15 +739,16 @@ class TestMailboxSend:
         marker_id = str(uuid.uuid4())
         write_session_marker(tmp_path, 4242, marker_id)
 
-        override_id = str(uuid.uuid4())
         dest = str(uuid.uuid4())
-        result = mailbox_send(dest, body="x", from_address=override_id)
-        assert "error" not in result
-        assert result["from"] == override_id
-        assert result["from"] != marker_id
+        result = mailbox_send(dest, body="x", from_address=str(uuid.uuid4()))
+        assert "error" in result
+        assert "not this server's own" in result["error"]
+        assert tuple_stats(f"mailbox/{dest}")["total"] == 0
 
+        result = mailbox_send(dest, body="x", from_address=marker_id)
+        assert "error" not in result
         rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
-        assert rows[0]["dims"]["from"] == override_id
+        assert [r["dims"]["from"] for r in rows] == [marker_id]
 
     def test_invalid_from_address_shape_is_refused_and_writes_nothing(
         self, t2_service_env, monkeypatch,

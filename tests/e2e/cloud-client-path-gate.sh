@@ -752,10 +752,17 @@ code, body, n1 = sys.argv[1:4]
 head = body[:160].replace("\n", " ")
 what = "a POST of {} with the leg-B bearer to /v1/_test/tenant-reset"
 if code == "404":
-    # The engine's own 404 for an unregistered path is the JDK HttpServer HTML ("No context found for request").
-    # Tighten this pass to that body once the first live run is recorded in nexus-69be4; until then 404 alone passes.
-    print("ok [N2]: %s answers 404 (body: %r): no such route on this engine" % (what, body[:80].replace("\n", " ")))
-    sys.exit(0)
+    # The engine's own 404 for an unregistered path is the JDK HttpServer HTML ("No context found for request"),
+    # recorded on the first live run (nexus-69be4, 2026-10-21, engine 0.1.161). A 404 without it can be the edge's
+    # own not-found page, which says nothing about the engine's routes.
+    if "No context found for request" in body:
+        print("ok [N2]: %s answers 404 (body: %r): the engine's own not-found, no such route on this engine"
+              % (what, body[:80].replace("\n", " ")))
+        sys.exit(0)
+    print("N2: INCONCLUSIVE: %s answers 404 (body: %r), which lacks the engine's own not-found text "
+          "'No context found for request': likely the edge's not-found, absence not shown, so the leg fails closed"
+          % (what, head))
+    sys.exit(1)
 engine = {"403": ("operator privilege required", "the operator-only refusal"),
           "400": ("missing required string field: tenant", "the missing-tenant refusal of an operator request"),
           "503": ("NX_SEARCH_PCI", "the NX_SEARCH_PCI=1 refusal")}

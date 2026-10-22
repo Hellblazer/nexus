@@ -43,7 +43,7 @@
 # Bulk volume and only authenticates to throwaway guests on tart's NAT network.
 #
 # Overrides of paths, commands and timings (NX_MAC_GUEST_DIR, _TART, _LEASE_ROOT,
-# _LEASE_REPO, _RUNNER_USERS, _RUN_UID, _TEST_ROOT, _LIFETIME_SECS, _STOP_WAIT)
+# _LEASE_REPO, _RUNNER_USERS, _RUN_UID, _TEST_ROOT, _LIFETIME_SECS, _STOP_WAIT, _PKILL)
 # are read only when NX_MAC_GUEST_TEST=1, so an environment variable alone never
 # redirects the guard, the lease or the files this script trusts.
 set -uo pipefail
@@ -61,6 +61,8 @@ if [[ $TESTING -eq 1 ]]; then
     RETRY_SLEEP="${NX_MAC_GUEST_RETRY_SLEEP:-3}"
     TEST_ROOT="${NX_MAC_GUEST_TEST_ROOT:-}"
     RUN_UID_OVERRIDE="${NX_MAC_GUEST_RUN_UID:-}"
+    # pkill -f matches every process on the box: a test's stand-in keeps a kill to its own tart run.
+    PKILL="${NX_MAC_GUEST_PKILL:-/usr/bin/pkill}"
     export TART_HOME="${TART_HOME:-/Volumes/Bulk/tart/home}"
 else
     BASE=/Volumes/Bulk/tart/nexus
@@ -78,6 +80,7 @@ else
     RETRY_SLEEP=3
     TEST_ROOT=''
     RUN_UID_OVERRIDE=''
+    PKILL=/usr/bin/pkill
     export TART_HOME=/Volumes/Bulk/tart/home
 fi
 KEYDIR="$BASE/ssh"
@@ -98,8 +101,6 @@ SSH_OPTS=(-i "$KEYDIR/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o Pass
           -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KEYDIR/known_hosts" -o GlobalKnownHostsFile=/dev/null
           -o HostKeyAlgorithms=ssh-ed25519 -o LogLevel=ERROR
           -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
-PKILL=/usr/bin/pkill
-
 die() { local c="$1"; shift; echo "host.sh: $*" >&2; exit "$c"; }
 
 valid_vm() {

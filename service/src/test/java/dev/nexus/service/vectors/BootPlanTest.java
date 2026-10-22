@@ -34,6 +34,25 @@ class BootPlanTest {
                 crossEncoder, "ce-detail", crossEncoder ? List.of() : List.of("/models/ce/model.onnx"));
     }
 
+    // ── late cross-encoder provision (nexus-mrsgp) ───────────────────────────────────────────
+
+    /**
+     * Measured on the native image: with bge built at boot, cross-encoder files provisioned while the
+     * engine runs load on the next rerank, no restart. With no local model loaded the restart stays.
+     */
+    @Test
+    void theCrossEncoderHint_saysNoRestartOnlyWhenBgeWasBuiltAtBoot() {
+        var withBge = BootPlan.decide(presence(true, false, false, false), EmbeddingProfile.BGE);
+        assertThat(withBge.buildsBge()).isTrue();
+        assertThat(withBge.crossEncoderFilesMissing()).isTrue();
+        assertThat(withBge.crossEncoderProvisionHint()).contains("next rerank loads them").doesNotContain("restart the engine");
+        assertThat(withBge.bannerHint()).contains(withBge.crossEncoderProvisionHint());
+
+        var noLocalModel = BootPlan.decide(presence(false, false, true, false), EmbeddingProfile.BGE);
+        assertThat(noLocalModel.buildsBge()).isFalse();
+        assertThat(noLocalModel.crossEncoderProvisionHint()).contains("restart the engine").contains("no local ONNX model");
+    }
+
     // ── the three-way bge decision, plus its failures (nexus-ngvxb) ────────────────────────────
 
     @Test
@@ -229,11 +248,13 @@ class BootPlanTest {
         var noCrossEncoder = BootPlan.decide(presence(true, false, true, false), EmbeddingProfile.BGE);
         assertThat(noCrossEncoder.bannerHint()).contains("`nx init --service`");
 
-        // The ONNX runtime directory is set at boot, so every remedy that provisions files says to restart.
+        // A remedy that provisions the bge model says to restart: the embedder is built at boot. A missing
+        // cross-encoder on an engine that built bge does not: measured on the native image, files provisioned
+        // while it runs load on the next rerank (nexus-mrsgp).
         assertThat(bgeDegraded.degradation().get().remedy()).contains("restart the engine");
         assertThat(partial.bannerHint()).contains("restart the engine");
-        assertThat(noCrossEncoder.bannerHint()).as("a missing cross-encoder is only usable after a restart")
-                .contains("restart the engine");
+        assertThat(noCrossEncoder.bannerHint()).as("a late cross-encoder loads on the next rerank after a bge boot")
+                .contains("next rerank loads them").doesNotContain("restart the engine");
 
         for (var plan : List.of(bgeDegraded, partial, noCrossEncoder)) {
             // No plain "nx init" without the --service flag anywhere in a hint.

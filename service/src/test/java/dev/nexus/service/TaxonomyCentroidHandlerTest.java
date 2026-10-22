@@ -276,6 +276,37 @@ class TaxonomyCentroidHandlerTest {
     }
 
     @Test
+    void upsert_toARetiredCollectionName_returns409NamingTheSuccessor_andStoresNothing() throws Exception {
+        // nexus-mp8ys: a centroid filed under a renamed-away name strands exactly as a chunk does. The first upsert
+        // warms the registry cache with the live row, then the name is retired through supersedeCollection (which
+        // must evict that row); the second upsert must be refused 409, not served from the cache. Control: the
+        // first upsert, same request shape, to the then-live name, succeeded.
+        String coll = "knowledge__centroidsup";
+        String successor = "knowledge__centroidsup2";
+        // Topic ids no other test in this class uses: the class shares one database, and a centroid left under
+        // the retired name would otherwise show up in another test's cross-collection listing.
+        upsert(coll, 9001L, 1.0f, 0.0f, "before", 1);
+        new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(svcDs))
+            .supersedeCollection(TENANT, coll, successor, "");
+
+        var rec = new java.util.LinkedHashMap<String, Object>();
+        rec.put("collection", coll);
+        rec.put("topic_id", 9002L);
+        rec.put("embedding", unit(0.0f, 1.0f));
+        rec.put("label", "after");
+        rec.put("doc_count", 1);
+        var resp = post("/v1/taxonomy/centroids/upsert", TENANT,
+            mapper.writeValueAsString(Map.of("records", List.of(rec))));
+
+        assertThat(resp.statusCode()).as("retired name -> 409: %s", resp.body()).isEqualTo(409);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("reason")).isEqualTo("collection_superseded");
+        assertThat(body.get("superseded_by")).isEqualTo(successor);
+        var c = mapper.readValue(get("/v1/taxonomy/centroids/count?collection=" + coll, TENANT).body(), MAP_T);
+        assertThat(((Number) c.get("count")).intValue()).as("only the pre-retire centroid").isEqualTo(1);
+    }
+
+    @Test
     void upsert_dimensionDisagreeingWithCollectionModel_returns400() throws Exception {
         // A 384-dim centroid in a collection registered under a 768-dim model is refused before any SQL.
         register("knowledge__dimmismatch", "bge-base-en-v15-768");

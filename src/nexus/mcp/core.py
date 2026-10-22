@@ -20,7 +20,6 @@ from typing import Annotated, Any
 import structlog
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
 try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
@@ -38,8 +37,10 @@ from nexus.corpus import (
     index_model_for_collection,
     is_conformant_collection_name,
     resolve_corpus,
+    store_read_scope,
     split_candidate_collection_name,
     t3_collection_name,
+    t3_collection_names_for_read,
 )
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
@@ -102,9 +103,12 @@ from nexus.mcp.operator_requests import (
 )
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
+    DirectoryResolutionError,
+    check_from_address_is_own,
+    no_session_id_message,
     resolve_default_from,
+    resolve_env_session_id,
     resolve_send_address,
-    validate_from_address,
 )
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
 # set (tuple_subscribe/tuple_unsubscribe/tuple_subscriptions below) and the
@@ -691,6 +695,26 @@ class T1UnavailableThisProcessError(RuntimeError):
     """
 
 
+#: The remedy half of the T1-unavailable error, split by host (nexus-wkjqm).
+#: A server Claude Code started keeps the NX_SESSION_ID remedy. A server
+#: Claude Desktop started (chat, Cowork; the account plugin's entry is not
+#: editable, docs/desktop-deployment.md) cannot take it, so it is sent to
+#: ``memory_put``; the variable stays for a self-configured server.
+#: Each text is pinned by an equality test.
+_T1_UNAVAILABLE_REMEDY_IN_CLAUDE_CODE: str = (
+    "Remedy: set NX_SESSION_ID in this "
+    "server's environment (the env block of its entry in the host's "
+    "MCP configuration) to name the scratch scope, then restart the "
+    "server; or run `nx doctor --check-t1`."
+)
+_T1_UNAVAILABLE_REMEDY_OUTSIDE_CLAUDE_CODE: str = (
+    "Remedy: a Nexus server started by Claude Desktop (chat or Cowork) has "
+    "no T1 scratch; use memory_put with a ttl for notes that carry across "
+    "turns. A self-configured server can set NX_SESSION_ID to a UUID in "
+    "its entry's environment, then restart; or run `nx doctor --check-t1`."
+)
+
+
 def _raise_t1_unavailable_this_process() -> None:
     """Pre-init hook body for the no-resolvable-session-id case.
 
@@ -702,6 +726,8 @@ def _raise_t1_unavailable_this_process() -> None:
     session_id) UPSERT, each invalidating the other's token — the same
     hazard the surrounding code already documents).
     """
+    from nexus.session import started_by_claude_code  # noqa: PLC0415 — deferred for startup cost; rare/branch-local failure path
+
     raise T1UnavailableThisProcessError(
         "T1 unavailable this process: no resolvable session id for this "
         "MCP server instance (neither NX_SESSION_ID nor "
@@ -711,10 +737,12 @@ def _raise_t1_unavailable_this_process() -> None:
         "only — every other nexus tool (search, memory, store, catalog) "
         "is unaffected. A sub-agent that inherited a LIVE minted token "
         "from its parent is unaffected too (checked before this hook "
-        "would ever be consulted). Remedy: set NX_SESSION_ID in this "
-        "server's environment (the env block of its entry in the host's "
-        "MCP configuration) to name the scratch scope, then restart the "
-        "server; or run `nx doctor --check-t1`."
+        "would ever be consulted). "
+        + (
+            _T1_UNAVAILABLE_REMEDY_IN_CLAUDE_CODE
+            if started_by_claude_code()
+            else _T1_UNAVAILABLE_REMEDY_OUTSIDE_CLAUDE_CODE
+        )
     )
 
 
@@ -806,6 +834,14 @@ def _retry_deferred_t1_mint() -> None:
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 
     mcp_infra.set_t1_pre_init_hook(None)
+    # nexus-zl1jv: the lifespan skipped the channel waiter while this mint was
+    # deferred; start it now, on the event loop (where the lifespan starts it),
+    # after the T1 call that completed the mint has returned. Without this a
+    # session that started with the service down never gets channel push.
+    try:
+        state["loop"].call_soon_threadsafe(_start_channel_waiter)
+    except Exception as exc:  # noqa: BLE001 — the waiter is best-effort delivery; the drain hook is the floor
+        _log.warning("channel_waiter_not_scheduled_after_deferred_mint", error=str(exc))
 
 
 async def _t1_session_refresh_loop(session_id: str, interval: float) -> None:
@@ -1043,6 +1079,17 @@ async def _cancel_t1_handoff_watch_task() -> None:
 # idempotent across the lifespan's several yield sites.
 
 
+def _waiter_session_id() -> str:
+    """The waiter's session id: empty when none resolves, and also when
+    `NX_SESSION_ID` is not a UUID (nexus-zl1jv). The lifespan must never
+    raise on that; the tools that need the id refuse with the shape
+    message instead."""
+    try:
+        return _current_subscription_session_id()
+    except DirectoryResolutionError:
+        return ""
+
+
 def _start_channel_waiter() -> None:
     """Start this session's channel waiter if a session id is resolvable
     and none is already running. Best-effort: the waiter is a delivery
@@ -1073,7 +1120,17 @@ def _start_channel_waiter() -> None:
         # that session has no channel waiter.
         _log.info("channel_waiter_skipped_probe_process", pid=_os.getpid())
         return
-    session_id = _current_subscription_session_id()
+    if _DEFERRED_T1_MINT:
+        # nexus-zl1jv: the startup T1 mint failed and is deferred. With only
+        # NX_SESSION_ID set the session id now resolves, and the `_get_t1()`
+        # below would run the pre-init hook's mint retry on the LIFESPAN
+        # thread, blocking startup on a service that is down. No waiter
+        # started here before either (NX_T1_SESSION_ID was unset), so
+        # skipping keeps that behaviour; the first scratch call brings T1 up
+        # and `_retry_deferred_t1_mint` then schedules this function again.
+        _log.info("channel_waiter_skipped_t1_mint_deferred")
+        return
+    session_id = _waiter_session_id()
     if not session_id or _channel.active_waiter(session_id) is not None:
         return
     try:
@@ -1097,7 +1154,7 @@ def _start_channel_waiter() -> None:
 
 async def _cancel_channel_waiter_task() -> None:
     """Cancel and await this session's channel waiter if one is running. Idempotent."""
-    session_id = _current_subscription_session_id()
+    session_id = _waiter_session_id()
     if not session_id:
         return
     waiter = _channel.active_waiter(session_id)
@@ -2513,6 +2570,14 @@ _SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
+# nexus-2nxoo: FastMCP bound its call_tool handler inside __init__, so the
+# per-call `mcp_tool_call` event (tool name + sorted `_meta` keys; INFO the first
+# time a key-set is seen in this process, DEBUG after) wraps the constructed
+# server's registry. Never raises; main() reports the status.
+from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
+
+_SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
+
 # RDR-215: register any ported hook_<name> tool-tier tools -- see
 # nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
 _register_hook_tools(mcp)
@@ -2922,7 +2987,6 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
-    _target_memo: dict | None = None,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2930,11 +2994,8 @@ def _search_render(
     plan-runner, ``nx doc cite`` (``_phase5_search``), and every direct
     in-process caller import and call; its ``str``/``dict`` return contract
     (keyed on the ``structured`` bool) is unchanged from before nexus-6jlki
-    and must stay that way — the wire-facing ``search()`` wrapper below is
-    the ONLY thing that changed shape. See ``search()``'s docstring for why
-    the split exists (structuredContent needs a ``CallToolResult`` return,
-    which is incompatible with the plain ``str`` this function's direct
-    callers depend on).
+    and must stay that way; the wire-facing ``search()`` wrapper below only
+    enforces the page cap and passes the result through (nexus-099mn).
 
     Ranking: with ``cluster_by=""`` (the default), results are ranked by
     ``hybrid_score`` — vector similarity blended with ``frecency_score``
@@ -3007,20 +3068,8 @@ def _search_render(
         # (nexus-hmxi) + resolve_corpus logic -- one implementation
         # instead of two that can drift (query()'s plain-corpus branch was
         # exactly that drift: nexus-z4j8d fix 1).
-        # nexus-vpa9q: the search() wrapper renders twice per request (text, then structured)
-        # and the second render is served by the page cache, whose key holds the resolved
-        # target. A target that changed in between (background fan-out counts landing, a names
-        # refresh) made the second render search the whole corpus again, so the wrapper passes
-        # one memo and both renders share one resolution.
-        if _target_memo is not None and "target" in _target_memo:
-            target = _target_memo["target"]
-            fanout_excluded = list(_target_memo["excluded"])
-        else:
-            fanout_excluded = []
-            target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
-            if _target_memo is not None:
-                _target_memo["target"] = target
-                _target_memo["excluded"] = list(fanout_excluded)
+        fanout_excluded = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3042,8 +3091,7 @@ def _search_render(
         boost_window = boost_window_size(limit)
         # ``lexical`` MUST be in this tuple. It changes WHICH rows are
         # retrieved, so a lexical call that reused a vector-only page would be
-        # served silently-wrong results inside the 120s TTL — and the wrapper
-        # calls _search_render twice, so it is reachable within one request.
+        # served silently-wrong results inside the 120s TTL.
         # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
@@ -3061,6 +3109,9 @@ def _search_render(
         #: a degrade is surfaced, never only logged).
         rerank_note: str | None = None
         cached = _page_cache_get(cache_key, need)
+        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+        #: handed to the boosts so the calibration reads the same rows.
+        model_of_out: list = []
         if cached is not None:
             results, diag, rerank_note = cached
         else:
@@ -3096,6 +3147,7 @@ def _search_render(
                 # nexus-ann50: measured without server rerank only; a reranked
                 # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
                 per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
+                model_of_out=model_of_out,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3109,6 +3161,7 @@ def _search_render(
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
                 window=boost_window,
+                model_of=model_of_out[-1] if model_of_out else None,
             )
             if lexical_rerank:
                 # Same consumption as the CLI's: scored rows lead in server
@@ -3356,72 +3409,14 @@ def _search_render(
         return _mcp_tool_error("search", e)
 
 
-def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
-    """Detect whether ``_cap_text_result`` fired and recover the drop count.
-
-    ``_cap_text_result`` appends ``"[<tool>: result capped at N chars; D
-    chars dropped — ...]"`` as a trailing, never-prepended marker (house
-    doctrine: no silent truncation). This is the one place that marker
-    format is parsed back out, so a structuredContent consumer can see the
-    same truncation fact the text reader sees (nexus-6jlki: truncation must
-    be visible in BOTH shapes). A parse miss degrades to ``(True, 0)`` —
-    still flagged truncated, just without a char count — never silently
-    ``(False, 0)`` (that would hide a real truncation from the structured
-    shape).
-    """
-    marker = f"[{tool}: result capped at "
-    if marker not in capped_text:
-        return False, 0
-    try:
-        dropped = int(capped_text.rsplit("; ", 1)[1].split(" chars dropped", 1)[0])
-    except (IndexError, ValueError):
-        return True, 0
-    return True, dropped
-
-
-# HISTORY (nexus-6jlki spike; kept out of the tool description, which the
-# harness truncates at 2048 chars — see AGENTS.md § MCP tools).
-# ``structured_output=False`` on the ``@mcp.tool()`` registration turns OFF
-# FastMCP's own return-type auto-detection — left on, the ``str | dict``
-# return annotation gets silently auto-wrapped as
-# ``structuredContent: {"result": <value>}`` (verified against the pinned
-# mcp==1.27.1; the nexus-r90ao audit, T2 [23357], narrowed the affected set:
-# ``str``, ``str | dict`` unions, and ``list[...]`` returns were
-# auto-wrapped, while bare unparameterized ``dict`` returns never were —
-# nobody designed the wrapping, no client is documented to rely on it).
-# This tool is the first to replace that accident with a deliberate shape.
-#
-# Business logic lives in ``_search_render`` (unchanged since before this
-# tool existed) — plan-runner, ``nx doc cite``, and this repo's test suite
-# call ``_search_render`` directly and see EXACTLY the same ``str``/``dict``
-# contract as before. Only a real MCP-wire call (an actual ``tools/call``,
-# not an in-process Python call) goes through this wrapper and can observe
-# the new ``structuredContent`` field; the reason for the split is that a
-# ``CallToolResult`` return is the only SDK-level way to give a caller
-# byte-identical human text AND separate machine data in one response
-# (confirmed via spike — a bare-dict/str return ties ``content`` and
-# ``structuredContent`` to the SAME serialization, which would replace
-# today's human-readable rendering with a JSON dump).
-#
-# Default (``structured=False``): ``content`` is ``_search_render``'s
-# human-readable string, byte-identical to what this tool returned before
-# nexus-6jlki. ``structuredContent`` carries the same
-# ``{ids, tumblers, distances, collections, chunk_collections,
-# chunk_text_hash}`` shape ``structured=True`` has always returned (fetched
-# via the page-turn cache, no extra vector-store round trip), plus
-# ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
-# (``_cap_text_result``) fired.
-#
-# Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
-# ``content``/``structuredContent["text"]`` is the PRESENTATION channel and
-# carries the render-layer file-diversity cap (at most 2 chunks per file
-# lead the page); the ``ids``/``tumblers``/``distances`` arrays are the
-# MACHINE channel — identical to ``structured=True`` — and are deliberately
-# UNCAPPED. The two can disagree on order within a page by design.
-#
-# ``structured=True`` is UNCHANGED: bare dict, no ``CallToolResult``, no
-# ``structuredContent`` wrapping — the plan-runner's in-process contract
-# (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).
+# Wire shape (nexus-099mn, shakeout F13). ``structured_output=False`` keeps
+# FastMCP from auto-wrapping the ``str | dict`` return as
+# ``structuredContent: {"result": ...}`` (nexus-r90ao). Default mode returns
+# the text only. From nexus-6jlki to nexus-099mn it also sent a
+# ``structuredContent`` envelope, and Claude Code shows a tool result's
+# structuredContent in place of its text, so the model read a JSON dump with
+# the render escaped inside it. ``structured=True`` returns the bare dict the
+# plan runner reads (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).
 @mcp.tool(
     title="Semantic Search",
     annotations={"readOnlyHint": True},
@@ -3475,7 +3470,7 @@ def search(
             "re-ranks."
         ),
     )] = False,
-) -> "str | dict | CallToolResult":
+) -> "str | dict":
     """Semantic search across T3 chunks; returns matching text fragments, not whole documents.
 
     Use `query` instead when the question is which DOCUMENTS match, not which
@@ -3483,28 +3478,22 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default, whose
-    structuredContent is `{ids, tumblers, distances, hybrid_scores,
-    collections, chunk_collections, chunk_text_hash, truncated,
-    truncated_chars, text}`. With `structured=True` it returns the bare
-    `{ids, tumblers, distances, hybrid_scores, collections,
-    chunk_collections, chunk_text_hash}` instead, with no text rendering and
-    so no `truncated`/`truncated_chars`/`text`. `distances` is the raw vector
-    distance (absolute, lower is better), `hybrid_scores` is what the page
-    was SORTED by (min-max normalised within this result window, higher is
-    better, so the best of two poor hits scores 1.0 and so does a lone poor
-    one -- read `distances` for a relevance floor). `truncated`/
-    `truncated_chars` say whether the text rendering cut the page and by how
-    much, and `text` is that rendering.
+    Returns a ranked, human-readable list of chunks by default. With
+    `structured=True` it returns the `{ids, tumblers, distances,
+    hybrid_scores, collections, chunk_collections, chunk_text_hash}` dict
+    instead. `distances` is the raw vector distance (absolute, lower is
+    better), `hybrid_scores` is what the page was SORTED by (min-max
+    normalised within this result window, higher is better, so the best of
+    two poor hits scores 1.0 and so does a lone poor one -- read `distances`
+    for a relevance floor).
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
     - `corpus="knowledge"` means every `knowledge__*` subject collection,
       the same scope the store read tools give `collection="knowledge"`.
     - `cluster_by` defaults to "" (no clustering).
-    - The text and `structuredContent` channels can disagree on ranking order
-      within a page: text applies a per-file diversity cap, structuredContent
-      does not.
+    - The text and `structured=True` can disagree on ranking order within a
+      page: text applies a per-file diversity cap, the dict does not.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.
@@ -3517,57 +3506,10 @@ def search(
         msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
         return {"error": msg} if structured else f"Error: {msg}"
-    target_memo: dict = {}
-    result = _search_render(
+    return _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold, lexical=lexical, _target_memo=target_memo,
-    )
-    if structured or not isinstance(result, str):
-        # structured=True, or an error string that already reads like one —
-        # unchanged wire behavior.
-        return result
-
-    truncated, dropped = _truncated_chars_dropped(result, "search")
-    data = _search_render(
-        query, corpus=corpus, limit=limit, offset=offset, where=where,
-        cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold, lexical=lexical, _target_memo=target_memo,
-    )
-    empty_shape = {
-        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
-        "collections": [], "chunk_collections": [], "chunk_text_hash": [],
-    }
-    structured_content = {
-        **(data if isinstance(data, dict) else empty_shape),
-        "truncated": truncated,
-        "truncated_chars": dropped,
-        # SELF-SUFFICIENCY (nexus-6jlki follow-up). A conforming MCP client
-        # may render structuredContent INSTEAD of the text block -- the
-        # protocol permits it and nexus's own client does exactly that
-        # (mcp_client/core.py::_parse_result prefers structuredContent over
-        # the first text block), as does Claude Code. The original design
-        # (T2 [23351]) modelled this field as purely additive -- "a new
-        # structuredContent field they can ignore or start consuming" -- so
-        # between c9762865d and this line a default-mode search delivered
-        # ids/tumblers/distances and NO paths, line numbers or snippets to
-        # a structuredContent-preferring client. Carrying the render here
-        # costs one duplicated string and makes the shape correct for
-        # whichever representation the client chooses to read.
-        "text": result,
-    }
-    # nexus-zdzm5: in structured mode _search_render returns a string only
-    # for an error (an unmatched corpus, or the tool's error boundary). It
-    # used to ride out as empty ids in a success-shaped structuredContent,
-    # the error visible only in the text block, so a structuredContent
-    # reader saw "no hits" for a failed call.
-    is_error = isinstance(data, str)
-    if is_error:
-        structured_content["error"] = data
-    return CallToolResult(
-        content=[TextContent(type="text", text=result)],
-        structuredContent=structured_content,
-        isError=is_error,
+        threshold=threshold, lexical=lexical,
     )
 
 
@@ -3790,27 +3732,30 @@ def _resolve_corpus_target(
             continue
         # *part* is a user-typed --corpus TOKEN: see _names_a_collection above.
         if _names_a_collection(part):
-            name = t3_collection_name(part, t3=t3)
-            # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
-            # navigation, never a human choice): a registered non-live
-            # collection named explicitly is excluded exactly like a fan-out
-            # member. A name with no cached row is unregistered, not non-live.
+            # nexus-50uw6 (RDR-210 Phase 4 Step 1): a shorthand name stands for
+            # every live model sibling of the corpus, found by catalog row.
+            # A fully-qualified name is still exactly that one collection.
             from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
-            # refresh=False: _get_collection_names() above already warmed
-            # this cache; a second fetch here would be a second round trip.
-            row = get_collection_row(name, refresh=False)
-            if row is not None and not is_live_collection_row(row):
-                _log.info(
-                    "corpus_explicit_non_live_excluded",
-                    collection=name,
-                    lifecycle_state=row.get("lifecycle_state"),
-                    corpus_part=part,
-                )
-                if excluded_out is not None:
-                    excluded_out.append(name)
-                continue
-            target.append(name)
+            for name in t3_collection_names_for_read(part, t3=t3):
+                # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
+                # navigation, never a human choice): a registered non-live
+                # collection named explicitly is excluded exactly like a fan-out
+                # member. A name with no cached row is unregistered, not non-live.
+                # refresh=False: _get_collection_names() above already warmed
+                # this cache; a second fetch here would be a second round trip.
+                row = get_collection_row(name, refresh=False)
+                if row is not None and not is_live_collection_row(row):
+                    _log.info(
+                        "corpus_explicit_non_live_excluded",
+                        collection=name,
+                        lifecycle_state=row.get("lifecycle_state"),
+                        corpus_part=part,
+                    )
+                    if excluded_out is not None:
+                        excluded_out.append(name)
+                    continue
+                target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
             counts = counts_up_front if counts_up_front is not None else _get_fanout_counts()
@@ -5163,6 +5108,9 @@ def query(
         # nexus-uro6c: capture threshold-filter diagnostics to surface a
         # threshold drop on a zero-hit (same rationale as the search tool).
         qdiag: list = []
+        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+        #: handed to the boosts so the calibration reads the same rows.
+        model_of_out: list = []
         results = search_cross_corpus(
             question, target, n_results=fetch_n, t3=t3, where=where_dict,
             catalog=_get_catalog(),
@@ -5170,6 +5118,7 @@ def query(
             taxonomy=_search_taxonomy(),
             telemetry=_search_telemetry_sink(),
             diagnostics_out=qdiag,
+            model_of_out=model_of_out,
             content_chars=_MCP_CONTENT_CHARS,
             # nexus-tnwm2: query groups by document and orders by
             # hybrid_score; it never reads _topic_label or _cluster_label.
@@ -5190,6 +5139,7 @@ def query(
             hybrid=cfg.get("search", {}).get("hybrid_default", False),
             tuning=get_tuning_config(),
             catalog=_get_catalog(),
+            model_of=model_of_out[-1] if model_of_out else None,
         )
         if not results:
             if structured:
@@ -5787,8 +5737,9 @@ def store_get(
         description=(
             "Collection name or subject prefix. \"knowledge\" (default) means "
             "every live knowledge__* collection, the same scope as search/"
-            "query's corpus=\"knowledge\"; a subject or full collection name "
-            "narrows the lookup to that one collection."
+            "query's corpus=\"knowledge\"; a subject reads every live model "
+            "sibling of its corpus; a conformant four-segment name is that one "
+            "collection."
         ),
     )] = "knowledge",
 ) -> str:
@@ -5807,7 +5758,8 @@ def store_get(
       resolves to that note.
     - `collection="knowledge"` (default) looks in every knowledge__*
       collection, as `search` does; a title found in more than one names
-      those collections instead of guessing.
+      those collections instead of guessing, and passing one of them as
+      `collection=` reads that one.
     - A title matching more than one document returns the candidate ids
       instead of content; pass a content-hash to disambiguate.
     """
@@ -5825,6 +5777,7 @@ def store_get(
         # never a title. Anything else is tried as an exact title.
         looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
         entry = None
+        also_titled: list[str] = []  # nexus-xkc4n: the other collections holding a title an exact name narrowed
         if looks_like_hash or len(scope) == 1:
             for candidate in scope:
                 entry = t3.get_by_id(candidate, doc_id)
@@ -5835,6 +5788,13 @@ def store_get(
             from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
             matches = [(c, found) for c in scope if (found := t3.find_ids_by_title(c, doc_id))]
+            if len(matches) > 1:
+                # nexus-xkc4n: naming one of the collections the message below lists
+                # picks it, also a sibling whose name the read resolver expands again.
+                named = [m for m in matches if m[0] == collection.strip()]
+                if named:
+                    also_titled = [c for c, _ in matches if c != named[0][0]]
+                    matches = named
             if len(matches) > 1:
                 return (
                     f"Title {doc_id!r} matches documents in {len(matches)} collections: "
@@ -5863,6 +5823,9 @@ def store_get(
             from nexus.catalog.store_hook import catalog_chashes_for_title  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
             found = [(c, docs) for c in scope if (docs := catalog_chashes_for_title(c, doc_id))]
+            if len(found) > 1 and (named := [f for f in found if f[0] == collection.strip()]):
+                also_titled = [c for c, _ in found if c != named[0][0]]
+                found = named  # nexus-xkc4n, as for the chunk-title matches above
             if len(found) == 1 and len(found[0][1]) == 1:
                 col_name, (chashes,) = found[0]
                 entry = t3.get_by_id(col_name, chashes[0])
@@ -5920,6 +5883,8 @@ def store_get(
             lines.append(f"Extractor:  {extraction_method}")
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
+        if also_titled:
+            lines.append(f"Also titled in: {', '.join(also_titled)}")
         lines.append("")
         lines.append(split[1] if split is not None else entry.get("content", ""))
         return "\n".join(lines)
@@ -5937,11 +5902,11 @@ def _read_scope(t3, collection: str) -> list[str]:
     placeholder is one member of that scope and stays reachable by its full
     name. Anything else resolves to its one collection, as before.
     """
-    if collection.strip() == "knowledge":
-        fanned = resolve_corpus("knowledge", _get_collection_names())
-        if fanned:
-            return fanned
-    return [t3_collection_name(collection, t3=t3)]
+    # The rule lives in corpus.store_read_scope, shared with the nx store verbs
+    # (nexus-2y8yw); the name source is looked up here at call time.
+    return store_read_scope(
+        collection, t3=t3, knowledge_collections=lambda: resolve_corpus("knowledge", _get_collection_names()),
+    )
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -6459,7 +6424,10 @@ def store_list(
         # nexus-mgqs8: the bare name spans every knowledge collection, so it
         # lists the subjects rather than paging one collection's entries.
         scope = _read_scope(t3, collection)
-        if len(scope) > 1:
+        # Only the bare name lists subjects. A named collection pages its own entries
+        # even when it has live siblings (nexus-50uw6): the picked name leads the scope,
+        # and the siblings are named below the header, so naming any one of them pages it.
+        if len(scope) > 1 and collection.strip() == "knowledge":
             # The sizes are printed, so keep the 60 s freshness they always had; only the
             # fan-out floor tolerates the 15 minute counts window.
             counts = _get_collection_counts(max_age=_PRINTED_COUNTS_MAX_AGE)
@@ -6475,11 +6443,21 @@ def store_list(
             total = info["count"]
         except KeyError:
             return f"Collection not found: {col_name}"
+        # Named for the siblings the read scope holds (nexus-50uw6), also on an empty
+        # page and in the docs view: an empty pick is the case they matter most (nexus-9ts7n).
+        also = (
+            f"  also in this corpus: {', '.join(scope[1:])} (pass one as collection= to page it)"
+            if len(scope) > 1 else ""
+        )
         if total == 0:
-            return f"No entries in {col_name}."
+            return f"No entries in {col_name}." + (f"\n{also}" if also else "")
 
         if docs:
-            return _store_list_docs(t3, col_name, total)
+            listed = _store_list_docs(t3, col_name, total)
+            if not also:
+                return listed
+            head, _, rest = listed.partition("\n")
+            return f"{head}\n{also}" + (f"\n{rest}" if rest else "")
 
         page = t3.list_store(col_name, limit=limit, offset=offset)
         if not page:
@@ -6496,6 +6474,8 @@ def store_list(
         lines: list[str] = [
             f"{col_name}  (showing {offset + 1}-{offset + len(page)}; {total} stored)"
         ]
+        if also:
+            lines.append(also)
         from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -7409,15 +7389,22 @@ def plan_delete(
 # ``tuple_rdp``/``tuple_inp`` tools.
 
 
-def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
-    return {
+def _tuple_row_to_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
+    """*fresh_claim*: the row ``tuple_in`` just claimed. The engine set its lease a
+    moment ago, so it is ``claimed`` by definition; relabelling it against this box's
+    clock would call a brand-new claim ``lapsed`` whenever the client runs ahead of
+    the engine by more than the lease."""
+    out = {
         "id": row.id,
         "subspace": row.subspace,
         "template": row.template,
         "keys": row.keys,
         "dims": row.dims,
         "body": row.body,
-        "claim_state": row.claim_state,
+        # nexus-5fpkh: a claim whose lease has passed reads "lapsed", computed here at
+        # read time; the engine's lazy reclaim and the stored state are untouched, and
+        # claimant / lease_until stay so the stale holder is still visible.
+        "claim_state": row.claim_state if fresh_claim else row.effective_claim_state(),
         "claimant": row.claimant,
         "lease_until": row.lease_until,
         "attempts": row.attempts,
@@ -7432,6 +7419,13 @@ def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
         "announced_at": row.announced_at,
         "announce_count": row.announce_count,
     }
+    # nexus-ztwp4 (F3 step 2): the session id the engine stamped on `out`. Null =
+    # no stamp: no live minted session at write time, a reply row written by an engine before nexus-g2ckl (v0.1.163), or a row that predates the column;
+    # the key is OMITTED when the engine renders no such key, so a consumer can
+    # tell "no stamp" from "this engine cannot say".
+    if row.sender_session_known:
+        out["sender_session"] = row.sender_session
+    return out
 
 
 def _tuple_census_to_dict(c: Any) -> dict[str, Any]:
@@ -7440,6 +7434,8 @@ def _tuple_census_to_dict(c: Any) -> dict[str, Any]:
         "total": c.total,
         "available": c.available,
         "claimed": c.claimed,
+        # nexus-5fpkh: of `claimed`, the claims whose lease has passed (not yet reclaimed).
+        "lapsed": c.lapsed,
         "dead": c.dead,
         "consumed": c.consumed,
         "expired_unpurged": c.expired_unpurged,
@@ -7464,9 +7460,11 @@ def tuple_out(
     )] = None,
     nonce: Annotated[str | None, Field(
         description=(
-            "Caller-minted nonce. Required for any template whose id_from is "
-            "keys+nonce (the mailbox); omit for a keys-only template (the "
-            "ledger). An id ingredient only, never echoed back on a read."
+            "Caller-minted nonce, its own parameter: never a key or a dim. Required "
+            "when the template's id_from is keys+nonce (mailbox/<address>, "
+            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>); omit "
+            "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
+            "back on a read."
         ),
     )] = None,
     ttl_seconds: Annotated[int | None, Field(
@@ -7482,7 +7480,10 @@ def tuple_out(
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
-    Returns the tuple id, lowercase hex.
+    Returns the tuple id, lowercase hex. On a keys+nonce template a nonce
+    names one write: the same nonce with a different body or dims is
+    refused as `NonceReuseConflict`, naming the id; mint a fresh nonce for
+    a new message.
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
@@ -7515,25 +7516,41 @@ def tuple_rd(
     )] = None,
     n: Annotated[int, Field(description="Max rows to return.")] = 1,
     since_created_at: Annotated[str, Field(
-        description="Paired with since_id to resume a (created_at, id) cursor; leave both empty to read from the start.",
+        description="The created_at of the last row of a prior read; resumes after it. Pair with since_id; "
+                    "leave both empty to read from the start.",
     )] = "",
-    since_id: Annotated[str, Field(description="See since_created_at.")] = "",
+    since_id: Annotated[str, Field(
+        description="The id (64 hex characters) of that same row; never a made-up value. See since_created_at.",
+    )] = "",
     timeout_s: Annotated[int, Field(
-        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
+                    "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
     )] = 0,
 ) -> list[dict]:
     """Read a subspace without claiming rows (`rd`); use `tuple_in` instead to claim one.
 
     A probe (never blocks) when `timeout_s=0` (the default); parks up to
-    `timeout_s` seconds (capped by the engine) when nothing matches
-    immediately. Matches on equality over whatever subset of the pinned
+    `timeout_s` seconds when nothing matches immediately. The engine
+    refuses a `timeout_s` above its cap (25 s by default), so a longer
+    wait is a loop of parks. Matches on equality over whatever subset of the pinned
     keys `keys_pattern` supplies.
 
     Returns a list of matching tuples, including dead-lettered rows
-    (dead-lettering is a claim state, not an exclusion).
+    (dead-lettering is a claim state, not an exclusion). `claim_state` is
+    null (unclaimed), `claimed`, `lapsed` (a claim whose `lease_until` is
+    before this client's clock; the claimant and `lease_until` are the
+    stale holder's) or `dead`.
+    `since_created_at` and `since_id` come from a returned row, together.
     """
-    since = (since_created_at, since_id) if since_created_at and since_id else None
     try:
+        if bool(since_created_at) != bool(since_id):
+            # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "since_created_at and since_id come as a pair, both from one row of a prior read "
+                "(its created_at and its id); pass both, or neither to read from the start"
+            )
+        since = (since_created_at, since_id) if since_created_at and since_id else None
         with _t2_ctx() as db:
             rows = db.tuples.rd(
                 subspace, keys_pattern, n=n, since=since, timeout_s=timeout_s,
@@ -7556,13 +7573,16 @@ def tuple_in(
         description="Claim lease length in seconds; refused above the template's max_lease_seconds.",
     )],
     timeout_s: Annotated[int, Field(
-        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
+                    "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
     )] = 0,
 ) -> dict | None:
     """Claim a tuple from a subspace (`in`); use `tuple_rd` instead for a non-destructive read.
 
     A probe (never blocks) when `timeout_s=0` (the default); parks up to
-    `timeout_s` seconds when nothing matches immediately. Unlike
+    `timeout_s` seconds when nothing matches immediately; the engine
+    refuses a `timeout_s` above its cap (25 s by default), so a longer
+    wait is a loop of parks. Unlike
     `tuple_rd`, every key in `keys_pattern` must be pinned (no subset
     match) and dead-lettered rows are never returned.
 
@@ -7582,12 +7602,32 @@ def tuple_in(
         if result is None:
             return None
         row, claim_id = result
-        return {"tuple": _tuple_row_to_dict(row), "claim_id": claim_id}
+        return {"tuple": _tuple_row_to_dict(row, fresh_claim=True), "claim_id": claim_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return {"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")}
 
 
 _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
+
+
+def _default_reply_from(reply: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A mailbox reply whose dims omit ``from`` is sent as this session
+    (nexus-g2ckl): the same id ``mailbox_send`` defaults to, which is also the
+    session the engine stamps the reply with, so a genuine reply reads
+    unlabelled. Returns a copy; any other reply, or no resolvable session,
+    passes through untouched and the engine judges it as before."""
+    if not isinstance(reply, dict) or not str(reply.get("subspace", "")).startswith("mailbox/"):
+        return reply
+    dims = reply.get("dims")
+    if dims is not None and not isinstance(dims, dict):
+        return reply
+    if dims and dims.get("from"):
+        return reply
+    try:
+        own = resolve_default_from()
+    except DirectoryResolutionError:
+        return reply
+    return {**reply, "dims": {**(dims or {}), "from": own}}
 
 
 def _reply_spec_from_tool_arg(reply: dict[str, Any] | None) -> ReplySpec | None:
@@ -7633,9 +7673,10 @@ def tuple_ack(
         description=(
             "Optional reply object written atomically with the ack, e.g. "
             "{\"subspace\": \"mailbox/<addr>\", \"keys\": {\"to\": \"<addr>\"}, "
-            "\"dims\": {\"from\": \"<me>\"}, \"body\": \"...\"}. Fields: subspace "
+            "\"dims\": {\"kind\": \"ack\"}, \"body\": \"...\"}. Fields: subspace "
             "and keys (required), dims/body/ttl_seconds (optional). No nonce — "
-            "the engine sets it to the request's tuple id."
+            "the engine sets it to the request's tuple id. A mailbox reply with no "
+            "dims.from is sent as this session's own id."
         ),
     )] = None,
 ) -> str:
@@ -7655,7 +7696,7 @@ def tuple_ack(
     not the content itself.
     """
     try:
-        spec = _reply_spec_from_tool_arg(reply)
+        spec = _reply_spec_from_tool_arg(_default_reply_from(reply))
         reply_id = _t2_index_write(
             lambda db: db.tuples.ack(claim_id, claimant, reply=spec), op="tuple_ack",
         )
@@ -7798,7 +7839,10 @@ def tuple_list(
     """List concrete tuple subspaces that currently exist, each with its row census.
 
     Use `tuple_registry` instead to see the template definitions rather
-    than live subspaces. Returns one census row per subspace, paged: a
+    than live subspaces. Returns one census row per subspace
+    (`subspace, total, available, claimed, lapsed, dead, consumed,
+    expired_unpurged, oldest_created_at, newest_created_at`; `lapsed` is
+    the part of `claimed` whose lease has passed on the engine's clock), paged: a
     truncated page appends a `_pagination` entry with `next_cursor` -- the
     catalog tools' own convention for a `list[dict]`-shaped paged result --
     pass that back as `after` to continue. Bounded to 100 by default
@@ -7831,10 +7875,11 @@ def tuple_stats(
     """Get the row census for one exact tuple subspace.
 
     Use `tuple_list` instead to enumerate subspaces by prefix. Returns
-    `{subspace, total, available, claimed, dead, consumed,
+    `{subspace, total, available, claimed, lapsed, dead, consumed,
     expired_unpurged, oldest_created_at, newest_created_at}`. `total`
     counts rows not yet consumed; consumed rows are counted only in
-    `consumed`.
+    `consumed`. `lapsed` is the part of `claimed` whose lease has passed
+    on the engine's clock.
     """
     try:
         with _t2_ctx() as db:
@@ -7868,8 +7913,8 @@ def mailbox_send(
     )] = None,
     from_address: Annotated[str | None, Field(
         description=(
-            "Optional sender override -- a session id or an agent id. "
-            "Defaults to this MCP server's own current session."
+            "Optional sender override -- this session's own id, or an agent "
+            "id. Defaults to this MCP server's own current session."
         ),
     )] = None,
 ) -> dict:
@@ -7886,14 +7931,15 @@ def mailbox_send(
     A name resolves through `directory/<name>`'s live rows: no live
     holder is refused, naming the name; more than one distinct holding
     session is refused, naming every holder -- resend to one of those
-    session ids directly instead. `from_address`, when given, must itself
-    be a session id or an agent id. With no `from_address`, the sender
+    session ids directly instead. `from_address`, when given, must be an
+    agent id or this server's own session id (any other session id is
+    refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
     when that cannot be resolved. Either refusal writes nothing.
     """
     try:
         from_id = (
-            validate_from_address(from_address) if from_address
+            check_from_address_is_own(from_address) if from_address
             else resolve_default_from()
         )
 
@@ -7919,14 +7965,19 @@ def _current_subscription_session_id() -> str:
     """The session id `tuple_subscribe`/`tuple_unsubscribe`/
     `tuple_subscriptions` scope the subscription set to.
 
-    Deliberately `NX_T1_SESSION_ID` alone, NOT `resolve_default_from`
-    (mailbox_send's own resolution, which reads the session marker first,
-    from `nexus.session_marker`): the subscription set already IS the
-    thing that owns this session's identity for T1 scoping (the same env
-    var the MCP lifespan's T1 mint sets) -- one lookup, not two disagreeing
-    ones.
+    Deliberately the environment tiers only (`NX_T1_SESSION_ID`, then
+    `NX_SESSION_ID`), NOT `resolve_default_from` (mailbox_send's own
+    resolution, which reads the session marker first, from
+    `nexus.session_marker`): the subscription set already IS the thing
+    that owns this session's identity for T1 scoping (the env var the MCP
+    lifespan's T1 mint sets) -- one lookup, not two disagreeing ones.
+    `NX_SESSION_ID` is the fallback for a host with no Claude Code session
+    (nexus-zl1jv); the lifespan's mint writes `NX_T1_SESSION_ID`, so it
+    wins whenever T1 came up. Raises `DirectoryResolutionError` for an
+    `NX_SESSION_ID` that is not a UUID; the three tools surface it as their
+    error, and the lifespan's waiter goes through `_waiter_session_id`.
     """
-    return _os.environ.get("NX_T1_SESSION_ID", "").strip()
+    return resolve_env_session_id()
 
 
 @mcp.tool(
@@ -7960,10 +8011,14 @@ def tuple_subscribe(
     queue or a lock is refused naming `in`; a second `mailbox/<name>` is
     refused once this session leases a name. At most 32 board topics.
 
-    A board subscription starts at now: only posts created after the
-    subscribe call are pushed, one notification per wait naming the
-    count, the first and last tuple id and the `tuple_rd` call that
-    reads them. Older posts are read with `tuple_rd`, never pushed.
+    A board subscription starts 30 seconds before the subscribe call (a
+    clock-skew margin): posts from that window on are pushed, at most 100
+    per wait, one notification per wait naming the count, the first and
+    last tuple id and the `tuple_rd` call that reads them. Older posts
+    are read with `tuple_rd`, never pushed. Mail sent to the mailbox
+    before the subscribe is delivered too, until it is claimed or
+    expires, each row announced at most 5 times (`max_announces`, 150 s
+    apart).
 
     Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
     lease so `mailbox_send` resolves that name to this session. It is NOT
@@ -7978,7 +8033,7 @@ def tuple_subscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(no_session_id_message())
         with _t2_ctx() as db:
             templates = (db.tuples.registry() or {}).get("templates", [])
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
@@ -8010,7 +8065,7 @@ def tuple_unsubscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(no_session_id_message())
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         subs.unsubscribe(subspace)
@@ -8034,12 +8089,13 @@ def tuple_subscriptions() -> list[dict]:
     Phase 3). There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board). A board entry carries `since`,
-    the subscribe time push delivery starts from.
+    the time of the subscribe call; push delivery starts 30 seconds
+    before it (a clock-skew margin).
     """
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(no_session_id_message())
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()
@@ -8052,6 +8108,10 @@ def tuple_subscriptions() -> list[dict]:
 
 def store_delete(doc_id: str, collection: str = "knowledge") -> str:
     """Delete a T3 knowledge entry by document ID.
+
+    Deletes from the one collection *collection* resolves to. When the id is
+    not there but a collection a read of *collection* looks in holds it, the
+    answer names the collection to pass.
 
     Args:
         doc_id: Document ID to delete (from store_list or store_put output)
@@ -8086,7 +8146,18 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # DIFFERENT collection. A collection-scoped existence check first
         # closes that off before any catalog mutation happens.
         if t3.get_by_id(col_name, doc_id) is None:
-            return f"Not found: {doc_id!r} in {col_name}"
+            # nexus-jald5: the read tools look further than a delete does; say which
+            # collection of the read scope holds the id, as nx store delete does.
+            # Best effort: a failing probe leaves the plain answer.
+            try:
+                holder = next(
+                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id) is not None),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
+                holder = None
+            hint = f"; it is in {holder}: pass collection={holder!r}" if holder else ""
+            return f"Not found: {doc_id!r} in {col_name}{hint}"
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): cleanup now runs BEFORE
         # the T3 delete, not after. PgVectorRepository#delete's anti-join
@@ -10469,7 +10540,10 @@ async def nx_answer(
     structured: Annotated[bool, Field(
         description=(
             "Return an envelope dict ({final_text, chunks, plan_id, "
-            "step_count, answer_shape, ...}) instead of a bare string."
+            "step_count, answer_shape, ...}) instead of a bare string. "
+            "The envelope's plan_id is the matched library plan or, on a "
+            "miss, the plan this call grew and saved; 0 when no row exists "
+            "(for example ttl 0, a failed save, or a run that ended before a plan was grown)."
         ),
     )] = False,
     min_confidence: Annotated[float | None, Field(
@@ -10509,7 +10583,9 @@ async def nx_answer(
 
     Returns the final step's output as a string, or a structured envelope
     (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
-    `structured=True`.
+    `structured=True`. The envelope's `plan_id` is the matched library plan
+    or, on a miss, the plan this call grew and saved, and 0 when no row
+    exists (for example ttl 0, a failed save, or a run that ended before a plan was grown).
 
     Constraints:
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and
@@ -12411,6 +12487,12 @@ async def nx_answer(
     # config-driven; 30-day default. Best-effort — a save failure never
     # affects the user's answer, and the T1 cache upsert is a separate
     # best-effort step inside the same guard.
+    #
+    # nexus-wvz8i F14: the save below is synchronous, so the saved row's id is
+    # in hand before the envelope is built. _saved_grown_plan_id carries it to
+    # the return; it stays 0 (the envelope's "no library row" sentinel) when
+    # nothing was saved (ttl 0, a save failure, a library-matched run).
+    _saved_grown_plan_id = 0
     if best.plan_id == 0:
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
@@ -12480,6 +12562,8 @@ async def nx_answer(
                         _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
                     return gid
                 grown_id = _t2_index_write(_do_grow)
+                if isinstance(grown_id, int) and grown_id > 0:
+                    _saved_grown_plan_id = grown_id
                 _log.info(
                     "plan_grow_saved",
                     plan_id=grown_id,
@@ -12538,7 +12622,7 @@ async def nx_answer(
 
     return _result(
         final_text,
-        plan_id=best.plan_id,
+        plan_id=best.plan_id or _saved_grown_plan_id,
         step_count=len(result.steps),
         chunks=envelope_chunks if structured else None,
         step_records=_result_step_records,
@@ -13204,7 +13288,7 @@ def main():
     # rather than a grep (nexus-dgvsz).
     from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
 
-    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp")
+    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp", pid=os.getpid())
 
     log.info(
         "mcp_server_starting",

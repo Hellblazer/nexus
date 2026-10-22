@@ -8,6 +8,7 @@ import math
 import contextvars
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,7 +16,11 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
-from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection_name
+from nexus.corpus import (
+    LOCAL_EMBEDDING_MODELS,
+    embedding_model_for_collection_name,
+    resolve_row_preferred,
+)
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
@@ -606,6 +611,7 @@ def _engine_is_dual(t3: Any) -> bool:
 
 def _threshold_for_collection_model(
     name: str, cfg: dict, *, dual: bool = False,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> float | None:
     """:func:`_threshold_for_collection`, withheld from a collection whose
     own embedding model is a local one (bge, MiniLM).
@@ -617,21 +623,32 @@ def _threshold_for_collection_model(
     is too low to filter on, so a bge collection gets none on any engine, as
     on a keyless engine today.
 
-    A name with NO model token (a legacy two-segment name) cannot say which
-    family holds its vectors. On a non-dual engine it keeps the prefix
-    threshold, as before. On a ``dual`` engine (*dual* true) a bge collection
-    may sit under that name, so it gets NO threshold: the conservative
-    reading, and what "dual" meant before per-family thresholds (nexus-ndr0t
-    S3). Only the absence of a token is covered: a four-segment name whose
-    token is unrecognised (neither a local model nor a known Voyage one)
+    The model comes from *model_of* (:func:`_collection_model_resolver`: the
+    catalog row's ``embedding_model``, the name's token only when no row backs
+    the name; nexus-noayy), and from the name alone when none is passed.
+
+    A collection whose model is UNKNOWN (no row and a legacy two-segment name
+    with no token, or a row without a model) cannot say which family holds its
+    vectors. On a non-dual engine it keeps the prefix threshold, as before. On
+    a ``dual`` engine (*dual* true) a bge collection may sit under that name,
+    so it gets NO threshold: the conservative reading, and what "dual" meant
+    before per-family thresholds (nexus-ndr0t S3). Only the absence of a model
+    is covered: a model that is neither a local one nor a known Voyage one
     still gets the prefix threshold on every engine, dual included.
     """
-    token = _model_token(name)
-    if token in LOCAL_EMBEDDING_MODELS:
+    model = (model_of or _model_token)(name)
+    if model is not None and _is_local_model(model):
         return None
-    if token is None and dual:
+    if model is None and dual:
         return None
     return _threshold_for_collection(name, cfg)
+
+
+def _is_local_model(model: str) -> bool:
+    """True for a local embedder's model value (bge, MiniLM): a token in
+    :data:`LOCAL_EMBEDDING_MODELS`, or a ``bge``-prefixed value (the test the
+    write path applies to a row's model, ``_collection_is_bge``)."""
+    return model in LOCAL_EMBEDDING_MODELS or model.lower().startswith(("bge", "minilm"))
 
 
 def _voyage_thresholds_active(t3: Any) -> bool:
@@ -683,11 +700,58 @@ def _overfetch_multiplier(collection_name: str) -> int:
 def _model_token(name: str) -> str | None:
     """The embedding-model token *name* carries, ``None`` for a name that has
     none. The one name-parse site in this module (the RDR-204 parse census
-    counts them), shared by model grouping and the per-family thresholds."""
+    counts them): the FALLBACK of :func:`_collection_model_resolver`, for a name
+    no catalog row backs."""
     return embedding_model_for_collection_name(name)
 
 
-def _group_collections_by_embedding_model(collections: list[str]) -> list[list[str]]:
+def _collection_model_resolver(
+    t3: Any, collections: "Iterable[str]",
+) -> "Callable[[str], str | None]":
+    """A ``name -> embedding model`` function, row-preferred (nexus-noayy).
+
+    The catalog row's ``embedding_model`` when a row backs the name (a legacy
+    or otherwise non-conformant name whose row says ``voyage-context-3`` is a
+    Voyage collection), else the model token the name carries
+    (:func:`nexus.corpus.resolve_row_preferred`). Shared by model grouping and
+    the per-family thresholds, so a collection is grouped and filtered by the
+    same family.
+
+    The rows are fetched ONCE here, for the distinct *collections*, through the
+    handle's own batched resolver (``_resolve_collection_rows``: the listing the
+    process already caches for the default tenant, one listing per call for any
+    other), never one request per collection per use. A handle with no such
+    resolver (a test fake, an injected stub) has no catalog and resolves by name
+    exactly as before; it never reaches the process-wide row cache.
+    """
+    rows: dict[str, dict | None] = {}
+    fetch = getattr(t3, "_resolve_collection_rows", None)
+    if callable(fetch):
+        try:
+            rows = dict(fetch(list(dict.fromkeys(collections))))
+        except Exception:  # noqa: BLE001 — a row lookup that cannot complete degrades to the name derivation, as resolve_row_preferred does per name; search must not fail on it
+            _log.warning("collection_model_rows_unavailable", exc_info=True)
+    unresolved: set[str] = set()
+
+    def model_of(name: str) -> str | None:
+        model = resolve_row_preferred(
+            name, "embedding_model", _model_token, row_resolver=rows.get,
+        )
+        if model is None and rows.get(name) is None and name not in unresolved:
+            # A name with no token and no row: the family is unknown and the
+            # name derivation is the only answer. With a cold row cache that is
+            # the pre-nexus-noayy behaviour, so say so once per name per search.
+            unresolved.add(name)
+            _log.warning("collection_model_unresolved", collection=name)
+        return model
+
+    return model_of
+
+
+def _group_collections_by_embedding_model(
+    collections: list[str],
+    model_of: "Callable[[str], str | None] | None" = None,
+) -> list[list[str]]:
     """Group *collections* by embedding model (nexus-d9xt2 / nexus-3l6gz).
 
     A combined ``/v1/vectors/search`` call embeds the query string ONCE and
@@ -700,10 +764,13 @@ def _group_collections_by_embedding_model(collections: list[str]) -> list[list[s
     query embedded by only one of the two models. Grouping by model keeps
     every combined call homogeneous.
 
-    A collection whose name does not parse a model token (the RDR-101
-    conformant 4-segment shape) is kept in its OWN singleton group keyed by
-    its raw name -- never guessed into an inferred model group and never
-    silently dropped. Mirrors ``nexus.mcp.core._group_collections_by_model``
+    The model is *model_of*'s answer (:func:`_collection_model_resolver`: the
+    catalog row's ``embedding_model``, so a legacy-named Voyage sibling groups
+    with the Voyage family; nexus-noayy), the name's token when none is passed.
+    A collection whose model cannot be determined (no row, and a name that does
+    not parse a model token: the RDR-101 conformant 4-segment shape) is kept in
+    its OWN singleton group keyed by its raw name -- never guessed into an
+    inferred model group and never silently dropped. Mirrors ``nexus.mcp.core._group_collections_by_model``
     (the same pattern for the catalog-routed combined-query tools); kept as
     a separate copy here rather than a cross-module import to avoid pulling
     the (heavy, MCP-server-shaped) ``nexus.mcp.core`` module into every
@@ -714,7 +781,7 @@ def _group_collections_by_embedding_model(collections: list[str]) -> list[list[s
     """
     groups: dict[str, list[str]] = {}
     for name in collections:
-        key = _model_token(name) or name
+        key = (model_of or _model_token)(name) or name
         groups.setdefault(key, []).append(name)
     return list(groups.values())
 
@@ -877,6 +944,11 @@ def _rerank_candidate_cap(
 #: Collections one per-collection request may name; a larger model group is
 #: sent as several requests and merged client-side.
 _PER_COLLECTION_MAX_COLLECTIONS = 256
+
+#: ``lexical_error_kind`` values (nexus-xd2rc) for which a collection's lexical
+#: arm is run again on ``/hybrid-search``: the route's statement bound or its
+#: fan-out budget stopped it, neither of which bounds that route.
+_LEXICAL_ARM_RETRY_KINDS: frozenset[str] = frozenset({"statement_timeout", "fanout_budget_exhausted"})
 
 #: ``error_kind`` values that mean "this collection's vector width does not
 #: match the query embedder's": the nexus-9tsdf stale-orphan class, handled
@@ -1144,6 +1216,7 @@ def search_cross_corpus(
     deep_candidates: bool = False,
     content_chars: int | None = None,
     per_collection_k_cap: int | None = None,
+    model_of_out: "list[Callable[[str], str | None]] | None" = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1208,6 +1281,12 @@ def search_cross_corpus(
     instance summarising per-collection raw/dropped counts and threshold
     context. Used by the CLI to emit the silent-zero stderr note; the
     engine never emits stderr itself.
+
+    *model_of_out* (nexus-ml9vu), when provided as an empty list, receives the
+    row-preferred ``name -> model`` function this call built for grouping and
+    the thresholds. The caller hands it to :func:`apply_ranking_boosts`
+    (``model_of=``), so the calibration reads the same rows the retrieval did,
+    with no second row read per search.
 
     *deep_candidates* (nexus-abdp2): size every batch with the deep
     per-collection floor, ``max(5, n_results * mult)``. A caller that
@@ -1396,6 +1475,12 @@ def search_cross_corpus(
     dual_engine = (
         apply_thresholds and threshold_override is None and _engine_is_dual(t3)
     )
+    # nexus-noayy: each collection's embedding model, read from its catalog row
+    # (the name's token only when no row backs it), once for this search. Grouping
+    # and the per-family thresholds below share it.
+    model_of = _collection_model_resolver(t3, collections)
+    if model_of_out is not None:
+        model_of_out.append(model_of)
 
     def _threshold_for(col: str) -> float | None:
         """The distance threshold applied to *col*: ``None`` when thresholds
@@ -1406,7 +1491,9 @@ def search_cross_corpus(
             return None
         if threshold_override is not None:
             return threshold_override
-        return _threshold_for_collection_model(col, cfg, dual=dual_engine)
+        return _threshold_for_collection_model(
+            col, cfg, dual=dual_engine, model_of=model_of,
+        )
 
     def _to_result(r: dict, col: str) -> SearchResult:
         """One engine row as a :class:`SearchResult` attributed to *col*."""
@@ -1708,14 +1795,20 @@ def search_cross_corpus(
         a pool of 8, instead of failing the group, and the group is remembered
         for 10 minutes so later searches go straight to per-collection.
 
-        ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
-        the batched path runs it (same batches, same per-batch size). Its rows
-        are unioned in here, threshold-exempt, with the vector copy winning a
-        tie; a lexical row counts toward ``kept`` only (nexus-079ly): ``raw``
-        and ``dropped`` stay the engine's per-collection counts. ``kept`` is
-        the rows the collection holds after the engine's pool-limit cut and
-        the lexical union (before the topic filter, the enrichment cap and the
-        page cut); the pool limit is at least 300 rows, not ``--limit``.
+        ``--lexical`` (nexus-xd2rc): the request asks the engine for each
+        collection's lexical arm too (``lexical: true``), so the leg costs no
+        second round trip. The engine unions those rows in, threshold-exempt
+        and outside its ``limit`` cut, with the vector copy winning a tie, and
+        names each collection's lexical ids. A lexical arm that failed raises
+        :class:`LexicalLegUnavailableError`, as the batched path does. An
+        engine that does not echo ``lexical`` predates it: the leg then runs
+        on ``/hybrid-search`` as the batched path runs it (same batches, same
+        per-batch size), unioned in here the same way. Either way a lexical row
+        counts toward ``kept`` only (nexus-079ly): ``raw`` and ``dropped``
+        stay the engine's per-collection vector counts. ``kept`` is the rows
+        the collection holds after the engine's pool-limit cut and the lexical
+        union (before the topic filter, the enrichment cap and the page cut);
+        the pool limit is at least 300 rows, not ``--limit``.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
             chunks = [
@@ -1766,6 +1859,8 @@ def search_cross_corpus(
                 **rerank_cap_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
+                # nexus-xd2rc: the lexical arms ride the same request; absent keeps it byte-identical.
+                **({"lexical": True} if lexical else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(
@@ -1810,6 +1905,36 @@ def search_cross_corpus(
                 if row_embeddings is not None and row_embeddings[i] is not None:
                     emb_by_col[name][r["id"]] = row_embeddings[i]
         stats = {e["collection"]: e for e in envelope["per_collection"]}
+        served_lexical = lexical and envelope.get("lexical") is True
+        #: Collections whose lexical leg runs on /hybrid-search here: all of them
+        #: against an engine that did not serve it, else those whose lexical arm
+        #: ran out of time (below).
+        hybrid_cols: list[str] = group if lexical and not served_lexical else []
+        if served_lexical:
+            lex_failed = {
+                c: e["lexical_error"] or e["lexical_error_kind"]
+                for c, e in stats.items()
+                if (e["lexical_error"] is not None or e["lexical_error_kind"] is not None)
+                and e["error"] is None and e["error_kind"] is None
+            }
+            # An arm the statement bound or the fan-out budget stopped (it shares
+            # the arm gate and the budget with every vector arm) is run again on
+            # /hybrid-search, outside them, as the leg ran before the route
+            # served it. Any other lexical failure refuses.
+            hybrid_cols = [
+                c for c in group
+                if stats.get(c, {}).get("lexical_error_kind") in _LEXICAL_ARM_RETRY_KINDS
+                and c in lex_failed
+            ]
+            lex_failed = {c: v for c, v in lex_failed.items() if c not in hybrid_cols}
+            if lex_failed:
+                raise LexicalLegUnavailableError(
+                    f"the lexical leg failed for {sorted(lex_failed)}: "
+                    f"{next(iter(lex_failed.values()))}. Refusing rather than returning "
+                    "vector-only rows, which would look like an answer while the leg you "
+                    "asked for never ran. The vector search itself succeeded, so retrying "
+                    "without --lexical will return results."
+                )
 
         parts = []
         for col in group:
@@ -1832,6 +1957,10 @@ def search_cross_corpus(
             else:
                 raw_count, dropped = stat["raw_count"], stat["dropped"]
                 min_raw, min_dropped = stat["min_raw_distance"], stat["min_dropped_distance"]
+            lexical_ids: set[str] = set()
+            if served_lexical and stat is not None:
+                returned = set(stat["lexical_ids"])
+                lexical_ids = {x.id for x in results if x.id in returned}
             parts.append({
                 "col": col,
                 "error": None,
@@ -1843,17 +1972,17 @@ def search_cross_corpus(
                 "min_dropped_distance": min_dropped,
                 "min_raw_distance": min_raw,
                 "rerank_meta": rerank_meta,
-                "lexical_ids": set(),
+                "lexical_ids": lexical_ids,
                 "embeddings": emb_by_col[col],
             })
 
-        if lexical:
-            desired = _desired_candidate_count(group, n_results, deep=True)
-            if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
-                n_batches = min(len(group), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
-                lex_batches = _chunked_collections(group, n_batches)
+        if hybrid_cols:
+            desired = _desired_candidate_count(hybrid_cols, n_results, deep=True)
+            if desired > QUOTAS.MAX_QUERY_RESULTS and len(hybrid_cols) > 1:
+                n_batches = min(len(hybrid_cols), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
+                lex_batches = _chunked_collections(hybrid_cols, n_batches)
             else:
-                lex_batches = [group]
+                lex_batches = [hybrid_cols]
 
             def _lex_batch(cols: list[str]) -> tuple[list[str], list[dict]]:
                 per_k = min(_desired_candidate_count(cols, n_results, deep=True),
@@ -1884,7 +2013,7 @@ def search_cross_corpus(
                     part["results"].append(_to_result(r, col))
             for col, part in live.items():
                 part["kept"] = len(part["results"])
-                part["lexical_ids"] = {
+                part["lexical_ids"] = part["lexical_ids"] | {
                     x.id for x in part["results"] if x.id in lexical_by_col[col]
                 }
         return parts
@@ -1895,8 +2024,10 @@ def search_cross_corpus(
     # combined call instead of one call each. The engine's plain search
     # route requires exact dimension homogeneity within a call
     # (PgVectorRepository#searchWithTokens: "mixed dimensions in one
-    # search call"), so a name that doesn't parse a model token stays its
-    # own singleton group -- never guessed into an inferred group.
+    # search call"), so a collection whose model is unknown (no catalog row,
+    # and a name with no model token) stays its own singleton group -- never
+    # guessed into an inferred group. The model is the row's, not the name's
+    # (nexus-noayy).
     #
     # Ordering note: cross-GROUP order in the final merge below is now by
     # each model's first occurrence in *collections* (all of one group's
@@ -1926,7 +2057,7 @@ def search_cross_corpus(
     pc_partials: list[dict] = []
     fallback_collections = collections
     if per_collection_route:
-        route_groups = _group_collections_by_embedding_model(collections)
+        route_groups = _group_collections_by_embedding_model(collections, model_of)
         group_workers = min(8, len(route_groups))
         if group_workers <= 1:
             group_parts = [_search_group_per_collection(g) for g in route_groups]
@@ -1943,7 +2074,7 @@ def search_cross_corpus(
     batches: list[list[str]] = [[c] for c in fallback_collections if c in poisoned_snapshot]
     healthy_collections = [c for c in fallback_collections if c not in poisoned_snapshot]
 
-    for group in _group_collections_by_embedding_model(healthy_collections):
+    for group in _group_collections_by_embedding_model(healthy_collections, model_of):
         # Sizing (nexus-d9xt2 review/critique fold-in): see
         # _desired_candidate_count's docstring -- scaled by len(group) as
         # well as n_results*mult, so a large group is no longer starved
@@ -2294,6 +2425,7 @@ def apply_ranking_boosts(
     tuning: TuningConfig | None = None,
     catalog: Any | None = None,
     window: int | None = None,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Apply the CLI's post-retrieval ranking boosts — hybrid scoring
     (RDR-frecency) then bibliographic quality boost (RDR-055 E2) — and
@@ -2341,6 +2473,12 @@ def apply_ranking_boosts(
     and a deeper pool only extends the tail. A pool of *window* rows or fewer
     is the whole window: the same scores as ``window=None``.
 
+    *model_of* (nexus-ml9vu) is the row-preferred ``name -> embedding model``
+    function the retrieval already built (:func:`search_cross_corpus`'s
+    ``model_of_out``), so each collection's calibration factor follows its
+    catalog row's model, as grouping and the thresholds do, rather than the
+    model its NAME implies. Omitted, the factors come from the name alone.
+
     Does NOT apply, by design, to result rows that never carry the
     metadata these boosts read:
 
@@ -2371,6 +2509,7 @@ def apply_ranking_boosts(
         "frecency_weight": _tuning.frecency_weight,
         "file_size_threshold": _tuning.file_size_threshold,
         "catalog": catalog,
+        "model_of": model_of,
     }
     if window is None:
         return apply_quality_boost(apply_hybrid_scoring(results, **scoring_kwargs))
@@ -2380,7 +2519,7 @@ def apply_ranking_boosts(
     # shallower one, and the order today's page is cut in when the boosts do
     # not reorder it. The collection/id tiebreak makes the cut, and every score
     # tie below, a function of the rows and not of the order they arrived in.
-    by_distance = order_by_calibrated_distance(results)
+    by_distance = order_by_calibrated_distance(results, model_of=model_of)
     head, tail = by_distance[:window], by_distance[window:]
     head = apply_quality_boost(apply_hybrid_scoring(head, **scoring_kwargs))
     if tail:

@@ -34,9 +34,9 @@
 #   macOS   sandbox-exec with outbound network denied except localhost and unix sockets.
 # A host without the tool, or where the tool cannot do its job (checked first with a connect to 192.0.2.1 that
 # the witness must flag or refuse), FAILS the run. Nothing is skipped. The proxy tolerates one request, the
-# PyPI probe nx doctor makes at the end of each setup run, at most once per run. The strace check tolerates one
-# link-local address, 169.254.169.254:80, four times: the engine's AWS metadata probe at start (setup_journey.py
-# LINK_LOCAL_PROBE; not routed off the host). Any other address, or a fifth probe, fails.
+# PyPI probe nx doctor makes at the end of each setup run, at most once per run. The strace check tolerates no
+# address at all: any connect that is not loopback, a unix socket or netlink fails, the engine's old probe of the
+# AWS metadata address 169.254.169.254:80 included (nexus-17jvq: DJL's telemetry call, fixed in the engine).
 #
 # Exit 0 and the last line "SETUP JOURNEY PASSED" is the pass.
 set -euo pipefail
@@ -156,7 +156,7 @@ if ${WITNESS_PREFIX[@]+"${WITNESS_PREFIX[@]}"} env -i HOME="$BUILD_HOME" PATH="/
     "$WORK/client/bin/python" -I "$DRIVER" "${ARGS[@]}"; then
     if [ "$WITNESS" = strace ]; then
         summary="$(_py --check-trace "$TRACE")" || { echo "$summary" >&2; _fail "the journey connected to an address outside this machine (above), or the trace is empty"; }
-        echo "== network witness: strace ${summary%%$'\n'*}: every connect was loopback, a unix socket or netlink, bar the tolerated engine probe"
+        echo "== network witness: strace ${summary%%$'\n'*}: every connect was loopback, a unix socket or netlink"
     elif [ "$WITNESS" = sandbox-exec ]; then
         echo "== network witness: sandbox-exec refused every non-local connect; the journey ran to the end"
     fi

@@ -121,6 +121,22 @@ public final class TaxonomyRepository {
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return;
+        // nexus-i15oc: a taxonomy row filed under a retired (superseded) name strands exactly as a chunk
+        // does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
+        CollectionRegistry.requireWritable(ctx, tenant, collection);
+    }
+
+    /**
+     * {@link #ensureCollectionRegistered} for the writers that legitimately file rows under a tombstone
+     * (nexus-i15oc): the fidelity-preserving {@code /import/*} verbs (the same stance as the manifest
+     * {@code UPSERT_IMPORT}: an import carries tombstoned collections as they were) and the rename's re-home
+     * onto its target. The target stays plain because a rename onto an EMPTY tombstone revives it: renaming
+     * B back onto A (the round trip that undoes a rename) lands on the tombstone the first rename left at A.
+     * The SOURCE needs no check, it is only read. Pinned by {@code TaxonomySupersededWriteTest}.
+     */
+    private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
+                                                                     String collection) {
+        if (collection == null || collection.isBlank()) return;
         CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
@@ -801,7 +817,9 @@ public final class TaxonomyRepository {
         // Fail loud BEFORE opening a transaction — an unresolvable dim means no
         // per-dim table exists to query at all (RDR-204 Phase 2, bead nexus-ft04v.16:
         // the row's own dimension via CollectionRegistry, never a name-segment parse).
-        CollectionRow collectionRow = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        // nexus-i15oc: assignments filed under a retired (superseded) name strand like chunks do; refused 409
+        // naming the successor, before any SQL.
+        CollectionRow collectionRow = CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
         int dim = collectionRow.dimension();
         // RDR-225: the functions and the existence probe read the one (model, tenant) leaf.
         String model = collectionRow.embeddingModel();
@@ -1088,6 +1106,7 @@ public final class TaxonomyRepository {
         // consistent with its persisting sibling even though this route has
         // no existence-probe text comparison of its own to protect.
         List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
+        // Read-only preview: stays plain lookup (nexus-i15oc), a tombstone answers like any other row.
         CollectionRow collectionRow = CollectionRegistry.lookup(tenantScope, tenant, collection);
         int dim = collectionRow.dimension();
         String model = collectionRow.embeddingModel();
@@ -1201,6 +1220,7 @@ public final class TaxonomyRepository {
         // Fail loud BEFORE opening a transaction, same discipline as
         // assignFromChashes: an unresolvable dim means no per-dim function
         // exists to call at all.
+        // Read-only listing: stays plain lookup (nexus-i15oc); the assignment write it feeds is the refusing half.
         int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-iygza rework round: bound this read the same way
@@ -1507,7 +1527,7 @@ public final class TaxonomyRepository {
             // columns are re-pointed at it (topics/taxonomy_meta carry NOT VALID RESTRICT
             // FKs to catalog_collections; topic_assignments' FK is ON UPDATE CASCADE but
             // the child UPDATE to newCol still requires the value to exist in the registry).
-            ensureCollectionRegistered(ctx, tenant, newCol);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newCol);
             int topics = ctx.update(TOPICS)
                 .set(TOPICS.COLLECTION, newCol)
                 .where(TOPICS.COLLECTION.eq(oldCol))
@@ -1921,7 +1941,7 @@ public final class TaxonomyRepository {
         // (that clause only applies to GENERATED ALWAYS identity columns).
         OffsetDateTime createdAtTs = parseTsStrict(createdAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, collection);
             // nexus-q2ign: this INSERT arbitrates TOPICS.ID only, so a root topic
             // (parent_id null) whose (collection, label) already lives at a
             // DIFFERENT id must be refused before the write, not left to raise a
@@ -1994,7 +2014,7 @@ public final class TaxonomyRepository {
             ? parseTsStrict(assignedAt) : null;
         tenantScope.withTenant(tenant, ctx -> {
             // RDR-156 P0.2: ensure collection is registered before the assignment write
-            ensureCollectionRegistered(ctx, tenant, sourceCollection);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, sourceCollection);
             // GREATEST(COALESCE(existing, -1.0), COALESCE(EXCLUDED, -1.0)) +
             // CASE WHEN EXCLUDED.assigned_by = 'projection' referencing the existing table row:
             // Postgres-specific; retained as DSL.field() fragments per spec.
@@ -2064,7 +2084,7 @@ public final class TaxonomyRepository {
         OffsetDateTime lastDiscoverAtTs = (lastDiscoverAt != null && !lastDiscoverAt.isBlank())
             ? parseTsStrict(lastDiscoverAt) : null;
         tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, collection);
             // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
             // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
             ctx.insertInto(TAXONOMY_META,
@@ -2140,7 +2160,7 @@ public final class TaxonomyRepository {
             String c = optS(r, "collection");
             if (c != null) collections.add(c);
         }
-        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+        for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
         // Dedupe on id (the conflict key), last occurrence wins. Sort by id (the
         // ON CONFLICT key) so concurrent batches lock TOPICS rows in one global order
@@ -2207,7 +2227,7 @@ public final class TaxonomyRepository {
             String c = optS(r, "source_collection");
             if (c != null) collections.add(c);
         }
-        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+        for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
         // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this
         // call. Sort by (doc_id, topic_id) so concurrent batches lock TOPIC_ASSIGNMENTS
@@ -2293,7 +2313,7 @@ public final class TaxonomyRepository {
     private static int importMetaBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
         var collections = new java.util.LinkedHashSet<String>();
         for (var r : rows) collections.add(reqS(r, "collection"));
-        for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
+        for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
 
         // Conflict key: (tenant_id, collection). Sort by collection so concurrent
         // batches lock TAXONOMY_META rows in one global order — deadlock avoidance,

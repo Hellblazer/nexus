@@ -10,7 +10,7 @@ package dev.nexus.service.db;
  * {@code TenantReset}. Only reachable when the route is enabled ({@code NX_TEST_TENANT_RESET_ROUTE=1}); no
  * production request path can raise it.
  *
- * <p>Deliberately NOT a {@link TupleException}: those twelve are the typed errors a released client maps to a
+ * <p>Deliberately NOT a {@link TupleException}: those thirteen are the typed errors a released client maps to a
  * {@code TupleError} class and the tuple-space doc lists ({@code test_tuple_error_table_pin.py} pins both). This one
  * reaches only the abandoned request of a reset test, so it stays out of the client's error vocabulary; a client
  * that did see it would read an unknown error body.

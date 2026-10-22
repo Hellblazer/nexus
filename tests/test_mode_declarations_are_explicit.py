@@ -690,7 +690,9 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 1
 # rationale is beside each entry in conftest.py.
 # 65 -> 64 (nexus-z0o2p.25, RDR-223 P3.3): the TestIsSameModelPassthrough entry
 # was deleted with db/reconcile's _is_same_model_passthrough and its tests.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 66
+# 66 -> 65 (nexus-50uw6, RDR-210 P4.1): the pin that held the single-name read
+# resolver to one sibling was replaced by tests that spell no per-type token.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 65
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

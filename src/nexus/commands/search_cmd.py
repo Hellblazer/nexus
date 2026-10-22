@@ -483,6 +483,10 @@ def search_cmd(
     except Exception:  # noqa: BLE001 — catalog optional for search; degrade to None on any failure
         _search_catalog = None
 
+    #: nexus-ml9vu: the row-preferred model resolver the retrieval builds, handed
+    #: to the boosts so the calibration reads the same rows (no second read).
+    model_of_out: list = []
+
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
@@ -502,6 +506,7 @@ def search_cmd(
                 # nexus-abdp2: --path and --max-file-chunks filter the pool
                 # after retrieval, so they need the deep per-collection floor.
                 deep_candidates=resolved is not None or max_file_chunks is not None,
+                model_of_out=model_of_out,
             )
         return raw
 
@@ -630,6 +635,7 @@ def search_cmd(
     results = apply_ranking_boosts(
         results, hybrid=hybrid, tuning=tuning, catalog=_scoring_cat,
         window=_boost_window,
+        model_of=model_of_out[-1] if model_of_out else None,
     )
     # nexus-zdzm5 (surface A A8): scoring logs this at debug; a CLI user who
     # typed --hybrid gets a plain note instead of a raw structlog line.

@@ -17,6 +17,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 
@@ -260,6 +261,65 @@ public final class CombinedWriteService {
         // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
         if (metadataMode.merge()) response.put("metadata_merge", true);
         return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 1 (bead nexus-0khi2) — move documents from {@code sourceCollection} into its
+     * model sibling {@code targetCollection}. Engine-internal: no HTTP route calls this, and the public
+     * routes are unchanged. The re-embed job's call.
+     *
+     * <p>The chunks are embedded OUTSIDE any transaction with the TARGET's model, through the same
+     * dedupe and existence partition as {@link #writeManyCombined}: a chash the target already holds
+     * with identical text is not embedded again, and a chunk two documents share is embedded once. Then
+     * ONE transaction per document writes the target chunks, replaces the document's manifest rows with
+     * rows naming the target, sets {@code physical_collection} to the target and re-homes the document's
+     * aspect, queue and highlight rows ({@link CatalogRepository#writeManifestMany(String, List, String,
+     * Map, boolean, Map, CatalogRepository.DocumentMove)}). A document that is no longer what the caller
+     * read is left where it is and reported in {@code failed} with the reason {@code
+     * move_precondition_failed}; the rest of the batch is unaffected.
+     *
+     * @param chunks          {@code {chash, text, metadata}} per chunk the documents' rows name, as read
+     *                        from the source
+     * @param docs            {@code {doc_id, rows}} per document, the rows as they will stand in the target
+     * @param expectedChashes per {@code doc_id}, the manifest chashes in position order the caller read
+     * @throws IllegalArgumentException when the two collections are not siblings: same content type and
+     *         owner, different embedding model
+     */
+    public CombinedWriteResult moveDocsCombined(String tenant, String sourceCollection, String targetCollection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, List<String>> expectedChashes) {
+        requireModelSiblings(tenant, sourceCollection, targetCollection);
+        CatalogRepository.DocumentMove move = new CatalogRepository.DocumentMove(sourceCollection, expectedChashes);
+        // a caller bug is refused before anything is embedded or written
+        move.requireRowsMatchExpected(docs);
+        ResolvedBatch batch = resolveChunks(tenant, targetCollection, chunks, false, MetadataMode.REPLACE);
+        Map<String, Object> response = catalogRepo.writeManifestMany(tenant, docs, targetCollection, null, false,
+            batch.resolved(), move);
+        response.put("chunks_deduped", batch.deduped());
+        response.put("embed_skipped", batch.skipped());
+        response.put("embed_embedded", batch.embedded());
+        return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    private static boolean isUnset(String v) {
+        return v == null || v.isBlank();
+    }
+
+    /** A move goes between model siblings only: same content type and owner, a different embedding model. */
+    private void requireModelSiblings(String tenant, String source, String target) {
+        if (source == null || source.isBlank() || target == null || target.isBlank()) {
+            throw new IllegalArgumentException("a document move needs a source and a target collection");
+        }
+        CollectionRow from = CollectionRegistry.lookup(tenantScope, tenant, source);
+        CollectionRow to = CollectionRegistry.lookup(tenantScope, tenant, target);
+        // Null (or blank) content type or owner on either side is no sibling: two nulls are equal to
+        // Objects.equals, and a move between collections whose owner nobody knows is not a model move.
+        if (isUnset(from.contentType()) || isUnset(from.ownerId()) || isUnset(to.contentType()) || isUnset(to.ownerId())
+                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
+                || Objects.equals(from.embeddingModel(), to.embeddingModel())) {
+            throw new IllegalArgumentException("a document move goes between model siblings: " + source
+                + " and " + target + " are not the same content type and owner under different models");
+        }
     }
 
     /**
@@ -517,7 +577,7 @@ public final class CombinedWriteService {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
-        CollectionRow row = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        CollectionRow row = CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
         if (embeddingModel == null || embeddingModel.isBlank()) {
             throw new IllegalArgumentException("'embedding_model' is required when a chunk carries an"
                 + " 'embedding' (chunks[" + first + "] does); collection '" + collection
@@ -578,7 +638,9 @@ public final class CombinedWriteService {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
-        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        // nexus-mp8ys: a retired name (superseded_by set) is refused here, before the registration
+        // check, the embedder and every write, naming the successor; see CollectionSupersededException.
+        int dim = CollectionRegistry.lookupWritable(tenantScope, tenant, collection).dimension();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
@@ -587,6 +649,8 @@ public final class CombinedWriteService {
         // instead of the RDR-156-era auto-stub. A combined write against an
         // unregistered collection now fails loud (UnregisteredCollectionException,
         // mapped to 422) rather than silently registering a blank-attribute row.
+        // nexus-i15oc: plain on purpose. The lookupWritable above is the superseded refusal and runs just
+        // before this with no round trip between; a cache hit (isKnown) is always a live row.
         ensureCollectionRegistered(tenant, collection);
 
         List<Map<String, Object>> src = chunks != null ? chunks : List.of();

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import dataclasses
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -120,7 +121,9 @@ class TupleRow:
     §Technical Design "Operations"). ``keys`` / ``dims`` are plain
     string-valued maps. ``claim_state`` is one of ``None`` (never
     claimed), ``"claimed"`` or ``"dead"`` — the engine's own vocabulary,
-    not re-typed here. Every ``*_at`` / ``lease_until`` field is an
+    not re-typed here. A reader-facing ``"lapsed"`` (a ``claimed`` row
+    whose lease has passed) exists only as :meth:`effective_claim_state`;
+    this field always holds the engine's value. Every ``*_at`` / ``lease_until`` field is an
     ISO-8601 timestamp string or ``None``, exactly as the wire sends it —
     parsing is the caller's job, not this record's.
 
@@ -149,6 +152,24 @@ class TupleRow:
     entirely -- :class:`~nexus.mcp.channel.ChannelWaiter` uses exactly
     this to refuse to run against such an engine, mirroring how it
     already refuses on a 404 from ``/wait`` itself.
+
+    ``sender_session`` (bead nexus-ztwp4, F3 step 2) is the session id the
+    engine stamped on ``out`` from the writer's minted T1 session token, or
+    ``None`` for no stamp: no live minted session at write time, a reply row
+    written by an engine before nexus-g2ckl (v0.1.163), or a row that predates
+    the column. A ``None`` is
+    ambiguous on its own: an engine that renders no such key gives no key at
+    all. ``sender_session_known`` tells the two apart -- ``True`` when the
+    engine rendered the key (so ``None`` means "no stamp"), ``False`` when it
+    did not (so ``None`` means "this engine cannot say"). A row built by hand
+    defaults to ``False``: unknown is the safe reading.
+
+    ``claimed_at`` (bead nexus-x907o) is when the row's CURRENT claim started:
+    set by the claim, never moved by a renew, cleared with the claim. ``None``
+    covers an unclaimed row, a claim made before the engine carried the column,
+    and an engine that renders no such key; a reader that needs the start and
+    finds ``None`` on a claimed row must treat it as unknown and use another
+    source.
     """
 
     id: str
@@ -167,6 +188,33 @@ class TupleRow:
     created_at: str | None
     announced_at: str | None = None
     announce_count: int | None = 0
+    sender_session: str | None = None
+    sender_session_known: bool = False
+    claimed_at: str | None = None
+
+    def effective_claim_state(self, now: datetime | None = None) -> str | None:
+        """``claim_state`` as a reader should see it: a claim whose
+        ``lease_until`` has passed is ``"lapsed"``, not ``"claimed"``.
+
+        The engine reclaims a lapsed lease lazily (the next claim attempt
+        or the sweep), so until then the stored row still says
+        ``claimed`` with its stale claimant and ``lease_until``. This is
+        computed at read time and changes nothing stored: ``claim_state``
+        itself stays the engine's own value, because the waiter, the
+        doctor rows and the drain hook compare it, and ``claimant`` /
+        ``lease_until`` stay on the row, so the old holder is still
+        visible. A ``claimed`` row with no parseable ``lease_until`` stays
+        ``claimed`` -- "cannot tell" is not "lapsed".
+        """
+        if self.claim_state != "claimed" or not self.lease_until:
+            return self.claim_state
+        try:
+            lease = datetime.fromisoformat(self.lease_until.replace("Z", "+00:00"))
+        except ValueError:
+            return self.claim_state
+        if lease.tzinfo is None:
+            lease = lease.replace(tzinfo=UTC)
+        return "lapsed" if lease <= (now or datetime.now(UTC)) else self.claim_state
 
 
 @dataclass(frozen=True)
@@ -243,6 +291,11 @@ class SubspaceCensus:
     expired_unpurged: int
     oldest_created_at: str | None
     newest_created_at: str | None
+    #: Bead nexus-5fpkh: claims whose lease has passed but the lazy reclaim
+    #: has not yet released -- a SUBSET of ``claimed`` (``claimed`` keeps
+    #: counting them, as before). ``0`` from an engine that predates the
+    #: field, which cannot tell and so reports none.
+    lapsed: int = 0
 
 
 @dataclass(frozen=True)

@@ -37,12 +37,15 @@ T2 nexus_rdr/208-decision-gate-2026-09-14):
 default is the tuple-watch session marker for this MCP server's claude
 ancestor (`nexus.session_marker._read_session_marker`, written synchronously
 by SessionStart on every source -- see that module's own docstrings),
-falling back to `NX_T1_SESSION_ID`. `resolve_active_session_id()` and a
-bare `NX_T1_SESSION_ID` read are deliberately NOT used here: the former
-returns the spawn-time `CLAUDE_CODE_SESSION_ID`, stale after an
-in-process `/clear`; the latter lags the T2 re-lease mint. A caller
-resolving neither is refused rather than stamping a `from` that might
-already be stale.
+falling back to `NX_T1_SESSION_ID`, then `NX_SESSION_ID` (the one name a
+host with no Claude Code session can set in a self-configured MCP server
+entry; nexus-zl1jv). `NX_SESSION_ID` must be a UUID, checked like
+`from_address`. `resolve_active_session_id()` and a bare `NX_T1_SESSION_ID`
+read are deliberately NOT used here: the former returns the spawn-time
+`CLAUDE_CODE_SESSION_ID`, stale after an in-process `/clear`; the latter
+lags the T2 re-lease mint. The marker sits above both variables. A caller
+resolving none is refused rather than stamping a `from` that might already
+be stale.
 """
 from __future__ import annotations
 
@@ -172,6 +175,149 @@ def validate_from_address(value: str) -> str:
     )
 
 
+def from_address_not_own_message(value: str, own_ids: list[str]) -> str:
+    """Refusal for a session-shaped ``from_address`` that is not one of the
+    calling server's own session ids (F3 step 1, nexus-2mv7y, JDR-002).
+    Pinned by an equality test."""
+    own = ", ".join(i[:64] for i in own_ids)
+    return (
+        f"from_address {value[:64]!r} is a session id but not this server's own "
+        f"({own}): `from` names the sender, so a session id there must be the "
+        "sending session's own. The usual slip is putting the recipient's id here; "
+        "it belongs in `to`. Omit from_address to send as this session; a subagent "
+        "passes its own agent id"
+    )
+
+
+def _own_session_ids(state_dir: Path | None, claude_pid: int | None) -> list[str]:
+    """The ids this server may send as: the tuple-watch session marker, then
+    the environment tier :func:`resolve_env_session_id` answers with
+    (``NX_T1_SESSION_ID``, else ``NX_SESSION_ID``), without duplicates. The
+    marker and ``NX_T1_SESSION_ID`` can differ across a ``/clear`` handoff
+    (JDR-001), and both are this session's. ``NX_SESSION_ID`` counts only
+    when ``NX_T1_SESSION_ID`` is unset, as everywhere else: a ``claude -p``
+    child carries its parent's id there and must not send as the parent. A
+    non-UUID environment value raises even beside a valid marker, which is
+    stricter than the default path (that one returns the marker first):
+    fail closed when a ``from_address`` is being checked."""
+    from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+
+    sd = state_dir if state_dir is not None else _nx_config.nexus_config_dir()
+    pid = claude_pid if claude_pid is not None else find_immediate_claude_pid()
+    own: list[str] = []
+    for c in ((_read_session_marker(sd, pid) if pid else None) or "", resolve_env_session_id()):
+        if c and looks_like_session_id(c) and c not in own:
+            own.append(c)
+    return own
+
+
+def check_from_address_is_own(
+    value: str, *, state_dir: Path | None = None, claude_pid: int | None = None,
+) -> str:
+    """``mailbox_send``'s ``from_address`` check (F3 step 1, nexus-2mv7y).
+
+    The shape check of :func:`validate_from_address` runs first. An agent
+    id passes: a subagent shares its parent's server and names itself that
+    way. A session id must equal one of this server's own ids, compared as
+    UUIDs so case and hyphenation do not matter, and the own id's spelling
+    is returned. With no own id resolvable there is nothing to compare and
+    it passes, in canonical spelling so a reply's `to` matches: the account-plugin server Claude Desktop and Cowork start,
+    and a Claude Code server whose T1 has not published its id yet. The
+    tenant is still the only authenticated identity (JDR-002): this stops a
+    confused model, not a hostile caller.
+    """
+    validate_from_address(value)
+    if looks_like_agent_id(value):
+        return value
+    own = _own_session_ids(state_dir, claude_pid)
+    if not own:
+        return str(uuid.UUID(value))
+    wanted = uuid.UUID(value)
+    for o in own:
+        if uuid.UUID(o) == wanted:
+            return o
+    raise DirectoryResolutionError(from_address_not_own_message(value, own))
+
+#: The refusal text for an unresolvable session id INSIDE Claude Code
+#: (nexus-zl1jv). There the session id exists but T1 has not published it
+#: yet: the startup mint was deferred (the storage service was down), or
+#: the tuple-watch marker is missing. Any T1 call retries the mint and
+#: writes ``NX_T1_SESSION_ID``. Pinned by an equality test.
+NO_SESSION_ID_IN_CLAUDE_CODE_MESSAGE: str = (
+    "no resolvable session id: T1 is not up yet in this Claude Code "
+    "session, so it has published no session id; make any scratch call or "
+    "run `nx doctor --check-t1`, then retry"
+)
+
+#: The refusal text for an unresolvable session id OUTSIDE Claude Code
+#: (a host that sets neither variable). Pinned by an equality test.
+NO_SESSION_ID_OUTSIDE_CLAUDE_CODE_MESSAGE: str = (
+    "no resolvable session id: NX_T1_SESSION_ID and NX_SESSION_ID are "
+    "unset; set NX_SESSION_ID to a UUID, unique per server, in a "
+    "self-configured MCP server entry. The account-plugin server (Claude "
+    "Desktop, Cowork) cannot set it; use memory_put to carry notes there"
+)
+
+
+def no_session_id_message() -> str:
+    """The ONE refusal for an unresolvable session id (nexus-zl1jv).
+
+    ``mailbox_send`` and ``tuple_subscribe``/``tuple_unsubscribe``/
+    ``tuple_subscriptions`` all raise it, so no site spells its own text.
+    The wording depends on the host: inside Claude Code the remedy is to
+    bring T1 up, outside it is to set ``NX_SESSION_ID``. T1 keeps its own
+    message, which names the variables T1 reads.
+    """
+    from nexus.session import started_by_claude_code  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+
+    if started_by_claude_code():
+        return NO_SESSION_ID_IN_CLAUDE_CODE_MESSAGE
+    return NO_SESSION_ID_OUTSIDE_CLAUDE_CODE_MESSAGE
+
+
+def invalid_env_session_id_message(value: str) -> str:
+    """Refusal for an ``NX_SESSION_ID`` that is not a UUID.
+
+    A peer replies to the sender address, and ``resolve_send_address``
+    reads anything that is not a session id or agent id as a NAME, so a
+    non-UUID sender is unreachable.
+    """
+    return (
+        f"NX_SESSION_ID {value[:64]!r} is not a UUID: mail and subscriptions "
+        "need a session id shaped like 123e4567-e89b-12d3-a456-426614174000, "
+        "because a peer replies to the sender and reads any other shape as a "
+        "name. Set NX_SESSION_ID to a UUID, unique per server"
+    )
+
+
+def resolve_env_session_id() -> str:
+    """The environment tiers of the tuple tools' session-id chain.
+
+    ``NX_T1_SESSION_ID`` (the MCP lifespan's T1 mint writes it), then
+    ``NX_SESSION_ID`` (the one a host with no Claude Code session names;
+    T1 resolves it too). Empty string when neither is set. The marker tier
+    sits above both and is read by :func:`resolve_default_from`.
+
+    Whichever tier answers gets the same shape check as ``from_address`` (a
+    UUID), and a value that fails raises :class:`DirectoryResolutionError`.
+    ``NX_T1_SESSION_ID`` is checked too: the T1 mint copies the resolved id
+    into it verbatim, so a non-UUID ``NX_SESSION_ID`` reaches this function
+    through that tier on any healthy service, not only when the mint was
+    deferred. Every other writer of ``NX_T1_SESSION_ID`` (Claude Code's
+    session id, ``claude -p`` dispatch's ``uuid4``) writes a UUID.
+    """
+    value = os.environ.get("NX_T1_SESSION_ID", "").strip() or os.environ.get(
+        "NX_SESSION_ID", ""
+    ).strip()
+    if not value:
+        return ""
+    if not looks_like_session_id(value):
+        raise DirectoryResolutionError(invalid_env_session_id_message(value))
+    return value
+
+
 def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | None = None) -> str:
     """Default `from` for `mailbox_send` when no `from_address` is given.
 
@@ -190,11 +336,8 @@ def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | Non
     if marker:
         return marker
 
-    env_id = os.environ.get("NX_T1_SESSION_ID", "").strip()
+    env_id = resolve_env_session_id()
     if env_id:
         return env_id
 
-    raise DirectoryResolutionError(
-        "no tuple-watch session marker and NX_T1_SESSION_ID is unset; "
-        "refusing to send with an unresolvable from"
-    )
+    raise DirectoryResolutionError(no_session_id_message())

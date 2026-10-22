@@ -374,6 +374,24 @@ _build_lease_claim() {
     mkdir "$dir" && (set -C; printf '%s\n' "$$" > "$dir/pid") 2>/dev/null
 }
 
+# _build_lease_try_claim <dir> — _build_lease_claim, telling contention from a
+# filesystem error: 0 claimed, 1 the directory exists (held, or being claimed),
+# 2 it could not be created; prints the last claim's stderr. A claim that failed
+# with the directory now absent is either a filesystem error or a holder that
+# released between our mkdir's EEXIST and the check (nexus-etut9: develop CI
+# 39780138434 read that as an error and exited 74). The error repeats and the
+# release does not, so the claim is tried again before it is called an error.
+_BUILD_LEASE_CLAIM_ATTEMPTS=3
+_build_lease_try_claim() {
+    local dir="$1" err n
+    for (( n = 1; n <= _BUILD_LEASE_CLAIM_ATTEMPTS; n++ )); do
+        err="$(_build_lease_claim "$dir" 2>&1)" && return 0
+        [[ -d "$dir" ]] && { printf '%s' "$err"; return 1; }
+    done
+    printf '%s' "$err"
+    return 2
+}
+
 # The phrase build_lease_acquire's two "lost the race" refusals carry, and the
 # number of immediate retries build_lease_acquire_wait gives one (nexus-t6t9f).
 # A lost race is not a held lease: the winner of a reclaim is a moment from
@@ -440,12 +458,13 @@ build_lease_acquire() {
     # ENOSPC, missing parent) can be told apart from plain EEXIST below
     # (review finding: reporting a permission/ENOSPC failure as "held by
     # <pid>" would be actively misleading — there is no holder at all).
-    local mkdir_err
-    if mkdir_err="$(_build_lease_claim "$dir" 2>&1)"; then
+    local mkdir_err claim_rc=0
+    mkdir_err="$(_build_lease_try_claim "$dir")" || claim_rc=$?
+    if (( claim_rc == 0 )); then
         _build_lease_populate "$dir" "$holder_label" "$command_line"
         return 0
     fi
-    if [[ ! -d "$dir" ]]; then
+    if (( claim_rc == 2 )); then
         echo "build_lease_acquire: ERROR — could not create build lease '$name' at $dir, and not because it already exists: $mkdir_err. This looks like a filesystem or permission problem, not lock contention — fix that before retrying." >&2
         return 74
     fi
@@ -498,12 +517,14 @@ build_lease_acquire() {
     fi
     rm -rf "$capture" 2>/dev/null
 
-    if mkdir_err="$(_build_lease_claim "$dir" 2>&1)"; then
+    claim_rc=0
+    mkdir_err="$(_build_lease_try_claim "$dir")" || claim_rc=$?
+    if (( claim_rc == 0 )); then
         _build_lease_populate "$dir" "$holder_label" "$command_line"
         _build_lease_log_event "$name" stale_reclaimed "${_BUILD_LEASE_WAITED:-0}" "$existing_pid" "$existing_label"
         return 0
     fi
-    if [[ ! -d "$dir" ]]; then
+    if (( claim_rc == 2 )); then
         echo "build_lease_acquire: ERROR — could not re-create build lease '$name' at $dir after reclaiming it, and not because someone else claimed it first: $mkdir_err. This looks like a filesystem or permission problem, not lock contention." >&2
         return 74
     fi

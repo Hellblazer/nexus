@@ -76,7 +76,7 @@ import java.util.Optional;
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
- *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, lapsed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
  *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
  *                                        refused_claimant, per_claimant: {claimant: slots}}
  *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
@@ -101,7 +101,7 @@ import java.util.Optional;
  * uses at every other bytea-identity boundary); {@code keys}/{@code dims}
  * are plain JSON objects of string values.
  *
- * <p>Errors: the twelve RDR-205/RDR-211-family typed errors ({@link TupleException} and its
+ * <p>Errors: the thirteen RDR-205/RDR-211-family typed errors ({@link TupleException} and its
  * subtypes) are caught ahead of the generic ladder and rendered as {@code
  * {"error": "<code>", "detail": "<message>"}} at each exception's own
  * {@link TupleException#httpStatus()} — {@code ParkCapExceeded} additionally
@@ -236,7 +236,11 @@ public final class TupleHandler implements HttpHandler {
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
 
-        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds);
+        // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
+        // ONLY from the minted session AuthFilter resolved, never from the request body (a
+        // "sender_session" body field is not read), and its absence is not a refusal.
+        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
     }
 
@@ -397,7 +401,10 @@ public final class TupleHandler implements HttpHandler {
         String claimId = requireString(body, "claim_id");
         String claimant = requireString(body, "claimant");
         TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
-        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply);
+        // nexus-g2ckl: a reply is stamped with the acker's minted session, as out stamps
+        // its rows; never read from the body.
+        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply, senderSession);
         HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
                 + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
                 + "}");
@@ -408,8 +415,8 @@ public final class TupleHandler implements HttpHandler {
      * {@code out} accepts, MINUS the nonce (RDR-206 Phase 1 Step 2).
      *
      * <p>A {@code nonce} key here is REFUSED rather than ignored. The engine sets a
-     * reply's nonce to {@code hex(consumed request id)} so a retried ack lands on the
-     * same reply row, and no caller, tool or flag carries one (Sam's decision
+     * reply's nonce to {@code hex(consumed request id)}, which makes the reply's id a
+     * function of the request it answers, and no caller, tool or flag carries one (Sam's decision
      * 2026-09-11). Silently dropping a supplied nonce would leave a caller believing it
      * had chosen the reply's identity, which is exactly the kind of ignored input that
      * only surfaces as a mystery much later. {@code validateOut} cannot catch this: it
@@ -430,7 +437,7 @@ public final class TupleHandler implements HttpHandler {
         if (r.containsKey("nonce")) {
             throw new SchemaViolationException("reply.nonce",
                     "must not be supplied: the engine sets a reply's nonce to the id of the "
-                    + "request it answers, so a retried ack lands on the same reply row");
+                    + "request it answers, so the reply's id follows from that request");
         }
         return new TupleRepository.ReplySpec(
                 requireString(r, "subspace"),
@@ -639,6 +646,9 @@ public final class TupleHandler implements HttpHandler {
         m.put("expired_unpurged", c.expiredUnpurged());
         m.put("oldest_created_at", c.oldestCreatedAt());
         m.put("newest_created_at", c.newestCreatedAt());
+        // Bead nexus-5fpkh: additive. Claims whose lease has passed but the lazy reclaim has
+        // not yet released; a SUBSET of "claimed", which keeps counting them.
+        m.put("lapsed", c.lapsed());
         return m;
     }
 
@@ -701,6 +711,15 @@ public final class TupleHandler implements HttpHandler {
         // announce_count=0, the column defaults.
         m.put("announced_at", t.announcedAt());
         m.put("announce_count", t.announceCount());
+        // nexus-fetre (F3 step 2): the server-resolved session that first wrote the row, null
+        // when the writer (or, for an ack reply, the acker; nexus-g2ckl) presented no minted
+        // session, or the row predates the column. A claim,
+        // not authentication: JDR-002.
+        m.put("sender_session", t.senderSession());
+        // nexus-x907o: when the CURRENT claim started (set by the claim, never moved by renew,
+        // cleared with claim_id); null on an unclaimed row or a claim that predates the column.
+        // claim_id itself stays unrendered (see above); this is a time, not a credential.
+        m.put("claimed_at", t.claimedAt());
         return m;
     }
 
@@ -833,7 +852,15 @@ public final class TupleHandler implements HttpHandler {
             return null;
         }
         OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
-        byte[] id = HEX.parseHex(String.valueOf(idRaw));
+        byte[] id;
+        try {
+            id = HEX.parseHex(String.valueOf(idRaw));
+        } catch (IllegalArgumentException e) {
+            // Bead nexus-o9gt2: HexFormat's own message ("string length not even: 1") names
+            // neither the field nor what a valid value is.
+            throw new IllegalArgumentException("since.id: not a tuple id (hex); pass the 'id' of a row "
+                    + "from a prior read, paired with that row's 'created_at'", e);
+        }
         return new TupleRepository.ReadCursor(createdAt, id);
     }
 

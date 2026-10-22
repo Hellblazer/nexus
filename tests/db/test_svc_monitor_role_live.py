@@ -213,3 +213,11 @@ class TestSvcMonitorHelperLive:
                 wal_retained_bytes(creds, psql_bin=pg_bin_dir() / "psql")
         finally:
             svc_monitor_cluster["su"]("GRANT pg_monitor TO nexus_svc")  # restore for siblings
+
+
+def test_the_managed_max_locks_per_transaction_is_what_the_cluster_runs_with(svc_monitor_cluster):
+    """nexus-o26hs: the fixture's cluster was configured by _configure_cluster; a
+    real postmaster parsed its managed block and runs with the raised lock table."""
+    from nexus.db.pg_provision import MANAGED_MAX_LOCKS_PER_TRANSACTION
+
+    assert svc_monitor_cluster["su"]("SHOW max_locks_per_transaction") == str(MANAGED_MAX_LOCKS_PER_TRANSACTION)

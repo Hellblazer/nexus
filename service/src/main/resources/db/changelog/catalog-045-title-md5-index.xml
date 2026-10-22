@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-gacz0 (review round): index the read path of GET /v1/catalog/by_title
+    (CatalogRepository.documentsByTitle), an exact title equality over a tenant's live
+    rows. Without an index the query is a sequential scan of the tenant's catalog_documents.
+
+    MEASURED (throwaway Testcontainers run, PostgreSQL 17.11, database collation en_US.utf8,
+    tenant of 250,000 documents, 95 percent live, beside a second tenant a tenth the size,
+    12 live documents carrying the searched title across six owners):
+      25,000 documents    sequential scan   3 to 4 ms   (no index to compare; 44 ms build, 1.5 MB)
+      250,000 documents   parallel seq scan 22 to 35 ms, 10.9k buffers
+                          with this index   0.02 to 0.05 ms, 4 to 6 buffers
+                          index build       361 ms, 15 MB
+    With an owner prefix the plan was the same scan: tumbler is plain TEXT and the
+    database collation is a locale one, so a LIKE 'p.%' prefix cannot become a range on the
+    (tenant_id, tumbler) primary key and stays a filter. The owner prefix therefore does not
+    narrow the work; the title index does.
+
+    WHY md5(title), not title. A btree on free text can exceed the btree row-size limit
+    (about a third of a page) for a long title; md5(title) is always 32 characters, so the
+    index cannot refuse a row. The query states `md5(title) = md5(?)` beside the exact
+    `title = ?`, so the planner uses the index and the equality still decides the match (an md5
+    collision cannot widen it). md5(text) is IMMUTABLE, so it is a valid index expression.
+
+    PARTIAL, WHERE deleted_at IS NULL: the read carries the same tombstone filter exactly, so
+    a tombstoned row is never a hit and stays out of the index. Leading column tenant_id, the
+    convention of catalog-001's and catalog-041's indexes (every RLS-scoped query filters by
+    tenant first). NOT unique: titles repeat across owners and collections.
+
+    BUILD-WINDOW DECISION: plain CREATE INDEX, not CONCURRENTLY, the precedent of
+    catalog-041-file-path-batch-index.xml (same table, same reasoning). A plain build takes a
+    SHARE lock, which blocks writes and not reads, for the length of the build; the measured
+    build is about a third of a second at 250,000 rows, and Liquibase runs the whole changelog
+    in the boot-time migration window before the engine serves traffic. The production row
+    count is confirmed at deploy time by the Liquibase walk rehearsal against a PITR fork,
+    as for every changeset-carrying engine tag. If a store is ever large enough that this stops
+    being negligible, build it manually as CREATE INDEX CONCURRENTLY outside Liquibase.
+
+    DATA EFFECT: none (CREATE INDEX only; no row is read, written, or otherwise touched). A
+    non-unique index needs no BYPASSRLS to complete (it validates nothing across tenants).
+
+    Placed after tuples-009-claimed-at.xml and before the grants-nexus-svc.xml runAlways
+    block, the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-045-1" author="nexus-gacz0">
+        <comment>Partial index on catalog_documents(tenant_id, md5(title)) for live rows, accelerating the exact-title lookup (GET /v1/catalog/by_title). DATA EFFECT: none -- CREATE INDEX only.</comment>
+        <sql splitStatements="true">
+CREATE INDEX idx_catalog_documents_title_md5_live
+    ON nexus.catalog_documents (tenant_id, md5(title))
+ WHERE deleted_at IS NULL;
+        </sql>
+        <rollback>
+            <sql>DROP INDEX IF EXISTS nexus.idx_catalog_documents_title_md5_live;</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

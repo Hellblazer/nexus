@@ -127,6 +127,18 @@ public final class BootPlan {
         return bge == Bge.BUILD;
     }
 
+    /**
+     * nexus-mrsgp: what to do after provisioning absent cross-encoder files. Measured on the native image
+     * (linux-arm64, 2026-10-21): an engine that built the bge embedder at boot loads cross-encoder files
+     * provisioned while it runs on the next rerank (real scores, no restart; ONNX Runtime was set up at boot).
+     * An engine that built no local model is unmeasured, so it keeps the restart.
+     */
+    public String crossEncoderProvisionHint() {
+        return buildsBge()
+                ? "run `" + PROVISION_COMMAND + "` to provision them; the next rerank loads them, no restart"
+                : "run `" + PROVISION_COMMAND + "` to provision them, then restart the engine (no local ONNX model was loaded at boot)";
+    }
+
     /** True when the local cross-encoder is the reranker. */
     public boolean buildsCrossEncoder() {
         return rerank == Rerank.CROSS_ENCODER;
@@ -206,8 +218,7 @@ public final class BootPlan {
         }
         if (crossEncoderFilesMissing()) {
             parts.add("the cross-encoder reranker's model files are absent, so rerank is skipped per request "
-                    + "(and nothing is sent to Voyage in its place); run `" + PROVISION_COMMAND
-                    + "` to provision them, then restart the engine (the ONNX runtime is set up at boot)");
+                    + "(and nothing is sent to Voyage in its place); " + crossEncoderProvisionHint());
         }
         return String.join("; ", parts);
     }

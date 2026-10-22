@@ -178,6 +178,56 @@ final class RerankStage {
         return envelope(truncate(ordered, topK), false, reranker.modelToken(), null);
     }
 
+    /**
+     * The rerank of a per-collection search with the lexical leg (nexus-xd2rc): {@code primary}, the
+     * vector rows, is scored as {@link #apply(String, List, Integer, Integer)} scores it ({@code
+     * maxCandidates} applies); {@code extras}, the lexical rows the vector rows do not hold, are scored in
+     * their own calls of at most {@code maxDocsPerCall} rows and are NOT capped by {@code maxCandidates}:
+     * a lexical-only hit can sit deep in distance order, and an unscored row lands in the tail a client
+     * drops. Both legs' scores come from one scorer for one query, so they are ordered against each other:
+     * every scored row by {@code rerank_score} descending (ties keep the input order), then every unscored
+     * row in its input order, then {@code topK}. A degrade in any call degrades the whole result, with the
+     * first error and the largest retry-after.
+     */
+    Map<String, Object> applyUnion(String query, List<Map<String, Object>> primary,
+                                   List<Map<String, Object>> extras, Integer topK, Integer maxCandidates,
+                                   int maxDocsPerCall) {
+        if (extras.isEmpty()) {
+            return apply(query, primary, topK, maxCandidates);
+        }
+        List<Map<String, Object>> envelopes = new ArrayList<>();
+        envelopes.add(apply(query, primary, null, maxCandidates));
+        for (int from = 0; from < extras.size(); from += maxDocsPerCall) {
+            envelopes.add(apply(query, extras.subList(from, Math.min(extras.size(), from + maxDocsPerCall)),
+                                null, null));
+        }
+        List<Map<String, Object>> scored = new ArrayList<>();
+        List<Map<String, Object>> unscored = new ArrayList<>();
+        boolean degraded = false;
+        String model = null;
+        String error = null;
+        Long retryAfter = null;
+        for (Map<String, Object> env : envelopes) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> results = (List<Map<String, Object>>) env.get("results");
+            for (Map<String, Object> row : results) {
+                (row.get("rerank_score") instanceof Number ? scored : unscored).add(row);
+            }
+            degraded |= Boolean.TRUE.equals(env.get("rerank_degraded"));
+            if (model == null && env.get("rerank_model") instanceof String m) model = m;
+            if (error == null && env.get("rerank_error") instanceof String e) error = e;
+            if (env.get("rerank_retry_after_seconds") instanceof Long r) {
+                retryAfter = retryAfter == null ? r : Math.max(retryAfter, r);
+            }
+        }
+        scored.sort(java.util.Comparator.comparingDouble(
+                (Map<String, Object> row) -> ((Number) row.get("rerank_score")).doubleValue()).reversed());
+        List<Map<String, Object>> ordered = new ArrayList<>(scored.size() + unscored.size());
+        ordered.addAll(scored);
+        ordered.addAll(unscored);
+        return envelope(truncate(ordered, topK), degraded, model, error, retryAfter);
+    }
+
     private Map<String, Object> degrade(List<Map<String, Object>> rows, Integer topK, String reason) {
         return degrade(rows, topK, reason, null);
     }

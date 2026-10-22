@@ -72,8 +72,13 @@ class TestEnvironmentReaderFailsClosed:
         assert sr.process_environment_values(1, ("HOME",), platform="darwin") is None
 
 
-def _procargs2(argc: int, argv: list[bytes], env: list[bytes], *, path: bytes = b"/usr/bin/nx", pad: int = 3) -> bytes:
-    """A synthetic KERN_PROCARGS2 block: argc, exec path, NUL padding, argv, env."""
+def _procargs2(
+    argc: int, argv: list[bytes], env: list[bytes], *, path: bytes = b"/usr/bin/nx", pad: int | None = 3,
+) -> bytes:
+    """A synthetic KERN_PROCARGS2 block: argc, exec path, NUL padding, argv, env. ``pad=None`` pads the way
+    the kernel does (the exec path and its NUL rounded up to 8 bytes, nexus-wnbba)."""
+    if pad is None:
+        pad = -(len(path) + 1) % 8
     return (
         struct.pack("i", argc) + path + b"\x00" + b"\x00" * pad
         + b"".join(a + b"\x00" for a in argv) + b"".join(e + b"\x00" for e in env)
@@ -108,6 +113,24 @@ class TestProcargs2Parser:
 
     def test_a_block_cut_inside_the_exec_path_is_none(self) -> None:
         assert sr.parse_procargs2_environment(struct.pack("i", 1) + b"/usr/bi") is None
+
+    @pytest.mark.parametrize("path", [b"/tmp/s", b"/tmp/ss", b"/usr/bin/nx", b"/opt/x/sixteen-chars", b"/a" * 12])
+    def test_an_empty_argv0_is_an_argv_string_not_padding(self, path: bytes) -> None:
+        # nexus-wnbba: an empty argv[0] is one NUL right where the kernel's padding ends; skipping the whole NUL
+        # run read "daemon" as argv[0] and the first env entry as the last argv string.
+        argv = [b"", b"daemon", b"service", b"start"]
+        blob = _procargs2(4, argv, self.ENV, path=path, pad=None)
+        assert sr.parse_procargs2_environment(blob) == self.ENV
+
+    def test_a_non_empty_argv0_on_the_kernel_layout_is_unchanged(self) -> None:
+        blob = _procargs2(4, self.ARGV, self.ENV, path=b"/tmp/ss", pad=None)
+        assert sr.parse_procargs2_environment(blob) == self.ENV
+
+    def test_the_measured_darwin_layout_parses(self) -> None:
+        # Bytes as KERN_PROCARGS2 returned them for `sleep 5` exec'd via /tmp/n3dc-pa/s with argv[0]="" and
+        # env AAA=1 BBB=2 (Darwin 27 arm64): 15-byte path+NUL padded to 16, then "", "5", env.
+        blob = struct.pack("i", 2) + b"/tmp/n3dc-pa/s\x00" + b"\x00" + b"\x00" + b"5\x00" + b"AAA=1\x00BBB=2\x00"
+        assert sr.parse_procargs2_environment(blob) == [b"AAA=1", b"BBB=2"]
 
     def test_a_block_cut_inside_the_environment_is_none(self) -> None:
         whole = _procargs2(4, self.ARGV, self.ENV)

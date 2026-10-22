@@ -593,7 +593,8 @@ def test_mailbox_resent_message_lands_once_with_expires_at_unchanged(t2_service_
     """Journey 6: the same sender resending the same nonce to one address
     is ONE row -- the id is a hash of (to, from, nonce), so a resend is an
     idempotent upsert that touches ``expires_at`` only (never body, per
-    ``TupleRepository.out``'s DO UPDATE clause), and under the default TTL
+    ``TupleRepository.out``'s DO UPDATE clause; a different body under the
+    same nonce is refused as NonceReuseConflict, nexus-fzteh), and under the default TTL
     (== the template's retention) ``expires_at`` is already clamped to
     ``created_at + retention`` and cannot move.
     """
@@ -616,18 +617,28 @@ def test_mailbox_resent_message_lands_once_with_expires_at_unchanged(t2_service_
     resend = runner.invoke(main, [
         "tuple", "out", f"mailbox/{address}",
         "--key", f"to={address}", "--dim", "from=sender-a",
-        "--body", "v2-should-not-land", "--nonce", nonce,
+        "--body", "v1", "--nonce", nonce,
     ])
     assert resend.exit_code == 0, resend.output
     assert resend.output.strip().splitlines()[-1] == tuple_id, (
         "a resend with the same nonce must land on the SAME tuple id"
     )
 
+    # A different body under the same nonce is not a resend: it is refused
+    # (NonceReuseConflict, nexus-fzteh), and the stored row is untouched.
+    changed = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "v2-must-not-land", "--nonce", nonce,
+    ])
+    assert changed.exit_code != 0, changed.output
+    assert "NonceReuseConflict" in changed.output
+
     rd2 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
     rows2 = _tuple_last_json_line(rd2.output)
     assert len(rows2) == 1, f"a resend must be one row, not a second: {rows2}"
     assert rows2[0]["id"] == tuple_id
-    assert rows2[0]["body"] == "v1", "a resend's DO UPDATE never touches body"
+    assert rows2[0]["body"] == "v1", "neither the resend nor the refused write touches body"
     assert rows2[0]["expires_at"] == row1["expires_at"], "expires_at must not move on a resend"
 
 
@@ -763,7 +774,7 @@ def test_mailbox_resend_every_day_for_a_week_never_extends_expires_at(t2_service
         resend = runner.invoke(main, [
             "tuple", "out", f"mailbox/{address}",
             "--key", f"to={address}", "--dim", "from=sender-a",
-            "--body", f"day {day}", "--nonce", nonce,
+            "--body", "day 0", "--nonce", nonce,
         ])
         assert resend.exit_code == 0, resend.output
         assert resend.output.strip().splitlines()[-1] == tuple_id

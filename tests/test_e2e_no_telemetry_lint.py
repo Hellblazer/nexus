@@ -52,6 +52,7 @@ CC_VALIDATION_EXPORTING_HARNESSES = ("runner.sh",)
 #: Sandbox scripts that build their environment without ``env -i`` and must
 #: export the opt-out instead.
 EXPORTING_SANDBOXES = (
+    "dual-embedder-gate.sh",
     "local-service-gate.sh",
     "sandbox.sh",
 )

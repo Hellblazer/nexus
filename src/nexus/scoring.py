@@ -2,7 +2,7 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import structlog
@@ -75,19 +75,18 @@ _FRECENCY_WEIGHT: float = 0.3
 # names keep the real per-content-type split. See that function's
 # docstring for the full design.
 #
-# RDR-210 Technical Design 12 (nexus-hf29s): ``bge-base-en-v15-768`` is
-# listed at an INTERIM factor of 1.30 (threshold 0.45/1.30; Sam, 2026-10-18),
-# the largest factor 210-research-17 measured inversion counts for. Its derived
-# best-F1 threshold, 0.325, is a factor of 0.45/0.325 = 1.38. It was an unlisted model before, so it fell
-# to the 0.55 default (0.818) and a bge hit and a Voyage hit competed on
-# scales that disagreed by ~1.7x. The inversion count at the derived 1.38 was
-# NOT run (the per-query distance lists behind 210-research-17 are gone), so
-# the value is held at the largest MEASURED factor until nexus-t189m (P4.3)
-# re-measures on real distances.
+# RDR-210 Technical Design 12 (nexus-hf29s, nexus-t189m, nexus-k1x5v):
+# ``bge-base-en-v15-768`` is listed at the MEASURED factor of 1.37 (threshold
+# 0.45/1.37 = 0.329, the best-F1 threshold; pooled bootstrap interval 1.24 to
+# 1.45, 2026-10-22, T2 nexus_rdr/210-p43-ca2-residuals-measured-2026-10-22).
+# It was an unlisted model before, so it fell to the 0.55 default (0.818) and a
+# bge hit and a Voyage hit competed on scales that disagreed by ~1.7x. No single
+# factor meets the P1.5 3-and-1 inversion bound on the rerank-off surfaces; the
+# measured counts are in Technical Design 12.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
-    "bge-base-en-v15-768": 0.45 / 1.30,
+    "bge-base-en-v15-768": 0.45 / 1.37,
 }
 _CALIBRATION_BASELINE: float = _CALIBRATION_THRESHOLDS_BY_MODEL["voyage-code-3"]
 _CALIBRATION_DEFAULT_THRESHOLD: float = 0.55  # matches config.py's "default" key
@@ -100,7 +99,7 @@ def _calibration_factor_for_model(model: str) -> float:
     ``raw_distance * factor`` rescales onto voyage-code-3's absolute
     range. voyage-code-3 itself gets 1.0 (the baseline, no change); a
     model with a more lenient threshold gets a factor < 1.0, shrinking
-    its distances proportionally, and a tighter one (bge, interim 1.30) a factor
+    its distances proportionally, and a tighter one (bge, 1.37) a factor
     > 1.0. An unrecognized model (anything this table does not list)
     falls, and logs once that it did, to the same "default" bucket ``search_engine._threshold_for_collection`` already
     uses for an unrecognized collection prefix.
@@ -140,6 +139,7 @@ def _log_unlisted_model_once(model: str) -> None:
 def _resolve_calibration_factors(
     results: list[SearchResult],
     extra_collections: Iterable[str] = (),
+    model_of: Callable[[str], str | None] | None = None,
 ) -> dict[str, float]:
     """Resolve a distance scale-correction factor per COLLECTION for one
     :func:`apply_hybrid_scoring` call, gated on whether the result set
@@ -156,6 +156,16 @@ def _resolve_calibration_factors(
     gate: they are collections of rows scored AGAINST *results* as the
     normalisation window (see :func:`apply_hybrid_scoring`'s ``window``), so
     the model-count decision stays a property of the window alone.
+
+    *model_of* (nexus-ml9vu) is the row-preferred ``name -> model`` function
+    :func:`nexus.search_engine._collection_model_resolver` builds, the same one
+    grouping and the thresholds use: a legacy name whose catalog row says
+    ``voyage-context-3`` is a Voyage collection, whatever the install embeds
+    legacy names with now. It is asked first; a collection it answers ``None``
+    for (no row and no token in the name) falls to the install-aware name
+    derivation, exactly as when *model_of* is omitted. A row model the
+    calibration table does not list takes the default factor and logs once,
+    as an unlisted name-derived model does.
     """
     from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
@@ -164,7 +174,9 @@ def _resolve_calibration_factors(
     def _model_for(collection: str) -> str:
         model = model_by_collection.get(collection)
         if model is None:
-            model = embedding_model_for_collection_calibrated(collection)
+            model = model_of(collection) if model_of is not None else None
+            if model is None:
+                model = embedding_model_for_collection_calibrated(collection)
             model_by_collection[collection] = model
         return model
 
@@ -178,7 +190,11 @@ def _resolve_calibration_factors(
     return {c: _calibration_factor_for_model(_model_for(c)) for c in covered}
 
 
-def order_by_calibrated_distance(results: list[SearchResult]) -> list[SearchResult]:
+def order_by_calibrated_distance(
+    results: list[SearchResult],
+    *,
+    model_of: Callable[[str], str | None] | None = None,
+) -> list[SearchResult]:
     """*results* nearest first by raw distance on the calibrated scale, as a new list.
 
     The order a pool is ranked in when the boosts are off, and the one
@@ -193,8 +209,12 @@ def order_by_calibrated_distance(results: list[SearchResult]) -> list[SearchResu
     pool depth. Ties break on collection then id, so the cut never depends on
     arrival order. Topic credit is left out on purpose: it can lift a row
     from beyond a shallow pool, which a cut must not depend on.
+
+    *model_of* is :func:`_resolve_calibration_factors`'s (nexus-ml9vu): pass the
+    same one :func:`apply_hybrid_scoring` gets, so the cut and the scores agree
+    on every collection's model.
     """
-    factors = _resolve_calibration_factors(results)
+    factors = _resolve_calibration_factors(results, model_of=model_of)
     return sorted(
         results, key=lambda r: (r.distance * factors.get(r.collection, 1.0), r.collection, r.id),
     )
@@ -273,8 +293,13 @@ def apply_hybrid_scoring(
     file_size_threshold: int = 30,
     catalog: Any | None = None,
     window: list[SearchResult] | None = None,
+    model_of: Callable[[str], str | None] | None = None,
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
+
+    *model_of* (nexus-ml9vu) is :func:`_resolve_calibration_factors`'s
+    row-preferred ``name -> model`` function; omitted, the calibration reads
+    each collection's model from its name alone.
 
     For code__ corpora (hybrid=True): score = vector_weight * vector_norm + frecency_weight * frecency_norm.
     For docs__/knowledge__/rdr__ (hybrid=True): score = vector_weight * vector_norm
@@ -394,6 +419,7 @@ def apply_hybrid_scoring(
     # no-op gate).
     calibration_factors = _resolve_calibration_factors(
         basis, extra_collections=() if window is None else {r.collection for r in results},
+        model_of=model_of,
     )
     distances = [_effective_distance(r, calibration_factors) for r in basis]
     frecencies = [

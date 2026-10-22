@@ -792,9 +792,13 @@ run_n "N2: an authenticated POST answering 404 -> ok (the route is absent)" 0 "o
 run_n "N2: the 404 ok line prints the body head, so the first live run records the real 404 body" 0 \
   "body: '<h1>404 Not Found</h1>No context found for request'" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
   "<h1>404 Not Found</h1>No context found for request"
-run_n "N2: the 404 body head is cut at 80 chars and kept on one line" 0 "body: '$(printf 'a%.0s' $(seq 1 79)) '" \
-  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 "$(printf 'a%.0s' $(seq 1 79))
+run_n "N2: the 404 body head is cut at 80 chars and kept on one line" 0 "body: 'No context found for request $(printf 'a%.0s' $(seq 1 50)) '" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 "No context found for request $(printf 'a%.0s' $(seq 1 50))
 $(printf 'b%.0s' $(seq 1 40))"
+run_n "N2: a 404 with an edge-shaped body -> INCONCLUSIVE, fails closed" 1 "INCONCLUSIVE" "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 \
+  "<html><body>404 Not Found</body></html>"
+run_n "N2: a 404 with an empty body -> INCONCLUSIVE, fails closed" 1 "lacks the engine's own not-found text" \
+  "$TMP/n2fn.sh" _tenant_reset_probe_verdict 404 ""
 # run_nx <label> <want-rc> <want-text> <forbidden-text> <args...>: like run_n against the probe judge, and the output
 # must NOT contain the forbidden text (an edge-shaped body must never print the REGISTERED verdict).
 run_nx() {

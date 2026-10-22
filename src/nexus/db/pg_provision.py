@@ -97,8 +97,10 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import glob
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -1358,8 +1360,26 @@ def _init_cluster(
     return True
 
 
+#: ``max_locks_per_transaction`` the managed block sets (nexus-o26hs). The engine's
+#: RDR-225 walk creates models x tenants x 2 leaf partitions in one transaction, and
+#: its boot preflight (WalkLockPreflight) refuses when their locks would not fit the
+#: lock table: at PostgreSQL's default of 64 that is about 39 tenants at four models,
+#: at 128 about 81. Each step of 64 costs the cluster about 1.5 MB of shared memory.
+#: Takes effect at the next PostgreSQL start: every path that starts the cluster
+#: (provision, the supervisor's ``_ensure_pg_running``, the replace quiesce)
+#: rewrites the managed block first, so ``nx daemon service stop --with-pg`` then
+#: ``nx daemon service start`` applies it to an existing install.
+MANAGED_MAX_LOCKS_PER_TRANSACTION: int = 128
+
+#: An active (uncommented) ``max_locks_per_transaction`` directive, ``=`` optional,
+#: any case, as PostgreSQL's conf parser accepts it.
+_MAX_LOCKS_DIRECTIVE = re.compile(r"^\s*max_locks_per_transaction(\s*=|\s)", re.IGNORECASE)
+_MAX_LOCKS_VALUE = re.compile(r"^\s*max_locks_per_transaction\s*=?\s*'?(\d+)'?\s*(#.*)?$", re.IGNORECASE)
+
+
 def _configure_cluster(pgdata: Path, port: int) -> None:
-    """Append port, listen_addresses, and (empty) unix_socket_directories.
+    """Append port, listen_addresses, (empty) unix_socket_directories and
+    max_locks_per_transaction.
 
     We run TCP-only (``listen_addresses = '127.0.0.1'``; all clients connect via
     ``-h 127.0.0.1``). Omitting ``-k`` from pg_ctl does NOT suppress the Unix
@@ -1369,6 +1389,13 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
     (``could not create lock file …/.s.PGSQL.<port>.lock: Permission denied``).
     Setting it empty disables the socket entirely, which also sidesteps the
     macOS 104-char socket-path limit that motivated dropping ``-k``. (nexus-6laob)
+
+    ``max_locks_per_transaction`` (:data:`MANAGED_MAX_LOCKS_PER_TRANSACTION`) is
+    written only when the conf outside the block does not already set it: the block
+    comes last and PostgreSQL takes the last value, so ours would override, and
+    could lower, the user's own (nexus-o26hs). Only this file is read: a value set
+    in an ``include``d file is not seen, and the block would override it. A value
+    raised by hand on the managed line is kept when it is above the default.
     """
     conf_path = pgdata / "postgresql.conf"
     conf_text = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
@@ -1379,6 +1406,9 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
     begin, end = "# nexus-managed: BEGIN", "# nexus-managed: END"
     lines: list[str] = []
     skipping = False
+    # A value raised by hand on the managed line itself (where the engine's refusal
+    # sends a reader of postgresql.conf) is kept rather than reset (nexus-o26hs).
+    managed_max_locks = MANAGED_MAX_LOCKS_PER_TRANSACTION
     for l in conf_text.splitlines():
         if l == begin:
             skipping = True
@@ -1387,6 +1417,8 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
             skipping = False
             continue
         if skipping:
+            if m := _MAX_LOCKS_VALUE.match(l):
+                managed_max_locks = max(managed_max_locks, int(m.group(1)))
             continue
         # Drop stale pre-sentinel managed comment lines (e.g. "# nexus-managed:
         # port") left by an older nexus. Their value lines (port =, listen_
@@ -1406,9 +1438,93 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
         # Omitting -k does NOT disable the Unix socket; empty disables it (see
         # docstring). Required for non-postgres OS users on Debian/Ubuntu.
         f"unix_socket_directories = ''",
-        end,
     ]
-    conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if not any(_MAX_LOCKS_DIRECTIVE.match(l) for l in lines):
+        lines.append(f"max_locks_per_transaction = {managed_max_locks}")
+    lines.append(end)
+    _replace_conf(conf_path, "\n".join(lines) + "\n")
+
+
+#: Age past which a staged conf file is taken to be a killed writer's (nexus-bt46b).
+_STALE_STAGING_S: float = 600.0
+
+#: Windows: ``os.replace`` needs delete access to the conf, so a handle another
+#: process holds without delete sharing (an indexer, antivirus) fails it with a
+#: sharing violation for a moment. Bounded retries before giving up.
+_REPLACE_RETRIES: int = 5
+_REPLACE_RETRY_SLEEP_S: float = 0.1
+
+
+def _replace_retrying(src: str, dst: Path) -> None:
+    """``os.replace``, retried briefly on a Windows sharing violation."""
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_SLEEP_S)
+
+
+def _replace_conf(conf_path: Path, text: str) -> None:
+    """Write *text* to *conf_path* whole or not at all (nexus-bt46b).
+
+    Staged in a uniquely named file beside the conf and swapped in with
+    ``os.replace``, so a crash, a full disk, a concurrent reader or a second
+    writer never meets a truncated conf, which PostgreSQL would start on with
+    its defaults; two writers each publish a whole file and the last one wins.
+    A symlinked conf is written through to its target, as a plain write would
+    be. The staged file takes the conf's mode, and its owner when run as root.
+    A conf this process may not write is refused as a plain write would be: a
+    rename would replace a file its owner made read-only.
+    """
+    target = Path(os.path.realpath(conf_path))
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(f"{target} is not writable")
+    prefix = f".{target.name}."
+    # A staged file a killed writer left behind; a live writer's is seconds old.
+    cutoff = time.time() - _STALE_STAGING_S
+    for stale in target.parent.glob(f"{glob.escape(prefix)}*"):
+        with contextlib.suppress(OSError):
+            if stale.is_file() and stale.stat().st_mtime < cutoff:
+                stale.unlink()
+    fd, staged = tempfile.mkstemp(dir=target.parent, prefix=prefix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if target.exists():
+            shutil.copymode(target, staged)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                st = os.stat(target)
+                os.chown(staged, st.st_uid, st.st_gid)
+        _replace_retrying(staged, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(staged)
+        raise
+
+
+def apply_managed_conf_before_start(pgdata: Path, port: int) -> bool:
+    """Rewrite the managed postgresql.conf block before a cold start of an
+    existing cluster (nexus-o26hs); True when it was written.
+
+    For the start paths outside :func:`provision` (the supervisor, the replace
+    quiesce). The block only carries settings PostgreSQL also runs without, so a
+    conf that cannot be read or written is logged and the start goes on, as it
+    did before these paths rewrote it. A data directory with no conf is left for
+    :func:`_start_cluster` to report.
+    """
+    if not (pgdata / "postgresql.conf").is_file():
+        return False
+    try:
+        _configure_cluster(pgdata, port)
+    except (OSError, UnicodeDecodeError) as exc:
+        _log.warning("pg_conf_managed_block_not_applied", pgdata=str(pgdata), error=repr(exc))
+        return False
+    return True
 
 
 class PgStartError(RuntimeError):

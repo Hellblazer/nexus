@@ -246,6 +246,12 @@ public final class NexusService {
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the ledger retention arm. */
     private final Runnable requestLedgerRetentionTask;
 
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the tuple sweep; null without a tuple repo. */
+    private final Runnable tupleSweepTask;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the T1 TTL sweep. */
+    private final Runnable t1SweepTask;
+
     /**
      * RDR-227 Step 2 (bead nexus-43ulx.23): the source of {@code GET /v1/status}'s {@code per_collection_indexes}
      * object. Bound late, by {@link #perCollectionIndexes(java.util.function.Supplier)}: the status route is
@@ -269,6 +275,14 @@ public final class NexusService {
      */
     private volatile java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat>
         chunksLeafBloat;
+
+    /**
+     * nexus-i827c: the leaf bloat sweep's view and period, read by the authenticated {@code GET /v1/admin/chunks-leaves}.
+     * Bound late by {@link #chunksLeaves(java.util.function.Supplier, java.util.function.Supplier)} for the same reason
+     * as {@link #chunksLeafBloat}; null until bound, and the route answers 503 until then.
+     */
+    private volatile java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> chunksLeavesView;
+    private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -614,6 +628,15 @@ public final class NexusService {
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
 
+        // /v1/admin/chunks-leaves — the leaves of nexus.chunks that need attention, NAMED (nexus-i827c). The
+        // unauthenticated /v1/status names none (Sam, 2026-10-19), so the names live here, behind the auth filter and
+        // an operator (root token) check in the handler itself. The sweep it reads is bound late, like status's.
+        var chunksLeavesCtx = server.createContext(dev.nexus.service.http.ChunksLeavesHandler.PATH,
+                new dev.nexus.service.http.ChunksLeavesHandler(
+                        () -> { var v = chunksLeavesView; return v == null ? null : v.get(); },
+                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); }));
+        chunksLeavesCtx.getFilters().addAll(authFilter);
+
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
         // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
         var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
@@ -744,9 +767,13 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
+        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple
+        // sweep's sibling): with a six-hour first delay an engine process that lives less than six hours never
+        // expires T1 rows.
+        this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));
         this.sweepScheduler.scheduleAtFixedRate(
-            surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC))),
-            SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+            this.t1SweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+            TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
         );
 
         // RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): a SECOND scheduled task on
@@ -758,11 +785,20 @@ public final class NexusService {
         // tupleRepo mirrors /v1/tuples's own null-registry posture (the feature
         // was never loaded, not that it degraded).
         if (this.tupleRepo != null) {
+            this.tupleSweepTask = surviving("tuple_scheduled_sweep_failed",
+                () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC)));
+            // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, shakeout F5):
+            // with a six-hour first delay an engine process that lives less than six hours never sweeps. The
+            // cloud census showed expired rows days old (board/ci/nexus-develop ~2,100, directory/* from
+            // 2026-10-18); the ledger retention task below and the reaper start the same way, for the same reason.
             this.sweepScheduler.scheduleAtFixedRate(
-                surviving("tuple_scheduled_sweep_failed",
-                    () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC))),
-                SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+                this.tupleSweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+                TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
             );
+            log.info("event=tuple_sweep_scheduled initial_delay_seconds={} interval_seconds={}",
+                ChunkReaper.INITIAL_DELAY.toSeconds(), TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS));
+        } else {
+            this.tupleSweepTask = null;
         }
 
         // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler, every
@@ -937,6 +973,16 @@ public final class NexusService {
         this.chunksLeafBloat = supplier;
     }
 
+    /**
+     * Bind the source of {@code GET /v1/admin/chunks-leaves} (nexus-i827c). {@code Main} calls it once the leaf bloat
+     * sweep exists; {@code view} must answer from the sweep's cache, with no catalog query.
+     */
+    public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
+                             java.util.function.Supplier<Long> sweepSeconds) {
+        this.chunksLeavesView = view;
+        this.chunksLeavesSweepSeconds = sweepSeconds;
+    }
+
     /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */
     dev.nexus.service.http.StatusHandler.ChunksLeafBloat chunksLeafBloatStatus() {
         var supplier = chunksLeafBloat;
@@ -988,6 +1034,16 @@ public final class NexusService {
     /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */
     dev.nexus.service.db.RequestLedger requestLedgerForTests() {
         return requestLedger;
+    }
+
+    /** The Runnable the scheduler runs for the tuple sweep, or null without a tuple repo. Package-private for the wiring test. */
+    Runnable tupleSweepTask() {
+        return tupleSweepTask;
+    }
+
+    /** The Runnable the scheduler runs for the T1 TTL sweep. Package-private for the wiring test. */
+    Runnable t1SweepTask() {
+        return t1SweepTask;
     }
 
     /** The Runnable the scheduler runs for ledger retention. Package-private for the wiring test. */

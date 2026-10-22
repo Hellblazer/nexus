@@ -285,6 +285,18 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "exercised there; a FakeCatalogHandler branch would need to fabricate "
         "multi-owner resolution the fake's single-tenant model does not carry"
     ),
+    "/by_title": (
+        "nexus-gacz0: backs HttpCatalogClient.find_by_title_exact(), on the shared "
+        "Catalog/HttpCatalogClient surface (catalog_protocol.py). Its exactness, "
+        "owner/content_type scope, tombstone and tenant filtering and the absence of "
+        "a page cap are pinned engine-side by CatalogHandlerByTitleTest; the client's "
+        "use of it and its 404/405 fallback to the full-text search are pinned in "
+        "tests/catalog/test_gacz0_find_by_title_exact_route.py against a stubbed "
+        "_get, and the route is round-tripped against the real engine in "
+        "tests/test_ghost_by_title_past_first_page.py. A FakeCatalogHandler branch "
+        "would re-implement exact-title filtering the fake's single canned entry "
+        "does not carry. Delete this entry if a fake branch is ever added"
+    ),
     "/owners/sweep_next_seq_drift": (
         "admin one-shot converge verb (nexus-0ehwe item 5, engine commit "
         "55615902) with NO Python client method yet — the live-cloud "

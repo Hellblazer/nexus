@@ -165,6 +165,18 @@ fi
 exec /usr/bin/pgrep "$@"
 """
 
+_FAKE_PKILL = r"""#!/bin/bash
+# stand-in for `pkill -SIG -f PATTERN`: signals only processes whose command line names this test's
+# directory, as the pgrep stand-in sees only those. The real one would kill a concurrent suite's
+# tart run of the same VM name.
+[[ "$1" == -* && "$2" == -f && $# -eq 3 ]] || { echo "fake pkill: unexpected arguments: $*" >&2; exit 2; }
+found=1
+for pid in $(/usr/bin/pgrep -f "$3"); do
+  [[ "$(ps -o command= -p "$pid" 2>/dev/null)" == *"$FAKE_ROOT"* ]] && kill -s "${1#-}" "$pid" 2>/dev/null && found=0
+done
+exit $found
+"""
+
 _FAKE_TART = r"""#!/bin/bash
 # stand-in for tart: VMs are files under $FAKE_ROOT/vms; `run` is a real process.
 v="$FAKE_ROOT/vms"
@@ -288,6 +300,7 @@ class Harness:
         self.root.mkdir()
         _exe(self.root / "guest", _FAKE_GUEST)
         _exe(self.root / "tart", _FAKE_TART)
+        _exe(self.root / "pkill", _FAKE_PKILL)
         (self.root / "vms").mkdir()
         (self.root / "vms" / "nexus-mac-clean").touch()
         (self.root / "boot").mkdir()
@@ -323,6 +336,7 @@ class Harness:
             "NX_MAC_GUEST_TEST": "1",
             "NX_MAC_GUEST_DIR": str(self.base),
             "NX_MAC_GUEST_TART": str(self.root / "tart"),
+            "NX_MAC_GUEST_PKILL": str(self.root / "pkill"),
             "NX_MAC_GUEST_LEASE_ROOT": str(self.common),
             "NX_MAC_GUEST_LEASE_REPO": str(self.tree),
             "NX_MAC_GUEST_RUNNER_USERS": self.user,
@@ -872,6 +886,27 @@ def test_a_vm_that_ignores_tart_stop_has_its_tart_run_killed_then_is_deleted(h: 
     assert "killing its tart run" in res.stderr
     assert not (h.root / "vms" / vm).exists()
     assert not (h.root / "vms" / f"{vm}.runpid").exists()
+
+
+@_POSIX_ONLY
+def test_killing_a_tart_run_spares_another_suites_run_of_the_same_vm_name(h: Harness) -> None:
+    """kill_run's pkill -f matches by command line; in a test it must reach only this harness's
+    tart run, never a concurrent suite's process with the same VM name (concurrent copies of this
+    file failed the kill test 3 of 6 when it reached across)."""
+    vm = "nx-mac-run-t7c"
+    (h.root / "vms" / vm).touch()
+    h.spawn_tart_run(vm)
+    outsider = subprocess.Popen(
+        ["bash", "-c", "while :; do sleep 0.2; done", "/elsewhere/tart", "run", "--no-graphics", vm],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    h.procs.append(outsider)
+    time.sleep(0.5)
+    res = h.run_host("destroy", vm, FAKE_STOP_HANGS="1")
+    assert res.returncode == 0, res.stderr
+    assert "killing its tart run" in res.stderr
+    assert not (h.root / "vms" / vm).exists()
+    assert outsider.poll() is None, "the kill reached a process outside this test"
 
 
 @_POSIX_ONLY

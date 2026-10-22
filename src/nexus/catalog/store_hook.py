@@ -716,14 +716,14 @@ def _find_ghost_by_title(reader, owner, title: str):
     mints a brand-new document with a fresh tumbler and the ghost is
     never reconciled.
 
-    There is no dedicated exact-title index on the catalog reader
-    protocol (only ``by_file_path`` / ``by_source_uri`` have that
-    shape), so this filters ``find()``'s FTS5 results — which use
-    token matching, not substring matching — down to entries whose
-    ``title`` is a byte-for-byte match AND whose tumbler is a
-    descendant of *owner* (the "knowledge" curator owner; ``find()``
-    has no owner scoping of its own, and content_type="knowledge" alone
-    is not owner-specific).
+    The reader answers an exact-title, owner-scoped lookup itself
+    (``find_by_title_exact(..., owner=owner, chunk_count=0)``, nexus-gacz0): one
+    engine request for the byte-for-byte title matches among *owner*'s ghosts.
+    Against an engine without that route the reader falls back to filtering
+    the full-text results, which use token matching, not substring matching;
+    the owner-prefix check below stays so both paths hold the same contract
+    (the "knowledge" curator owner; content_type="knowledge" alone is not
+    owner-specific).
 
     Restricted to GHOST entries (``chunk_count == 0``): reconciling
     onto a non-ghost entry would silently repoint an already-populated
@@ -740,7 +740,11 @@ def _find_ghost_by_title(reader, owner, title: str):
         return None
     # Every exact-title match, not find()'s first 50: a ghost past row 50
     # went unmatched and register() minted a duplicate (nexus-3bafq sibling).
-    for entry in reader.find_by_title_exact(title, content_type="knowledge"):
+    # chunk_count=0 asks the reader for ghosts only (the engine filters it); the checks
+    # below stay as the guard, so a reader that ignores either filter cannot widen a match.
+    for entry in reader.find_by_title_exact(
+        title, content_type="knowledge", owner=owner, chunk_count=0,
+    ):
         if entry.chunk_count == 0 and owner.is_prefix_of(entry.tumbler):
             return entry
     return None

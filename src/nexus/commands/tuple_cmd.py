@@ -336,10 +336,10 @@ def tuple_in_cmd(
         raise SystemExit(1)
     row, claim_id = result
     if json_out:
-        click.echo(json.dumps({"tuple": _row_dict(row), "claim_id": claim_id}))
+        click.echo(json.dumps({"tuple": _row_dict(row, fresh_claim=True), "claim_id": claim_id}))
     else:
         click.echo(f"claim_id={claim_id}")
-        _print_row(row)
+        _print_row(row, fresh_claim=True)
 
 
 @tuple_group.command(name="ack")
@@ -523,7 +523,7 @@ def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, jso
     for c in rows:
         click.echo(
             f"{c.subspace}  total={c.total} available={c.available} "
-            f"claimed={c.claimed} dead={c.dead} consumed={c.consumed} "
+            f"claimed={c.claimed} lapsed={c.lapsed} dead={c.dead} consumed={c.consumed} "
             f"expired_unpurged={c.expired_unpurged}"
         )
     if next_cursor:
@@ -547,6 +547,7 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
     click.echo(f"total: {c.total}")
     click.echo(f"available: {c.available}")
     click.echo(f"claimed: {c.claimed}")
+    click.echo(f"lapsed: {c.lapsed}")
     click.echo(f"dead: {c.dead}")
     click.echo(f"consumed: {c.consumed}")
     click.echo(f"expired_unpurged: {c.expired_unpurged}")
@@ -628,35 +629,45 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
 # ── rendering helpers ────────────────────────────────────────────────────────
 
 
-def _row_dict(row: Any) -> dict[str, Any]:
-    return {
+def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
+    # fresh_claim: the row `in` just claimed. The engine set its lease a moment ago, so it
+    # is "claimed"; relabelling it against this box's clock could call it "lapsed".
+    out = {
         "id": row.id, "subspace": row.subspace, "template": row.template,
         "keys": row.keys, "dims": row.dims, "body": row.body,
-        "claim_state": row.claim_state, "claimant": row.claimant,
+        "claim_state": row.claim_state if fresh_claim else row.effective_claim_state(),
+        "claimant": row.claimant,
         "lease_until": row.lease_until, "attempts": row.attempts,
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
     }
+    # nexus-ztwp4 (F3 step 2): null = no stamp: no live minted session at write time, a reply row written by an engine before nexus-g2ckl (v0.1.163), or a row that predates the column;
+    # omitted when the engine renders no such key.
+    if row.sender_session_known:
+        out["sender_session"] = row.sender_session
+    return out
 
 
 def _census_dict(c: Any) -> dict[str, Any]:
     return {
         "subspace": c.subspace, "total": c.total, "available": c.available,
-        "claimed": c.claimed, "dead": c.dead, "consumed": c.consumed,
+        "claimed": c.claimed, "lapsed": c.lapsed, "dead": c.dead, "consumed": c.consumed,
         "expired_unpurged": c.expired_unpurged,
         "oldest_created_at": c.oldest_created_at, "newest_created_at": c.newest_created_at,
     }
 
 
-def _print_row(row: Any) -> None:
+def _print_row(row: Any, *, fresh_claim: bool = False) -> None:
     click.echo(f"  id: {row.id}")
     click.echo(f"  subspace: {row.subspace}")
     click.echo(f"  template: {row.template}")
     click.echo(f"  keys: {row.keys}")
     click.echo(f"  dims: {row.dims}")
     click.echo(f"  body: {row.body}")
-    click.echo(f"  claim_state: {row.claim_state}")
+    click.echo(f"  claim_state: {row.claim_state if fresh_claim else row.effective_claim_state()}")
     click.echo(f"  created_at: {row.created_at}")
+    if row.sender_session_known:
+        click.echo(f"  sender_session: {row.sender_session}")
 
 
 def _render_rows(rows: list, json_out: bool) -> None:

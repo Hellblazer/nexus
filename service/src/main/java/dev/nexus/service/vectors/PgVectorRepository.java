@@ -967,7 +967,9 @@ public final class PgVectorRepository {
         // check, the embedder and every write statement, naming the model; the lookup is a cache hit
         // (dimForCollection just resolved the same row) and so is the partition answer after the first
         // write of a model.
-        final String embeddingModel = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+        // nexus-mp8ys: a retired name (superseded_by set) is refused here, before the ownership check,
+        // the embedder and every write, naming the successor; see CollectionSupersededException.
+        final String embeddingModel = CollectionRegistry.lookupWritable(tenantScope, tenant, collection).embeddingModel();
         ModelPartitions.require(tenantScope, tenant, ModelPartitions.CHUNKS, embeddingModel);
 
         // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership check runs here, after the
@@ -1159,9 +1161,13 @@ public final class PgVectorRepository {
         // full-suite failure) rather than inline in the batch transaction below —
         // kept for symmetry with that history even though a read-only check has no
         // lock-hold duration to bound.
+        // nexus-i15oc: this is the re-check AFTER the embed round trip, the slow gap in which a supersede can
+        // commit. The supersede evicts the cached row, so isKnown is false and the read below sees the tombstone;
+        // plain requireRegistered would pass it and file the batch under the retired name. A cache hit is
+        // always a live row, so the common case stays free.
         if (!CollectionRegistry.isKnown(tenant, collection)) {
             tenantScope.withTenant(tenant, ctx -> {
-                CollectionRegistry.requireRegistered(ctx, tenant, collection);
+                CollectionRegistry.requireWritable(ctx, tenant, collection);
                 return null;
             });
         }
@@ -1666,7 +1672,7 @@ public final class PgVectorRepository {
     }
 
     /**
-     * The probe's statement, apart from running it, so the plan pin and the latency check in
+     * The probe's statement, apart from running it, so the plan pins and the count check in
      * {@code RouterProbeShapeIntegrationTest} read the plan of the statement the engine runs and not of a copy.
      *
      * <p>Shape. A leaf now holds one model, so a collection is a larger share of it than of the old single
@@ -1915,13 +1921,35 @@ public final class PgVectorRepository {
      */
     public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                       long tokens, List<String> skippedCollections, int peakRetainedRows,
-                                      int embeddingDim) {
+                                      int embeddingDim, List<Map<String, Object>> lexicalRows,
+                                      List<LexicalStat> lexical) {
+        /** A result of a request that did not ask for the lexical leg. */
+        public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                   long tokens, List<String> skippedCollections, int peakRetainedRows,
+                                   int embeddingDim) {
+            this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, embeddingDim, List.of(),
+                 List.of());
+        }
+
         /** A result of a request that did not ask for embeddings ({@code embeddingDim} 0). */
         public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                    long tokens, List<String> skippedCollections, int peakRetainedRows) {
             this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, 0);
         }
     }
+
+    /**
+     * The lexical arm of one collection in a {@link #searchPerCollection} request that asked for it
+     * ({@code lexical}, nexus-xd2rc), aligned with {@link PerCollectionResult#perCollection()}.
+     *
+     * @param count     rows the collection's text-gated statement returned (0 on error)
+     * @param ids       their ids, best first; every one is in the response, as a vector row or as a
+     *                  {@link PerCollectionResult#lexicalRows()} row. Empty when the collection's vector arm
+     *                  failed: its lexical rows are not served either
+     * @param error     the failure text when the lexical statement returned nothing, else {@code null}
+     * @param errorKind the stable failure kind (set exactly when {@code error} is), else {@code null}
+     */
+    public record LexicalStat(int count, List<String> ids, String error, ArmErrorKind errorKind) {}
 
     /** What bounded one arm's statement: the search bound, the fan-out budget, or the request budget. */
     enum Limiter { SEARCH, FANOUT, REQUEST }
@@ -2013,16 +2041,101 @@ public final class PgVectorRepository {
         }
 
         /** The retained survivors, best first. */
-        synchronized List<Map<String, Object>> drainBestFirst() {
+        synchronized List<Candidate> drainBestFirst() {
             List<Candidate> all = new ArrayList<>(worstOnTop);
             all.sort(MERGE_ORDER);
-            List<Map<String, Object>> rows = new ArrayList<>(all.size());
-            for (Candidate c : all) {
-                rows.add(c.row());
-            }
-            return rows;
+            return all;
         }
     }
+
+    /** The wire rows of {@code candidates}, in order. */
+    private static List<Map<String, Object>> rowsOf(List<Candidate> candidates) {
+        List<Map<String, Object>> rows = new ArrayList<>(candidates.size());
+        for (Candidate c : candidates) {
+            rows.add(c.row());
+        }
+        return rows;
+    }
+
+    /**
+     * The lexical arms of a {@link #searchPerCollection} request (nexus-xd2rc): each collection's
+     * text-gated rows, held apart from the bounded vector merge until every arm has settled, then
+     * unioned in by {@link #union}.
+     */
+    private static final class LexicalLeg {
+        private final List<Candidate>[] rows;
+        private final String[] errors;
+        private final ArmErrorKind[] kinds;
+        private final boolean[] settled;
+
+        @SuppressWarnings("unchecked")
+        LexicalLeg(int collections) {
+            this.rows = new List[collections];
+            this.errors = new String[collections];
+            this.kinds = new ArmErrorKind[collections];
+            this.settled = new boolean[collections];
+        }
+
+        synchronized void accept(int slot, List<Candidate> candidates) {
+            rows[slot] = candidates;
+            settled[slot] = true;
+        }
+
+        synchronized void error(int slot, ArmErrorKind kind, String text) {
+            errors[slot] = text;
+            kinds[slot] = kind;
+            settled[slot] = true;
+        }
+
+        synchronized boolean isSettled(int slot) {
+            return settled[slot];
+        }
+
+        /**
+         * The rows the vector survivors do not already hold, best first, and one stat per collection.
+         * A row both legs returned keeps its vector copy (already among {@code survivors}). A lexical row
+         * is exempt from its collection's threshold and from the {@code limit} cut, so a lexical row
+         * whose vector copy either removed comes back here. A collection whose vector arm failed
+         * contributes no lexical rows: the client reads that collection as failed.
+         */
+        synchronized Union union(List<PerCollectionStat> vectorStats, List<Candidate> survivors) {
+            Set<String> held = new HashSet<>(survivors.size() * 2);
+            for (Candidate c : survivors) {
+                held.add(c.collection() + "\u0000" + c.id());
+            }
+            List<Candidate> extras = new ArrayList<>();
+            List<LexicalStat> stats = new ArrayList<>(rows.length);
+            for (int slot = 0; slot < rows.length; slot++) {
+                PerCollectionStat vector = vectorStats.get(slot);
+                List<Candidate> mine = rows[slot] == null ? List.of() : rows[slot];
+                if (errors[slot] != null || vector == null || vector.error() != null) {
+                    stats.add(new LexicalStat(mine.size(), List.of(), errors[slot], kinds[slot]));
+                    continue;
+                }
+                List<String> ids = new ArrayList<>(mine.size());
+                for (Candidate c : mine) {
+                    ids.add(c.id());
+                    if (held.add(c.collection() + "\u0000" + c.id())) {
+                        extras.add(c);
+                    }
+                }
+                stats.add(new LexicalStat(mine.size(), ids, null, null));
+            }
+            extras.sort(MERGE_ORDER);
+            return new Union(extras, stats);
+        }
+
+        record Union(List<Candidate> extras, List<LexicalStat> stats) {}
+    }
+
+    /** Where an arm's isolated failure is recorded: its collection's vector stat or its lexical stat. */
+    @FunctionalInterface
+    private interface ArmErrorSink {
+        void error(ArmErrorKind kind, String text);
+    }
+
+    /** One unit of fan-out work: a collection's vector arm, or its lexical arm. */
+    private record ArmTask(int slot, boolean lexical) {}
 
     /** Per-arm scratch: which limit set the arm's CURRENT statement bound, and the bound itself. */
     private static final class ArmRun {
@@ -2387,7 +2500,24 @@ public final class PgVectorRepository {
                                                    boolean includeSourceUri,
                                                    boolean includeEmbeddings) {
         return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
-            includeSourceUri, includeEmbeddings,
+            includeSourceUri, includeEmbeddings, false);
+    }
+
+    /**
+     * As above, with the lexical leg when {@code lexical} (nexus-xd2rc): each collection also runs
+     * {@link #hybridSearch}'s text-gated statement as its own arm, top-{@code perCollectionK}, and its
+     * rows come back in {@link PerCollectionResult#lexicalRows()} and {@link PerCollectionResult#lexical()}.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical,
             new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
                                PgSession.startupSearchStatementTimeoutMs()));
     }
@@ -2412,6 +2542,20 @@ public final class PgVectorRepository {
                                                    Map<String, Object> where,
                                                    boolean includeSourceUri,
                                                    boolean includeEmbeddings,
+                                                   FanoutSettings settings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, false, settings);
+    }
+
+    /** As above with every fan-out knob explicit, the embeddings opt-in and the lexical leg; a test seam. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
                                                    FanoutSettings settings) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
@@ -2481,14 +2625,29 @@ public final class PgVectorRepository {
             }
         }
 
-        int workers = Math.max(1, Math.min(Math.min(parallelism, tenantScope.poolSize()), runnable.size()));
+        // nexus-xd2rc: with the lexical leg every runnable collection is two tasks, its vector arm and its
+        // lexical arm, drawn from one queue through the same workers and the same arm gate.
+        List<ArmTask> tasks = new ArrayList<>(lexical ? runnable.size() * 2 : runnable.size());
+        for (int i : runnable) {
+            tasks.add(new ArmTask(i, false));
+        }
+        if (lexical) {
+            for (int i : runnable) {
+                tasks.add(new ArmTask(i, true));
+            }
+        }
+        // The gate text is bound raw (plainto_tsquery, trgm <%), so it is stripped of NUL as hybridSearch does.
+        final String gateText = stripNul(queryText);
+        LexicalLeg lexicalLeg = new LexicalLeg(n);
+        int workers = Math.max(1, Math.min(Math.min(parallelism, tenantScope.poolSize()), tasks.size()));
         Semaphore armGate = tenantScope.fanoutArmGate(
             fanoutArmPermits(System.getenv(FANOUT_ARM_PERMITS_ENV), tenantScope.poolSize()));
         AtomicInteger cursor = new AtomicInteger();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         long[] armNanos = new long[n];
+        long[] lexicalArmNanos = new long[n];
         ArmPhases[] armPhases = new ArmPhases[n];
-        if (!runnable.isEmpty()) {
+        if (!tasks.isEmpty()) {
             try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
                 for (int w = 0; w < workers; w++) {
                     pool.submit(() -> {
@@ -2496,20 +2655,35 @@ public final class PgVectorRepository {
                         // fan-out budget is spent.
                         while (failure.get() == null && fanoutDeadlineNanos - System.nanoTime() > 0L) {
                             int slot = cursor.getAndIncrement();
-                            if (slot >= runnable.size()) {
+                            if (slot >= tasks.size()) {
                                 return;
                             }
-                            int i = runnable.get(slot);
+                            ArmTask task = tasks.get(slot);
+                            int i = task.slot();
                             String col = cols.get(i);
                             ArmRun run = new ArmRun();
                             long armStart = System.nanoTime();
+                            if (task.lexical()) {
+                                try {
+                                    lexicalLeg.accept(i, runLexicalArm(tenant, model, col, dims[i], queryVec,
+                                        gateText, wherePlan, perCollectionK, requestDeadlineNanos,
+                                        fanoutDeadlineNanos, searchBoundMs, armGate, run));
+                                } catch (Throwable t) {
+                                    settleArmFailure(t, col, run, fanoutBudgetMs,
+                                                     (kind, text) -> lexicalLeg.error(i, kind, text), failure);
+                                } finally {
+                                    lexicalArmNanos[i] = System.nanoTime() - armStart;
+                                }
+                                continue;
+                            }
                             try {
                                 List<Candidate> rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
                                                               perCollectionK, requestDeadlineNanos,
                                                               fanoutDeadlineNanos, searchBoundMs, armGate, run);
                                 merger.accept(i, col, thresholdMap.get(col), rows);
                             } catch (Throwable t) {
-                                settleArmFailure(t, i, col, run, fanoutBudgetMs, merger, failure);
+                                settleArmFailure(t, col, run, fanoutBudgetMs,
+                                                 (kind, text) -> merger.error(i, col, kind, text), failure);
                             } finally {
                                 armNanos[i] = System.nanoTime() - armStart;
                                 armPhases[i] = run.phases;
@@ -2529,11 +2703,30 @@ public final class PgVectorRepository {
                 merger.error(slot, cols.get(slot), ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
                     "fan-out budget of " + fanoutBudgetMs + " ms was spent before this collection's search started");
             }
+            if (lexical && !lexicalLeg.isSettled(slot)) {
+                lexicalLeg.error(slot, ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                    "fan-out budget of " + fanoutBudgetMs + " ms was spent before this collection's lexical "
+                    + "search started");
+            }
         }
 
-        List<Map<String, Object>> rows = merger.drainBestFirst();
+        List<Candidate> survivors = merger.drainBestFirst();
+        List<Map<String, Object>> rows = rowsOf(survivors);
+        List<PerCollectionStat> stats = merger.stats();
+        List<Map<String, Object>> lexicalRows = List.of();
+        List<LexicalStat> lexicalStats = List.of();
+        if (lexical) {
+            LexicalLeg.Union union = lexicalLeg.union(stats, survivors);
+            lexicalRows = rowsOf(union.extras());
+            lexicalStats = union.stats();
+        }
+        // Enrichment and the embedding fill run once over every row the response carries.
+        List<Map<String, Object>> served = lexicalRows.isEmpty() ? rows : new ArrayList<>(rows);
+        if (!lexicalRows.isEmpty()) {
+            served.addAll(lexicalRows);
+        }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, rows, includeSourceUri);
+        enrichSearchRows(tenant, served, includeSourceUri);
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
@@ -2541,17 +2734,16 @@ public final class PgVectorRepository {
             // statement timeout) costs the vectors, never the rows. The client fetches by id any row
             // that arrives without embedding_b64 (nexus-92q1p review M2).
             try {
-                attachEmbeddings(tenant, model, queryDim, rows);
+                attachEmbeddings(tenant, model, queryDim, served);
             } catch (RuntimeException e) {
-                for (Map<String, Object> row : rows) {
+                for (Map<String, Object> row : served) {
                     row.remove(EMBEDDING_ROW_KEY);
                 }
                 log.warn("event=search_per_collection_embedding_fill_failed rows={} error_class={} error={}",
-                         rows.size(), e.getClass().getSimpleName(), e.getMessage());
+                         served.size(), e.getClass().getSimpleName(), e.getMessage());
             }
         }
         final long embeddingFillMs = includeEmbeddings ? (System.nanoTime() - fillStartNanos) / 1_000_000L : 0L;
-        List<PerCollectionStat> stats = merger.stats();
         long fanoutMs = (System.nanoTime() - startNanos) / 1_000_000L;
         long slowestArmMs = 0L;
         long sumArmMs = 0L;
@@ -2602,8 +2794,21 @@ public final class PgVectorRepository {
                  stats.stream().filter(s -> s.errorKind() == ArmErrorKind.STATEMENT_TIMEOUT).count(),
                  skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs, queryEmbedMs, enrichMs,
                  includeEmbeddings, embeddingFillMs);
+        if (lexical) {
+            long slowestLexicalMs = 0L;
+            long sumLexicalMs = 0L;
+            for (int slot : runnable) {
+                long ms = lexicalArmNanos[slot] / 1_000_000L;
+                slowestLexicalMs = Math.max(slowestLexicalMs, ms);
+                sumLexicalMs += ms;
+            }
+            log.info("event=search_per_collection_lexical arms={} lexical_rows={} extra_rows={} errors={} "
+                     + "slowest_arm_ms={} sum_arm_ms={}",
+                     runnable.size(), lexicalStats.stream().mapToInt(LexicalStat::count).sum(), lexicalRows.size(),
+                     lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs);
+        }
         return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
-                                       includeEmbeddings ? queryDim : 0);
+                                       includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats);
     }
 
     /** Row key of a survivor's stored vector: base64 of its little-endian float32 components. */
@@ -2681,12 +2886,12 @@ public final class PgVectorRepository {
      * ({@link ArmErrorKind#FANOUT_BUDGET_EXHAUSTED}); when the REQUEST budget's bound cancelled it,
      * the request itself is out of time and the whole request fails with the deadline shape.
      */
-    private static void settleArmFailure(Throwable t, int slot, String collection, ArmRun run,
-                                         long fanoutBudgetMs, FanoutMerger merger,
+    private static void settleArmFailure(Throwable t, String collection, ArmRun run,
+                                         long fanoutBudgetMs, ArmErrorSink sink,
                                          AtomicReference<Throwable> failure) {
         for (Throwable c = t, last = null; c != null && c != last; last = c, c = c.getCause()) {
             if (c instanceof FanoutBudgetSpentException spent) {
-                merger.error(slot, collection, ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                sink.error(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
                     "fan-out budget of " + fanoutBudgetMs + " ms was spent before this collection's search "
                     + "finished (" + spent.getMessage() + ")");
                 return;
@@ -2694,10 +2899,10 @@ public final class PgVectorRepository {
         }
         if ("57014".equals(firstSqlState(t))) {
             switch (run.limiter) {
-                case SEARCH -> merger.error(slot, collection, ArmErrorKind.STATEMENT_TIMEOUT,
+                case SEARCH -> sink.error(ArmErrorKind.STATEMENT_TIMEOUT,
                     "search statement for collection '" + collection + "' exceeded its " + run.boundMs
                     + " ms bound (statement timeout, SQLSTATE 57014)");
-                case FANOUT -> merger.error(slot, collection, ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                case FANOUT -> sink.error(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
                     "fan-out budget of " + fanoutBudgetMs + " ms ran out while collection '" + collection
                     + "' was searching (its statement was bounded to " + run.boundMs + " ms)");
                 case REQUEST -> failure.compareAndSet(null, new RequestDeadlineExceededException(
@@ -2746,6 +2951,36 @@ public final class PgVectorRepository {
                 run.boundMs = bound.timeoutMs();
                 return bound.timeoutMs();
             }, true, run.phases));
+        } finally {
+            armGate.release();
+        }
+    }
+
+    /**
+     * One lexical arm (nexus-xd2rc): {@link #hybridSearch}'s text-gated statements for {@code collection},
+     * top-{@code k} by vector distance among the rows the text gate admits, under the same arm gate and
+     * the same three-way statement bound as {@link #runArm}. The query vector is the request's one
+     * embedding; nothing here embeds again. The rows have the plain-search shape, so they become
+     * {@link Candidate}s the same way.
+     */
+    private List<Candidate> runLexicalArm(String tenant, String model, String collection, int dim, Vector queryVec,
+                                          String gateText, WherePlan wherePlan, int k, long requestDeadlineNanos,
+                                          long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
+                                          ArmRun run) {
+        String[] colls = new String[] {collection};
+        acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
+        try {
+            // The gate probe, the rank and an exact re-run are separate statements; each is bounded by
+            // what remains of the three budgets when it starts, as runArm's statement and re-run are.
+            java.util.function.IntSupplier bound = () -> {
+                ArmBound b = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(), searchBoundMs);
+                run.limiter = b.limiter();
+                run.boundMs = b.timeoutMs();
+                return b.timeoutMs();
+            };
+            return plainSearchCandidates(tenantScope.withTenant(tenant, ctx ->
+                hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model, tenant,
+                           bound, true)));
         } finally {
             armGate.release();
         }
@@ -3049,6 +3284,40 @@ public final class PgVectorRepository {
         String[] colls = collectionNames.toArray(String[]::new);
         String gateQueryText = queryText;
 
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
+            hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
+                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false));
+
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            // RDR-169 Phase B fix round 1 (Gap 2): retention rides along for response-shape consistency
+            // with plain search; the text gate keeps a reference-only row from reaching here in practice.
+            rows.add(searchRow(rec));
+        }
+        return rows;
+    }
+
+    /**
+     * The text-gated statements of {@link #hybridSearch}, in a transaction the caller opened: the
+     * statement bound, the gate probe, then the selective by-chash rank or the HNSW-first rank. Shared by
+     * {@link #hybridSearch} and the lexical arm of {@link #searchPerCollection} (nexus-xd2rc).
+     *
+     * @param statementTimeoutMs the statement bound, evaluated when it is set
+     * @param rebind when true the bound is evaluated and set again before the rank and before an exact
+     *        re-run, so a fan-out arm's later statements are bounded by the budget that remains, as
+     *        {@link #runArm}'s are; false keeps the first bound for every statement
+     */
+    private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String gateQueryText,
+                                                String[] colls, WherePlan wherePlan, int nResults,
+                                                int selectiveGateMax, String model, String tenant,
+                                                java.util.function.IntSupplier statementTimeoutMs,
+                                                boolean rebind) {
+        // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
+        // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
+        // inherit it. Set here, before the first fetch, rather than per branch: a
+        // branch without HNSW is still a scan that can pin xmin. First of the GUC round
+        // trips so the rest run under its network bound too (nexus-u9zkn).
+        PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
         // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l
         // selectivity-aware two-branch dispatch (bounded gate probe -> chash-ranked
         // selective path vs HNSW-first fallback) as three generated schema functions,
@@ -3056,107 +3325,80 @@ public final class PgVectorRepository {
         // for the derivation from git history). Probe cap and comparison are
         // unchanged: LIMIT selectiveGateMax + 1, dispatch on matches <= selectiveGateMax.
         final int probeCap = selectiveGateMax + 1;
+        // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
+        // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
+        // do not. Pinned per-transaction so the gate is independent of cluster config --
+        // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
+        PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
+        // nexus-6nkn3: a custom plan per execution so the planner sees the
+        // collection set's selectivity (a cached generic HNSW plan on a tiny
+        // collection ran ~30s and returned EMPTY in production).
+        PgSession.setSearchPlanCacheMode(ctx);
 
-        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
-            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
-            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
-            // inherit it. Set here, before the first fetch, rather than per branch: a
-            // branch without HNSW is still a scan that can pin xmin. First of the GUC round
-            // trips so the rest run under its network bound too (nexus-u9zkn).
-            PgSession.setSearchStatementTimeout(ctx);
-            // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
-            // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
-            // do not. Pinned per-transaction so the gate is independent of cluster config --
-            // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
-            PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            // nexus-6nkn3: a custom plan per execution so the planner sees the
-            // collection set's selectivity (a cached generic HNSW plan on a tiny
-            // collection ran ~30s and returned EMPTY in production).
-            PgSession.setSearchPlanCacheMode(ctx);
-
-            // T2 [24219] critique finding B (single-gate-eval restored, nexus-x7z7l/
-            // conexus-qsa): the probe is now SETOF bytea, not a scalar COUNT -- ONE
-            // bounded fetch both decides the plan (row count vs selectiveGateMax) AND,
-            // for the selective case, supplies the exact chash set the rank query below
-            // reuses via a cheap chash = ANY(...) PK filter, never re-running the
-            // expensive `<%` trigram gate a second time.
-            org.jooq.Table<?> probeFn = switch (dim) {
-                case 384  -> TEXT_GATE_PROBE_384.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-                case 768  -> TEXT_GATE_PROBE_768.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-                case 1024 -> TEXT_GATE_PROBE_1024.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-            };
-            Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
-            int matches = probeResult.size();
-
-            if (matches <= selectiveGateMax) {
-                // Selective: rank ONLY the probe's own chash set + scope, no text-gate
-                // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-011).
-                // matches == 0 needs no special empty-gate case: chash = ANY('{}') is
-                // false for every row, so the rank query naturally returns zero rows.
-                byte[][] chashes = new byte[probeResult.size()][];
-                for (int i = 0; i < probeResult.size(); i++) {
-                    chashes[i] = probeResult.get(i).get(0, byte[].class);
-                }
-                org.jooq.Table<?> fn = switch (dim) {
-                    case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                    case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                    case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                    default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-                };
-                return ctx.selectFrom(fn).fetch();
-            }
-            // HNSW-first for a dense gate: keep HNSW scanning past ef_search
-            // (text_gated_search_hnsw_first_<dim>, vectors-011, inlines so these GUCs
-            // govern its own body exactly as they governed the retired raw SQL).
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            // nexus-4ktfm: crowd-out headroom for the traversal itself (see
-            // PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            PgSession.setHnswEfSearch(ctx, nResults);
-            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
-            PgSession.setHnswScanBudget(ctx);
-            org.jooq.Table<?> hnswFirstFn = switch (dim) {
-                case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
-                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-            };
-            // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
-            // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
-            // is already exact (ranks the complete materialized gate), so it never needed
-            // the fallback.
-            return exactSelectFrom(ctx, nResults, hnswFirstFn);
-        });
-
-        List<Map<String, Object>> rows = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id",         rec.get("id", String.class));
-            row.put("content",    rec.get("content", String.class));
-            row.put("distance",   rec.get("distance", Double.class));
-            row.put("collection", rec.get("collection", String.class));
-            // RDR-169 Phase B fix round 1 (Gap 2): additive, alongside the
-            // already-nullable content -- text_gated_search_hnsw_first_<dim>
-            // / text_gated_search_by_chash_<dim> now select it
-            // (vectors-015-retention-search-return.xml). hybridSearch's own
-            // FTS/trigram gate excludes a reference-only row from ever
-            // reaching here in practice, but the field rides along for
-            // response-shape consistency with plain search.
-            row.put("retention",  rec.get("retention", String.class));
-            JSONB meta = rec.get("metadata", JSONB.class);
-            row.putAll(fromJson(meta != null ? meta.data() : null));
-            rows.add(row);
+        // T2 [24219] critique finding B (single-gate-eval restored, nexus-x7z7l/
+        // conexus-qsa): the probe is now SETOF bytea, not a scalar COUNT -- ONE
+        // bounded fetch both decides the plan (row count vs selectiveGateMax) AND,
+        // for the selective case, supplies the exact chash set the rank query below
+        // reuses via a cheap chash = ANY(...) PK filter, never re-running the
+        // expensive `<%` trigram gate a second time.
+        org.jooq.Table<?> probeFn = switch (dim) {
+            case 384  -> TEXT_GATE_PROBE_384.call(
+                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
+            case 768  -> TEXT_GATE_PROBE_768.call(
+                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
+            case 1024 -> TEXT_GATE_PROBE_1024.call(
+                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
+        int matches = probeResult.size();
+        if (rebind) {
+            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
         }
-        return rows;
+
+        if (matches <= selectiveGateMax) {
+            // Selective: rank ONLY the probe's own chash set + scope, no text-gate
+            // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-011).
+            // matches == 0 needs no special empty-gate case: chash = ANY('{}') is
+            // false for every row, so the rank query naturally returns zero rows.
+            byte[][] chashes = new byte[probeResult.size()][];
+            for (int i = 0; i < probeResult.size(); i++) {
+                chashes[i] = probeResult.get(i).get(0, byte[].class);
+            }
+            org.jooq.Table<?> fn = switch (dim) {
+                case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+            return ctx.selectFrom(fn).fetch();
+        }
+        // HNSW-first for a dense gate: keep HNSW scanning past ef_search
+        // (text_gated_search_hnsw_first_<dim>, vectors-011, inlines so these GUCs
+        // govern its own body exactly as they governed the retired raw SQL).
+        PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+        // nexus-4ktfm: crowd-out headroom for the traversal itself (see
+        // PgSession.DEFAULT_EF_SEARCH_FLOOR).
+        PgSession.setHnswEfSearch(ctx, nResults);
+        // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+        PgSession.setHnswScanBudget(ctx);
+        org.jooq.Table<?> hnswFirstFn = switch (dim) {
+            case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
+        // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
+        // is already exact (ranks the complete materialized gate), so it never needed
+        // the fallback.
+        return exactSelectFrom(ctx, nResults, hnswFirstFn, rebind ? statementTimeoutMs : null);
     }
 
     /**
@@ -5837,7 +6079,10 @@ FROM scope s
         // The origin is the registered catalog row, never a name: an origin that is gone fails loud here. It must
         // be live, the only state the reaper visits; restoring into a dormant or disputed collection would put
         // chunks where nothing is looking after them.
-        var origin = CollectionRegistry.lookup(tenantScope, tenant, originCollection);
+        // nexus-mp8ys: a renamed-away origin keeps lifecycle_state 'live' and names its successor, so the
+        // lifecycle test below cannot see it; restoring into it would strand the chunks under a name nothing
+        // routes to. Refused 409 naming the successor, as every other implicit write to a retired name is.
+        var origin = CollectionRegistry.lookupWritable(tenantScope, tenant, originCollection);
         if (!"live".equals(origin.lifecycleState())) {
             throw new IllegalArgumentException(originCollection + " is not a live collection (lifecycle_state="
                 + origin.lifecycleState() + "); a restore goes into a live collection");
@@ -5891,9 +6136,75 @@ FROM scope s
      * the origin.
      */
     public List<String> resolveQuarantineSiblings(String tenant, String originCollection) {
+        return tenantScope.withTenant(tenant, ctx -> siblingNames(ctx, tenant, originCollection));
+    }
+
+    /**
+     * What a {@code resolve_siblings} request learned (nexus-wbfpw.64): the quarantine siblings in the order
+     * {@link #resolveQuarantineSiblings} gives them, or {@code timedOut} when the read ran into its statement bound
+     * and the list is unknown (never an empty list standing in for "none": that answer would let a client conclude
+     * nothing is stranded).
+     */
+    public record SiblingResolution(List<String> names, boolean timedOut) {
+        public SiblingResolution {
+            names = List.copyOf(names);
+        }
+    }
+
+    /**
+     * {@link #resolveQuarantineSiblings} under a statement bound of its own
+     * ({@link PgSession#DEFAULT_QUARANTINE_SIBLING_RESOLUTION_STATEMENT_TIMEOUT_MS}), for the expire-quarantine and
+     * restore-rereferenced routes, which run it on every request that asks (nexus-wbfpw.64). The bound is a
+     * separate statement ahead of the read in its own transaction, so it bounds the read and nothing after it; a
+     * bound that trips (SQLSTATE 57014) is reported as {@link SiblingResolution#timedOut()}, not thrown, because the
+     * page the request also asked for must still run.
+     *
+     * <p>No index backs the {@code origin_collection} tag, on purpose (nexus-wbfpw.64). The read walks the primary-key
+     * prefix {@code (tenant_id, collection)} of each quarantine collection and filters the tag on the heap, so its cost
+     * is those collections' own rows and never the rest of the tenant's chunks. Measured through the service role under
+     * FORCE RLS (a superuser connection bypasses RLS and shows an index doing far better than it can in production:
+     * 0.05 to 0.1 ms, which is not what {@code nexus_svc} gets), on 100,000 non-quarantine rows beside the quarantine
+     * rows, none tagged for the origin, the worst case: 3 to 16 ms over 12,800 quarantine rows in 8 siblings
+     * (production measured 7.77 ms), 90 to 142 ms over 140,400 in 18. An expression index on
+     * {@code (tenant_id, collection, (metadata->>'origin_collection'))}, full or partial to the rows that carry the tag,
+     * took the second to 54 to 69 ms, about 1.6 times, because under RLS the tag test is a filter on the index scan and
+     * not an index condition ({@code jsonb ->> text} is not leakproof; see the master changelog's note on the removed
+     * {@code catalog-038}). The partial form is small (1.3 MB over the 140,400 rows) and costs the write of an untagged
+     * row nothing measurable; the full form added 15 to 25 percent to a 20,000-row bulk insert. Neither was added: a gain
+     * of 1.6 times on a read that runs once per collection per run does not pay for a migration that puts an index on every
+     * leaf of the partitioned table, and the statement bound already covers about 2 million quarantine rows, roughly 150
+     * times production's. Past about a million, add the partial index.
+     */
+    public SiblingResolution resolveQuarantineSiblingsBounded(String tenant, String originCollection) {
+        return resolveQuarantineSiblingsBounded(tenant, originCollection,
+            PgSession.DEFAULT_QUARANTINE_SIBLING_RESOLUTION_STATEMENT_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public SiblingResolution resolveQuarantineSiblingsBounded(String tenant, String originCollection,
+                                                               int statementTimeoutMs) {
+        try {
+            List<String> names = tenantScope.withTenant(tenant, ctx -> {
+                PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs,
+                    PgSession.DEFAULT_QUARANTINE_SIBLING_RESOLUTION_LOCK_TIMEOUT_MS);
+                return siblingNames(ctx, tenant, originCollection);
+            });
+            return new SiblingResolution(names, false);
+        } catch (RuntimeException e) {
+            // 55P03 is a lock wait that ran out: a reader waiting behind an exclusive lock on the chunks table.
+            // It is the same "could not read inside the bound" as 57014 and is answered the same way.
+            String state = sqlState(e);
+            if (QUERY_CANCELED.equals(state) || LOCK_NOT_AVAILABLE.equals(state)) {
+                return new SiblingResolution(List.of(), true);
+            }
+            throw e;
+        }
+    }
+
+    private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection) {
         String reaperName = "quarantine-" + originCollection;
         Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
-        List<String> found = tenantScope.withTenant(tenant, ctx ->
+        List<String> found =
             ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                    .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))
@@ -5902,7 +6213,7 @@ FROM scope s
                           .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
                               .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
                               .and(originTag.eq(originCollection)))))))
-               .fetch(CATALOG_COLLECTIONS.NAME));
+               .fetch(CATALOG_COLLECTIONS.NAME);
         var ordered = new ArrayList<String>(found.size());
         if (found.contains(reaperName)) ordered.add(reaperName);
         found.stream().filter(n -> !n.equals(reaperName)).sorted().forEach(ordered::add);

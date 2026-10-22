@@ -132,7 +132,9 @@ public final class TaxonomyCentroidRepository {
                 int dim = r.embedding().length;
                 // RDR-225: the collection's registry row is the authority for the model; the vector's
                 // length must agree with it, and the model must have a partition, before any write.
-                CollectionRow collectionRow = CollectionRegistry.require(ctx, tenant, r.collection());
+                // nexus-mp8ys: a centroid under a retired (superseded) name is stranded exactly like a chunk; refused
+                // 409 naming the successor, ahead of the dimension and partition checks.
+                CollectionRow collectionRow = CollectionRegistry.requireWritable(ctx, tenant, r.collection());
                 String model = collectionRow.embeddingModel();
                 if (dim != collectionRow.dimension()) {
                     throw new IllegalArgumentException(

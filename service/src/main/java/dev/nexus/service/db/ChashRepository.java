@@ -243,6 +243,9 @@ public final class ChashRepository {
             for (String c : java.util.stream.Stream.of(oldCollection, newCollection).sorted().distinct().toList()) {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
+            // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
+            // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
+            // target may be superseded. The source needs no check, it is only read.
             ensureCollectionRegistered(ctx, tenant, newCollection);
             // RDR-225 (nexus-3wh8d.13): a chunk carries its collection's model, so this re-home can
             // only file rows under a target of the SAME model. The models are read from the
@@ -325,8 +328,9 @@ public final class ChashRepository {
         // verified it above), so lookup() below is a cache hit in the common case —
         // require() already cached it mid-transaction — and a cheap single-row read
         // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
-        CollectionRegistry.markKnown(tenant, newCollection,
-            CollectionRegistry.lookup(tenantScope, tenant, newCollection));
+        // nexus-hkh1y: the lookup itself caches (on a miss, through the guarded fill); a direct
+        // markKnown of its result would re-cache a read a concurrent evict had invalidated.
+        CollectionRegistry.lookup(tenantScope, tenant, newCollection);
         return updated;
     }
 

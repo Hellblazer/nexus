@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mcp.types import CallToolResult
 
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
@@ -988,7 +987,7 @@ def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_m
     assert not by_title.startswith("Not found"), by_title
     assert text in by_title and "title-b" not in by_title.split("\n")[0], by_title
 
-    hits = search(query=text, corpus="knowledge__fixture-subject").content[0].text
+    hits = search(query=text, corpus="knowledge__fixture-subject")
     line = next((ln for ln in hits.splitlines() if "title-a" in ln or "title-b" in ln), "")
     assert "title-a · title-b" in line, hits
 
@@ -2135,99 +2134,78 @@ def test_search_under_cap_is_unaffected():
     assert "result capped" not in out
 
 
-# ── structuredContent spike (nexus-6jlki) ───────────────────────────────────
+# ── Wire shape of the search tool (nexus-099mn, shakeout F13) ─────────────
 #
-# The wire-facing ``search()`` wrapper (distinct from ``_search_render``,
-# the business logic exercised by every test above) attaches protocol-level
-# ``structuredContent`` alongside byte-identical human text. These tests
-# call ``search()`` directly as a plain Python function — a real
-# ``CallToolResult`` is returned either way (no FastMCP ToolManager/transport
-# needed to observe ``.content`` / ``.structuredContent``).
+# Default mode returns the human-readable text and nothing else. From
+# nexus-6jlki it also returned a CallToolResult carrying a structuredContent
+# envelope; Claude Code displays structuredContent in place of the text,
+# so the model read a JSON dump. ``structured=True`` returns the bare dict.
 
-@pytest.mark.t2_tenant
-def test_search_default_mode_returns_calltoolresult_with_structured_content():
-    _mock_t3([{"name": "code__test", "count": 1}])
-    with patch("nexus.search_engine.search_cross_corpus",
-               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
-                                              distance=0.1234, collection="code__test",
-                                              metadata={"tumbler": "1.1",
-                                                        "chunk_text_hash": "ab" * 32})]), \
-         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        result = search(query="vector database", corpus="code__test")
-
-    assert isinstance(result, CallToolResult)
-    # Text is byte-identical to what _search_render (the pre-nexus-6jlki
-    # tool body) would have returned on its own for the same inputs.
-    assert len(result.content) == 1
-    assert result.content[0].type == "text"
-    text = result.content[0].text
-    assert "vector database internals" in text.lower() or "r1" in text
-
-    with patch("nexus.search_engine.search_cross_corpus",
-               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
-                                              distance=0.1234, collection="code__test",
-                                              metadata={"tumbler": "1.1",
-                                                        "chunk_text_hash": "ab" * 32})]), \
-         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        expected_text = _search_render(query="vector database", corpus="code__test")
-    assert text == expected_text, "structuredContent wiring must not alter the text shape"
-
-    data = result.structuredContent
-    assert data["ids"] == ["r1"]
-    assert data["tumblers"] == ["1.1"]
-    assert data["distances"] == [pytest.approx(0.1234)]
-    assert data["collections"] == ["code__test"]
-    assert data["chunk_text_hash"] == ["ab" * 32]
-    assert data["truncated"] is False
-    assert data["truncated_chars"] == 0
+def _search_hit(*a, **kw):
+    return [SearchResult(id="r1", content="vector database internals",
+                         distance=0.1234, collection="code__test",
+                         metadata={"tumbler": "1.1", "chunk_text_hash": "ab" * 32})]
 
 
 @pytest.mark.t2_tenant
-def test_search_structured_content_carries_the_render_text():
-    """structuredContent must be SELF-SUFFICIENT (nexus-6jlki follow-up).
-
-    A conforming MCP client may render ``structuredContent`` INSTEAD of the
-    text block -- that is not a client bug, the protocol permits it, and
-    nexus's own client does exactly that (``mcp_client/core.py::_parse_result``
-    documents its preference order as "structuredContent (already a dict) ->
-    the first text content block"). Claude Code does the same, so between
-    c9762865d and this test the flagship retrieval tool delivered
-    ids/tumblers/distances and NO file paths, line numbers or snippets to
-    its largest consumer.
-
-    The design memo (T2 [23351]) modelled the new field as additive -- "a
-    new structuredContent field they can ignore or start consuming" -- and
-    every test written for the spike asserts on the SERVER's CallToolResult,
-    where both shapes are present and correct. The displacement is invisible
-    from there, which is why six green wire-shape tests could not see it.
-
-    The invariant that IS checkable server-side: whichever shape a client
-    picks, it must get the render. Hence the text lives in both.
-    """
+def test_search_default_mode_returns_the_text_on_consecutive_calls(monkeypatch):
+    """Shakeout F13 reported plain text on the first call and a JSON
+    envelope on later ones. Default, structured, default: the later calls
+    are served by the page-turn cache (one backend search), and each call
+    has its own mode's shape."""
+    _fresh_page_cache(monkeypatch)
     _mock_t3([{"name": "code__test", "count": 1}])
-    with patch("nexus.search_engine.search_cross_corpus",
-               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
-                                              distance=0.1234, collection="code__test",
-                                              metadata={"tumbler": "1.1",
-                                                        "chunk_text_hash": "ab" * 32})]), \
-         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        result = search(query="vector database", corpus="code__test")
+    calls: list[str] = []
 
-    assert isinstance(result, CallToolResult)
-    rendered = result.content[0].text
-    assert result.structuredContent["text"] == rendered, (
-        "structuredContent must carry the same render the text block does; a "
-        "client that reads only structuredContent otherwise receives content-"
-        "addressed hashes with nothing readable in them"
-    )
-    # The render is what makes it self-sufficient: paths and snippet, not ids.
-    assert "vector database internals" in result.structuredContent["text"]
+    def _counted(*a, **kw):
+        calls.append("search")
+        return _search_hit()
+
+    with patch("nexus.search_engine.search_cross_corpus", _counted), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        first = search(query="vector database", corpus="code__test")
+        middle = search(query="vector database", corpus="code__test", structured=True)
+        last = search(query="vector database", corpus="code__test")
+    assert calls == ["search"], "the later calls must come from the page-turn cache"
+
+    for result in (first, last):
+        assert type(result) is str, f"default-mode search returned {type(result).__name__}"
+    assert first == last
+    assert "vector database internals" in first.lower()
+    assert type(middle) is dict
+    assert middle["ids"] == ["r1"]
+
+
+@pytest.mark.t2_tenant
+def test_search_text_carries_the_truncation_marker(monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    _mock_t3([{"name": "code__test", "count": 20}])
+    results = [
+        SearchResult(id=f"r{i}", content=f"padding content number {i} " * 10,
+                     distance=0.1, collection="code__test", metadata={})
+        for i in range(20)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="padding", corpus="code__test", limit=20)
+
+    assert type(result) is str
+    assert "[search: result capped at 100 chars" in result
+
+
+def test_search_corpus_resolution_error_is_text():
+    _mock_t3([])
+    result = search(query="q", corpus="zzznope")
+    assert type(result) is str
+    assert "No collections match corpus" in result
 
 
 @pytest.mark.t2_tenant
 def test_search_structured_true_wire_call_unchanged():
-    """``structured=True`` over the wire is untouched: bare dict, no
-    CallToolResult, no new keys — the plan-runner in-process contract."""
+    """``structured=True`` returns the bare dict the plan runner reads,
+    with no text-rendering keys."""
     _mock_t3([{"name": "code__test", "count": 1}])
     with patch("nexus.search_engine.search_cross_corpus",
                lambda *a, **kw: [SearchResult(id="r1", content="x", distance=0.1,
@@ -2316,51 +2294,9 @@ def test_search_structured_partial_mismatch_carries_warnings_key():
     with patch("nexus.search_engine.search_cross_corpus", _fake_cross_corpus), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         text_result = search(query="x-vply6-partial-mismatch-text", corpus="code__test")
-    rendered = text_result.content[0].text
+    rendered = text_result
     assert "excluded by service errors" in rendered
     assert "knowledge__seam" in rendered
-
-
-@pytest.mark.t2_tenant
-def test_search_structured_content_reflects_text_truncation(monkeypatch):
-    from nexus.mcp import core as mcp_core
-
-    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
-    _mock_t3([{"name": "code__test", "count": 20}])
-    results = [
-        SearchResult(id=f"r{i}", content=f"padding content number {i} " * 10,
-                     distance=0.1, collection="code__test", metadata={})
-        for i in range(20)
-    ]
-    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
-         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        result = search(query="padding", corpus="code__test", limit=20)
-
-    assert isinstance(result, CallToolResult)
-    assert "[search: result capped at 100 chars" in result.content[0].text
-    assert result.structuredContent["truncated"] is True
-    assert result.structuredContent["truncated_chars"] > 0
-
-
-def test_search_corpus_resolution_error_gets_empty_structured_shape():
-    """nexus-6jlki finding: ``_search_render``'s ``if not target: return
-    f"No collections match corpus {corpus!r}"`` fires UNCONDITIONALLY —
-    unlike the ``if not results`` / ``if not page`` branches further down,
-    it is not gated on ``structured``, so ``_search_render(...,
-    structured=True)`` against an unresolvable corpus ALSO returns that
-    string rather than the promised empty dict (a pre-existing
-    ``_search_render`` quirk, unrelated to and not fixed by this spike —
-    see the T3 insight this test's sibling finding is filed under).
-    The wire wrapper does not special-case this: the text is unaffected,
-    and structuredContent degrades to the empty shape rather than being
-    omitted, so a structuredContent-only consumer never has to guess
-    whether it got an error string or a real result."""
-    _mock_t3([])
-    result = search(query="q", corpus="zzznope")
-    assert isinstance(result, CallToolResult)
-    assert "No collections match corpus" in result.content[0].text
-    assert result.structuredContent["ids"] == []
-    assert result.structuredContent["truncated"] is False
 
 
 def test_scoped_search_tools_cap_oversized_results(monkeypatch):
@@ -3043,15 +2979,20 @@ def test_search_refuses_a_limit_past_the_documented_cap():
                   structured=True)["error"].startswith("limit must be")
 
 
-def test_search_error_is_marked_in_structured_content():
+def test_search_error_is_the_text(monkeypatch):
     """nexus-zdzm5: a failed search rode out as empty ids in a success-shaped
-    structuredContent, the error only in the text block, so a client that
-    reads structuredContent (nexus's own does) saw "no hits"."""
+    structuredContent, so a client reading structuredContent saw "no hits".
+    Since nexus-099mn there is no structuredContent; the error is the text.
+    The background fan-out counts refresh is stubbed: on a loaded runner it
+    outlived the 2 s teardown join, ran after the mock T3 was gone and reached
+    storage with no tenant (7.84.0 PR CI shard 1)."""
+    from nexus import mcp_infra  # noqa: PLC0415 — local, matches this file's per-test imports
+
+    monkeypatch.setattr(mcp_infra, "_start_fanout_counts_refresh", lambda: None)
     _mock_t3([{"name": "code__test", "count": 1}])
     result = search(query="zdzm5 error probe", corpus="no_such_corpus_zz")
-    assert result.isError is True
-    assert "no_such_corpus_zz" in result.structuredContent["error"]
-    assert result.structuredContent["ids"] == []
+    assert type(result) is str
+    assert "no_such_corpus_zz" in result
 
 
 @pytest.mark.t2_tenant
@@ -3179,6 +3120,6 @@ def test_a_topic_grouped_text_render_prints_the_topic_headers():
     with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         text = search(query="topic header probe", corpus="code__test",
-                      cluster_by="semantic").content[0].text
+                      cluster_by="semantic")
     assert "── Topic Alpha ──" in text
     assert "── Topic Beta ──" in text

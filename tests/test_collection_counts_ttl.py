@@ -304,10 +304,10 @@ def test_only_one_background_refresh_runs_at_a_time(floor_world):
 
 
 def test_one_search_request_resolves_its_target_once(monkeypatch):
-    """The search() wrapper renders twice (text, then structured) and the second render is served
-    by the page cache, keyed on the resolved target. When the background counts land between the
-    two renders the floor changes the target; measured live (2026-10-09 06:59Z) that made every
-    cold first search run the whole fan-out twice. Both renders now share one resolution."""
+    """One search() call resolves its target and runs the fan-out once. Until nexus-099mn the
+    wrapper rendered twice (text, then structured), and background counts landing between the
+    renders changed the target; measured live (2026-10-09 06:59Z) that made every cold first
+    search run the whole fan-out twice. A second render per request would fail this again."""
     from nexus.mcp import core
 
     targets = iter([["knowledge__a", "knowledge__thin"], ["knowledge__a"]])

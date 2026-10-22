@@ -350,22 +350,27 @@ that touches while no test is running is a late touch, owned by the test that cr
 Tests marked `integration`, `slow` or `lint` keep a tenant per test: the default selection
 deselects them, so no census has said which of them touch storage.
 
-- `NX_TEST_T2_SUBSTRATE=per-test` (older spelling `engine`) is the escape hatch: a tenant
-  for every test, the guard off. Kept for one release; `none` still provisions nothing.
+- `NX_TEST_T2_SUBSTRATE=none` provisions nothing. The `per-test` escape hatch (older spelling
+  `engine`: a tenant for every test, the guard off) shipped in 7.83.0 and is retired
+  (nexus-llo7w); either value now errors every test at setup, naming the variable.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
   some touch event, and Python children that were spawned reached the shim: `children_seen` must be
   non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet below;
   set it on a full-suite run, not a scoped one. A run that pytest-split is splitting (`--splits`: a CI
   shard, whatever its size) or that collects at least `SWEEP_AUTO_FLOOR` (4000,
-  `tests/_storage_touch_guard.py`) tests asks them by itself, so a CI shard needs no variable; the
-  docs-readers leg (1561, not split) and any one-directory run do not;
-  `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic run is advisory**: whatever the
-  shape checks or the late-touch check find is a yellow warning with the test names (and a `warnings`
-  entry in the report), never a `vacuity` entry, so it cannot change the exit status; its report still
-  says `sweep: true` so the fan-in accepts it. Only an explicit `NX_STORAGE_TOUCH_SWEEP=1` run fails on
-  them, late touch included (a full run had 5 late child touches on 2026-10-19). A scoped run whose
-  Python children never reached the shim prints a yellow warning instead of a verdict.
+  `tests/_storage_touch_guard.py`) tests asks them by itself; the docs-readers leg (1561, not split)
+  and any one-directory run do not; `NX_STORAGE_TOUCH_SWEEP_FLOOR=<n>` moves the floor. **An automatic
+  run is advisory**: whatever the shape checks or the late-touch check find is a yellow warning with
+  the test names (and a `warnings` entry in the report), never a `vacuity` entry, so it cannot change
+  the exit status; its report still says `sweep: true` so the fan-in accepts it. Only an explicit
+  `NX_STORAGE_TOUCH_SWEEP=1` run fails on them, late touch included. **The CI shards export it**
+  (nexus-ey246), so on CI each shard gates; a split run outside CI is advisory. The late touches seen
+  before (5 on a hellmini full run, 2026-10-19; 1 per CI run until 2026-10-20 15:40Z) had deterministic
+  causes, since fixed. **Downgrade trigger:** the first shard red on a late touch that passes on a rerun
+  with no code change moves late touches back to a warning (`_vacuity` in the guard, one line); the
+  shape, children-seen and guard-error checks keep gating. A scoped run whose Python children never
+  reached the shim prints a yellow warning instead of a verdict.
 - **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
   tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
   `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in
@@ -376,11 +381,16 @@ deselects them, so no census has said which of them touch storage.
   missing shard would under-count and pass), on a report from a non-sweep run, and on a repeated run id. A session never gates on its share: it sees only its file neighbourhood of the suite, so
   `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
   Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
-  prints the number to commit. **No CI leg runs the fan-in yet, and both ceilings are still `"measure"`**:
-  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_GUARD_MODE=report` supplies the number
-  (in fail mode that run exits non-zero on the known late child touches). A split shard's report is
-  already a whole-run one; the docs-readers leg still needs the variable exported. Marks only get added, so when the count rises, drop marks a test
+  prints the number to commit. pytest-gate runs the fan-in over the six shards' reports, and the
+  `python_unit` ceiling is armed (measured on CI, `measured_on` in the ceiling file). The CI shards
+  export `NX_STORAGE_TOUCH_SWEEP=1` (nexus-ey246), so each shard gates on the whole-run checks, late
+  touches included; the docs-readers leg does not export it. Marks only get added, so when the count rises, drop marks a test
   no longer needs before raising the ceiling.
+  Before pushing, `uv run python scripts/tenant_delta.py` prints how many tests that mint a tenant your
+  branch adds against its merge base with origin/develop, per changed module (nexus-g37hn; the marker,
+  or `t2_tenant`/`t2_service_env` in the fixture closure, counted at collection). The push script runs
+  it as a `PUSH_TENANT_HINT` line on stderr when the pushed range changes a test module; it never
+  refuses (`NX_PUSH_TENANT_CHECK=0` skips it).
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
   (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default

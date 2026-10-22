@@ -3,7 +3,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.Record6;
+import org.jooq.Record7;
 
 import java.util.Map;
 import java.util.Optional;
@@ -52,13 +52,14 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@code cached(...).isPresent()}. See {@link CollectionRow} for the field
  * semantics.
  *
- * <p><strong>Correctness: mark-known only after commit.</strong> Callers MUST call
- * {@link #markKnown} only after the transaction that performed the (possibly
- * skipped) registration has committed successfully — never from inside the
- * {@code TenantScope.withTenant} lambda itself, UNLESS the row being marked was
- * already committed by an EARLIER transaction (e.g. {@link #require} caching a row
- * it just read mid-transaction — that row's existence predates this transaction,
- * so marking it known cannot be undone by this transaction's own rollback). If the
+ * <p><strong>Correctness: mark-known only after commit.</strong> The only production
+ * fill is {@link #require}'s own (reached through {@link #lookup} too), guarded by the
+ * eviction count (nexus-hkh1y); {@link #markKnown} stays public as a test seeding seam.
+ * The rule below is why that fill may run mid-transaction and why a writer must not
+ * cache its own write: a row may be cached only once a committed transaction holds it,
+ * never from inside the {@code TenantScope.withTenant} lambda that wrote it ({@link
+ * #require} caches a row it just read, whose existence predates the reading
+ * transaction, so this transaction's own rollback cannot undo it). If the
  * enclosing transaction later rolls back (e.g. an unrelated error later in the
  * same batch), a row THIS transaction wrote was never actually persisted; marking
  * the cache eagerly for THAT row would cause every subsequent writer to skip
@@ -77,10 +78,35 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * bounded by the same "collections this process has actually touched" argument —
  * at real-world scale (hundreds of collections per tenant, low hundreds of
  * tenants per process) the whole cache remains a few megabytes at most.
+ *
+ * <p><b>One engine per database</b> (nexus-hkh1y). The cache is evicted only in the JVM that made
+ * the change, so it is correct only while one engine serves a database. That holds today: production
+ * runs exactly one engine JVM for every tenant, on one host behind one edge, and a redeploy stops the
+ * old engine before the new one starts (RDR-007's single-host design, per conexus, 2026-10-22); a
+ * rehearsal fork runs its own engine against its own database. Replicas or a blue/green overlap on
+ * one database would leave the other JVM serving a stale row (a renamed-away name still writable
+ * there) and need a TTL or shared invalidation (LISTEN/NOTIFY) first. The assumption is enforced since
+ * nexus-5tykh: {@link EngineSingletonLock} takes a session advisory lock at boot, so a second engine on the same
+ * database refuses to start, and an engine that loses the lock and finds another holder exits. An engine that
+ * loses it and takes it back calls {@link #evictAll}, because another engine may have run in the gap.
  */
 public final class CollectionRegistry {
 
     private static final Map<String, CollectionRow> KNOWN = new ConcurrentHashMap<>();
+
+    /**
+     * nexus-hkh1y: a {@link #require} miss reads the row and then caches it, and an evict can land
+     * between the two (a supersede or rename commits and evicts while the read is in flight). Caching
+     * that read would put back the live row the evict just removed, with no TTL to age it out. Every
+     * evict bumps {@link #evictions} under {@link #FILL_LOCK}; a miss notes the count before its read
+     * and caches only if it is unchanged, under the same lock, so a read that started before an evict
+     * never re-caches. Taken on misses and evicts only, never on a cache hit.
+     */
+    private static final Object FILL_LOCK = new Object();
+    private static long evictions;
+
+    /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
+    static volatile Runnable afterMissReadForTests;
 
     private CollectionRegistry() {}
 
@@ -111,8 +137,21 @@ public final class CollectionRegistry {
      * (see class doc) — unless {@code row} reflects a pair confirmed registered by
      * an EARLIER, already-committed transaction (as {@link #require} does on a
      * cache miss).
+     *
+     * <p>No production code outside this class calls it (nexus-hkh1y): an unguarded put of a
+     * row read before a concurrent evict re-caches the stale row. Production fills go through
+     * {@link #require}/{@link #lookup}, whose fill checks the eviction count; this stays public
+     * as the seeding seam tests in other packages use.
      */
     public static void markKnown(String tenant, String collection, CollectionRow row) {
+        if (row.isSuperseded()) {
+            // nexus-mp8ys: a retired name is never cached. The cache answers "may this write
+            // proceed without a read", and a revive (POST /collections/upsert) clears
+            // superseded_by without touching the cache, so a cached tombstone would go on
+            // refusing a name that was revived. Uncached, every read of a tombstone re-reads it.
+            KNOWN.remove(key(tenant, collection));
+            return;
+        }
         KNOWN.put(key(tenant, collection), row);
     }
 
@@ -132,7 +171,10 @@ public final class CollectionRegistry {
      * errors rather than writing orphaned rows.
      */
     public static void evict(String tenant, String collection) {
-        KNOWN.remove(key(tenant, collection));
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.remove(key(tenant, collection));
+        }
     }
 
     /**
@@ -158,19 +200,42 @@ public final class CollectionRegistry {
     public static int evictTenant(String tenant) {
         String prefix = tenant + '|';
         int[] removed = {0};
-        KNOWN.keySet().removeIf(k -> {
-            boolean mine = k.startsWith(prefix);
-            if (mine) {
-                removed[0]++;
-            }
-            return mine;
-        });
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.keySet().removeIf(k -> {
+                boolean mine = k.startsWith(prefix);
+                if (mine) {
+                    removed[0]++;
+                }
+                return mine;
+            });
+        }
         return removed[0];
+    }
+
+    /**
+     * Forget every cached pair, for every tenant (nexus-5tykh). {@link EngineSingletonLock} calls it after the engine
+     * lost its one-engine-per-database lock and took it back: another engine may have served the database in the
+     * gap and changed or superseded rows this cache still holds. Bumps the eviction count, so a miss whose read
+     * began before this call caches nothing.
+     *
+     * @return the number of cached pairs removed
+     */
+    public static int evictAll() {
+        synchronized (FILL_LOCK) {
+            evictions++;
+            int removed = KNOWN.size();
+            KNOWN.clear();
+            return removed;
+        }
     }
 
     /** Test-only: clears all cached entries. */
     static void clearForTests() {
-        KNOWN.clear();
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.clear();
+        }
     }
 
     /**
@@ -182,10 +247,10 @@ public final class CollectionRegistry {
      * this bead retires: those wrote a blank-attribute row on first write so their
      * own {@code (tenant, collection)} FK could never fail; this checks existence
      * instead and never writes anything. Checks the in-process cache first (skips
-     * a round trip once a pair is known-registered — {@code CatalogRepository
-     * .upsertCollection} and siblings mark it via {@link #markKnown} post-commit);
-     * on a cache miss, reads the row from the database directly and caches it so
-     * repeat writes to the same collection skip the SELECT too.
+     * a round trip once a pair is known-registered); on a cache miss, reads the row
+     * from the database directly and caches it so repeat writes to the same
+     * collection skip the SELECT too, unless an evict ran between the read and the
+     * fill (nexus-hkh1y), in which case the row is returned but not cached.
      *
      * @throws UnregisteredCollectionException if no row exists for the pair
      * @throws IllegalStateException if the row's own {@code dimension} is {@code NULL}
@@ -201,10 +266,15 @@ public final class CollectionRegistry {
         if (hit.isPresent()) {
             return hit.get();
         }
-        Record6<String, String, String, Integer, String, Integer> r = ctx.select(
+        long evictionsBeforeRead;
+        synchronized (FILL_LOCK) {
+            evictionsBeforeRead = evictions;
+        }
+        Record7<String, String, String, Integer, String, Integer, String> r = ctx.select(
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
-                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION)
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .from(CATALOG_COLLECTIONS)
             .leftJoin(EMBEDDING_MODELS)
                 .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
@@ -229,8 +299,16 @@ public final class CollectionRegistry {
                 + "dimension: catalog_collections.dimension is NULL and its embedding_model '"
                 + r.value3() + "' has no nexus.embedding_models row to fall back to");
         }
-        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5());
-        markKnown(tenant, collection, row);
+        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5(), r.value7());
+        Runnable seam = afterMissReadForTests;
+        if (seam != null) {
+            seam.run();
+        }
+        synchronized (FILL_LOCK) {
+            if (evictions == evictionsBeforeRead) {
+                markKnown(tenant, collection, row);
+            }
+        }
         return row;
     }
 
@@ -260,5 +338,37 @@ public final class CollectionRegistry {
             return hit.get();
         }
         return scope.withTenant(tenant, ctx -> require(ctx, tenant, collection));
+    }
+
+    /**
+     * {@link #require}, for a caller that is about to WRITE chunks into {@code collection}
+     * (nexus-mp8ys): refuses a retired name instead of returning it. Reads, listings and the
+     * fidelity-preserving collection import ({@code UPSERT_IMPORT}, which legitimately carries
+     * tombstoned collections) keep using {@link #require} / {@link #lookup}, which hand a tombstone
+     * back with {@link CollectionRow#supersededBy()} set. The quarantine restore writes chunks back
+     * into its origin and so refuses a retired origin too ({@code PgVectorRepository#checkRestoreOrigin}).
+     * Callers: the manifest row writers (plain and append modes) and the taxonomy centroid upsert.
+     *
+     * @throws UnregisteredCollectionException if no row exists for the pair
+     * @throws CollectionSupersededException if the row names a successor
+     */
+    public static CollectionRow requireWritable(DSLContext ctx, String tenant, String collection) {
+        return refuseIfSuperseded(tenant, collection, require(ctx, tenant, collection));
+    }
+
+    /**
+     * {@link #requireWritable}, for callers OUTSIDE an open transaction; the write-path twin of
+     * {@link #lookup}. A cache hit is always a live row (see {@link #markKnown}), so the hot path
+     * costs what {@link #lookup} costs.
+     */
+    public static CollectionRow lookupWritable(TenantScope scope, String tenant, String collection) {
+        return refuseIfSuperseded(tenant, collection, lookup(scope, tenant, collection));
+    }
+
+    private static CollectionRow refuseIfSuperseded(String tenant, String collection, CollectionRow row) {
+        if (row.isSuperseded()) {
+            throw new CollectionSupersededException(tenant, collection, row.supersededBy());
+        }
+        return row;
     }
 }

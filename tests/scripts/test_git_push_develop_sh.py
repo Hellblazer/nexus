@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -160,6 +161,75 @@ class TestBatchingHint:
         proc = _run(work, _commit(work, "two"), env={"NX_PUSH_BATCH_MINUTES": value})
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert ("PUSH_BATCH_HINT" in proc.stderr) == (value != "0")
+
+
+class TestTenantHint:
+    """nexus-g37hn: a push whose range changes a test module runs scripts/tenant_delta.py and
+    prints its output as PUSH_TENANT_HINT lines on stderr. Never a refusal. A stub stands in
+    for the real script, which needs the project's pytest."""
+
+    _STUB = (
+        "import pathlib, sys\n"
+        "pathlib.Path('tenant-stub-ran').write_text(' '.join(sys.argv[1:]))\n"
+        "print('tenant delta: +1 test(s) that mint a tenant across 1 changed module(s)')\n"
+        "sys.exit({rc})\n"
+    )
+
+    def _arm(self, work: Path, rc: int = 0) -> None:
+        (work / "scripts").mkdir(exist_ok=True)
+        (work / "scripts" / "tenant_delta.py").write_text(self._STUB.format(rc=rc))
+        _git("add", "scripts/tenant_delta.py", cwd=work)
+        _git("commit", "-q", "-m", "stub", cwd=work)
+
+    def _touch_test(self, work: Path) -> str:
+        (work / "tests").mkdir(exist_ok=True)
+        (work / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+        _git("add", "tests/test_x.py", cwd=work)
+        _git("commit", "-q", "-m", "test", cwd=work)
+        return _git("rev-parse", "HEAD", cwd=work)
+
+    @pytest.fixture(autouse=True)
+    def _needs_uv(self) -> None:
+        if shutil.which("uv") is None:
+            pytest.fail("uv is not on PATH; the hint runs the script through uv and must not skip")
+
+    def test_a_push_that_changes_a_test_module_prints_the_hint_and_still_pushes(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        sha = self._touch_test(work)
+        proc = _run(work, *_git("rev-list", "origin/develop..HEAD", cwd=work).split())
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+        assert "PUSH_TENANT_HINT tenant delta: +1 test(s)" in proc.stderr
+        assert "PUSH_TENANT_HINT" not in proc.stdout
+        assert "--base refs/remotes/origin/develop" in (work / "tenant-stub-ran").read_text()
+
+    def test_a_push_that_changes_no_test_module_does_not_run_it(self, repos) -> None:
+        _origin, work = repos
+        self._arm(work)
+        proc = _run(work, *_git("rev-list", "origin/develop..HEAD", cwd=work).split())
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not (work / "tenant-stub-ran").exists()
+        assert "PUSH_TENANT_HINT" not in proc.stderr
+
+    def test_zero_turns_it_off(self, repos) -> None:
+        _origin, work = repos
+        self._arm(work)
+        self._touch_test(work)
+        proc = _run(work, *_git("rev-list", "origin/develop..HEAD", cwd=work).split(),
+                    env={"NX_PUSH_TENANT_CHECK": "0"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not (work / "tenant-stub-ran").exists()
+
+    def test_a_failing_count_is_reported_and_the_push_goes_through(self, repos) -> None:
+        origin, work = repos
+        self._arm(work, rc=2)
+        sha = self._touch_test(work)
+        proc = _run(work, *_git("rev-list", "origin/develop..HEAD", cwd=work).split())
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+        assert "PUSH_TENANT_HINT" in proc.stderr, "a count that fails must say so, not fall silent"
+        assert "--budget-s 30" in (work / "tenant-stub-ran").read_text()
 
 
 class TestDetachedSource:

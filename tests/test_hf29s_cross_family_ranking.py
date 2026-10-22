@@ -5,9 +5,8 @@
 Technical Design 12. One engine can now hold a bge family and a Voyage family
 (``dual``), so every surface that merges across families needs one rule:
 
-- ``scoring.py`` lists ``bge-base-en-v15-768`` at an INTERIM factor of 1.30
-  (Sam, 2026-10-18: the largest factor 210-research-17 counted inversions
-  for; the derived best-F1 factor is 1.38); an unlisted model keeps the default
+- ``scoring.py`` lists ``bge-base-en-v15-768`` at an MEASURED factor of 1.37
+  (nexus-t189m, 2026-10-22: the pooled best-F1 factor, interval 1.24 to 1.45); an unlisted model keeps the default
   and logs it.
 - ``_grouped_combined_query`` merges model groups by CALIBRATED distance.
 - Rerank-on merges (``nx search``, MCP ``search`` with ``lexical=true``) stop
@@ -39,8 +38,12 @@ from click.testing import CliRunner
 import nexus.mcp_infra as mcp_infra
 from nexus import scoring
 from nexus.mcp import core as mcp_core
-from nexus.scoring import _calibration_factor_for_model, apply_hybrid_scoring
-from nexus.search_engine import search_cross_corpus
+from nexus.scoring import (
+    _calibration_factor_for_model,
+    apply_hybrid_scoring,
+    order_by_calibrated_distance,
+)
+from nexus.search_engine import apply_ranking_boosts, search_cross_corpus
 from nexus.types import SearchResult
 from tests.test_mcp_server import _HYBRID_DEFAULT_ON_CFG, _mock_t3, search
 from tests.test_search_cmd_server_rerank import (
@@ -78,8 +81,8 @@ def rows_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_bge_factor_is_the_measured_ratio_within_1e_6() -> None:
-    assert _calibration_factor_for_model(BGE) == pytest.approx(1.30, abs=1e-6)
-    assert _calibration_factor_for_model(BGE) == pytest.approx(0.45 / (0.45 / 1.30), abs=1e-6)
+    assert _calibration_factor_for_model(BGE) == pytest.approx(1.37, abs=1e-6)
+    assert _calibration_factor_for_model(BGE) == pytest.approx(0.45 / (0.45 / 1.37), abs=1e-6)
     # The Voyage entries are untouched.
     assert _calibration_factor_for_model("voyage-code-3") == pytest.approx(1.0)
     assert _calibration_factor_for_model("voyage-context-3") == pytest.approx(0.45 / 0.65)
@@ -164,23 +167,21 @@ def test_bge_entry_orders_the_recorded_median_cases_correctly_in_both_directions
     assert _top(d2) == "bge-relevant"
 
 
-def test_the_interim_1_30_keeps_the_tail_case_the_derived_1_38_loses(
+def test_the_1_37_factor_loses_the_tail_case_a_single_scalar_cannot_keep(
     rows_by_name,
 ) -> None:
-    """The reason the entry is held at 1.30 until Phase 4 Step 3 (nexus-t189m)
-    measures on real data. On the recorded quantiles a p90-relevant bge chunk
-    (0.40) sits ahead of a MEDIAN off-topic Voyage chunk (0.76 * 0.692 = 0.526)
-    at 1.30 (0.40 * 1.30 = 0.52) and behind it at the derived 1.38 (0.554). The
-    record counted inversions at 1.15 to 1.30 and never at 1.38 on its per-query
-    data. This test pins a LIMIT of the higher factor, not a goal."""
+    """A LIMIT of the factor, not a goal (nexus-t189m: no single factor meets 3
+    and 1). On the recorded quantiles a p90-relevant bge chunk (0.40) sits behind
+    a MEDIAN off-topic Voyage chunk (0.76 * 0.692 = 0.526) at 1.37 (0.40 * 1.37 =
+    0.548); the old 1.30 (0.52) kept it ahead and paid for it in the other
+    direction (measured: prose top-20 3 and 7 at 1.30, 2 and 8 at 1.4)."""
     tail = [
         _hit(VOY_RDR, "voyage-irrelevant", _VOY_OFFTOPIC_MEDIAN),
         _hit(BGE_DOCS, "bge-relevant", _BGE_RELEVANT_P90),
     ]
-    assert _top(tail) == "bge-relevant"
-    # The same pair at the derived 1.38 (threshold 0.325), which the record never counted:
-    with patch.dict(scoring._CALIBRATION_THRESHOLDS_BY_MODEL, {BGE: 0.325}):
-        assert _top(tail) == "voyage-irrelevant"
+    assert _top(tail) == "voyage-irrelevant"
+    with patch.dict(scoring._CALIBRATION_THRESHOLDS_BY_MODEL, {BGE: 0.45 / 1.30}):
+        assert _top(tail) == "bge-relevant"
     # Voyage p90 relevant against the closest bge off-topic chunk (a marginal inversion
     # the factor cannot fix without breaking direction 1; the intended tripwire):
     assert _top([
@@ -198,8 +199,8 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
     monkeypatch.setattr(mcp_infra, "get_collection_row", _row_for)
     rows = {
         BGE_KNOW: [
-            {"id": "b1", "collection": BGE_KNOW, "distance": 0.33},   # 0.429
-            {"id": "b2", "collection": BGE_KNOW, "distance": 0.50},   # 0.650
+            {"id": "b1", "collection": BGE_KNOW, "distance": 0.30},   # 0.411
+            {"id": "b2", "collection": BGE_KNOW, "distance": 0.50},   # 0.685
         ],
         VOY_RDR: [
             {"id": "v1", "collection": VOY_RDR, "distance": 0.63},    # 0.436
@@ -209,11 +210,11 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
     merged = mcp_core._grouped_combined_query(
         [BGE_KNOW, VOY_RDR], lambda group: list(rows[group[0]]),
     )
-    # Raw-distance order would be b1 (0.33), b2 (0.50), v1 (0.63), v2 (0.70).
+    # Raw-distance order would be b1 (0.30), b2 (0.50), v1 (0.63), v2 (0.70).
     assert [r["id"] for r in merged] == ["b1", "v1", "v2", "b2"]
     # The engine's distances are reported untouched.
     assert {r["id"]: r["distance"] for r in merged} == {
-        "b1": 0.33, "b2": 0.50, "v1": 0.63, "v2": 0.70,
+        "b1": 0.30, "b2": 0.50, "v1": 0.63, "v2": 0.70,
     }
 
 
@@ -297,7 +298,7 @@ def _cli_t3():
 
 def _cli_rows(bge_scored: bool, voy_scored: bool):
     return [
-        _result("b-rel", BGE_KNOW, 0.33, 0.20 if bge_scored else None),
+        _result("b-rel", BGE_KNOW, 0.30, 0.20 if bge_scored else None),
         _result("v-mid", VOY_RDR, 0.63, 0.80 if voy_scored else None),
         _result("v-hi", VOY_RDR, 0.75, 0.90 if voy_scored else None),
     ]
@@ -305,10 +306,25 @@ def _cli_rows(bge_scored: bool, voy_scored: bool):
 
 @pytest.mark.t2_tenant
 def test_cli_both_groups_scored_merge_by_rerank_score(runner, cloud_env):  # noqa: F811
-    res = _invoke(
-        runner, _cli_t3(), _fake_retrieval(_cli_rows(True, True)), _CLI_ARGS,
-    )
+    # nexus-ml9vu: the resolver the retrieval hands back reaches the boosts
+    # (this test already boots a tenant; the wiring check rides on it).
+    sentinel = lambda name: None  # noqa: E731
+    rows = _fake_retrieval(_cli_rows(True, True))
+
+    def retrieval(*a, **kw):
+        kw["model_of_out"].append(sentinel)
+        return rows(*a, **kw)
+
+    seen: list = []
+
+    def boosts(results, **kw):
+        seen.append(kw.get("model_of"))
+        return apply_ranking_boosts(results, **kw)
+
+    with patch("nexus.commands.search_cmd.apply_ranking_boosts", boosts):
+        res = _invoke(runner, _cli_t3(), retrieval, _CLI_ARGS)
     assert res.exit_code == 0, res.output
+    assert seen == [sentinel]
     assert "server rerank degraded" not in res.output
     # rerank_score order, not calibrated distance (which would put v-mid first).
     assert [i["id"] for i in json.loads(res.stdout)] == ["v-hi", "v-mid", "b-rel"]
@@ -326,7 +342,7 @@ def test_cli_one_group_degraded_falls_back_to_calibrated_order_with_the_warning(
     assert res.exit_code == 0, res.output
     assert "server rerank degraded" in res.output
     assert "rate limited" in res.output
-    # Calibrated at the interim 1.30: b-rel 0.429, v-mid 0.436, v-hi 0.519. The old
+    # Calibrated at 1.37: b-rel 0.411, v-mid 0.436, v-hi 0.519. The old
     # "scored rows lead" order was v-hi, v-mid, b-rel and sank the degraded family's row.
     assert [i["id"] for i in json.loads(res.stdout)] == ["b-rel", "v-mid", "v-hi"]
 
@@ -354,7 +370,7 @@ def _mcp_rows(bge_scored: bool, voy_scored: bool) -> list[SearchResult]:
         return {} if score is None else {"rerank_score": score}
 
     return [
-        SearchResult(id="b-rel", content="x", distance=0.33, collection=BGE_KNOW,
+        SearchResult(id="b-rel", content="x", distance=0.30, collection=BGE_KNOW,
                      metadata=md(0.20 if bge_scored else None)),
         SearchResult(id="v-mid", content="x", distance=0.63, collection=VOY_RDR,
                      metadata=md(0.80 if voy_scored else None)),
@@ -363,7 +379,15 @@ def _mcp_rows(bge_scored: bool, voy_scored: bool) -> list[SearchResult]:
     ]
 
 
-def _mcp_search(query: str, rows: list[SearchResult], degraded: dict[str, dict]):
+def _mcp_resolver(name: str) -> str | None:
+    """Stands in for the resolver ``search_cross_corpus`` hands back (nexus-ml9vu)."""
+    return None
+
+
+def _mcp_search(
+    query: str, rows: list[SearchResult], degraded: dict[str, dict],
+    boosts_model_of: list | None = None,
+):
     t3 = _mock_t3([
         {"name": BGE_KNOW, "count": 3, "embedding_model": BGE},
         {"name": VOY_RDR, "count": 3, "embedding_model": "voyage-context-3"},
@@ -373,10 +397,17 @@ def _mcp_search(query: str, rows: list[SearchResult], degraded: dict[str, dict])
     def _cross_corpus(*a, **kw):
         if kw.get("rerank_meta_out") is not None:
             kw["rerank_meta_out"].update(degraded)
+        kw["model_of_out"].append(_mcp_resolver)
         return list(rows)
+
+    def _boosts(results, **kw):
+        if boosts_model_of is not None:
+            boosts_model_of.append(kw.get("model_of"))
+        return apply_ranking_boosts(results, **kw)
 
     try:
         with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+             patch("nexus.search_engine.apply_ranking_boosts", _boosts), \
              patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
             return search(query=query, corpus=f"{BGE_KNOW},{VOY_RDR}", lexical=True,
                           structured=True)
@@ -386,8 +417,11 @@ def _mcp_search(query: str, rows: list[SearchResult], degraded: dict[str, dict])
 
 @pytest.mark.t2_tenant
 def test_mcp_both_groups_scored_merge_by_rerank_score() -> None:
-    out = _mcp_search("hf29s mcp both scored", _mcp_rows(True, True), {})
+    seen: list = []
+    out = _mcp_search("hf29s mcp both scored", _mcp_rows(True, True), {}, boosts_model_of=seen)
     assert out["ids"] == ["v-hi", "v-mid", "b-rel"]
+    # nexus-ml9vu: the resolver the retrieval handed back reaches the boosts.
+    assert seen == [_mcp_resolver]
 
 
 @pytest.mark.t2_tenant
@@ -396,12 +430,12 @@ def test_mcp_one_group_degraded_falls_back_to_calibrated_order_with_the_note() -
         "hf29s mcp one degraded", _mcp_rows(False, True),
         {BGE_KNOW: {"degraded": True, "error": "rate limited"}},
     )
-    assert out["ids"] == ["b-rel", "v-mid", "v-hi"]  # calibrated at the interim 1.30: 0.429, 0.436, 0.519
+    assert out["ids"] == ["b-rel", "v-mid", "v-hi"]  # calibrated at 1.37: 0.411, 0.436, 0.519
     # The degrade is still surfaced, and says what order the rows are in.
     # Served from the page cache, which carries the note of the entry it returns.
     try:
         text = search(query="hf29s mcp one degraded", corpus=f"{BGE_KNOW},{VOY_RDR}",
-                      lexical=True).content[0].text
+                      lexical=True)
     finally:
         mcp_infra.inject_t3(None)
     assert "lexical rerank degraded" in text
@@ -441,7 +475,7 @@ def test_mcp_unscored_tail_without_a_degrade_still_trails_the_scored_rows() -> N
     rows = [
         SearchResult(id="scored", content="x", distance=0.75, collection=VOY_RDR,
                      metadata={"rerank_score": 0.9}),
-        SearchResult(id="tail", content="x", distance=0.33, collection=BGE_KNOW,
+        SearchResult(id="tail", content="x", distance=0.30, collection=BGE_KNOW,
                      metadata={}),
     ]
     out = _mcp_search("hf29s mcp unscored tail no degrade", rows, {})
@@ -458,7 +492,7 @@ def test_mcp_clustered_partial_rerank_orders_clusters_and_rows_by_the_calibrated
         "hf29s mcp clustered partial", _mcp_rows(False, True),
         {BGE_KNOW: {"degraded": True, "error": "rate limited"}},
     )
-    # Calibrated at the interim 1.30: b-rel 0.429, v-mid 0.436, v-hi 0.519. The
+    # Calibrated at 1.37: b-rel 0.411, v-mid 0.436, v-hi 0.519. The
     # bge cluster's best row leads; the voyage cluster follows, its rows in score order.
     assert out["ids"] == ["b-rel", "v-mid", "v-hi"]
 
@@ -488,10 +522,10 @@ class _ModeT3:
     }
 
     @classmethod
-    def make(cls, monkeypatch: pytest.MonkeyPatch, mode: str | None):
+    def make(cls, monkeypatch: pytest.MonkeyPatch, mode: str | None, row_resolver=None):
         from nexus.db.http_vector_client import HttpVectorClient
 
-        client = HttpVectorClient()
+        client = HttpVectorClient(_row_resolver=row_resolver)
         monkeypatch.setattr(
             client.__class__, "search",
             lambda self, query, collection_names, n_results=10, where=None:
@@ -661,3 +695,432 @@ def test_a_fake_engine_reporting_dual_gives_a_legacy_name_no_threshold(monkeypat
 
     results = search_cross_corpus("q", [LEGACY], 10, _Fake())
     assert {r.id for r in results} == {"leg-near", "leg-far"}
+
+
+# ── 8. the family comes from the collection ROW, the name is the fallback ────
+# (RDR-210 Phase 4 Step 1 residual S-R3-3, nexus-noayy)
+#
+# A Voyage sibling registered under a legacy (non-four-segment) name carries no
+# model token, so grouping and the per-family threshold, both of which parsed the
+# name, grouped it alone and (on a dual engine) dropped its threshold. The row
+# says voyage-context-3; search now reads it, once per search and from the
+# listing the process already holds.
+
+LEGACY_VOY = "docs__legacyvoy"
+LEGACY_BGE = "docs__legacybge"
+
+
+def _row(name: str, model: str) -> dict:
+    return {
+        "name": name, "content_type": "docs", "owner_id": name.split("__")[1],
+        "embedding_model": model, "lifecycle_state": "live",
+    }
+
+
+class _RowCatalog:
+    """A row resolver that counts its lookups, answering from a fixed table."""
+
+    def __init__(self, rows: dict[str, dict]) -> None:
+        self.rows = rows
+        self.calls: list[str] = []
+
+    def __call__(self, name: str) -> dict | None:
+        self.calls.append(name)
+        return self.rows.get(name)
+
+
+def _recording_t3(monkeypatch: pytest.MonkeyPatch, mode: str | None, catalog: _RowCatalog):
+    """A client whose ``search`` answers every requested collection from
+    ``_ModeT3.ROWS`` (each row tagged with its collection) and records the
+    batches it was asked for."""
+    t3 = _ModeT3.make(monkeypatch, mode, row_resolver=catalog)
+    batches: list[list[str]] = []
+
+    def _search(self, query, collection_names, n_results=10, where=None, **kw):
+        batches.append(list(collection_names))
+        return [
+            {**r, "collection": c}
+            for c in collection_names for r in _ModeT3.ROWS.get(c, [])
+        ]
+
+    monkeypatch.setattr(t3.__class__, "search", _search)
+    t3.batches = batches
+    return t3
+
+
+def _seed_rows(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    for n in names:
+        monkeypatch.setitem(_ModeT3.ROWS, n, list(_LEGACY_ROWS))
+
+
+def test_a_legacy_name_whose_row_says_voyage_is_filtered_on_a_dual_engine(monkeypatch):
+    """The case the interim rule (nexus-ndr0t S3) drops: the row names the
+    family, so the Voyage threshold applies to the legacy name again."""
+    _seed_rows(monkeypatch, LEGACY_VOY)
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-model-b")})
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3)
+    ids = {r.id for r in results}
+    assert "leg-near" in ids
+    assert "leg-far" not in ids          # past the docs threshold (0.65): filtered
+    assert "bge-far" in ids              # the bge family stays unfiltered
+
+
+def test_a_legacy_name_whose_row_says_bge_gets_no_threshold(monkeypatch):
+    _seed_rows(monkeypatch, LEGACY_BGE)
+    catalog = _RowCatalog({LEGACY_BGE: _row(LEGACY_BGE, BGE)})
+    t3 = _recording_t3(monkeypatch, "voyage", catalog)
+    results = search_cross_corpus("q", [LEGACY_BGE], 10, t3)
+    assert {r.id for r in results} == {"leg-near", "leg-far"}
+
+
+def test_a_legacy_voyage_row_groups_with_the_conformant_voyage_family(monkeypatch):
+    """One combined request for the Voyage family, one for the bge family: the
+    legacy name no longer sits alone in a singleton batch."""
+    _seed_rows(monkeypatch, LEGACY_VOY)
+    # The row names the conformant sibling's own model, read off its name, so they group.
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, _ModeT3.VOY.split("__")[2])})
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY, _ModeT3.BGE], 10, t3)
+    assert sorted(map(sorted, t3.batches)) == sorted(
+        [sorted([LEGACY_VOY, _ModeT3.VOY]), [_ModeT3.BGE]]
+    )
+
+
+def test_a_name_with_no_token_and_no_row_still_gets_no_threshold_on_a_dual_engine(monkeypatch):
+    """The interim rule is the fallback and it is unchanged."""
+    _seed_rows(monkeypatch, LEGACY)
+    catalog = _RowCatalog({})            # no row backs the name
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    results = search_cross_corpus("q", [LEGACY], 10, t3)
+    assert {r.id for r in results} == {"leg-near", "leg-far"}
+    # ...and on a non-dual Voyage engine it keeps the prefix threshold.
+    t3 = _recording_t3(monkeypatch, "voyage", _RowCatalog({}))
+    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, t3)} == {"leg-near"}
+
+
+def test_a_row_without_a_model_is_authoritative_and_not_guessed_from_the_name(monkeypatch):
+    """Row presence alone gates the fallback (resolve_row_preferred): an
+    incomplete row on a conformant Voyage name is a model-less family, so on a
+    dual engine it gets no threshold rather than the name's."""
+    _seed_rows(monkeypatch, _ModeT3.VOY)
+    monkeypatch.setitem(_ModeT3.ROWS, _ModeT3.VOY, list(_LEGACY_ROWS))
+    row = _row(_ModeT3.VOY, "voyage-model-b")
+    del row["embedding_model"]
+    t3 = _recording_t3(monkeypatch, "dual", _RowCatalog({_ModeT3.VOY: row}))
+    assert {r.id for r in search_cross_corpus("q", [_ModeT3.VOY], 10, t3)} == {"leg-near", "leg-far"}
+
+
+def test_conformant_names_are_unchanged_and_each_name_is_looked_up_once(monkeypatch):
+    """No request multiplication: one lookup per distinct collection per
+    search, however many batches, groups and threshold reads follow."""
+    catalog = _RowCatalog({
+        _ModeT3.VOY: _row(_ModeT3.VOY, "voyage-model-b"),
+        _ModeT3.BGE: _row(_ModeT3.BGE, BGE),
+    })
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE, _ModeT3.VOY], 10, t3)
+    ids = {r.id for r in results}
+    assert "voy-far" not in ids and "bge-far" in ids
+    assert sorted(catalog.calls) == sorted([_ModeT3.VOY, _ModeT3.BGE])
+
+
+def test_a_fake_handle_without_a_row_resolver_falls_back_to_the_name(monkeypatch):
+    """Test fakes and injected stubs carry no catalog: name parsing only, and
+    no reach into the process-wide row cache (a read of it fails the test)."""
+    from nexus.search_engine import _group_collections_by_embedding_model
+
+    def _no_cache_read(*a, **k):
+        raise AssertionError("a handle with no row resolver must not read the row cache")
+
+    monkeypatch.setattr(mcp_infra, "get_collection_row", _no_cache_read)
+
+    class _Fake:
+        _voyage_client = object()
+
+        def embedding_mode(self):
+            return "dual"
+
+        def search(self, query, collection_names, n_results=10, where=None, **kw):
+            return list(_LEGACY_ROWS)
+
+    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, _Fake())} == {"leg-near", "leg-far"}
+    assert _group_collections_by_embedding_model([_ModeT3.VOY, _ModeT3.BGE]) == [
+        [_ModeT3.VOY], [_ModeT3.BGE],
+    ]
+
+
+def test_the_doctor_probe_reads_the_family_from_the_row_too(monkeypatch):
+    from nexus.doctor_search import _default_threshold_for
+
+    cfg = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
+    monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: cfg)
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-model-b")})
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    assert _default_threshold_for(LEGACY_VOY, t3) == pytest.approx(0.65)
+    assert _default_threshold_for(LEGACY, t3) is None
+
+
+def test_the_default_tenant_reads_rows_from_the_cache_already_held_and_fetches_nothing(monkeypatch):
+    """The process-default client adds NO request to learn a model: it reads the
+    collections cache the caller listed through, and never lists or refreshes."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
+    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-model-b")])
+
+    def _no_fetch(*a, **k):
+        raise AssertionError("a row read must not fetch")
+
+    monkeypatch.setattr(HttpVectorClient, "list_collections", _no_fetch)
+    monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", _no_fetch)
+    got = HttpVectorClient()._resolve_collection_rows([LEGACY_VOY, "docs__cold"])
+    assert got[LEGACY_VOY]["embedding_model"] == "voyage-model-b"
+    assert got["docs__cold"] is None      # not in the cache: the name answers
+
+
+def test_a_non_default_tenant_client_reads_the_listing_once_not_once_per_name(monkeypatch):
+    """A client for another tenant has no shared row cache; resolving its rows
+    costs ONE listing for the whole search, never one per collection."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    listings: list[int] = []
+    rows = [_row(LEGACY_VOY, "voyage-model-b"), _row(_ModeT3.BGE, BGE)]
+
+    def _list(self, *a, **k):
+        listings.append(1)
+        return rows
+
+    monkeypatch.setattr(HttpVectorClient, "list_collections", _list)
+    monkeypatch.setattr("nexus.db.http_vector_client._process_default_tenant", lambda: "default")
+    client = HttpVectorClient(tenant="other")
+    got = client._resolve_collection_rows([LEGACY_VOY, _ModeT3.BGE, "docs__absent"])
+    assert len(listings) == 1
+    assert got[LEGACY_VOY]["embedding_model"] == "voyage-model-b"
+    assert got[_ModeT3.BGE]["embedding_model"] == BGE
+    assert got["docs__absent"] is None
+
+
+def test_a_default_tenant_client_filters_a_legacy_voyage_row_from_the_primed_cache(monkeypatch):
+    """The production wiring end to end: a plain default-tenant HttpVectorClient
+    (no injected resolver), the collections cache primed as the caller's listing
+    primes it, and search_cross_corpus. The legacy name groups and filters as
+    Voyage, and the search adds no listing."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    _seed_rows(monkeypatch, LEGACY_VOY)
+    monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
+    mcp_infra.prime_collections_cache([_row(LEGACY_VOY, "voyage-model-b"), _row(_ModeT3.BGE, BGE)])
+
+    def _no_fetch(*a, **k):
+        raise AssertionError("the search must not list or refresh")
+
+    monkeypatch.setattr(HttpVectorClient, "list_collections", _no_fetch)
+    monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", _no_fetch)
+    t3 = _ModeT3.make(monkeypatch, "dual")
+    ids = {r.id for r in search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3)}
+    assert "leg-near" in ids
+    assert "leg-far" not in ids
+    assert "bge-far" in ids
+
+
+def test_a_model_less_name_with_no_row_logs_once_that_the_family_is_unresolved(monkeypatch):
+    from structlog.testing import capture_logs
+
+    from nexus.search_engine import _collection_model_resolver
+
+    t3 = _ModeT3.make(monkeypatch, "dual")
+    monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
+    mcp_infra.prime_collections_cache([])
+    with capture_logs() as logs:
+        model_of = _collection_model_resolver(t3, [LEGACY])
+        assert model_of(LEGACY) is None
+        assert model_of(LEGACY) is None
+    unresolved = [e for e in logs if e.get("event") == "collection_model_unresolved"]
+    assert len(unresolved) == 1 and unresolved[0]["collection"] == LEGACY
+
+
+# ── nexus-ml9vu: calibration reads the model from the row, as grouping does ──
+#
+# nexus-noayy made grouping and the thresholds row-preferred; the calibration
+# factor still came from the NAME, so a legacy name whose row says Voyage was
+# scored with the factor of whatever the install embeds legacy names with now.
+
+#: A non-local model the calibration table does not list: it behaves as Voyage.
+_VOY_B = "voyage-model-b"
+_CONFORMANT_VOY = f"docs__v__{_VOY_B}__v1"
+_CONFORMANT_BGE = f"docs__b__{BGE}__v1"
+
+
+def _row_models(**by_name: str):
+    """A ``name -> model | None`` function over a fixed table (the shape of
+    ``_collection_model_resolver``'s answer)."""
+    return lambda name: by_name.get(name)
+
+
+@pytest.fixture
+def bge_profile_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bge-profile dual engine: a legacy name's own derivation answers bge.
+    Scoring's code-collection read finds no row (nothing is listed)."""
+    monkeypatch.setattr("nexus.corpus.resolve_read_embedding_model", lambda content_type: BGE)
+    monkeypatch.setattr(mcp_infra, "get_collection_row", lambda name, **kw: None)
+
+
+def _legacy_pair() -> list[SearchResult]:
+    return [_hit(LEGACY_VOY, "legacy", 0.50), _hit(_CONFORMANT_VOY, "conformant", 0.60)]
+
+
+def test_an_omitted_resolver_means_the_name_derivation(
+    bge_profile_legacy,
+) -> None:
+    """With no ``model_of`` the factors come from the name alone, as before the
+    resolver existed: a legacy name takes the install's own derivation (bge
+    here). That is the documented consequence of omitting it, not the intended
+    answer for a legacy Voyage row; the resolver is what corrects it."""
+    factors = scoring._resolve_calibration_factors(_legacy_pair())
+    assert factors[LEGACY_VOY] == pytest.approx(_calibration_factor_for_model(BGE))
+    assert factors[_CONFORMANT_VOY] == pytest.approx(_calibration_factor_for_model(_VOY_B))
+
+
+def test_a_legacy_voyage_row_and_a_conformant_voyage_collection_are_one_model(
+    bge_profile_legacy,
+) -> None:
+    results = _legacy_pair()
+    model_of = _row_models(**{LEGACY_VOY: _VOY_B})
+    factors = scoring._resolve_calibration_factors(results, model_of=model_of)
+    assert factors == {LEGACY_VOY: 1.0, _CONFORMANT_VOY: 1.0}
+    ranked = apply_hybrid_scoring(results, hybrid=False, model_of=model_of)
+    assert [r.content for r in ranked] == ["legacy", "conformant"]
+    assert ranked[0].hybrid_score == pytest.approx(1.0)
+
+
+def test_a_legacy_voyage_row_beside_a_bge_collection_gets_each_its_own_factor(
+    bge_profile_legacy,
+) -> None:
+    results = [_hit(LEGACY_VOY, "legacy", 0.50), _hit(_CONFORMANT_BGE, "bge", 0.40)]
+    factors = scoring._resolve_calibration_factors(
+        results, model_of=_row_models(**{LEGACY_VOY: _VOY_B}),
+    )
+    assert factors[LEGACY_VOY] == pytest.approx(_calibration_factor_for_model(_VOY_B))
+    assert factors[_CONFORMANT_BGE] == pytest.approx(_calibration_factor_for_model(BGE))
+    assert factors[LEGACY_VOY] != pytest.approx(factors[_CONFORMANT_BGE])
+
+
+def test_a_none_resolver_changes_nothing(bge_profile_legacy) -> None:
+    results = [_hit(LEGACY_VOY, "legacy", 0.50), _hit(_CONFORMANT_BGE, "bge", 0.40)]
+    assert scoring._resolve_calibration_factors(results, model_of=None) == (
+        scoring._resolve_calibration_factors(results)
+    )
+    assert [r.content for r in order_by_calibrated_distance(results, model_of=None)] == [
+        r.content for r in order_by_calibrated_distance(results)
+    ]
+
+
+def test_a_name_the_resolver_cannot_answer_falls_back_to_the_name_derivation(
+    bge_profile_legacy,
+) -> None:
+    """No token and no row (the resolver answers None): the install's own
+    derivation decides, as before, so a bge-profile legacy name sits with a bge
+    collection and the set is one model."""
+    results = [_hit(LEGACY, "legacy", 0.50), _hit(_CONFORMANT_BGE, "bge", 0.40)]
+    factors = scoring._resolve_calibration_factors(results, model_of=lambda name: None)
+    assert factors == {LEGACY: 1.0, _CONFORMANT_BGE: 1.0}
+
+
+def test_a_row_model_the_table_does_not_list_still_logs_and_takes_the_default(
+    bge_profile_legacy, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scoring, "_UNLISTED_MODELS_LOGGED", set())
+    results = [_hit(LEGACY_VOY, "legacy", 0.50), _hit(_CONFORMANT_BGE, "bge", 0.40)]
+    with structlog.testing.capture_logs() as logs:
+        factors = scoring._resolve_calibration_factors(
+            results, model_of=_row_models(**{LEGACY_VOY: "row-model-not-in-table"}),
+        )
+    assert factors[LEGACY_VOY] == pytest.approx(0.45 / 0.55)
+    assert [e["model"] for e in logs if e["event"] == "calibration_model_unlisted"] == [
+        "row-model-not-in-table",
+    ]
+
+
+def test_the_boost_window_cut_uses_the_resolver_too(bge_profile_legacy) -> None:
+    """``order_by_calibrated_distance`` cuts the window the boosts score: with
+    the row's model the legacy row is the nearest, so a window of one keeps it."""
+    results = _legacy_pair()
+    model_of = _row_models(**{LEGACY_VOY: _VOY_B})
+    assert [r.content for r in order_by_calibrated_distance(results, model_of=model_of)] == [
+        "legacy", "conformant",
+    ]
+    ranked = apply_ranking_boosts(results, window=1, model_of=model_of)
+    assert [r.content for r in ranked] == ["legacy", "conformant"]
+    assert ranked[0].hybrid_score == pytest.approx(1.0)
+    # Without it, today's cut: the bge factor pushes the legacy row behind.
+    assert apply_ranking_boosts(_legacy_pair(), window=1)[0].content == "conformant"
+
+
+@pytest.mark.parametrize("window", [None, 2], ids=["no-window", "window-covers-both"])
+def test_the_boosts_score_the_head_with_the_resolvers_factors(bge_profile_legacy, window) -> None:
+    """The hybrid scoring inside ``apply_ranking_boosts`` gets the resolver too:
+    with a window of one the head is a single row that scores 1.0 whatever the
+    factors, so only a window that holds both rows (or none, as MCP ``query``
+    calls it) can tell. The legacy Voyage row is the nearest on the shared scale."""
+    model_of = _row_models(**{LEGACY_VOY: _VOY_B})
+    ranked = apply_ranking_boosts(_legacy_pair(), window=window, model_of=model_of)
+    assert [r.content for r in ranked] == ["legacy", "conformant"]
+    assert ranked[0].hybrid_score == pytest.approx(1.0)
+    # Without it the bge factor pushes the legacy row behind (today's cut).
+    assert apply_ranking_boosts(_legacy_pair(), window=window)[0].content == "conformant"
+
+
+def test_search_hands_back_the_resolver_it_built_and_it_ranks_the_legacy_row_first(
+    monkeypatch, bge_profile_legacy,
+):
+    """The resolver ``search_cross_corpus`` builds from the rows (no second row
+    read) is what the caller passes on to the boosts."""
+    monkeypatch.setitem(_ModeT3.ROWS, LEGACY_VOY, [{"id": "leg", "content": "l", "distance": 0.50}])
+    monkeypatch.setitem(
+        _ModeT3.ROWS, _ModeT3.VOY, [{"id": "con", "content": "c", "distance": 0.60}],
+    )
+    voy_model = _ModeT3.VOY.split("__")[2]
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, voy_model)})
+    t3 = _recording_t3(monkeypatch, "dual", catalog)
+    out: list = []
+    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY], 10, t3, model_of_out=out)
+    assert len(out) == 1 and out[0](LEGACY_VOY) == voy_model
+    boosted = apply_ranking_boosts(results, window=1, model_of=out[0])
+    assert [r.id for r in boosted] == ["leg", "con"]
+    assert apply_ranking_boosts(results, window=1)[0].id == "con"
+    # One lookup per name for the whole search, boosts included.
+    assert sorted(catalog.calls) == sorted([LEGACY_VOY, _ModeT3.VOY])
+
+
+def _wiring_probe(rows: list[SearchResult]):
+    """A ``search_cross_corpus`` stand-in that hands back a sentinel resolver
+    through ``model_of_out`` and records what ``apply_ranking_boosts`` is given."""
+    seen: dict = {}
+
+    def sentinel(name: str) -> str | None:
+        return None
+
+    def _cross_corpus(*a, **kw):
+        kw["model_of_out"].append(sentinel)
+        return list(rows)
+
+    def _boosts(results, **kw):
+        seen["model_of"] = kw.get("model_of")
+        return results
+
+    return sentinel, seen, _cross_corpus, _boosts
+
+
+def test_mcp_query_passes_the_retrieval_resolver_to_the_boosts() -> None:
+    rows = [_hit(_CONFORMANT_BGE, "b", 0.40)]
+    sentinel, seen, cross_corpus, boosts = _wiring_probe(rows)
+    _mock_t3([{"name": _CONFORMANT_BGE, "count": 1, "embedding_model": BGE}])
+    try:
+        with patch("nexus.search_engine.search_cross_corpus", cross_corpus), \
+             patch("nexus.search_engine.apply_ranking_boosts", boosts), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            mcp_core.query(question="ml9vu wiring query", corpus=_CONFORMANT_BGE, structured=True)
+    finally:
+        mcp_infra.inject_t3(None)
+    assert seen["model_of"] is sentinel

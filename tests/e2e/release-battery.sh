@@ -165,6 +165,9 @@ define_leg preflight  serial "PREFLIGHT (PASSED|FAILED)"                 tests/e
 define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       tests/e2e/local-service-gate.sh
 define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --package-upgrade
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
+# nexus-oc2bk (RDR-210 P5.2): keyed bge + Voyage engine, release battery and by hand only, never nightly (Sam, Q3).
+# Needs the operator's Voyage key; an absent key fails the leg, it does not skip it.
+define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2e/dual-embedder-gate.sh
 
 ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then

@@ -54,6 +54,7 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "MODEL_PARTITION_MISSING_REASON",
         "TENANT_PARTITION_MISSING_REASON",
         "TENANT_CREATION_BUSY_REASON",
+        "COLLECTION_SUPERSEDED_REASON",
     ],
 )
 def test_the_rdr225_partition_reasons_equal_the_engines(name: str) -> None:

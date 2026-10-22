@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.db.ChunksLeafAutovacuumCheck;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.SweepBounds;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -10,10 +11,13 @@ import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -27,7 +31,8 @@ import java.util.Objects;
  * nexus-dxsjc (HNSW maintenance policy nexus-4lnn1, R4): the per-leaf bloat view of {@code nexus.chunks}. One read
  * says, for every ordinary leaf, how many live and dead tuples the statistics hold, when autovacuum last finished on
  * it, whether it still carries the four autovacuum storage parameters of {@code vectors-034} and whether
- * {@code autovacuum_enabled} was switched off.
+ * {@code autovacuum_enabled} was switched off; and, for the authenticated leaf listing (nexus-i827c), the size of every
+ * {@code pci_} index on it.
  *
  * <p><b>Leaves, never the parent.</b> The partitioned parent and the model partitions hold no tuples and autovacuum
  * never visits them, so their {@code pg_stat_user_tables} rows are empty; reading {@code relname = 'chunks'} reports
@@ -59,6 +64,19 @@ import java.util.Objects;
  */
 public final class LeafBloatCatalog {
 
+    private static final Logger log = LoggerFactory.getLogger(LeafBloatCatalog.class);
+
+    /** SQLSTATE of a lock wait that ran out ({@code lock_timeout}). */
+    private static final String LOCK_NOT_AVAILABLE = "55P03";
+
+    /**
+     * How long the {@code pci_} index size read waits for a lock. {@code pg_relation_size} opens the index with an
+     * ACCESS SHARE lock, so a non-concurrent {@code REINDEX} or {@code DROP INDEX} (ACCESS EXCLUSIVE on the index)
+     * makes it wait. The sizes are listing-only, so the wait is short and its failure costs only the sizes (see
+     * {@link #pciIndexSizes}), never the aggregate view the status route reads.
+     */
+    public static final Duration PCI_SIZE_LOCK_BOUND = Duration.ofSeconds(1);
+
     /** The base of the overdue line: {@code autovacuum_vacuum_threshold} of vectors-034 (and the s9wav leaf policy). */
     public static final long OVERDUE_BASE_ROWS = 1000;
 
@@ -70,6 +88,20 @@ public final class LeafBloatCatalog {
 
     /** The statement bound of one read: the engine's sweep-statement bound. */
     public static final Duration DEFAULT_READ_BOUND = SweepBounds.STATEMENT_TIMEOUT;
+
+    /** The prefix of a per-collection index name ({@link PciCatalog#PREFIX}); the size read considers no other index. */
+    private static final String PCI_PREFIX = PciCatalog.PREFIX;
+
+    /**
+     * One {@code pci_} index on a leaf (nexus-i827c: read again, for the authenticated leaf listing; the aggregate
+     * view on {@code GET /v1/status} does not carry it).
+     *
+     * @param name  the index name
+     * @param valid {@code pg_index.indisvalid}
+     * @param bytes {@code pg_relation_size} of the index when the read ran, or {@code null} when the size could not be
+     *              read (a lock held on the index past {@link #PCI_SIZE_LOCK_BOUND}); unknown is never 0
+     */
+    public record PciIndex(String name, boolean valid, Long bytes) { }
 
     /**
      * One leaf of {@code nexus.chunks}.
@@ -83,9 +115,37 @@ public final class LeafBloatCatalog {
      *                           the statistics began (a reset of the statistics sets it back to 0)
      * @param policySet          all four {@code vectors-034} autovacuum parameters are present
      * @param autovacuumEnabled  false only when {@code autovacuum_enabled} is set to a false spelling
+     * @param pciIndexes         its {@code pci_} indexes in name order; empty when it has none
      */
     public record Leaf(String name, long liveRows, long deadRows, long plannerRows, Instant lastAutovacuum,
-                       long vacuumCount, boolean policySet, boolean autovacuumEnabled) {
+                       long vacuumCount, boolean policySet, boolean autovacuumEnabled, List<PciIndex> pciIndexes) {
+
+        public Leaf {
+            pciIndexes = List.copyOf(pciIndexes);
+        }
+
+        /** A leaf with no {@code pci_} index, which is every leaf the aggregate view's tests build. */
+        public Leaf(String name, long liveRows, long deadRows, long plannerRows, Instant lastAutovacuum,
+                    long vacuumCount, boolean policySet, boolean autovacuumEnabled) {
+            this(name, liveRows, deadRows, plannerRows, lastAutovacuum, vacuumCount, policySet, autovacuumEnabled,
+                List.of());
+        }
+
+        /**
+         * Bytes of every {@code pci_} index on the leaf, valid or not (an invalid one still occupies its pages); 0 for a
+         * leaf with none, and {@code null} when any of them has no size ({@link PciIndex#bytes()}), so a size that could
+         * not be read is not reported as a small one.
+         */
+        public Long pciIndexBytes() {
+            long total = 0;
+            for (PciIndex i : pciIndexes) {
+                if (i.bytes() == null) {
+                    return null;
+                }
+                total += Math.max(0L, i.bytes());
+            }
+            return total;
+        }
 
         /**
          * The row count the overdue line scales by: the larger of the statistics' {@code live + dead} and the planner's
@@ -121,6 +181,7 @@ public final class LeafBloatCatalog {
 
     private final DataSource dataSource;
     private final Duration readBound;
+    private final Duration pciSizeLockBound;
 
     /** @param dataSource the pool the engine's role connects through; the read borrows one connection per call */
     public LeafBloatCatalog(DataSource dataSource) {
@@ -128,10 +189,20 @@ public final class LeafBloatCatalog {
     }
 
     LeafBloatCatalog(DataSource dataSource, Duration readBound) {
+        this(dataSource, readBound, PCI_SIZE_LOCK_BOUND);
+    }
+
+    /** As above with the {@code pci_} size read's lock bound named, for a test that cannot wait a second. */
+    LeafBloatCatalog(DataSource dataSource, Duration readBound, Duration pciSizeLockBound) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.readBound = Objects.requireNonNull(readBound, "readBound");
+        this.pciSizeLockBound = Objects.requireNonNull(pciSizeLockBound, "pciSizeLockBound");
         if (readBound.toMillis() < 1) {
             throw new IllegalArgumentException("readBound must be at least 1 ms (0 would disable it), got " + readBound);
+        }
+        if (pciSizeLockBound.toMillis() < 1) {
+            throw new IllegalArgumentException(
+                "pciSizeLockBound must be at least 1 ms (0 would disable it), got " + pciSizeLockBound);
         }
     }
 
@@ -168,7 +239,7 @@ public final class LeafBloatCatalog {
         }
     }
 
-    /** Read through {@code ctx}: three statements in the caller's transaction. */
+    /** Read through {@code ctx}: four statements in the caller's transaction. */
     Snapshot read(DSLContext ctx) {
         List<ChunksLeafAutovacuumCheck.LeafRel> rels = ChunksLeafAutovacuumCheck.leaves(ctx);
         if (rels.isEmpty()) {
@@ -210,14 +281,94 @@ public final class LeafBloatCatalog {
             estimates.put(row.value1(), est == null || est < 0 ? 0L : Math.round(est));
         }
 
+        // The pci_ indexes, keyed by the leaf they sit on (nexus-i827c). Their names and validity come from the
+        // catalog, which takes no lock on the index; the sizes are a separate, bounded step (pciIndexSizes) so a
+        // lock held on one index costs the sizes and nothing else.
+        Field<Long> indRelid = DSL.field(DSL.name("i", "indrelid")).cast(SQLDataType.BIGINT);
+        Field<String> indName = DSL.field(DSL.name("ix", "relname"), SQLDataType.VARCHAR);
+        Field<Boolean> indValid = DSL.field(DSL.name("i", "indisvalid"), SQLDataType.BOOLEAN);
+        Map<String, Long> sizes = pciIndexSizes(ctx);
+        Map<Long, List<PciIndex>> indexes = new HashMap<>();
+        for (var row : ctx.select(indRelid, indName, indValid)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_index")).as("i"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("ix"))
+                .on(DSL.field(DSL.name("ix", "oid")).eq(DSL.field(DSL.name("i", "indexrelid"))))
+                .where(DSL.left(indName, PCI_PREFIX.length()).eq(PCI_PREFIX))
+                .orderBy(indName)
+                .fetch()) {
+            indexes.computeIfAbsent(row.value1(), k -> new ArrayList<>())
+                .add(new PciIndex(row.value2(), Boolean.TRUE.equals(row.value3()), sizes.get(row.value2())));
+        }
+
         List<Leaf> leaves = new ArrayList<>(rels.size());
         for (ChunksLeafAutovacuumCheck.LeafRel rel : rels) {
             long[] c = counts.getOrDefault(rel.oid(), new long[] {0, 0, 0});
             leaves.add(new Leaf(rel.name(), c[0], c[1], estimates.getOrDefault(rel.oid(), 0L),
-                vacuumed.get(rel.oid()), c[2], rel.policySet(), !rel.autovacuumDisabled()));
+                vacuumed.get(rel.oid()), c[2], rel.policySet(), !rel.autovacuumDisabled(),
+                indexes.getOrDefault(rel.oid(), List.of())));
         }
         leaves.sort(Comparator.comparing(Leaf::name));
         return new Snapshot(leaves);
+    }
+
+    /**
+     * The size of every {@code pci_} index, by name, or an EMPTY map when a lock held on one of them outlasted
+     * {@link #PCI_SIZE_LOCK_BOUND} (a non-concurrent {@code REINDEX} or {@code DROP INDEX}).
+     *
+     * <p>Why a separate step with its own lock bound, not one more column of the statement above: {@code
+     * pg_relation_size} takes an ACCESS SHARE lock on each index, so with none a DDL on a single {@code pci_} index
+     * would stall the whole read to its 30 s statement bound and fail it, and {@code GET /v1/status} would then report
+     * {@code chunks_leaf_bloat} expired for a read that only wanted a listing's byte counts. The step runs in a
+     * savepoint: a lock timeout aborts the statement, and without one it would abort the surrounding transaction and
+     * with it the counts. A failure other than the lock wait (the statement bound included) is rethrown as before;
+     * only the lock wait is absorbed, and it is logged.
+     */
+    private Map<String, Long> pciIndexSizes(DSLContext ctx) {
+        Field<String> name = DSL.field(DSL.name("ix", "relname"), SQLDataType.VARCHAR);
+        Field<Long> bytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+            DSL.field(DSL.name("ix", "oid")));
+        Map<String, Long> sizes = new HashMap<>();
+        try {
+            ctx.connection(conn -> {
+                Savepoint savepoint = conn.setSavepoint();
+                try {
+                    PgSession.setLocal(ctx, "lock_timeout", Long.toString(pciSizeLockBound.toMillis()));
+                    for (var row : ctx.select(name, bytes)
+                            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("ix"))
+                            .where(DSL.left(name, PCI_PREFIX.length()).eq(PCI_PREFIX))
+                            .and(DSL.field(DSL.name("ix", "relkind"), SQLDataType.VARCHAR).eq("i"))
+                            .fetch()) {
+                        if (row.value2() != null) {   // NULL: the index went away since the name was read
+                            sizes.put(row.value1(), row.value2());
+                        }
+                    }
+                    // Roll back to the savepoint even on success: the sizes are already read, and only a
+                    // rollback reverts the SET LOCAL lock_timeout (a release keeps it until the transaction ends).
+                    conn.rollback(savepoint);
+                    conn.releaseSavepoint(savepoint);
+                } catch (RuntimeException e) {
+                    conn.rollback(savepoint);
+                    throw e;
+                }
+            });
+        } catch (DataAccessException e) {
+            if (!LOCK_NOT_AVAILABLE.equals(sqlState(e))) {
+                throw e;
+            }
+            log.warn("event=chunks_leaf_bloat_pci_size_unread reason=lock_wait bound_ms={}", pciSizeLockBound.toMillis());
+            sizes.clear();
+        }
+        return sizes;
+    }
+
+    private static String sqlState(Throwable e) {
+        int depth = 0;
+        for (Throwable c = e; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof SQLException sql && sql.getSQLState() != null) {
+                return sql.getSQLState();
+            }
+        }
+        return null;
     }
 
     private static long nz(Long value) {

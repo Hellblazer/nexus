@@ -35,7 +35,7 @@ from tests import _storage_touch_guard
 import sys as _sys  # noqa: E402
 
 # tests._storage_touch_guard (nexus-j23ni): the opt-in tenant's storage-touch
-# guard; active in the default substrate (optin), inert under none and per-test.
+# guard; active in the default substrate (optin), inert under none.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
 pytest_plugins = [
@@ -262,6 +262,17 @@ _RETIRED_T2_SUBSTRATES: dict[str, str] = {
         "the only substrate. If you meant 'this test needs no T2 store', "
         "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
     ),
+    **{
+        value: (
+            f"NX_TEST_T2_SUBSTRATE={value}: the per-test escape hatch (a tenant "
+            "for every test) was retired after one release (nexus-llo7w). "
+            "Unset the variable: a test that touches storage asks for a tenant "
+            "with pytest.mark.t2_tenant or a t2_tenant parameter, and the "
+            "storage-touch guard names one that does not. "
+            "NX_TEST_T2_SUBSTRATE=none provisions nothing."
+        )
+        for value in ("per-test", "engine")
+    },
 }
 
 
@@ -291,7 +302,7 @@ def _selected_t2_substrate_boots_engine() -> bool:
     ``t2_tenant`` tenant boot the engine, but which ones is not known until
     they run, and a session that boots even once spends the machine-wide
     shared-memory budget the suite lease and the preflight protect. So the
-    lease is taken and the preflight runs exactly as for ``per-test``.
+    lease is taken and the preflight runs.
     """
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
@@ -633,7 +644,7 @@ def pytest_sessionstart(session):
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
     global _real_config_dir_baseline_dir, _real_autostart_baseline, _real_manager_baseline
-    global _this_session_conexus_version, _last_seen_version_baseline_content
+    global _this_session_conexus_version, _last_seen_version_baseline_content, _mint_lock_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     # BEFORE the fence below replaces them: the guard's read-only manager probe
     # must ask the operator's real manager.
@@ -705,6 +716,7 @@ def pytest_sessionstart(session):
         _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
+        _mint_lock_baseline_content = _snapshot_mint_lock_contents(_real_config_dir_for_guard())
 
 
 def _check_fixture_cache_leaks(session) -> None:
@@ -961,12 +973,14 @@ def _split_appends_from_state(
     last_seen_version_content: str | None = None,
     last_seen_version_baseline_content: str | None = None,
     this_session_version: str | None = None,
+    mint_lock_baseline_content: dict[str, bytes] | None = None,
+    mint_lock_content: dict[str, bytes] | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
     pairs) into (state_mutations, benign_appends), preserving each entry
     verbatim in whichever list it lands.
 
-    Three ways to be benign. (1) The path lives under a directory a live
+    Four ways to be benign. (1) The path lives under a directory a live
     daemon owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is
     ambient output rather than suite behaviour. (2) Its basename is a known
     append-only log, it existed before, and its size strictly GREW. A log
@@ -976,7 +990,19 @@ def _split_appends_from_state(
     deliberately never does for most files; the directory can hold a live
     user's real data). (3) nexus-b2eaw, ``last_seen_version`` only -- its
     baseline and post-session CONTENT are byte-identical, so nothing real
-    happened regardless of whose version it is (see below).
+    happened regardless of whose version it is (see below). (4) nexus-2edpf,
+    a root-level ``data_token_mint_lock.*`` that existed at session start,
+    kept its bytes, and whose attribution line names no pytest test. This is
+    NOT the b2eaw argument: a lock's bytes are written only when it is
+    created, and every later mint, a test's included, only touches its mtime
+    (nexus-ndfc1), so unchanged bytes do not prove no test reused it. What
+    the rule stands on is the creator: a lock first created while a pytest
+    test runs names that test (develop source always writes the line,
+    nexus-28bzt) and is never exempt, so such a leak fails on every run, not
+    just the first. A writer that had PYTEST_CURRENT_TEST scrubbed (a child
+    with a clean env, a session hook) records null: it fails the run that
+    creates the lock (ADDED) and is exempt after that. A created, rewritten or
+    removed lock stays state.
 
     nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
     this function also exempted ``last_seen_version`` whenever its content
@@ -1045,9 +1071,19 @@ def _split_appends_from_state(
         ):
             # Content-based: the mtime/size diff fired, but the bytes never
             # changed -- no real event, regardless of anyone's version.
-            # Deliberately the ONLY content-driven exemption left: unlike a
-            # version-mismatch, "before == after byte-for-byte" cannot be
-            # produced by a genuine state mutation, in-session or not.
+            # Unlike a version-mismatch, "before == after byte-for-byte"
+            # cannot be produced by a genuine state mutation, in-session or
+            # not. (The mint-lock rule below is creator-based, see (4).)
+            appends.append(entry)
+        elif (
+            rel.startswith(_MINT_LOCK_FILE_PREFIX)
+            and mint_lock_baseline_content is not None
+            and mint_lock_content is not None
+            and rel in mint_lock_baseline_content
+            and mint_lock_content.get(rel) == mint_lock_baseline_content[rel]
+            and _mint_lock_created_outside_pytest(mint_lock_baseline_content[rel])
+        ):
+            # A live host's mint touched a lock pytest did not create; see (4).
             appends.append(entry)
         elif (
             rel in (_ROTATED_LOG_NAME, _ROTATED_LOG_BACKUP_NAME)
@@ -1186,6 +1222,56 @@ def _resolve_this_session_conexus_version() -> str | None:
 #: but can never prove it IS, and the diagnostic must not claim otherwise).
 _last_seen_version_baseline_content: str | None = None
 
+#: ``nexus.db.data_token._MINT_LOCK_PREFIX``, spelled here so the guard does
+#: not import product code at session start.
+_MINT_LOCK_FILE_PREFIX: str = "data_token_mint_lock."
+
+#: Largest mint lock whose bytes the guard reads; a real one is one JSON line.
+_MINT_LOCK_MAX_READ_BYTES: int = 64 * 1024
+
+#: Session-start bytes of each root-level mint lock under the real config dir,
+#: for :func:`_split_appends_from_state`'s byte-identical check (a live
+#: ``nx-mcp`` host's mint touches the mtime and nothing else).
+_mint_lock_baseline_content: dict[str, bytes] = {}
+
+
+def _mint_lock_created_outside_pytest(content: bytes) -> bool:
+    """True when a mint lock's attribution line names no pytest test, or it
+    has none (written by a release before nexus-ndfc1; tests run develop
+    source, which always writes one). A line that does not parse is not
+    trusted."""
+    if not content.strip():
+        return True
+    import json  # noqa: PLC0415 — read only when a mint lock changed during the run
+
+    try:
+        record = json.loads(content.splitlines()[0])
+    except ValueError:
+        return False
+    return isinstance(record, dict) and not record.get("pytest_current_test")
+
+
+def _snapshot_mint_lock_contents(config_dir: Path) -> dict[str, bytes]:
+    """``{name: bytes}`` for every root-level mint lock in *config_dir*. The
+    bytes are the lock's own attribution line (pid, argv0, endpoint, tenant),
+    not user data. A file that cannot be read, or is over the cap, is left
+    out, so its change stays a state mutation."""
+    out: dict[str, bytes] = {}
+    try:
+        entries = list(os.scandir(config_dir))
+    except OSError:
+        return out
+    for de in entries:
+        if not de.name.startswith(_MINT_LOCK_FILE_PREFIX):
+            continue
+        try:
+            if not de.is_file(follow_symlinks=False) or de.stat().st_size > _MINT_LOCK_MAX_READ_BYTES:
+                continue
+            out[de.name] = Path(de.path).read_bytes()
+        except OSError:
+            continue
+    return out
+
 
 def _snapshot_last_seen_version_content() -> str | None:
     """The REAL ``last_seen_version``'s text content right now (session
@@ -1213,6 +1299,13 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
+    # The conexus plugin's git-integrity hook
+    # (conexus/hooks/scripts/routing/subagent_git_integrity_check.py) writes
+    # ``git-integrity/<session_id>/*`` on every tool call of the live Claude
+    # session that is RUNNING this pytest, so the directory changes during any
+    # run launched from such a session with no test involved. No test reads
+    # the REAL directory; the hook's own tests use a sandboxed config dir.
+    "git-integrity/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
@@ -1613,7 +1706,7 @@ def _check_real_config_dir_mutations(session) -> None:
         return
     # nexus-b2eaw: read the stamp's actual post-session content so
     # _split_appends_from_state can tell a genuine content change from a
-    # spurious stat touch (byte-identical content -- the ONE content-driven
+    # spurious stat touch (byte-identical content -- the one content-driven
     # exemption left after round 2's CRITICAL finding removed the
     # version-mismatch exemption). See _this_session_conexus_version's and
     # _last_seen_version_baseline_content's docstrings for why reading this
@@ -1630,6 +1723,8 @@ def _check_real_config_dir_mutations(session) -> None:
         last_seen_version_content=_stamp_content,
         last_seen_version_baseline_content=_last_seen_version_baseline_content,
         this_session_version=_this_session_conexus_version,
+        mint_lock_baseline_content=_mint_lock_baseline_content,
+        mint_lock_content=_snapshot_mint_lock_contents(_real_config_dir_for_guard()),
     )
     if benign_appends:
         print(
@@ -1638,7 +1733,8 @@ def _check_real_config_dir_mutations(session) -> None:
             f"(an append-only log grew, or a live daemon wrote/rotated its own "
             f"output): "
             f"{', '.join(_format_diff_entry(e) for e in benign_appends)}\n"
-            f"  Reported, not failed: these are append-only logs, not state. "
+            f"  Reported, not failed: append-only logs, daemon output, or a mint lock a live "
+            f"host touched (nexus-2edpf), not state. "
             f"A truncation or in-place rewrite of the same file WOULD fail.\n"
         )
     if not changed:
@@ -2174,8 +2270,9 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     `test_mode_declarations_are_explicit`'s own body. By the time a test's
     body executes, `_pytest/runner.py`'s `pytest_runtest_setup` has ALREADY
     called `item.setup()`, which resolves every fixture the item depends
-    on -- including the autouse `_pin_t2_substrate` fixture, which boots
-    the engine substrate for EVERY test unless `NX_TEST_T2_SUBSTRATE=none`.
+    on -- including the autouse `_pin_t2_substrate` fixture, which (before
+    the nexus-j23ni opt-in flip) booted the engine substrate for EVERY test
+    unless `NX_TEST_T2_SUBSTRATE=none`.
     Locally this was invisible (the box happily absorbed a second engine
     boot from the subprocess probe's nested pytest invocation); under a
     REAL `--splits`/`--group` CI shard, the nested invocation's engine boot
@@ -2828,9 +2925,8 @@ def t2_service_env(request: pytest.FixtureRequest,
     dropped (``minted_test_tenant``, RDR-225), so a worker's PG does not
     grow by about 50 relations per test.
 
-    ``NX_TEST_T2_SUBSTRATE=per-test`` (the escape hatch) has ``_pin_t2_substrate``
-    pull this fixture in for every test. Requestable directly by tests that want
-    the tenant name.
+    Requestable directly by tests that want the tenant name. Under
+    ``NX_TEST_T2_SUBSTRATE=none`` a test that requests it still gets this body.
 
     Under the default substrate, ``optin`` (nexus-j23ni), it is an alias for
     ``t2_tenant``: the tenant, the test's T1 session and the shared posture
@@ -2854,8 +2950,7 @@ def t2_tenant(request: pytest.FixtureRequest,
     Under the default substrate (``optin``) it is a thin wrapper over the same
     machinery as ``t2_service_env``: the minted tenant, plus this test's T1
     session, and not ``NX_LOCAL`` (``_pin_local_posture_optin`` owns that).
-    Under ``per-test`` ``_pin_t2_substrate`` already provisions every test, so
-    this just hands back that tenant.
+    Under ``none`` a test that requests it gets ``t2_service_env``'s body.
     """
     if not _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_service_env")
@@ -2878,7 +2973,7 @@ def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
     ambient ``NX_STORAGE_BACKEND``, which the tenant fixture otherwise
     overrides; ``_pin_t2_substrate`` depends on this fixture so the drop runs
     BEFORE a marker-requested tenant sets ``service``, not after. Nothing under
-    ``per-test`` and ``none``.
+    ``none``.
     """
     if not _storage_touch_guard.optin_selected():
         return
@@ -3128,8 +3223,9 @@ def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: 
     module ``pytestmark`` included) or requests one of those fixtures; every
     other test mints nothing, and the storage-touch guard
     (``tests/_storage_touch_guard.py``, fail mode) fails one that reaches
-    storage without a tenant, naming it. ``NX_TEST_T2_SUBSTRATE=per-test`` is
-    the escape hatch back to a tenant for EVERY test, for one release.
+    storage without a tenant, naming it. ``NX_TEST_T2_SUBSTRATE=per-test`` was
+    the escape hatch back to a tenant for EVERY test; after one release it is
+    retired (nexus-llo7w) and refused by name like ``sqlite``.
     ``scripts/annotate_t2_tenant.py`` regenerates the marks from a census.
 
     The substrate is what the product actually ships on;
@@ -3190,19 +3286,17 @@ def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: 
         return
     if selected in _RETIRED_T2_SUBSTRATES:
         raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
-    if _storage_touch_guard.optin_selected():
-        # nexus-j23ni, the default since the flip: mint only for a test that
-        # carries the marker (module ``pytestmark`` included); one that
-        # requests ``t2_tenant`` by parameter gets it from that request. The
-        # storage-touch guard (fail mode) names a test that reaches storage
-        # with neither. ``NX_TEST_T2_SUBSTRATE=per-test`` mints for every test.
-        if (
-            request.node.get_closest_marker("t2_tenant") is not None
-            or any(request.node.get_closest_marker(m) is not None for m in _UNCENSUSED_MARKERS)
-        ):
-            request.getfixturevalue("t2_tenant")
-        return
-    request.getfixturevalue("t2_service_env")
+    # nexus-j23ni, the default since the flip and now the only tenant mode
+    # (anything else is refused above or is a UsageError at configure): mint
+    # only for a test that carries the marker (module ``pytestmark`` included);
+    # one that requests ``t2_tenant`` by parameter gets it from that request.
+    # The storage-touch guard (fail mode) names a test that reaches storage
+    # with neither.
+    if (
+        request.node.get_closest_marker("t2_tenant") is not None
+        or any(request.node.get_closest_marker(m) is not None for m in _UNCENSUSED_MARKERS)
+    ):
+        request.getfixturevalue("t2_tenant")
 
 
 @pytest.fixture(autouse=True)
@@ -3952,7 +4046,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # nexus-03wze fix round (review fold): test_rdr_109_phase2_
     # dispatch.py's file-level exclusion reclassified per-test.
     #
-    # Reason class "mode-self-test": each of these 8 pins LOCAL mode
+    # Reason class "mode-self-test": each of these 7 pins LOCAL mode
     # explicitly (monkeypatching is_local_mode/local_embed_model_choice/
     # get_credential directly) and asserts the REAL nexus-35ok4/GH-#1461
     # local-install-can-use-Voyage write/read chokepoint dispatch --
@@ -3968,7 +4062,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_rdr_109_phase2_dispatch.py::test_effective_local_voyage_without_key_fails_loud",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_targets_voyage_not_bge_when_key_present",
     "tests/test_rdr_109_phase2_dispatch.py::test_read_path_still_finds_bge_when_key_present",
-    "tests/test_rdr_109_phase2_dispatch.py::test_read_path_prefers_voyage_over_bge_once_voyage_sibling_exists",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_raises_when_nothing_to_grandfather_keyless_voyage",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_no_t3_probe_raises_keyless_voyage_config",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_mints_voyage_when_key_present_and_nothing_preexisting",

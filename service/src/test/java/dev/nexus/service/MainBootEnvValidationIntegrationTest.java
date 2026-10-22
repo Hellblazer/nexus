@@ -251,4 +251,102 @@ class MainBootEnvValidationIntegrationTest {
         assertThat(noFlag.reachedMigration()).as(noFlag.output()).isTrue();
         assertThat(noFlag.output()).doesNotContain(BIND_REFUSED);
     }
+
+    // ── one engine per database (nexus-5tykh) ────────────────────────────────────────────────────────────
+
+    private static final String LOCK_REFUSED = "event=engine_singleton_lock_refused";
+
+    /** A connection of this test that holds the engine singleton lock, standing in for a running first engine. */
+    private java.sql.Connection holdTheEngineLock() throws Exception {
+        var props = new java.util.Properties();
+        props.setProperty("user", pg.getUsername());
+        props.setProperty("password", pg.getPassword());
+        props.setProperty("ApplicationName", "first-engine-stand-in");
+        var c = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), props);
+        var took = org.jooq.impl.DSL.using(c, org.jooq.SQLDialect.POSTGRES)
+            .select(org.jooq.impl.DSL.function("pg_try_advisory_lock", org.jooq.impl.SQLDataType.BOOLEAN,
+                org.jooq.impl.DSL.val(dev.nexus.service.db.EngineSingletonLock.LOCK_KEY)))
+            .fetchOne(0, Boolean.class);
+        assertThat(took).as("the stand-in took the lock").isTrue();
+        return c;
+    }
+
+    /** The stand-in's backend pid and the address Postgres records for it, as the refusal line must repeat them. */
+    private record StandIn(int pid, String clientAddr) { }
+
+    private StandIn standIn() throws Exception {
+        try (var c = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
+            var activity = org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("pg_catalog", "pg_stat_activity"));
+            var rec = org.jooq.impl.DSL.using(c, org.jooq.SQLDialect.POSTGRES)
+                .select(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("pid"), Integer.class),
+                    org.jooq.impl.DSL.function("host", org.jooq.impl.SQLDataType.VARCHAR,
+                        org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("client_addr"))))
+                .from(activity)
+                .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("application_name"), String.class)
+                    .eq("first-engine-stand-in"))
+                .fetchOne();
+            return new StandIn(rec.value1(), rec.value2());
+        }
+    }
+
+    /**
+     * A real boot against a database whose lock another session holds exits 1 after the wait, before the schema
+     * migration, and its refusal line names the holder's backend pid and client address: the operator's handle for a
+     * half-open connection left by a stopped engine (conexus, 2026-10-22).
+     */
+    @Test
+    void aSecondEngine_isRefusedBeforeTheMigration_andTheLogNamesTheHolderPidAndClientAddr() throws Exception {
+        try (var holder = holdTheEngineLock()) {
+            StandIn holderBackend = standIn();
+            String pid = Integer.toString(holderBackend.pid());
+            String addr = holderBackend.clientAddr();
+            assertThat(addr).as("the stand-in came in over TCP").isNotBlank();
+
+            Boot boot = bootWith(java.util.Map.of("NX_ENGINE_SINGLETON_LOCK_WAIT_SECONDS", "1"), MIGRATION_START);
+
+            assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
+            assertThat(boot.reachedMigration()).as("a refused engine never migrates:\n" + boot.output()).isFalse();
+            assertThat(lines(boot, LOCK_REFUSED)).as("exactly one refusal event:\n" + boot.output()).hasSize(1);
+            assertThat(lines(boot, LOCK_REFUSED).get(0))
+                .contains("holder_pid=" + pid)
+                .contains("holder_client_addr=" + addr)
+                .contains("holder_application_name=first-engine-stand-in")
+                .doesNotContain(pg.getPassword());
+        }
+    }
+
+    /** The control for the refusal above: with the lock free the same boot takes it and reaches the migration. */
+    @Test
+    void anEngineWithTheLockFree_takesItBeforeTheMigration() throws Exception {
+        Boot boot = boot(null, null);
+
+        assertThat(boot.reachedMigration()).as(boot.output()).isTrue();
+        assertThat(boot.output()).doesNotContain(LOCK_REFUSED);
+        assertThat(boot.output().indexOf("event=engine_singleton_lock_acquired"))
+            .as("acquired, and before the migration starts:\n" + boot.output()).isPositive()
+            .isLessThan(boot.output().indexOf(MIGRATION_START));
+    }
+
+    /** The operator's opt-out boots past a held lock and says so at WARN. */
+    @Test
+    void theOptOut_bootsPastAHeldLock_withAWarn() throws Exception {
+        try (var holder = holdTheEngineLock()) {
+            Boot boot = boot("NX_ENGINE_SINGLETON_LOCK", "off");
+
+            assertThat(boot.reachedMigration()).as(boot.output()).isTrue();
+            assertThat(boot.output()).doesNotContain(LOCK_REFUSED);
+            assertThat(lines(boot, "event=engine_singleton_lock_disabled")).as(boot.output()).hasSize(1);
+            assertThat(lines(boot, "event=engine_singleton_lock_disabled").get(0)).contains("WARN");
+        }
+    }
+
+    @Test
+    void aMalformedSingletonLockSetting_exitsOneNamingTheVariable_beforeTheMigration() throws Exception {
+        Boot boot = boot("NX_ENGINE_SINGLETON_LOCK", "maybe");
+
+        assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
+        assertThat(boot.reachedMigration()).as(boot.output()).isFalse();
+        assertThat(lines(boot, "event=engine_singleton_lock_env_invalid")).as(boot.output()).hasSize(1);
+        assertThat(lines(boot, "event=engine_singleton_lock_env_invalid").get(0)).contains("NX_ENGINE_SINGLETON_LOCK");
+    }
 }

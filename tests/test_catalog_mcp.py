@@ -202,7 +202,83 @@ def test_search_returns_match(cat) -> None:
 
 
 def test_search_no_results(cat) -> None:
-    assert catalog_search(query="nonexistent") == []
+    """Zero rows is an explicit line, not an empty list (nexus-r88er F12).
+
+    An empty list renders as nothing at all, so a topical query on this
+    title/metadata tool read as a broken tool. The note names the tool's
+    scope and points at the nexus server's content tools by full MCP name.
+    """
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    rows = catalog_search(query="tuple space mailbox")
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    note = rows[0]["note"]
+    assert note.startswith("0 matches")
+    assert "titles and metadata" in note
+    assert "mcp__plugin_conexus_nexus__search" in note
+    assert "mcp__plugin_conexus_nexus__query" in note
+
+
+def test_search_no_results_on_a_filter_is_also_explicit(cat) -> None:
+    catalog_register(title="alpha", owner="1.1", content_type="prose")
+    rows = catalog_search(content_type="code")
+    assert len(rows) == 1 and rows[0]["note"].startswith("0 matches")
+
+
+def test_search_nonempty_result_carries_no_note(cat) -> None:
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    rows = catalog_search("authentication")
+    assert len(rows) == 1
+    assert rows[0]["title"] == "authentication module"
+    assert all("note" not in r for r in rows)
+
+
+def test_search_refuses_a_negative_offset_or_a_limit_below_one(cat) -> None:
+    """A negative limit slices to an empty page with matches present
+    (matches[2:2]), so the empty-page note would claim every match lies
+    before the offset. Such input is refused instead (F12 confirmation pass)."""
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    for kwargs in ({"limit": -1, "offset": 2}, {"limit": 0}, {"offset": -1}):
+        rows = catalog_search("authentication", **kwargs)
+        assert len(rows) == 1 and set(rows[0]) == {"error"}, kwargs
+        assert "limit must be >= 1 and offset >= 0" in rows[0]["error"]
+    # the find_all branch (query plus a filter) past the end gives the true count
+    rows = catalog_search("authentication", owner="1.1", offset=3)
+    assert "No rows at offset 3" in rows[0]["note"] and "1 match," in rows[0]["note"]
+
+
+def test_search_past_the_end_does_not_claim_zero_matches(cat) -> None:
+    """An offset past the last row used to return the "0 matches" note while
+    matches existed (F12 review). The note must be true: at offset > 0 it says
+    there are no rows at that offset and gives the real match count."""
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    catalog_register(title="authentication tests", owner="1.1", content_type="code")
+
+    # full-text branch, offset beyond the 2 matches
+    rows = catalog_search("authentication", offset=5)
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    note = rows[0]["note"]
+    assert "0 matches" not in note
+    assert "No rows at offset 5" in note and "2 matches" in note
+
+    # filter branch, offset exactly at the end
+    rows = catalog_search(content_type="code", offset=2)
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    assert "0 matches" not in rows[0]["note"]
+    assert "2 matches" in rows[0]["note"]
+
+    # singular
+    rows = catalog_search("module", offset=1)
+    assert "1 match," in rows[0]["note"]
+
+
+def test_search_last_page_still_returns_rows_and_zero_still_says_zero(cat) -> None:
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    catalog_register(title="authentication tests", owner="1.1", content_type="code")
+    last = catalog_search("authentication", offset=1, limit=5)
+    assert len(last) == 1 and "note" not in last[0]
+    # offset 0 with nothing matching is the real zero
+    zero = catalog_search("tuple space mailbox", offset=0)
+    assert zero[0]["note"].startswith("0 matches")
 
 
 @pytest.mark.parametrize("field,register_val,search_kwarg", [

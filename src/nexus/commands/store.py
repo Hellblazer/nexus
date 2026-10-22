@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -8,7 +9,13 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError, t3_collection_name
+from nexus.corpus import (
+    EmbeddingProfileMismatchError,
+    LocalVoyageCredentialMissingError,
+    store_read_scope,
+    t3_collection_name,
+    t3_collection_names_for_read,
+)
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import PutOversizedError
@@ -205,8 +212,8 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
 @store.command("list")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
-                   "docs/collections.md.")
+                   "knowledge, every knowledge collection). Never a model token or "
+                   "version; see docs/collections.md.")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
 @click.option("--offset", default=0, show_default=True,
@@ -218,7 +225,12 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
                    "(read-only; the set 'nx t3 gc' would quarantine). Requires --collection. "
                    "--limit bounds the rows shown.")
 def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: bool) -> None:
-    """List entries in a T3 knowledge collection."""
+    """List entries in a T3 knowledge collection.
+
+    With no --collection, lists the knowledge collections and their sizes
+    (every live knowledge collection, as the MCP store_list does); name one to
+    page its entries.
+    """
     if reapable:
         # The operator must NAME the collection: the default ('knowledge') is a convenience for the
         # plain listing, but an audit of what garbage collection would take should never silently
@@ -231,19 +243,39 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
         if docs or offset:
             raise click.UsageError("--reapable cannot be combined with --docs or --offset.")
     db = _t3()
-    col_name = t3_collection_name(collection, t3=db)
+    # nexus-9ts7n: the named collection is paged and its live model siblings are
+    # named, as the MCP store_list does (nexus-50uw6); naming a sibling pages it.
+    # nexus-2y8yw: bare "knowledge" is every knowledge collection (nexus-mgqs8), so
+    # it lists the subjects with their sizes rather than paging one of them.
+    if reapable:
+        scope = t3_collection_names_for_read(collection, t3=db)
+    else:
+        scope, rows = _store_scope(collection, db)
+        if len(scope) > 1 and collection.strip() == "knowledge":
+            counts = {r["name"]: r.get("count", "?") for r in rows if isinstance(r, dict) and "name" in r}
+            click.echo(f"{len(scope)} knowledge collections (pass one as --collection to list its entries):")
+            for name in scope:
+                click.echo(f"  {name}  {counts.get(name, '?')} entries")
+            if docs or offset:
+                click.echo("  (--docs and --offset apply to a named collection)")
+            return
+    col_name = scope[0]
+    also = (
+        f"  also in this corpus: {', '.join(scope[1:])} (pass one as --collection to list it)\n"
+        if len(scope) > 1 else ""
+    )
 
     if reapable:
         _list_reapable(db, col_name, limit)
         return
 
     if docs:
-        _list_documents(db, col_name)
+        _list_documents(db, col_name, also=also)
         return
 
     entries = db.list_store(col_name, limit=limit, offset=offset)
     if not entries:
-        click.echo(f"No entries in {col_name} at offset {offset}.")
+        click.echo(f"No entries in {col_name} at offset {offset}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
     # Get total count for page info
@@ -257,7 +289,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # nexus-sis0m.3: `total` is the collection's STORED chunk count (the
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
-    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n")
+    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
     from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -376,7 +408,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
         click.echo(f"\n  More reapable chunks exist than --limit {limit}; raise --limit to see them.")
 
 
-def _list_documents(db: T3Database, col_name: str) -> None:
+def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
     """List documents in a collection, grouped by the catalog manifest.
 
     Grouping is :func:`nexus.catalog.store_hook.group_documents`, shared
@@ -399,17 +431,17 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         # way plain `store list` reports it, at exit 0. Every other failure,
         # a stopped service among them, used to print "Collection not found"
         # too, which reads as data loss; those now propagate.
-        click.echo(f"No documents in {col_name}.")
+        click.echo(f"No documents in {col_name}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
     from nexus.catalog.store_hook import group_documents  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
     docs, degraded = group_documents(db, col_name, total_chunks)
     if not docs:
-        click.echo(f"No documents in {col_name}.")
+        click.echo(f"No documents in {col_name}." + (f"\n{also.rstrip()}" if also else ""))
         return
 
-    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n")
+    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n" + also)
     if degraded:
         click.echo(
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
@@ -427,12 +459,39 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 
 
 
+def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
+    """The collections a ``nx store`` read looks in, by the rule the MCP store
+    tools use (:func:`nexus.corpus.store_read_scope`, nexus-2y8yw), and the live
+    rows listed for it (empty unless the bare ``knowledge`` asked for them).
+
+    The names come from the verb's own T3 handle, one listing, so the scope and
+    the counts printed beside it are the client the verb reads through.
+    """
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred: heavy module
+
+    listed: list = []
+
+    def _knowledge() -> list[str]:
+        # A stopped service raises what the CLI group already turns into its
+        # "did not answer" / "nx daemon service start" message (nexus-sis0m.1).
+        rows = db.list_collections()
+        listed.extend(
+            r for r in rows
+            if isinstance(r, dict) and "name" in r and is_live_collection_row(r)
+            and r.get("content_type") == "knowledge"  # no catalog row: left out, as resolve_corpus does
+            and r.get("lifecycle_state", "live") == "live"
+        )
+        return sorted(r["name"] for r in listed)
+
+    return store_read_scope(collection, t3=db, knowledge_collections=_knowledge), listed
+
+
 @store.command("get")
 @click.argument("doc_id")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
-                   "docs/collections.md.")
+                   "knowledge, every knowledge collection). Never a model token or "
+                   "version; see docs/collections.md.")
 @click.option("--json", "json_out", is_flag=True, default=False,
               help="Output as JSON")
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
@@ -448,10 +507,17 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
       nx store get a1b2c3d4e5f6789012345678901234abcdef0123456789abcdef0123456789ab --collection code__myrepo --json
     """
     db = _t3()
-    col_name = t3_collection_name(collection, t3=db)
-    entry = db.get_by_id(col_name, doc_id)
+    # nexus-9ts7n: every live model sibling of the corpus, as the MCP store_get
+    # reads (nexus-50uw6); a fully-qualified name is that one collection.
+    scope, _rows = _store_scope(collection, db)
+    col_name, entry = scope[0], None
+    for candidate in scope:
+        entry = db.get_by_id(candidate, doc_id)
+        if entry is not None:
+            col_name = candidate
+            break
     if entry is None:
-        raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+        raise click.ClickException(f"Entry {doc_id!r} not found in {', '.join(scope)}")
     # nexus-spujb: a note split to its model's token window reads back whole.
     split = _split_note_text(db, col_name, [entry["id"]])
     if split is not None:
@@ -459,7 +525,7 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
 
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local
-        click.echo(json.dumps(entry, indent=2))
+        click.echo(json.dumps({**entry, "collection": col_name}, indent=2))
     else:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
@@ -560,7 +626,10 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # collection-scoped itself (nexus-r3cdg); this check stays as the
         # primary layer.
         if db.get_by_id(col_name, doc_id) is None:
-            raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+            # nexus-9ts7n: a delete stays in the one collection it names (reads span
+            # the corpus's siblings, a delete does not), so say which sibling has it.
+            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id) is not None)
+            raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}{hint}")
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
         # after. PgVectorRepository#delete's anti-join refuses to delete a
@@ -590,10 +659,32 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
             )
         click.echo(f"Deleted: {doc_id}  from  {col_name}")
     else:
-        _delete_by_title(db, col_name, title, yes)
+        _delete_by_title(
+            db, col_name, title, yes,
+            hint=lambda: _holder_hint(db, collection, col_name, lambda s: bool(db.find_ids_by_title(s, title))),
+        )
 
 
-def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> None:
+def _holder_hint(db: T3Database, collection: str, col_name: str, holds: Callable[[str], bool]) -> str:
+    """``; it is in S: pass --collection S`` for the first other collection a
+    read of *collection* would look in (``nx store get``'s scope) that *holds*
+    what a delete did not find in *col_name*, else empty (nexus-9ts7n,
+    nexus-jald5). Read-only and best effort: a delete never reaches into a
+    collection it was not given, and a probe that fails leaves the plain
+    not-found message."""
+    try:
+        others = [s for s in _store_scope(collection, db)[0] if s != col_name]
+        holder = next((s for s in others if holds(s)), None)
+    except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
+        _log.warning("store_delete_holder_hint_failed", collection=col_name, exc_info=False)
+        return ""
+    return f"; it is in {holder}: pass --collection {holder}" if holder else ""
+
+
+def _delete_by_title(
+    db: T3Database, col_name: str, title: str, yes: bool,
+    hint: Callable[[], str] = str,
+) -> None:
     """``--title`` names documents (nexus-sis0m.5).
 
     Catalog documents titled *title* are tombstoned with their own manifest
@@ -629,7 +720,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
             finally:
                 reader.close()
         if not n_docs and not row_ids:
-            raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+            raise click.ClickException(f"No entries with title {title!r} in {col_name}{hint()}")
         click.echo(
             f"Found {n_docs} document(s) and {len(row_ids)} chunk(s) titled "
             f"{title!r} in {col_name}."
@@ -639,7 +730,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
 
     reaped = docs.documents if docs else ()
     if not reaped and not row_ids and not (docs and docs.failures):
-        raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+        raise click.ClickException(f"No entries with title {title!r} in {col_name}{hint()}")
 
     # Chunks titled *title* that no reaped document named: the chunk-title
     # path, reap-before-delete, exactly as before.

@@ -283,3 +283,199 @@ def test_counts_are_pluralised_in_plain_english() -> None:
     two = _row(_status(pinned=2)).detail
     assert "on 1 leaf " in one and "1 leaves" not in one
     assert "on 2 leaves " in two and "leafves" not in two
+
+
+# ── nx doctor --verbose: name the leaves from the operator-only admin route (nexus-i827c) ──────────────────────
+
+
+_ADMIN_ROUTE = "GET /v1/admin/chunks-leaves"
+_SENTINEL_TOKEN = "tok-sentinel-never-printed-0123456789"
+
+
+class _FakeStore:
+    """An ``HttpTokenStore`` stand-in: ``outcome`` is what ``chunks_leaves()`` returns or raises."""
+
+    outcome: object = None
+    constructed = 0
+
+    def __init__(self, *a, **kw) -> None:
+        type(self).constructed += 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def chunks_leaves(self):
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.fixture
+def store(monkeypatch):
+    """Patch the store the verbose read builds; the test sets ``store.outcome``."""
+    _FakeStore.outcome, _FakeStore.constructed = None, 0
+    monkeypatch.setattr("nexus.db.t2.http_token_store.HttpTokenStore", _FakeStore)
+    monkeypatch.setenv("NX_SERVICE_TOKEN", _SENTINEL_TOKEN)
+    return _FakeStore
+
+
+def _leaf(name: str, problems: list[str], **kw) -> dict:
+    return {"leaf": name, "problems": problems, "rows": 130000, "dead_rows": 30000,
+            "last_autovacuum": "2026-10-22T09:00:00Z", "overdue_state": "pinned", "pci_index_count": 1,
+            "pci_index_bytes": 4096000, **kw}
+
+
+def _verbose_row(status):
+    (r,) = _check_chunks_leaf_bloat(status, verbose=True)
+    return r
+
+
+def test_verbose_lists_each_leaf_with_rows_last_autovacuum_state_and_pci_bytes(store) -> None:
+    store.outcome = {"leaves_total": 3, "needing_attention": 2, "leaves": [
+        _leaf("chunks_m0a90d9bc_t_aaaa", ["pinned"]),
+        _leaf("chunks_mad318272_t_bbbb", ["policy_unset", "autovacuum_disabled"], overdue_state="none",
+              last_autovacuum=None, pci_index_bytes=0, pci_index_count=0, rows=5000, dead_rows=10)]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert r.ok is False and r.warn is True, "the row still warns on the counts"
+    assert "chunks_m0a90d9bc_t_aaaa: pinned; rows 130000, dead 30000, last autovacuum 2026-10-22T09:00:00Z, " \
+        "overdue pinned, 3.9 MiB in 1 pci_ index(es)" in r.detail
+    assert "chunks_mad318272_t_bbbb: policy_unset,autovacuum_disabled; rows 5000, dead 10, last autovacuum never, " \
+        "overdue none, 0 B in 0 pci_ index(es)" in r.detail
+    assert store.constructed == 1
+
+
+def test_the_default_sweep_reads_no_admin_route(store) -> None:
+    store.outcome = AssertionError("the default sweep must not read the admin route")
+    r = _row(_golden("overdue_pinned"))
+    assert r.warn is True and "chunks_m" not in r.detail
+    assert store.constructed == 0
+    assert "nx doctor --verbose" in r.detail, "the default row says where the names are"
+
+
+def test_verbose_reads_nothing_when_the_row_does_not_warn(store) -> None:
+    store.outcome = AssertionError("a healthy row needs no leaf list")
+    r = _verbose_row(_status(total=2))
+    assert r.ok is True and not r.warn
+    assert store.constructed == 0
+
+
+def test_an_engine_that_predates_the_route_is_one_line_and_never_an_error(store) -> None:
+    store.outcome = None  # chunks_leaves() returns None for a 404
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert f"this engine predates the leaf listing ({_ADMIN_ROUTE} answered 404)" in r.detail
+    assert "event=chunks_leaf_bloat_leaf" in r.detail
+    assert r.detail.count("predates the leaf listing") == 1
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_a_refused_credential_names_the_operator_token_and_leaks_nothing(store, status_code) -> None:
+    import httpx
+
+    from nexus.db.t2.http_token_store import TokenAdminAuthError
+
+    request = httpx.Request("GET", "http://127.0.0.1:9/v1/admin/chunks-leaves")
+    response = httpx.Response(status_code, request=request, json={"error": "operator privilege required"})
+    store.outcome = TokenAdminAuthError([f"{status_code} from engine", f"  sent: {_SENTINEL_TOKEN}"],
+                                        request=request, response=response)
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert f"leaf listing refused ({_ADMIN_ROUTE} answered {status_code})" in r.detail
+    assert "operator (root) token" in r.detail
+    assert _SENTINEL_TOKEN not in r.detail and not any(_SENTINEL_TOKEN in f for f in r.fix_suggestions)
+
+
+@pytest.mark.parametrize("error", [ConnectionError("refused"), OSError("boom"), ValueError("not an object"),
+                                   RuntimeError("no service configured")])
+def test_any_other_failure_is_one_line_with_the_error_type_only(store, error) -> None:
+    store.outcome = error
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert r.ok is False and r.warn is True
+    assert f"leaf listing unavailable: {type(error).__name__}" in r.detail
+    assert str(error) not in r.detail, "the message may carry an endpoint or credential; only the type is printed"
+
+
+def test_a_leaf_whose_pci_sizes_could_not_be_read_prints_unknown_bytes_never_zero(store) -> None:
+    # The engine answers pci_index_bytes null when a lock on a pci_ index cost the size read (nexus-i827c).
+    store.outcome = {"leaves": [_leaf("chunks_m0a90d9bc_t_aaaa", ["pinned"], pci_index_bytes=None)]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "? in 1 pci_ index(es)" in r.detail
+    assert "0 B in 1 pci_ index(es)" not in r.detail
+
+
+def test_an_empty_listing_says_the_engine_names_no_leaf(store) -> None:
+    store.outcome = {"leaves_total": 3, "needing_attention": 0, "leaves": []}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "names no leaf that needs attention" in r.detail
+
+
+def test_a_long_listing_names_twenty_and_counts_the_rest(store) -> None:
+    store.outcome = {"leaves": [_leaf(f"chunks_leaf_{i:03d}", ["starved"]) for i in range(23)]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "chunks_leaf_019" in r.detail and "chunks_leaf_020" not in r.detail
+    assert "and 3 more" in r.detail
+
+
+def test_a_body_without_a_leaves_list_is_unreadable_not_a_crash(store) -> None:
+    store.outcome = {"leaves_total": 3}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "leaf listing unreadable" in r.detail
+
+
+def test_the_doctor_verbose_flag_reaches_the_sweep(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_run(git_hooks_scope=None, engine_status=None, *, verbose=False):
+        seen["verbose"] = verbose
+        return [], True
+
+    monkeypatch.setattr("nexus.health.run_health_checks", fake_run)
+    monkeypatch.setattr(_FETCH, lambda **kw: None)
+    monkeypatch.setattr("nexus.commands.doctor._run_supplementary_checks", lambda status: None)
+    runner = CliRunner()
+    assert runner.invoke(main, ["doctor"]).exit_code == 0
+    assert seen == {"verbose": False}
+    assert runner.invoke(main, ["doctor", "--verbose"]).exit_code == 0
+    assert seen == {"verbose": True}
+
+
+# ── a stale listing says so (nexus-i827c review): the body carries expired / last_read_at / consecutive_failures ──
+
+
+def test_an_expired_view_marks_the_listing_stale_and_names_the_last_read(store) -> None:
+    store.outcome = {"expired": True, "last_read_at": "2026-10-20T08:00:00Z", "consecutive_failures": 0,
+                     "leaves": [_leaf("chunks_m0a90d9bc_t_aaaa", ["pinned"])]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "STALE" in r.detail and "2026-10-20T08:00:00Z" in r.detail
+    assert "chunks_m0a90d9bc_t_aaaa: pinned" in r.detail, "the stale names are still listed"
+
+
+def test_an_empty_listing_from_an_expired_view_does_not_say_the_leaves_recovered(store) -> None:
+    store.outcome = {"expired": True, "last_read_at": "2026-10-20T08:00:00Z", "leaves": []}
+    r = _verbose_row(_status(total=2, expired=True))
+    assert "STALE" in r.detail and "2026-10-20T08:00:00Z" in r.detail
+    assert "recovered" not in r.detail, "an expired view cannot say a leaf recovered"
+
+
+def test_the_row_s_own_expired_flag_marks_the_listing_stale_even_if_the_body_does_not(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-20T08:00:00Z", "leaves": []}
+    r = _verbose_row(_status(total=2, expired=True))
+    assert "STALE" in r.detail and "recovered" not in r.detail
+
+
+def test_failed_reads_after_a_good_one_are_named_on_a_fresh_listing(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-22T09:00:00Z", "consecutive_failures": 2,
+                     "leaves": [_leaf("chunks_leaf_a", ["starved"])]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "the last 2 reads failed" in r.detail and "2026-10-22T09:00:00Z" in r.detail
+    assert "STALE" not in r.detail
+
+
+def test_a_fresh_empty_listing_keeps_the_recovered_wording(store) -> None:
+    store.outcome = {"expired": False, "last_read_at": "2026-10-22T09:00:00Z", "consecutive_failures": 0, "leaves": []}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "names no leaf that needs attention" in r.detail and "may have recovered" in r.detail
+    assert "STALE" not in r.detail

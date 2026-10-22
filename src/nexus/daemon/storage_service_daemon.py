@@ -1443,6 +1443,45 @@ class StorageServiceSupervisor:
 
     # -- Internal helpers ---------------------------------------------------
 
+    def _spawned_engine_version(self) -> tuple[int, int, int] | None:
+        """The tag of the engine binary this supervisor is about to spawn, from its install receipt.
+
+        RDR-210 Technical Design 4: ``install_binary`` writes the tag beside the well-known binary
+        (``read_installed_provenance``). That sidecar describes THAT binary only, so it answers for
+        a native launch of the well-known path and for nothing else: a ``NEXUS_SERVICE_BIN``
+        override, a ``NEXUS_SERVICE_JAR`` launch, no sidecar, a corrupt one, or a tag that is not
+        ``engine-service-v<X.Y.Z>`` all read ``None`` ("unknown"), which callers treat as an
+        engine that may predate the dual router.
+
+        The receipt is trusted only while the bytes it describes are still the bytes on disk
+        (``verify_installed_binary``, nexus-8eaeg): a sidecar over a swapped, corrupt or missing
+        binary names an engine that will not be the one that starts, so it reads ``None`` too.
+        """
+        if self._launch_kind != "native":
+            return None
+        from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            TAG_NAMESPACE_PREFIX,
+            verify_installed_binary,
+        )
+        from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            read_installed_provenance,
+            well_known_binary_path,
+        )
+        from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        try:
+            if Path(self._binary_path).resolve() != well_known_binary_path(self._config_dir).resolve():
+                return None
+        except OSError:
+            return None
+        provenance = read_installed_provenance(self._config_dir)
+        if not verify_installed_binary(self._config_dir, provenance=provenance).ok:
+            return None
+        tag = provenance.get("tag") if provenance else None
+        if not isinstance(tag, str) or not tag.startswith(TAG_NAMESPACE_PREFIX):
+            return None
+        return parse_engine_version(tag[len(TAG_NAMESPACE_PREFIX):])
+
     def _spawn_service(self) -> tuple[subprocess.Popen[bytes], int]:
         """Spawn the native service process with env vars, returning (proc, port).
 
@@ -1578,24 +1617,46 @@ class StorageServiceSupervisor:
         # the configured model IS a voyage model, or when no choice was
         # recorded (pre-init / legacy voyage-local installs keep today's
         # behavior). Explicit NX_VOYAGE_API_KEY still always passes through.
+        #
+        # RDR-210 Phase 3 Step 1 (nexus-wypwq): the r5f3c rule exists because a key flipped an
+        # OLD engine Voyage-only. An engine at or above DUAL_EMBEDDER_FIRST_ENGINE_VERSION boots
+        # dual (bge and Voyage) when keyed and has bge files, and reads the profile from
+        # NX_EMBED_PROFILE (set below), so the key no longer moves new collections: it passes
+        # whenever the credential chain has one, whatever local.embed_model says. The tag is read
+        # from the spawned binary's install receipt; below it, or with no readable receipt, the
+        # r5f3c rule stands unchanged.
         if not env.get("NX_VOYAGE_API_KEY"):
             from nexus.config import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
                 get_credential,
                 local_embed_model_choice,
                 local_embed_model_is_voyage,
             )
+            from nexus.engine_version import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                DUAL_EMBEDDER_FIRST_ENGINE_VERSION,
+            )
 
             embed_choice = local_embed_model_choice() or ""
+            bge_choice = bool(embed_choice) and not local_embed_model_is_voyage()
+            spawned_version = self._spawned_engine_version()
+            dual_engine = (
+                spawned_version is not None
+                and spawned_version >= DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+            )
             # nexus-35ok4: this condition and corpus.effective_embedding_model_for_writes'
             # local-mode branch both dispatch off local_embed_model_is_voyage() — the
             # single shared predicate — so "plumb the key into the engine" and "mint
             # voyage-* collection names" can never disagree again.
-            if embed_choice and not local_embed_model_is_voyage():
+            if bge_choice and not dual_engine:
                 _log.info(
                     "storage_service_voyage_key_not_plumbed",
                     configured_embed_model=embed_choice,
-                    reason="local.embed_model configures a non-voyage embedder; "
-                    "set NX_VOYAGE_API_KEY explicitly to override",
+                    engine_tag=(
+                        "unknown (no verified install receipt for the spawned binary)"
+                        if spawned_version is None
+                        else ".".join(str(p) for p in spawned_version) + " (below the first dual tag)"
+                    ),
+                    reason="local.embed_model configures a non-voyage embedder and the engine may "
+                    "predate the dual router; set NX_VOYAGE_API_KEY explicitly to override",
                 )
             else:
                 voyage_key = get_credential("voyage_api_key")
@@ -1604,13 +1665,35 @@ class StorageServiceSupervisor:
                     _log.info(
                         "storage_service_voyage_key_resolved", source="credential_chain"
                     )
-                else:
+                elif not bge_choice:
+                    # A bge-choice install with no key never asked for Voyage: no warning (it
+                    # only reaches here at a dual tag, where the key is optional for it).
                     _log.warning(
                         "storage_service_no_voyage_key",
                         embedding_mode="onnx-local",
                         consequence="voyage-* collections will be refused (HTTP 422)",
                         hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
                     )
+
+        # RDR-210 Phase 3 Step 1 (nexus-wypwq, Technical Design 2): always tell the engine the
+        # profile, from the one function the client's write model reads, so the names the client
+        # mints and the profile the engine seeds agree. The engine reads NX_EMBED_PROFILE
+        # (EmbeddingProfile.ENV, Main.java) and an engine that predates it ignores the variable.
+        # The caller's environment does not override it: a stray NX_EMBED_PROFILE would let the
+        # engine seed a profile the client does not mint for. A config the client cannot read must not
+        # fail the spawn (an explicit NX_VOYAGE_API_KEY never touched config.yml before this block):
+        # fall back to bge, the profile of an install with no recorded Voyage intent, and say so.
+        from nexus.config import local_embed_profile  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        try:
+            env["NX_EMBED_PROFILE"] = local_embed_profile()
+        except Exception as exc:  # noqa: BLE001 — a malformed config.yml must not make the supervisor spawn fail
+            _log.warning(
+                "storage_service_embed_profile_unreadable",
+                error=type(exc).__name__,
+                fallback="bge",
+            )
+            env["NX_EMBED_PROFILE"] = "bge"
 
         # Launch artifact: native binary (argv[0] = binary) or, when explicitly
         # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The
@@ -2746,7 +2829,7 @@ class StorageServiceSupervisor:
             _log.info("storage_service_starting_pg", port=self._pg_port)
             from nexus.db.pg_provision import StartInterruptedError  # noqa: PLC0415 — deferred import — bound before the try so the except clause below can always name it
             try:
-                from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                from nexus.db.pg_provision import apply_managed_conf_before_start, discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
                 pg_data_str = self._creds.get("PG_DATA", "")
                 if not pg_data_str:
@@ -2756,6 +2839,12 @@ class StorageServiceSupervisor:
                     )
                 pgdata = Path(pg_data_str)
                 bins = discover_pg_binaries()
+                # The managed postgresql.conf block is rewritten before every cold
+                # start, as provision does, so a setting added to it reaches an
+                # existing install at its next PostgreSQL start (nexus-o26hs:
+                # max_locks_per_transaction for the RDR-225 walk). Best effort: a
+                # conf it cannot write is logged and the start goes on.
+                apply_managed_conf_before_start(pgdata, self._pg_port)
                 # Windows only: let a stop request end the start's wait
                 # (nexus-f9bgu.17). POSIX keeps its single blocking call.
                 stop = self._stop_requested

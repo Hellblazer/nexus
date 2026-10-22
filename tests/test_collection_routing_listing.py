@@ -178,16 +178,25 @@ class TestTheProcessCache:
         assert mcp_infra.get_collection_names() == [_LIVE, _QUAR]
         assert len(seen) == 1, "the full listing filled the names too"
 
-    def test_the_default_bare_prefix_fanout_is_one_stats_request_on_a_cold_cache(self, monkeypatch):
+    def test_the_default_bare_prefix_fanout_never_waits_on_the_full_listing_on_a_cold_cache(self, monkeypatch):
         """The caller of the above (``_resolve_corpus_target``, a bare-prefix corpus such as the default
-        knowledge,code,docs): it reads names first, then sizes per bare prefix, and used to pay routing + full.
+        knowledge,code,docs). Since nexus-vpa9q the fan-out floor never waits on the full listing: a cold
+        cache gives no counts and starts ONE background refresh, and names come from the routing listing.
+        The refresh is held here and run after, so the request order is fixed (nexus-4278c: with a live
+        thread the test asserted one request and failed whenever the routing read beat the refresh).
         (``code`` is the prefix the fake tenant holds; an unmatched prefix takes resolve_corpus's own bounded
         refresh, which is not what this pins.)"""
         from nexus.mcp import core
 
         seen = self._client(monkeypatch)
+        started: list[str] = []
+        monkeypatch.setattr(mcp_infra, "_start_fanout_counts_refresh", lambda: started.append("refresh"))
         core._resolve_corpus_target("code,code", mcp_infra.get_t3())
-        assert seen == ["/v1/vectors/stats"]
+        assert seen == ["/v1/vectors/stats?fields=routing"], "the fan-out does not wait on the full listing"
+        assert started == ["refresh"], "one background refresh, not one per bare-prefix part"
+        mcp_infra._refresh_fanout_counts()
+        assert seen == ["/v1/vectors/stats?fields=routing", "/v1/vectors/stats"]
+        assert mcp_infra.get_fanout_counts() == {_LIVE: 10, _QUAR: 0}
 
     def test_the_cache_and_its_counts_flag_are_installed_together_under_the_lock(self):
         """review L4: the (cache, counts-loaded) pair is one atomic assignment. A writer that does not

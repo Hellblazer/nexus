@@ -673,7 +673,7 @@ from __future__ import annotations
 #: (IRREVERSIBLE). The
 #: store-put route answers 410 (nexus-nt76j, the one [not-additive] wire
 #: entry), so the engine deploys paired with this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 162)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 163)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
@@ -718,6 +718,20 @@ CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 128)
 #: Same at-start check and same rationale as
 #: :data:`CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION` above.
 CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 129)
+
+#: RDR-210 Phase 3 Step 1 (nexus-wypwq): the first engine tag that can boot DUAL (bge and Voyage
+#: together) and reads ``NX_EMBED_PROFILE``. ``engine-service-v0.1.161`` carries the router
+#: (nexus-uaovy), the profile seed (nexus-qhclj) and the profile-chosen reranker (nexus-un7vj);
+#: the P2.7 comment and ledger commit (nexus-c0mwl) is an ancestor of the tag. The supervisor
+#: reads the spawned binary's install receipt and, at or above this version, passes the Voyage key
+#: whatever ``local.embed_model`` says; below it, or with no readable receipt, the nexus-r5f3c rule
+#: stands, because against an older engine a key flips it Voyage-only.
+#:
+#: Not a feature floor on the serving engine like the constants above: it keys the SPAWN decision,
+#: and ``REQUIRED_ENGINE_VERSION`` must not be below it (a test pins that), since the relaxation is
+#: safe only in the client release whose pin names a dual engine. That constant is also the managed
+#: floor, so the tag is deployed to the cloud engine before such a release ships.
+DUAL_EMBEDDER_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 161)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

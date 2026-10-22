@@ -563,3 +563,50 @@ class TestTheUnavailableMessageNamesTheRemedy:
 
     def test_it_no_longer_sends_a_desktop_user_to_a_claude_code_session(self):
         assert "Claude Code session" not in self._message().split("Remedy:", 1)[1]
+
+
+class TestTheUnavailableRemedyFollowsTheHost:
+    """nexus-wkjqm: a server Claude Desktop started cannot take NX_SESSION_ID (the account plugin's
+    entry is not editable), so its T1-unavailable error sends it to memory_put; a Claude Code server
+    keeps the NX_SESSION_ID remedy."""
+
+    _IN_CLAUDE_CODE = (
+        "Remedy: set NX_SESSION_ID in this server's environment (the env block of its entry in the "
+        "host's MCP configuration) to name the scratch scope, then restart the server; or run "
+        "`nx doctor --check-t1`."
+    )
+    _OUTSIDE = (
+        "Remedy: a Nexus server started by Claude Desktop (chat or Cowork) has no T1 scratch; use "
+        "memory_put with a ttl for notes that carry across turns. A self-configured server can set "
+        "NX_SESSION_ID to a UUID in its entry's environment, then restart; or run "
+        "`nx doctor --check-t1`."
+    )
+
+    @staticmethod
+    def _message(monkeypatch, *, claude_code: bool) -> str:
+        from nexus.mcp.core import T1UnavailableThisProcessError, _raise_t1_unavailable_this_process
+
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+        if claude_code:
+            monkeypatch.setenv("CLAUDECODE", "1")
+        with pytest.raises(T1UnavailableThisProcessError) as exc:
+            _raise_t1_unavailable_this_process()
+        return str(exc.value)
+
+    def test_both_remedy_texts_are_pinned(self):
+        from nexus.mcp import core
+
+        assert core._T1_UNAVAILABLE_REMEDY_IN_CLAUDE_CODE == self._IN_CLAUDE_CODE
+        assert core._T1_UNAVAILABLE_REMEDY_OUTSIDE_CLAUDE_CODE == self._OUTSIDE
+
+    def test_inside_claude_code_the_message_ends_with_the_nx_session_id_remedy(self, monkeypatch):
+        msg = self._message(monkeypatch, claude_code=True)
+        assert msg.endswith(self._IN_CLAUDE_CODE)
+        assert "memory_put" not in msg
+
+    def test_outside_claude_code_the_message_ends_with_the_memory_put_remedy(self, monkeypatch):
+        msg = self._message(monkeypatch, claude_code=False)
+        assert msg.endswith(self._OUTSIDE)
+        assert "resolvable session id" in msg  # the diagnosis half is shared
+        assert "search, memory, store, catalog" in msg

@@ -923,8 +923,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # re-home with ZERO re-embedding, so the vectors would stay in the old
     # model space while the name claims the new one (silent staleness/
     # search corruption, no Voyage call ever fires). Cross-model moves are
-    # the RDR-162 migration pipeline's job (remap_collection_references +
-    # vector ETL), not rename's.
+    # the RDR-210 re-embed job's concern (a per-document move into the model
+    # sibling), not rename's.
     old_model = embedding_model_for_collection(old)
     new_model = embedding_model_for_collection(new)
     if old_model != new_model and not force_prefix_change:
@@ -1666,7 +1666,7 @@ def _reembed_collection(
                     m["embedding_model"] = target_model
             # nexus-sghyo: no client-computed embeddings — the command
             # guard (reembed_cmd) has already pinned target_model ==
-            # the name-encoded model for service-backed handles, so the
+            # the row's model for service-backed handles, so the
             # server re-embeds with the correct model. force_re_embed=True
             # bypasses the existence-partition skip so every chash is
             # genuinely recomputed, not treated as already-current.
@@ -1723,13 +1723,29 @@ def _reembed_collection(
     return processed, skipped
 
 
+def _reembed_source_model(db: object, name: str) -> str:
+    """The model the engine will embed *name* with: the catalog row's
+    ``embedding_model`` when a row backs the name (RDR-210 Technical Design 10;
+    the engine routes by the row, never by a name segment), else the model the
+    name encodes. The row read goes through the client's own resolver, so it
+    never crosses tenants (nexus-dxifx)."""
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    model = resolve_row_preferred(
+        name, "embedding_model", embedding_model_for_collection,
+        row_resolver=getattr(db, "_resolve_collection_row", None),
+    )
+    return model if model else embedding_model_for_collection(name)
+
+
 @collection.command("re-embed")
 @click.argument("name")
 @click.option(
     "--to", "target_model", required=True,
     type=click.Choice(_REEMBED_SUPPORTED_MODELS),
     help="Target embedding model; in service mode it must be the model the "
-         "collection name encodes.",
+         "collection's catalog row records (the model its name encodes when "
+         "no row backs the name).",
 )
 @click.option("--dry-run/--no-dry-run", default=True,
               help="Default dry-run. Pass --no-dry-run to actually write.")
@@ -1774,7 +1790,8 @@ def reembed_cmd(
 
     # nexus-u37lw (critique Critical): in service mode, upsert_chunks_with_
     # embeddings forwards TEXT and the server re-embeds by the model the
-    # COLLECTION NAME encodes (EmbedderRouter routes by name segment) —
+    # collection's catalog row records (EmbedderRouter routes by the row, the
+    # name's model only when no row backs it; nexus-dxifx) —
     # client-computed vectors are discarded. A --to that differs from the
     # encoded model would therefore silently no-op with the OLD model while
     # stamping the NEW model into metadata (corrupting staleness checks)
@@ -1782,13 +1799,14 @@ def reembed_cmd(
     # the rename --cross-model flow.
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    if not dry_run and is_service_backed(db):
-        encoded = embedding_model_for_collection(name)
+    if is_service_backed(db):
+        encoded = _reembed_source_model(db, name)
         if encoded != target_model:
             raise click.ClickException(
                 f"service mode re-embeds server-side using the model the "
-                f"collection NAME encodes — or, for legacy 2-segment names, "
-                f"the prefix-inferred model ({encoded!r}); --to {target_model!r} "
+                f"collection's catalog row records — or, when no row backs the "
+                f"name, the model its name encodes ({encoded!r}); "
+                f"--to {target_model!r} "
                 f"cannot take effect on {name!r}. Cross-model moves "
                 f"re-index from source into a {target_model}-named "
                 f"collection (nx index repo / nx index pdf — the RDR-162 "

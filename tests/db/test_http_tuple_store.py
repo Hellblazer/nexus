@@ -31,6 +31,7 @@ for exactly that reason.
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -82,7 +83,7 @@ def _uniq(label: str) -> str:
 
 @pytest.mark.t2_tenant
 class TestOut:
-    def test_out_then_rd_returns_the_written_tuple(self, t2_service_env) -> None:
+    def test_out_then_rd_returns_the_written_tuple(self, t2_service_env, monkeypatch) -> None:
         store = HttpTupleStore()
         addr = _uniq("addr")
         tuple_id = store.out(
@@ -105,6 +106,40 @@ class TestOut:
         assert row.claim_state is None
         assert row.claimant is None
         assert not hasattr(row, "claim_id")
+
+        # nexus-ztwp4 (F3 step 2), carried here rather than in a test of its own so
+        # it costs no extra tenant: the fixture's minted T1 session stamps the row
+        # with the session ID (never the token), and an in_ returns it on the claim.
+        session_id = os.environ["NX_T1_SESSION_ID"]
+        assert os.environ["NX_T1_SESSION"] != session_id
+        assert (row.sender_session, row.sender_session_known) == (session_id, True)
+        claimed = store.in_(f"mailbox/{addr}", {"to": addr}, claimant=addr, lease_s=30)
+        assert claimed is not None and claimed[0].sender_session == session_id
+
+        # nexus-x907o, same economy: an unclaimed row has no claimed_at; a claim stamps one,
+        # the in_ result and a later rd agree on it, and a renew leaves it where it was.
+        assert row.claimed_at is None
+        assert claimed[0].claimed_at is not None
+        held = store.rd(f"mailbox/{addr}", {"to": addr})[0]
+        assert held.claimed_at == claimed[0].claimed_at
+        store.renew(claimed[1], addr, 60)
+        renewed = store.rd(f"mailbox/{addr}", {"to": addr})[0]
+        assert renewed.claimed_at == claimed[0].claimed_at
+
+        # No token: the write lands, unstamped (null, but known: the engine rendered the key).
+        monkeypatch.delenv("NX_T1_SESSION")
+        a2 = _uniq("addr")
+        store.out(f"mailbox/{a2}", {"to": a2}, {"from": "sender-a"}, "x", nonce=_uniq("n"))
+        unstamped = store.rd(f"mailbox/{a2}", {"to": a2})[0]
+        assert (unstamped.sender_session, unstamped.sender_session_known) == (None, True)
+
+        # A token the engine does not know: AuthFilter 401s it, the client drops the
+        # header and retries once, and the write still lands unstamped.
+        monkeypatch.setenv("NX_T1_SESSION", "not-a-minted-token")
+        a3 = _uniq("addr")
+        store.out(f"mailbox/{a3}", {"to": a3}, {"from": "sender-a"}, "x", nonce=_uniq("n"))
+        stale = store.rd(f"mailbox/{a3}", {"to": a3})[0]
+        assert (stale.sender_session, stale.sender_session_known) == (None, True)
 
     def test_missing_nonce_on_keys_plus_nonce_template_is_schema_violation(
         self, t2_service_env,
@@ -414,6 +449,19 @@ class TestReleaseAgainstAnOldEngine:
 
 
 # ── registry / census ────────────────────────────────────────────────────
+
+
+class TestClaimedAtWire:
+    """nexus-x907o: the claim start parses off the wire, and an engine that
+    renders no such key (one predating it) reads as None, never an error."""
+
+    def test_the_key_parses_and_its_absence_reads_as_none(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_tuple_row
+
+        stamp = "2026-10-22T12:00:00.123456Z"
+        assert _body_to_tuple_row({"claimed_at": stamp}).claimed_at == stamp
+        assert _body_to_tuple_row({"claimed_at": None}).claimed_at is None
+        assert _body_to_tuple_row({}).claimed_at is None
 
 
 class TestRegistry:
@@ -905,7 +953,7 @@ class TestTypedErrorMapping:
         assert exc_info.value.__cause__ is exc
 
     def test_unrecognised_error_code_falls_through_unchanged(self) -> None:
-        exc = _status_error(404, "SomeFutureCode", "not one of the twelve")
+        exc = _status_error(404, "SomeFutureCode", "not one of the thirteen")
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             _raise_typed(exc)
         assert exc_info.value is exc

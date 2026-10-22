@@ -28,10 +28,16 @@ class _Census:
 
 
 class _Row:
-    def __init__(self, claimant: str | None, lease_until: str | None, claim_state: str | None = "claimed") -> None:
+    def __init__(
+        self, claimant: str | None, lease_until: str | None, claim_state: str | None = "claimed",
+        claimed_at: str | None = None,
+    ) -> None:
         self.claimant = claimant
         self.lease_until = lease_until
         self.claim_state = claim_state
+        # None is an engine that predates nexus-x907o, or a claim made before
+        # its column: the row then falls back to the diag path.
+        self.claimed_at = claimed_at
 
 
 class _Store:
@@ -227,6 +233,115 @@ class TestLockHeldMeasured:
         assert "lock/do".encode().hex() in calls[0]
 
 
+class TestLockHeldFromTheWire:
+    """nexus-x907o: an engine that renders ``claimed_at`` measures the hold
+    with no diag path at all, and a claim without one falls back to the diag
+    path (the classes above are that fallback: their rows carry none)."""
+
+    def test_wire_claimed_at_measures_without_touching_psql_or_credentials(self, monkeypatch, tmp_path) -> None:
+        # A managed deployment with no diag role: before this the row could only
+        # name the holder; the hold duration now comes off the row.
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        store = _Store(
+            [_Census("lock/push", 1)],
+            rows={"lock/push": [_Row("sess-a", _future(), claimed_at=_ago(minutes=5))]},
+        )
+        calls: list[str] = []
+        r = _run(monkeypatch, store, creds_path=tmp_path / "absent", diag_runner=_runner("", calls))
+        assert r.ok is True and r.warn is not True, r.detail
+        assert r.detail == "lock/push held 5m by sess-a"
+        assert calls == []
+
+    def test_wire_claimed_at_past_the_bound_is_a_finding_on_a_managed_deployment(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        store = _Store(
+            [_Census("lock/push", 1)],
+            rows={"lock/push": [_Row("sess-a", _future(), claimed_at=_ago(hours=3))]},
+        )
+        r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
+        assert r.ok is False and r.warn is True
+        assert "lock/push by sess-a (held 3.0h, over 60m)" in r.detail
+
+    def test_a_claim_with_no_claimed_at_still_uses_the_diag_path(self, monkeypatch) -> None:
+        store = _Store(
+            [_Census("lock/push", 1)],
+            rows={"lock/push": [_Row("sess-a", _future(), claimed_at=None)]},
+        )
+        calls: list[str] = []
+        r = _run(
+            monkeypatch, store,
+            diag_credentials=_DIAG, diag_runner=_runner(_ago(hours=2), calls),
+        )
+        assert r.ok is False and r.warn is True and "held 2.0h" in r.detail
+        assert len(calls) == 1
+
+    def test_an_unparseable_claimed_at_falls_back_rather_than_reading_as_clean(self, monkeypatch) -> None:
+        store = _Store(
+            [_Census("lock/push", 1)],
+            rows={"lock/push": [_Row("sess-a", _future(), claimed_at="not-a-time")]},
+        )
+        calls: list[str] = []
+        r = _run(
+            monkeypatch, store,
+            diag_credentials=_DIAG, diag_runner=_runner(_ago(minutes=5), calls),
+        )
+        assert r.detail == "lock/push held 5m by sess-a"
+        assert len(calls) == 1
+
+    def test_mixed_wire_and_fallback_locks_each_use_their_own_source(self, monkeypatch) -> None:
+        store = _Store(
+            [_Census("lock/push", 1), _Census("lock/index", 1)],
+            rows={
+                "lock/push": [_Row("sess-a", _future(), claimed_at=_ago(minutes=5))],
+                "lock/index": [_Row("sess-b", _future(), claimed_at=None)],
+            },
+        )
+        calls: list[str] = []
+        r = _run(
+            monkeypatch, store,
+            diag_credentials=_DIAG, diag_runner=_runner(_ago(hours=2), calls),
+        )
+        # Only the claim with no wire start reached psql.
+        assert len(calls) == 1
+        assert r.ok is False and r.warn is True
+        assert "lock/index by sess-b (held 2.0h" in r.detail
+        assert "lock/push" not in r.detail  # inside the bound: reported only when clean
+
+    def test_wire_finding_survives_an_unmeasurable_sibling_on_a_managed_deployment(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        store = _Store(
+            [_Census("lock/push", 1), _Census("lock/index", 1)],
+            rows={
+                "lock/push": [_Row("sess-a", _future(), claimed_at=_ago(hours=3))],
+                "lock/index": [_Row("sess-b", _future(), claimed_at=None)],
+            },
+        )
+        r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
+        assert r.ok is False and r.warn is True
+        assert "lock/push by sess-a (held 3.0h" in r.detail
+        assert "lock/index by sess-b" in r.detail and "not measurable" in r.detail
+
+    def test_wire_measured_lock_beside_an_unmeasurable_one_stays_informational(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        store = _Store(
+            [_Census("lock/push", 1), _Census("lock/index", 1)],
+            rows={
+                "lock/push": [_Row("sess-a", _future(), claimed_at=_ago(minutes=5))],
+                "lock/index": [_Row("sess-b", _future(), claimed_at=None)],
+            },
+        )
+        r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
+        assert r.ok is True and r.warn is not True
+        assert r.detail.startswith("informational:")
+        assert "lock/push held 5m by sess-a" in r.detail and "lock/index by sess-b" in r.detail
+
+
 def test_row_is_registered_in_run_health_checks() -> None:
     import inspect
 
@@ -239,8 +354,8 @@ def test_row_absent_from_fresh_install_mvv_allowlist() -> None:
 
 
 class TestLockHeldRealEngine:
-    """The row's SQL against the real tables: a real lock claim through the
-    engine, its claim-log row backdated as the cluster superuser."""
+    """The row against the real tables: a real lock claim through the engine,
+    its claim-log row and its claimed_at backdated as the cluster superuser."""
 
     def _psql(self, state, sql: str) -> str:
         proc = subprocess.run(
@@ -268,7 +383,10 @@ class TestLockHeldRealEngine:
         assert claim is not None
         # The premise under test: renewing keeps the claim id, so the claim's
         # start stays the claim row's time, not the renew's.
+        started_on_wire = store.rd(subspace, {"resource": resource})[0].claimed_at
+        assert started_on_wire is not None
         store.renew(claim[1], claimant, 600)
+        assert store.rd(subspace, {"resource": resource})[0].claimed_at == started_on_wire
         diag = DiagCredentials(
             port=state["pg_port"], user=state["pg_user"], password="",
             dbname="nexus_t2_substrate",
@@ -286,7 +404,30 @@ class TestLockHeldRealEngine:
         )
         assert backdated, "the claim's claim-log row must exist to backdate"
 
+        # The engine under test renders claimed_at, so the row reads it off the
+        # wire and the claim-log backdate alone changes nothing.
+        still_fresh = h._check_tuple_lock_held(diag_credentials=diag, psql_bin=psql_bin)[0]
+        assert still_fresh.ok is True, still_fresh.detail
+
+        wire_backdated = self._psql(
+            state,
+            "UPDATE nexus.tuples SET claimed_at = now() - interval '3 hours' "
+            f"WHERE claim_id = '{claim[1]}' RETURNING claimed_at;",
+        )
+        assert wire_backdated, "the claimed row must exist to backdate"
+
         stale = h._check_tuple_lock_held(diag_credentials=diag, psql_bin=psql_bin)[0]
         assert stale.ok is False and stale.warn is True, stale.detail
         assert f"{subspace} by {claimant}" in stale.detail
         assert "held 3.0h" in stale.detail
+
+        # The fallback's SQL against the real tables (an older engine, or a claim
+        # made before the column, has no claimed_at): still the backdated claim row.
+        from nexus.db.diag_connection import run_diagnostic_sql
+
+        out = run_diagnostic_sql(
+            (h._lock_claim_started_sql(subspace, claimant),), diag, psql_bin=psql_bin,
+        )
+        started = h._parse_tuple_timestamp(out[0] if out else None)
+        assert started is not None
+        assert 2.9 * 3600 < (datetime.now(UTC) - started).total_seconds() < 3.1 * 3600

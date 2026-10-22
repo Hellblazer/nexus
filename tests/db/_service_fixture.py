@@ -503,19 +503,27 @@ def build_in_progress_reason(
         lease = (lease_root or _build_lease_root()) / "service"
         if not lease.is_dir():
             return None
-        raw_pid = (lease / "pid").read_text().strip()
-        pid = int(raw_pid)
+        # Read as build_lease_acquire reads it (nexus-m5vb3): the lib creates
+        # pid and pgid empty (set -C) before writing them, and pid after the
+        # mkdir, so an empty file is the same as a missing one.
+        raw_pid = _lease_field(lease / "pid", "")
+        raw_pgid = _lease_field(lease / "pgid", "")
         # The lease lib records the real build's process GROUP (`pgid`,
         # build_lease_track_pid) once the ./mvnw child exists; it outlives
         # a wrapper killed directly, so it wins over the wrapper's pid
         # exactly as in _build_lease_group_alive (nexus-pv93h).
-        pgid_file = lease / "pgid"
-        if pgid_file.exists():
-            if not _group_alive(int(pgid_file.read_text().strip())):
+        # Digits only, as the lib's ^[0-9]+$: int() also takes "-1", "+5" and
+        # "1_0", and a signal to -1 always reports alive. ("0" passes, as it does there.)
+        if raw_pgid:
+            if not (raw_pgid.isascii() and raw_pgid.isdigit() and _group_alive(int(raw_pgid))):
                 return None
-        elif not _pid_alive(pid):
-            return None  # holder is gone; the lease lib will reclaim it
-        builder = (lease / "worktree").read_text().strip() if (lease / "worktree").exists() else ""
+        elif raw_pid:
+            if not (raw_pid.isascii() and raw_pid.isdigit() and _pid_alive(int(raw_pid))):
+                return None  # holder is gone; the lease lib will reclaim it
+        elif time.time() - lease.stat().st_mtime >= _build_lease_populate_grace_s():
+            return None  # the claimer died before writing its pid; the lib reclaims that too
+        pid = raw_pid or "<being populated>"
+        builder = _lease_field(lease / "worktree", "")
         if builder and _is_another_checkout(builder, repo_root or _REPO_ROOT):
             return None  # another worktree's build: it never rewrites this jar
         # The holder is live: a missing descriptive file is the populate
@@ -536,9 +544,18 @@ def build_in_progress_reason(
 
 def _lease_field(path: Path, default: str) -> str:
     try:
-        return path.read_text().strip() or default
+        return path.read_text(errors="replace").strip() or default
     except OSError:
         return default
+
+
+def _build_lease_populate_grace_s() -> float:
+    """scripts/lib/build-lease.sh's _BUILD_LEASE_POPULATE_GRACE_S: how long a
+    lease with no pid yet counts as a claim in progress rather than a dead one."""
+    try:
+        return float(os.environ.get("_BUILD_LEASE_POPULATE_GRACE_S", "10"))
+    except ValueError:
+        return 10.0
 
 
 def _is_another_checkout(builder: str, here: Path) -> bool:
@@ -639,6 +656,16 @@ def _jar_freshness_mtime(jar: Path) -> float:
         return jar_mtime
 
 
+def jar_checkout(jar: Path) -> Path:
+    """The checkout whose ``service/target`` holds *jar*, so the build lease is
+    scoped to the jar's own checkout (nexus-m5vb3); this checkout for a jar laid
+    out any other way. Not resolved: a gate-jar-cache link points into the cache."""
+    target = jar.absolute().parent
+    if target.name == "target" and target.parent.name == "service":
+        return target.parent.parent
+    return _REPO_ROOT
+
+
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     """Return a skip reason if the shaded service jar is missing, INCOMPLETE
     or STALE, else ``None`` (jar is current and safe to launch).
@@ -655,7 +682,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     # jar's current bytes is meaningful -- it is mid-replacement. Reporting
     # that is strictly more useful than reporting whatever the partial file
     # happens to look like right now (nexus-06fu4).
-    building = build_in_progress_reason()
+    building = build_in_progress_reason(repo_root=jar_checkout(jar))
     if building:
         return building
     if not jar.exists():

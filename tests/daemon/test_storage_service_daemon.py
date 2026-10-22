@@ -1936,6 +1936,318 @@ class TestSpawnServiceVoyageKeyPlumbing:
 
 
 # ---------------------------------------------------------------------------
+# RDR-210 Phase 3 Step 1 (nexus-wypwq): key and profile plumbing keyed on the
+# spawned binary's install receipt
+# ---------------------------------------------------------------------------
+
+
+def _tag_of(version: tuple[int, int, int]) -> str:
+    return "engine-service-v" + ".".join(str(p) for p in version)
+
+
+def _write_engine_receipt(
+    config_dir: Path, tag: str | None, *, raw: str | None = None, binary: str = "genuine",
+) -> None:
+    """Write the provenance sidecar ``install_binary`` writes beside the well-known binary.
+
+    The binary at the well-known path is real bytes whose sha256 the sidecar records, so
+    ``verify_installed_binary`` (nexus-8eaeg) passes. ``binary`` selects the other states:
+    ``"tampered"`` (the sidecar records the digest of other bytes), ``"missing"`` (no file).
+    """
+    import hashlib
+    import json
+
+    from nexus.daemon.binary_install import binary_sidecar_path
+
+    path = binary_sidecar_path(config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+        return
+    exe = well_known_binary_path(config_dir)
+    payload = b"engine-bytes"
+    if binary != "missing":
+        exe.write_bytes(b"other-bytes" if binary == "tampered" else payload)
+    version = tag[len("engine-service-v"):] if tag else ""
+    path.write_text(
+        json.dumps({"version": version, "tag": tag, "sha256": hashlib.sha256(payload).hexdigest()}),
+        encoding="utf-8",
+    )
+
+
+#: The five choice/key cases of RDR-210 Phase 3 Step 1, as
+#: (id, local.embed_model choice, key persisted in config.yml, key only in VOYAGE_API_KEY,
+#:  key reaches the engine, profile the supervisor passes).
+_FIVE_CASES = [
+    ("bge-choice-with-key", "BAAI/bge-base-en-v1.5", True, False, True, "bge"),
+    ("voyage-choice-no-key", "voyage-context-3", False, False, False, "voyage"),
+    ("no-choice-persisted-key", None, True, False, True, "voyage"),
+    ("no-choice-env-only-key", None, False, True, True, "bge"),
+    ("no-choice-no-key", None, False, False, False, "bge"),
+]
+
+
+class TestSpawnServiceDualKeyAndProfile:
+    """The key reaches a dual-capable engine whatever the embedder choice, and the engine is told the
+    profile; below the first dual tag, or with no receipt, the nexus-r5f3c rule stands."""
+
+    def _spawn(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        choice: str | None = None,
+        persisted_key: bool = False,
+        env_key: bool = False,
+        tag: str | None = None,
+        receipt_raw: str | None = None,
+        binary_path: Path | None = None,
+        key_value: str = "the-key",
+        explicit_profile: str | None = None,
+        explicit_key: str | None = None,
+        binary: str = "genuine",
+        config_raw: str | None = None,
+    ) -> dict[str, str]:
+        """A real config.yml and a real sidecar in *config_dir*; Popen mocked. Returns the spawn env."""
+        import yaml
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("NX_LOCAL", "1")
+        for name in ("NX_VOYAGE_API_KEY", "VOYAGE_API_KEY", "NX_EMBED_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        if env_key:
+            monkeypatch.setenv("VOYAGE_API_KEY", key_value)
+        if explicit_profile is not None:
+            monkeypatch.setenv("NX_EMBED_PROFILE", explicit_profile)
+        if explicit_key is not None:
+            monkeypatch.setenv("NX_VOYAGE_API_KEY", explicit_key)
+        cfg: dict[str, Any] = {}
+        if choice:
+            cfg["local"] = {"embed_model": choice}
+        if persisted_key:
+            cfg["credentials"] = {"voyage_api_key": key_value}
+        (config_dir / "config.yml").write_text(
+            yaml.safe_dump(cfg) if config_raw is None else config_raw, encoding="utf-8"
+        )
+        if tag is not None or receipt_raw is not None:
+            _write_engine_receipt(config_dir, tag, raw=receipt_raw, binary=binary)
+        sup = _make_supervisor(
+            config_dir, clock,
+            binary_path=binary_path or well_known_binary_path(config_dir),
+        )
+        captured: dict[str, str] = {}
+
+        def _fake_popen(cmd, env=None, **kwargs):
+            captured.update(env or {})
+            return MagicMock(pid=43210)
+
+        monkeypatch.setattr("nexus.daemon.storage_service_daemon._popen", _fake_popen)
+        sup._spawn_service()
+        return captured
+
+    @pytest.mark.parametrize(
+        ("choice", "persisted", "env_only", "key_passed", "profile"),
+        [c[1:] for c in _FIVE_CASES],
+        ids=[c[0] for c in _FIVE_CASES],
+    )
+    def test_five_cases_at_the_first_dual_tag(
+        self, config_dir, clock, monkeypatch, choice, persisted, env_only, key_passed, profile
+    ) -> None:
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice=choice, persisted_key=persisted, env_key=env_only,
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION),
+        )
+        if key_passed:
+            assert env["NX_VOYAGE_API_KEY"] == "the-key"
+        else:
+            assert "NX_VOYAGE_API_KEY" not in env
+        assert env["NX_EMBED_PROFILE"] == profile
+
+    def test_a_later_tag_than_the_first_dual_tag_also_passes_the_key(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice="BAAI/bge-base-en-v1.5", persisted_key=True, tag="engine-service-v0.1.200",
+        )
+        assert env["NX_VOYAGE_API_KEY"] == "the-key"
+
+    @pytest.mark.parametrize(
+        ("tag", "raw"),
+        [
+            pytest.param("engine-service-v0.1.160", None, id="tag-below-the-first-dual-tag"),
+            pytest.param("engine-service-v0.0.999", None, id="older-minor"),
+            pytest.param(None, None, id="no-receipt"),
+            pytest.param("not-a-tag", None, id="unparseable-tag"),
+            pytest.param("engine-service-v0.1.161-rc1", None, id="qualified-tag"),
+            pytest.param("engine-service-vdev", None, id="dev-tag"),
+            pytest.param(None, "{not json", id="corrupt-receipt"),
+            pytest.param(None, "[]", id="receipt-not-an-object"),
+            pytest.param(None, '{"version": "0.1.161"}', id="receipt-without-a-tag"),
+            pytest.param(None, '{"tag": 161}', id="tag-not-a-string"),
+        ],
+    )
+    def test_bge_choice_with_key_withholds_the_key_below_the_tag_or_without_a_receipt(
+        self, config_dir, clock, monkeypatch, tag, raw
+    ) -> None:
+        """The r5f3c rule, unchanged: against an older (or unknown) engine a key flips it Voyage-only."""
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice="BAAI/bge-base-en-v1.5", persisted_key=True, env_key=True,
+            tag=tag, receipt_raw=raw,
+        )
+        assert "NX_VOYAGE_API_KEY" not in env
+        # The profile goes to every engine; one that predates the variable ignores it.
+        assert env["NX_EMBED_PROFILE"] == "bge"
+
+    def test_below_the_tag_a_no_choice_install_keeps_the_old_plumbing(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        """r5f3c plumbs the chain key for no choice or a Voyage choice, receipt or not."""
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            persisted_key=True, tag="engine-service-v0.1.160",
+        )
+        assert env["NX_VOYAGE_API_KEY"] == "the-key"
+        assert env["NX_EMBED_PROFILE"] == "voyage"
+
+    def test_the_receipt_of_another_binary_is_not_the_spawned_binarys_receipt(
+        self, config_dir, clock, monkeypatch, tmp_path
+    ) -> None:
+        """NEXUS_SERVICE_BIN names a binary the sidecar does not describe: no receipt, the old rule."""
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice="BAAI/bge-base-en-v1.5", persisted_key=True,
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION),
+            binary_path=tmp_path / "elsewhere" / "nexus-service",
+        )
+        assert "NX_VOYAGE_API_KEY" not in env
+
+    def test_a_jar_launch_has_no_receipt(self, config_dir, clock) -> None:
+        """A ``NEXUS_SERVICE_JAR`` launch is not the installed native binary, whatever the sidecar says."""
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        _write_engine_receipt(config_dir, _tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION))
+        sup = _make_supervisor(config_dir, clock, binary_path=well_known_binary_path(config_dir))
+        assert sup._spawned_engine_version() == DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+        sup._launch_kind = "jar"
+        assert sup._spawned_engine_version() is None
+
+    @pytest.mark.parametrize("ambient", ["voyage", "bge", "bogus"])
+    def test_an_ambient_nx_embed_profile_is_ignored(self, config_dir, clock, monkeypatch, ambient) -> None:
+        """RDR-210: the supervisor ALWAYS sets the profile from ``local_embed_profile()``, so the names
+        the client mints and the profile the engine seeds cannot disagree through a stray caller env."""
+        env = self._spawn(config_dir, clock, monkeypatch, explicit_profile=ambient)
+        assert env["NX_EMBED_PROFILE"] == "bge"  # local_embed_profile() on this config
+
+    def test_an_ambient_profile_does_not_override_a_voyage_choice(self, config_dir, clock, monkeypatch) -> None:
+        env = self._spawn(
+            config_dir, clock, monkeypatch, choice="voyage-model-b", explicit_profile="bge",
+        )
+        assert env["NX_EMBED_PROFILE"] == "voyage"
+
+    def test_a_blank_nx_embed_profile_is_replaced_by_the_computed_one(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        env = self._spawn(
+            config_dir, clock, monkeypatch, persisted_key=True, explicit_profile="   ",
+        )
+        assert env["NX_EMBED_PROFILE"] == "voyage"  # computed from the persisted key, not the blank
+
+    @pytest.mark.parametrize("binary", ["tampered", "missing"])
+    def test_a_receipt_over_bytes_that_fail_verification_is_not_trusted(
+        self, config_dir, clock, monkeypatch, binary
+    ) -> None:
+        """nexus-8eaeg: the sidecar describes bytes; a binary that does not match it (swapped, corrupt,
+        gone) says nothing about the engine that would spawn, so the r5f3c rule stands."""
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice="BAAI/bge-base-en-v1.5", persisted_key=True, env_key=True,
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION), binary=binary,
+        )
+        assert "NX_VOYAGE_API_KEY" not in env
+        assert env["NX_EMBED_PROFILE"] == "bge"
+
+    def test_a_malformed_config_does_not_fail_the_spawn_when_an_explicit_key_is_set(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        """The explicit-key path reads no config; the profile read must not make a malformed
+        config.yml fatal where it was not before. Falls back to bge and warns."""
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            env = self._spawn(
+                config_dir, clock, monkeypatch,
+                explicit_key="explicit-key", config_raw="local: [unclosed\n  - : :\n",
+            )
+        assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
+        assert env["NX_EMBED_PROFILE"] == "bge"
+        warned = [e for e in logs if e.get("event") == "storage_service_embed_profile_unreadable"]
+        assert warned and warned[0]["log_level"] == "warning"
+
+    def test_an_explicit_nx_voyage_api_key_still_wins_at_the_first_dual_tag(
+        self, config_dir, clock, monkeypatch
+    ) -> None:
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            persisted_key=True, explicit_key="explicit-key",
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION),
+        )
+        assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
+
+    @pytest.mark.parametrize(
+        ("choice", "persisted", "env_only", "_key_passed", "_profile"),
+        [c[1:] for c in _FIVE_CASES],
+        ids=[c[0] for c in _FIVE_CASES],
+    )
+    def test_supervisor_profile_equals_the_client_write_model_family(
+        self, config_dir, clock, monkeypatch, choice, persisted, env_only, _key_passed, _profile
+    ) -> None:
+        """The profile the supervisor passes and the model the client mints for new collections come
+        from one function. The Voyage choice with no key is the client's refusal
+        (``LocalVoyageCredentialMissingError``): a Voyage intent that cannot be served."""
+        from nexus.corpus import LocalVoyageCredentialMissingError, effective_embedding_model_for_writes
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION
+
+        env = self._spawn(
+            config_dir, clock, monkeypatch,
+            choice=choice, persisted_key=persisted, env_key=env_only,
+            tag=_tag_of(DUAL_EMBEDDER_FIRST_ENGINE_VERSION),
+        )
+        for content_type in ("code", "docs", "knowledge", "rdr"):
+            try:
+                model = effective_embedding_model_for_writes(content_type)
+            except LocalVoyageCredentialMissingError:
+                family = "voyage"
+            else:
+                family = "voyage" if model.startswith("voyage") else "bge" if "bge" in model else model
+            assert family == env["NX_EMBED_PROFILE"], (content_type, family, env["NX_EMBED_PROFILE"])
+
+    def test_required_engine_version_is_not_below_the_first_dual_tag(self) -> None:
+        """The supervisor relaxes the r5f3c guard for a receipt at the first dual tag. That relaxation is
+        safe only in the client release whose pin names a dual engine, and the pin is also the managed
+        floor (RDR-210 Technical Design 4). Fails while ``REQUIRED_ENGINE_VERSION`` is below the constant,
+        so the guard cannot merge ahead of the pin (the shape of health.py's route-floor guard)."""
+        from nexus.engine_version import DUAL_EMBEDDER_FIRST_ENGINE_VERSION, REQUIRED_ENGINE_VERSION
+
+        assert not REQUIRED_ENGINE_VERSION < DUAL_EMBEDDER_FIRST_ENGINE_VERSION, (
+            f"REQUIRED_ENGINE_VERSION {REQUIRED_ENGINE_VERSION} is below the first dual engine "
+            f"{DUAL_EMBEDDER_FIRST_ENGINE_VERSION}: raise the pin in the same release, after the tag is "
+            "deployed to the cloud engine"
+        )
+
+
+# ---------------------------------------------------------------------------
 # nexus-ogccs: supervisor passes the resolved onnx_models root to the engine
 # ---------------------------------------------------------------------------
 
@@ -3793,6 +4105,36 @@ class TestSupervisorSelfManagesPgAtBoot:
         assert bins == "FAKE_BINS"
         assert pgdata == config_dir / "postgres", "starts nx's own PG_DATA"
         assert port == 15439, "starts nx's own provisioned port"
+
+    @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX mode bits; root ignores them")
+    def test_an_unwritable_conf_does_not_stop_the_cold_start(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-o26hs: the managed block is rewritten before a cold start, best
+        effort. A postgresql.conf that cannot be written is logged and the
+        cluster is still started, as it was before the rewrite existed."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        import nexus.db.pg_provision as pgp
+
+        pgdata = config_dir / "postgres"
+        pgdata.mkdir(parents=True)
+        conf = pgdata / "postgresql.conf"
+        conf.write_text("shared_buffers = 128MB\n", encoding="utf-8")
+        conf.chmod(0o400)
+        sup = _make_supervisor(config_dir, clock, pg_port=15439)
+        sup._creds["PG_DATA"] = str(pgdata)
+        started: list[Path] = []
+        monkeypatch.setattr(pgp, "discover_pg_binaries", lambda: "FAKE_BINS")
+        monkeypatch.setattr(pgp, "_start_cluster", lambda bins, d, port: started.append(Path(d)))
+        accepting = iter([False, True])
+        monkeypatch.setattr(ssd_mod, "_port_accepting", lambda host, port, **kw: next(accepting))
+        monkeypatch.setattr(sup, "_backfill_provision_grants", lambda: None)
+        try:
+            sup._ensure_pg_running()
+        finally:
+            conf.chmod(0o600)
+        assert started == [pgdata], "the cluster was started despite the unwritable conf"
+        assert conf.read_text(encoding="utf-8") == "shared_buffers = 128MB\n"
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,7 @@ _CANARIES = [
 #:
 #: The subject here is ``_isolate_service_endpoint_env``, which is
 #: substrate-INDEPENDENT — it scrubs four env vars. But a child that inherits
-#: NX_TEST_T2_SUBSTRATE=engine boots its OWN PG + JVM session engine, and in a
+#: the engine substrate boots its OWN PG + JVM session engine, and in a
 #: FULL RUN the parent already has one. Measured: every subprocess errored at
 #: exactly 60.3s — ``_engine_substrate.py``'s ``_wait_tcp(timeout=60.0)`` —
 #: and the parent then reported "the scrub is not covering it", which is not

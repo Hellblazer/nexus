@@ -666,7 +666,8 @@ public final class VectorHandler implements HttpHandler {
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
      *   "rerank_top_k":       null,             // optional; requires rerank
      *   "rerank_max_candidates": null,          // optional; requires rerank; score at most this many rows
-     *   "content_chars": 300                    // optional (nexus-tao37); cap each row's text at N code points
+     *   "content_chars": 300,                   // optional (nexus-tao37); cap each row's text at N code points
+     *   "lexical": false                        // optional (nexus-xd2rc); add each collection's text-gated rows, see below
      * }
      * </pre>
      *
@@ -707,7 +708,20 @@ public final class VectorHandler implements HttpHandler {
      * cut can no longer be rescued by rerank. Accepted in the design of record (T2
      * {@code nexus/design-tu8wp-engine-per-collection-topk-2026-10-04-part2}, Q3).
      *
-     * <p>Lexical/hybrid search stays on {@code /hybrid-search}.
+     * <p><strong>{@code lexical} (nexus-xd2rc).</strong> Opt-in, default {@code false}: the response is then
+     * byte-identical to before. When {@code true}, each collection also runs the {@code /hybrid-search} text-gated
+     * statement as its own arm (top-{@code per_collection_k} by vector distance among the rows the text gate
+     * admits), through the same workers, arm gate and bounds as the vector arms. Its rows are unioned in: a row
+     * both arms returned keeps its vector copy, and a lexical row is exempt from its collection's threshold and
+     * from the {@code limit} cut, so {@code results} can hold more than {@code limit} rows (the lexical rows the
+     * vector rows do not hold follow them, best first, before any rerank). With {@code rerank} those extra rows are
+     * scored in calls of their own, not capped by {@code rerank_max_candidates}, and ordered with the vector rows
+     * by score ({@link RerankStage#applyUnion}). The envelope echoes {@code "lexical": true}, so a client detects an
+     * engine that ignored the field by its absence, and each {@code per_collection} entry gains
+     * {@code lexical_count}, {@code lexical_ids} (every id the collection's lexical arm returned, all of them in
+     * {@code results}; empty when the collection failed), {@code lexical_error} and {@code lexical_error_kind}
+     * (the {@code error_kind} values). {@code raw_count}, {@code dropped} and the distances stay the vector
+     * arm's.
      */
     private void handleSearchPerCollection(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -738,6 +752,7 @@ public final class VectorHandler implements HttpHandler {
                     "rerank_top_k requires \"rerank\": true — set both or neither");
         }
         Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
+        boolean lexical             = optBool(body, "lexical", false);
         Integer contentChars        = optInteger(body, "content_chars");
         if (contentChars != null && contentChars < 1) {
             throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
@@ -750,19 +765,26 @@ public final class VectorHandler implements HttpHandler {
 
         long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
-                                              thresholds, where, includeSourceUri, includeEmbeddings);
+                                              thresholds, where, includeSourceUri, includeEmbeddings, lexical);
         long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
 
         Map<String, Object> envelope = new LinkedHashMap<>();
         if (rerank) {
-            envelope.putAll(rerankStage.apply(queryText, result.rows(), rerankTopK, rerankMaxCandidates));
-        } else {
+            envelope.putAll(rerankStage.applyUnion(queryText, result.rows(), result.lexicalRows(), rerankTopK,
+                    rerankMaxCandidates, dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST));
+        } else if (result.lexicalRows().isEmpty()) {
             envelope.put("results", result.rows());
+        } else {
+            List<Map<String, Object>> union = new ArrayList<>(result.rows().size() + result.lexicalRows().size());
+            union.addAll(result.rows());
+            union.addAll(result.lexicalRows());
+            envelope.put("results", union);
         }
         List<Map<String, Object>> perCollection = new ArrayList<>(result.perCollection().size());
-        for (var stat : result.perCollection()) {
+        for (int i = 0; i < result.perCollection().size(); i++) {
+            var stat = result.perCollection().get(i);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("collection", stat.collection());
             m.put("raw_count", stat.rawCount());
@@ -771,6 +793,13 @@ public final class VectorHandler implements HttpHandler {
             m.put("min_dropped_distance", stat.minDroppedDistance());
             m.put("error", stat.error());
             m.put("error_kind", stat.errorKind() == null ? null : stat.errorKind().wire());
+            if (lexical) {
+                var lex = result.lexical().get(i);
+                m.put("lexical_count", lex.count());
+                m.put("lexical_ids", lex.ids());
+                m.put("lexical_error", lex.error());
+                m.put("lexical_error_kind", lex.errorKind() == null ? null : lex.errorKind().wire());
+            }
             perCollection.add(m);
         }
         if (includeEmbeddings && embeddingsLimit != null && envelope.get("results") instanceof List<?> finalRows) {
@@ -796,6 +825,9 @@ public final class VectorHandler implements HttpHandler {
         envelope.put("per_collection", perCollection);
         envelope.put("per_collection_k", perK);
         envelope.put("limit", limit);
+        if (lexical) {
+            envelope.put("lexical", true);
+        }
         if (contentChars != null) {
             envelope.put("content_chars", contentChars);
         }
@@ -810,7 +842,8 @@ public final class VectorHandler implements HttpHandler {
         // nexus-mz9jv: the request's total beside the search_per_collection line's split (query embed, fan-out,
         // enrich, embedding fill): repo_ms covers those, the rest of handler_ms is rerank, serialisation, the write.
         log.info("event=search_per_collection_request collections={} rows={} bytes={} repo_ms={} serialize_ms={} "
-                 + "handler_ms={}", collections.size(), result.rows().size(), envelopeBody.length(), repoMs,
+                 + "handler_ms={}", collections.size(), result.rows().size() + result.lexicalRows().size(),
+                 envelopeBody.length(), repoMs,
                  serializeMs, (System.nanoTime() - handlerStartNanos) / 1_000_000L);
     }
 
@@ -1688,6 +1721,15 @@ public final class VectorHandler implements HttpHandler {
      * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
      * {"restored": N, "remaining": R, "row_limit": L} — loop while
      * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
+     *
+     * <p>nexus-wbfpw.64 ([additive]): an optional {@code resolve_siblings: true}, on either form, also asks the engine
+     * which quarantine collections may hold chunks of {@code origin_collection} (the reaper's own name for it plus
+     * every quarantine collection holding a chunk tagged with it; {@link PgVectorRepository#resolveQuarantineSiblings}),
+     * read under a 2 s statement bound of its own. The response then adds {@code "quarantine_collections": [...]}, or
+     * {@code "sibling_resolution": "timed_out"} with no list when the bound tripped. The page still runs for the named
+     * {@code quarantine_collection} alone (a keyed page is one transaction with its ledger row, so it cannot span
+     * siblings); the client sends the route again for each other sibling named. An engine without the field answers
+     * neither key, which is how a client tells it apart from this one.
      */
     private void handleGcRestoreRereferenced(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1703,29 +1745,38 @@ public final class VectorHandler implements HttpHandler {
         // mirroring handleGcQuarantineOrphans's identical routing (nexus-a6mon).
         // Additive: a request without it is the unbounded form exactly as
         // before, so no released client changes behaviour.
+        boolean resolveSiblings = optBool(body, "resolve_siblings", false);   // nexus-wbfpw.64
         int rowLimit = resolveRowLimit(body);
         if (rowLimit > 0) {
             if (keyed != null) {
                 // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
                 final int limit = rowLimit;
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, RESTORE_ROUTE, raw);
+                if (replayAnswered(ex, keyed, tenant, RESTORE_ROUTE, raw, resolveSiblings)) return;
+                final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
                     marker -> repo.restoreRereferencedBounded(
                         tenant, quarantineCollection, originCollection, limit, dim, marker),
-                    out -> boundedRestoreBody(out, limit));
+                    out -> withSiblings(boundedRestoreBody(out, limit), siblings));
                 return;
             }
+            // Read BEFORE the page, so a read that fails outright (a lost connection, not a bound) is a 5xx with
+            // nothing committed, never a 5xx hiding a page that already was.
+            final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
             var bounded = repo.restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit);
-            HttpUtil.send(ex, 200, json(boundedRestoreBody(bounded, rowLimit)));
+            HttpUtil.send(ex, 200, json(withSiblings(boundedRestoreBody(bounded, rowLimit), siblings)));
             return;
         }
         if (keyed != null) {
             refuseKey(ex, "idempotency_key_unsupported");
         }
 
+        final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
         long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
-        HttpUtil.send(ex, 200, json(Map.of("restored", restored)));
+        var unbounded = new java.util.LinkedHashMap<String, Object>();
+        unbounded.put("restored", restored);
+        HttpUtil.send(ex, 200, json(withSiblings(unbounded, siblings)));
     }
 
     /**
@@ -1756,6 +1807,10 @@ public final class VectorHandler implements HttpHandler {
      * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
      * {@code force}, and the floor counts only the untagged rows. The engine expires its own
      * rows (RDR-192, nexus-2x9xa).
+     *
+     * <p>nexus-wbfpw.64 ([additive]): an optional {@code resolve_siblings: true}, on either form, adds
+     * {@code "quarantine_collections"} (or {@code "sibling_resolution": "timed_out"}) to the response, exactly as on
+     * {@code restore-rereferenced}; the page itself still expires only the named {@code quarantine_collection}.
      */
     private void handleGcExpireQuarantine(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1770,6 +1825,7 @@ public final class VectorHandler implements HttpHandler {
         double floorFraction        = optDouble(body, "floor_fraction", 0.5);
         int floorMinChunks          = optInt(body, "floor_min_chunks", 50);
         boolean force                = optBool(body, "force", false);
+        boolean resolveSiblings      = optBool(body, "resolve_siblings", false);   // nexus-wbfpw.64
 
         // An optional `row_limit` selects the BOUNDED expire, as on restore-rereferenced: absent is the
         // unbounded form exactly as before, present must be a positive integer.
@@ -1779,25 +1835,70 @@ public final class VectorHandler implements HttpHandler {
             final boolean countRefused = optBool(body, "count_refused", true);
             if (keyed != null) {
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, EXPIRE_ROUTE, raw);
+                if (replayAnswered(ex, keyed, tenant, EXPIRE_ROUTE, raw, resolveSiblings)) return;
+                final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.ExpireBoundedOutcome>runKeyed(ex, keyed, tenant, EXPIRE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
                         cutoff, floorFraction, floorMinChunks, force, limit, countRefused, dim, marker),
-                    out -> boundedExpireBody(out, limit));
+                    out -> withSiblings(boundedExpireBody(out, limit), siblings));
                 return;
             }
+            final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
             var bounded = repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force, limit, countRefused);
-            HttpUtil.send(ex, 200, json(boundedExpireBody(bounded, limit)));
+            HttpUtil.send(ex, 200, json(withSiblings(boundedExpireBody(bounded, limit), siblings)));
             return;
         }
         if (keyed != null) {
             refuseKey(ex, "idempotency_key_unsupported");
         }
 
+        final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
-        HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+        var unbounded = new java.util.LinkedHashMap<String, Object>();
+        unbounded.put("expired", outcome.expired());
+        unbounded.put("refused", outcome.refused());
+        HttpUtil.send(ex, 200, json(withSiblings(unbounded, siblings)));
+    }
+
+    /**
+     * nexus-wbfpw.64: the sibling fields of a {@code resolve_siblings} request, empty when the request did not ask
+     * (so a client that does not send the field sees the body it always saw). Asked: {@code quarantine_collections},
+     * the quarantine siblings that may hold chunks of the origin, in {@link PgVectorRepository#resolveQuarantineSiblings}'s
+     * order, or, when the read ran into its statement bound, {@code sibling_resolution: "timed_out"} and no list. A
+     * client reads the PRESENCE of {@code quarantine_collections} as "this engine resolves siblings"; an engine that
+     * predates the field answers neither key.
+     */
+    private static Map<String, Object> siblingFields(PgVectorRepository repo, String tenant, String origin,
+                                                     boolean asked) {
+        if (!asked) return Map.of();
+        var resolved = repo.resolveQuarantineSiblingsBounded(tenant, origin);
+        return resolved.timedOut()
+            ? Map.of("sibling_resolution", "timed_out")
+            : Map.of("quarantine_collections", resolved.names());
+    }
+
+    /**
+     * nexus-wbfpw.64 (review): a keyed request that already COMMITTED is answered from the ledger, so the sibling read
+     * that a fresh page needs before it claims its row would be thrown away; this answers the replay first and returns
+     * true, having written the response, so the read is skipped. It asks only when the request asked for siblings (the
+     * one case it saves anything), and only a committed row answers: an in-flight or failed one still reads, then claims,
+     * as before. The answer is the one {@link KeyedSweep#run} gives a committed key (the stored body, or 422 for a key
+     * reused with another body).
+     */
+    private boolean replayAnswered(HttpExchange ex, KeyedRequest keyed, String tenant, String route, byte[] raw,
+                                   boolean resolveSiblings) throws IOException {
+        return resolveSiblings && keyedSweep.answerCommitted(ex, tenant, keyed.id(), keyed.header(), route, raw);
+    }
+
+    /** {@code body} with {@code siblings} appended, in a map that keeps the key order and tolerates null values. */
+    private static Map<String, Object> withSiblings(Map<String, Object> body, Map<String, Object> siblings) {
+        if (siblings.isEmpty()) return body;
+        var merged = new java.util.LinkedHashMap<String, Object>(body);
+        merged.putAll(siblings);
+        return merged;
     }
 
     /**

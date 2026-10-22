@@ -55,6 +55,10 @@ class VectorHandlerSearchPerCollectionTest {
     private static final String OTHER_MODEL = "knowledge__tu8wp-http-other__bge-base-en-v15-768__v1";
     private static final String ORPHAN = "knowledge__tu8wp-http-orphan__minilm-l6-v2-384__v1";
     private static final String GHOST = "knowledge__tu8wp-http-ghost__minilm-l6-v2-384__v1";
+    /** nexus-xd2rc: three plain rows near the query and one far row carrying {@link #LEX_QUERY}. */
+    private static final String LEX = "knowledge__tu8wp-http-lex__minilm-l6-v2-384__v1";
+    private static final String LEX_QUERY = "zebracorn";
+    private static final String LEX_FAR = "lex zebracorn far";
     private static final List<String> FAN = List.of(
         "knowledge__tu8wp-http-fan0__minilm-l6-v2-384__v1", "knowledge__tu8wp-http-fan1__minilm-l6-v2-384__v1",
         "knowledge__tu8wp-http-fan2__minilm-l6-v2-384__v1", "knowledge__tu8wp-http-fan3__minilm-l6-v2-384__v1");
@@ -118,7 +122,7 @@ class VectorHandlerSearchPerCollectionTest {
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            for (String c : List.of(DENSE, SMALL, OTHER_MODEL, ORPHAN)) {
+            for (String c : List.of(DENSE, SMALL, OTHER_MODEL, ORPHAN, LEX)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
             for (String c : FAN) {
@@ -133,6 +137,9 @@ class VectorHandlerSearchPerCollectionTest {
         // Every collection needs a chunk of its own: the engine sweeps registered-but-empty
         // "ghost" collections on a tenant's first authenticated request.
         seed(seedScope, seedRepo, ORPHAN, "orphan", 1, 0.5, 0.01);
+        embedder.register(LEX_QUERY, 1f, 0f);
+        seedTexts(seedScope, seedRepo, LEX, List.of("lex plain 0", "lex plain 1", "lex plain 2", LEX_FAR),
+                  List.of(0.0, 0.001, 0.002, 1.2));
         var embedder768 = new PgVectorRepositoryContractTest.FakeEmbedder(768);
         seed(seedScope, new PgVectorRepository(seedScope, embedder768, embedder768), OTHER_MODEL, "other", 1,
              0.5, 0.01, embedder768);
@@ -168,6 +175,22 @@ class VectorHandlerSearchPerCollectionTest {
             embedder.register(text, (float) Math.cos(theta), (float) Math.sin(theta));
             ids.add(chash(text));
             texts.add(text);
+            metas.add(Map.of());
+        }
+        repo.upsertChunks(TENANT, collection, ids, texts, metas);
+        scope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, collection, ids.toArray(new String[0]));
+            return null;
+        });
+    }
+
+    private void seedTexts(TenantScope scope, PgVectorRepository repo, String collection, List<String> texts,
+                           List<Double> angles) {
+        List<String> ids = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < texts.size(); i++) {
+            embedder.register(texts.get(i), (float) Math.cos(angles.get(i)), (float) Math.sin(angles.get(i)));
+            ids.add(chash(texts.get(i)));
             metas.add(Map.of());
         }
         repo.upsertChunks(TENANT, collection, ids, texts, metas);
@@ -303,6 +326,54 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(body.get("results")).hasSize(8);
         assertThat(body.get("per_collection")).hasSize(2);
         assertThat(body.get("per_collection_k").asInt()).isEqualTo(5);
+    }
+
+    // ── lexical (nexus-xd2rc) ─────────────────────────────────────────────────
+
+    private static Map<String, Object> lexicalRequest() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("query", LEX_QUERY);
+        m.put("collections", List.of(LEX));
+        m.put("per_collection_k", 5);
+        m.put("limit", 1);
+        m.put("lexical", true);
+        return m;
+    }
+
+    @Test
+    void lexical_echoesTheFlag_reportsTheArmPerCollection_andServesItsRowsBeyondTheLimit() throws Exception {
+        var r = post(lexicalRequest());
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.fieldNames()).toIterable()
+            .containsExactly("results", "per_collection", "per_collection_k", "limit", "lexical");
+        assertThat(body.get("lexical").asBoolean()).isTrue();
+        // limit 1 keeps the nearest plain row; the far token row is the lexical arm's and is not cut.
+        assertThat(body.get("results")).hasSize(2);
+        assertThat(body.get("results").get(1).get("id").asText()).isEqualTo(chash(LEX_FAR));
+        JsonNode pc = body.get("per_collection").get(0);
+        assertThat(pc.fieldNames()).toIterable().containsExactly(
+            "collection", "raw_count", "dropped", "min_raw_distance", "min_dropped_distance", "error",
+            "error_kind", "lexical_count", "lexical_ids", "lexical_error", "lexical_error_kind");
+        assertThat(pc.get("raw_count").asInt()).as("the vector arm's count").isEqualTo(4);
+        assertThat(pc.get("lexical_count").asInt()).isEqualTo(1);
+        assertThat(pc.get("lexical_ids")).hasSize(1);
+        assertThat(pc.get("lexical_ids").get(0).asText()).isEqualTo(chash(LEX_FAR));
+        assertThat(pc.get("lexical_error").isNull()).isTrue();
+        assertThat(pc.get("lexical_error_kind").isNull()).isTrue();
+    }
+
+    @Test
+    void lexical_withRerankAndNoReranker_degradesLoud_andKeepsTheLexicalRows() throws Exception {
+        Map<String, Object> req = lexicalRequest();
+        req.put("rerank", true);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("rerank_degraded").asBoolean()).isTrue();
+        assertThat(body.get("rerank_error").asText()).contains("no reranker configured");
+        assertThat(body.get("results")).hasSize(2);
+        assertThat(body.get("lexical").asBoolean()).isTrue();
     }
 
     @Test

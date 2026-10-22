@@ -237,6 +237,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // idListAccepting).
         neither("/ghost-sweep", "handleGhostSweep"),
         collectionExempt("/resolve", "handleResolve", RESOLVE_BOUNDED),
+        // nexus-gacz0: same envelope shape as /list ({"documents":[...],"count":N}); the request carries
+        // title/owner/content_type scalars, no id list (not idListAccepting). Unbounded by design (the
+        // contract is "every exact match"), and count is emitted, so no exemption.
+        collectionOk("/by_title", "handleByTitle"),
         neither("/stats", "handleStats"),
 
         // ── Links ─────────────────────────────────────────────────────────

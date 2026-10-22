@@ -95,6 +95,7 @@ from typing import Any
 from nexus._hook_runtime._io import HookResult, stream
 from nexus._locking import lock_fd, unlock_fd
 from nexus._log_safe_url import has_userinfo, log_endpoint
+from nexus.tuple_sender import sender_label
 
 #: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
 #: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
@@ -698,6 +699,29 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     return outcome.get("body")
 
 
+#: nexus-565ds: printed once per drain, before the first block whose from= line carries a sender label,
+#: so the label is glossed where it is read and not only in the mailbox skill.
+_SENDER_LEGEND = (
+    "(A bracketed mark after from= says what the engine could not confirm about the sender: [unverified] "
+    "the claimed name does not match the session the engine recorded for the write; [unattested] the "
+    "engine recorded no session for it (a CI post, a dropped token, an old row, or a writer that left the "
+    "session header off); [agent mail, sent under session S] mail that claims to come from a subagent, "
+    "sent under that session. A mark is a lead to check, not a verdict; no "
+    "mark is not proof of the sender either (JDR-002).)\n"
+)
+
+#: The marks a rendered from= line can carry (tuple_sender.case_word), for _labelled().
+_LABEL_OPENERS = (" [unverified", " [unattested", " [agent mail")
+
+
+def _labelled(text: str) -> bool:
+    """Whether a rendered block's first line (its from= line) carries a sender label. Used only for a
+    block recovered from the pending record, which keeps the rendered text and not the row; every
+    other caller passes the label it computed from the row, since from= and kind= are sender text."""
+    first = text.split("\n", 1)[0]
+    return any(opener in first for opener in _LABEL_OPENERS)
+
+
 class _Out:
     """Writes each delivered block to stdout IMMEDIATELY, flushing every time.
 
@@ -717,6 +741,7 @@ class _Out:
 
     def __init__(self) -> None:
         self._opened = False
+        self._legend_shown = False
         self._unstreamed: list[str] = []
 
     def _write(self, text: str) -> None:
@@ -725,10 +750,13 @@ class _Out:
         if not stream(text):
             self._unstreamed.append(text)
 
-    def block(self, text: str) -> None:
+    def block(self, text: str, labelled: bool | None = None) -> None:
         if not self._opened:
             self._write("## Mailbox (RDR-205): delivered at this prompt\n")
             self._opened = True
+        if not self._legend_shown and (_labelled(text) if labelled is None else labelled):
+            self._write(_SENDER_LEGEND)
+            self._legend_shown = True
         self._write(text)
 
     def result(self) -> HookResult:
@@ -757,6 +785,20 @@ def _dims_of(row: dict[str, Any]) -> dict[str, Any]:
     return dims if isinstance(dims, dict) else {}
 
 
+def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
+    """`` [unverified]``, `` [unattested]`` or `` [agent mail, sent under session <S>]`` after the
+    ``from=`` field, or "" when the row earns no label (bead nexus-ggmg7, F3
+    step 2c, JDR-002). ``from`` is a claim the writer typed; ``sender_session``
+    is the session the engine stamped. The decision is
+    :func:`sender_label`; this hook only reads the raw JSON, where an absent
+    key (an engine that predates the stamp) is different from a null one.
+    NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
+    token for any session id."""
+    label = sender_label(dims.get("from"), row.get("sender_session"),
+                         stamp_known="sender_session" in row)
+    return f" [{label}]" if label else ""
+
+
 def _render_live(address: str, row: dict[str, Any]) -> str:
     dims = _dims_of(row)
     sender = dims.get("from", "?")
@@ -765,7 +807,7 @@ def _render_live(address: str, row: dict[str, Any]) -> str:
     body = row.get("body")
     body_text = body if body else "(no body)"
     return (
-        f"- from={sender} kind={kind} correlation_id={corr} "
+        f"- from={sender}{_sender_tag(row, dims)} kind={kind} correlation_id={corr} "
         f"address=mailbox/{address} tuple_id={row.get('id', '?')}\n"
         f"  {body_text}"
     )
@@ -775,7 +817,7 @@ def _render_dead(address: str, row: dict[str, Any]) -> str:
     dims = _dims_of(row)
     return (
         f"- UNDELIVERABLE at mailbox/{address} tuple_id={row.get('id', '?')} "
-        f"from={dims.get('from', '?')} attempts={row.get('attempts', '?')}: this row is "
+        f"from={dims.get('from', '?')}{_sender_tag(row, dims)} attempts={row.get('attempts', '?')}: this row is "
         f"dead-lettered and can never be claimed, so nothing will deliver it. "
         f"Reported once. Purge it with `nx tuple stats mailbox/{address}` and the "
         f"engine's sweep, or ask the sender to resend."
@@ -974,7 +1016,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             seen = _read_seen(config_dir, address)
             fresh = [r for r in dead_rows if str(r.get("id")) not in seen]
             for row in fresh:
-                out.block(_render_dead(address, row))
+                out.block(_render_dead(address, row), labelled=bool(_sender_tag(row, _dims_of(row))))
                 seen.add(str(row.get("id")))
             if fresh:
                 # Keep only ids still present, so the file cannot grow forever.
@@ -1037,7 +1079,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
                 # by id, so no other row's record is disturbed.
                 _clear_pending(config_dir, address, row_id)
                 return "ack_refused"
-            out.block(rendered)
+            out.block(rendered, labelled=bool(_sender_tag(row, _dims_of(row))))
             _clear_pending(config_dir, address, row_id)
             delivered += 1
         return "cap"

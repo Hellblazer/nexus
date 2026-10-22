@@ -523,6 +523,18 @@ public final class PgSession {
     public static final int DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS = 2_000;
 
     /**
+     * Bound on the quarantine sibling resolution a {@code gc/expire-quarantine} or {@code gc/restore-rereferenced}
+     * request asks for with {@code resolve_siblings} (nexus-wbfpw.64), set as its OWN statement before the read. The
+     * read is an EXISTS over the tenant's quarantine collections keyed on {@code metadata->>'origin_collection'}; it
+     * measured 7.77 ms warm over about 12,800 quarantine rows in production and grows linearly with them, so 2 s is
+     * more than two orders of magnitude above that and still far inside the ~30 s edge deadline the page that follows
+     * shares. A request whose resolution trips it still gets its page; it answers
+     * {@code sibling_resolution: "timed_out"} and no sibling list.
+     */
+    public static final int DEFAULT_QUARANTINE_SIBLING_RESOLUTION_STATEMENT_TIMEOUT_MS = 2_000;
+    public static final int DEFAULT_QUARANTINE_SIBLING_RESOLUTION_LOCK_TIMEOUT_MS = 2_000;
+
+    /**
      * Bound every later statement in this transaction to {@code statementTimeoutMs}
      * and every lock wait to {@code lockTimeoutMs}. Two {@code set_config} calls,
      * each its own top-level statement, so the statement bound applies to the

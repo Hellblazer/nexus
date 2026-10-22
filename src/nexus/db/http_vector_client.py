@@ -36,7 +36,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
@@ -54,6 +54,7 @@ from nexus.db.gateway_backoff import (
     is_non_idempotent_sweep_path,
 )
 from nexus.db.client_identity import client_identity_headers
+from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
@@ -1878,6 +1879,12 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
+        # nexus-mp8ys: the engine refused a chunk write to a retired name. Typed,
+        # naming the successor, and not a VectorServiceError: no caller's degrade
+        # path or retry ladder may treat it as a transient engine failure.
+        _superseded = superseded_write_error_from_body(e.code, err)
+        if _superseded is not None:
+            raise _superseded from e
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
@@ -1989,12 +1996,15 @@ def _unregistered_collection_message(code: int, err: Any) -> str | None:
     )
 
 
-def _get(path: str, *, tenant: str = "default") -> Any:
-    """GET from the service endpoint, return parsed response body."""
+def _get(path: str, *, tenant: str = "default", timeout: float = 30) -> Any:
+    """GET from the service endpoint, return parsed response body.
+
+    ``timeout`` is the per-attempt socket budget in seconds; a diagnostic probe passes a short one.
+    """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     try:
-        return _request("GET", path, tenant=tenant, timeout=30, body=None)
+        return _request("GET", path, tenant=tenant, timeout=timeout, body=None)
     except urllib.error.HTTPError as e:
         body_bytes = _response_body(e)
         try:
@@ -3026,6 +3036,28 @@ def live_collection_rows(t3: Any, *, routing: bool = False) -> list[dict]:
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
 
 
+def sibling_candidate_rows(t3: Any) -> list[dict]:
+    """The live catalog rows a sibling lookup scans (nexus-50uw6, RDR-210
+    Phase 4 Step 1), each carrying its ``name``; ``[]`` when *t3* offers no
+    listing to scan.
+
+    The single-name read resolver finds a corpus's model siblings by the row
+    tuple ``(content_type, owner_id)``, never by a name, so it needs rows and
+    must not add a request to a read to get them. A real client answers from
+    :meth:`HttpVectorClient._sibling_candidate_rows` (the shared collections cache
+    for the process-default tenant); any other handle with a ``list_collections()``
+    (a test double) gets the client-side live filter, as :func:`live_collection_rows`.
+    """
+    if isinstance(t3, HttpVectorClient):
+        return t3._sibling_candidate_rows()
+    if callable(getattr(t3, "list_collections", None)):
+        return [
+            row for row in live_collection_rows(t3)
+            if isinstance(row, dict) and "content_type" in row
+        ]
+    return []
+
+
 #: How long a route-absent answer from ``/v1/vectors/search-per-collection``
 #: is trusted before the route is probed again (nexus-tu8wp.2): a 404, the
 #: edge refusing the path (403 or an edge-generated response), 405 and 501.
@@ -3216,6 +3248,69 @@ class HttpVectorClient:
             if row.get("name") == collection:
                 return row if "content_type" in row else None
         return None
+
+    def _resolve_collection_rows(
+        self, collections: "Iterable[str]",
+    ) -> "dict[str, dict | None]":
+        """The catalog row of each distinct name in *collections*, ``None`` for
+        a name no row backs: :meth:`_resolve_collection_row` for a batch, and
+        CACHE-ONLY for the process-default tenant.
+
+        nexus-noayy (search reads each collection's model from its row, and a
+        search must not add a request to learn it). Three cases:
+
+        - an injected ``_row_resolver``: asked once per name, as
+          :meth:`_resolve_collection_row` does;
+        - the process-default tenant: a read of what the shared ``mcp_infra``
+          collections cache already holds (``refresh=False``), never a fetch.
+          The caller that picked the collections listed them through that cache
+          (``get_collection_names``, or ``prime_collections_cache`` from the
+          listing it already made), so the rows are there; a caller that never
+          listed gets no rows and the name derivation answers, as before this
+          read existed;
+        - any OTHER tenant, which has no shared cache: ONE
+          :meth:`list_collections` for the whole batch, where
+          :meth:`_resolve_collection_row` would list once per name.
+
+        A resolver that raises is "no row" for that name.
+        """
+        names = list(dict.fromkeys(collections))
+        if self._row_resolver is None and self._tenant != _process_default_tenant():
+            listing = {row.get("name"): row for row in self.list_collections(routing=True)}
+            return {
+                n: row if (row := listing.get(n)) is not None and "content_type" in row else None
+                for n in names
+            }
+        if self._row_resolver is None:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            return {n: get_collection_row(n, refresh=False) for n in names}
+        rows: dict[str, dict | None] = {}
+        for n in names:
+            try:
+                rows[n] = self._row_resolver(n)
+            except Exception:  # noqa: BLE001 — a handled outcome (None), as resolve_row_preferred treats a raising row resolver; the caller falls back to the name
+                _log.warning("http_vector_client_row_resolver_failed", collection=n, exc_info=True)
+                rows[n] = None
+        return rows
+
+    def _sibling_candidate_rows(self) -> list[dict]:
+        """The live rows :func:`sibling_candidate_rows` scans for this handle.
+
+        Same three cases as :meth:`_resolve_collection_rows`: an injected
+        ``_row_resolver`` is per-name and cannot be enumerated (no rows, so the
+        caller keeps its one name); the process-default tenant reads the shared
+        collections cache (:func:`nexus.mcp_infra.get_cached_collection_rows`,
+        no request of its own); any OTHER tenant has no shared cache, so it asks
+        for one routing listing.
+        """
+        if self._row_resolver is not None:
+            return []
+        if self._tenant == _process_default_tenant():
+            from nexus.mcp_infra import get_cached_collection_rows  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            return [row for row in get_cached_collection_rows() if is_live_collection_row(row)]
+        return [
+            row for row in self.list_live_collections(routing=True) if "content_type" in row
+        ]
 
     # ── Seam B write path ────────────────────────────────────────────────────
 
@@ -3914,6 +4009,7 @@ class HttpVectorClient:
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
         content_chars: int | None = None,
+        lexical: bool = False,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -3982,6 +4078,17 @@ class HttpVectorClient:
         route returns (``limit`` is 1000 under rerank) does not pay to transfer the
         vectors of rows it will drop. The rest come back without one, and the caller
         fetches those by id like any other row without a vector.
+
+        *lexical* (nexus-xd2rc) asks the engine to run each collection's
+        text-gated ``/hybrid-search`` statement as its own arm in the same
+        request. Its rows are unioned into ``results`` (the vector copy wins a
+        row both arms returned; a lexical row is exempt from the threshold and
+        from the *limit* cut, so ``results`` can exceed *limit*), and the
+        envelope then carries ``"lexical": True`` with ``lexical_ids``,
+        ``lexical_count``, ``lexical_error`` and ``lexical_error_kind`` on each
+        ``per_collection`` entry. ``"lexical"`` is absent when the engine did
+        not echo the field (it predates it and ignored it): the caller then
+        runs the lexical leg on ``/hybrid-search`` itself.
         """
         if self._per_collection_written_off():
             return None
@@ -4010,6 +4117,8 @@ class HttpVectorClient:
             # nexus-tao37: the engine caps each row's text after its rerank; an engine that
             # predates the field ignores it and answers the full text.
             body["content_chars"] = int(content_chars)
+        if lexical:
+            body["lexical"] = True
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -4122,7 +4231,9 @@ class HttpVectorClient:
         object, names a collection that was not requested, repeats one, or
         carries a count or distance of the wrong type; a requested collection
         that has neither an entry nor a place in the skipped-collections
-        header.
+        header; under a ``"lexical": true`` echo, an entry whose
+        ``lexical_ids`` is not a list of non-empty strings or whose
+        ``lexical_count`` is not a count.
         """
         def refuse(why: str) -> PerCollectionEnvelopeError:
             return PerCollectionEnvelopeError(
@@ -4170,6 +4281,7 @@ class HttpVectorClient:
                 raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a number")
             return v
 
+        lexical = payload.get("lexical") is True
         wanted = set(requested)
         seen: set[str] = set()
         entries: list[dict] = []
@@ -4189,19 +4301,34 @@ class HttpVectorClient:
                 "error": entry.get("error"),
                 "error_kind": entry.get("error_kind"),
             })
+            if lexical:
+                lexical_ids = entry.get("lexical_ids")
+                if not isinstance(lexical_ids, list) or not all(
+                    isinstance(i, str) and i for i in lexical_ids
+                ):
+                    raise refuse(f"'lexical_ids' of '{name}' is not a list of ids")
+                entries[-1].update({
+                    "lexical_ids": lexical_ids,
+                    "lexical_count": count(entry, "lexical_count"),
+                    "lexical_error": entry.get("lexical_error"),
+                    "lexical_error_kind": entry.get("lexical_error_kind"),
+                })
         unaccounted = wanted - seen - set(skipped)
         if unaccounted:
             raise refuse(
                 f"{len(unaccounted)} requested collection(s) have no 'per_collection' "
                 f"entry and were not reported skipped, e.g. '{sorted(unaccounted)[0]}'"
             )
-        return {
+        envelope: dict[str, Any] = {
             "results": rows,
             "per_collection": entries,
             "per_collection_k": payload["per_collection_k"],
             "limit": payload["limit"],
             "skipped_collections": skipped,
         }
+        if lexical:
+            envelope["lexical"] = True
+        return envelope
 
     def search_metadata_scoped(
         self,
@@ -4632,6 +4759,7 @@ class HttpVectorClient:
 
     def gc_restore_rereferenced_bounded(
         self, quarantine_collection: str, origin_collection: str, row_limit: int,
+        *, resolve_siblings: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/restore-rereferenced with ``row_limit`` (nexus-e8h5x),
         mirroring :meth:`gc_quarantine_orphans`'s identical additive routing
@@ -4649,15 +4777,22 @@ class HttpVectorClient:
         RDR-222 Phase 1: one call is one keyed request, resolved through the ledger on an ambiguous
         outcome exactly as :meth:`gc_quarantine_orphans_bounded` is (restore takes no sweep gate, so
         it never sees ``sweep_gate_busy``).
+
+        ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine which quarantine
+        collections may hold chunks of ``origin_collection``. An engine that has it adds
+        ``"quarantine_collections": [str]`` to the answer (or ``"sibling_resolution": "timed_out"``
+        when its read ran into its bound); an engine that predates it answers neither, which is how a
+        caller tells the two apart, never by version. The field is sent only when asked.
         """
+        body: dict = {
+            "quarantine_collection": quarantine_collection,
+            "origin_collection": origin_collection,
+            "row_limit": row_limit,
+        }
+        if resolve_siblings:
+            body["resolve_siblings"] = True
         return _keyed_sweep_post(
-            "/v1/vectors/gc/restore-rereferenced",
-            {
-                "quarantine_collection": quarantine_collection,
-                "origin_collection": origin_collection,
-                "row_limit": row_limit,
-            },
-            tenant=self._tenant, gate_busy=False,
+            "/v1/vectors/gc/restore-rereferenced", body, tenant=self._tenant, gate_busy=False,
         )
 
     def gc_expire_quarantine(
@@ -4690,7 +4825,7 @@ class HttpVectorClient:
     def gc_expire_quarantine_bounded(
         self, quarantine_collection: str, origin_collection: str, cutoff: str,
         floor_fraction: float, floor_min_chunks: int, force: bool, row_limit: int,
-        *, count_refused: bool = True,
+        *, count_refused: bool = True, resolve_siblings: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/expire-quarantine with ``row_limit`` (RDR-222 Amendment A1, nexus-1579m):
         the bounded form of :meth:`gc_expire_quarantine`, selected by the same additive per-route toggle
@@ -4712,21 +4847,25 @@ class HttpVectorClient:
         The engine takes the sweep gate for this form, so a 503 ``sweep_gate_busy`` waits ``Retry-After``
         and resends. The unbounded :meth:`gc_expire_quarantine` stays for hand use and as the capability
         fallback.
+
+        ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine for the origin's quarantine
+        siblings, answered as in :meth:`gc_restore_rereferenced_bounded` (``quarantine_collections`` or
+        ``sibling_resolution``); the page itself still expires only ``quarantine_collection``. Sent only
+        when asked.
         """
-        return _keyed_sweep_post(
-            "/v1/vectors/gc/expire-quarantine",
-            {
-                "quarantine_collection": quarantine_collection,
-                "origin_collection": origin_collection,
-                "cutoff": cutoff,
-                "floor_fraction": floor_fraction,
-                "floor_min_chunks": floor_min_chunks,
-                "force": force,
-                "row_limit": row_limit,
-                "count_refused": count_refused,
-            },
-            tenant=self._tenant, gate_busy=True,
-        )
+        body: dict = {
+            "quarantine_collection": quarantine_collection,
+            "origin_collection": origin_collection,
+            "cutoff": cutoff,
+            "floor_fraction": floor_fraction,
+            "floor_min_chunks": floor_min_chunks,
+            "force": force,
+            "row_limit": row_limit,
+            "count_refused": count_refused,
+        }
+        if resolve_siblings:
+            body["resolve_siblings"] = True
+        return _keyed_sweep_post("/v1/vectors/gc/expire-quarantine", body, tenant=self._tenant, gate_busy=True)
 
     def gc_quarantine_restore(
         self,

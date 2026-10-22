@@ -3,8 +3,8 @@
 
 A test gets a minted tenant only when it asks for one (the ``t2_tenant`` /
 ``t2_service_env`` fixture or the ``t2_tenant`` marker). That is the default
-substrate (``NX_TEST_T2_SUBSTRATE`` unset, or ``optin``); ``per-test`` is the
-escape hatch that mints for every test, and ``none`` mints nothing. This module is
+substrate (``NX_TEST_T2_SUBSTRATE`` unset, or ``optin``); ``none`` mints nothing, and
+the ``per-test`` escape hatch is retired (nexus-llo7w). This module is
 what keeps the default safe: a test that reaches storage WITHOUT a tenant must be
 named, even when the code under test catches the error and carries on.
 
@@ -69,7 +69,7 @@ swallow the teardown failure). The whole-run shape (some test provisioned, some
 clean, some touch event, and Python children that were spawned reached the shim) is
 asked when ``NX_STORAGE_TOUCH_SWEEP=1`` (it gates: a problem is in ``vacuity`` and
 fails the session in fail mode). It is also asked, as ADVICE ONLY, when pytest-split is
-splitting the run (``--splits``: a CI shard) or the run collects at least
+splitting the run (``--splits``; the CI shards export the variable, so they gate) or the run collects at least
 ``SWEEP_AUTO_FLOOR`` tests (``NX_STORAGE_TOUCH_SWEEP_FLOOR`` overrides it; ``sweep_auto``
 in the report says an automatic run): every problem such a run finds is a yellow warning
 and a ``warnings`` entry, never ``vacuity``, so it can never change the exit status, and
@@ -90,10 +90,11 @@ of every shard of a run, is checked against ``tests/storage_touch_ceiling.toml``
 ``python -m tests._storage_touch_fan_in <dir> --suite <name> --shards <N>`` (stdlib only: CI
 runs it on a runner with no pytest). One
 session never gates: it sees only its file neighbourhood of the suite, so its
-``provisioned_per_test`` is printed as advice. No CI leg runs the fan-in yet.
+``provisioned_per_test`` is printed as advice. pytest-gate runs the fan-in over the CI shards' reports,
+and the shards export ``NX_STORAGE_TOUCH_SWEEP=1``, so each one gates on the whole-run checks.
 
-The guard is active under the default substrate and ``optin``; under ``none`` and
-``per-test`` it installs nothing and records nothing. Two things are unconditional:
+The guard is active under the default substrate and ``optin``; under ``none`` (and a
+retired value, which the conftest refuses) it installs nothing and records nothing. Two things are unconditional:
 ``_reset_vector_lease_cache`` (``http_vector_client`` caches a discovered lease
 process-wide), and, with the guard active, the ``http_vector_client`` singleton
 reset (a warm ``embedding_mode`` memo would hide a touch, a cold failed probe
@@ -144,15 +145,13 @@ from tests._storage_touch_fan_in import REPORT_NAME, SWEEP_ENV
 
 SUBSTRATE_ENV = "NX_TEST_T2_SUBSTRATE"
 OPTIN_VALUE = "optin"
-#: The escape hatch of the 2026-10 default flip (nexus-j23ni): every test mints
-#: its own tenant, as the suite did before. ``engine`` is the older spelling
-#: tests/containers documents; it always meant the same thing.
-PER_TEST_VALUE = "per-test"
-PER_TEST_VALUES = frozenset({PER_TEST_VALUE, "engine"})
-#: Values that provision nothing (``none``) or name the two tenant modes, and the
-#: retired ones the conftest refuses by name. Anything else is a typo.
-KNOWN_VALUES = frozenset({"none", OPTIN_VALUE}) | PER_TEST_VALUES
-RETIRED_VALUES = frozenset({"sqlite"})
+#: Values that provision nothing (``none``) or name the tenant mode, and the
+#: retired ones the conftest refuses by name (``_RETIRED_T2_SUBSTRATES``, whose keys
+#: ``tests/test_storage_touch_guard.py`` keeps equal to these). ``per-test`` and its
+#: older spelling ``engine`` were the escape hatch of the 2026-10 default flip
+#: (nexus-j23ni), kept one release and retired by nexus-llo7w. Anything else is a typo.
+KNOWN_VALUES = frozenset({"none", OPTIN_VALUE})
+RETIRED_VALUES = frozenset({"sqlite", "per-test", "engine"})
 MODE_ENV = "NX_STORAGE_TOUCH_GUARD_MODE"
 REPORT_DIR_ENV = "NX_STORAGE_TOUCH_REPORT_DIR"
 CHILD_LOG_ENV = "NX_STORAGE_TOUCH_CHILD_LOG"
@@ -228,15 +227,9 @@ def substrate_value() -> str | None:
 
 def optin_selected() -> bool:
     """True when this session runs the opt-in tenant mode: the DEFAULT (variable
-    unset) and an explicit ``optin``. ``none`` provisions nothing and
-    ``per-test`` is the escape hatch back to a tenant for every test; the guard
-    is inert under both."""
+    unset) and an explicit ``optin``. ``none`` provisions nothing, and the guard
+    is inert under it."""
     return substrate_value() in (None, OPTIN_VALUE)
-
-
-def per_test_selected() -> bool:
-    """True when every test mints its own tenant (the pre-flip behaviour)."""
-    return substrate_value() in PER_TEST_VALUES
 
 
 class StorageTouchError(AssertionError):
@@ -1242,9 +1235,10 @@ class Guard:
             )
         if self.explicit_sweep:
             # the run that explicitly asked the whole-run checks leaves nothing unexamined: a
-            # late touch (a leaked thread or child) is a failure there. An automatic run (a
-            # pytest-split shard, a large unsplit run) only prints it: a full hellmini run on
-            # 2026-10-19 had late_child_touches=5, so gating there would fail on thread timing.
+            # late touch (a leaked thread or child) is a failure there, and the CI shards ask
+            # (nexus-ey246). Whether one lands can depend on thread timing, so an automatic run
+            # only prints it; the late touches seen before had deterministic causes, since fixed.
+            # tests/AGENTS.md names the trigger that moves them back to a warning here.
             problems += self._warnings(report)
         if report["xfail_touches"]:
             shown = ", ".join(report["xfail_touches"][:5])
@@ -1556,9 +1550,8 @@ def pytest_configure(config: pytest.Config) -> None:
     value = substrate_value()
     if value is not None and value not in KNOWN_VALUES and value not in RETIRED_VALUES:
         raise pytest.UsageError(
-            f"{SUBSTRATE_ENV}={value!r} is not a substrate: use 'none' (provision nothing), 'optin' "
-            f"(the default: a tenant only for tests that ask for one) or '{PER_TEST_VALUE}' "
-            "(a tenant for every test, the escape hatch)"
+            f"{SUBSTRATE_ENV}={value!r} is not a substrate: use 'none' (provision nothing) or 'optin' "
+            "(the default: a tenant only for tests that ask for one)"
         )
     if not optin_selected():
         return

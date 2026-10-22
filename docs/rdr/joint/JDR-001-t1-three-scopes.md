@@ -194,7 +194,7 @@ Bash included), so tier 3 serves it before the file or this gate is
 consulted, and it keeps the launching session's scope as it did before.
 The gate cannot close that case; it is the cost of an env-based
 discriminator. Claude Desktop chat, which has no Claude Code session, now
-gets T1 unavailable instead of borrowing one (Cowork was not measured).
+gets T1 unavailable instead of borrowing one. Cowork is measured too (2026-10-21, a Cowork/desktop session through the remote-devices bridge): T1 unavailable. Claude Desktop sets no session id for the server it spawns, but the conversation's cloud container carries `CLAUDE_CODE_SESSION_ID`, `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=remote_cowork` together with `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS=1`, so `nx-mcp` runs on the Mac, spawned by Desktop, and never sees them.
 
 ## Owners
 

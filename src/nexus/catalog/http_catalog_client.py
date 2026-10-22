@@ -22,6 +22,8 @@ below maps to an exact ``case`` in the Java handler's switch:
   POST  /v1/catalog/delete              delete by {tumbler}  (also DELETE)
   POST  /v1/catalog/purge-trash         reclaim tombstoned rows {older_than_days, dry_run} (nexus-3ck2g)
   GET   /v1/catalog/resolve?...         resolve by file_path/source_uri/title
+  GET   /v1/catalog/by_title?title=X[&owner=P][&content_type=C][&chunk_count=N]
+                                        every live doc whose title equals X exactly (nexus-gacz0)
   GET   /v1/catalog/stats               per-tenant statistics
   POST  /v1/catalog/link               upsert link
   POST  /v1/catalog/unlink             delete link(s)
@@ -393,7 +395,14 @@ _CHASH_POSITIONS_RETRY_S: float = 600.0
 #: extra round trip per interval rather than one per search.
 _CHASH_POSITIONS_FAILURE_RETRY_S: float = 60.0
 
-#: Clock for the chash_positions backoff; a module alias so a test can move
+#: How long an engine's missing ``/by_title`` route (404/405, engines before
+#: engine-service-v0.1.163, nexus-gacz0) is trusted before it is probed again,
+#: so an old engine costs one extra round trip per interval and a process that
+#: outlives an engine upgrade starts using the route without a restart. The same
+#: shape and scale as :data:`_CHASH_POSITIONS_RETRY_S`.
+_BY_TITLE_RETRY_S: float = 600.0
+
+#: Clock for the chash_positions and by_title backoffs; a module alias so a test can move
 #: it without freezing time.monotonic for the whole process.
 _monotonic = time.monotonic
 
@@ -2093,23 +2102,63 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             want *= 4
 
     def find_by_title_exact(
-        self, title: str, *, content_type: str | None = None
+        self, title: str, *, content_type: str | None = None,
+        owner: Tumbler | str | None = None, chunk_count: int | None = None,
     ) -> list[CatalogEntry]:
         """Every live document whose ``title`` equals *title* exactly.
 
         The exact-resolution entry point nexus-fgxmk promotes out of the test
         files (``tests/test_enrich_command.py::_exact``,
-        ``tests/_catalog_fixture_ops.py::documents_by_title``): a full-text
-        :meth:`find` on the title, then an exact client-side title filter.
-        The ``'simple'`` tsquery leg keeps stopword lexemes, so a title made
-        of nothing but stopwords still matches itself. Returns a list because
-        titles are not unique across owners/collections; a caller that needs
-        exactly one asserts ``len(...) == 1`` with the candidates in the
-        message. Bounded by the engine's ``/search`` result cap — for a title
-        whose tokens match more documents than that, resolve by identity
-        (:meth:`by_source_uri` / :meth:`by_file_path`) instead.
+        ``tests/_catalog_fixture_ops.py::documents_by_title``). Returns a list
+        because titles are not unique across owners/collections; a caller that
+        needs exactly one asserts ``len(...) == 1`` with the candidates in the
+        message.
+
+        *owner* (a tumbler prefix) narrows the answer to that owner's
+        documents; *content_type* to one type; *chunk_count* to documents with
+        exactly that many chunks (``0``: the ghosts a ``store_put`` reconcile
+        wants). All are optional.
+
+        The engine answers it directly (``GET /v1/catalog/by_title``, nexus-gacz0):
+        one request, every exact match, no page cap. An engine without the route
+        (404/405, before engine-service-v0.1.163) is served by the older recipe: a
+        full-text :meth:`find_all` on the title, then an exact client-side title
+        filter (and an owner-prefix filter when *owner* is given). That path is
+        bounded by how many documents share the title's tokens, which is the cost
+        the route removes: one request for a title under 500 matches, several
+        growing ones for a title of common words. The route's absence is
+        remembered for :data:`_BY_TITLE_RETRY_S`; any other failure propagates, as
+        it did before, and is not read as absence.
         """
-        return [e for e in self.find_all(title, content_type=content_type) if e.title == title]
+        owner_prefix = str(owner) if owner else None
+        backoff = getattr(self, "_by_title_backoff", None)
+        route_absent = backoff is not None and _monotonic() - backoff < _BY_TITLE_RETRY_S
+        if title and not route_absent:
+            try:
+                result = self._get(
+                    "/by_title", title=title, owner=owner_prefix, content_type=content_type,
+                    chunk_count=chunk_count,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response is None or exc.response.status_code not in (404, 405):
+                    raise
+                self._by_title_backoff = _monotonic()
+                _log.debug("http_catalog_client.by_title_route_absent")
+            else:
+                self._by_title_backoff = None
+                # The engine matches exactly; the title and chunk-count tests are kept as
+                # the sibling lookups keep theirs, so a regressed route cannot widen a match.
+                return [
+                    e for e in self._docs_from(result)
+                    if e.title == title and (chunk_count is None or e.chunk_count == chunk_count)
+                ]
+        entries = [e for e in self.find_all(title, content_type=content_type) if e.title == title]
+        if owner_prefix:
+            prefix = Tumbler.parse(owner_prefix)
+            entries = [e for e in entries if prefix.is_prefix_of(e.tumbler)]
+        if chunk_count is not None:
+            entries = [e for e in entries if e.chunk_count == chunk_count]
+        return entries
 
     def by_file_path(
         self, owner: Tumbler | str, file_path: str
@@ -3183,15 +3232,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         )
         return False
 
-    def list_collections(self, lifecycle_state: str | None = None) -> list[dict]:
+    def list_collections(
+        self, lifecycle_state: str | None = None, content_type: str | None = None,
+    ) -> list[dict]:
         """Registry rows via ``GET /v1/catalog/collections/list``.
 
         ``lifecycle_state`` (nexus-bc7ps) is the route's exact-match filter:
         ``None`` is every state (inventory, doctor, gc), ``"live"`` is the
         routing view in which a ``quarantine-<name>`` row never appears. An
         unknown value is a 400 from the engine, never a silently empty list.
+
+        ``content_type`` (nexus-dxifx, RDR-210 Phase 4 Step 1) is the route's
+        other exact-match filter (``CatalogHandler.handleCollectionList`` has
+        taken it since RDR-204 Phase 2); ``None`` sends no filter. The route has
+        no ``owner_id`` filter, so a caller that wants one corpus's rows keeps
+        those whose ``owner_id`` matches.
         """
-        result = self._get("/collections/list", lifecycle_state=lifecycle_state)
+        result = self._get(
+            "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
+        )
         return [
             _coerce_legacy_grandfathered(c)
             for c in (result.get("collections", []) if result else [])

@@ -177,6 +177,13 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("logs/mcp.log") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log.1") is True
 
+    def test_user_hook_integrity_dir_is_allowlisted(self) -> None:
+        """The live session's user-level integrity hook writes
+        ``<name>/<session_id>/*`` per tool call, during any run launched
+        from that session; no test touches it."""
+        assert _is_allowlisted_config_dir_path("git-integrity/0c85547d-6e3f/state.json") is True
+        assert _is_allowlisted_config_dir_path("git-integrity-x/state.json") is False
+
     def test_context_l1_cache_dir_is_allowlisted(self) -> None:
         """nexus-pfuns follow-up (2026-09-25): ``context/<repo>-<hash>.txt``
         is the RDR-072 per-repo Knowledge Map cache

@@ -29,10 +29,10 @@ public interface Reranker {
     String modelToken();
 
     /**
-     * Whether this reranker has the files it needs on disk (nexus-yuh4a). This is a file-presence
-     * answer, NOT a promise that a rerank would succeed: for {@link CrossEncoderReranker} it is true
-     * when its model and tokenizer files are present, including files that are present but cannot be
-     * loaded. Read live on every call from those files, never a boot snapshot. A reranker that has no
+     * Whether this reranker has the files it needs on disk (nexus-yuh4a). NOT a promise that a rerank
+     * would succeed: for {@link CrossEncoderReranker} it is true when its model and tokenizer files are
+     * present, except files a load already failed on, which read false until either is replaced
+     * (nexus-vk1l1). Read live on every call from those files, never a boot snapshot. A reranker that has no
      * file to lose (the Voyage client) is always true; whether its key is accepted only shows on a
      * request. Must be cheap and must not throw: {@code /v1/status} calls it.
      */

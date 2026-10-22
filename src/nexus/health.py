@@ -4726,8 +4726,9 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
 
     ``GET /v1/status`` names the CHOSEN reranker in ``reranker`` even when its model files are absent and every rerank
     degrades, so the name does not say whether search is reranked. ``reranker_available`` is the engine's answer on
-    whether the reranker's model files are present, read live from the files on every response. It reports files on
-    disk, not that a rerank would succeed (present-but-unloadable files read true, and so does the Voyage reranker).
+    whether the reranker's model files are present, read live from the files on every response. Files a load already
+    failed on read false until either is replaced (nexus-vk1l1); files never tried, and the Voyage reranker, read true,
+    so true is not a promise that a rerank would succeed.
     The value is a bare boolean; the engine puts no path in it.
 
     * warn: ``reranker_available`` is false (searches are served without rerank, with a degraded-rerank field).
@@ -4764,16 +4765,207 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
     name = name if isinstance(name, str) and name else None
     if available:
         return [HealthResult(label=label, ok=True, detail=f"{name or 'the reranker'}: model files are present")]
-    which = f"the reranker ({name}): model files are absent" if name else "no reranker is configured"
+    which = (f"the reranker ({name}): model files are absent, or the last load of these files failed"
+             if name else "no reranker is configured")
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=f"{which}, so searches are served without rerank",
-        fix_suggestions=["Run `nx init --service` to provision the cross-encoder model files; the engine reads this "
-                         "row's value from those files"],
+        fix_suggestions=["If the files are absent, run `nx init --service` to provision them. If a load failed, the "
+                         "engine log's cross_encoder_reranker_init_failed event names the cause; for bad files, "
+                         "`nx init --service` again. Every rerank retries the load"],
     )]
 
 
-def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+_EMBEDDING_FAMILY_LABEL = "Embedding family"
+
+#: The model-token prefix that names each profile's family in ``/version``'s ``embedding_models``
+#: (``bge-base-en-v15-768``, ``voyage-code-3``, ``voyage-context-3``).
+_PROFILE_FAMILY_PREFIX = {"voyage": "voyage", "bge": "bge"}
+
+
+#: Per-attempt socket budget for the Embedding family row's ``GET /version`` (``_get`` defaults to 30 s,
+#: which would stall ``nx doctor`` on a hung engine; same order as config.py's ``_LADDER_PROBE_TIMEOUT_S``).
+_EMBEDDING_FAMILY_PROBE_TIMEOUT_S = 3.0
+
+
+def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-wypwq (RDR-210 Phase 3 Step 1, Technical Design 2): does the engine serve the family of its profile?
+
+    An engine told a profile it cannot serve (``voyage`` with no key, ``bge`` with no bge model files) boots
+    DEGRADED, not refused: it seeds the chosen profile, serves the family it can, and answers 422 for the other
+    family's collections. ``GET /version`` lists the model tokens it serves in ``embedding_models``. This row reads
+    the profile against that list and warns when the profile's family is absent.
+
+    The profile is the engine's own ``embedding_profile`` from the same ``/version`` body (what it seeded); an engine
+    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because a
+    managed engine has no bge files by design and the client's local intent says nothing about it. An engine that
+    reports ``embedding_mode`` ``voyage`` and no profile is voyage-only whatever the client intends, so it reads as
+    cannot tell. The fetch uses a short timeout (``_EMBEDDING_FAMILY_PROBE_TIMEOUT_S``).
+
+    * warn: ``embedding_models`` lacks the profile's family (the remedy names the key or the bge files, then a restart).
+    * warn: ``embedding_models`` is present but not a list of strings (never read as served).
+    * not applicable (ok): the engine cannot be reached, or an older engine does not report ``embedding_models``, or
+      the profile cannot be determined. "Cannot tell" is never "served" and never "degraded".
+    """
+    label = _EMBEDDING_FAMILY_LABEL
+    body: dict | None
+    if version_body is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to keep CLI startup fast
+            fetched = _get(
+                "/version", tenant=_process_default_tenant(), timeout=_EMBEDDING_FAMILY_PROBE_TIMEOUT_S,
+            )
+            body = fetched if isinstance(fetched, dict) else None
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_embedding_family_probe_failed", error=str(exc))
+            body = None
+    else:
+        body = version_body if isinstance(version_body, dict) else None
+
+    if body is None:
+        return [HealthResult(label=label, ok=True, detail="not applicable: the engine's /version could not be read")]
+    if "embedding_models" not in body:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: this engine's /version does not report the embedding models it serves "
+            "(an older engine, or one that is still starting)"))]
+    models = body.get("embedding_models")
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"the engine's embedding_models could not be read (not a list of strings; got {repr(models)[:40]})",
+            fix_suggestions=["Check that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+
+    profile = body.get("embedding_profile")
+    if profile is None and body.get("embedding_mode") != "voyage":
+        # An engine in voyage mode serves Voyage whatever this client intends, so the client's profile is
+        # no evidence about what that engine was told: only the other modes are read against it.
+        from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — deferred to avoid circular import
+        profile = local_embed_profile() if is_local_mode() else None
+    prefix = _PROFILE_FAMILY_PREFIX.get(profile) if isinstance(profile, str) else None
+    if prefix is None:
+        return [HealthResult(label=label, ok=True, detail=(
+            "not applicable: the embedding profile could not be determined for this engine"))]
+
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred to avoid circular import
+
+    served = ", ".join(models) or "no model"
+    if any(m.startswith(prefix) for m in models):
+        return [HealthResult(label=label, ok=True, detail=f"profile {profile}: its family is served ({served})")]
+    if profile == "voyage":
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"profile voyage but the engine serves {served}: it booted degraded, and every Voyage "
+                    "collection answers 422 (the engine has no Voyage key)"),
+            fix_suggestions=["Persist the key with `nx config set voyage_api_key --stdin` (or export VOYAGE_API_KEY), "
+                             f"then restart the service: `{_SERVICE_RESTART_COMMAND}`",
+                             "Or choose the local embedder (`nx init`) if Voyage was not intended"],
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
+                "answers 422 (the engine found no bge model files)"),
+        fix_suggestions=["Run `nx init --service` to provision the bge model files, then restart the service: "
+                         f"`{_SERVICE_RESTART_COMMAND}`"],
+    )]
+
+
+#: How many leaves ``nx doctor --verbose`` names before it says "and N more".
+_LEAF_LISTING_MAX = 20
+
+#: The authenticated route that names the leaves ``GET /v1/status`` only counts (nexus-i827c).
+_LEAF_LISTING_ROUTE = "GET /v1/admin/chunks-leaves"
+
+
+def _human_bytes(n: object) -> str:
+    """``1536`` as ``1.5 KiB``; a non-number as ``?``."""
+    if not isinstance(n, (int, float)) or isinstance(n, bool) or n < 0:
+        return "?"
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return "?"
+
+
+def _leaf_listing_lines(*, row_expired: bool = False) -> list[str]:
+    """The leaves of ``nexus.chunks`` that need attention, one indented line each, read from the engine's
+    operator-only ``GET /v1/admin/chunks-leaves`` (nexus-i827c); ``nx doctor --verbose`` appends them to the leaf
+    bloat row. Never raises: every way the read can fail is one line saying why, and none is an error.
+
+    * the engine predates the route (404): one line, naming the engine log as the place the names are;
+    * the credential is refused (401, 403): the route needs the operator (root) token, and the line says where to set it;
+    * anything else (unreachable, a body this client cannot read): the reason, in one line.
+
+    The body says how old its read is (``expired``, ``last_read_at``, ``consecutive_failures``). A listing from an
+    expired view (the body's, or the row's own *row_expired*) is headed STALE with the time of the last read, and an
+    empty one says nothing about now rather than that a leaf recovered; failed reads after a good one are named.
+    """
+    import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
+
+    log_hint = f"the leaf names are in the engine log ({_LEAF_BLOAT_LOG_EVENT})"
+    try:
+        from nexus.db.t2.http_token_store import HttpTokenStore, TokenAdminAuthError  # noqa: PLC0415 — deferred: only on --verbose
+    except Exception as exc:  # noqa: BLE001 — best-effort: --verbose must not crash `nx doctor`
+        return [f"      leaf listing unavailable: {type(exc).__name__}"]
+    try:
+        with HttpTokenStore() as store:
+            body = store.chunks_leaves()
+    except TokenAdminAuthError as exc:
+        status = exc.response.status_code
+        return [f"      leaf listing refused ({_LEAF_LISTING_ROUTE} answered {status}): it needs the operator (root) "
+                "token; set one with `nx config set service_token <root token>` or NX_SERVICE_TOKEN. "
+                f"Until then {log_hint}"]
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
+        return [f"      leaf listing unavailable: {type(exc).__name__}; {log_hint}"]
+    except Exception as exc:  # noqa: BLE001 — best-effort: --verbose must not crash `nx doctor`
+        _log.debug("doctor_chunks_leaf_listing_failed", error=str(exc))
+        return [f"      leaf listing unavailable: {type(exc).__name__}; {log_hint}"]
+    if body is None:
+        return [f"      this engine predates the leaf listing ({_LEAF_LISTING_ROUTE} answered 404); {log_hint}"]
+    rows = body.get("leaves")
+    if not isinstance(rows, list):
+        return [f"      leaf listing unreadable (no leaves list in the answer); {log_hint}"]
+    last_read = body.get("last_read_at") if isinstance(body.get("last_read_at"), str) else None
+    read_at = f"read at {last_read}" if last_read else "no read time given"
+    stale = body.get("expired") is True or row_expired
+    failed = body.get("consecutive_failures")
+    failed_note = (f"; the last {failed} read{'s' if failed != 1 else ''} failed, so this is from the last good read"
+                   if isinstance(failed, int) and not isinstance(failed, bool) and failed > 0 else "")
+    if not rows:
+        if stale:
+            return [f"      leaf listing STALE: the engine's view is expired ({read_at}) and its last read named no "
+                    "leaf that needs attention, which says nothing about the leaves now" + failed_note]
+        return ["      leaf listing: the engine names no leaf that needs attention (it may have recovered since "
+                f"the status counts were read; {read_at}){failed_note}"]
+    if stale:
+        head = (f"leaves needing attention, STALE: the engine's view is expired ({read_at}), so these may no longer "
+                f"be true{failed_note} (rows is what the overdue rule scales by):")
+    else:
+        head = f"leaves needing attention (from the engine, {read_at}{failed_note}; rows is what the overdue rule scales by):"
+    out = [f"      {head}"]
+    for row in rows[:_LEAF_LISTING_MAX]:
+        if not isinstance(row, dict):
+            continue
+        problems = ",".join(str(p) for p in row.get("problems") or []) or "?"
+        rows_n = row.get("rows")
+        dead_n = row.get("dead_rows")
+        vacuumed = row.get("last_autovacuum") or "never"
+        state = row.get("overdue_state") or "?"
+        pci = f"{_human_bytes(row.get('pci_index_bytes'))} in {row.get('pci_index_count', '?')} pci_ index(es)"
+        out.append(
+            f"        {row.get('leaf', '?')}: {problems}; rows {rows_n if isinstance(rows_n, int) else '?'}, "
+            f"dead {dead_n if isinstance(dead_n, int) else '?'}, last autovacuum {vacuumed}, overdue {state}, {pci}"
+        )
+    if len(rows) > _LEAF_LISTING_MAX:
+        out.append(f"        and {len(rows) - _LEAF_LISTING_MAX} more")
+    return out
+
+
+def _check_chunks_leaf_bloat(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, verbose: bool = False,
+) -> list[HealthResult]:
     """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
 
     Reads the ``chunks_leaf_bloat`` object of ``GET /v1/status``, which the engine fills from a background read of the
@@ -4806,6 +4998,12 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
     Not applicable (ok, no warning) when the engine cannot be reached, does not report the object (an older engine, or
     one still starting) or reports no leaves with no failed read (a box with nothing yet to read). A present object
     that cannot be read warns, as the Per-collection indexes row does.
+
+    ``verbose`` (``nx doctor --verbose``, nexus-i827c): when the row warns on leaves, it also reads the engine's
+    authenticated ``GET /v1/admin/chunks-leaves`` and lists each leaf that needs attention with its rows, last
+    autovacuum, overdue state and ``pci_`` index bytes (:func:`_leaf_listing_lines`). Against an engine that predates
+    the route that is one line saying so, never an error; a credential the route refuses is one line naming the
+    operator token. The default sweep reads no admin route.
     """
     label = _LEAF_BLOAT_LABEL
     status: dict | None
@@ -4895,10 +5093,12 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
         if n_disabled:
             parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
         starved_after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
+        listing = "".join(f"\n{line}" for line in _leaf_listing_lines(row_expired=expired)) if verbose else ""
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "
-                    f"log ({_LEAF_BLOAT_LOG_EVENT})"),
+                    f"log ({_LEAF_BLOAT_LOG_EVENT}), or `nx doctor --verbose` lists them with the operator token"
+                    f"{listing}"),
             fix_suggestions=[
                 f"Read the engine log for {_LEAF_BLOAT_LOG_EVENT}: one WARN per leaf names it with its problem, dead "
                 "rows and live rows (the status route is unauthenticated, so it names no leaf)",
@@ -7626,10 +7826,14 @@ def _check_tuple_lock_held(
 
     The engine census finds lock-template subspaces with a claimed row and
     ``rd`` names each live holder. Only then does the row need the claim's
-    start time, which it reads through the local nexus_diag path. A box with
-    no held lock, a virgin box included, never reaches psql and reports not
-    applicable. A managed deployment has no local diag path, so a held lock
-    there is informational, naming the holder with the duration unmeasured.
+    start time. An engine that renders ``claimed_at`` (nexus-x907o) gives it
+    on the row, and that is used first: it works the same on a local box and
+    a managed deployment. A claim with no ``claimed_at`` (an older engine, or
+    a claim made before its column) falls back to the local nexus_diag path.
+    A box with no held lock, a virgin box included, never reaches psql and
+    reports not applicable. A managed deployment has no local diag path, so a
+    held lock there with no ``claimed_at`` is informational, naming the holder
+    with the duration unmeasured.
     """
     label = _TUPLE_LOCK_HELD_LABEL
 
@@ -7673,8 +7877,9 @@ def _check_tuple_lock_held(
         )]
 
     now = datetime.now(UTC)
-    # (subspace, claimant, threshold_s)
-    held: list[tuple[str, str, float]] = []
+    # (subspace, claimant, threshold_s, started): started is the claim's start
+    # off the wire (nexus-x907o), None when the engine gave none.
+    held: list[tuple[str, str, float, datetime | None]] = []
     # A claimed subspace no template resolves might be a lock this client
     # cannot recognise; named, never silently dropped (the unmatched rule
     # _template_take_enabled states).
@@ -7702,7 +7907,7 @@ def _check_tuple_lock_held(
             # available, and a renew after the lapse is refused.
             if r.claim_state != "claimed" or not r.claimant or lease_until is None or lease_until <= now:
                 continue
-            held.append((census.subspace, r.claimant, threshold_s))
+            held.append((census.subspace, r.claimant, threshold_s, _parse_tuple_timestamp(r.claimed_at)))
 
     unresolved_note = (
         f"claimed subspace(s) with no resolvable template, not checked: {', '.join(unresolved)}"
@@ -7713,57 +7918,16 @@ def _check_tuple_lock_held(
             return [HealthResult(label=label, ok=False, warn=True, detail=unresolved_note)]
         return [HealthResult(label=label, ok=True, detail="not applicable: no lock is held")]
 
-    holders = "; ".join(f"{s} by {c}" for s, c, _ in held)
-    if diag_credentials is None:
-        from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred to avoid circular import
-        diag_credentials = resolve_diag_credentials(creds_path)
-    if diag_credentials is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        if is_local_mode():
-            # A fixable local setup gap, so a warning.
-            return [HealthResult(
-                label=label, ok=False, warn=True,
-                detail=(
-                    f"held: {holders}; hold duration not measured: no nexus_diag "
-                    "diagnostic credentials. Re-run `nx init --service` to "
-                    "backfill the diagnostic role."
-                    + (f" Also {unresolved_note}." if unresolved else "")
-                ),
-            )]
-        # A managed deployment has no local diag path by design (nexus-y3wuu).
-        # A held lock is normal, so without a duration this is informational,
-        # never a verdict either way.
-        return [HealthResult(
-            label=label, ok=not unresolved, warn=bool(unresolved),
-            detail=(
-                f"informational: held: {holders}; hold duration is not "
-                "measurable from this client on a managed deployment"
-                + (f". Also {unresolved_note}" if unresolved else "")
-            ),
-        )]
-
-    from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred to avoid circular import
-
     over: list[str] = []
     reported: list[str] = []
-    for subspace, claimant, threshold_s in held:
-        try:
-            out = run_diagnostic_sql(
-                (_lock_claim_started_sql(subspace, claimant),), diag_credentials,
-                psql_bin=psql_bin, psql_runner=diag_runner,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort per-lock; report it unmeasured, never clean
-            _log.debug("doctor_tuple_lock_held_diag_failed", subspace=subspace, error=str(exc))
-            over.append(f"{subspace} by {claimant} (hold duration not measured: {exc})")
-            continue
-        started = _parse_tuple_timestamp(out[0] if out else None)
+    # A claim whose start the engine rendered (claimed_at) is measured from the
+    # wire, so it needs no diag path and is as good on a managed deployment as on
+    # a local box. Only a claim with no start on the wire (an engine predating
+    # nexus-x907o, or a claim made before its column) goes to the diag path.
+    pending: list[tuple[str, str, float]] = []
+    for subspace, claimant, threshold_s, started in held:
         if started is None:
-            # The claim row is gone: purged past the template's
-            # claim_log_ttl_seconds, far longer than any threshold here.
-            over.append(
-                f"{subspace} by {claimant} (no claim row in tuple_claim_log: "
-                "held past the claim log's retention, or never logged)"
-            )
+            pending.append((subspace, claimant, threshold_s))
             continue
         age_s = (now - started).total_seconds()
         reported.append(f"{subspace} held {_fmt_age(age_s)} by {claimant}")
@@ -7774,15 +7938,91 @@ def _check_tuple_lock_held(
             )
 
     tail = f". Also {unresolved_note}" if unresolved else ""
+    fix = [
+        "Ask the named holder whether it is still working; a holder "
+        "that has stopped leaves the lock blocked until it releases "
+        "or stops renewing.",
+    ]
+
+    def over_text() -> str:
+        return f"{len(over)} lock(s) held past the renewal bound: " + "; ".join(over)
+
+    if pending:
+        holders = "; ".join(f"{s} by {c}" for s, c, _ in pending)
+        if diag_credentials is None:
+            from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred to avoid circular import
+            diag_credentials = resolve_diag_credentials(creds_path)
+        if diag_credentials is None:
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+            if is_local_mode():
+                # A fixable local setup gap, so a warning.
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        (over_text() + "; " if over else "")
+                        + f"held: {holders}; hold duration not measured: no nexus_diag "
+                        "diagnostic credentials. Re-run `nx init --service` to "
+                        "backfill the diagnostic role."
+                        + (f" Also {unresolved_note}." if unresolved else "")
+                    ),
+                )]
+            # A managed deployment has no local diag path by design (nexus-y3wuu).
+            # A held lock is normal, so without a duration this is informational,
+            # never a verdict either way. An engine that renders claimed_at never
+            # reaches here for its own claims; this is an older engine's claim.
+            if over:
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        over_text()
+                        + f"; also held, duration not measurable from this client: {holders}" + tail
+                    ),
+                    fix_suggestions=fix,
+                )]
+            measured = ("; ".join(reported) + "; ") if reported else ""
+            return [HealthResult(
+                label=label, ok=not unresolved, warn=bool(unresolved),
+                detail=(
+                    f"informational: {measured}held: {holders}; hold duration is not "
+                    "measurable from this client on a managed deployment"
+                    + (f". Also {unresolved_note}" if unresolved else "")
+                ),
+            )]
+
+        from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred to avoid circular import
+
+        for subspace, claimant, threshold_s in pending:
+            try:
+                out = run_diagnostic_sql(
+                    (_lock_claim_started_sql(subspace, claimant),), diag_credentials,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort per-lock; report it unmeasured, never clean
+                _log.debug("doctor_tuple_lock_held_diag_failed", subspace=subspace, error=str(exc))
+                over.append(f"{subspace} by {claimant} (hold duration not measured: {exc})")
+                continue
+            started = _parse_tuple_timestamp(out[0] if out else None)
+            if started is None:
+                # The claim row is gone: purged past the template's
+                # claim_log_ttl_seconds, far longer than any threshold here.
+                over.append(
+                    f"{subspace} by {claimant} (no claim row in tuple_claim_log: "
+                    "held past the claim log's retention, or never logged)"
+                )
+                continue
+            age_s = (now - started).total_seconds()
+            reported.append(f"{subspace} held {_fmt_age(age_s)} by {claimant}")
+            if age_s > threshold_s:
+                over.append(
+                    f"{subspace} by {claimant} (held {_fmt_age(age_s)}, over "
+                    f"{_fmt_age(threshold_s)})"
+                )
+
     if over:
         return [HealthResult(
             label=label, ok=False, warn=True,
-            detail=f"{len(over)} lock(s) held past the renewal bound: " + "; ".join(over) + tail,
-            fix_suggestions=[
-                "Ask the named holder whether it is still working; a holder "
-                "that has stopped leaves the lock blocked until it releases "
-                "or stops renewing.",
-            ],
+            detail=over_text() + tail,
+            fix_suggestions=fix,
         )]
     if unresolved:
         return [HealthResult(label=label, ok=False, warn=True, detail="; ".join(reported) + tail)]
@@ -8066,9 +8306,9 @@ def _check_tuple_sweep_freshness(
         return [HealthResult(
             label=label, ok=True,
             detail=(
-                f"{total} tenant(s), none swept yet (normal within the "
-                "first sweep interval after startup or first tuple "
-                "activity). Budget-exhaustion state is not persisted by "
+                f"{total} tenant(s), none swept yet (normal for about a "
+                "minute after engine startup, when the first pass runs, "
+                "or before a new tenant's first visit). Budget-exhaustion state is not persisted by "
                 "the engine (only logged); this row measures sweep "
                 "recency only."
             ),
@@ -11172,6 +11412,8 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
 def run_health_checks(
     git_hooks_scope: str | Path | None = None,
     engine_status: object = _ENGINE_STATUS_UNSET,
+    *,
+    verbose: bool = False,
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -11184,6 +11426,9 @@ def run_health_checks(
     failed) when the caller already fetched it, so one ``nx doctor`` run makes
     one status request for the "Ownerless writes" row and the engine-activity
     block together. Left unset, the row fetches its own.
+
+    ``verbose``: ``nx doctor --verbose``. The "Chunks leaf bloat" row then names the leaves it counts, read from the
+    engine's operator-only admin route (nexus-i827c). Off, the sweep reads no admin route.
 
     Returns (results, is_local_mode).
     """
@@ -11323,8 +11568,9 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
-    results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
+    results.extend(_check_chunks_leaf_bloat(engine_status, verbose=verbose))  # nexus-dxsjc, nexus-i827c
     results.extend(_check_reranker(engine_status))  # nexus-yuh4a
+    results.extend(_check_embedding_family())  # nexus-wypwq
     results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())

@@ -58,6 +58,32 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class HnswServingGucParityTest {
 
+    /**
+     * Deliberate {@code setSearchStatementTimeout(} calls beyond one per iterative-scan site, per file, with
+     * the reason. {@code PgVectorRepository#hybridRank}: a per-collection fan-out's lexical arm sets its bound
+     * again between the gate probe and the rank, so the rank is bounded by the budget that remains
+     * (nexus-xd2rc); the site's first bound is the paired one.
+     */
+    private static final java.util.Map<String, Integer> EXTRA_STATEMENT_BOUNDS =
+        java.util.Map.of("PgVectorRepository.java", 1);
+
+    /**
+     * Where a window the sweeps read begins: every {@code tenantScope.withTenant(} block, and the body of
+     * {@code PgVectorRepository#hybridRank}, which runs {@code hybridSearch}'s statements (and the fan-out's
+     * lexical arms) inside a transaction its callers open (nexus-xd2rc). Each window runs to the end of
+     * its enclosing method.
+     */
+    private static List<Integer> blockStarts(String body) {
+        List<Integer> starts = new ArrayList<>();
+        for (String anchor : List.of("tenantScope.withTenant(", "private Result<? extends Record> hybridRank(")) {
+            for (int at = body.indexOf(anchor); at >= 0; at = body.indexOf(anchor, at + 1)) {
+                starts.add(at);
+            }
+        }
+        starts.sort(null);
+        return starts;
+    }
+
     @Test
     void everyIterativeScanSiteAlsoSizesEfSearch() {
         Path root = Path.of("src", "main", "java");
@@ -80,6 +106,7 @@ class HnswServingGucParityTest {
                     continue; // the definitions themselves
                 }
                 iterativeSites += iter;
+                timeout -= EXTRA_STATEMENT_BOUNDS.getOrDefault(p.getFileName().toString(), 0);
                 if (iter != ef || iter != timeout || iter != planMode || iter != budget) {
                     unpaired.add(p.getFileName() + ": " + iter
                         + " iterative_scan site(s) vs " + ef + " setHnswEfSearch call(s) vs "
@@ -146,8 +173,7 @@ class HnswServingGucParityTest {
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
-                for (int at = body.indexOf("tenantScope.withTenant("); at >= 0;
-                     at = body.indexOf("tenantScope.withTenant(", at + 1)) {
+                for (int at : blockStarts(body)) {
                     // Window = the rest of the enclosing method (closing brace at
                     // member indent), so a later helper DEFINITION is never read as
                     // a call of the block above it.
@@ -206,8 +232,7 @@ class HnswServingGucParityTest {
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
-                for (int at = body.indexOf("tenantScope.withTenant("); at >= 0;
-                     at = body.indexOf("tenantScope.withTenant(", at + 1)) {
+                for (int at : blockStarts(body)) {
                     int end = body.indexOf("\n    }\n", at);
                     String block = body.substring(at, end < 0 ? body.length() : end);
                     for (int it = block.indexOf("\"hnsw.iterative_scan\""); it >= 0;

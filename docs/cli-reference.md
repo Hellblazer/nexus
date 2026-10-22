@@ -652,6 +652,8 @@ Document rows (year, authors, venue, citation count, backend id), so
 
 Batch-extract structured aspects (problem formulation, proposed method, datasets, baselines, results, extras) for documents in a `knowledge__*` collection. Iterates the catalog (one entry per source document, NOT per chunk) and calls the synchronous extractor directly, bypassing the post-document hook chain to avoid double-firing on documents already triggered at ingest. Aspects land in T2 `document_aspects`.
 
+**Input bound (nexus-95qz4).** A model-backed extractor reads at most 150,000 characters of a document, the head first. A whole PDF once overflowed the model's context, and that document got null fields on every run. The text is cut there, the cut is marked in what the model reads (it is told to leave a field null when its evidence would come after the cut, and to lower its confidence), an `aspect_extractor_content_truncated` warning is logged, and the record carries `extras.input_truncated` with `kept_chars` and `total_chars` so a partial record can be told from a full one. A batch of documents is split into calls whose document text together stays within the same budget. The deterministic `rdr__` parser reads the whole file and has no bound.
+
 **GAP-FILL IS THE DEFAULT (7.18.0, `nexus-ym9ey`).** A bare invocation processes
 only documents with NO aspect row. Before 7.18.0 it re-extracted the entire
 collection every time: three consecutive runs over the same `rdr__` collection
@@ -1608,7 +1610,11 @@ A write that names the tombstoned collection directly is refused with an error
 naming its successor, and `nx index repo` stops the same way with the remedy
 (nexus-wwuzp). A long-running process that registered the old name before the
 rename checks its cached registration again within 60 s; before 7.67.0 it kept
-writing chunks under the tombstone.
+writing chunks under the tombstone. Since engine-service-v0.1.163 the engine itself
+refuses such a write with 409 `collection_superseded` naming the successor: chunk and
+manifest writes (nexus-mp8ys), and taxonomy, aspect, highlight and aspect-queue writes
+(nexus-i15oc). The client raises `SupersededCollectionWriteError` and never re-registers
+the retired name.
 
 ### nx catalog migrate-fallback
 
@@ -1923,7 +1929,7 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to move any
 
 **Who expires what.** The move frees no storage: moved chunks sit in a `quarantine-*` collection (these collections appear in `nx collection list`) until they expire, and each side expires what it moved (Sam, 2026-10-01), with one engine-side exception for `knowledge__*` (below, Sam, 2026-10-04).
 
-- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` uses only the row-derived name and `quarantine-<collection>`, with no such query, so a chunk stranded under any other name waits for `nx t3 gc`). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. The expiry is the bounded, request-keyed drain (RDR-222 Amendment A1, nexus-1579m): pages of 2,000 rows, each committed on its own, each sent with an `Idempotency-Key` so a resend after a timeout cannot repeat it. `nx t3 gc` runs it strict: a drain that stops short, an error on the first page, or a page that fails after earlier ones committed is an exit 1 that names the pages and rows that did expire and, for a page the request ledger could not settle, its request key (`GET /v1/requests/<key>` says whether it committed); a page that committed with its count lost makes the line read `at least N expired`, and a refused count the engine did not give reads `refused unknown`. `nx index repo` runs the same loop non-strict: it logs a failed page and carries on. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
+- **The client expires the chunks the client moved**, once they are older than `NX_GC_QUARANTINE_DAYS` (default 14), with no fraction floor (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, and `NX_GC_FLOOR_FRACTION` / `NX_GC_FORCE` do not apply to the expiry). `nx index repo` runs that expiry at the end of its prune for the repo's `code`, `docs` and `rdr` collections. `nx t3 gc` runs it for any collection it moves, after its own move and also on a run with nothing to move, so a `knowledge__*` quarantine (which no repo index sweeps) expires too. The sibling is not only the one the catalog row names today: `nx t3 gc` asks the engine which quarantine collections hold the collection's chunks and expires from each (`nx index repo` reaches the same siblings from its first restore page of a collection, since `engine-service-v0.1.163` (nexus-wbfpw.64), where the engine answers the question inside the route; against an older engine it keeps the row-derived name and `quarantine-<collection>` only, so a chunk stranded under any other name waits for `nx t3 gc`, which falls back to its dry-run probe). Its output is one line per sibling it tried, `Client expiry of <quarantine> ...: N expired, M refused`, with that sibling's own counts, where refused counts the chunks the manifest references again, always kept. A bulk quarantine of any size expires with no extra flag. The expiry is the bounded, request-keyed drain (RDR-222 Amendment A1, nexus-1579m): pages of 2,000 rows, each committed on its own, each sent with an `Idempotency-Key` so a resend after a timeout cannot repeat it. `nx t3 gc` runs it strict: a drain that stops short, an error on the first page, or a page that fails after earlier ones committed is an exit 1 that names the pages and rows that did expire and, for a page the request ledger could not settle, its request key (`GET /v1/requests/<key>` says whether it committed); a page that committed with its count lost makes the line read `at least N expired`, and a refused count the engine did not give reads `refused unknown`. `nx index repo` runs the same loop non-strict: it logs a failed page and carries on. A T3 handle with no expire route prints `Client expiry of <quarantine> did NOT run: ...` on stderr, and a failing sibling exits 1 naming what the earlier siblings already expired. The client expiry leaves chunks the engine's reaper tagged alone. In a `knowledge__*` quarantine, `NX_GC_QUARANTINE_DAYS` is not the only clock: on an engine that expires client-moved knowledge quarantine (below), a value above 14 does not keep the rows past the engine's own retention.
 - **The engine expires the chunks its reaper moved**, on its own retention (`NX_REAPER_QUARANTINE_RETENTION_DAYS`, default 14), in every sibling.
 - **The engine also expires the chunks a client moved, in `quarantine-knowledge__*` siblings only** (nexus-wbfpw.75), because no repo index sweeps a knowledge collection and these rows used to wait for a hand-run `nx t3 gc`. Its retention is its own, `NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS` (default 14, an engine setting: the engine cannot see your `NX_GC_QUARANTINE_DAYS`), counted from the row's own `quarantined_at`. It keeps every chunk the origin's manifest references, has no fraction floor, and is audited as `gc_audit` operation `reaper_expire_client_quarantine` (`nx catalog gc-audit list --operation reaper_expire_client_quarantine --json`), distinct from `reaper_expire_quarantine` for the rows the reaper moved. Code, docs and rdr quarantine is never touched by it, and neither is a knowledge row whose sibling or origin is not registered as such (the origin must be live). Your `NX_GC_QUARANTINE_DAYS` does not govern these rows on an engine that carries it: set it to 60 and the engine still deletes a knowledge row at 14 days. Your `nx t3 gc` expiry still works beside it: the engine's rows are a strict subset of what yours would take, and a row one took is simply absent to the other. An engine without this change expires none of these rows; only your `nx t3 gc` does.
 
@@ -2337,10 +2343,10 @@ A note whose text is too large for the collection's embedding model's token wind
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
-| `-n` / `--limit NUM` | Maximum entries to show (default: 200) |
-| `--offset N` | Skip this many entries (for pagination) |
-| `--docs` | Show unique documents instead of individual chunks |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`, every live `knowledge__*` collection: lists them with their sizes, as MCP `store_list` does; name one to page its entries) |
+| `-n` / `--limit NUM` | Maximum entries to show (default: 200); applies once a collection is named |
+| `--offset N` | Skip this many entries (for pagination); applies once a collection is named |
+| `--docs` | Show unique documents instead of individual chunks; applies once a collection is named |
 | `--reapable` | List the chunks the engine's reapable predicate selects in `--collection` (RDR-192 Step 10, nexus-wbfpw.19); see below |
 
 **`list --reapable`.** Read-only: it lists the chunks `nx t3 gc` would quarantine now, from the engine route `POST /v1/vectors/reapable` with the engine's default 30 day grace (a lock-free snapshot, so it is advisory: it can differ from what a later `gc` moves). It requires an explicit `--collection` (omitting it is a usage error, so an audit never silently targets the default `knowledge` collection), and it cannot be combined with `--docs` or `--offset`; `--limit` bounds the rows shown and a notice says when more exist. Each row prints the chunk's `chash`, `ownerless_since`, the age in days since that instant, `last_written_at`, `created_at`, `title` and `catalog_doc_id` (`-` when the chunk's metadata names none). `ownerless_since` is the grace clock the engine uses: the later of `last_written_at` and when the chunk last lost an owner (`nexus.chunk_orphaned_at`), so the age answers "how long has this chunk been ownerless" and is at least the 30 day grace for every listed chunk. An engine older than the field omits it, and the age then falls back to time since the last write (which can overstate how long the chunk has been ownerless). `created_at` is write-once and never the grace clock, so no age is derived from it. A name that no T3 collection or catalog registration carries is refused ("no collection named ..."), as `nx t3 gc` refuses it, instead of printing `0 reapable chunks`. When nothing is reapable in a known collection it prints `0 reapable chunks in <collection>` and exits 0. Needs an engine that carries the route (the same engine tag as `nx t3 gc` above); an older engine gets an error saying so.
@@ -2358,7 +2364,7 @@ Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` dig
 
 Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row via a chash-keyed, best-effort reap, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. **The reap now runs BEFORE the T3 chunk delete, not after (RDR-191 F10c, nexus-o8dil.5).** The engine's delete is anti-join-scoped: it refuses to remove a chunk that any live catalog manifest row still references, including the note's own not-yet-tombstoned row, so reaping first is what lets the ordinary single-owner delete succeed at all.
 
-For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything.
+For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything. When another collection that `nx store get` with the same `--collection` reads holds the id (a live model sibling, or for bare `knowledge` any knowledge collection), the error adds `it is in S: pass --collection S` (nexus-9ts7n); `--title` does the same for chunks with that title (nexus-jald5). The delete itself never reaches into another collection.
 
 When the chash's catalog lookup is ambiguous (more than one candidate catalog document shares it), the reap deliberately declines to tombstone anything: nothing is guessed (nexus-5axey). That is no longer a benign no-op: with no live-manifest-row retracted, the engine's anti-join then refuses the chunk delete, and the command exits non-zero instead of silently leaving a ghost catalog row behind:
 
@@ -2386,7 +2392,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`, every live `knowledge__*` collection, the scope `search` uses; a shorthand also reads every live model sibling) |
 | `--json` | Output as JSON |
 
 **`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name when no conformant counterpart exists; nexus-sis0m.5)
@@ -2680,7 +2686,7 @@ nx collection list
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). The new collection takes the content type and owner its name implies, and each note's `chroma://<old>/<title>` source URI is rewritten to the new name in the same transaction; a rewrite onto a URI a live document already holds is refused (nexus-sis0m.3; needs an engine carrying it, older engines copy the old owner and leave URIs) |
-| `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
+| `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the engine embeds by the model the collection's catalog row records (by the model its name encodes only when no row backs the name or the row records none), so a `--to` that differs from that model fails loud, `--dry-run` included, instead of stamping a model the engine did not use (nexus-dxifx); cross-model moves re-index from source into a collection named for the new model. `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
 | `shape [--json] [--full]` | Read-only audit of the whole collection SET against the rules in [docs/collections.md](collections.md): placeholder, date-like, task-or-document-shaped, and source-app subjects, the `default` corpus, likely duplicate subjects (name evidence; confirm with `merge-candidates`), a model the install no longer writes with, a stored dimension that disagrees with the name's model (the GH #667 class), thin and one-document collections, fan-out-floor casualties, test residue, ghost rows, grandfathered relics, blank catalog attributes, superseded-but-live, chunks with no catalog row. One finding per violation with a proposed action; the human view lists at most 10 collections per check, `--full` lists every one, `--json` always carries all; never writes, never calls a model; a read failure is an error, never an empty report (nexus-ger23) |
@@ -2721,7 +2727,7 @@ takes ~25–70 minutes against the pgvector service. Maintenance-window operatio
 
 | Flag | Description |
 |------|-------------|
-| `--to MODEL` | Target embedding model (required): `voyage-3`, `voyage-code-3` or `voyage-context-3` (the last since nexus-tysei). In service mode it must be the model the collection name encodes |
+| `--to MODEL` | Target embedding model (required): `voyage-3`, `voyage-code-3` or `voyage-context-3` (the last since nexus-tysei). In service mode it must be the model the collection's catalog row records, or the model its name encodes when no row backs the name or the row records none |
 | `--dry-run` / `--no-dry-run` | Default `--dry-run`; pass `--no-dry-run` to actually write |
 | `--yes` | Skip the destructive-action confirmation prompt |
 
@@ -2913,9 +2919,11 @@ headless host where the unit can't activate) a session supervisor starts instead
 the service reads and records it in `~/.config/nexus/config.yml` under
 `local.embed_model`. The RDR-144 two-choice picker (bge-768 / minilm-384) was
 removed at RDR-174 P1.3, so `nx init` asks no embedder question. A keyless
-local engine serves bge-768 only and a keyed one serves Voyage only; MiniLM is
-never served locally, and a collection the running engine cannot embed for is
-refused (422). A fresh, bge or minilm
+local engine serves bge-768 only. A keyed one serves Voyage, and bge-768 beside
+it when the bge model files are present and the engine is at or above
+`engine-service-v0.1.161` (it boots `dual`); a key with no bge files serves
+Voyage only. MiniLM is never served locally, and a collection the running
+engine cannot embed for is refused (422). A fresh, bge or minilm
 `local.embed_model` is stamped `BAAI/bge-base-en-v1.5` (one-time ~140 MB model
 download). If `local.embed_model` already holds a `voyage-*` value, `nx init`
 keeps it and says so, adding a second line when no Voyage key is configured
@@ -2937,10 +2945,13 @@ In local mode `nx init` also:
    because the service cannot boot without the file; re-run when online.
 3. **Migrates nothing.** The safe 384-to-768 collection migration it once
    offered went with the picker (RDR-174 P1.3). `nx init` never re-embeds or
-   deletes a collection. The engine serves one embedding family per boot, so
-   collections embedded with the other family stop serving after a restart
-   until it is switched back or they are re-indexed; RDR-210 tracks the
-   dual-mode engine that serves both side by side. Details under "Local mode
+   deletes a collection. An engine that has both a Voyage key and the bge
+   files, at or above `engine-service-v0.1.161`, serves both families side
+   by side, so a restart strands neither. An engine with only one of them
+   (no key, no bge files, or an older tag) serves one family and answers 422
+   for collections of the other until the missing piece is supplied or they
+   are re-indexed; `nx doctor`'s "Embedding family" row warns when the
+   engine serves no model of its profile's family. Details under "Local mode
    with Voyage" below.
 
 **Cloud mode** is a no-op: embeddings run server-side via Voyage. `nx init`
@@ -2964,10 +2975,27 @@ The engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
 resolves it from the credential chain and injects it into the native
 binary's environment), so **a restart is required** after either command
 above for the change to take effect — `nx config set` alone does not
-reach an already-running engine. Once restarted, the engine boots into
-Voyage-only mode for every collection (no local ONNX fallback), and
-`nx index`/`nx store` mint `voyage-code-3`/`voyage-context-3` collection
-names to match, exactly like cloud mode.
+reach an already-running engine. Once restarted, the engine serves Voyage
+collections, and `nx index`/`nx store` mint `voyage-code-3`/`voyage-context-3`
+collection names to match, exactly like cloud mode. The supervisor also tells
+the engine this profile through `NX_EMBED_PROFILE`, taken from the same
+function the client's write model reads, and an `NX_EMBED_PROFILE` in your own
+environment is overridden. Whether the engine still serves bge-768
+collections beside the Voyage ones depends on the bge model files, which
+`nx init` fetches: with them, an engine at or above `engine-service-v0.1.161`
+boots `dual`; without them it serves Voyage only (no local ONNX fallback).
+
+**When the supervisor passes the key (nexus-wypwq).** The supervisor reads the
+tag of the engine binary it is about to spawn from the install receipt beside
+`nexus-service`. At or above `engine-service-v0.1.161` it passes the key from
+the credential chain whenever there is one, whatever `local.embed_model` says,
+so a bge choice with a key boots a dual engine too: Voyage-named collections
+are served, and a query that touches them calls Voyage. Below that tag, or
+with no verified receipt (a `NEXUS_SERVICE_BIN` or `NEXUS_SERVICE_JAR`
+launch, a missing or unreadable receipt), the older rule stands: the key
+passes only when `local.embed_model` names a Voyage model or records none
+(nexus-r5f3c), because a key flips an older engine Voyage-only. An explicit
+`NX_VOYAGE_API_KEY` in your environment always passes through.
 
 **What happens to a corpus you already indexed under bge/minilm** depends
 on whether the key is configured yet, not just on `local.embed_model`:
@@ -2977,7 +3005,7 @@ on whether the key is configured yet, not just on `local.embed_model`:
 | bge/minilm (default) | — | bge/minilm collection, as always | bge/minilm collection, as always |
 | voyage-* | absent | finds the existing bge/minilm collection | **grandfathers onto the existing bge/minilm collection** (the engine has no key yet, so it's still serving bge — writing there still works) |
 | voyage-* | present, no voyage collection yet | finds the existing bge/minilm collection | **targets the voyage collection — a NEW sibling**, never the old bge/minilm one |
-| voyage-* | present, voyage collection already exists | **finds ONLY the voyage collection** — the bge/minilm one is no longer checked, even if it still holds data (see caveat below) | targets the (already-existing) voyage collection |
+| voyage-* | present, voyage collection already exists | picks the voyage collection; reads also look in every live sibling of the corpus, the bge/minilm one included (see caveat below) | targets the (already-existing) voyage collection |
 
 The "targets a new sibling" row is the one to plan around: once the key is
 configured (whether or not the engine has been restarted yet), a write
@@ -2985,25 +3013,26 @@ does not extend your existing bge/minilm corpus — it starts a separate
 `voyage-code-3`/`voyage-context-3` collection alongside it. Indexing
 without a configured `voyage_api_key` in this state fails loud at write
 time rather than silently falling back to bge. Pre-existing bge/minilm
-collections are never deleted or migrated automatically; once the engine
-is actually restarted and running voyage-only, they become unreadable
-through it entirely (not just unwritable) until you reindex — so switch
-before you have a corpus you care about, or budget time to reindex it
-into the new voyage collection.
+collections are never deleted or migrated automatically. On a dual engine
+(the usual case: `nx init` fetches the bge files) a bge-768 collection stays
+readable and writable through the restarted engine; only a Voyage-only
+engine (no bge files, or a tag below `engine-service-v0.1.161`) makes them
+unreadable through it entirely (not just unwritable) until you reindex, so
+if yours is one of those, budget time to reindex into the new voyage
+collection.
 
-**Caveat — reads stop checking bge once a voyage sibling exists.** The
-"finds the existing bge/minilm collection" read behavior above holds only
-*until* the first keyed write creates the voyage collection. From that
-point on, reads resolve directly to the voyage collection and never fall
-back to check bge again — even though the bge collection is still there
-and may still hold data nothing has migrated. `nx search`/`nx store list`
-resolve to ONE physical collection per corpus, so this is not a
-multi-collection merge; anything left in the old bge collection after a
-keyed write is effectively invisible to reads until you reindex it into
-the voyage collection. This is the same underlying gap tracked as a
-follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
-restart) — that bead's scope now explicitly includes this stale/orphaned
-bge-data-after-a-keyed-write case, not just the engine-restart case.
+**Caveat — once a voyage sibling exists, a shorthand name picks it, and only reads look further.**
+The first keyed write creates the voyage collection, and the single-name
+resolver picks it from then on. Reads look in every live sibling of a
+shorthand name such as `art` or `knowledge__art` (found by the collections'
+catalog rows): the MCP `search`, `query`, `store_get`, `store_list` and
+`store_get_many` tools (nexus-50uw6), `nx search --corpus`, and `nx store get`,
+which names the sibling it found the entry in, and `nx store list`, which pages
+the picked collection and names its siblings so you can list one by name
+(nexus-9ts7n). `nx store delete` and MCP `store_delete` stay in the one
+collection they resolve; when an `--id` or a `--title` is not there but a sibling
+holds it, the error names the `--collection` to pass. The Voyage-only flip after a restart
+(nexus-ddmfg) now applies only to an engine that cannot serve both families.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
 already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision
@@ -3011,9 +3040,12 @@ leg leave it alone and say so (with a second line when no Voyage key is
 configured); they used to write it back to
 bge-768, which stranded the Voyage collections at the next service restart. To
 go back to bge-768 on purpose, run `nx config set local.embed_model
-BAAI/bge-base-en-v1.5` and restart the service; nothing checks first, and the
-Voyage collections stop serving until you switch back. The engine still serves
-one posture per boot; RDR-210 tracks the dual-mode engine.
+BAAI/bge-base-en-v1.5` and restart the service; nothing checks first. New
+collections are then minted for bge. Whether the Voyage collections keep
+serving depends on the restarted engine: one that is dual (a tag of
+`engine-service-v0.1.161` or later read from the install receipt, a configured
+key, the bge files) serves both families, and any other boots with one family
+and answers 422 for the other's collections until you switch back.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on
@@ -3412,6 +3444,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff, plus one confirming HEAD after an ETag mismatch — about 81.5s worst case per document, so `ceil(sample / min(8, sample)) * 81.5s` worst case for the whole run (~163 s at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. A host that mints a fresh `ETag` on every response (no stable validator, which `backfill-etags` cannot fix) reads `unknown`, not `stale`: an `https://` ETag mismatch is confirmed with one more HEAD, and an ETag that changes again while `Content-Length` holds (or is absent from both) and no `Last-Modified` is sent is reported as an unstable validator (nexus-ltrjf); a second ETag equal to the recorded one reads `fresh`. A mismatch the second HEAD repeats, or one where the length also moved, stays `stale`, so a fresh-ETag host whose length also varies still reads `stale`. A real change can read `unknown` this way (a same-length rewrite behind per-node ETags, or a page edited between the two HEADs) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
+| `--verbose` | Main sweep only: add the detail the sweep leaves out (nexus-i827c). The Chunks leaf bloat row, when it warns, lists each leaf of `nexus.chunks` that needs attention, read from the engine's operator-only `GET /v1/admin/chunks-leaves` (needs the root service token). A listing from an expired engine view is headed `STALE` with the time of its last read. Ignored by the `--check-*` modes. This is the `nx doctor` flag, not the global `-v`/`--verbose` that turns on debug logging (it is a different flag: `nx -v doctor` and `nx doctor --verbose` do different things) |
 
 **Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ naming `nx doctor --fix`, and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
@@ -3912,7 +3945,13 @@ fraction, which autovacuum leaves alone, is not overdue. Rows is the larger of t
 estimate (`pg_class.reltuples`, the figure autovacuum scales by), so a leaf whose counters a crash or restore zeroed is judged on the estimate. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
 rows remain) or `starved` (overdue for `overdue_warn_after_seconds` with no vacuum finished), how many lack any of the four autovacuum
 settings, and how many have `autovacuum_enabled` off; a `waiting` leaf passes with a note. The warning says the leaf names are in the
-engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. It also warns when the
+engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. `nx doctor --verbose`
+(nexus-i827c) names them from the engine instead: when the row warns, it reads the operator-only `GET /v1/admin/chunks-leaves` and lists each
+leaf that is pinned or starved, lacks one of the four autovacuum settings or has autovacuum off, with its rows, dead rows, last autovacuum,
+overdue state and `pci_` index bytes (the first 20, then a count of the rest). The route needs the root token (a tenant or mint token is 403,
+no credential 401; the row says so and where to set one, `nx config set service_token <root token>` or `NX_SERVICE_TOKEN`); against an engine
+that predates it (404) the row prints one line saying so, never an error. A listing read from a view that has `expired` (the body's flag or the row's own) is headed `STALE` with the time of the last read, and an empty one then says so instead of saying the leaves recovered; failed reads after a good one are named. The default sweep reads no admin route, and `--verbose` is ignored by
+the `--check-*` modes. `--verbose` here is the `nx doctor` flag, not the global `-v`/`--verbose` (debug logging). It also warns when the
 engine's view has `expired`, and when its reads have failed since it started and none has succeeded (`ever_read`, `consecutive_failures`).
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
@@ -3920,11 +3959,13 @@ and managed mode alike, over HTTP only; it is not the local-only tuples-bloat ro
 **Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
 body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
 whether search is reranked; `reranker_available` is the engine's answer on whether the reranker's model files are present, read live
-from the files on every response. It reports files on disk, not that a rerank would succeed: files that are present but cannot be
-loaded, and the Voyage reranker, read true. The row warns when it is false, naming the reranker, and says to run
+from the files on every response. Files a load already failed on read false until either is replaced (nexus-vk1l1); files never
+tried, and the Voyage reranker, read true, so true is not a promise that a rerank would succeed. The row warns when it is false, naming the reranker, and says to run
 `nx init --service`; the value is a bare boolean and carries no path. A value that is not a boolean warns. Not
 applicable (green) when the engine cannot be reached or an older engine does not report the key, which is "cannot tell", never "available".
 It works in local and managed mode alike, over HTTP only.
+
+**Embedding family (nexus-wypwq, RDR-210 Phase 3 Step 1).** `nx doctor`'s "Embedding family" row reads `GET /version`. An engine told a profile it cannot serve boots degraded, not refused: it seeds the profile, serves the family it can, and answers 422 for the other family's collections. The row takes the engine's own `embedding_profile` (an engine that does not report one is read against this client's `local_embed_profile()`, in local mode only, and not at all when it reports `embedding_mode` `voyage`) and warns when `embedding_models` has no model of that family: a `voyage` profile with no key (persist one with `nx config set voyage_api_key --stdin`, then restart the service) or a `bge` profile with no bge model files (`nx init --service`, then restart). Not applicable (green) when the engine cannot be reached, an older engine does not report `embedding_models`, or the profile cannot be determined, which is "cannot tell", never "served". A value that is not a list of strings warns. It works in local and managed mode alike, over HTTP only.
 
 **Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
 threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
@@ -4886,7 +4927,7 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea). Each row prints `sender_session` (text and JSON) when the engine sent the key: the session the engine recorded for the write, null when it recorded none, absent from an engine at v0.1.162 or earlier. It is the raw stamp, with no `unverified`/`unattested` mark; the drain hook and the channel apply those (see [Tuple Space](tuple-space.md)).
 
 ### nx tuple in
 
@@ -4979,7 +5020,7 @@ The boot-loaded template registry: digest, source directories, and the registere
 nx tuple list [--prefix PREFIX] [--limit N] [--after CURSOR] [--json]
 ```
 
-Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`dead`/`consumed`/`expired_unpurged`. Unpaged by default — every matching subspace, exactly as before this paging addition (bead nexus-xapt8). With `--limit`, a truncated page prints a `next: --after=<cursor>` hint line (under `--json`, the array's last element is `{"next_cursor": "..."}` instead); pass that cursor back as `--after` to continue. Results are always ordered by subspace name.
+Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`lapsed`/`dead`/`consumed`/`expired_unpurged` (`lapsed` is the part of `claimed` whose lease has passed on the engine's clock). Unpaged by default — every matching subspace, exactly as before this paging addition (bead nexus-xapt8). With `--limit`, a truncated page prints a `next: --after=<cursor>` hint line (under `--json`, the array's last element is `{"next_cursor": "..."}` instead); pass that cursor back as `--after` to continue. Results are always ordered by subspace name.
 
 | Flag | Description |
 |------|-------------|
@@ -4994,7 +5035,7 @@ Concrete tuple subspaces that exist, optionally filtered to those starting with 
 nx tuple stats SUBSPACE [--json]
 ```
 
-The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`, `expired_unpurged`, `oldest_created_at`, `newest_created_at`.
+The census for one subspace: `total`, `available`, `claimed`, `lapsed`, `dead`, `consumed`, `expired_unpurged`, `oldest_created_at`, `newest_created_at`.
 
 | Flag | Description |
 |------|-------------|
@@ -5122,6 +5163,12 @@ toward `fallback`, and the per-row listing renders it `fallback` rather
 than the misleading `plan=0`. (This per-row display convention is separate
 from the `--steps` by-plan grouping key — see below.)
 
+The run log's `plan_id` is the MATCHED plan only. A run that missed and grew
+a plan shows `plan_id = 0` here, while the `nx_answer` `structured=True`
+envelope for the same call carries the id of the plan it saved (0 when
+no row was saved, for example ttl 0, a failed save, or a run that ended before a plan was grown). The two agree on a library match
+and differ on a grown-on-miss run by design (nexus-wvz8i).
+
 `created_at` is stamped by the ENGINE's clock, not this machine's. A run
 recorded moments ago may not appear for a sub-second-precision `--since`
 value if this machine's clock and the engine's have drifted by even a few
@@ -5207,7 +5254,10 @@ executed-failed with `--include-failed`; see above):
 - **by plan** (keyed by `plan_id` as a string, or `"fallback"` for a
   genuine planner-error miss with no `plan_id` at all — `plan_id=0`, the
   ad-hoc inline-planner sentinel, gets its OWN `"0"` key, distinct from
-  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`.
+  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. The
+  key is the run log's matched plan, so a run that grew and saved a plan
+  still lands under `"0"` even though its `nx_answer` envelope reported the
+  saved id.
 - **cost-consistency violations**: rows where a row's own `cost_usd`
   disagrees with `sum(steps.cost_usd)` beyond a relative epsilon (0.5%,
   sub-cent absolute floor — a literal to-the-cent tolerance is too loose

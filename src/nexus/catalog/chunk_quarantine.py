@@ -49,7 +49,7 @@ First concrete piece of the RDR-156 soft-delete theme (nexus-70r3c).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -314,6 +314,73 @@ def restore_rereferenced_serverside(db: Any, quarantine_name: str, origin_name: 
     return fn(quarantine_name, origin_name)
 
 
+@dataclass
+class SiblingResolution:
+    """What the engine said about an origin's quarantine siblings, read off the FIRST page of a bounded drain
+    that asked (``resolve_siblings``; nexus-wbfpw.64). One instance may be shared by the restore and the expiry of one
+    collection: the move between them writes only the caller's own sibling, so the first answer holds for both.
+
+    ``status`` is how the engine answered, and tells an engine that has the field from one that does not by the
+    response, never by version:
+
+    * ``"unasked"``: no page has asked yet.
+    * ``"resolved"``: the engine answered ``quarantine_collections``; ``names`` is that list (the reaper's own name for
+      the origin when registered, then every other quarantine collection holding a chunk tagged with the origin).
+    * ``"timed_out"``: the engine has the field but its read ran into its statement bound
+      (``sibling_resolution: "timed_out"``). The list is unknown, and asking again by any scan would hit the same bound.
+    * ``"predates"``: the page was answered with neither key: an engine from before nexus-wbfpw.64 (v0.1.162 and
+      earlier), which ignored the field.
+    * ``"unknown"``: the first page committed but its answer was lost, so nothing can be said; it is asked again.
+    """
+
+    status: str = "unasked"
+    names: list[str] = field(default_factory=list)
+
+    def wants_asking(self) -> bool:
+        return self.status in ("unasked", "unknown")
+
+    def read(self, result: Any) -> None:
+        """Record the answer of a page that asked. Only a dict answer can carry either key."""
+        if not isinstance(result, dict):
+            self.status = "predates"
+        elif result.get("committed_unknown_counts"):
+            self.status = "unknown"
+        elif isinstance(result.get("quarantine_collections"), list):
+            self.status = "resolved"
+            self.names = [n for n in result["quarantine_collections"] if isinstance(n, str)]
+        elif result.get("sibling_resolution") == "timed_out":
+            self.status = "timed_out"
+        else:
+            self.status = "predates"
+
+
+def _warn_resolution_timed_out(origin_name: str) -> None:
+    _log.warning(
+        "quarantine_sibling_resolution_timed_out",
+        collection=origin_name,
+        using="row-derived and reaper names only; a sibling stranded under another name waits for the next run",
+    )
+
+
+def siblings_after_first_page(
+    db: Any, origin_name: str, primary: str, resolution: SiblingResolution, *, probe_fallback: bool = False,
+) -> list[str]:
+    """The siblings to go on with once the first page (which was *primary*'s) has answered, *primary* first.
+
+    ``resolved``: the engine's list, with no derived guess added (the engine knows whether the reaper's name is
+    registered). Anything else is the old behaviour exactly: the derived names, plus, only when *probe_fallback* and
+    the engine did not answer the field (an engine that predates it, or a lost answer), the dry-run probe of
+    :func:`resolve_quarantine_siblings`. A ``timed_out`` engine is never probed: the probe is the same scan, with no
+    bound of its own."""
+    if resolution.status == "resolved":
+        return list(dict.fromkeys([primary, *resolution.names]))
+    if resolution.status == "timed_out":
+        _warn_resolution_timed_out(origin_name)
+        return resolve_quarantine_siblings(db, origin_name, primary=primary)
+    probe = probe_fallback and resolution.status in ("predates", "unknown", "unasked")
+    return resolve_quarantine_siblings(db, origin_name, primary=primary, probe_engine=probe)
+
+
 #: Absolute ceiling on drain-loop iterations for BOTH bounded GC loops
 #: (nexus-e8h5x review round 2, code-review SIGNIFICANT finding): a
 #: server-side bug, or a collection under enough concurrent write pressure
@@ -378,6 +445,7 @@ GC_EXPIRE_ROW_LIMIT_DEFAULT = 2000
 
 def restore_rereferenced_bounded_serverside(
     db: Any, quarantine_name: str, origin_name: str, row_limit: int = GC_RESTORE_ROW_LIMIT_DEFAULT,
+    *, resolution: SiblingResolution | None = None,
 ) -> int | None:
     """Try the server-side BOUNDED restore (nexus-e8h5x), looping until
     drained. Total restored count, or ``None`` if the bounded route is
@@ -408,6 +476,10 @@ def restore_rereferenced_bounded_serverside(
     WARNING naming the collection and the still-outstanding ``remaining``
     and returns the partial total — never raises, since a partial drain is
     still real, useful progress.
+
+    With *resolution* (nexus-wbfpw.64) the FIRST page also asks the engine for the origin's quarantine siblings
+    (``resolve_siblings``) and *resolution* records the answer (:meth:`SiblingResolution.read`); later pages do not
+    ask. Without it the call is exactly what it was, so a client object that does not take the keyword is never sent it.
     """
     fn = getattr(db, "gc_restore_rereferenced_bounded", None)
     if fn is None:
@@ -415,8 +487,14 @@ def restore_rereferenced_bounded_serverside(
     total = 0
     max_iterations = _gc_loop_max_iterations(row_limit)
     remaining = None
+    asking = resolution is not None
     for _ in range(max_iterations):
-        result = fn(quarantine_name, origin_name, row_limit)
+        if asking:
+            result = fn(quarantine_name, origin_name, row_limit, resolve_siblings=True)
+            resolution.read(result)  # type: ignore[union-attr]  # asking implies resolution is set
+            asking = False
+        else:
+            result = fn(quarantine_name, origin_name, row_limit)
         if result.get("committed_unknown_counts"):
             # RDR-222: the batch committed (the ledger says so) but its response was lost and its
             # stored body is unavailable, so its count is unknown: stop and say so, never loop on
@@ -583,9 +661,11 @@ def quarantine_orphans_bounded_serverside(
 #: ``PgVectorRepository.resolveQuarantineSiblings``) and answers it without
 #: moving, attaching or auditing anything. The client relies on exactly that
 #: (an empty-window dry-run still answers ``quarantine_collections`` and writes
-#: no ``gc_audit`` row), pinned by ``VectorHandlerQuarantineRestoreRouteTest``,
-#: until nexus-wbfpw.64 moves the resolution into the engine's own expire and
-#: restore-rereferenced routes and this probe is retired.
+#: no ``gc_audit`` row), pinned by ``VectorHandlerQuarantineRestoreRouteTest``.
+#: nexus-wbfpw.64 moved the resolution into the engine's own expire and
+#: restore-rereferenced routes (:class:`SiblingResolution`); this probe now runs
+#: only against an engine that predates that (v0.1.162 and earlier), from
+#: ``nx t3 gc`` alone, and goes when no such engine is supported.
 _SIBLING_PROBE_SINCE = "1970-01-01T00:00:00Z"
 _SIBLING_PROBE_AFTER_CHASH = "f" * 64
 
@@ -624,13 +704,15 @@ def resolve_quarantine_siblings(
        chunks, which no rename of the origin or of its owner can disturb.
 
     ``probe_engine`` defaults to ``False`` on purpose: the probe costs the
-    engine an unindexed EXISTS scan of every quarantine collection of the
+    engine an unbounded EXISTS scan of every quarantine collection of the
     tenant that is not named for the origin, plus one POST, so it does not
     belong on ``nx index repo``'s hot path (per collection, every run). A new
-    caller must ask for it. ``nx t3 gc`` does; the indexer does not, and a chunk
-    stranded under a name neither derived name reaches waits for ``nx t3 gc``.
-    nexus-wbfpw.64 resolves siblings inside the engine's own expire and
-    restore-rereferenced routes and retires this probe.
+    caller must ask for it. nexus-wbfpw.64 resolves siblings inside the engine's
+    own expire and restore-rereferenced routes, under a statement bound
+    (:class:`SiblingResolution`, :func:`siblings_after_first_page`); this probe
+    is now only the fallback ``nx t3 gc`` takes against an engine that predates
+    that, where a chunk stranded under a third name is still reached by the
+    verb and, as before, by nothing on the index path.
 
     Where the engine cannot answer (a ``db`` with no restore route, an engine
     that predates sibling resolution, an origin the restore refuses) steps 1 and
@@ -670,6 +752,7 @@ def resolve_quarantine_siblings(
 
 def restore_rereferenced_across_serverside(
     db: Any, siblings: list[str], origin_name: str, *, best_effort: bool = False,
+    resolution: SiblingResolution | None = None,
 ) -> int | None:
     """:func:`restore_rereferenced_bounded_serverside` (then the unbounded call,
     as the indexer always has) over every sibling in *siblings*, total restored.
@@ -680,13 +763,27 @@ def restore_rereferenced_across_serverside(
     local-mode transport failure) on any sibling after the
     first is logged (``quarantine_sibling_restore_failed``, naming the sibling)
     and skipped, so an extra sibling never costs the caller the first one or
-    what follows; a failure on the first still raises."""
+    what follows; a failure on the first still raises.
+
+    *siblings* are the names the caller derived, the first being the sibling it moves into. With *resolution*
+    (nexus-wbfpw.64) the first sibling's first page asks the engine for the origin's siblings, and when the engine
+    answers them they replace the derived names after the first (so the index path reaches a sibling stranded under a
+    name the catalog row no longer derives, without the dry-run probe). An engine that does not answer leaves the derived
+    names alone. A *resolution* already ``resolved`` (by an earlier call for the same collection) is used without asking
+    again."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
 
     total = 0
-    for i, sibling in enumerate(siblings):
+    queue = list(siblings)
+    if resolution is not None and resolution.status == "resolved":
+        queue = siblings_after_first_page(db, origin_name, queue[0], resolution)
+    ask = resolution if (resolution is not None and resolution.wants_asking()) else None
+    i = 0
+    while i < len(queue):
+        sibling = queue[i]
+        first_ask = ask if i == 0 else None
         try:
-            restored = restore_rereferenced_bounded_serverside(db, sibling, origin_name)
+            restored = restore_rereferenced_bounded_serverside(db, sibling, origin_name, resolution=first_ask)
             if restored is None:
                 restored = restore_rereferenced_serverside(db, sibling, origin_name)
         except (VectorServiceError, OSError) as exc:  # OSError: local-mode transport failures arrive bare
@@ -696,16 +793,22 @@ def restore_rereferenced_across_serverside(
                 "quarantine_sibling_restore_failed",
                 collection=origin_name, sibling=sibling, code=getattr(exc, "code", None), error=str(exc),
             )
+            i += 1
             continue
         if restored is None:
             return None
         total += restored
+        if first_ask is not None and first_ask.status == "resolved":
+            queue = siblings_after_first_page(db, origin_name, queue[0], first_ask)
+        elif first_ask is not None and first_ask.status == "timed_out":
+            _warn_resolution_timed_out(origin_name)
+        i += 1
     return total
 
 
 def expire_quarantine_across_serverside(
     db: Any, siblings: list[str], origin_name: str, cutoff: str,
-    *, best_effort: bool = False,
+    *, best_effort: bool = False, resolution: SiblingResolution | None = None,
 ) -> tuple[int, int | None] | None:
     """:func:`expire_quarantine_serverside` (non-strict) over every sibling in *siblings*, summed
     ``(expired, refused)``; ``refused`` is the chunks the origin's manifest still references, kept. A
@@ -723,15 +826,25 @@ def expire_quarantine_across_serverside(
     local-mode transport failure) on any sibling after the first is logged
     (``quarantine_sibling_expire_failed``, naming the sibling) and skipped, and a failure on the
     first still raises. A caller that must report each sibling's own outcome (``nx t3 gc``) loops
-    over :func:`expire_quarantine_serverside` itself."""
+    over :func:`expire_quarantine_serverside` itself.
+
+    *resolution* works as it does for :func:`restore_rereferenced_across_serverside` (nexus-wbfpw.64): one
+    already ``resolved`` for this collection is used as it stands; otherwise the first sibling's first page asks."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
 
     expired = 0
     refused: int | None = None
-    for i, sibling in enumerate(siblings):
+    queue = list(siblings)
+    if resolution is not None and resolution.status == "resolved":
+        queue = siblings_after_first_page(db, origin_name, queue[0], resolution)
+    ask = resolution if (resolution is not None and resolution.wants_asking()) else None
+    i = 0
+    while i < len(queue):
+        sibling = queue[i]
+        first_ask = ask if i == 0 else None
         try:
             result = expire_quarantine_serverside(
-                db, sibling, origin_name, cutoff,
+                db, sibling, origin_name, cutoff, resolution=first_ask,
             )
         except (VectorServiceError, OSError) as exc:  # OSError: local-mode transport failures arrive bare
             if not (best_effort and i):
@@ -740,12 +853,18 @@ def expire_quarantine_across_serverside(
                 "quarantine_sibling_expire_failed",
                 collection=origin_name, sibling=sibling, code=getattr(exc, "code", None), error=str(exc),
             )
+            i += 1
             continue
         if result is None:
             return None
         expired += result[0]
         if result[1] is not None:
             refused = (refused or 0) + result[1]
+        if first_ask is not None and first_ask.status == "resolved":
+            queue = siblings_after_first_page(db, origin_name, queue[0], first_ask)
+        elif first_ask is not None and first_ask.status == "timed_out":
+            _warn_resolution_timed_out(origin_name)
+        i += 1
     return expired, refused
 
 
@@ -762,6 +881,7 @@ _NO_EXPIRY_FLOOR_MIN_CHUNKS = 100
 def expire_quarantine_bounded_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str,
     row_limit: int = GC_EXPIRE_ROW_LIMIT_DEFAULT, *, strict: bool = False,
+    resolution: SiblingResolution | None = None,
 ) -> tuple[int, int | None, bool] | None:
     """The server-side BOUNDED client expiry (RDR-222 Amendment A1, nexus-1579m), looping pages until the
     sibling holds no more expirable rows. ``(expired, refused, counts_complete)``, or ``None`` if the
@@ -799,6 +919,10 @@ def expire_quarantine_bounded_serverside(
 
     ``count_refused`` is sent only for a strict drain, until a page has answered it: the indexer discards
     ``refused``, and counting it costs the engine a sibling-wide scan inside the 25 s bound.
+
+    With *resolution* (nexus-wbfpw.64) the first page also asks the engine for the origin's quarantine siblings
+    (``resolve_siblings``) and *resolution* records the answer; a first page that raises records nothing, and the
+    next call asks again. Later pages never ask. Without it nothing extra is sent.
     """
     import http.client  # noqa: PLC0415 — deferred: keeps this module import-light
 
@@ -813,11 +937,12 @@ def expire_quarantine_bounded_serverside(
     pages = 0
     max_iterations = _gc_loop_max_iterations(row_limit)
     for _ in range(max_iterations):
+        extra = {"resolve_siblings": True} if (resolution is not None and pages == 0) else {}
         try:
             result = fn(
                 quarantine_name, origin_name, cutoff,
                 _NO_EXPIRY_FLOOR_FRACTION, _NO_EXPIRY_FLOOR_MIN_CHUNKS, False, row_limit,
-                count_refused=strict and refused is None,
+                count_refused=strict and refused is None, **extra,
             )
         except (VectorServiceError, OSError, http.client.HTTPException) as exc:
             if strict:
@@ -831,6 +956,8 @@ def expire_quarantine_bounded_serverside(
             )
             return expired, refused, False
         pages += 1
+        if extra:
+            resolution.read(result)  # type: ignore[union-attr]  # extra is only set when resolution is
         if result.get("committed_unknown_counts"):
             # RDR-222: the page committed (the ledger says so) but its response was lost and its stored body
             # is unavailable, so its count and ``more`` are unknown. The next page recomputes both from live
@@ -878,6 +1005,7 @@ def expire_quarantine_bounded_serverside(
 
 def expire_quarantine_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str, *, strict: bool = False,
+    resolution: SiblingResolution | None = None,
 ) -> tuple[int, int | None, bool] | None:
     """The server-side grace-window expiry, with no fraction floor (see the module docstring, step 3).
     ``(expired, refused, counts_complete)`` — ``refused`` is the chunks the origin's manifest still
@@ -887,8 +1015,12 @@ def expire_quarantine_serverside(
     Tries the bounded, keyed loop first (:func:`expire_quarantine_bounded_serverside`; ``strict`` is
     ``nx t3 gc``'s), and falls back to the unbounded call for a client object that lacks it (the
     in-memory double): a ``None`` from the loop is about the CLIENT object's capability, never about
-    whether there was anything to expire."""
-    bounded = expire_quarantine_bounded_serverside(db, quarantine_name, origin_name, cutoff, strict=strict)
+    whether there was anything to expire.
+
+    *resolution* is passed to the bounded loop (nexus-wbfpw.64); the unbounded fallback never asks."""
+    bounded = expire_quarantine_bounded_serverside(
+        db, quarantine_name, origin_name, cutoff, strict=strict, resolution=resolution,
+    )
     if bounded is not None:
         return bounded
     fn = getattr(db, "gc_expire_quarantine", None)

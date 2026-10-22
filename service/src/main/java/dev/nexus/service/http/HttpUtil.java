@@ -378,6 +378,12 @@ public final class HttpUtil {
      *       collection of another ({@link #COLLECTION_MODEL_MISMATCH_REASON}, RDR-225); the body also
      *       carries {@code source_collection}, {@code source_model}, {@code target_collection} and
      *       {@code target_model}. Not retryable: a move between models is a cross-model migration.</li>
+     *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
+     *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
+     *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
+     *       also carries {@code collection}, {@code superseded_by} (the successor) and {@code message}. NOT a
+     *       "not registered" 422 on purpose: a client retries that one by re-registering, which revives the
+     *       retired name. Not retryable; only an explicit registration revives the name.</li>
      *   <li>{@code unregistered_embedding_model} (422): a chunk or centroid write named a collection whose
      *       embedding model is registered in no {@code nexus.embedding_models} row and has no partition
      *       ({@link #UNREGISTERED_EMBEDDING_MODEL_REASON}, RDR-225); the body carries {@code model}.</li>
@@ -539,6 +545,25 @@ public final class HttpUtil {
             send(exchange, 409,
                 "{\"error\":\"doc_count posture tripwire\",\"sqlstate\":\""
                 + SQLSTATE_RAISE_EXCEPTION + "\",\"detail\":" + jsonString(tripwireDetail) + "}");
+            return true;
+        }
+        // nexus-mp8ys: an implicit chunk write to a retired (superseded) collection name. 409, and
+        // deliberately NOT the "not registered" 422 above: a client's register-and-retry recognises
+        // that exact reason and wording, and a retry would re-register (revive) the retired name.
+        // "error" is the stable key here (as on the idempotency-key 4xx bodies), "reason" repeats it
+        // for a client that dispatches on reason, and "message" carries the prose.
+        var collectionSuperseded = collectionSuperseded(e);
+        if (collectionSuperseded != null) {
+            log.warn("event={}_collection_superseded {} tenant={} collection={} superseded_by={}",
+                event, context, collectionSuperseded.tenant(), collectionSuperseded.collection(),
+                collectionSuperseded.supersededBy());
+            send(exchange, 409,
+                "{\"error\":\"" + COLLECTION_SUPERSEDED_REASON + "\""
+                + ",\"reason\":\"" + COLLECTION_SUPERSEDED_REASON + "\""
+                + ",\"message\":" + jsonString(collectionSuperseded.getMessage())
+                + ",\"collection\":" + jsonString(collectionSuperseded.collection())
+                + ",\"superseded_by\":" + jsonString(collectionSuperseded.supersededBy())
+                + "}");
             return true;
         }
         // RDR-225 (nexus-3wh8d.13): the partitioned-chunks refusals, all ahead of the generic class-23
@@ -749,6 +774,19 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.UnregisteredCollectionException uce) {
                 return uce;
+            }
+        }
+        return null;
+    }
+
+    /** {@code error} (and {@code reason}) on the 409 for a chunk write to a superseded collection name (nexus-mp8ys). Wire contract. */
+    static final String COLLECTION_SUPERSEDED_REASON = "collection_superseded";
+
+    /** The {@link dev.nexus.service.db.CollectionSupersededException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.CollectionSupersededException collectionSuperseded(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.CollectionSupersededException s) {
+                return s;
             }
         }
         return null;

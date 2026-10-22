@@ -182,8 +182,53 @@ class TupleAckWithReplyTest {
                 .isEqualTo("the answer");
     }
 
+    /**
+     * Bead nexus-b747g. The reply id used to be the id an {@code out} with nonce
+     * hex(request id) computes, and every ingredient of that is readable through rd, so
+     * any tenant caller could write the reply first. Since nexus-fzteh the real
+     * ack-with-reply then hit 409 and rolled back while the forged row stood. The reply
+     * id is now digested under its own label, so no {@code out} nonce reaches it.
+     */
     @Test
-    void theReplyNonceIsTheConsumedRequestId_setByTheEngine() {
+    void anOutWithTheRequestIdAsNonce_cannotTakeTheReplyId() {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        String claimId = requestAndClaim(answerer, "worker-1");
+        byte[] requestId = repo.rd(TENANT, "mailbox/" + answerer, Map.of("to", answerer), 10, null, 0)
+                .get(0).id();
+
+        byte[] squatId = repo.out(TENANT, "mailbox/" + asker, Map.of("to", asker),
+                Map.of("from", "answerer"), "forged", HexFormat.of().formatHex(requestId), null);
+
+        byte[] replyId = repo.ackWithReply(TENANT, claimId, "worker-1", reply(asker, "the answer", null));
+
+        assertThat(replyId).as("the real reply lands under an id no out can produce")
+                .isNotNull().isNotEqualTo(squatId);
+        assertThat(rowCount("mailbox/" + answerer))
+                .as("the request was consumed: the ack committed rather than rolling back on a 409")
+                .isZero();
+        var replies = repo.rd(TENANT, "mailbox/" + asker, Map.of("to", asker), 10, null, 0);
+        assertThat(replies).extracting(TupleRepository.TupleRow::body)
+                .containsExactlyInAnyOrder("forged", "the answer");
+    }
+
+    /** The reply's nonce is the request's id: two requests answered with identical reply
+     *  keys and dims are two rows. A constant engine nonce would collapse them into one. */
+    @Test
+    void twoRequestsAnsweredWithIdenticalReplyKeysAndDims_areTwoReplyRows() {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        String first = requestAndClaim(answerer, "worker-1");
+        byte[] firstId = repo.ackWithReply(TENANT, first, "worker-1", reply(asker, "same", null));
+        String second = requestAndClaim(answerer, "worker-1");
+        byte[] secondId = repo.ackWithReply(TENANT, second, "worker-1", reply(asker, "same", null));
+
+        assertThat(secondId).isNotEqualTo(firstId);
+        assertThat(rowCount("mailbox/" + asker)).isEqualTo(2);
+    }
+
+    @Test
+    void anOutAfterTheReply_withTheRequestIdAsNonce_isASeparateRow() {
         String asker = addr("asker");
         String answerer = addr("answerer");
         String claimId = requestAndClaim(answerer, "worker-1");
@@ -192,17 +237,12 @@ class TupleAckWithReplyTest {
 
         repo.ackWithReply(TENANT, claimId, "worker-1", reply(asker, "correlated", null));
 
-        // Proved through the PUBLIC api rather than a test-only accessor on computeId:
-        // an independent `out` to the same reply subspace, with the nonce set to
-        // hex(request id), must land on the SAME row rather than minting a second one.
-        // If the engine had used any other nonce, this would be a different id and the
-        // subspace would hold two rows.
         assertThat(rowCount("mailbox/" + asker)).isEqualTo(1);
         repo.out(TENANT, "mailbox/" + asker, Map.of("to", asker), Map.of("from", "answerer"),
-                "correlated", HexFormat.of().formatHex(requestId), null);
+                "other", HexFormat.of().formatHex(requestId), null);
         assertThat(rowCount("mailbox/" + asker))
-                .as("the reply's nonce is hex(request id): a refire on that nonce is the SAME row")
-                .isEqualTo(1);
+                .as("an out on hex(request id) is not the reply's row, and so cannot overwrite or block it")
+                .isEqualTo(2);
     }
 
     /**

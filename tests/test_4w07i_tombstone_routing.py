@@ -38,14 +38,15 @@ def test_rows_without_the_key_behave_as_before():
 @pytest.mark.integration
 def test_a_retired_name_holding_chunks_is_not_routed_to(t2_service_env, tmp_path):
     """Engine substrate end to end: index A, rename A to B, write to A again,
-    and the routing listing leaves A out while the inventory still names it
-    with its successor.
+    and the routing listing leaves A out.
 
     A current client refuses the stale write (nexus-wwuzp revalidates an aged
-    registration with a read), so that refusal is asserted first. The engine
-    still accepts a write to the retired name from a client that predates
-    wwuzp, which is how a retired name comes to hold chunks; that client is
-    modelled by skipping the revalidation read for the second write."""
+    registration with a read), so that refusal is asserted first. A client that
+    predates wwuzp (modelled by skipping the revalidation read) is now refused by
+    the ENGINE too: a chunk write to a superseded name is a 409 naming the
+    successor (nexus-mp8ys), so a retired name no longer comes to hold chunks
+    through a write. Routing still lists the successor and never the retired
+    name; if the inventory names the tombstone, it names its successor."""
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — test-local import
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -61,11 +62,13 @@ def test_a_retired_name_holding_chunks_is_not_routed_to(t2_service_env, tmp_path
     with pytest.raises(SupersededCollectionWriteError):
         index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
     with patch("nexus.corpus._revalidate_cached_registration", return_value=True):
-        assert index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
+        with pytest.raises(SupersededCollectionWriteError) as refused:
+            index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
+    assert _NEW in str(refused.value), "the engine's refusal names the successor"
 
     inventory = {r["name"]: r for r in client.list_collections()}
-    assert _OLD in inventory, "the retired name must hold chunks for this test to mean anything"
-    assert inventory[_OLD].get("superseded_by") == _NEW
+    if _OLD in inventory:
+        assert inventory[_OLD].get("superseded_by") == _NEW
 
     routed = {r["name"] for r in live_collection_rows(client)}
     assert _NEW in routed

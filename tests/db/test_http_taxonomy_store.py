@@ -1708,6 +1708,62 @@ class TestPersist:
                   "assigned_by": "hdbscan", "doc_ids": []}],
             )
 
+    def test_persist_discovered_409_collection_superseded_raises_typed_even_when_topics_exist(
+        self, fake_server, monkeypatch,
+    ) -> None:
+        """nexus-i15oc: the engine refuses a persist into a retired collection name with
+        409 ``collection_superseded`` and no sqlstate. The benign-skip branch reads "409,
+        no sqlstate" as the old discovery race and returns ``[]`` when the collection has
+        topics, which a tombstone with topics always does. The REAL ``_post`` turns that
+        body into ``SupersededCollectionWriteError`` before the ``HTTPStatusError`` arm
+        can see it; this pins the order, over a real httpx round trip rather than a
+        stubbed ``_post``."""
+        import httpx
+
+        from nexus.collection_errors import SupersededCollectionWriteError
+
+        monkeypatch.setattr(
+            "nexus.corpus.write_with_registration_retry",
+            lambda name, write_fn, **kwargs: write_fn(),
+        )
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return httpx.Response(409, json={
+                "error": "collection_superseded",
+                "reason": "collection_superseded",
+                "message": "collection 'c-sup' was superseded by 'c-sup-v2'",
+                "collection": "c-sup",
+                "superseded_by": "c-sup-v2",
+            })
+
+        store = HttpTaxonomyStore(
+            base_url=fake_server, _token=TOKEN, centroid_store=_FakeCentroidStore([]),
+        )
+        store._client = httpx.Client(
+            base_url=fake_server, transport=httpx.MockTransport(handler),
+        )
+        asked_for_topics: list[str] = []
+
+        def _topics(collection, **kw):
+            asked_for_topics.append(collection)
+            return [{"id": 7}]  # the tombstone HAS topics: the benign reading is on offer
+
+        monkeypatch.setattr(store, "get_topics_for_collection", _topics)
+
+        with pytest.raises(SupersededCollectionWriteError) as caught:
+            store.persist_discovered_topics(
+                "c-sup",
+                [{"label": "x", "doc_count": 0, "terms": "[]",
+                  "assigned_by": "hdbscan", "doc_ids": []}],
+            )
+
+        assert caught.value.name == "c-sup"
+        assert caught.value.successor == "c-sup-v2"
+        assert paths == ["/v1/taxonomy/topics/persist_discovered"]
+        assert asked_for_topics == [], "the benign-skip branch was reached"
+
     @pytest.mark.t2_tenant
     def test_persist_discovered_non_409_http_error_propagates(self, client, monkeypatch) -> None:
         """nexus-n2ls1: ONLY 409 is benign — a 500/422/anything-else must still

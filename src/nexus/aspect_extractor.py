@@ -740,6 +740,68 @@ def _parse_rdr_alternatives(text: str) -> list[str]:
     return titles
 
 
+#: nexus-95qz4: the most document text one extractor call carries, per document
+#: and per batch call. A whole PDF once overflowed the model's 200k-token context
+#: (~252k tokens), so that document got null-fields on every run. The budget does
+#: not rest on a characters-per-token guess: at the densest case, one token per
+#: character (CJK), 150k characters is 150k tokens, which leaves room for the
+#: prompt template and the ``claude -p`` overhead under 200k.
+_EXTRACTOR_CONTENT_CHAR_BUDGET: int = 150_000
+
+
+def _bound_content(content: str, source_path: str) -> str:
+    """Cut ``content`` to the extractor budget, head first (abstract and
+    introduction lead), and say so in the text the model reads. Content
+    within the budget passes through unchanged."""
+    if len(content) <= _EXTRACTOR_CONTENT_CHAR_BUDGET:
+        return content
+    _log.warning(
+        "aspect_extractor_content_truncated",
+        source_path=source_path,
+        chars=len(content),
+        kept=_EXTRACTOR_CONTENT_CHAR_BUDGET,
+    )
+    return (
+        content[:_EXTRACTOR_CONTENT_CHAR_BUDGET]
+        + f"\n\n[document truncated to the first {_EXTRACTOR_CONTENT_CHAR_BUDGET}"
+        + f" of {len(content)} characters for aspect extraction. Leave a field null"
+        + " when its evidence would come after this point, and lower confidence.]\n"
+    )
+
+
+def _mark_truncated(record: AspectRecord | ExtractFail | None, total_chars: int) -> None:
+    """Record in ``extras`` that the extractor saw only the head of a
+    document longer than the budget, so a partial record can be told
+    apart from a full one."""
+    if total_chars <= _EXTRACTOR_CONTENT_CHAR_BUDGET or not isinstance(record, AspectRecord):
+        return
+    record.extras = {
+        **(record.extras or {}),
+        "input_truncated": {
+            "kept_chars": _EXTRACTOR_CONTENT_CHAR_BUDGET,
+            "total_chars": total_chars,
+        },
+    }
+
+
+def _split_by_budget(
+    group: list[tuple[int, str, str, str]],
+) -> list[list[tuple[int, str, str, str]]]:
+    """Split a batch group, in order, so no sub-batch's document text exceeds
+    the extractor budget. Each document is already bounded, so a sub-batch
+    always holds at least one."""
+    batches: list[list[tuple[int, str, str, str]]] = []
+    size = 0
+    for item in group:
+        if batches and size + len(item[3]) <= _EXTRACTOR_CONTENT_CHAR_BUDGET:
+            batches[-1].append(item)
+            size += len(item[3])
+        else:
+            batches.append([item])
+            size = len(item[3])
+    return batches
+
+
 def _truncate(text: str, cap: int) -> str:
     """Cap a long section to ``cap`` characters; append an ellipsis
     when truncation occurs. Empty strings pass through unchanged."""
@@ -1395,12 +1457,14 @@ def extract_aspects(
         # No subprocess, no retry budget, no Claude API cost.
         return _extract_via_parser_fn(config, content, source_path, collection)
 
-    prompt = config.prompt_template.format(content=content)
+    prompt = config.prompt_template.format(content=_bound_content(content, source_path))
     parsed = _retry_subprocess(prompt, config)
     if parsed is None:
-        return _empty_record(source_path, collection, config)
-
-    return _build_record(parsed, source_path, collection, config)
+        record = _empty_record(source_path, collection, config)
+    else:
+        record = _build_record(parsed, source_path, collection, config)
+    _mark_truncated(record, len(content))
+    return record
 
 
 # ── Batch extraction (RDR-089 Phase 4 — one Claude call per N papers) ────────
@@ -1506,6 +1570,7 @@ def extract_aspects_batch(
     # content rows. Mirrors the single-doc path's pattern at
     # extract_aspects:882-920.
     callable_inputs: list[tuple[int, str, str, str, ExtractorConfig]] = []
+    content_chars: dict[int, int] = {}  # nexus-95qz4: each document's length before the bound
     t3_handle: Any = None  # lazy: only construct when we actually need to read
     for idx, collection, source_path, content, queue_doc_id in indexed_inputs:
         if not content:
@@ -1571,7 +1636,10 @@ def extract_aspects_batch(
                 item_config, content, source_path, collection,
             )
             continue
-        callable_inputs.append((idx, collection, source_path, content, item_config))
+        content_chars[idx] = len(content)
+        callable_inputs.append(
+            (idx, collection, source_path, _bound_content(content, source_path), item_config),
+        )
 
     if not callable_inputs:
         return out
@@ -1585,7 +1653,14 @@ def extract_aspects_batch(
         bucket = by_config.setdefault(cfg.extractor_name, (cfg, []))
         bucket[1].append((idx, collection, source_path, content))
 
-    for cfg, group in by_config.values():
+    # nexus-95qz4: a group whose documents together exceed the extractor budget
+    # runs as several calls, so no prompt overflows the model's context.
+    sub_batches = [
+        (cfg, sub)
+        for cfg, group in by_config.values()
+        for sub in _split_by_budget(group)
+    ]
+    for cfg, group in sub_batches:
         prompt = _build_batch_prompt(group, cfg)
         timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
         parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
@@ -1618,6 +1693,9 @@ def extract_aspects_batch(
                 out[idx] = _empty_record(source_path, collection, cfg)
                 continue
             out[idx] = _build_record_from_entry(entry, source_path, collection, cfg)
+
+    for idx, chars in content_chars.items():
+        _mark_truncated(out[idx], chars)
 
     return out
 

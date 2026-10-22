@@ -1,0 +1,246 @@
+{
+  "schema": 1,
+  "note": "Known-item queries; relevance is any chunk of the target file. Each was written by reading the target and describing it the way someone who remembers the document but not its words would.",
+  "queries": [
+    {
+      "id": "prose-01",
+      "set": "prose",
+      "query": "Which benchmark tooling tells me whether a cheap model is good enough to run the analytical operators, by running the same input twice and then scoring against a deliberately broken copy?",
+      "target": "docs/benchmarking.md"
+    },
+    {
+      "id": "prose-02",
+      "set": "prose",
+      "query": "What's the guidance on naming a collection when I save notes - can I name it after the project I'm working on this month?",
+      "target": "docs/collections.md"
+    },
+    {
+      "id": "prose-03",
+      "set": "prose",
+      "query": "How do I get an agent inside a dev container to use the storage service running on my laptop instead of starting its own?",
+      "target": "docs/container-integration.md"
+    },
+    {
+      "id": "prose-04",
+      "set": "prose",
+      "query": "If I already have a local setup with a lot of notes, can I carry them over to the hosted service, or do I start from scratch?",
+      "target": "docs/managed-onboarding.md"
+    },
+    {
+      "id": "prose-05",
+      "set": "prose",
+      "query": "Which editors and command-line tools other than Claude can launch the nexus tool server, and what does the setup look like for one of them?",
+      "target": "docs/mcp-hosts.md"
+    },
+    {
+      "id": "prose-06",
+      "set": "prose",
+      "query": "If an older engine release has to take over a machine that a newer one already migrated, what should I do with the existing database directory before it boots?",
+      "target": "docs/migration-runbook.md"
+    },
+    {
+      "id": "prose-07",
+      "set": "prose",
+      "query": "When a reusable retrieval recipe needs values from the caller, who wins if the template and the caller both supply the same one, and what happens when a mandatory one is missing?",
+      "target": "docs/plan-authoring-guide.md"
+    },
+    {
+      "id": "prose-08",
+      "set": "prose",
+      "query": "A local install is supposed to keep everything on my machine. Under what configuration does it start sending my text to an outside embedding provider, and does a restart switch that off?",
+      "target": "docs/privacy-policy.md"
+    },
+    {
+      "id": "prose-09",
+      "set": "prose",
+      "query": "Which of the retrieval entry points favours chunks that are linked to design records, and which one ignores the link graph?",
+      "target": "docs/querying-guide.md"
+    },
+    {
+      "id": "prose-10",
+      "set": "prose",
+      "query": "Why couldn't I remove a single entry from the memory store without hand-editing the database file, and which storage layers got a delete verb as the fix?",
+      "target": "docs/rdr/rdr-022-memory-delete-command.md"
+    },
+    {
+      "id": "prose-11",
+      "set": "prose",
+      "query": "After the embedding-model mismatch slipped through several release candidates, what follow-up closed the testing and tooling holes, and which collection tools were added for agents?",
+      "target": "docs/rdr/rdr-040-cce-postmortem-gaps-mcp-enhancement.md"
+    },
+    {
+      "id": "prose-12",
+      "set": "prose",
+      "query": "How was a reviewing agent supposed to learn what the implementer had already tried and found fragile earlier in the same session?",
+      "target": "docs/rdr/rdr-041-t1-scratch-inter-agent-context.md"
+    },
+    {
+      "id": "prose-13",
+      "set": "prose",
+      "query": "Why do agents call work finished when pieces are unwired, and what two-layer hook design was proposed to catch that before a task gets closed?",
+      "target": "docs/rdr/rdr-045-post-implementation-verification.md"
+    },
+    {
+      "id": "prose-14",
+      "set": "prose",
+      "query": "Why did slash commands break when their startup script printed markdown fences, and what was chosen instead of inlining shell in the command file?",
+      "target": "docs/rdr/rdr-130-command-preambles-via-nx-cli.md"
+    },
+    {
+      "id": "prose-15",
+      "set": "prose",
+      "query": "Two stores claimed to know which collections belong to a repository and they disagreed; which design record proposes dropping the per-user JSON registry in favour of the catalog?",
+      "target": "docs/rdr/rdr-137-eliminate-repos-json.md"
+    },
+    {
+      "id": "prose-16",
+      "set": "prose",
+      "query": "A migration was refused by the service for a 384-dimension model; what had gone stale in the classifier that mirrors the service's embedders?",
+      "target": "docs/rdr/rdr-162-truthful-post-rdr160-upgrade-path.md"
+    },
+    {
+      "id": "prose-17",
+      "set": "prose",
+      "query": "How was nexus supposed to index content that lives in somebody's Obsidian vault without copying the text itself into its own tables?",
+      "target": "docs/rdr/rdr-169-docuverse-storage-reference-only-chunks.md"
+    },
+    {
+      "id": "prose-18",
+      "set": "prose",
+      "query": "A record that gets read fifty times just lives longer in the short-term store; which proposal turns access counts into actually moving things between memory tiers?",
+      "target": "docs/rdr/rdr-209-heat-based-graduation-between-memory-tiers.md"
+    },
+    {
+      "id": "prose-19",
+      "set": "prose",
+      "query": "Which of the three memory layers evaporates when the session ends and which one is permanent, and how do I merge two near-duplicate notes?",
+      "target": "docs/storage-tiers.md"
+    },
+    {
+      "id": "prose-20",
+      "set": "prose",
+      "query": "Where do the checked-in multi-agent scripts live for reviewing with majority-vote verification and for tracing unused wiring, and what is each one for?",
+      "target": "docs/workflows.md"
+    },
+    {
+      "id": "code-01",
+      "set": "code",
+      "query": "How does the indexer cut a source file into pieces - does it understand the language's structure, and what does it do with a file it cannot parse?",
+      "target": "src/nexus/chunker.py"
+    },
+    {
+      "id": "code-02",
+      "set": "code",
+      "query": "What decides that a vector collection is leftover test debris, one that has chunks in it but no live catalog documents pointing at it?",
+      "target": "src/nexus/commands/catalog_cmds/t3_orphans.py"
+    },
+    {
+      "id": "code-03",
+      "set": "code",
+      "query": "Where is the tiny map of knowledge topics generated and cached so a session can inject it almost instantly at start?",
+      "target": "src/nexus/context.py"
+    },
+    {
+      "id": "code-04",
+      "set": "code",
+      "query": "On Windows, what retries a file rename while an antivirus scan holds the file, and how do we move a group of files so a failure leaves nothing half installed?",
+      "target": "src/nexus/daemon/replace_guard.py"
+    },
+    {
+      "id": "code-05",
+      "set": "code",
+      "query": "Which module picks the offline embedding model for a zero-configuration setup, preferring the bigger 768-dimension one when its library is installed?",
+      "target": "src/nexus/db/local_ef.py"
+    },
+    {
+      "id": "code-06",
+      "set": "code",
+      "query": "Where is the small ranking-model file that the Java engine's local reranker needs downloaded and checksum-verified?",
+      "target": "src/nexus/db/service_crossencoder_model.py"
+    },
+    {
+      "id": "code-07",
+      "set": "code",
+      "query": "Is there a checker that reads markdown and warns when a documented collection name or a quoted chunk count has drifted out of date?",
+      "target": "src/nexus/doc/ref_scanner.py"
+    },
+    {
+      "id": "code-08",
+      "set": "code",
+      "query": "What leaves a local trail showing the trash purge ran, so doctor can tell an empty audit table from a purge that never happened?",
+      "target": "src/nexus/gc_purge_marker.py"
+    },
+    {
+      "id": "code-09",
+      "set": "code",
+      "query": "Where do we log, once per distinct shape, which metadata keys a client sends with tool calls, without ever recording the values?",
+      "target": "src/nexus/mcp/_tool_call_log.py"
+    },
+    {
+      "id": "code-10",
+      "set": "code",
+      "query": "What fixes the hang where the first numpy import inside a tool call freezes the Windows server because a read is stuck on its input pipe?",
+      "target": "src/nexus/mcp/_win_stdin.py"
+    },
+    {
+      "id": "code-11",
+      "set": "code",
+      "query": "Why isn't the session lease good enough as a signal that the tool server is ready to talk, and what file stands in for it?",
+      "target": "src/nexus/mcp/connect_marker.py"
+    },
+    {
+      "id": "code-12",
+      "set": "code",
+      "query": "Which file records that an install is in the middle of an upgrade so other long-running processes show a warning banner and pause their work?",
+      "target": "src/nexus/migration/state.py"
+    },
+    {
+      "id": "code-13",
+      "set": "code",
+      "query": "How are plan templates gathered from the built-in directory, accepted design records and the project folder before they are stored?",
+      "target": "src/nexus/plans/loader.py"
+    },
+    {
+      "id": "code-14",
+      "set": "code",
+      "query": "Where are the counts of how often each routing hook rule fired, allowed, blocked or was escaped computed for the thirty-day review?",
+      "target": "src/nexus/routing_stats.py"
+    },
+    {
+      "id": "code-15",
+      "set": "code",
+      "query": "How does a message addressed to a name get turned into a concrete mailbox, and what tells a session identifier from an agent identifier?",
+      "target": "src/nexus/tuple_directory.py"
+    },
+    {
+      "id": "code-16",
+      "set": "code",
+      "query": "What builds the instruction a session receives at startup telling it to subscribe to its own mailbox, and checks that the tuple surface exists first?",
+      "target": "src/nexus/mailbox_arm.py"
+    },
+    {
+      "id": "code-17",
+      "set": "code",
+      "query": "What warns us out loud when two different owners end up with separate catalog entries for the same file path?",
+      "target": "src/nexus/catalog/path_ambiguity.py"
+    },
+    {
+      "id": "code-18",
+      "set": "code",
+      "query": "Which helper turns a comma-separated key=value string with comparison operators into a metadata filter shared by the command line and the tools?",
+      "target": "src/nexus/filters.py"
+    },
+    {
+      "id": "code-19",
+      "set": "code",
+      "query": "Where is the command group for issuing, rotating and revoking bridge tokens, and why can the token only be displayed once?",
+      "target": "src/nexus/commands/service_cmd.py"
+    },
+    {
+      "id": "code-20",
+      "set": "code",
+      "query": "Which thin client talks to the Java aspects service to store and look up highlights, mirroring the interface of the old local store?",
+      "target": "src/nexus/db/t2/http_document_highlights_store.py"
+    }
+  ]
+}

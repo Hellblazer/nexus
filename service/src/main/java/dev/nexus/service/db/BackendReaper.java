@@ -57,12 +57,56 @@ public final class BackendReaper {
     private BackendReaper() {
     }
 
-    /** {@code nexus-service/<release>/<8 hex>} -- unique per process boot. */
+    /** Hex characters of the per-boot nonce ({@code newApplicationName} makes 4 random bytes). */
+    static final int NONCE_HEX_CHARS = 8;
+
+    /**
+     * The longest pool name whose derived names still fit Postgres' 63 bytes: the lock connection appends
+     * {@link EngineSingletonLock#NAME_SUFFIX}, and the reaper's {@code /reaper} is shorter. A name Postgres
+     * truncates no longer equals the string compared against {@code pg_stat_activity}, and the nonce, which is
+     * the end of the name, is what gets cut.
+     */
+    static final int MAX_POOL_NAME_BYTES = 63 - EngineSingletonLock.NAME_SUFFIX.length();
+
+    /**
+     * The longest release part: what is left of {@link #MAX_POOL_NAME_BYTES} after the prefix, the slash after
+     * the release and the nonce. The release is the stamped release tag, which nothing else bounds.
+     */
+    static final int MAX_RELEASE_BYTES = MAX_POOL_NAME_BYTES - APPLICATION_NAME_PREFIX.length() - 1 - NONCE_HEX_CHARS;
+
+    /**
+     * {@code nexus-service/<release>/<8 hex>} -- unique per process boot. The release part is printable ASCII
+     * (anything else becomes {@code _}) cut to {@link #MAX_RELEASE_BYTES} bytes, never the nonce.
+     */
     public static String newApplicationName(String releaseVersion) {
         String release = (releaseVersion == null || releaseVersion.isBlank()) ? "dev" : releaseVersion.trim();
+        // Postgres rewrites non-printable-ASCII bytes in application_name, so a name carrying them would never
+        // equal the string compared against pg_stat_activity (the reaper's and the singleton lock's own match).
+        release = release.replaceAll("[^\\x20-\\x7E]", "_");
+        release = truncateUtf8(release, MAX_RELEASE_BYTES);
         byte[] nonce = new byte[4];
         ThreadLocalRandom.current().nextBytes(nonce);
         return APPLICATION_NAME_PREFIX + release + "/" + HexFormat.of().formatHex(nonce);
+    }
+
+    /** {@code s} cut to at most {@code maxBytes} UTF-8 bytes, on a character boundary. */
+    static String truncateUtf8(String s, int maxBytes) {
+        if (s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxBytes) {
+            return s;
+        }
+        StringBuilder out = new StringBuilder();
+        int bytes = 0;
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            int n = new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes + n > maxBytes) {
+                break;
+            }
+            out.appendCodePoint(cp);
+            bytes += n;
+            i += Character.charCount(cp);
+        }
+        return out.toString();
     }
 
     /**

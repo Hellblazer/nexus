@@ -351,3 +351,43 @@ class TestStartReachesBackfillBeforeSpawn:
             "run first, reproducing the original bug's call-path-skip shape "
             "one level up from _ensure_pg_running"
         )
+
+
+def _strip_managed_max_locks(config_dir: Path) -> None:
+    """Make the conf look like one written before nexus-o26hs: no managed
+    max_locks_per_transaction line."""
+    conf = config_dir / "postgres" / "postgresql.conf"
+    kept = [l for l in conf.read_text(encoding="utf-8").splitlines()
+            if not l.startswith("max_locks_per_transaction")]
+    conf.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
+class TestColdStartAppliesTheManagedConf:
+    """nexus-o26hs: an existing install gets a setting added to the managed block
+    at its next PostgreSQL start. Both paths that start the cluster outside
+    provision() (the supervisor, the replace quiesce) rewrite the block first."""
+
+    @pytest.mark.parametrize("path", ["supervisor", "replace_quiesce"])
+    def test_a_cold_start_runs_with_the_managed_max_locks_per_transaction(
+        self, upgrade_shaped_cluster, bins, path,
+    ):
+        from nexus.daemon import replace_quiesce  # noqa: PLC0415 — deferred import, test-local
+        from nexus.db.pg_provision import MANAGED_MAX_LOCKS_PER_TRANSACTION  # noqa: PLC0415
+
+        result, config_dir = upgrade_shaped_cluster
+        os_user = _os_user()
+        ops = replace_quiesce.default_ops(config_dir)
+        ops.stop_pg()
+        assert not _port_accepting("127.0.0.1", result.port)
+        _strip_managed_max_locks(config_dir)
+
+        if path == "supervisor":
+            _make_supervisor(result, config_dir)._ensure_pg_running()
+        else:
+            ops.start_pg()
+
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user, "SHOW max_locks_per_transaction",
+        ) == str(MANAGED_MAX_LOCKS_PER_TRANSACTION), (
+            f"a {path} cold start did not rewrite the managed postgresql.conf block"
+        )

@@ -148,6 +148,11 @@ public final class TokenStore {
      * model partition and then queues for the tables that reference chunks, so a writer that holds one
      * of them and needs that partition closes a cycle, and PostgreSQL may end it on the token
      * transaction. Nothing was issued, so it is retried like the other two.
+     *
+     * <p>At {@link TenantCreationBound#DEFAULT} a 55P03 does not occur: the 1 s statement_timeout fires before
+     * {@code create_tenant_partitions}' own 2 s lock_timeout, so a stuck creation ends as 57014. A bound above
+     * 2 s makes 55P03 the first to fire; {@code TenantTokenPartitionsIntegrationTest} drives that case
+     * (nexus-3wh8d.34).
      */
     static String lockWaitState(Throwable t) {
         Throwable c = t;
