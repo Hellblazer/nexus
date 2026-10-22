@@ -345,6 +345,9 @@ class TestDeletedCwdHeal:
     def test_a_call_moves_the_process_off_a_deleted_cwd_and_says_so_once(self, tmp_path, monkeypatch):
         from nexus.util.stable_cwd import stable_daemon_cwd
 
+        from nexus.util import stable_cwd
+
+        monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
         server = _mk_server()
         _tool_call_log.install_tool_call_log(server)
         gone = tmp_path / "plugin_x.old.1"

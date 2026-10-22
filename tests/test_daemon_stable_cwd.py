@@ -544,6 +544,7 @@ def test_heal_deleted_cwd_moves_the_process_off_a_deleted_directory(
     gone.rmdir()
     with pytest.raises(FileNotFoundError):
         os.getcwd()
+    monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
     assert stable_cwd.heal_deleted_cwd() is True
     assert os.getcwd() == stable_cwd.stable_daemon_cwd()
 
@@ -564,6 +565,7 @@ def test_heal_deleted_cwd_rewrites_no_environment(tmp_path: Path, monkeypatch: p
     gone.mkdir()
     monkeypatch.chdir(gone)
     gone.rmdir()
+    monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", "relative/cfg")
     monkeypatch.delenv(stable_cwd.REPO_ROOT_ENV, raising=False)
     assert stable_cwd.heal_deleted_cwd() is True

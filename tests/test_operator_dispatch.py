@@ -5429,6 +5429,12 @@ class TestChildCwd:
     while its MCP servers keep running there; a `claude -p` that inherited it
     exited 1, "The current working directory was deleted"."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_heal_flag(self, monkeypatch):
+        from nexus.util import stable_cwd
+
+        monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+
     @staticmethod
     async def _spawned_cwd() -> str | None:
         from nexus.operators.dispatch import claude_dispatch
@@ -5482,6 +5488,31 @@ class TestChildCwd:
             with pytest.raises(OperatorError, match="working directory was deleted"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, allowed_tools=["Read", "Grep", "Glob"])
         assert not spawned, "a refused operator spawns nothing"
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_a_file_tool_operator_is_refused_after_the_per_call_heal(self, tmp_path, monkeypatch) -> None:
+        """The MCP path: the tool-call wrap heals before the tool runs, so dispatch sees
+        the stable cwd, not a missing one, and must still refuse (confirmation pass)."""
+        from nexus.operators.dispatch import OperatorError, claude_dispatch
+        from nexus.util import stable_cwd
+
+        monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+        gone = tmp_path / "plugin_x.old.3"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        assert stable_cwd.heal_deleted_cwd() is True
+        spawned: list = []
+
+        async def intercept(*args, **kwargs):
+            spawned.append(kwargs)
+            return _make_proc()
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorError, match="working directory was deleted"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, allowed_tools=["Read", "Grep", "Glob"])
+        assert not spawned
 
     @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
     @pytest.mark.asyncio

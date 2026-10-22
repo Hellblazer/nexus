@@ -1352,7 +1352,7 @@ async def claude_dispatch(
         or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
         or read_claude_session_id()
     )
-    from nexus.util.stable_cwd import current_project_root, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
+    from nexus.util.stable_cwd import current_project_root, cwd_was_healed, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
 
     # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
     # caller's directory while that exists, deliberately not the stable cwd
@@ -1364,7 +1364,11 @@ async def claude_dispatch(
     # an operator with no file tools runs in the stable cwd, since `claude`
     # exits 1 before starting in a deleted directory; one with file tools is
     # refused rather than left to search the filesystem root.
+    # A server the per-call heal (mcp/_tool_call_log) already moved off its deleted
+    # directory sits in the stable cwd, which is no project either.
     child_cwd = current_project_root()
+    if child_cwd is not None and cwd_was_healed() and child_cwd == stable_daemon_cwd():
+        child_cwd = None
     if child_cwd is None:
         if set(allowed_tools or ()) & {"Read", "Grep", "Glob"}:
             raise OperatorError(

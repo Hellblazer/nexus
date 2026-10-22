@@ -122,6 +122,18 @@ def enter_stable_daemon_cwd(*, project_root: str | os.PathLike[str] | None = Non
     return target
 
 
+#: Set once :func:`heal_deleted_cwd` has moved this process off a deleted directory.
+#: The process then sits in the stable cwd, which is not a project: a caller that
+#: needs the project directory reads :func:`cwd_was_healed` instead of trusting
+#: ``os.getcwd()`` (nexus-x6qc7).
+_healed_from_deleted = False
+
+
+def cwd_was_healed() -> bool:
+    """``True`` once this process was moved off a deleted working directory."""
+    return _healed_from_deleted
+
+
 def heal_deleted_cwd() -> bool:
     """Move a long-lived process off a working directory that was deleted under it.
 
@@ -144,8 +156,10 @@ def heal_deleted_cwd() -> bool:
         pass
     except OSError:
         return False
+    global _healed_from_deleted
     try:
         os.chdir(stable_daemon_cwd())
     except OSError:
         return False
+    _healed_from_deleted = True
     return True
