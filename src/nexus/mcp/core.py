@@ -103,7 +103,8 @@ from nexus.mcp.operator_requests import (
 )
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
-    NO_SESSION_ID_MESSAGE,
+    DirectoryResolutionError,
+    no_session_id_message,
     resolve_default_from,
     resolve_env_session_id,
     resolve_send_address,
@@ -694,6 +695,26 @@ class T1UnavailableThisProcessError(RuntimeError):
     """
 
 
+#: The remedy half of the T1-unavailable error, split by host (nexus-wkjqm).
+#: A server Claude Code started keeps the NX_SESSION_ID remedy. A server
+#: Claude Desktop started (chat, Cowork; the account plugin's entry is not
+#: editable, docs/desktop-deployment.md) cannot take it, so it is sent to
+#: ``memory_put``; the variable stays for a self-configured server.
+#: Each text is pinned by an equality test.
+_T1_UNAVAILABLE_REMEDY_IN_CLAUDE_CODE: str = (
+    "Remedy: set NX_SESSION_ID in this "
+    "server's environment (the env block of its entry in the host's "
+    "MCP configuration) to name the scratch scope, then restart the "
+    "server; or run `nx doctor --check-t1`."
+)
+_T1_UNAVAILABLE_REMEDY_OUTSIDE_CLAUDE_CODE: str = (
+    "Remedy: a Nexus server started by Claude Desktop (chat or Cowork) has "
+    "no T1 scratch; use memory_put with a ttl for notes that carry across "
+    "turns. A self-configured server can set NX_SESSION_ID to a UUID in "
+    "its entry's environment, then restart; or run `nx doctor --check-t1`."
+)
+
+
 def _raise_t1_unavailable_this_process() -> None:
     """Pre-init hook body for the no-resolvable-session-id case.
 
@@ -705,6 +726,8 @@ def _raise_t1_unavailable_this_process() -> None:
     session_id) UPSERT, each invalidating the other's token — the same
     hazard the surrounding code already documents).
     """
+    from nexus.session import started_by_claude_code  # noqa: PLC0415 — deferred for startup cost; rare/branch-local failure path
+
     raise T1UnavailableThisProcessError(
         "T1 unavailable this process: no resolvable session id for this "
         "MCP server instance (neither NX_SESSION_ID nor "
@@ -714,10 +737,12 @@ def _raise_t1_unavailable_this_process() -> None:
         "only — every other nexus tool (search, memory, store, catalog) "
         "is unaffected. A sub-agent that inherited a LIVE minted token "
         "from its parent is unaffected too (checked before this hook "
-        "would ever be consulted). Remedy: set NX_SESSION_ID in this "
-        "server's environment (the env block of its entry in the host's "
-        "MCP configuration) to name the scratch scope, then restart the "
-        "server; or run `nx doctor --check-t1`."
+        "would ever be consulted). "
+        + (
+            _T1_UNAVAILABLE_REMEDY_IN_CLAUDE_CODE
+            if started_by_claude_code()
+            else _T1_UNAVAILABLE_REMEDY_OUTSIDE_CLAUDE_CODE
+        )
     )
 
 
@@ -1046,6 +1071,17 @@ async def _cancel_t1_handoff_watch_task() -> None:
 # idempotent across the lifespan's several yield sites.
 
 
+def _waiter_session_id() -> str:
+    """The waiter's session id: empty when none resolves, and also when
+    `NX_SESSION_ID` is not a UUID (nexus-zl1jv). The lifespan must never
+    raise on that; the tools that need the id refuse with the shape
+    message instead."""
+    try:
+        return _current_subscription_session_id()
+    except DirectoryResolutionError:
+        return ""
+
+
 def _start_channel_waiter() -> None:
     """Start this session's channel waiter if a session id is resolvable
     and none is already running. Best-effort: the waiter is a delivery
@@ -1076,7 +1112,16 @@ def _start_channel_waiter() -> None:
         # that session has no channel waiter.
         _log.info("channel_waiter_skipped_probe_process", pid=_os.getpid())
         return
-    session_id = _current_subscription_session_id()
+    if _DEFERRED_T1_MINT:
+        # nexus-zl1jv: the startup T1 mint failed and is deferred. With only
+        # NX_SESSION_ID set the session id now resolves, and the `_get_t1()`
+        # below would run the pre-init hook's mint retry on the LIFESPAN
+        # thread, blocking startup on a service that is down. No waiter
+        # started here before either (NX_T1_SESSION_ID was unset), so
+        # skipping keeps that behaviour; the first scratch call brings T1 up.
+        _log.info("channel_waiter_skipped_t1_mint_deferred")
+        return
+    session_id = _waiter_session_id()
     if not session_id or _channel.active_waiter(session_id) is not None:
         return
     try:
@@ -1100,7 +1145,7 @@ def _start_channel_waiter() -> None:
 
 async def _cancel_channel_waiter_task() -> None:
     """Cancel and await this session's channel waiter if one is running. Idempotent."""
-    session_id = _current_subscription_session_id()
+    session_id = _waiter_session_id()
     if not session_id:
         return
     waiter = _channel.active_waiter(session_id)
@@ -7955,7 +8000,9 @@ def _current_subscription_session_id() -> str:
     lifespan's T1 mint sets) -- one lookup, not two disagreeing ones.
     `NX_SESSION_ID` is the fallback for a host with no Claude Code session
     (nexus-zl1jv); the lifespan's mint writes `NX_T1_SESSION_ID`, so it
-    wins whenever T1 came up.
+    wins whenever T1 came up. Raises `DirectoryResolutionError` for an
+    `NX_SESSION_ID` that is not a UUID; the three tools surface it as their
+    error, and the lifespan's waiter goes through `_waiter_session_id`.
     """
     return resolve_env_session_id()
 
@@ -8009,7 +8056,7 @@ def tuple_subscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError(NO_SESSION_ID_MESSAGE)
+            raise ValueError(no_session_id_message())
         with _t2_ctx() as db:
             templates = (db.tuples.registry() or {}).get("templates", [])
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
@@ -8041,7 +8088,7 @@ def tuple_unsubscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError(NO_SESSION_ID_MESSAGE)
+            raise ValueError(no_session_id_message())
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         subs.unsubscribe(subspace)
@@ -8070,7 +8117,7 @@ def tuple_subscriptions() -> list[dict]:
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError(NO_SESSION_ID_MESSAGE)
+            raise ValueError(no_session_id_message())
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()

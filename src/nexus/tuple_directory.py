@@ -38,14 +38,14 @@ default is the tuple-watch session marker for this MCP server's claude
 ancestor (`nexus.session_marker._read_session_marker`, written synchronously
 by SessionStart on every source -- see that module's own docstrings),
 falling back to `NX_T1_SESSION_ID`, then `NX_SESSION_ID` (the one name a
-host with no Claude Code session, e.g. the desktop app, can set; nexus-zl1jv).
-`resolve_active_session_id()` and a bare `NX_T1_SESSION_ID` read are
-deliberately NOT used here: the former returns the spawn-time
+host with no Claude Code session can set in a self-configured MCP server
+entry; nexus-zl1jv). `NX_SESSION_ID` must be a UUID, checked like
+`from_address`. `resolve_active_session_id()` and a bare `NX_T1_SESSION_ID`
+read are deliberately NOT used here: the former returns the spawn-time
 `CLAUDE_CODE_SESSION_ID`, stale after an in-process `/clear`; the latter
-lags the T2 re-lease mint. The marker sits above both variables, so a
-nested `claude` that inherited its parent's `NX_SESSION_ID` still names
-ITS OWN session. A caller resolving none is refused rather than stamping a
-`from` that might already be stale.
+lags the T2 re-lease mint. The marker sits above both variables. A caller
+resolving none is refused rather than stamping a `from` that might already
+be stale.
 """
 from __future__ import annotations
 
@@ -175,16 +175,56 @@ def validate_from_address(value: str) -> str:
     )
 
 
-#: The ONE refusal text for an unresolvable session id (nexus-zl1jv).
-#: ``mailbox_send`` and ``tuple_subscribe``/``tuple_unsubscribe``/
-#: ``tuple_subscriptions`` all raise it, so a host without a Claude Code
-#: session reads one wording naming the whole chain. T1 keeps its own
-#: message, which names the variables T1 reads.
-NO_SESSION_ID_MESSAGE: str = (
-    "no resolvable session id: this is not a Claude Code session and "
-    "NX_T1_SESSION_ID and NX_SESSION_ID are unset; run inside Claude Code "
-    "or set NX_SESSION_ID"
+#: The refusal text for an unresolvable session id INSIDE Claude Code
+#: (nexus-zl1jv). There the session id exists but T1 has not published it
+#: yet: the startup mint was deferred (the storage service was down), or
+#: the tuple-watch marker is missing. Any T1 call retries the mint and
+#: writes ``NX_T1_SESSION_ID``. Pinned by an equality test.
+NO_SESSION_ID_IN_CLAUDE_CODE_MESSAGE: str = (
+    "no resolvable session id: T1 is not up yet in this Claude Code "
+    "session, so it has published no session id; make any scratch call or "
+    "run `nx doctor --check-t1`, then retry"
 )
+
+#: The refusal text for an unresolvable session id OUTSIDE Claude Code
+#: (a host that sets neither variable). Pinned by an equality test.
+NO_SESSION_ID_OUTSIDE_CLAUDE_CODE_MESSAGE: str = (
+    "no resolvable session id: NX_T1_SESSION_ID and NX_SESSION_ID are "
+    "unset; set NX_SESSION_ID to a UUID, unique per server, in a "
+    "self-configured MCP server entry. The account-plugin server (Claude "
+    "Desktop, Cowork) cannot set it; use memory_put to carry notes there"
+)
+
+
+def no_session_id_message() -> str:
+    """The ONE refusal for an unresolvable session id (nexus-zl1jv).
+
+    ``mailbox_send`` and ``tuple_subscribe``/``tuple_unsubscribe``/
+    ``tuple_subscriptions`` all raise it, so no site spells its own text.
+    The wording depends on the host: inside Claude Code the remedy is to
+    bring T1 up, outside it is to set ``NX_SESSION_ID``. T1 keeps its own
+    message, which names the variables T1 reads.
+    """
+    from nexus.session import started_by_claude_code  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+
+    if started_by_claude_code():
+        return NO_SESSION_ID_IN_CLAUDE_CODE_MESSAGE
+    return NO_SESSION_ID_OUTSIDE_CLAUDE_CODE_MESSAGE
+
+
+def invalid_env_session_id_message(value: str) -> str:
+    """Refusal for an ``NX_SESSION_ID`` that is not a UUID.
+
+    A peer replies to the sender address, and ``resolve_send_address``
+    reads anything that is not a session id or agent id as a NAME, so a
+    non-UUID sender is unreachable.
+    """
+    return (
+        f"NX_SESSION_ID {value[:64]!r} is not a UUID: mail and subscriptions "
+        "need a session id shaped like 123e4567-e89b-12d3-a456-426614174000, "
+        "because a peer replies to the sender and reads any other shape as a "
+        "name. Set NX_SESSION_ID to a UUID, unique per server"
+    )
 
 
 def resolve_env_session_id() -> str:
@@ -194,12 +234,21 @@ def resolve_env_session_id() -> str:
     ``NX_SESSION_ID`` (the one a host with no Claude Code session names;
     T1 resolves it too). Empty string when neither is set. The marker tier
     sits above both and is read by :func:`resolve_default_from`.
+
+    ``NX_SESSION_ID`` is set by a person, so it gets the same shape check
+    as ``from_address`` (a UUID) and a value that fails raises
+    :class:`DirectoryResolutionError`. ``NX_T1_SESSION_ID`` is written by
+    the T1 mint and is not re-checked here.
     """
-    for var in ("NX_T1_SESSION_ID", "NX_SESSION_ID"):
-        value = os.environ.get(var, "").strip()
-        if value:
-            return value
-    return ""
+    value = os.environ.get("NX_T1_SESSION_ID", "").strip()
+    if value:
+        return value
+    value = os.environ.get("NX_SESSION_ID", "").strip()
+    if not value:
+        return ""
+    if not looks_like_session_id(value):
+        raise DirectoryResolutionError(invalid_env_session_id_message(value))
+    return value
 
 
 def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | None = None) -> str:
@@ -224,4 +273,4 @@ def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | Non
     if env_id:
         return env_id
 
-    raise DirectoryResolutionError(NO_SESSION_ID_MESSAGE)
+    raise DirectoryResolutionError(no_session_id_message())
