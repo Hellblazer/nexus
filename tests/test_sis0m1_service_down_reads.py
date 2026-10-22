@@ -48,6 +48,19 @@ def test_a_read_verb_names_the_stopped_service(service_down, argv):
     assert "Collection not found" not in result.output, result.output
 
 
+@pytest.mark.expects_unresolvable_endpoint
+@pytest.mark.parametrize("argv", [["store", "get", "a" * 64], ["store", "list"]], ids=["get", "list"])
+def test_the_bare_default_store_reads_name_the_stopped_service(service_down, argv):
+    """nexus-2y8yw: with no --collection the verbs list every knowledge
+    collection first; that listing names the stopped service the same way. No
+    tenant: the endpoint is unresolvable on purpose, nothing reaches storage."""
+    result = CliRunner().invoke(main, argv)
+
+    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, SystemExit), f"{argv}: {type(result.exception).__name__} escaped"
+    assert "nx daemon service start" in result.output, result.output
+
+
 @pytest.fixture
 def lease_points_at_a_stopped_service(monkeypatch):
     """The other shape of "stopped": a lease that still names a port nothing

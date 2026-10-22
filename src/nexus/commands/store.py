@@ -11,6 +11,7 @@ _log = structlog.get_logger(__name__)
 from nexus.corpus import (
     EmbeddingProfileMismatchError,
     LocalVoyageCredentialMissingError,
+    store_read_scope,
     t3_collection_name,
     t3_collection_names_for_read,
 )
@@ -210,8 +211,8 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
 @store.command("list")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
-                   "docs/collections.md.")
+                   "knowledge, every knowledge collection). Never a model token or "
+                   "version; see docs/collections.md.")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
 @click.option("--offset", default=0, show_default=True,
@@ -223,7 +224,12 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
                    "(read-only; the set 'nx t3 gc' would quarantine). Requires --collection. "
                    "--limit bounds the rows shown.")
 def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: bool) -> None:
-    """List entries in a T3 knowledge collection."""
+    """List entries in a T3 knowledge collection.
+
+    With no --collection, lists the knowledge collections and their sizes
+    (every live knowledge collection, as the MCP store_list does); name one to
+    page its entries.
+    """
     if reapable:
         # The operator must NAME the collection: the default ('knowledge') is a convenience for the
         # plain listing, but an audit of what garbage collection would take should never silently
@@ -238,7 +244,20 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     db = _t3()
     # nexus-9ts7n: the named collection is paged and its live model siblings are
     # named, as the MCP store_list does (nexus-50uw6); naming a sibling pages it.
-    scope = t3_collection_names_for_read(collection, t3=db)
+    # nexus-2y8yw: bare "knowledge" is every knowledge collection (nexus-mgqs8), so
+    # it lists the subjects with their sizes rather than paging one of them.
+    if reapable:
+        scope = t3_collection_names_for_read(collection, t3=db)
+    else:
+        scope, rows = _store_scope(collection, db)
+        if len(scope) > 1 and collection.strip() == "knowledge":
+            counts = {r["name"]: r.get("count", "?") for r in rows if isinstance(r, dict) and "name" in r}
+            click.echo(f"{len(scope)} knowledge collections (pass one as --collection to list its entries):")
+            for name in scope:
+                click.echo(f"  {name}  {counts.get(name, '?')} entries")
+            if docs or offset:
+                click.echo("  (--docs and --offset apply to a named collection)")
+            return
     col_name = scope[0]
     also = (
         f"  also in this corpus: {', '.join(scope[1:])} (pass one as --collection to list it)\n"
@@ -439,12 +458,39 @@ def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
 
 
 
+def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
+    """The collections a ``nx store`` read looks in, by the rule the MCP store
+    tools use (:func:`nexus.corpus.store_read_scope`, nexus-2y8yw), and the live
+    rows listed for it (empty unless the bare ``knowledge`` asked for them).
+
+    The names come from the verb's own T3 handle, one listing, so the scope and
+    the counts printed beside it are the client the verb reads through.
+    """
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred: heavy module
+
+    listed: list = []
+
+    def _knowledge() -> list[str]:
+        # A stopped service raises what the CLI group already turns into its
+        # "did not answer" / "nx daemon service start" message (nexus-sis0m.1).
+        rows = db.list_collections()
+        listed.extend(
+            r for r in rows
+            if isinstance(r, dict) and "name" in r and is_live_collection_row(r)
+            and r.get("content_type") == "knowledge"  # no catalog row: left out, as resolve_corpus does
+            and r.get("lifecycle_state", "live") == "live"
+        )
+        return sorted(r["name"] for r in listed)
+
+    return store_read_scope(collection, t3=db, knowledge_collections=_knowledge), listed
+
+
 @store.command("get")
 @click.argument("doc_id")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
-                   "docs/collections.md.")
+                   "knowledge, every knowledge collection). Never a model token or "
+                   "version; see docs/collections.md.")
 @click.option("--json", "json_out", is_flag=True, default=False,
               help="Output as JSON")
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
@@ -462,7 +508,7 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     db = _t3()
     # nexus-9ts7n: every live model sibling of the corpus, as the MCP store_get
     # reads (nexus-50uw6); a fully-qualified name is that one collection.
-    scope = t3_collection_names_for_read(collection, t3=db)
+    scope, _rows = _store_scope(collection, db)
     col_name, entry = scope[0], None
     for candidate in scope:
         entry = db.get_by_id(candidate, doc_id)
