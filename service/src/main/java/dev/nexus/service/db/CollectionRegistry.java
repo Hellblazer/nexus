@@ -52,13 +52,14 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@code cached(...).isPresent()}. See {@link CollectionRow} for the field
  * semantics.
  *
- * <p><strong>Correctness: mark-known only after commit.</strong> Callers MUST call
- * {@link #markKnown} only after the transaction that performed the (possibly
- * skipped) registration has committed successfully — never from inside the
- * {@code TenantScope.withTenant} lambda itself, UNLESS the row being marked was
- * already committed by an EARLIER transaction (e.g. {@link #require} caching a row
- * it just read mid-transaction — that row's existence predates this transaction,
- * so marking it known cannot be undone by this transaction's own rollback). If the
+ * <p><strong>Correctness: mark-known only after commit.</strong> The only production
+ * fill is {@link #require}'s own (reached through {@link #lookup} too), guarded by the
+ * eviction count (nexus-hkh1y); {@link #markKnown} stays public as a test seeding seam.
+ * The rule below is why that fill may run mid-transaction and why a writer must not
+ * cache its own write: a row may be cached only once a committed transaction holds it,
+ * never from inside the {@code TenantScope.withTenant} lambda that wrote it ({@link
+ * #require} caches a row it just read, whose existence predates the reading
+ * transaction, so this transaction's own rollback cannot undo it). If the
  * enclosing transaction later rolls back (e.g. an unrelated error later in the
  * same batch), a row THIS transaction wrote was never actually persisted; marking
  * the cache eagerly for THAT row would cause every subsequent writer to skip
