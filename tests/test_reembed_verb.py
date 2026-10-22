@@ -883,6 +883,7 @@ class TestRunTaxonomyDiscover:
         monkeypatch.setattr("nexus.commands.taxonomy_cmd._command_shared_t2_client", lambda: None)
         monkeypatch.setattr("nexus.commands.taxonomy_cmd._claude_available", lambda: False)
         monkeypatch.setattr("nexus.commands.taxonomy_cmd._default_db_path", lambda: "unused")
+        monkeypatch.setattr("nexus.context.generate_context_l1", lambda *a, **k: None)
         monkeypatch.setattr("nexus.commands.taxonomy_cmd._run_discover_projection", lambda *a, **k: None)
         monkeypatch.setattr("nexus.db.make_t3", lambda: object())
         monkeypatch.setattr("nexus.config.load_config", lambda: {"taxonomy": {"auto_label": False}})
