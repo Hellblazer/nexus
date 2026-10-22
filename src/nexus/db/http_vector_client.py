@@ -4811,8 +4811,9 @@ class HttpVectorClient:
         ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine which quarantine
         collections may hold chunks of ``origin_collection``. An engine that has it adds
         ``"quarantine_collections": [str]`` to the answer (or ``"sibling_resolution": "timed_out"``
-        when its read ran into its bound); an engine that predates it answers neither, which is how a
-        caller tells the two apart, never by version. The field is sent only when asked.
+        when its read ran into its bound). Every engine at or above ``REQUIRED_ENGINE_VERSION`` has it;
+        an answer with neither key comes from an engine below that floor (a local one not restarted
+        since a client upgrade) or a defect. The field is sent only when asked.
         """
         body: dict = {
             "quarantine_collection": quarantine_collection,

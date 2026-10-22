@@ -4056,12 +4056,9 @@ def _prune_collection_serverside(
     # moved), and the client's move leaves no ``quarantined_by`` tag for the
     # engine's own expiry to find, so a chunk moved under yesterday's name was
     # neither re-referenced nor expired by a pass that looked only under today's.
-    # Those two names are what this path starts from and what it keeps against an
-    # engine that predates nexus-wbfpw.64 (v0.1.162 and earlier): the dry-run probe
-    # (``resolve_quarantine_siblings`` ``probe_engine``) is never run here, because
-    # this runs per collection on every ``nx index repo`` and the probe is an
-    # unbounded scan engine-side, so against such an engine a chunk stranded under a
-    # third name waits for ``nx t3 gc``, which probes. nexus-wbfpw.64: the first
+    # Those two names are what this path starts from, and what it keeps when the
+    # engine's lookup timed out or answered neither key (nexus-6bk7i: no scan runs
+    # to find a third-name sibling then; it waits for the next run). nexus-wbfpw.64: the first
     # restore page and the first expire page of a collection ask the engine for the
     # origin's siblings (``resolve_siblings``, read under a 2 s bound), and an engine
     # that answers (``quarantine_collections``) replaces the derived extras with
@@ -4077,7 +4074,7 @@ def _prune_collection_serverside(
     # resolving them crosses no wire (a db with no routes still returns False below
     # before anything is sent). The bounded call falls back to the unbounded one
     # per sibling inside the helper, as the single-name code did.
-    siblings = resolve_quarantine_siblings(db, collection_name, primary=quarantine_name)
+    siblings = resolve_quarantine_siblings(collection_name, primary=quarantine_name)
     sibling_resolution = SiblingResolution()
     restored = restore_rereferenced_across_serverside(
         db, siblings, collection_name, best_effort=True, resolution=sibling_resolution,

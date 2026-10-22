@@ -165,15 +165,16 @@ class TestFixPathsRealClient:
 # ── nx t3 gc (RDR-192 Step 8, nexus-wbfpw.18) ────────────────────────────────
 
 
-@pytest.mark.parametrize("engine", ["resolves", "predates"])
+@pytest.mark.parametrize("engine", ["resolves", "fieldless"])
 def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypatch, cloud_mode, engine):
     """The reapable census + listing + engine move through the real client. Pins the client's own
     wiring (method names, request bodies, response reads); the verb's refusals and the engine's
     behaviour are ``test_wbfpw18_t3_gc_wire.py`` and ``test_wbfpw18_t3_gc_substrate.py``. The
     pre-.18 version of this test pinned a list-then-delete-by-id sweep through /store-delete.
-    Since nexus-wbfpw.64 the first expire page asks the engine for the siblings: an engine that
-    answers them (``resolves``) gets no probe; one that predates the field gets the dry-run
-    sibling probe after that page (nexus-wbfpw.58)."""
+    The first expire page asks the engine for the siblings (nexus-wbfpw.64). An engine that
+    answers them (``resolves``) is a clean run. One that answers neither key (``fieldless``; no
+    supported engine does) exits 1 after the same calls: there is no dry-run probe to follow the
+    page any more (nexus-6bk7i)."""
     chash = "a" * 64
     posted = []
 
@@ -195,12 +196,6 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         if path == "/v1/vectors/gc/quarantine-orphans":
             return {"moved": 1, "sample": [{"chash": chash, "title": "t"}], "remaining": 0,
                     "row_limit": body.get("row_limit")}
-        if path == "/v1/vectors/gc/quarantine-restore":
-            # The sibling probe (nexus-wbfpw.58): a dry run that selects nothing and answers the
-            # engine's sibling set. Here it names only the sibling the row already derives.
-            return {"origin_collection": _KNOWLEDGE, "dry_run": True, "audit_id": None, "audit_ids": [],
-                    "quarantine_collection": f"quarantine-{_KNOWLEDGE}",
-                    "quarantine_collections": [f"quarantine-{_KNOWLEDGE}"], "chashes": {}}
         if path == "/v1/vectors/gc/expire-quarantine":
             if engine == "resolves" and body.get("resolve_siblings"):
                 return {"expired": 0, "refused": 0,
@@ -226,8 +221,9 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         patch("nexus.indexer_utils.catalog_documents_for_collection", return_value=[]),
     ):
         result = runner.invoke(main, ["t3", "gc", "-c", _KNOWLEDGE, "--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (0 if engine == "resolves" else 1), result.output
     assert "quarantined 1 chunk(s)" in result.output
+    assert ("did not name" in result.output) == (engine == "fieldless"), result.output
     paths = [p for p, _ in posted]
     assert paths == [
         "/v1/vectors/manifest-less-census",
@@ -235,12 +231,9 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         "/v1/vectors/manifest-less-census",  # re-read immediately before the move
         "/v1/vectors/gc/quarantine-orphans",
         "/v1/vectors/gc/expire-quarantine",  # the client expiry of the sibling it just filled
-    ] + (["/v1/vectors/gc/quarantine-restore"] if engine == "predates" else [])  # the dry-run probe
+    ]
     expire = next(b for p, b in posted if p == "/v1/vectors/gc/expire-quarantine")
     assert expire["resolve_siblings"] is True, "the first expire page asks the engine (nexus-wbfpw.64)"
-    if engine == "predates":
-        probe = posted[-1][1]
-        assert probe["dry_run"] is True and probe["limit"] == 1 and probe["after_chash"] == "f" * 64
     move = next(b for p, b in posted if p == "/v1/vectors/gc/quarantine-orphans")
     assert move["collection"] == _KNOWLEDGE
     assert move["quarantine_collection"].startswith("quarantine-")
