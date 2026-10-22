@@ -519,4 +519,53 @@ class TenantTokenPartitionsIntegrationTest {
         store.issueToken(tenant, "x", null);
         assertLeavesExist(tenant);
     }
+
+    @Test
+    @Order(10)
+    void aLockTimeoutInsideTheCreation_isRetriedAsTheSameBusy_notPropagated() throws Exception {
+        // nexus-3wh8d.34 (WP6): every test above reaches the busy path through the 1 s statement_timeout (57014),
+        // which always fires before create_tenant_partitions' own 2 s lock_timeout. A bound longer than 2 s lets
+        // PostgreSQL raise 55P03 for real, so dropping 55P03 from TokenStore.lockWaitState fails here: the error
+        // would propagate instead of ending as TenantCreationBusyException, which the handlers answer as the 503
+        // pinned above.
+        String tenant = "p225-tok-busy-lock-timeout";
+        String firstModelPartition;
+        try (Connection su = pg.createConnection("")) {
+            firstModelPartition = PartitionScratch.children(dsl(su), "chunks").stream()
+                .map(PartitionScratch.Child::name).sorted().findFirst().orElseThrow();
+        }
+        var store = new TokenStore(ds, Clock.systemUTC(), new TokenStore.TenantCreationBound(
+            java.time.Duration.ofMillis(6000), 1, java.time.Duration.ZERO));
+        try (Connection blocker = pg.createConnection("")) {
+            blocker.setAutoCommit(false);
+            dsl(blocker).fetchCount(DSL.table(DSL.name("nexus", firstModelPartition)));
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> store.issueToken(tenant, "x", null))
+                .isInstanceOfSatisfying(TenantCreationBusyException.class, e -> {
+                    assertThat(e.tenant()).isEqualTo(tenant);
+                    assertThat(e.attempts()).isEqualTo(1);
+                    assertThat(sqlStates(e.getCause())).as("the attempt ended on the lock timeout").contains("55P03")
+                        .doesNotContain("57014");
+                });
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertThat(ms).as("one 2 s lock_timeout, well inside the 6 s statement bound").isBetween(1800L, 5500L);
+            blocker.rollback();
+        }
+        try (Connection su = pg.createConnection("")) {
+            assertThat(dsl(su).fetchCount(SERVICE_TOKENS, SERVICE_TOKENS.TENANT_ID.eq(tenant)))
+                .as("nothing was issued").isZero();
+        }
+        store.issueToken(tenant, "x", null);
+        assertLeavesExist(tenant);
+    }
+
+    private static List<String> sqlStates(Throwable t) {
+        List<String> states = new ArrayList<>();
+        for (Throwable c = t; c != null && states.size() < 32; c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                states.add(se.getSQLState());
+            }
+        }
+        return states;
+    }
 }
