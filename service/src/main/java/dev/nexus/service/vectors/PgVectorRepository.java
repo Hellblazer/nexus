@@ -2974,11 +2974,9 @@ public final class PgVectorRepository {
                 run.boundMs = b.timeoutMs();
                 return b.timeoutMs();
             };
-            return plainSearchCandidates(tenantScope.withTenant(tenant, ctx -> {
-                PgSession.setSearchStatementTimeout(ctx, bound.getAsInt());
-                return hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model,
-                                  tenant, bound);
-            }));
+            return plainSearchCandidates(tenantScope.withTenant(tenant, ctx ->
+                hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model, tenant,
+                           bound, true)));
         } finally {
             armGate.release();
         }
@@ -3282,16 +3280,9 @@ public final class PgVectorRepository {
         String[] colls = collectionNames.toArray(String[]::new);
         String gateQueryText = queryText;
 
-        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
-            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
-            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
-            // inherit it. Set here, before the first fetch, rather than per branch: a
-            // branch without HNSW is still a scan that can pin xmin. First of the GUC round
-            // trips so the rest run under its network bound too (nexus-u9zkn).
-            PgSession.setSearchStatementTimeout(ctx);
-            return hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
-                              model, tenant, null);
-        });
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
+            hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
+                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false));
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -3303,19 +3294,26 @@ public final class PgVectorRepository {
     }
 
     /**
-     * The text-gated statements of {@link #hybridSearch}, run in a transaction the caller opened and
-     * bounded (its {@code statement_timeout} is already set): the gate probe, then the selective
-     * by-chash rank or the HNSW-first rank. Shared by {@link #hybridSearch} and the lexical arm of
-     * {@link #searchPerCollection} (nexus-xd2rc), which sets the arm's own bound first.
+     * The text-gated statements of {@link #hybridSearch}, in a transaction the caller opened: the
+     * statement bound, the gate probe, then the selective by-chash rank or the HNSW-first rank. Shared by
+     * {@link #hybridSearch} and the lexical arm of {@link #searchPerCollection} (nexus-xd2rc).
      *
-     * @param rebindTimeoutMs {@code null} keeps the caller's bound for every statement; otherwise it is
-     *        evaluated again, and set, before the rank and before an exact re-run, so a fan-out arm's later
-     *        statements are bounded by the budget that remains, as {@link #runArm}'s are
+     * @param statementTimeoutMs the statement bound, evaluated when it is set
+     * @param rebind when true the bound is evaluated and set again before the rank and before an exact
+     *        re-run, so a fan-out arm's later statements are bounded by the budget that remains, as
+     *        {@link #runArm}'s are; false keeps the first bound for every statement
      */
     private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String gateQueryText,
                                                 String[] colls, WherePlan wherePlan, int nResults,
                                                 int selectiveGateMax, String model, String tenant,
-                                                java.util.function.IntSupplier rebindTimeoutMs) {
+                                                java.util.function.IntSupplier statementTimeoutMs,
+                                                boolean rebind) {
+        // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
+        // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
+        // inherit it. Set here, before the first fetch, rather than per branch: a
+        // branch without HNSW is still a scan that can pin xmin. First of the GUC round
+        // trips so the rest run under its network bound too (nexus-u9zkn).
+        PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
         // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l
         // selectivity-aware two-branch dispatch (bounded gate probe -> chash-ranked
         // selective path vs HNSW-first fallback) as three generated schema functions,
@@ -3350,8 +3348,8 @@ public final class PgVectorRepository {
         };
         Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
         int matches = probeResult.size();
-        if (rebindTimeoutMs != null) {
-            PgSession.setSearchStatementTimeout(ctx, rebindTimeoutMs.getAsInt());
+        if (rebind) {
+            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
         }
 
         if (matches <= selectiveGateMax) {
@@ -3396,7 +3394,7 @@ public final class PgVectorRepository {
         // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
         // is already exact (ranks the complete materialized gate), so it never needed
         // the fallback.
-        return exactSelectFrom(ctx, nResults, hnswFirstFn, rebindTimeoutMs);
+        return exactSelectFrom(ctx, nResults, hnswFirstFn, rebind ? statementTimeoutMs : null);
     }
 
     /**

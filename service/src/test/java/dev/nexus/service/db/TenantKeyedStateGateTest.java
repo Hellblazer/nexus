@@ -554,6 +554,12 @@ public class TenantKeyedStateGateTest {
                 + "is sent; request-scoped");
             notKeyed.put("PgVectorRepository.FanoutMerger.worstOnTop", "the merge heap of one fan-out search; "
                 + "dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.rows", "the lexical arms' rows of one fan-out search "
+                + "(nexus-xd2rc); dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.Union.extras", "the lexical rows one fan-out search "
+                + "returns beside its vector rows; dies with the request");
+            notKeyed.put("PgVectorRepository.LexicalLeg.Union.stats", "per-collection lexical stats of one "
+                + "fan-out search; dies with the request");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.pendingSubspaces", "wake bookkeeping of one parked wait; "
                 + "dies when that request ends");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.tenant", "the tenant of one parked wait, immutable; "
@@ -665,7 +671,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, TEST_HOOK);
             }
-            // RESULT (70)
+            // RESULT (73)
             for (String f : List.of(
                 "ChunksLeafAutovacuumCheck.LeafRel.options",
                 "LeafBloatCatalog.Snapshot.leaves",
@@ -710,6 +716,9 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.MetadataUpdateOutcome.missing",
                 "PgVectorRepository.NeedEmbedResolution.needEmbedIdx",
                 "PgVectorRepository.NeedEmbedResolution.originalAbsentIdx",
+                "PgVectorRepository.LexicalStat.ids",
+                "PgVectorRepository.PerCollectionResult.lexical",
+                "PgVectorRepository.PerCollectionResult.lexicalRows",
                 "PgVectorRepository.PerCollectionResult.perCollection",
                 "PgVectorRepository.PerCollectionResult.rows",
                 "PgVectorRepository.PerCollectionResult.skippedCollections",
