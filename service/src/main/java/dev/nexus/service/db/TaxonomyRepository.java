@@ -1523,6 +1523,8 @@ public final class TaxonomyRepository {
     /** Rename all taxonomy rows from old to new collection. */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
+            CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
             // RDR-164 P1a: the new collection name must be registered before the denorm
             // columns are re-pointed at it (topics/taxonomy_meta carry NOT VALID RESTRICT
             // FKs to catalog_collections; topic_assignments' FK is ON UPDATE CASCADE but

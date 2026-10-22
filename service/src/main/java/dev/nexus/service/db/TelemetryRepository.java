@@ -638,17 +638,20 @@ public final class TelemetryRepository {
      * Returns a map of {tableName -> rowCount}.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
-        int searchCount = tenantScope.withTenant(tenant, ctx -> ctx.update(SEARCH_TELEMETRY)
-            .set(SEARCH_TELEMETRY.COLLECTION, newName)
-            .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName))
-            .execute());
-
-        int hookCount = tenantScope.withTenant(tenant, ctx -> ctx.update(HOOK_FAILURES)
-            .set(HOOK_FAILURES.COLLECTION, newName)
-            .where(HOOK_FAILURES.COLLECTION.eq(oldName))
-            .execute());
-
-        return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
+        // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
+        // refusal leaves neither table touched. Refused while a re-embed job holds either name.
+        return tenantScope.withTenant(tenant, ctx -> {
+            CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
+            int searchCount = ctx.update(SEARCH_TELEMETRY)
+                .set(SEARCH_TELEMETRY.COLLECTION, newName)
+                .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName))
+                .execute();
+            int hookCount = ctx.update(HOOK_FAILURES)
+                .set(HOOK_FAILURES.COLLECTION, newName)
+                .where(HOOK_FAILURES.COLLECTION.eq(oldName))
+                .execute();
+            return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
+        });
     }
 
     /**

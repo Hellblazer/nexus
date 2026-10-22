@@ -1539,6 +1539,12 @@ class StorageServiceSupervisor:
         # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
         # (container bind override, default loopback) passes through via env inheritance.
         env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
+        # RDR-210 Phase 6 Step 2 (nexus-f98bg): this supervisor spawns the LOCAL engine, the only one that
+        # runs the cross-model re-embed job runner and answers its control routes. The managed (cloud) engine
+        # is not started here and never sees the variable, so it has no runner. Forced, not setdefault: an
+        # operator's inherited value must not turn a local engine's runner off by accident or a managed
+        # one's on. The engine reads the value 1, ignoring surrounding whitespace.
+        env["NX_ENGINE_LOCAL"] = "1"
         # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the engine treats an UNSET
         # NX_OWNERLESS_WRITE_MODE as log-only (the first production deploy must not refuse
         # anything until the would-refuse log has been read). A LOCAL install has no such

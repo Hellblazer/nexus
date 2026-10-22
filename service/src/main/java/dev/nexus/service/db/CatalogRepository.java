@@ -7,6 +7,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
@@ -4875,8 +4876,17 @@ public final class CatalogRepository {
      * RDR-210 Phase 6 Step 1, the internal parameter of the combined write that makes it a MOVE: the
      * collection the documents leave, and per document the manifest chashes (in position order) the
      * caller read. Engine-internal: no HTTP route builds one.
+     *
+     * <p>{@code jobId} is the re-embed job the move belongs to, or null for a move that belongs to none. With a
+     * job, each document's move transaction also records the move against the job
+     * ({@link ReembedJobRepository#recordMoveInTxn}), so a document and its record commit or roll back together.
      */
-    record DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes) {
+    record DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes, java.util.UUID jobId) {
+        /** A move that belongs to no job. */
+        DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes) {
+            this(sourceCollection, expectedChashes, null);
+        }
+
         DocumentMove {
             requireNonBlank(sourceCollection, "sourceCollection");
             if (expectedChashes == null) {
@@ -6066,6 +6076,11 @@ public final class CatalogRepository {
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
+                                // The job's record of this move, in the same transaction. Lock order for a job's
+                                // move: the sweep gate (shared) and the index-run lock above, then the job row.
+                                if (move.jobId() != null) {
+                                    ReembedJobRepository.recordMoveInTxn(ctx, tenant, move.jobId(), docId);
+                                }
                                 java.util.function.Consumer<String> afterCompleted = afterMoveCompletedHookForTests;
                                 if (afterCompleted != null) afterCompleted.accept(docId);
                             }
@@ -9364,6 +9379,63 @@ public final class CatalogRepository {
         public SourceUriCollision(String message) { super(message); }
     }
 
+    /**
+     * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a rename, rehome or other name-rewriting verb touches a
+     * collection that a re-embed job holds as its source or its target. The message names the job, the collection and the way out. Mapped to 409 by the handler.
+     * Nothing has moved when it is thrown.
+     */
+    public static final class CollectionHeldByReembedJob extends RuntimeException {
+        private final java.util.UUID jobId;
+
+        public CollectionHeldByReembedJob(String message, java.util.UUID jobId) {
+            super(message);
+            this.jobId = jobId;
+        }
+
+        public java.util.UUID jobId() {
+            return jobId;
+        }
+    }
+
+    /** The advisory-lock key a re-embed job's start (exclusive) and every name-rewriting verb's guard (shared) take. */
+    static String reembedGuardKey(String tenant) {
+        return "reembedguard:" + tenant;
+    }
+
+    /**
+     * Refuse {@code verb} (a name-rewriting operation: {@code rename}, {@code rehome}, or a satellite table's
+     * rename) when a re-embed job in a lock state names {@code from} or {@code to} as its source or its target.
+     * Rewriting a name a job is moving documents out of or into desynchronises the job from the data it holds.
+     *
+     * <p>Call it inside the verb's own transaction, after the verb's other locks. It takes the per-tenant guard
+     * lock SHARED, the lock {@link ReembedJobRepository#start} takes exclusive, so a job cannot be started between
+     * this read and the verb's commit. Lock order: the verb's own locks (sweep gates), then this one; a job's start
+     * takes only this one and holds no job-row lock while it waits, and the runner's transactions never take it,
+     * so there is no cycle.
+     *
+     * @throws CollectionHeldByReembedJob naming the job, when one holds either name
+     */
+    public static void refuseUnderReembedJob(DSLContext ctx, String tenant, String verb, String from, String to) {
+        ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+                   DSL.function("hashtext", Integer.class, DSL.val(reembedGuardKey(tenant)))))
+           .fetch();
+        var held = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE, REEMBED_JOBS.SOURCE_COLLECTION,
+                REEMBED_JOBS.TARGET_COLLECTION)
+            .from(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.STATE.in(ReembedJobRepository.LOCK_STATES))
+            .and(REEMBED_JOBS.SOURCE_COLLECTION.in(from, to)
+                .or(REEMBED_JOBS.TARGET_COLLECTION.in(from, to)))
+            .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+            .limit(1)
+            .fetchOne();
+        if (held != null) {
+            throw new CollectionHeldByReembedJob("cannot " + verb + " " + from + " to " + to + ": re-embed job "
+                + held.value1() + " (" + held.value2() + ") is moving documents from " + held.value3() + " to "
+                + held.value4() + ". Abort or finish the job first.", held.value1());
+        }
+    }
+
     /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
     public boolean collectionIsEmpty(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> collectionIsEmpty(ctx, name));
@@ -9547,6 +9619,10 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(oldName, newName).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg, ruling 4): a name a re-embed job in a lock state is moving
+            // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
+            // rename's own transaction.
+            refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
             // as a superseded tombstone instead of deleting it, a round-trip rename
             // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
@@ -10068,6 +10144,10 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(source, target).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a re-home files the source's rows under the target, so it
+            // moves a collection a re-embed job is draining or filling out from under the job. Refused, 409 naming
+            // the job, whichever role the held name has (the source being moved out, the target being moved onto).
+            refuseUnderReembedJob(ctx, tenant, "rehome", source, target);
             requireLiveCollection(ctx, source, "source");
             requireLiveCollection(ctx, target, "target");
             // RDR-225 (nexus-3wh8d.13): the chunk UPDATE below files the source's chunk rows under the

@@ -243,6 +243,9 @@ public final class ChashRepository {
             for (String c : java.util.stream.Stream.of(oldCollection, newCollection).sorted().distinct().toList()) {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name a re-embed job is moving documents out of or into
+            // is not re-homed underneath it; 409 naming the job (HttpUtil.sendTypedDbError).
+            CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCollection, newCollection);
             // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
             // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
             // target may be superseded. The source needs no check, it is only read.

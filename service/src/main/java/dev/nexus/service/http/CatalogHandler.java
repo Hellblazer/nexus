@@ -293,6 +293,13 @@ public final class CatalogHandler implements HttpHandler {
             // gets the same 409 the pre-check gives, with the message that names the remedy.
             // It fell into the generic catch below for one commit and surfaced as an opaque 500.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.CollectionHeldByReembedJob e) {
+            // RDR-210 Phase 6 Step 2 (nexus-f98bg, ruling 4): the rename names a collection a re-embed job is
+            // moving documents out of or into. A refusal naming the job, with its id for the client.
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("error", e.getMessage());
+            body.put("job_id", e.jobId().toString());
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
         } catch (CatalogRepository.SourceUriCollision e) {
             // nexus-sis0m.3: the rename's source_uri rewrite would land on a URI a live
             // document already holds; a refusal, not a server error.

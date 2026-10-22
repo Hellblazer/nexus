@@ -103,6 +103,26 @@ public final class ReembedJobRepository {
             this.existingState = existingState;
         }
 
+        private JobLockHeld(String message, UUID existingJobId, String existingState) {
+            super(message);
+            this.existingJobId = existingJobId;
+            this.existingState = existingState;
+        }
+
+        /** A job in a lock state is moving documents INTO {@code collection}, which a new job would move out of. */
+        static JobLockHeld targetOf(String collection, UUID existingJobId, String existingState) {
+            return new JobLockHeld("re-embed job " + existingJobId + " (" + existingState
+                + ") holds " + collection + " as its target; it cannot also be a new job's source",
+                existingJobId, existingState);
+        }
+
+        /** A job in a lock state is moving documents OUT of {@code collection}, which a new job would fill. */
+        static JobLockHeld sourceOf(String collection, UUID existingJobId, String existingState) {
+            return new JobLockHeld("re-embed job " + existingJobId + " (" + existingState
+                + ") holds " + collection + " as its source; it cannot also be a new job's target",
+                existingJobId, existingState);
+        }
+
         public UUID existingJobId() {
             return existingJobId;
         }
@@ -150,14 +170,37 @@ public final class ReembedJobRepository {
             super("the lock on source " + sourceCollection + " changed hands twice while it was being read",
                 cause);
         }
+
+        private LockContention(Throwable cause, String message) {
+            super(message, cause);
+        }
+
+        /**
+         * {@link #start} waited {@link #GUARD_LOCK_TIMEOUT_MS} for the per-tenant guard and did not get it: a
+         * name-rewriting verb holds it shared for its whole transaction. Nothing was written; retry.
+         */
+        static LockContention guardBusy(String sourceCollection, Throwable cause) {
+            return new LockContention(cause, "a collection rename or rehome is in progress for this tenant; the "
+                + "re-embed job on " + sourceCollection + " was not started. Retry shortly");
+        }
     }
+
+    /**
+     * How long {@link #start} waits for the per-tenant guard before answering {@link LockContention}. A rename
+     * holds the guard shared until it commits, so an unbounded wait would pin the caller's pool connection for
+     * as long as a large rename runs. Same bound as the other short lock waits ({@code
+     * PgSession.DEFAULT_GC_EXPIRE_BOUNDED_LOCK_TIMEOUT_MS}).
+     */
+    static final int GUARD_LOCK_TIMEOUT_MS = 2_000;
 
     private final TenantScope scope;
 
     /**
      * Test-only seam: called with a phase ({@code "before_lookup"}: the source-lock index refused and the
      * holder is about to be looked up; {@code "holder_gone"}: no holder was found and the operation is about
-     * to be retried) and the zero-based attempt, outside any transaction. Null (a no-op) in production.
+     * to be retried; both outside any transaction) and the zero-based attempt. {@code "after_start_reads"} is
+     * called INSIDE {@link #start}'s transaction, with the per-tenant start lock held, between its cross-job reads
+     * and its insert. Null (a no-op) in production.
      */
     private volatile BiConsumer<String, Integer> lockRetryHookForTests;
 
@@ -173,15 +216,56 @@ public final class ReembedJobRepository {
     /**
      * Insert a {@code planned} job. {@code tokenCap} null means no cap.
      *
+     * <p><b>The per-tenant start lock.</b> The two cross-job reads below (this job's source against the lock-state
+     * jobs' targets, this job's target against their sources) and the insert are one decision. The source-lock
+     * index covers only two jobs on the SAME source, so two starts that meet on different names (A to B and B to C)
+     * would each read the other's absence and both insert. The transaction therefore takes
+     * {@code pg_advisory_xact_lock(hashtext('reembedguard:' || tenant))} first, serialising the tenant's starts, and
+     * the name-rewriting verbs ({@link CatalogRepository#refuseUnderReembedJob}) take the same key shared, so a
+     * start cannot slip between a rename's read of the jobs and its commit. Lock order: this lock first, then
+     * nothing else (a start takes no job-row lock; it only reads and inserts), so it cannot be a link in a cycle
+     * with the runner's sweep-gate, index-run and job-row locks, none of which waits on it.
+     *
      * @throws JobLockHeld     when a job in a lock state already holds {@code source}, naming it (a failed job
-     *                         included: it keeps the lock until it is resumed or aborted)
-     * @throws LockContention  when the index refused twice and the holder was gone each time it was looked up
+     *                         included: it keeps the lock until it is resumed or aborted), or holds {@code source}
+     *                         as its target, or {@code target} as its source
+     * @throws LockContention  when the index refused twice and the holder was gone each time it was looked up, or
+     *                         when a rename or rehome held the per-tenant guard for longer than
+     *                         {@link #GUARD_LOCK_TIMEOUT_MS}
      */
     public Job start(String tenant, String source, String target, Long tokenCap, boolean keepSource,
                      boolean forceDelete) {
         UUID jobId = UUID.randomUUID();
         return retryingOnLock(tenant, jobId, () -> source, () ->
-            scope.withTenant(tenant, ctx -> Job.from(ctx.insertInto(REEMBED_JOBS)
+            scope.withTenant(tenant, ctx -> {
+                takeStartGuard(ctx, tenant, source);
+                // A source that is the TARGET of a job still in a lock state is being filled by that job;
+                // moving documents out of it would race that job. The unique index covers only same-source jobs,
+                // so this is the refusal that names the job holding the collection from the other side.
+                var intoSource = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
+                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                    .and(REEMBED_JOBS.TARGET_COLLECTION.eq(source))
+                    .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
+                    .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+                    .limit(1)
+                    .fetchOne();
+                if (intoSource != null) {
+                    throw JobLockHeld.targetOf(source, intoSource.value1(), intoSource.value2());
+                }
+                // The reverse: a target that is the SOURCE of a job still in a lock state is being drained by
+                // that job; filling it from a new job would race the drain.
+                var outOfTarget = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
+                    .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                    .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(target))
+                    .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
+                    .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+                    .limit(1)
+                    .fetchOne();
+                if (outOfTarget != null) {
+                    throw JobLockHeld.sourceOf(target, outOfTarget.value1(), outOfTarget.value2());
+                }
+                hook("after_start_reads", 0);
+                return Job.from(ctx.insertInto(REEMBED_JOBS)
                 .set(REEMBED_JOBS.TENANT_ID, tenant)
                 .set(REEMBED_JOBS.JOB_ID, jobId)
                 .set(REEMBED_JOBS.SOURCE_COLLECTION, source)
@@ -193,7 +277,31 @@ public final class ReembedJobRepository {
                 .set(REEMBED_JOBS.STARTED_AT, clock())
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
                 .returning()
-                .fetchOne())));
+                .fetchOne());
+            }));
+    }
+
+    /**
+     * Take the per-tenant guard exclusive, waiting at most {@link #GUARD_LOCK_TIMEOUT_MS}. The bound is
+     * transaction-local and is put back as it was once the guard is held, so the reads and the insert that follow
+     * run under the setting they had before. A timeout (SQLSTATE 55P03) is {@link LockContention}, which the route
+     * answers as a retryable 409; the transaction ends with the throw, so nothing was written.
+     */
+    static void takeStartGuard(DSLContext ctx, String tenant, String source) {
+        String before = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout")))
+            .fetchOne(0, String.class);
+        PgSession.setLocal(ctx, "lock_timeout", Integer.toString(GUARD_LOCK_TIMEOUT_MS));
+        try {
+            ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                    DSL.function("hashtext", Integer.class, DSL.val(CatalogRepository.reembedGuardKey(tenant)))))
+                .fetch();
+        } catch (RuntimeException e) {
+            if (SqlConstraints.isLockNotAvailable(e)) {
+                throw LockContention.guardBusy(source, e);
+            }
+            throw e;
+        }
+        PgSession.setLocal(ctx, "lock_timeout", before);
     }
 
     public Optional<Job> get(String tenant, UUID jobId) {
@@ -266,8 +374,9 @@ public final class ReembedJobRepository {
     }
 
     /**
-     * Fold one batch into a job, in one transaction: the batch's skips (insert-or-ignore, so a document
-     * skipped once in this job is counted once), its chunk and token counters, and the cursor, kept
+     * Fold one batch into a job, in one transaction: the batch's skips (a document skipped once in this job is
+     * counted once; one that had moved and is in the source again becomes a skip, and stops counting as moved),
+     * its chunk and token counters, and the cursor, kept
      * monotone ({@code greatest}), so the cursor passes skipped documents the moves never reached.
      *
      * <p>The batch has already happened (its moves are committed and counted by {@link #recordMoveInTxn},
@@ -280,6 +389,30 @@ public final class ReembedJobRepository {
      * @return the updated row, or empty when the job is absent or finished
      */
     public Optional<Job> advanceAfterBatch(String tenant, UUID jobId, BatchResult batch) {
+        return advanceAfterBatch(tenant, jobId, batch, null);
+    }
+
+    /**
+     * {@link #advanceAfterBatch(String, UUID, BatchResult)} for a batch with a failed document: instead of moving
+     * the cursor forward, set it to {@code least(cursor, retryAfter)}. The moves that committed in the batch (the
+     * documents after the failed one) have already advanced the cursor past the failed document, and a cursor
+     * left there would step the resume past it, to be found only by the next pass and, on the last pass, recorded
+     * as a {@code pass_limit} skip with the real failure lost. {@code retryAfter} is the document just before the
+     * first failed one (or the cursor the batch started from), so the resume reads the failed document first.
+     * The documents after it that committed are no longer candidates; ones that were skipped are skipped again
+     * without being counted twice.
+     *
+     * <p>The one lowering of the cursor besides {@link #startNextPass}, and only ever to a point at or after the
+     * start of the batch, so it never re-walks documents an earlier batch finished.
+     *
+     * @param retryAfter the cursor to resume after, or null for the ordinary monotone advance;
+     *                   {@code batch.cursor()} must then be null
+     * @throws IllegalArgumentException when both {@code retryAfter} and {@code batch.cursor()} are set
+     */
+    public Optional<Job> advanceAfterBatch(String tenant, UUID jobId, BatchResult batch, String retryAfter) {
+        if (retryAfter != null && batch.cursor() != null) {
+            throw new IllegalArgumentException("a batch with a failed document does not also advance the cursor");
+        }
         return scope.withTenant(tenant, ctx -> {
             Optional<Short> pass = ctx.select(REEMBED_JOBS.PASS_NUMBER).from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
@@ -291,20 +424,47 @@ public final class ReembedJobRepository {
                 return Optional.<Job>empty();
             }
             long newlySkipped = 0;
+            long noLongerMoved = 0;
             for (Skip skip : batch.skips()) {
-                newlySkipped += ctx.insertInto(REEMBED_JOB_MOVES)
-                    .set(REEMBED_JOB_MOVES.TENANT_ID, tenant)
-                    .set(REEMBED_JOB_MOVES.JOB_ID, jobId)
-                    .set(REEMBED_JOB_MOVES.DOC_ID, skip.docId())
-                    .set(REEMBED_JOB_MOVES.OUTCOME, OUTCOME_SKIPPED)
-                    .set(REEMBED_JOB_MOVES.REASON, skip.reason())
-                    .set(REEMBED_JOB_MOVES.PASS_NUMBER, pass.get())
-                    .set(REEMBED_JOB_MOVES.AT, clock())
-                    .onConflictDoNothing()
-                    .execute();
+                String previous = ctx.select(REEMBED_JOB_MOVES.OUTCOME).from(REEMBED_JOB_MOVES)
+                    .where(REEMBED_JOB_MOVES.TENANT_ID.eq(tenant))
+                    .and(REEMBED_JOB_MOVES.JOB_ID.eq(jobId))
+                    .and(REEMBED_JOB_MOVES.DOC_ID.eq(skip.docId()))
+                    .forUpdate()
+                    .fetchOne(REEMBED_JOB_MOVES.OUTCOME);
+                if (OUTCOME_SKIPPED.equals(previous)) {
+                    continue;
+                }
+                if (previous == null) {
+                    ctx.insertInto(REEMBED_JOB_MOVES)
+                        .set(REEMBED_JOB_MOVES.TENANT_ID, tenant)
+                        .set(REEMBED_JOB_MOVES.JOB_ID, jobId)
+                        .set(REEMBED_JOB_MOVES.DOC_ID, skip.docId())
+                        .set(REEMBED_JOB_MOVES.OUTCOME, OUTCOME_SKIPPED)
+                        .set(REEMBED_JOB_MOVES.REASON, skip.reason())
+                        .set(REEMBED_JOB_MOVES.PASS_NUMBER, pass.get())
+                        .set(REEMBED_JOB_MOVES.AT, clock())
+                        .execute();
+                } else {
+                    // A document that moved and is in the source again (a client wrote back after its move)
+                    // and could not be moved again: it is a skip now, the mirror of recordMoveInTxn's
+                    // skipped-to-moved.
+                    ctx.update(REEMBED_JOB_MOVES)
+                        .set(REEMBED_JOB_MOVES.OUTCOME, OUTCOME_SKIPPED)
+                        .set(REEMBED_JOB_MOVES.REASON, skip.reason())
+                        .set(REEMBED_JOB_MOVES.PASS_NUMBER, pass.get())
+                        .set(REEMBED_JOB_MOVES.AT, clock())
+                        .where(REEMBED_JOB_MOVES.TENANT_ID.eq(tenant))
+                        .and(REEMBED_JOB_MOVES.JOB_ID.eq(jobId))
+                        .and(REEMBED_JOB_MOVES.DOC_ID.eq(skip.docId()))
+                        .execute();
+                    noLongerMoved++;
+                }
+                newlySkipped++;
             }
             var update = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.DOCUMENTS_SKIPPED, REEMBED_JOBS.DOCUMENTS_SKIPPED.plus(newlySkipped))
+                .set(REEMBED_JOBS.DOCUMENTS_MOVED, REEMBED_JOBS.DOCUMENTS_MOVED.minus(noLongerMoved))
                 .set(REEMBED_JOBS.CHUNKS_EMBEDDED, REEMBED_JOBS.CHUNKS_EMBEDDED.plus(batch.chunksEmbedded()))
                 .set(REEMBED_JOBS.CHUNKS_REUSED, REEMBED_JOBS.CHUNKS_REUSED.plus(batch.chunksReused()))
                 .set(REEMBED_JOBS.TOKENS_BILLED, REEMBED_JOBS.TOKENS_BILLED.plus(batch.tokensBilled()))
@@ -312,6 +472,9 @@ public final class ReembedJobRepository {
             if (batch.cursor() != null) {
                 update = update.set(REEMBED_JOBS.DOC_CURSOR,
                     DSL.greatest(REEMBED_JOBS.DOC_CURSOR, DSL.val(batch.cursor())));
+            } else if (retryAfter != null) {
+                update = update.set(REEMBED_JOBS.DOC_CURSOR,
+                    DSL.least(REEMBED_JOBS.DOC_CURSOR, DSL.val(retryAfter)));
             }
             return update
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
@@ -320,6 +483,32 @@ public final class ReembedJobRepository {
                 .fetchOptional()
                 .map(Job::from);
         });
+    }
+
+    /**
+     * Begin the next pass over the source: {@code pass_number + 1} and the cursor back to the start. The one
+     * place the cursor moves backwards (everywhere else it is {@code greatest}), because a new pass walks the
+     * source from the beginning to find what the last pass left or a client wrote back.
+     *
+     * <p>The UPDATE matches only while the job is {@code running} and still on {@code fromPass}, so a runner
+     * that decided from a stale read, a pause or an abort that landed first, or a second runner, applies
+     * nothing and the pass number is never counted twice.
+     *
+     * @return the updated row, or empty when the job is absent, not {@code running}, or no longer on
+     *         {@code fromPass}
+     */
+    public Optional<Job> startNextPass(String tenant, UUID jobId, int fromPass) {
+        return scope.withTenant(tenant, ctx -> ctx.update(REEMBED_JOBS)
+            .set(REEMBED_JOBS.PASS_NUMBER, (short) (fromPass + 1))
+            .set(REEMBED_JOBS.DOC_CURSOR, "")
+            .set(REEMBED_JOBS.UPDATED_AT, clock())
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+            .and(REEMBED_JOBS.STATE.eq(RUNNING))
+            .and(REEMBED_JOBS.PASS_NUMBER.eq((short) fromPass))
+            .returning()
+            .fetchOptional()
+            .map(Job::from));
     }
 
     /**
@@ -361,6 +550,34 @@ public final class ReembedJobRepository {
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                 .and(REEMBED_JOBS.STATE.eq(CUTOVER))
                 .and(REEMBED_JOBS.CUTOVER_STEP.eq(step)));
+        });
+    }
+
+    /**
+     * Record why a job in {@code state} is not making progress, without changing its state: set
+     * {@code last_error} to {@code message}. The write is a no-op (and leaves {@code updated_at} alone) when the
+     * column already holds the message, so a blocked cutover that repeats on every tick records itself once.
+     * {@code last_error} is the last error seen; a null {@code message} clears it (the runner clears a blocked
+     * cutover's message when the cutover finishes).
+     *
+     * @return true when the job is in {@code state} afterwards (the message is stored), false when the job is
+     *         absent or has left {@code state}
+     */
+    public boolean setLastError(String tenant, UUID jobId, String state, String message) {
+        return scope.withTenant(tenant, ctx -> {
+            int set = ctx.update(REEMBED_JOBS)
+                .set(REEMBED_JOBS.LAST_ERROR, message)
+                .set(REEMBED_JOBS.UPDATED_AT, clock())
+                .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                .and(REEMBED_JOBS.STATE.eq(state))
+                .and(message == null ? REEMBED_JOBS.LAST_ERROR.isNotNull()
+                    : REEMBED_JOBS.LAST_ERROR.isNull().or(REEMBED_JOBS.LAST_ERROR.ne(message)))
+                .execute();
+            return set == 1 || ctx.fetchExists(ctx.selectFrom(REEMBED_JOBS)
+                .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                .and(REEMBED_JOBS.STATE.eq(state)));
         });
     }
 

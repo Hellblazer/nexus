@@ -237,6 +237,21 @@ public final class NexusService {
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
     private final Runnable reaperScheduledTask;
 
+    /**
+     * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the cross-model re-embed job runner, on its own single-thread
+     * executor ({@link #reembedExecutor}), not {@link #sweepScheduler}: one batch may run for minutes, and the sweep
+     * thread serves the T1 sweep, tuple sweep, ledger retention and the reaper. Null unless {@value #ENGINE_LOCAL_ENV}
+     * is exactly {@code 1} (the supervisor sets it for the local engine; the managed engine never sees it) and the
+     * engine has an embedder router to move documents with.
+     */
+    private final dev.nexus.service.reembed.ReembedRunner reembedRunner;
+
+    /** The single-thread executor the runner runs on, or null when no runner was wired. Shut down by {@link #stop()}. */
+    private final ScheduledExecutorService reembedExecutor;
+
+    /** The exact {@link Runnable} handed to {@link #reembedExecutor}, or null when none was wired. */
+    private final Runnable reembedScheduledTask;
+
     /** RDR-222 Phase 1 (nexus-yye8l.3): the request ledger the retention arm prunes. */
     private final dev.nexus.service.db.RequestLedger requestLedger;
 
@@ -397,6 +412,28 @@ public final class NexusService {
         return bind;
     }
 
+    /**
+     * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): set by the local supervisor ({@code storage_service_daemon.py}) on the
+     * engine it spawns. Only an engine whose environment carries it runs the re-embed job runner; the supervisor is the
+     * only launcher in this repository that sets it, and the managed engine is not started by it.
+     */
+    static final String ENGINE_LOCAL_ENV = "NX_ENGINE_LOCAL";
+
+    /**
+     * True only for the value {@code 1} after trimming surrounding whitespace, as {@link #tenantResetRouteEnabled}:
+     * any other value leaves it off.
+     */
+    static boolean localEngineEnabled(java.util.function.Function<String, String> env) {
+        String raw = env.apply(ENGINE_LOCAL_ENV);
+        return raw != null && raw.trim().equals("1");
+    }
+
+    /** First runner pass after boot, so a job left {@code running} or in {@code cutover} resumes promptly. */
+    private static final long REEMBED_INITIAL_DELAY_SECONDS = 5L;
+
+    /** Pause between the end of one runner pass and the start of the next; {@link #kickReembed()} cuts it short. */
+    private static final long REEMBED_INTERVAL_SECONDS = 30L;
+
     /** Bead nexus-0bl77 (rtg20 phase A): the flag that registers {@code POST /v1/_test/tenant-reset}. */
     static final String TENANT_RESET_ROUTE_ENV = "NX_TEST_TENANT_RESET_ROUTE";
 
@@ -542,6 +579,26 @@ public final class NexusService {
                         ScheduledExecutorService sweepSchedulerOverride,
                         java.util.function.Function<String, String> env,
                         java.util.function.BooleanSupplier pciEnabled) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, sweepSchedulerOverride, env, pciEnabled, null, null);
+    }
+
+    /**
+     * The constructor with the re-embed runner's two seams (bead nexus-f98bg): the executor it is scheduled on, so a
+     * wiring test can record what is registered (null makes the real {@code reembed-runner} thread), and the bounds it
+     * works to (null is {@link dev.nexus.service.reembed.ReembedRunner.Settings#DEFAULT}). Package-private.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride,
+                        java.util.function.Function<String, String> env,
+                        java.util.function.BooleanSupplier pciEnabled,
+                        ScheduledExecutorService reembedExecutorOverride,
+                        dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings) throws IOException {
         // Before anything binds or touches the database: a refused configuration must not half-start.
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
@@ -855,6 +912,38 @@ public final class NexusService {
                 pgVectorRepository != null, reaperSettings.enabled());
         }
 
+        // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the re-embed job runner, local engine only. Its own thread
+        // (a batch can run for minutes). The first pass runs a few seconds after boot, which is the boot pickup of
+        // any job left planned, running or in cutover; routes (Step 2, a later commit) wake it through kickReembed().
+        // Tenants are the reaper's: the default tenant plus every token-bearing one, since the job tables are FORCE RLS.
+        if (localEngineEnabled(env) && combinedWriteService != null) {
+            var runner = new dev.nexus.service.reembed.ReembedRunner(
+                new dev.nexus.service.db.ReembedJobRepository(tenantScope),
+                new dev.nexus.service.db.ReembedSourceReader(tenantScope), catalogRepo, combinedWriteService,
+                this::reaperTenants,
+                reembedSettings != null ? reembedSettings : dev.nexus.service.reembed.ReembedRunner.Settings.DEFAULT);
+            this.reembedRunner = runner;
+            this.reembedExecutor = reembedExecutorOverride != null ? reembedExecutorOverride
+                : Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, "reembed-runner");
+                    t.setDaemon(true);
+                    return t;
+                });
+            // Held in a field so a test runs THIS object, as reaperScheduledTask: a test that called runner.tick()
+            // directly stayed green with the schedule turned into a no-op.
+            this.reembedScheduledTask = surviving("reembed_runner_failed", runner::tick);
+            this.reembedExecutor.scheduleWithFixedDelay(this.reembedScheduledTask,
+                REEMBED_INITIAL_DELAY_SECONDS, REEMBED_INTERVAL_SECONDS, TimeUnit.SECONDS);
+            log.info("event=reembed_runner_scheduled initial_delay_seconds={} interval_seconds={}",
+                REEMBED_INITIAL_DELAY_SECONDS, REEMBED_INTERVAL_SECONDS);
+        } else {
+            this.reembedRunner = null;
+            this.reembedExecutor = null;
+            this.reembedScheduledTask = null;
+            log.info("event=reembed_runner_not_scheduled engine_local={} has_embedder={}",
+                localEngineEnabled(env), combinedWriteService != null);
+        }
+
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
         this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
@@ -928,6 +1017,30 @@ public final class NexusService {
      */
     Runnable reaperScheduledTask() {
         return reaperScheduledTask;
+    }
+
+    /** The re-embed job runner, or null when none was wired (not the local engine, or no embedder). Package-private. */
+    dev.nexus.service.reembed.ReembedRunner reembedRunner() {
+        return reembedRunner;
+    }
+
+    /**
+     * The very {@link Runnable} the runner's executor runs, or null when no runner was wired. Package-private: the
+     * wiring test runs this object, so it fails when the schedule is a no-op.
+     */
+    Runnable reembedScheduledTask() {
+        return reembedScheduledTask;
+    }
+
+    /**
+     * Ask the runner to run now instead of waiting out its interval; a no-op when no runner is wired. For the
+     * control routes that start, resume or abort a job. The single runner thread serialises it with a scheduled pass.
+     */
+    void kickReembed() {
+        ScheduledExecutorService executor = reembedExecutor;
+        if (executor != null && !executor.isShutdown()) {
+            executor.execute(reembedScheduledTask);
+        }
     }
 
     /**
@@ -1791,6 +1904,11 @@ public final class NexusService {
      *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
+        // cursor on the next boot.
+        if (reembedExecutor != null) {
+            reembedExecutor.shutdownNow();
+        }
         // RDR-205 (bead nexus-em75s.4): signal every parked rd/in BEFORE the HTTP
         // server stops, so they return the probe result instead of riding out
         // their budget past process exit.

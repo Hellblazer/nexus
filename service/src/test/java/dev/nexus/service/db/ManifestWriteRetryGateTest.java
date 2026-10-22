@@ -99,7 +99,10 @@ class ManifestWriteRetryGateTest {
         "TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML",
         "DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table",
         "CatalogHandler", "comments only",
-        "VectorHandler", "javadoc only"));
+        "VectorHandler", "javadoc only",
+        "ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
+            + " find a source's candidate documents and what a cutover's delete would destroy); the re-embed move"
+            + " writes the manifest through CatalogRepository"));
 
     private static final Pattern TABLE_REF = Pattern.compile("catalog_document_chunks|CatalogDocumentChunks",
         Pattern.CASE_INSENSITIVE);
