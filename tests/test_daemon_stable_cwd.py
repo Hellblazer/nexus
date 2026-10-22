@@ -524,3 +524,25 @@ def test_the_supervisor_argv_is_absolute_when_path_holds_a_relative_entry(
     argv = daemon_cmd._resolve_nx_bin()
     assert len(argv) == 1 and Path(argv[0]).is_absolute()
     assert Path(argv[0]).resolve() == (tmp_path / "rel" / "bin" / "nx").resolve()
+
+
+def test_heal_deleted_cwd_leaves_an_existing_directory_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Claude Code MCP server keeps its project directory (nexus-x6qc7)."""
+    monkeypatch.chdir(tmp_path)
+    assert stable_cwd.heal_deleted_cwd() is False
+    assert os.getcwd() == str(tmp_path.resolve())
+
+
+def test_heal_deleted_cwd_moves_the_process_off_a_deleted_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Desktop deletes a plugin's install directory on update while its MCP
+    servers run there (nexus-x6qc7, shakeout F19)."""
+    gone = tmp_path / "plugin_x.old.1"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    with pytest.raises(FileNotFoundError):
+        os.getcwd()
+    assert stable_cwd.heal_deleted_cwd() is True
+    assert os.getcwd() == stable_cwd.stable_daemon_cwd()

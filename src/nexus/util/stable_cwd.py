@@ -120,3 +120,19 @@ def enter_stable_daemon_cwd(*, project_root: str | os.PathLike[str] | None = Non
     except OSError:
         return ""
     return target
+
+
+def heal_deleted_cwd() -> bool:
+    """Move a long-lived process off a working directory that was deleted under it.
+
+    For a process that cannot start in the stable cwd because its host chose the
+    directory: Claude Desktop starts its MCP servers in the plugin's install
+    directory and deletes that directory when it updates the plugin, while the
+    servers keep running (nexus-x6qc7, shakeout F19: every ``claude -p`` the
+    server spawned then exited 1, "The current working directory was deleted").
+    A directory that still exists is left alone, so a Claude Code server keeps
+    its project directory. Returns ``True`` when it moved the process.
+    """
+    if current_project_root() is not None:
+        return False
+    return bool(enter_stable_daemon_cwd())

@@ -334,3 +334,36 @@ def _report_call_passes_pid(module: str) -> bool:
                         for kw in node.keywords
                     )
     raise AssertionError(module + ": main() never calls report_sdk_patches")
+
+
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+class TestDeletedCwdHeal:
+    """nexus-x6qc7 (shakeout F19): Claude Desktop deletes a plugin's install
+    directory on update while its MCP servers run there. The wrap ahead of every
+    tool call moves the process off it, so no tool's subprocess inherits it."""
+
+    def test_a_call_moves_the_process_off_a_deleted_cwd_and_says_so_once(self, tmp_path, monkeypatch):
+        from nexus.util.stable_cwd import stable_daemon_cwd
+
+        server = _mk_server()
+        _tool_call_log.install_tool_call_log(server)
+        gone = tmp_path / "plugin_x.old.1"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        with capture_logs() as logs:
+            result = _call(server, "echo")
+            _call(server, "echo")
+        assert result.root.isError is False
+        assert os.getcwd() == stable_daemon_cwd()
+        healed = [e for e in logs if e["event"] == "mcp_cwd_deleted_healed"]
+        assert len(healed) == 1, logs
+
+    def test_an_existing_cwd_is_left_alone(self, tmp_path, monkeypatch):
+        server = _mk_server()
+        _tool_call_log.install_tool_call_log(server)
+        monkeypatch.chdir(tmp_path)
+        with capture_logs() as logs:
+            _call(server, "echo")
+        assert os.getcwd() == str(tmp_path.resolve())
+        assert not [e for e in logs if e["event"] == "mcp_cwd_deleted_healed"]

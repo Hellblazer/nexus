@@ -66,9 +66,10 @@ _limit_noted = False
 
 def _reset_state() -> None:
     """Forget the remembered key-sets (tests; a process never needs it)."""
-    global _limit_noted
+    global _limit_noted, _cwd_healed
     _seen_keysets.clear()
     _limit_noted = False
+    _cwd_healed = False
 
 
 def _meta_keys(req: Any) -> list[str]:
@@ -111,6 +112,23 @@ def _emit(req: Any) -> None:
     emit("mcp_tool_call", tool=req.params.name, meta_keys=keys, pid=os.getpid(), **extra)
 
 
+_cwd_healed = False
+
+
+def _heal_cwd() -> None:
+    """nexus-x6qc7 (shakeout F19): this wrap already runs ahead of every tool call
+    on both servers, so it also moves the process off a working directory its host
+    deleted (Claude Desktop removes the plugin's install directory on update while
+    the servers run there). Without it every subprocess a tool starts, ``claude -p``
+    included, inherits the deleted directory. Logs once per process."""
+    global _cwd_healed
+    from nexus.util.stable_cwd import heal_deleted_cwd  # noqa: PLC0415 — stdlib-only, deferred like the SDK import
+
+    if heal_deleted_cwd() and not _cwd_healed:
+        _cwd_healed = True
+        structlog.get_logger(__name__).warning("mcp_cwd_deleted_healed", cwd=os.getcwd(), pid=os.getpid())
+
+
 def install_tool_call_log(server: object) -> str:
     """Wrap the server's ``CallToolRequest`` handler with the per-call event.
 
@@ -130,6 +148,10 @@ def install_tool_call_log(server: object) -> str:
             try:
                 _emit(req)
             except Exception:  # noqa: BLE001 — observability must never break a tool call
+                pass
+            try:
+                _heal_cwd()
+            except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
                 pass
             return await original(req)
 

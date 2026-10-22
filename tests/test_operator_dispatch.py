@@ -5420,3 +5420,43 @@ class TestJobHandleClosesOnEveryOutcome:
             f"job {job} closed {fake.closed_handles.count(job)} times on "
             f"timeout (want exactly 1) -- closed_handles={fake.closed_handles}"
         )
+
+
+# ── nexus-x6qc7: the claude -p child never inherits a deleted cwd ───────────
+
+class TestChildCwd:
+    """Shakeout F19: Claude Desktop deletes a plugin's install directory on update
+    while its MCP servers keep running there; a `claude -p` that inherited it
+    exited 1, "The current working directory was deleted"."""
+
+    @staticmethod
+    async def _spawned_cwd() -> str | None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        seen: dict = {}
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            seen.update(kwargs)
+            return proc
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert "cwd" in seen, "the spawn must name its cwd, never inherit it"
+        return seen["cwd"]
+
+    @pytest.mark.asyncio
+    async def test_an_existing_cwd_is_passed_through(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert await self._spawned_cwd() == str(tmp_path.resolve())
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_a_deleted_cwd_is_replaced_by_the_stable_cwd(self, tmp_path, monkeypatch) -> None:
+        from nexus.util.stable_cwd import stable_daemon_cwd
+
+        gone = tmp_path / "plugin_x.old.1"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        assert await self._spawned_cwd() == stable_daemon_cwd()

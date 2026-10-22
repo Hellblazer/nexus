@@ -45,9 +45,6 @@ _ALLOWED: dict[tuple[str, str], str] = {
         "a `claude -p` extraction bounded by a timeout and group-killed on expiry; it runs inside "
         "the aspect worker, which has entered the stable cwd, so it inherits that"
     ),
-    ("operators/dispatch.py", "claude_dispatch"): (
-        "a `claude -p` operator call bounded by a timeout and group-killed on expiry"
-    ),
     ("daemon/storage_service_daemon.py", "_spawn_service"): (
         "the engine is a child of the supervisor, which entered the stable cwd at its --foreground "
         "entry; the engine inherits it"

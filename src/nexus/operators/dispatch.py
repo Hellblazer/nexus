@@ -1493,7 +1493,18 @@ async def claude_dispatch(
     _dispatch_job: int | None = None
     try:
         from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.util.stable_cwd import current_project_root, stable_daemon_cwd  # noqa: PLC0415 - deferred, matches the import above
 
+        # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
+        # caller's directory while that exists (a Claude Code server's project
+        # directory, as before); when the host deleted it (Claude Desktop removes
+        # a plugin's install directory on update while its MCP servers keep
+        # running there), it is the stable cwd, since `claude` exits 1 before
+        # starting in a deleted directory.
+        child_cwd = current_project_root()
+        if child_cwd is None:
+            child_cwd = stable_daemon_cwd()
+            _log.warning("operator_dispatch_cwd_deleted", operator=operator, cwd=child_cwd)
         prompt_path = _write_prompt_file(prompt)
         proc = await _spawn_with_prompt_file(
             argv,
@@ -1501,6 +1512,7 @@ async def claude_dispatch(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=child_cwd,
             **isolation_popen_kwargs(),
         )
         _dispatch_spawn_at = time.monotonic()
