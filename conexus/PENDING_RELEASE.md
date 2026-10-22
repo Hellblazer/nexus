@@ -45,6 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/routing/_lib.py` (nexus-m4lej): `log_routing_event` defaults to the session id of the payload `run_hook` read, so the credential-print and subagent git-write guards' `routing_events` rows carry a session; the drop meter keeps it too.
 
 
 ## Deferred to the next client release
