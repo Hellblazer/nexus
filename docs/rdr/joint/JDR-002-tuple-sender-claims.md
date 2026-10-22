@@ -33,17 +33,20 @@ The one capability on the tuple path is the **`claim_id`**. It is returned
 only to the claim's winner and withheld from `rd` (nexus-em75s.35).
 `ack`, `nack`, `renew` and `release` all require it.
 
-A reply written by `ack(..., reply=)` gets an id that no `out` can compute
-(nexus-b747g), so a pre-written row cannot block or replace it. A
+On an engine after `engine-service-v0.1.162`, a reply written by
+`ack(..., reply=)` gets an id that no `out` can compute (nexus-b747g), so
+a pre-written row cannot block or replace it; v0.1.162 and earlier compute
+it as an `out` would. A
 separate row with a forged `from` can still sit beside it.
 
 What a reader may rely on beyond the tenant:
 
 - `mailbox_send` refuses a session-shaped `from_address` that is not one of
   the calling server's own session ids (nexus-2mv7y). An agent id still
-  passes, and so does a session id when no session resolves (Claude
-  Desktop, Cowork), because nothing exists there to compare against. This
-  guards against a confused model, not a hostile caller.
+  passes, unchecked beyond its shape. A session id passes when no session
+  resolves (Claude Desktop, Cowork, or a Claude Code server whose T1 has
+  not published its id yet), because nothing exists there to compare
+  against. This guards against a confused model, not a hostile caller.
 - Raw `tuple_out` and the dims of a `tuple_ack` reply are not guarded.
 
 Planned, not built: a server-written `sender_session` on `out`, taken from

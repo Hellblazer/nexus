@@ -210,8 +210,11 @@ class TestCheckFromAddressIsOwn:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-    def test_own_marker_id_passes(self, tmp_path) -> None:
+    def test_own_marker_id_passes_beside_a_different_t1_id(self, tmp_path, monkeypatch) -> None:
+        # The env tier is set, so dropping the marker tier leaves an own set
+        # without MARKER and the call is refused.
         write_session_marker(tmp_path, 4242, self.MARKER)
+        monkeypatch.setenv("NX_T1_SESSION_ID", self.T1)
         assert check_from_address_is_own(self.MARKER, state_dir=tmp_path, claude_pid=4242) == self.MARKER
 
     def test_own_t1_session_id_passes_beside_a_marker(self, tmp_path, monkeypatch) -> None:
@@ -219,9 +222,19 @@ class TestCheckFromAddressIsOwn:
         monkeypatch.setenv("NX_T1_SESSION_ID", self.T1)
         assert check_from_address_is_own(self.T1, state_dir=tmp_path, claude_pid=4242) == self.T1
 
-    def test_own_nx_session_id_passes(self, tmp_path, monkeypatch) -> None:
+    def test_nx_session_id_is_own_when_t1_is_unset(self, tmp_path, monkeypatch) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
         monkeypatch.setenv("NX_SESSION_ID", self.ENV)
         assert check_from_address_is_own(self.ENV, state_dir=tmp_path, claude_pid=4242) == self.ENV
+
+    def test_nx_session_id_is_not_own_when_t1_is_set(self, tmp_path, monkeypatch) -> None:
+        """A claude -p child gets its own NX_T1_SESSION_ID and its parent's id
+        in NX_SESSION_ID; it must not send as the parent."""
+        monkeypatch.setenv("NX_T1_SESSION_ID", self.T1)
+        monkeypatch.setenv("NX_SESSION_ID", self.ENV)
+        with pytest.raises(DirectoryResolutionError) as exc:
+            check_from_address_is_own(self.ENV, state_dir=tmp_path, claude_pid=4242)
+        assert str(exc.value) == from_address_not_own_message(self.ENV, [self.T1])
 
     def test_a_different_session_id_is_refused_with_the_pinned_text(self, tmp_path, monkeypatch) -> None:
         write_session_marker(tmp_path, 4242, self.MARKER)
@@ -233,10 +246,17 @@ class TestCheckFromAddressIsOwn:
     def test_the_refusal_text(self) -> None:
         assert from_address_not_own_message(self.OTHER, [self.MARKER]) == (
             f"from_address {self.OTHER!r} is a session id but not this server's own "
-            f"({self.MARKER}): a session id names who sent the message, so only the "
-            "sending session's own id is accepted. Omit from_address to send as this "
-            "session; an agent id still passes"
+            f"({self.MARKER}): `from` names the sender, so a session id there must be the "
+            "sending session's own. The usual slip is putting the recipient's id here; "
+            "it belongs in `to`. Omit from_address to send as this session; a subagent "
+            "passes its own agent id"
         )
+
+    def test_own_id_in_another_spelling_passes_as_the_own_spelling(self, tmp_path) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        assert check_from_address_is_own(
+            self.MARKER.upper(), state_dir=tmp_path, claude_pid=4242,
+        ) == self.MARKER
 
     def test_an_agent_id_passes_regardless(self, tmp_path) -> None:
         write_session_marker(tmp_path, 4242, self.MARKER)
@@ -246,10 +266,11 @@ class TestCheckFromAddressIsOwn:
     def test_no_own_id_resolvable_lets_a_session_id_pass(self, tmp_path) -> None:
         assert check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242) == self.OTHER
 
-    def test_a_non_uuid_env_value_is_not_an_own_id(self, tmp_path, monkeypatch) -> None:
-        write_session_marker(tmp_path, 4242, self.MARKER)
+    def test_a_non_uuid_env_value_is_refused_not_treated_as_no_session(self, tmp_path, monkeypatch) -> None:
+        """Fail closed: with no marker, an unusable env id must not read as
+        the Desktop case, where any session id passes."""
         monkeypatch.setenv("NX_SESSION_ID", "not-a-uuid")
-        with pytest.raises(DirectoryResolutionError):
+        with pytest.raises(DirectoryResolutionError, match="is not a UUID"):
             check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242)
 
     def test_the_shape_check_still_runs_first(self, tmp_path) -> None:
