@@ -32,12 +32,15 @@ import java.util.function.Supplier;
  * public.databasechangelog}, and only when there is something to copy (a fresh install has no {@code
  * nexus.chunks} yet). Once the changeset is applied the check never runs again.
  *
- * <p><strong>The factor is inferred, not measured.</strong> {@link #requiredBytes} is 2.2x the combined
+ * <p><strong>The factor, and one measurement of it.</strong> {@link #requiredBytes} is 2.2x the combined
  * {@code pg_total_relation_size} (heap, indexes and TOAST) of the two tables: 1x for the copy, 1x for the WAL
- * the copy writes (estimated as 1x the table), 0.2x headroom. RDR-225 P0.4, the measured peak this was to be
- * compared against, was cancelled with the evaluation experiment, so nothing here has been checked against a
- * real walk. The Phase 3 rehearsal on a production fork measures the real peak; if it exceeds this
- * estimate, change {@link #FACTOR_TENTHS} and the RDR's statement together.
+ * the copy writes (estimated as 1x the table), 0.2x headroom. Measured once (nexus-s7cyy, T2
+ * {@code nexus_rdr/225-s7cyy-walk-disk-wal-peak-2026-10-22}): 100k 768-d chunks, 981 MB of tables, at
+ * {@code max_wal_size} 1GB with WAL already at that steady state, the filesystem grew 1.08x the tables at peak;
+ * WAL stayed at its cap, so the walk added only the copy. A store whose WAL starts small can add up to
+ * {@code max_wal_size} more, never more than the walk writes, so 2.2x stays an upper bound. Not measured: an
+ * empty starting WAL, a much larger store, real-disk timing. If a measured peak ever exceeds this estimate,
+ * change {@link #FACTOR_TENTHS} and the RDR's statement together.
  *
  * <p><strong>Where free space is read.</strong> The engine may not share a filesystem with Postgres: the
  * cloud runs managed Postgres, and a BYO database is remote too. Free space is therefore read only from a data
