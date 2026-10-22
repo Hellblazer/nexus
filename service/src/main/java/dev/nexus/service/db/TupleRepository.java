@@ -13,7 +13,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record1;
-import org.jooq.Record8;
+import org.jooq.Record9;
 import org.jooq.ResultQuery;
 import org.jooq.SelectLimitStep;
 import org.jooq.impl.DSL;
@@ -461,7 +461,7 @@ public final class TupleRepository {
     public record SubspaceCensus(
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
-            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt) {
+            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt, long lapsed) {
     }
 
     /** {@code subspace_list}'s paged form (nexus-xapt8): {@code nextCursor} is
@@ -701,7 +701,27 @@ public final class TupleRepository {
             // consumed state (every other column is simply absent from this
             // DO UPDATE's .set() list, so Postgres leaves it untouched). Unchanged
             // from before RDR-211 Phase 1 Step 1's lock flag above.
-            insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling)).execute();
+            var refire = insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling));
+            if (p.template().idFrom() == TemplateSchema.IdFrom.KEYS_NONCE) {
+                // Bead nexus-fzteh: a nonce names ONE write. The id does not include the
+                // body, so a changed body (or dims) under a used nonce landed on the
+                // existing row and was dropped without a word. The DO UPDATE now applies
+                // only when the stored row matches this write (null and empty body are the
+                // same write), or when the row is already consumed -- an acked row has had
+                // its body cleared, and a late retry of the write it came from is not a
+                // different write. Zero rows affected can only mean the guard failed, so it
+                // is a conflict; the guard sits in the same statement as the upsert, so two
+                // racing writers cannot both pass a separate read-then-write check.
+                Field<String> storedBody = DSL.coalesce(TUPLES.BODY, "");
+                Field<JSONB> storedDims = DSL.coalesce(TUPLES.DIMS, DSL.val(EMPTY_DIMS));
+                Condition sameWrite = storedBody.eq(DSL.val(body == null ? "" : body))
+                        .and(storedDims.eq(DSL.val(p.dimsJsonb() == null ? EMPTY_DIMS : p.dimsJsonb())));
+                if (refire.where(TUPLES.CONSUMED_AT.isNotNull().or(sameWrite)).execute() == 0) {
+                    throw new NonceReuseConflictException(HexFormat.of().formatHex(id), p.subspace());
+                }
+            } else {
+                refire.execute();
+            }
         }
         maintainTenant(ctx, tenant);
         return id;
@@ -746,7 +766,10 @@ public final class TupleRepository {
         TreeSet<String> unknownKeys = new TreeSet<>(keys.keySet());
         unknownKeys.removeAll(t.keys());
         if (!unknownKeys.isEmpty()) {
-            throw new SchemaViolationException(unknownKeys.first(), "not a declared key for this template");
+            String first = unknownKeys.first();
+            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
+                    ? "not a key: the nonce is " + NONCE_OWN_FIELD
+                    : "not a declared key for this template");
         }
         for (String k : t.keys()) {
             String v = keys.get(k);
@@ -761,7 +784,10 @@ public final class TupleRepository {
         TreeSet<String> unknownDims = new TreeSet<>(dims.keySet());
         unknownDims.removeAll(t.dimensions().keySet());
         if (!unknownDims.isEmpty()) {
-            throw new SchemaViolationException(unknownDims.first(), "not a declared dimension for this template");
+            String first = unknownDims.first();
+            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
+                    ? "not a dimension: the nonce is " + NONCE_OWN_FIELD
+                    : "not a declared dimension for this template");
         }
         for (var e : t.dimensions().entrySet()) {
             String name = e.getKey();
@@ -776,10 +802,19 @@ public final class TupleRepository {
         }
     }
 
+    private static final JSONB EMPTY_DIMS = JSONB.valueOf("{}");
+    private static final String NONCE_FIELD = "nonce";
+    /** Bead nexus-jz3kh: what a refusal says about where the nonce goes. {@code nonce} is a
+     *  parameter of the write itself (the request's own {@code nonce} field, {@code tuple_out}'s
+     *  {@code nonce} argument); a caller who sees "nonce: required" and tries it as a key or a dim
+     *  is refused again, so every nonce-related refusal names the parameter. */
+    private static final String NONCE_OWN_FIELD = "its own field of the write (tuple_out's `nonce` parameter)";
+
     /** The nonce half of {@code out}'s validation. See {@link #validateOutShape}. */
     private void validateNonce(TemplateSchema t, String nonce) {
         if (t.idFrom() == TemplateSchema.IdFrom.KEYS_NONCE && (nonce == null || nonce.isBlank())) {
-            throw new SchemaViolationException("nonce", "required for id_from=keys+nonce");
+            throw new SchemaViolationException(NONCE_FIELD, "required for id_from=keys+nonce: the nonce is "
+                    + NONCE_OWN_FIELD + ", not a key or a dimension");
         }
     }
 
@@ -2729,7 +2764,7 @@ public final class TupleRepository {
      * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Package-private for that
      * test.
      */
-    static SelectLimitStep<Record8<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime>>
+    static SelectLimitStep<Record9<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime, Long>>
             subspaceCensusQuery(DSLContext ctx, String tenant, String prefix, String after) {
         Condition cond = TUPLES.TENANT_ID.eq(tenant);
         if (prefix != null && !prefix.isBlank()) {
@@ -2753,7 +2788,9 @@ public final class TupleRepository {
                         DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
                                 .cast(Long.class),
                         DSL.min(TUPLES.CREATED_AT),
-                        DSL.max(TUPLES.CREATED_AT))
+                        DSL.max(TUPLES.CREATED_AT),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
                 .from(TUPLES)
                 .where(cond)
                 .groupBy(TUPLES.SUBSPACE)
@@ -2785,8 +2822,9 @@ public final class TupleRepository {
                 long expiredUnpurged = rec.get(5, Long.class);
                 OffsetDateTime oldest = rec.get(6, OffsetDateTime.class);
                 OffsetDateTime newest = rec.get(7, OffsetDateTime.class);
+                long lapsed = rec.get(8, Long.class);
                 out.add(new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                        consumed, expiredUnpurged, oldest, newest));
+                        consumed, expiredUnpurged, oldest, newest, lapsed));
             }
             return new SubspacePage(out, nextCursor);
         });
@@ -2809,7 +2847,9 @@ public final class TupleRepository {
                         DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
                                 .cast(Long.class),
                         DSL.min(TUPLES.CREATED_AT),
-                        DSL.max(TUPLES.CREATED_AT))
+                        DSL.max(TUPLES.CREATED_AT),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
                 .from(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(subspace)))
                 .fetchOne();
@@ -2821,8 +2861,9 @@ public final class TupleRepository {
         long expiredUnpurged = rec.value5();
         OffsetDateTime oldest = rec.value6();
         OffsetDateTime newest = rec.value7();
+        long lapsed = rec.value8();
         return new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                consumed, expiredUnpurged, oldest, newest);
+                consumed, expiredUnpurged, oldest, newest, lapsed);
     }
 
     // ── shared helpers ───────────────────────────────────────────────────────

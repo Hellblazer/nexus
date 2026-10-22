@@ -89,6 +89,7 @@ timeout could fire on its own.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from dataclasses import dataclass
@@ -217,6 +218,20 @@ class MaxLiveRowsExceededError(TupleError):
     code = "MaxLiveRowsExceeded"
 
 
+class NonceReuseConflictError(TupleError):
+    """``out`` on a ``keys+nonce`` template named a tuple id that already
+    exists, but the new write's body or dimensions differ from the stored
+    row's (bead nexus-fzteh). A nonce names ONE write: a byte-identical
+    retry still returns the same id, a changed payload under the same
+    nonce is a caller bug or a collision and is refused instead of being
+    dropped silently. 409: retrying the same request cannot succeed --
+    mint a fresh nonce for a new message, or resend the original body.
+    Never raised for a row already consumed (a late retry of the write
+    that row came from)."""
+
+    code = "NonceReuseConflict"
+
+
 class TtlTooLongError(TupleError):
     """``out``'s explicit ``ttl_seconds`` exceeds the template's
     ``retention_seconds`` ceiling."""
@@ -253,6 +268,7 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         ClaimOwnershipError,
         ParkCapExceededError,
         MaxLiveRowsExceededError,
+        NonceReuseConflictError,
         TtlTooLongError,
         LeaseTooLongError,
         CensusTimeoutError,
@@ -448,6 +464,7 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
         expired_unpurged=int(body.get("expired_unpurged", 0)),
         oldest_created_at=body.get("oldest_created_at"),
         newest_created_at=body.get("newest_created_at"),
+        lapsed=int(body.get("lapsed", 0)),
     )
 
 
@@ -470,10 +487,36 @@ def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
     if since is None:
         return None
     created_at, cursor_id = since
+    _check_read_cursor(created_at, cursor_id)
     payload: dict[str, str] = {"created_at": created_at}
     if cursor_id:
         payload["id"] = cursor_id
     return payload
+
+
+_TUPLE_ID_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def _check_read_cursor(created_at: str, cursor_id: str) -> None:
+    """Refuse a malformed ``(created_at, id)`` read cursor before sending
+    (bead nexus-o9gt2). The pair is a position in a subspace, copied from
+    a row a prior read returned (``created_at`` and ``id``); a hand-typed
+    value used to reach the engine and come back as the JDK's raw
+    ``HTTP 400: string length not even: 1``. An empty ``cursor_id`` is the
+    per-subscriber watermark sentinel (see :func:`_since_payload`) and is
+    not checked."""
+    if cursor_id and not _TUPLE_ID_HEX.fullmatch(cursor_id):
+        raise SchemaViolationError(
+            f"field 'since_id': {cursor_id!r} is not a tuple id; it must be the 64-hex-character "
+            "'id' of a row from a prior read, paired with that row's 'created_at' as since_created_at"
+        )
+    try:
+        datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        raise SchemaViolationError(
+            f"field 'since_created_at': {created_at!r} is not a timestamp; it must be the "
+            "'created_at' of a row from a prior read, paired with that row's 'id' as since_id"
+        ) from None
 
 
 # ── HttpTupleStore ──────────────────────────────────────────────────────────

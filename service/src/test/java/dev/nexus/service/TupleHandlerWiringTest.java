@@ -792,6 +792,50 @@ class TupleHandlerWiringTest {
                 .isEqualTo(400);
     }
 
+    /**
+     * Bead nexus-o9gt2 (shakeout F11): a cursor id that is not hex used to reach the client as the
+     * JDK's raw "string length not even: 1". It is a 400 that names the field and says where the id
+     * comes from.
+     */
+    @Test
+    void rd_nonHexSinceId_is400_namingSinceIdAndWhereItComesFrom() throws Exception {
+        for (String badId : new String[] {"0", "xyz", "abc"}) {
+            var resp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                    "subspace", "mailbox/rd-since-badid",
+                    "since", Map.of("created_at", "2026-01-01T00:00:00Z", "id", badId)));
+            assertThat(resp.statusCode()).as("since.id=%s", badId).isEqualTo(400);
+            assertThat(resp.body()).as("since.id=%s", badId)
+                    .contains("since.id")
+                    .contains("tuple id")
+                    .contains("prior read")
+                    .doesNotContain("string length not even");
+        }
+    }
+
+    /**
+     * Bead nexus-fzteh (shakeout F9): the same nonce with a different body is a 409 typed error naming
+     * the existing id; the identical retry is a 200 with that same id.
+     */
+    @Test
+    void out_sameNonceDifferentBody_is409NonceReuseConflict_identicalRetryIs200() throws Exception {
+        Map<String, Object> first = Map.of("subspace", "board/fzteh-wire", "keys", Map.of("topic", "fzteh-wire"),
+                "dims", Map.of("from", "s"), "body", "one", "nonce", "n-wire");
+        var ok = post(withRegistry, "/v1/tuples/out", first);
+        assertThat(ok.statusCode()).isEqualTo(200);
+        String id = (String) mapper.readValue(ok.body(), MAP_T).get("id");
+
+        var retry = post(withRegistry, "/v1/tuples/out", first);
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(retry.body(), MAP_T).get("id")).isEqualTo(id);
+
+        var changed = post(withRegistry, "/v1/tuples/out", Map.of("subspace", "board/fzteh-wire",
+                "keys", Map.of("topic", "fzteh-wire"), "dims", Map.of("from", "s"), "body", "two", "nonce", "n-wire"));
+        assertThat(changed.statusCode()).isEqualTo(409);
+        var body = mapper.readValue(changed.body(), MAP_T);
+        assertThat(body.get("error")).isEqualTo("NonceReuseConflict");
+        assertThat((String) body.get("detail")).contains(id).contains("fresh nonce");
+    }
+
     @Test
     void wait_malformedSinceWatermarkOnPerSubscriberAnnounce_is400() throws Exception {
         var resp = post(withRegistry, "/v1/tuples/wait", Map.of(

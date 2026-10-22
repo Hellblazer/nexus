@@ -232,6 +232,127 @@ class TupleRepositoryTest {
                 .isInstanceOf(SchemaViolationException.class);
     }
 
+    // ── nonce is its own parameter (bead nexus-jz3kh, shakeout F7) ──────────
+
+    /** A keys+nonce write with no nonce says the nonce is a field of its own, not a key or a dim. */
+    @Test
+    void out_keysNonceTemplateWithoutNonce_refusalNamesNonceAsItsOwnField() {
+        assertThatThrownBy(() -> repo.out(TENANT_A, "board/jz3kh-missing",
+                Map.of("topic", "jz3kh-missing"), Map.of("from", "s"), "hi", null, null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'nonce'")
+                .hasMessageContaining("its own field of the write")
+                .hasMessageContaining("not a key or a dimension");
+    }
+
+    /** The caller who then tries the nonce as a key is told where it goes. */
+    @Test
+    void out_nonceSuppliedAsAKey_refusalSaysNonceIsNotAKey() {
+        assertThatThrownBy(() -> repo.out(TENANT_A, "board/jz3kh-key",
+                Map.of("topic", "jz3kh-key", "nonce", "n1"), Map.of("from", "s"), "hi", "n1", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'nonce'")
+                .hasMessageContaining("its own field of the write")
+                .hasMessageContaining("not a key");
+    }
+
+    /** ...and as a dimension. */
+    @Test
+    void out_nonceSuppliedAsADimension_refusalSaysNonceIsNotADimension() {
+        assertThatThrownBy(() -> repo.out(TENANT_A, "board/jz3kh-dim",
+                Map.of("topic", "jz3kh-dim"), Map.of("from", "s", "nonce", "n1"), "hi", "n1", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'nonce'")
+                .hasMessageContaining("its own field of the write")
+                .hasMessageContaining("not a dimension");
+    }
+
+    // ── a nonce names one write (bead nexus-fzteh, shakeout F9) ─────────────
+
+    /** Same nonce, same body, same dims: the retry lands on the one tuple. */
+    @Test
+    void out_sameNonceIdenticalWrite_returnsTheSameId_oneRow() {
+        String topic = "fzteh-retry-" + UUID.randomUUID();
+        Map<String, String> keys = Map.of("topic", topic);
+        byte[] id1 = repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s", "kind", "note"),
+                "first", "n-retry", null);
+        byte[] id2 = repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s", "kind", "note"),
+                "first", "n-retry", null);
+        assertThat(id2).isEqualTo(id1);
+        assertThat(repo.rdp(TENANT_A, "board/" + topic, keys, 10, null)).hasSize(1);
+    }
+
+    /** Same nonce, different body: refused with a typed conflict naming the id; the first body stands. */
+    @Test
+    void out_sameNonceDifferentBody_conflictNamesTheId_firstBodyStands() {
+        String topic = "fzteh-body-" + UUID.randomUUID();
+        Map<String, String> keys = Map.of("topic", topic);
+        byte[] id = repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s"), "first", "n-body", null);
+        assertThatThrownBy(() -> repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s"),
+                "second", "n-body", null))
+                .isInstanceOf(dev.nexus.service.db.NonceReuseConflictException.class)
+                .satisfies(e -> {
+                    var c = (dev.nexus.service.db.NonceReuseConflictException) e;
+                    assertThat(c.code()).isEqualTo("NonceReuseConflict");
+                    assertThat(c.httpStatus()).isEqualTo(409);
+                    assertThat(c.id()).isEqualTo(java.util.HexFormat.of().formatHex(id));
+                    assertThat(c.getMessage()).contains(c.id()).contains("fresh nonce");
+                });
+        var rows = repo.rdp(TENANT_A, "board/" + topic, keys, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).body()).isEqualTo("first");
+    }
+
+    /** Same nonce, same body, different non-id dims: also a conflict (the dims would be dropped). */
+    @Test
+    void out_sameNonceDifferentDims_conflict() {
+        String topic = "fzteh-dims-" + UUID.randomUUID();
+        Map<String, String> keys = Map.of("topic", topic);
+        repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s", "kind", "note"), "b", "n-dims", null);
+        assertThatThrownBy(() -> repo.out(TENANT_A, "board/" + topic, keys,
+                Map.of("from", "s", "kind", "alert"), "b", "n-dims", null))
+                .isInstanceOf(dev.nexus.service.db.NonceReuseConflictException.class);
+    }
+
+    /** A null body and an empty body are the same write. */
+    @Test
+    void out_sameNonceNullThenEmptyBody_isNotAConflict() {
+        String topic = "fzteh-null-" + UUID.randomUUID();
+        Map<String, String> keys = Map.of("topic", topic);
+        byte[] id1 = repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s"), null, "n-null", null);
+        byte[] id2 = repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s"), "", "n-null", null);
+        assertThat(id2).isEqualTo(id1);
+    }
+
+    /**
+     * A retry of a write whose row was already consumed (acked, body cleared) is the same write
+     * arriving late, not a conflict: the original caller timed out after the consumer got it.
+     */
+    @Test
+    void out_sameNonceRetryAfterTheRowWasAcked_isNotAConflict() {
+        String to = "fzteh-acked-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s"),
+                "payload", "n-acked", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-fzteh", 60);
+        assertThat(claimed).isPresent();
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-fzteh");
+
+        byte[] id2 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s"),
+                "payload", "n-acked", null);
+        assertThat(id2).isEqualTo(id1);
+    }
+
+    /** A keys-only template keeps its refire semantics: a changed dim on the same keys is not refused. */
+    @Test
+    void out_keysOnlyTemplateRefire_isNotRefused() {
+        Map<String, String> keys = Map.of("agent_id", "agent-fzteh-ledger", "kind", "start");
+        byte[] id1 = repo.out(TENANT_A, "ledger/session-fzteh", keys, Map.of("agent_type", "developer"),
+                null, null, null);
+        byte[] id2 = repo.out(TENANT_A, "ledger/session-fzteh", keys, Map.of("agent_type", "debugger"),
+                null, null, null);
+        assertThat(id2).isEqualTo(id1);
+    }
+
     /**
      * nexus-em75s.36: {@code ledger/<session_id>}'s {@code kind} key is pinned to
      * {@code {start, report}} (RDR-205 §Technical Design "Registry" ~844). A value
@@ -643,6 +764,36 @@ class TupleRepositoryTest {
                 .as("a lapsed-then-reclaimed row must keep its body -- only ack clears it "
                         + "(bead nexus-8zoyp)")
                 .isEqualTo("lapse-body");
+    }
+
+    /**
+     * Bead nexus-5fpkh (shakeout F10): the census counts a claim whose lease has passed as {@code
+     * lapsed}, a subset of {@code claimed} (the lazy reclaim is unchanged, so the row still reads
+     * {@code claimed} until the next claim attempt re-takes it). A live claim is not counted.
+     */
+    @Test
+    void census_countsALapsedLeaseSeparately_subsetOfClaimed_inStatsAndList() throws Exception {
+        String addr = "5fpkh-lapsed-" + UUID.randomUUID();
+        String subspace = "probe/" + addr;
+        for (String k : new String[] {"short", "long"}) {
+            repo.out(TENANT_A, subspace, Map.of("owner", addr, "kind", k), Map.of(), null, null, null);
+        }
+        assertThat(repo.inp(TENANT_A, subspace, Map.of("owner", addr, "kind", "short"), "c-short", 1L)).isPresent();
+        assertThat(repo.inp(TENANT_A, subspace, Map.of("owner", addr, "kind", "long"), "c-long", 300L)).isPresent();
+
+        var live = repo.subspaceStats(TENANT_A, subspace);
+        assertThat(live.claimed()).isEqualTo(2);
+        assertThat(live.lapsed()).as("no lease has passed yet").isZero();
+
+        Thread.sleep(1_500); // let the 1-second lease lapse; nothing re-takes it
+
+        var stats = repo.subspaceStats(TENANT_A, subspace);
+        assertThat(stats.claimed()).as("lapsed is a subset of claimed; the reclaim is lazy").isEqualTo(2);
+        assertThat(stats.lapsed()).isEqualTo(1);
+        assertThat(stats.total()).isEqualTo(2);
+        var listed = repo.subspaceList(TENANT_A, subspace);
+        assertThat(listed).hasSize(1);
+        assertThat(listed.get(0)).isEqualTo(stats);
     }
 
     @Test

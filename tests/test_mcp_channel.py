@@ -2479,6 +2479,29 @@ class TestBoardStartAtNowAndFold:
         assert sender.calls == [], "stamped once per subscriber: the backlog never comes back"
 
     @pytest.mark.asyncio
+    async def test_a_post_just_before_the_subscribe_is_pushed_but_one_past_the_margin_is_not(self) -> None:
+        """Bead nexus-zihq1 (shakeout F8): a board subscription starts
+        `board_start_skew_s` (30 s) BEFORE the subscribe call, so a post
+        created inside that margin is pushed even though it predates the
+        subscribe, and one just past it is not. `tuple_subscribe`'s
+        description states exactly this; this pins the behaviour the
+        description now documents."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "inside", "post", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "inside", created_at=_iso(1_000_000 - 10))  # noqa: SLF001
+        fake.seed("board/ci/x", "outside", "post", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "outside", created_at=_iso(1_000_000 - 31))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        assert waiter.board_start_skew_s == 30.0
+
+        await waiter.tick()
+
+        assert [m["tuple_id"] for _content, m in sender.calls] == ["inside"]
+
+    @pytest.mark.asyncio
     async def test_one_new_post_keeps_the_single_post_shape(self) -> None:
         session_id = str(uuid.uuid4())
         subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))

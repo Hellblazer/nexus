@@ -23,6 +23,7 @@ it.
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import datetime
@@ -85,6 +86,83 @@ class TestTupleOutRd:
         # nexus-zdzm5: was {"error": "Error: ..."}, a doubled prefix the
         # text-tool error helper added inside a dict-shaped result.
         assert not rows[0]["error"].startswith("Error:"), rows[0]["error"]
+
+
+class TestShakeoutTupleSemantics:
+    """The 2026-10-21 shakeout findings, end to end through the real engine
+    (beads nexus-jz3kh F7, nexus-fzteh F9, nexus-5fpkh F10, nexus-o9gt2 F11)."""
+
+    def test_f7_a_keys_nonce_board_write_without_nonce_names_the_nonce_parameter(self, t2_service_env) -> None:
+        topic = _uniq("topic")
+        out = tuple_out(f"board/{topic}", {"topic": topic}, {"from": "s"}, "hi")
+        assert "field 'nonce'" in out
+        assert "its own field of the write" in out
+        assert "tuple_out's `nonce` parameter" in out
+
+    def test_f7_the_nonce_tried_as_a_key_or_a_dim_is_told_where_it_goes(self, t2_service_env) -> None:
+        topic = _uniq("topic")
+        as_key = tuple_out(f"board/{topic}", {"topic": topic, "nonce": "n"}, {"from": "s"}, "hi", nonce="n")
+        as_dim = tuple_out(f"board/{topic}", {"topic": topic}, {"from": "s", "nonce": "n"}, "hi", nonce="n")
+        assert "not a key" in as_key and "its own field of the write" in as_key
+        assert "not a dimension" in as_dim and "its own field of the write" in as_dim
+
+    def test_f9_same_nonce_different_body_is_refused_naming_the_id_and_the_first_body_stands(
+        self, t2_service_env,
+    ) -> None:
+        topic = _uniq("topic")
+        sub = f"board/{topic}"
+        first = tuple_out(sub, {"topic": topic}, {"from": "s"}, "one", nonce="n-1")
+        assert re.fullmatch(r"[0-9a-f]{64}", first)
+        assert tuple_out(sub, {"topic": topic}, {"from": "s"}, "one", nonce="n-1") == first  # byte-identical retry
+
+        clash = tuple_out(sub, {"topic": topic}, {"from": "s"}, "two", nonce="n-1")
+        assert clash.startswith("Error:")
+        assert first in clash
+        assert "fresh nonce" in clash
+
+        rows = tuple_rd(sub, {"topic": topic})
+        assert [r["body"] for r in rows] == ["one"]
+
+    def test_f10_a_lapsed_lease_reads_as_lapsed_with_the_stale_holder_and_is_counted(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tuple_out(sub, {"to": addr}, {"from": "s"}, "work", nonce=_uniq("nonce"))
+        claimant = _uniq("claimant")
+        claim = tuple_in(sub, {"to": addr}, claimant=claimant, lease_s=1)
+        assert claim is not None
+
+        live = tuple_rd(sub, {"to": addr})
+        assert live[0]["claim_state"] == "claimed"
+        assert tuple_stats(sub)["lapsed"] == 0
+
+        time.sleep(1.6)  # the 1 s lease passes; nothing re-takes it, so the row is still stored as claimed
+
+        row = tuple_rd(sub, {"to": addr})[0]
+        assert row["claim_state"] == "lapsed"
+        assert row["claimant"] == claimant
+        assert row["lease_until"]
+        stats = tuple_stats(sub)
+        assert (stats["claimed"], stats["lapsed"]) == (1, 1)
+        listed = tuple_list(sub)
+        assert (listed[0]["claimed"], listed[0]["lapsed"]) == (1, 1)
+
+    def test_f11_a_made_up_cursor_is_refused_naming_since_id_not_a_raw_http_400(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "s"}, "x", nonce=_uniq("nonce"))
+        out = tuple_rd(f"mailbox/{addr}", {"to": addr}, since_created_at="2026-10-21T00:00:00Z", since_id="0")
+        err = out[0]["error"]
+        assert "since_id" in err and "prior read" in err
+        assert "HTTP 400" not in err and "string length not even" not in err
+
+    def test_f11_a_real_cursor_from_a_returned_row_resumes_after_it(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        for i in range(2):
+            tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "s"}, f"m{i}", nonce=_uniq("nonce"))
+        first = tuple_rd(f"mailbox/{addr}", {"to": addr}, n=1)[0]
+        rest = tuple_rd(
+            f"mailbox/{addr}", {"to": addr}, n=5, since_created_at=first["created_at"], since_id=first["id"],
+        )
+        assert [r["body"] for r in rest] == ["m1"]
 
 
 class TestTupleInAckNack:

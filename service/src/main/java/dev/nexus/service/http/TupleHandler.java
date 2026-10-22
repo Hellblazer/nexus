@@ -639,6 +639,9 @@ public final class TupleHandler implements HttpHandler {
         m.put("expired_unpurged", c.expiredUnpurged());
         m.put("oldest_created_at", c.oldestCreatedAt());
         m.put("newest_created_at", c.newestCreatedAt());
+        // Bead nexus-5fpkh: additive. Claims whose lease has passed but the lazy reclaim has
+        // not yet released; a SUBSET of "claimed", which keeps counting them.
+        m.put("lapsed", c.lapsed());
         return m;
     }
 
@@ -833,7 +836,15 @@ public final class TupleHandler implements HttpHandler {
             return null;
         }
         OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
-        byte[] id = HEX.parseHex(String.valueOf(idRaw));
+        byte[] id;
+        try {
+            id = HEX.parseHex(String.valueOf(idRaw));
+        } catch (IllegalArgumentException e) {
+            // Bead nexus-o9gt2: HexFormat's own message ("string length not even: 1") names
+            // neither the field nor what a valid value is.
+            throw new IllegalArgumentException("since.id: not a tuple id (hex); pass the 'id' of a row "
+                    + "from a prior read, paired with that row's 'created_at'", e);
+        }
         return new TupleRepository.ReadCursor(createdAt, id);
     }
 

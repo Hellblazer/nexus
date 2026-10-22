@@ -523,7 +523,7 @@ def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, jso
     for c in rows:
         click.echo(
             f"{c.subspace}  total={c.total} available={c.available} "
-            f"claimed={c.claimed} dead={c.dead} consumed={c.consumed} "
+            f"claimed={c.claimed} lapsed={c.lapsed} dead={c.dead} consumed={c.consumed} "
             f"expired_unpurged={c.expired_unpurged}"
         )
     if next_cursor:
@@ -547,6 +547,7 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
     click.echo(f"total: {c.total}")
     click.echo(f"available: {c.available}")
     click.echo(f"claimed: {c.claimed}")
+    click.echo(f"lapsed: {c.lapsed}")
     click.echo(f"dead: {c.dead}")
     click.echo(f"consumed: {c.consumed}")
     click.echo(f"expired_unpurged: {c.expired_unpurged}")
@@ -632,7 +633,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row.id, "subspace": row.subspace, "template": row.template,
         "keys": row.keys, "dims": row.dims, "body": row.body,
-        "claim_state": row.claim_state, "claimant": row.claimant,
+        "claim_state": row.effective_claim_state(), "claimant": row.claimant,
         "lease_until": row.lease_until, "attempts": row.attempts,
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
@@ -642,7 +643,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
 def _census_dict(c: Any) -> dict[str, Any]:
     return {
         "subspace": c.subspace, "total": c.total, "available": c.available,
-        "claimed": c.claimed, "dead": c.dead, "consumed": c.consumed,
+        "claimed": c.claimed, "lapsed": c.lapsed, "dead": c.dead, "consumed": c.consumed,
         "expired_unpurged": c.expired_unpurged,
         "oldest_created_at": c.oldest_created_at, "newest_created_at": c.newest_created_at,
     }
@@ -655,7 +656,7 @@ def _print_row(row: Any) -> None:
     click.echo(f"  keys: {row.keys}")
     click.echo(f"  dims: {row.dims}")
     click.echo(f"  body: {row.body}")
-    click.echo(f"  claim_state: {row.claim_state}")
+    click.echo(f"  claim_state: {row.effective_claim_state()}")
     click.echo(f"  created_at: {row.created_at}")
 
 

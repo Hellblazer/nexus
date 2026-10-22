@@ -7502,7 +7502,10 @@ def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
         "keys": row.keys,
         "dims": row.dims,
         "body": row.body,
-        "claim_state": row.claim_state,
+        # nexus-5fpkh: a claim whose lease has passed reads "lapsed", computed here at
+        # read time; the engine's lazy reclaim and the stored state are untouched, and
+        # claimant / lease_until stay so the stale holder is still visible.
+        "claim_state": row.effective_claim_state(),
         "claimant": row.claimant,
         "lease_until": row.lease_until,
         "attempts": row.attempts,
@@ -7525,6 +7528,8 @@ def _tuple_census_to_dict(c: Any) -> dict[str, Any]:
         "total": c.total,
         "available": c.available,
         "claimed": c.claimed,
+        # nexus-5fpkh: of `claimed`, the claims whose lease has passed (not yet reclaimed).
+        "lapsed": c.lapsed,
         "dead": c.dead,
         "consumed": c.consumed,
         "expired_unpurged": c.expired_unpurged,
@@ -7549,9 +7554,11 @@ def tuple_out(
     )] = None,
     nonce: Annotated[str | None, Field(
         description=(
-            "Caller-minted nonce. Required for any template whose id_from is "
-            "keys+nonce (the mailbox); omit for a keys-only template (the "
-            "ledger). An id ingredient only, never echoed back on a read."
+            "Caller-minted nonce, its own parameter: never a key or a dim. Required "
+            "when the template's id_from is keys+nonce (mailbox/<address>, "
+            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>); omit "
+            "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
+            "back on a read."
         ),
     )] = None,
     ttl_seconds: Annotated[int | None, Field(
@@ -7567,7 +7574,10 @@ def tuple_out(
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
-    Returns the tuple id, lowercase hex.
+    Returns the tuple id, lowercase hex. On a keys+nonce template a nonce
+    names one write: the same nonce with a different body or dims is
+    refused as `NonceReuseConflict`, naming the id; mint a fresh nonce for
+    a new message.
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
@@ -7600,9 +7610,12 @@ def tuple_rd(
     )] = None,
     n: Annotated[int, Field(description="Max rows to return.")] = 1,
     since_created_at: Annotated[str, Field(
-        description="Paired with since_id to resume a (created_at, id) cursor; leave both empty to read from the start.",
+        description="The created_at of the last row of a prior read; resumes after it. Pair with since_id; "
+                    "leave both empty to read from the start.",
     )] = "",
-    since_id: Annotated[str, Field(description="See since_created_at.")] = "",
+    since_id: Annotated[str, Field(
+        description="The id (64 hex characters) of that same row; never a made-up value. See since_created_at.",
+    )] = "",
     timeout_s: Annotated[int, Field(
         description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
                     "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
@@ -7617,10 +7630,20 @@ def tuple_rd(
     keys `keys_pattern` supplies.
 
     Returns a list of matching tuples, including dead-lettered rows
-    (dead-lettering is a claim state, not an exclusion).
+    (dead-lettering is a claim state, not an exclusion). `claim_state` is
+    null (unclaimed), `claimed`, `lapsed` (a claim whose lease has passed;
+    the claimant and `lease_until` are the stale holder's) or `dead`.
+    `since_created_at` and `since_id` come from a returned row, together.
     """
-    since = (since_created_at, since_id) if since_created_at and since_id else None
     try:
+        if bool(since_created_at) != bool(since_id):
+            # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "since_created_at and since_id come as a pair, both from one row of a prior read "
+                "(its created_at and its id); pass both, or neither to read from the start"
+            )
+        since = (since_created_at, since_id) if since_created_at and since_id else None
         with _t2_ctx() as db:
             rows = db.tuples.rd(
                 subspace, keys_pattern, n=n, since=since, timeout_s=timeout_s,
@@ -7921,10 +7944,10 @@ def tuple_stats(
     """Get the row census for one exact tuple subspace.
 
     Use `tuple_list` instead to enumerate subspaces by prefix. Returns
-    `{subspace, total, available, claimed, dead, consumed,
+    `{subspace, total, available, claimed, lapsed, dead, consumed,
     expired_unpurged, oldest_created_at, newest_created_at}`. `total`
     counts rows not yet consumed; consumed rows are counted only in
-    `consumed`.
+    `consumed`. `lapsed` is the part of `claimed` whose lease has passed.
     """
     try:
         with _t2_ctx() as db:
@@ -8055,10 +8078,12 @@ def tuple_subscribe(
     queue or a lock is refused naming `in`; a second `mailbox/<name>` is
     refused once this session leases a name. At most 32 board topics.
 
-    A board subscription starts at now: only posts created after the
-    subscribe call are pushed, one notification per wait naming the
-    count, the first and last tuple id and the `tuple_rd` call that
-    reads them. Older posts are read with `tuple_rd`, never pushed.
+    A board subscription starts 30 seconds before the subscribe call (a
+    clock-skew margin): posts from that window on are pushed, at most 100
+    per wait, one notification per wait naming the count, the first and
+    last tuple id and the `tuple_rd` call that reads them. Older posts
+    are read with `tuple_rd`, never pushed. Mail sent to the mailbox
+    before the subscribe is delivered too, until claimed or expired.
 
     Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
     lease so `mailbox_send` resolves that name to this session. It is NOT
