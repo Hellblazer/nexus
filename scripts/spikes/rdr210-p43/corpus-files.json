@@ -1,0 +1,352 @@
+{
+  "schema": 1,
+  "chunk_max_chars": 1500,
+  "prose": [
+    {
+      "path": "docs/benchmarking.md",
+      "sha256": "61ec24bfc103f265583aa27baa5fcc65c028718a7f4891e6c65606339b640446"
+    },
+    {
+      "path": "docs/catalog.md",
+      "sha256": "f070c68272f3e276a6cac39cfc808f05be633e28d81ef106d281daac7041a7ab"
+    },
+    {
+      "path": "docs/collections.md",
+      "sha256": "6dd7af31594cd0770a0f92474fe9a155d3a68d7d4470c4100ce11674d501d1b2"
+    },
+    {
+      "path": "docs/container-integration.md",
+      "sha256": "f60314c68181d0f3e047e43dd93044571c683de52a6ed0fff9a5741305e21f24"
+    },
+    {
+      "path": "docs/contributing.md",
+      "sha256": "d6fa547e09f11e8373f7915942771cd7286b610416a4ccb3ba421e972a79a4bf"
+    },
+    {
+      "path": "docs/desktop-deployment.md",
+      "sha256": "049201e592faea8aac89c045e71fb672625f8d85c0184ebdafdf9c59b29f8f8b"
+    },
+    {
+      "path": "docs/getting-started.md",
+      "sha256": "69dd4d651b4e2e4d09825291b84de4885635463e0e5739673362b1d9ed631e1d"
+    },
+    {
+      "path": "docs/managed-onboarding.md",
+      "sha256": "ebc5a1693eaa96874b9905f08b36378827e025e72a32045b071caf88cc82bcd1"
+    },
+    {
+      "path": "docs/mcp-hosts.md",
+      "sha256": "1fcec5e657687ecd9fe169668eae79ec50771b5bb98febaff0d8a1c6cdd856e7"
+    },
+    {
+      "path": "docs/mcp-servers.md",
+      "sha256": "6eaa89d43edc792cd9119daa622f73c14a346b88e343c5a4c2c424b24e355d6c"
+    },
+    {
+      "path": "docs/migration-runbook.md",
+      "sha256": "4b1c4fc27ecb2712f071df5f8e714bf7054d253299218b18dffe6ed04dbf39df"
+    },
+    {
+      "path": "docs/plan-authoring-guide.md",
+      "sha256": "50b12b47235e3c70e439c253117274b6a5b0ea170766aa18b16759bd1db99174"
+    },
+    {
+      "path": "docs/plan-centric-retrieval.md",
+      "sha256": "8a5e109a130dccdfc864b51e67c7d2b90008ad6f622efef18ae6606971ca9cdf"
+    },
+    {
+      "path": "docs/privacy-policy.md",
+      "sha256": "1b8f31cfe7c2d205eac51251ca30d414c8b081d673d985ad8432a718dae60df2"
+    },
+    {
+      "path": "docs/querying-guide.md",
+      "sha256": "0d48b8ab4d706f1622bd75dcf6ddc35870c4a5150d2773b3f065297bf4139ecb"
+    },
+    {
+      "path": "docs/rdr.md",
+      "sha256": "39271d94536cf40da069a2686923548e66c85735450efa0faebeba3909be19d3"
+    },
+    {
+      "path": "docs/rdr/rdr-020-voyage-chromadb-read-timeout.md",
+      "sha256": "5f4c795722569d36f02cc84eaf9b7768fc1e427e4b2e357d233f6dd4af27d535"
+    },
+    {
+      "path": "docs/rdr/rdr-022-memory-delete-command.md",
+      "sha256": "a88f9319d10cdfc0242a5c72608ce0ab1ae6d81219ab8bdd8e6dbcdc1914bd60"
+    },
+    {
+      "path": "docs/rdr/rdr-036-post-accept-planning-workflow.md",
+      "sha256": "e3c027b9c895e3be16686e2acfa9d97bb4b713a3207f1a3d7770be9491089983"
+    },
+    {
+      "path": "docs/rdr/rdr-040-cce-postmortem-gaps-mcp-enhancement.md",
+      "sha256": "41b51e3ae892b2daea2ecf777dc731a87b9b67fefc5fc30d917c549243206695"
+    },
+    {
+      "path": "docs/rdr/rdr-041-t1-scratch-inter-agent-context.md",
+      "sha256": "ed8ab3d055bda93c076dd7ce442e83984ef3430da8b8dbdf93837d8e51dade66"
+    },
+    {
+      "path": "docs/rdr/rdr-045-post-implementation-verification.md",
+      "sha256": "94925f6ee2a70db36fe2130c0509d901a54089e4b5b876f211e4dde85ed5285b"
+    },
+    {
+      "path": "docs/rdr/rdr-051-link-lifecycle.md",
+      "sha256": "1c83c52e8b58dba3472e758a5c4c8433b772c9927599c8c11523e7dfba5b147b"
+    },
+    {
+      "path": "docs/rdr/rdr-053-xanadu-fidelity.md",
+      "sha256": "ad8da42f4cee657afe3cb653bc388ee1028b67437571f99638fd706fd2642412"
+    },
+    {
+      "path": "docs/rdr/rdr-099-devonthink-integration.md",
+      "sha256": "575069a575bb5d52916ac94b0853fd5ebba20f123571c6c00ebe691ce56adae7"
+    },
+    {
+      "path": "docs/rdr/rdr-102-phase4-completion.md",
+      "sha256": "661e4afbe40c5633bdf4fd7f1cfef2b15d77482533c82e92f22ccc82f54f9472"
+    },
+    {
+      "path": "docs/rdr/rdr-112-storage-as-service-container-boundary.md",
+      "sha256": "60e7bed99fe79f71058168988dc6df67094f7fad2c7396105ea7aa1ff04882e2"
+    },
+    {
+      "path": "docs/rdr/rdr-130-command-preambles-via-nx-cli.md",
+      "sha256": "eb1db61a77de6e5119922a8be0cbd7785e3624c61673a9e7be60ca2beb92d310"
+    },
+    {
+      "path": "docs/rdr/rdr-137-eliminate-repos-json.md",
+      "sha256": "05cd725fcf5cd57524154d368e100802a5df56001cb3feccb8253e96df5f7c2a"
+    },
+    {
+      "path": "docs/rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md",
+      "sha256": "f3245f4feda65a70c88d5a92408d97d40b5e6c1f0cf299aec69fdbdcd8fc9f0b"
+    },
+    {
+      "path": "docs/rdr/rdr-146-catalog-store-behind-daemon.md",
+      "sha256": "2140dacadbcd433e57f2cfe3d950d99d699d5896d279b23938588711c36260f6"
+    },
+    {
+      "path": "docs/rdr/rdr-150-qwen-mcp-figure-augmentation.md",
+      "sha256": "7e591a9df1268fe05146fa774d83e582188cc6978ba55ee3d5cd06bb8a0542ab"
+    },
+    {
+      "path": "docs/rdr/rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "sha256": "e3bb770dabdec5b92671f5355dd9fbebcebe4fca5ba1ec1cf023e6d80c9ccde9"
+    },
+    {
+      "path": "docs/rdr/rdr-159-guided-upgrade-migration.md",
+      "sha256": "afed2ae6fd81da02b35bd2cbcf8639062274c23c0cae5473191c4ea3d5037c52"
+    },
+    {
+      "path": "docs/rdr/rdr-162-truthful-post-rdr160-upgrade-path.md",
+      "sha256": "93b72925d042e8c4053a39db2323ffc8c54d36b34a887609a9c2fcc8319c6aa1"
+    },
+    {
+      "path": "docs/rdr/rdr-169-docuverse-storage-reference-only-chunks.md",
+      "sha256": "20aeb9063ef117be180e4554c3bc58964e59f98b8829b8c92da02af5b987142a"
+    },
+    {
+      "path": "docs/rdr/rdr-176-survivable-managed-migration-readiness.md",
+      "sha256": "6b46d3b9a75d917309740172dafac50e85309c970b823f202f170fae7d9dc651"
+    },
+    {
+      "path": "docs/rdr/rdr-184-orchestration-protocol-hardening.md",
+      "sha256": "2bd7b9bccea5fa22ac637c4a0c0f1b6a76694c72ca781925c1c094b8a448749b"
+    },
+    {
+      "path": "docs/rdr/rdr-189-target-definition-layer.md",
+      "sha256": "19a64856d5a4633cf5470004b0829e4d0228a146b960cdf38d16d93f5d668e72"
+    },
+    {
+      "path": "docs/rdr/rdr-209-heat-based-graduation-between-memory-tiers.md",
+      "sha256": "76d6692a46fca24fc83afb8a1d3d7d6797b5e2861e64b0365d24e535ce7cc708"
+    },
+    {
+      "path": "docs/rdr/rdr-223-atomic-chunk-plus-owner-write.md",
+      "sha256": "7d032f959c35c4209fef82bc0ffb7dd615e0f42d5c0d9482051119f3be02ae2d"
+    },
+    {
+      "path": "docs/repo-indexing.md",
+      "sha256": "d7be6932fc6c2d1583a5b87f9a10bfdb28c593d4e46b2b95a7983201d0f3ce14"
+    },
+    {
+      "path": "docs/storage-tiers.md",
+      "sha256": "8eb064f31d473dd4617387e5595013adb04018877958f3d7764266fd6ffbc13c"
+    },
+    {
+      "path": "docs/tuple-space-walkthroughs.md",
+      "sha256": "17be0096ccaeca0c11b469c9d99aef1cc2e0b2715de7b47965a1272cc9cac8eb"
+    },
+    {
+      "path": "docs/windows-install.md",
+      "sha256": "2674071f05b8cd865970131f7cedf3b5ad8b2236ead5288a9303a83b85cb1843"
+    },
+    {
+      "path": "docs/workflows.md",
+      "sha256": "8d54dd2e2f65551d29c7540c6c4da8786e629b5395c5da3cb2e70a295088b589"
+    }
+  ],
+  "code": [
+    {
+      "path": "src/nexus/_session_end_launcher.py",
+      "sha256": "bc98f6475beec5a96026e694b55d2332d7fe38e1455a5e8cc21394bcf58ee5b9"
+    },
+    {
+      "path": "src/nexus/catalog/catalog_spans.py",
+      "sha256": "71cc75e33ac99507914000e91e23028460a5f7216eb87cade871bd631ded3686"
+    },
+    {
+      "path": "src/nexus/catalog/path_ambiguity.py",
+      "sha256": "b909e4facac88bc5a8fcddb27b29de9542784fb0ada0bf0f221c0a056ec1a8fa"
+    },
+    {
+      "path": "src/nexus/catalog/tumbler.py",
+      "sha256": "e7fc71f90852a04ba03e9c655720e156a9c644278aa2b9430833a2ae0f006914"
+    },
+    {
+      "path": "src/nexus/chunker.py",
+      "sha256": "7f0cdc8d8133447924ffbb3597eb6bda3515b3bdb5bddb2785c4d31fbf82ba9a"
+    },
+    {
+      "path": "src/nexus/commands/catalog_cmds/report.py",
+      "sha256": "c39343eb0d638b6c694215075ce2b601d125a8e74a8856bf79c9176b9f6e38de"
+    },
+    {
+      "path": "src/nexus/commands/catalog_cmds/t3_orphans.py",
+      "sha256": "6a860b1924e0290b5258fe9c5dd8fdee3fff395ae57731ba9626d7850a67bd87"
+    },
+    {
+      "path": "src/nexus/commands/mineru.py",
+      "sha256": "924d0675b79309e307d7f2755aa2351458d6e64c1f44b2caa8ab2bd3ffe50d36"
+    },
+    {
+      "path": "src/nexus/commands/plan.py",
+      "sha256": "2327886e1e689a6f0f2513e18520b09aa715df696ebe3257124732fd8d1e595f"
+    },
+    {
+      "path": "src/nexus/commands/service_cmd.py",
+      "sha256": "2261683a3c3a2b95d6a3898a05c5de5b4be326f9b9961e6b589ad0d494ceb44c"
+    },
+    {
+      "path": "src/nexus/console/routes/activity.py",
+      "sha256": "104cb0621f919456cb770c928a08565b012b76ff9ee63c605bfdcdcb13b4b46a"
+    },
+    {
+      "path": "src/nexus/console/routes/health.py",
+      "sha256": "11829250dd390792eb4fd530017d6ed7dc870a43083f3380fe92899a87426dbc"
+    },
+    {
+      "path": "src/nexus/console/watchers.py",
+      "sha256": "5dfd11beb04866b423c4366db4f8dd2677d43bd32573d25b9fe8f252c0678505"
+    },
+    {
+      "path": "src/nexus/context.py",
+      "sha256": "44d101356535014aaacacc9fedb4fb7451ca3d1831e41f787ff2526ce306edf3"
+    },
+    {
+      "path": "src/nexus/daemon/replace_guard.py",
+      "sha256": "fe4aae7b32aff23ef1b6082e4b828d7028b7fb13c512a70ba0e70dffbf9dcfd0"
+    },
+    {
+      "path": "src/nexus/daemon/windows_autostart.py",
+      "sha256": "7175c44926ab729ffdf8036a324a1216c797365e5580a18794e198850e5e9118"
+    },
+    {
+      "path": "src/nexus/db/inmemory_pipeline.py",
+      "sha256": "9e992736984448b007b6325a250f4cb9a2e4933dda624457059cf0af477671c4"
+    },
+    {
+      "path": "src/nexus/db/local_ef.py",
+      "sha256": "077e66f084cb5d6a4a8f219aa8a56cab531fce6f81245b0a5b88afda335dee1a"
+    },
+    {
+      "path": "src/nexus/db/service_crossencoder_model.py",
+      "sha256": "9cac8a500fe05d2eaa86dc605808d0beb23bc4f304a7dcd0b50dd5d2320af1e3"
+    },
+    {
+      "path": "src/nexus/db/t2/http_centroid_store.py",
+      "sha256": "de0d10b152b11af8c2ea1602e801896fa503049b008eee3c27f31fb3ad5c5d55"
+    },
+    {
+      "path": "src/nexus/db/t2/http_document_aspects_store.py",
+      "sha256": "27cd945797d8c77083e5cd3a99061996b29436b425c259db0931f0c4f03c7a3c"
+    },
+    {
+      "path": "src/nexus/db/t2/http_document_highlights_store.py",
+      "sha256": "a3061718c238858431b977ce1bdad31cc200ecc89c603d6ed0fb661bad94888c"
+    },
+    {
+      "path": "src/nexus/doc/footnote_converter.py",
+      "sha256": "59e6cfc3177dc22ec5838c945be05f45dde7d7841daf27988bf60cccd91e3995"
+    },
+    {
+      "path": "src/nexus/doc/ref_scanner.py",
+      "sha256": "b5b34c08232d14986888ce67bf954ff790536e435a35a19793717f6dde453d52"
+    },
+    {
+      "path": "src/nexus/filters.py",
+      "sha256": "5a2df4a7ca52563b94b073e2351d47e0475ea0bee8aa0b1a0e7c55306b4e3380"
+    },
+    {
+      "path": "src/nexus/gc_purge_marker.py",
+      "sha256": "5b2aa3394eff0a6b8b90c3d9ce3ce355ac7dc6be75213d83411f88ae631ee656"
+    },
+    {
+      "path": "src/nexus/mailbox_arm.py",
+      "sha256": "82a032538d87c141a37e79980e801b0fd842566fb812d912e172e38e2c9d5a6f"
+    },
+    {
+      "path": "src/nexus/mcp/_tool_call_log.py",
+      "sha256": "2f7d7f1c6b04abc45e5b76613776e74597b6e780a0b451d1c2306a965855f7e7"
+    },
+    {
+      "path": "src/nexus/mcp/_win_stdin.py",
+      "sha256": "a32607e2b89a5d7360d9c311f6e588da33fe5c748878c906b20a77d6dbd99f7a"
+    },
+    {
+      "path": "src/nexus/mcp/connect_marker.py",
+      "sha256": "59777be0fe6f50e438b5c3292ce50ca5468df7f0106ff16684aa44313e9b42ac"
+    },
+    {
+      "path": "src/nexus/mcp/hooks.py",
+      "sha256": "e495afe1370e95f25e950cebe99f80c2ab1ad8f81e36d90f96ca66f49319d867"
+    },
+    {
+      "path": "src/nexus/mcp/plan_cache_registry.py",
+      "sha256": "851fbb7d4a17198da027454346f34c9d84c239f84f9857060b74b946d47b5e32"
+    },
+    {
+      "path": "src/nexus/mcp/setup_tools.py",
+      "sha256": "a9323faafabdb3767f9bce8192d5dfae03af3ddbe79c58c61d4df1b5698e3e0a"
+    },
+    {
+      "path": "src/nexus/migration/state.py",
+      "sha256": "34de237c3b0e8162f759ad45f16a070b9d9e2f257193d4fd1cd0e1b7797d7540"
+    },
+    {
+      "path": "src/nexus/plans/loader.py",
+      "sha256": "7cba7b5ab1eff9956e20983b287b1639d57d63f8f706209b173df99213919084"
+    },
+    {
+      "path": "src/nexus/prose_indexer.py",
+      "sha256": "268e4fbd02327de8bbbb9cb9b9f25879eaa9a717445fee37f920d78d25a329ae"
+    },
+    {
+      "path": "src/nexus/routing_stats.py",
+      "sha256": "9533f7fa597764de74613f6f17b47acec70dbcedfa1f0975ac4f514b97bbd7b1"
+    },
+    {
+      "path": "src/nexus/scoring.py",
+      "sha256": "fd74be7f70ef10f573e566a889fa3d228a18e88de05fe7efab1f9fb005d585f9"
+    },
+    {
+      "path": "src/nexus/tuple_directory.py",
+      "sha256": "3ab3b0ac77e13f6ce3e6830dc3ba9ddfb9ef271d1d82132b623b02380ab5c307"
+    },
+    {
+      "path": "src/nexus/upgrade_ladder/provisioning.py",
+      "sha256": "804ec1df2d83b60cc67a9705ebb51ef7c4831afa0d1427325061b0167794d2db"
+    }
+  ]
+}
