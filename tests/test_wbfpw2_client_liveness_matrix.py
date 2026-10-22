@@ -14,7 +14,9 @@ not something an in-memory double can stand in for (same rationale as
 Each row is built through a REAL public client write path, never a raw SQL
 seed: ``store_put`` (R7), a catalog manifest write (``append_manifest_
 chunks``/``write_manifest``, R2/R3/R5/R6), a catalog delete producing a
-tombstone (R3), and a real cross-model collection rename (R4). R8 has no
+tombstone (R3). R4 is a real cross-model collection rename on the engine, posted
+directly: the client no longer sends ``cross_model`` (nexus-avjrb), and the engine
+branch it stages stays for conexus 6.18.1's guided upgrade. R8 has no
 public write path at all (the pre-nexus-b6enc "legacy note" shape a real
 store_put can no longer produce, since b6enc always pairs the reverse
 ``meta.doc_id`` stamp with a manifest write) -- it is seeded through the
@@ -193,7 +195,7 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     rows["R3"] = {"collection": coll, "chash": chash, "text": text}
 
     # ---- R4: chunk in A, only manifest row is in collection B -- built via
-    # a REAL cross-model collection rename (client write path #4). The
+    # a REAL cross-model collection rename on the engine (posted directly). The
     # rename's COPY branch re-homes catalog_documents + the manifest row
     # onto the target collection but never touches nexus.chunks itself
     # (confirmed by service/src/test/java/dev/nexus/service/
@@ -216,7 +218,11 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     # manifest row) -- a real, independent T3 write into tgt, not a copy
     # of the source row.
     _write_chunk(client, tgt, chash, text)
-    HttpCatalogClient().rename_collection(src, tgt, cross_model=True)
+    # The client no longer sends cross_model (nexus-avjrb); the engine's COPY branch
+    # stays for conexus 6.18.1's guided upgrade, so this scenario drives it directly.
+    HttpCatalogClient()._post(
+        "/collections/rename", {"old_name": src, "new_name": tgt, "cross_model": True}, idempotent=False,
+    )
     rows["R4"] = {"collection": src, "chash": chash, "text": text}
 
     # ---- R5: chunk in A shared by two live documents; ONE is re-manifested

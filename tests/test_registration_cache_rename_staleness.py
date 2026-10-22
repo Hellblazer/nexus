@@ -224,8 +224,9 @@ def test_supersede_collection_marks_the_entry_for_revalidation(
 def test_rename_that_leaves_the_old_row_live_just_restamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cross-model copy rename leaves the source live: the read says not
-    superseded, so the entry is re-stamped and nothing is upserted."""
+    """A rename that leaves the source live (as the engine's cross-model copy
+    branch does; here _post is stubbed, so only the cache logic runs): the read says
+    not superseded, so the entry is re-stamped and nothing is upserted."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
     w = _writer()
@@ -234,7 +235,7 @@ def test_rename_that_leaves_the_old_row_live_just_restamps(
     monkeypatch.setattr(
         HttpCatalogClient, "_post", lambda self, path, body, **kw: {"renamed": {}},
     )
-    object.__new__(HttpCatalogClient).rename_collection_cascade(_OLD, _NEW, cross_model=True)
+    object.__new__(HttpCatalogClient).rename_collection_cascade(_OLD, _NEW)
 
     ensure_collection_registered(_OLD, registrar=reg)
     assert w.get_collection.call_count == 1

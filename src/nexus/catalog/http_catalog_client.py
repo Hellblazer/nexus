@@ -3505,15 +3505,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         expire_cached_registration(old_name)
         return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
-    def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
+    def rename_collection(self, old: str, new: str) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
         # The int contract reports the re-homed catalog_documents count.
-        renamed = self.rename_collection_cascade(old, new, cross_model=cross_model)
+        renamed = self.rename_collection_cascade(old, new)
         return int(renamed.get("catalog_documents", 0))
 
-    def rename_collection_cascade(
-        self, old: str, new: str, *, cross_model: bool = False
-    ) -> dict[str, int]:
+    def rename_collection_cascade(self, old: str, new: str) -> dict[str, int]:
         """RDR-164 P3: atomically re-home a collection X->Y and all its in-Postgres
         derived state via the service's single transactional renameCollection.
 
@@ -3525,31 +3523,28 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``document_highlights``, ``aspect_extraction_queue``,
         ``catalog_documents``, ``search_telemetry``, ``hook_failures``,
         ``catalog_collections_deleted``; ``chash_index`` is retired, RDR-187).
-        The cross-model COPY branch (target already registered) returns only
-        ``catalog_documents``. The streaming pipeline buffer lives engine-side
+        The streaming pipeline buffer lives engine-side
         (``nexus.pdf_pipeline``, RDR-186 .16); the local-mode fan-out stays
         client-side (see ``rename_collection_data_plane``).
 
-        ``cross_model`` (nexus-gaou3): pass ``True`` ONLY for a deliberate RDR-162
-        cross-model repoint where ``new`` is already a populated target. With the
-        default ``False`` the service rejects an existing ``new`` with 409 (a plain
-        rename onto an existing collection is a collision, not a silent COPY).
+        The service rejects an existing ``new`` with 409: a rename onto an existing
+        collection is a collision, not a silent COPY. The engine's ``cross_model``
+        COPY branch (nexus-gaou3) has no caller in this client since
+        remap_collection_references went (nexus-0khi2); conexus 6.18.1's guided
+        upgrade still sends it, so the engine keeps it (nexus-avjrb).
         """
         body: dict[str, Any] = {"old_name": old, "new_name": new}
-        if cross_model:
-            body["cross_model"] = True
-        else:
-            # nexus-sis0m.3: the new row's content_type/owner_id, derived from
-            # the new name here because the engine does not parse names
-            # (RDR-204). Without them the engine copies the old row's, and a
-            # renamed knowledge collection kept the old subject as its owner.
-            # An engine predating the fields ignores them.
-            from nexus.corpus import collection_type_and_owner  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        # nexus-sis0m.3: the new row's content_type/owner_id, derived from
+        # the new name here because the engine does not parse names
+        # (RDR-204). Without them the engine copies the old row's, and a
+        # renamed knowledge collection kept the old subject as its owner.
+        # An engine predating the fields ignores them.
+        from nexus.corpus import collection_type_and_owner  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-            try:
-                body["content_type"], body["owner_id"] = collection_type_and_owner(new)
-            except ValueError:
-                pass
+        try:
+            body["content_type"], body["owner_id"] = collection_type_and_owner(new)
+        except ValueError:
+            pass
         # idempotent=False (nexus-ll31n sibling): a cascade rename over
         # EVERY row matching `old` across a dozen tables is a
         # population-discovery sweep, not a caller-supplied-id mutation. A

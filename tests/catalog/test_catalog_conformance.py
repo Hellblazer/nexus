@@ -21,7 +21,7 @@ EXPLICIT named parameter (positional-or-keyword / keyword-only, excluding `*args
 parameter BY NAME. A `VAR_KEYWORD` (`**kwargs`) on the client does NOT satisfy it.
 
 The contract is a one-directional MINIMUM: the client MAY carry extra service-only
-params (the 6 BENIGN methods — e.g. `cross_model`, `legacy_grandfathered`,
+params (e.g. `legacy_grandfathered`,
 `new_collection`); those are deliberate service capabilities and are NOT flagged.
 
 TDD status
