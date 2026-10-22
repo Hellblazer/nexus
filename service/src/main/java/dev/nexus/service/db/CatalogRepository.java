@@ -9597,15 +9597,14 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull) {
-        // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection (both branches), which fires
+        // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
-            // paths in this bead). Both branches below bulk-repoint
-            // catalog_document_chunks.collection (and the canonical branch
-            // additionally repoints chunks_<dim>.collection via
+            // paths in this bead). The rename below bulk-repoints
+            // catalog_document_chunks.collection (and chunks_<dim>.collection via
             // COLLECTION_SCOPED_TABLES) from oldName to newName -- the SAME
             // hazard class as a manifest INSERT: it can make a chash appear
             // referenced in newName's scope (or vanish from oldName's) while

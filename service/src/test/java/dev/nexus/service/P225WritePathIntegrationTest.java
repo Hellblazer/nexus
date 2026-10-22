@@ -47,7 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * repositories and as the production role. Chunk, manifest, topic-assignment and centroid writers supply the
  * collection's model and conflict on the four-column keys; a model with no partition is refused before any SQL, naming
  * the model; a model or dimension that disagrees with its collection is refused; a re-home across models is refused,
- * and a rename onto a live target is refused. (The quarantine, restore, GC and purge families, and the
+ * (The quarantine, restore, GC and purge families, and the
  * deferred FKs, are exercised by their own suites on the same layout.)
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)

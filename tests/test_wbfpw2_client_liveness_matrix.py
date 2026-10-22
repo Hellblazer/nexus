@@ -14,9 +14,8 @@ not something an in-memory double can stand in for (same rationale as
 Each row is built through a REAL public client write path, never a raw SQL
 seed: ``store_put`` (R7), a catalog manifest write (``append_manifest_
 chunks``/``write_manifest``, R2/R3/R5/R6), a catalog delete producing a
-tombstone (R3). R4 is a real cross-model collection rename on the engine, posted
-directly: the client no longer sends ``cross_model`` (nexus-avjrb), and the engine
-branch it stages stays for conexus 6.18.1's guided upgrade. R8 has no
+tombstone (R3). R4 is the shape a cross-model rename's COPY branch left, built from
+public chunk and manifest writes since that branch is gone (nexus-avjrb). R8 has no
 public write path at all (the pre-nexus-b6enc "legacy note" shape a real
 store_put can no longer produce, since b6enc always pairs the reverse
 ``meta.doc_id`` stamp with a manifest write) -- it is seeded through the
@@ -194,35 +193,22 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     assert cat.delete_document(str(doc)), "control: the tombstone write must report a real delete"
     rows["R3"] = {"collection": coll, "chash": chash, "text": text}
 
-    # ---- R4: chunk in A, only manifest row is in collection B -- built via
-    # a REAL cross-model collection rename on the engine (posted directly). The
-    # rename's COPY branch re-homes catalog_documents + the manifest row
-    # onto the target collection but never touches nexus.chunks itself
-    # (confirmed by service/src/test/java/dev/nexus/service/
-    # CatalogRenameCollectionTest.java::renameCollection_crossModelCopy
-    # Branch_targetExists_repointsDocsAndManifests's own fixture comment),
-    # so the physical chunk this test writes into the source collection is
-    # stranded there, unmanifested -- the production "rename COPY branch
-    # leaves source-collection chunk rows" shape (T2 nexus/rdr-192-
-    # reverification-2026-09-26, Producers section).
+    # ---- R4: chunk in A, only manifest row is in collection B. The production shape is
+    # what the RDR-162 cross-model rename's COPY branch left: it re-homed the document
+    # and its manifest row onto the target and never touched nexus.chunks, stranding the
+    # source chunk unmanifested (T2 nexus/rdr-192-reverification-2026-09-26, Producers).
+    # That branch is gone (nexus-avjrb), so the shape is built directly from public
+    # writes: the chunk is written into A, and the document and its only manifest row
+    # are written in B over a same-chash chunk there.
     src = _coll("r4-src")
     tgt = _coll("r4-tgt")
     text = "wbfpw2 R4 -- a chunk stranded in its source collection by a cross-model rename."
     chash = _chash(text)
     _write_chunk(client, src, chash, text)
-    doc = cat.register(owner, "wbfpw2-r4-doc", content_type="knowledge", physical_collection=src)
-    cat.append_manifest_chunks(str(doc), [{"chash": chash, "position": 0}], collection=src)
-    cat.resync_chunk_count_cache(str(doc))
-    # The cross-model COPY branch requires the TARGET to already carry a
-    # chunk under the same chash (fk_catalog_chunks_chunk on the re-homed
-    # manifest row) -- a real, independent T3 write into tgt, not a copy
-    # of the source row.
     _write_chunk(client, tgt, chash, text)
-    # The client no longer sends cross_model (nexus-avjrb); the engine's COPY branch
-    # stays for conexus 6.18.1's guided upgrade, so this scenario drives it directly.
-    HttpCatalogClient()._post(
-        "/collections/rename", {"old_name": src, "new_name": tgt, "cross_model": True}, idempotent=False,
-    )
+    doc = cat.register(owner, "wbfpw2-r4-doc", content_type="knowledge", physical_collection=tgt)
+    cat.append_manifest_chunks(str(doc), [{"chash": chash, "position": 0}], collection=tgt)
+    cat.resync_chunk_count_cache(str(doc))
     rows["R4"] = {"collection": src, "chash": chash, "text": text}
 
     # ---- R5: chunk in A shared by two live documents; ONE is re-manifested

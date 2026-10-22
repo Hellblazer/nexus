@@ -3528,10 +3528,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         client-side (see ``rename_collection_data_plane``).
 
         The service rejects an existing ``new`` with 409: a rename onto an existing
-        collection is a collision, not a silent COPY. The engine's ``cross_model``
-        COPY branch (nexus-gaou3) has no caller in this client since
-        remap_collection_references went (nexus-0khi2); conexus 6.18.1's guided
-        upgrade still sends it, so the engine keeps it (nexus-avjrb).
+        collection is a collision. The RDR-162 ``cross_model`` COPY repoint is gone
+        from both halves (nexus-avjrb).
         """
         body: dict[str, Any] = {"old_name": old, "new_name": new}
         # nexus-sis0m.3: the new row's content_type/owner_id, derived from

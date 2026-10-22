@@ -636,7 +636,7 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
 
     @Test
     void theChashRenameDoesNotRetagWhenTheSourceIsStillALiveRegisteredCollection() throws Exception {
-        // The same route serves the RDR-162 cross-model cascade, where the source stays live (the chash cascade keeps its own copy semantics).
+        // A source that is still a live registered collection keeps its quarantine rows.
         String t = newTenant();
         String x = col("c4lx");
         String y = col("c4ly");
