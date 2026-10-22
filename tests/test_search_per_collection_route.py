@@ -1250,9 +1250,20 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
-        _search(engine, cols, lexical=True)
+        engine.lexical_rows = [{"id": "lex-only", "content": "t", "distance": 0.8, "collection": cols[1]}]
+        results = _search(engine, cols, lexical=True)
         assert "lexical" not in engine.route_calls()[0]
         assert any(path == _HYBRID for path, _body in engine.calls), "the leg ran on /hybrid-search"
+        assert "lex-only" in [r.id for r in results], "the leg's rows come back"
+
+    @pytest.mark.parametrize(
+        ("value", "on"),
+        [("1", True), ("true", True), (" TRUE ", True), ("on", True), ("yes", True),
+         ("", False), ("0", False), ("off", False), ("2", False)],
+    )
+    def test_the_opt_in_reads_only_the_documented_values(self, monkeypatch, value, on):
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, value)
+        assert hvc.route_lexical_enabled() is on
 
 
 # ── nexus-079ly: raw and dropped are the engine's facts, kept is explicit ────

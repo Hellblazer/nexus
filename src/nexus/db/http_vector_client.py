@@ -3127,7 +3127,7 @@ def route_lexical_enabled() -> bool:
     """True only when ``NX_SEARCH_ROUTE_LEXICAL`` is ``1``/``true``/``on``/``yes``.
 
     Off by default (nexus-n51v1): with the field the engine runs one lexical arm per
-    collection, about 280 ms each, and a default ``--lexical`` search over 118
+    collection, 0.3 to 0.65 s each, and a default ``--lexical`` search over 118
     collections took 11.99 s against 6.90 s for the batched ``/hybrid-search`` leg
     (engine-service-v0.1.163, 2026-10-22). Read on every search.
     """
