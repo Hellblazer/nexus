@@ -40,9 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4925
+provisioned_tests = 4926
 tolerance_tests = 0
-measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff)"
+# 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
+# runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
+# row of that run reads the session engine, so the test needs its tenant (t2_tenant). CI 39698506258 (a0d079992)
+# counted 4926 with that one test and nothing else new; the DDL-per-run ratchet is untouched.
+measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
 # substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
