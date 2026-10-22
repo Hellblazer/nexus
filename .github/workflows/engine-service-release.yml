@@ -266,15 +266,16 @@ jobs:
     timeout-minutes: ${{ matrix.target.timeout }}
     strategy:
       fail-fast: false
-      # max-parallel: 2 — the two linux builds run in parallel (they schedule
-      # cleanly on the shared GH-hosted pool). mac-arm64 (ordered last) only
-      # starts once a linux slot frees; when it falls back to macos-14 this
-      # still matters (the scarce shared GH macOS pool was getting
-      # starved-then-slammed when all three launched at once). On hellmini
-      # (the default) mac-arm64 has its own dedicated runner and isn't
-      # actually contending for anything, but the deferred ordering is
-      # harmless there too, so it stays unconditional.
-      max-parallel: 2
+      # max-parallel is 2 only when mac-arm64 falls back to macos-14: the
+      # scarce shared GH macOS pool was getting starved-then-slammed when all
+      # three launched at once, so mac (ordered last) waits for a linux slot.
+      # On the lab runners (lab-mac-m, the default, or hellmini) mac has its own
+      # slot and contends with nothing, and holding it behind linux is NOT
+      # harmless: mac native -> smoke-mac-arm64 -> promote-release is the
+      # critical path, and the hold added ~9.5 min to engine-service-v0.1.163
+      # (run 39818942210: lab-mac-m idle 17:02:07-17:11:36; nexus-mm5jl). So
+      # all three build at once there.
+      max-parallel: ${{ (inputs.mac_runner || 'lab-mac-m') == 'macos-14' && 2 || 3 }}
       matrix:
         # maxheap: log-measured per-runner (engine-service-v0.1.40 run 29258747763).
         # Both linux boxes report ~16GB (5632m showed as 31% of system memory) and
