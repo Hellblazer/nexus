@@ -438,7 +438,7 @@ def test_mcp_one_group_degraded_falls_back_to_calibrated_order_with_the_note() -
     # Served from the page cache, which carries the note of the entry it returns.
     try:
         text = search(query="hf29s mcp one degraded", corpus=f"{BGE_KNOW},{VOY_RDR}",
-                      lexical=True).content[0].text
+                      lexical=True)
     finally:
         mcp_infra.inject_t3(None)
     assert "lexical rerank degraded" in text

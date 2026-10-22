@@ -2138,7 +2138,7 @@ def test_search_under_cap_is_unaffected():
 #
 # Default mode returns the human-readable text and nothing else. From
 # nexus-6jlki it also returned a CallToolResult carrying a structuredContent
-# envelope; Claude clients display structuredContent in place of the text,
+# envelope; Claude Code displays structuredContent in place of the text,
 # so the model read a JSON dump. ``structured=True`` returns the bare dict.
 
 def _search_hit(*a, **kw):
@@ -2150,20 +2150,30 @@ def _search_hit(*a, **kw):
 @pytest.mark.t2_tenant
 def test_search_default_mode_returns_the_text_on_consecutive_calls(monkeypatch):
     """Shakeout F13 reported plain text on the first call and a JSON
-    envelope on later ones. The second call here is served by the page-turn
-    cache, the path a repeat search takes, and must have the first's shape."""
+    envelope on later ones. Default, structured, default: the later calls
+    are served by the page-turn cache (one backend search), and each call
+    has its own mode's shape."""
     _fresh_page_cache(monkeypatch)
     _mock_t3([{"name": "code__test", "count": 1}])
-    with patch("nexus.search_engine.search_cross_corpus", _search_hit), \
+    calls: list[str] = []
+
+    def _counted(*a, **kw):
+        calls.append("search")
+        return _search_hit()
+
+    with patch("nexus.search_engine.search_cross_corpus", _counted), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         first = search(query="vector database", corpus="code__test")
-        second = search(query="vector database", corpus="code__test")
-        expected = _search_render(query="vector database", corpus="code__test")
+        middle = search(query="vector database", corpus="code__test", structured=True)
+        last = search(query="vector database", corpus="code__test")
+    assert calls == ["search"], "the later calls must come from the page-turn cache"
 
-    for result in (first, second):
+    for result in (first, last):
         assert type(result) is str, f"default-mode search returned {type(result).__name__}"
-        assert result == expected
+    assert first == last
     assert "vector database internals" in first.lower()
+    assert type(middle) is dict
+    assert middle["ids"] == ["r1"]
 
 
 @pytest.mark.t2_tenant
@@ -3104,6 +3114,6 @@ def test_a_topic_grouped_text_render_prints_the_topic_headers():
     with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         text = search(query="topic header probe", corpus="code__test",
-                      cluster_by="semantic").content[0].text
+                      cluster_by="semantic")
     assert "── Topic Alpha ──" in text
     assert "── Topic Beta ──" in text

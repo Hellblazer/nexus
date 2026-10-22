@@ -3090,8 +3090,7 @@ def _search_render(
         boost_window = boost_window_size(limit)
         # ``lexical`` MUST be in this tuple. It changes WHICH rows are
         # retrieved, so a lexical call that reused a vector-only page would be
-        # served silently-wrong results inside the 120s TTL — and the wrapper
-        # calls _search_render twice, so it is reachable within one request.
+        # served silently-wrong results inside the 120s TTL.
         # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
@@ -3413,7 +3412,7 @@ def _search_render(
 # FastMCP from auto-wrapping the ``str | dict`` return as
 # ``structuredContent: {"result": ...}`` (nexus-r90ao). Default mode returns
 # the text only. From nexus-6jlki to nexus-099mn it also sent a
-# ``structuredContent`` envelope, and Claude clients show a tool result's
+# ``structuredContent`` envelope, and Claude Code shows a tool result's
 # structuredContent in place of its text, so the model read a JSON dump with
 # the render escaped inside it. ``structured=True`` returns the bare dict the
 # plan runner reads (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).

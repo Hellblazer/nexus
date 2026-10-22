@@ -20,8 +20,8 @@ wrap with no test noticing. This file makes every tool's disposition an
 explicit source-level fact instead of a return-annotation accident.
 
 nexus-6jlki gave ``search()`` a deliberate structuredContent envelope in
-default mode; nexus-099mn (shakeout F13) removed it, because Claude clients
-display structuredContent in place of the text. Every tool in this file's
+default mode; nexus-099mn (shakeout F13) removed it, because Claude Code
+displays structuredContent in place of the text. Every tool in this file's
 census keeps ``structured_output=False`` and emits no structuredContent at
 all -- pure text over the wire.
 
@@ -135,70 +135,6 @@ def test_every_mcp_tool_registration_has_explicit_structured_output():
         "@mcp.tool() registration(s) with no explicit structured_output= "
         f"(silently inheriting FastMCP's auto-detect): {implicit}"
     )
-
-
-# ── Layer 1b: structuredContent self-sufficiency census (lint, AST-only) ──
-#
-# nexus-6jlki follow-up. A conforming MCP client may render
-# ``structuredContent`` INSTEAD of the text block; the protocol permits it,
-# nexus's own client does it (``mcp_client/core.py::_parse_result`` prefers
-# structuredContent over the first text block), and so does Claude Code.
-# The spike's design memo (T2 [23351]) modelled the field as purely additive
-# -- "a new structuredContent field they can ignore or start consuming" --
-# and every test written for it asserts on the SERVER's CallToolResult,
-# where both shapes are present and correct. The displacement is not
-# observable from that object, so six green wire-shape tests could not see
-# that default-mode ``search`` had begun delivering ids and hashes with no
-# paths, line numbers or snippets to its largest consumer.
-#
-# This census is the part that generalises. ``query``, ``nx_answer`` and
-# ``memory_search`` are all slated for the same dual-shape treatment (memo,
-# Tool-by-tool mapping); each will construct its own ``CallToolResult``.
-# Rather than trust three future authors to remember, any function that
-# builds one with ``structuredContent=`` must also build a dict carrying a
-# ``"text"`` key. AST-only, so it costs nothing and needs no substrate.
-
-
-def _functions_constructing_structured_calltoolresult(path: pathlib.Path):
-    """Yield FunctionDefs in *path* that build a CallToolResult with
-    ``structuredContent=``."""
-    tree = ast.parse(path.read_text(), filename=str(path))
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for sub in ast.walk(node):
-            if (
-                isinstance(sub, ast.Call)
-                and getattr(sub.func, "id", None) == "CallToolResult"
-                and any(kw.arg == "structuredContent" for kw in sub.keywords)
-            ):
-                yield node
-                break
-
-
-@pytest.mark.lint
-@pytest.mark.parametrize("path", _MCP_SOURCE_FILES, ids=lambda p: p.name)
-def test_structured_content_payloads_carry_the_render_text(path: pathlib.Path) -> None:
-    """Every dual-shape tool must put the render inside structuredContent.
-
-    Fails for a NEW tool that copies search()'s wrapper shape and forgets
-    the text -- which is the exact regression this census exists to stop
-    recurring across query / nx_answer / memory_search.
-    """
-    for fn in _functions_constructing_structured_calltoolresult(path):
-        keys = {
-            key.value
-            for dict_node in (n for n in ast.walk(fn) if isinstance(n, ast.Dict))
-            for key in dict_node.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
-        assert "text" in keys, (
-            f"{path.name}::{fn.name}() returns a CallToolResult with "
-            "structuredContent but never builds a 'text' key. A client that "
-            "renders structuredContent instead of the text block would get no "
-            "readable content. Carry the render in the payload -- see "
-            "search() in src/nexus/mcp/core.py."
-        )
 
 
 # ── Layer 2: call-through spot-checks (default loop, mocked substrate) ─────
