@@ -89,6 +89,10 @@ _FAILED_HEADS = (
 #: The file in the setup directory that records "not now" (``nx_setup._MARKER``).
 NOT_NOW_MARKER = "not-now"
 
+#: What the real server's ``setup_status`` says after a finished run when the provisioned local service is
+#: stopped (``nexus.mcp.setup_tools.SERVICE_DOWN``, nexus-sv2wx.24): the old "Setup is done." is history then.
+SERVICE_DOWN_PHRASE = "a local Nexus service are installed, but the service is not running"
+
 #: Said by the stand-in (``nx_standin.py``) and the session-start hook (``nx_setup_notice.py``).
 BROKEN_PHRASE = "Nexus is installed but cannot start; setup repairs it"
 NOT_INSTALLED_PHRASE = "Nexus is not installed on this machine"
@@ -866,7 +870,8 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
     with Step("B5 reconnect: the real server answers"):
         conn, answers = talk(box, "nexus", [("setup_status", {})])
         expect(not stand_in_claim(conn.server_name) and REAL_TOOL_NAMES <= conn.tools, f"B: server {conn.server_name!r} tools {sorted(conn.tools)[:8]}")
-        expect(answers[0].startswith("No usable Nexus service was found") and "Setup is done." in answers[0],
+        # B1 stopped A's service and B's repair starts none, so the answer is that the service is down.
+        expect(answers[0].startswith("No usable Nexus service was found") and SERVICE_DOWN_PHRASE in answers[0],
                f"B: the real server's setup_status after the repair: {answers[0][:300]!r}")
     with Step("B6 a full session start after a cli-only run: one quiet line, no question (state 7 with the choice recorded)"):
         text = session_start_after_setup(box)

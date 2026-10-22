@@ -84,6 +84,8 @@ class TestEntries:
         notice = _plugin_module("hooks", "scripts", "nx_setup_notice.py")
         notice.load_siblings()
         assert sj.BROKEN_PHRASE == standin.BROKEN_PHRASE
+        from nexus.mcp.setup_tools import SERVICE_DOWN
+        assert SERVICE_DOWN.startswith("No usable Nexus service was found") and sj.SERVICE_DOWN_PHRASE in SERVICE_DOWN
         assert sj.NOT_INSTALLED_PHRASE in notice.not_installed_text(("x",), "https://example.test")
         assert "ASK THE USER FIRST" in standin.ASK_FIRST
         # The names the journey expects of each stand-in are the ones the module builds.
