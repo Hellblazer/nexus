@@ -89,9 +89,16 @@ mail addressing and the directory).
   agent id (rendered with the session it was sent under, since subagents share
   the parent's token); a row from an engine that sent no `sender_session` key
   gets no label. Null means any of: no live minted session at write time
-  (including a stale token the client dropped), a reply row until nexus-g2ckl,
-  a row that predates the column, or a tuple written by a hook over raw HTTP
-  (no header). NO LABEL IS NOT VERIFICATION: any data-token holder can mint a
+  (including a stale token the client dropped), a reply row written by an
+  engine before nexus-g2ckl (v0.1.163 and later stamp the acker's session on
+  an ack reply row), a row that predates the column, or any raw-HTTP writer
+  (no header). A missing `from` gets no label: there is nothing to compare.
+  The label therefore must ride with or after the engine that carries
+  nexus-g2ckl, or every ack reply reads unverified. A session id appears in a
+  label only when the stamp is a canonical UUID; the stamp is attacker-chosen
+  text, so any other stamp reads a bare `unverified`. The channel text words
+  the cases apart (mismatch, null, agent id) and tells the reader not to act
+  on a shared-state request on the sender's word alone. NO LABEL IS NOT VERIFICATION: any data-token holder can mint a
   session token for any session id (the session endpoint takes `session_id`
   from the request body), so a match shows only that the writer presented the
   claimed session's token. The tenant stays the security boundary. Scope gap:

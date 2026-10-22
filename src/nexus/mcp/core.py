@@ -7525,7 +7525,7 @@ def _tuple_row_to_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]
         "announce_count": row.announce_count,
     }
     # nexus-ztwp4 (F3 step 2): the session id the engine stamped on `out`. Null =
-    # no stamp: no live minted session at write time, a reply row (until nexus-g2ckl), or a row that predates the column;
+    # no stamp: no live minted session at write time, a reply row written by an engine before nexus-g2ckl (v0.1.163), or a row that predates the column;
     # the key is OMITTED when the engine renders no such key, so a consumer can
     # tell "no stamp" from "this engine cannot say".
     if row.sender_session_known:
