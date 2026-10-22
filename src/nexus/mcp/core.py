@@ -1090,6 +1090,24 @@ def _waiter_session_id() -> str:
         return ""
 
 
+def _arm_session_name(subs: Any) -> None:
+    """Lease this session's `directory/<name>` row from the name Claude Code
+    already knows (nexus-u839f), so `mailbox_send(to=<name>)` resolves after a
+    restart or `--resume` without the model calling `tuple_subscribe`. Called
+    from :func:`_start_channel_waiter`, which runs at server start, after a
+    deferred T1 mint and after a `/clear` handoff for the new id; the lease
+    is the set's ordinary one, renewed by its existing thread. Best-effort:
+    no name, an unreadable registry or an engine error is logged and
+    swallowed, and an explicit `tuple_subscribe` still works (and replaces
+    an auto-armed name)."""
+    try:
+        name = _subscriptions.resolve_session_name(subs.session_id)
+        if name and subs.arm_session_name(name, store_factory=_t2_ctx):
+            _log.info("session_name_armed", name=name, session_id=subs.session_id)
+    except Exception as e:  # noqa: BLE001 — best-effort convenience; never blocks the waiter
+        _log.warning("session_name_arm_failed", session_id=getattr(subs, "session_id", ""), error=str(e))
+
+
 def _start_channel_waiter() -> None:
     """Start this session's channel waiter if a session id is resolvable
     and none is already running. Best-effort: the waiter is a delivery
@@ -1138,6 +1156,7 @@ def _start_channel_waiter() -> None:
 
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
+        _arm_session_name(subs)
         waiter = _channel.ChannelWaiter(
             session_id, _t2_ctx, subs,
             state_dir=nexus_config_dir(),

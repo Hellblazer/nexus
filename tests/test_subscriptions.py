@@ -549,3 +549,229 @@ class TestBoardStartPosition:
         first = s.entries()[1]["since"]
         s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
         assert s.entries()[1]["since"] == first
+
+
+# ── nexus-u839f: the session's own name is re-armed without a model step ────
+
+
+def _write_session_file(sessions_dir, pid, **fields) -> None:
+    import json
+
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    body = {"pid": pid, "kind": "interactive", "updatedAt": 1, **fields}
+    (sessions_dir / f"{pid}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+class TestResolveSessionName:
+    """`resolve_session_name` reads Claude Code's own session registry
+    (`<config>/sessions/<pid>.json`) for the name of the live interactive
+    session whose id this server holds. Every miss is None, never a raise."""
+
+    def _alive(self, *pids):
+        return lambda pid: pid in pids
+
+    def test_matches_on_session_id_for_a_live_interactive_entry(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 11, sessionId=sid, name="nexus_3dc")
+        _write_session_file(tmp_path, 12, sessionId=str(uuid.uuid4()), name="someone-else")
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(11, 12)) == "nexus_3dc"
+
+    def test_a_dead_pid_a_non_interactive_kind_or_no_name_is_no_match(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 21, sessionId=sid, name="dead-holder")
+        _write_session_file(tmp_path, 22, sessionId=sid, name="sdk-child", kind="sdk")
+        _write_session_file(tmp_path, 23, sessionId=sid)
+        _write_session_file(tmp_path, 24, sessionId=sid, name="   ")
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(22, 23, 24)) is None
+
+    def test_the_most_recently_updated_live_entry_wins(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 31, sessionId=sid, name="old-name", updatedAt=5)
+        _write_session_file(tmp_path, 32, sessionId=sid, name="new-name", updatedAt=9)
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(31, 32)) == "new-name"
+
+    def test_missing_dir_unreadable_and_malformed_files_are_quiet_misses(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        assert resolve_session_name(sid, sessions_dir=tmp_path / "absent", pid_alive=self._alive(1)) is None
+        (tmp_path / "1.json").write_text("not json{{", encoding="utf-8")
+        (tmp_path / "2.json").write_text("[1, 2]", encoding="utf-8")
+        (tmp_path / "3.json").write_text('{"sessionId": "%s", "name": 7, "pid": "x"}' % sid, encoding="utf-8")
+        (tmp_path / "4.key").write_text("secret", encoding="utf-8")
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(1, 2, 3)) is None
+
+    def test_an_empty_session_id_matches_nothing(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        _write_session_file(tmp_path, 41, sessionId="", name="x")
+        assert resolve_session_name("", sessions_dir=tmp_path, pid_alive=self._alive(41)) is None
+
+    def test_the_default_dir_follows_claude_config_dir(self, tmp_path, monkeypatch) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path / "sessions", 51, sessionId=sid, name="from-env")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        assert resolve_session_name(sid, pid_alive=self._alive(51)) == "from-env"
+
+
+class TestArmSessionName:
+    """`arm_session_name` takes the name Claude Code already knows through
+    the SAME `_arm_name_lease` an explicit `tuple_subscribe` uses, so the
+    existing lease thread renews it. It is a convenience: it never beats an
+    explicit choice and never makes one fail."""
+
+    def test_arms_the_directory_lease_with_this_sessions_id(self) -> None:
+        fake = _FakeTuples()
+        s = SubscriptionSet(session_id="sess-auto")
+        try:
+            assert s.arm_session_name("nexus_3dc", store_factory=lambda: _fake_store_factory(fake)) is True
+            assert s.leased_name == "nexus_3dc"
+            [(subspace, keys, dims, _nonce, ttl)] = fake.calls
+            assert (subspace, keys, dims) == ("directory/nexus_3dc", {"name": "nexus_3dc"}, {"session_id": "sess-auto"})
+            assert ttl == int(DIRECTORY_TTL_S)
+            assert s._lease_thread is not None and s._lease_thread.is_alive()  # noqa: SLF001 — the existing renewal thread
+            assert s.entries() == [{"subspace": "mailbox/sess-auto"}]  # still never a delivered mailbox
+        finally:
+            s.shutdown()
+
+    def test_an_unsafe_name_or_the_session_id_itself_is_a_quiet_no_op(self) -> None:
+        s = SubscriptionSet(session_id="sess-auto")
+        for bad in ("", "has space", "../x", "-lead", "sess-auto", "line\nbreak"):
+            assert s.arm_session_name(bad, store_factory=_poison_store_factory()) is False
+        assert s.leased_name is None
+
+    def test_an_explicit_name_already_held_is_not_overridden(self, tmp_path) -> None:
+        fake = _FakeTuples()
+        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
+        s = SubscriptionSet(session_id="sess-auto")
+        s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
+        try:
+            assert s.arm_session_name("from-registry", store_factory=_poison_store_factory()) is False
+            assert s.leased_name == "chosen"
+        finally:
+            s.shutdown()
+
+    def test_an_explicit_subscribe_of_another_name_replaces_the_auto_name(self, tmp_path) -> None:
+        fake = _FakeTuples()
+        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
+        s = SubscriptionSet(session_id="sess-auto")
+        s.arm_session_name("from-registry", store_factory=factory)
+        try:
+            s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
+            assert s.leased_name == "chosen"
+            released = [c for c in fake.calls if c[0] == "directory/from-registry" and c[4] == 1]
+            assert released, "the replaced auto name's row is released, not left to its TTL"
+            # the explicit name is now a choice: a second explicit name is refused again
+            with pytest.raises(SchemaViolationError):
+                s.subscribe("mailbox/third", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+        finally:
+            s.shutdown()
+
+    def test_an_explicit_subscribe_of_the_same_name_is_idempotent_and_makes_it_a_choice(self, tmp_path) -> None:
+        fake = _FakeTuples()
+        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
+        s = SubscriptionSet(session_id="sess-auto")
+        s.arm_session_name("same", store_factory=factory)
+        try:
+            before = len(fake.calls)
+            s.subscribe("mailbox/same", templates=[], store_factory=factory, state_dir=tmp_path)
+            assert len(fake.calls) == before  # no second arm
+            with pytest.raises(SchemaViolationError):
+                s.subscribe("mailbox/other", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+        finally:
+            s.shutdown()
+
+    def test_a_second_auto_arm_is_a_no_op(self) -> None:
+        fake = _FakeTuples()
+        s = SubscriptionSet(session_id="sess-auto")
+        try:
+            assert s.arm_session_name("n", store_factory=lambda: _fake_store_factory(fake)) is True
+            assert s.arm_session_name("n", store_factory=_poison_store_factory()) is False
+            assert len(fake.calls) == 1
+        finally:
+            s.shutdown()
+
+
+class TestWaiterStartArmsTheSessionName:
+    """nexus-u839f: the arm happens where the server starts its
+    session-scoped background work, `_start_channel_waiter`, so server
+    start, a deferred T1 mint and a `/clear` handoff (which calls the same
+    function for the new id) all re-arm the name without a model step."""
+
+    @pytest.fixture
+    def server(self, tmp_path, monkeypatch):
+        import os
+
+        from nexus.mcp import core as _core
+
+        sid = str(uuid.uuid4())
+        fake = _FakeTuples()
+        started: list[object] = []
+
+        class _T1:
+            def list_entries(self):
+                return []
+
+        class _Waiter:
+            def __init__(self, *args, **kwargs) -> None:
+                self.session_id = args[0]
+
+            def start(self) -> None:
+                started.append(self)
+
+        monkeypatch.delenv("NX_MCP_PROBE", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_T1_SESSION_ID", sid)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+        monkeypatch.setattr(_core, "_DEFERRED_T1_MINT", {})
+        monkeypatch.setattr(_core, "_get_t1", lambda: (_T1(), None))
+        monkeypatch.setattr(_core, "_t2_ctx", lambda: _fake_store_factory(fake))
+        monkeypatch.setattr(_core._channel, "ChannelWaiter", _Waiter)
+        sessions = tmp_path / "claude" / "sessions"
+        # this process's own pid: alive, so the default liveness check passes
+        _write_session_file(sessions, os.getpid(), sessionId=sid, name="nexus_3dc")
+        try:
+            yield _core, sid, fake, started
+        finally:
+            _core._channel.unregister_active_waiter(sid)
+            _core._subscriptions.reset_cache(sid)
+
+    def test_starting_the_waiter_arms_the_name_from_the_sessions_registry(self, server) -> None:
+        core, sid, fake, started = server
+        core._start_channel_waiter()
+        assert len(started) == 1
+        assert [(c[0], c[2]) for c in fake.calls] == [("directory/nexus_3dc", {"session_id": sid})]
+        assert core._subscriptions._CACHE[sid].leased_name == "nexus_3dc"  # noqa: SLF001
+
+    def test_a_second_start_with_a_live_waiter_arms_nothing_more(self, server) -> None:
+        core, _sid, fake, started = server
+        core._start_channel_waiter()
+        core._channel.register_active_waiter(started[0])
+        core._start_channel_waiter()
+        assert len(fake.calls) == 1
+
+    def test_no_registry_entry_still_starts_the_waiter_and_writes_nothing(self, server, tmp_path, monkeypatch) -> None:
+        core, _sid, fake, started = server
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-such-claude-dir"))
+        core._start_channel_waiter()
+        assert len(started) == 1
+        assert fake.calls == []
+
+    def test_a_resolver_failure_never_stops_the_waiter(self, server, monkeypatch) -> None:
+        core, _sid, fake, started = server
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr(core._subscriptions, "resolve_session_name", _boom)
+        core._start_channel_waiter()
+        assert len(started) == 1
+        assert fake.calls == []

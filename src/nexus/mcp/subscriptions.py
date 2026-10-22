@@ -101,6 +101,63 @@ DIRECTORY_HEARTBEAT_S: float = 60.0
 _LEASE_POLL_S: float = 5.0
 
 
+# ── The session's own name, from Claude Code's session registry (nexus-u839f) ─
+
+
+def _claude_sessions_dir() -> Path:
+    """Claude Code's per-process session registry, ``<config>/sessions``.
+    ``CLAUDE_CONFIG_DIR`` is honoured the way Claude Code honours it."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(override).expanduser() if override else Path.home() / ".claude") / "sessions"
+
+
+def resolve_session_name(
+    session_id: str,
+    *,
+    sessions_dir: Path | None = None,
+    pid_alive: Callable[[int], bool] | None = None,
+) -> str | None:
+    """The name Claude Code shows for the live interactive session whose id
+    is *session_id*, read from ``<config>/sessions/<pid>.json`` (fields
+    ``sessionId``, ``name``, ``kind``, ``pid``, ``updatedAt``). None for any
+    miss: no directory, an unreadable or malformed file, no matching entry,
+    a non-interactive entry (a ``claude -p`` child), a dead pid, or no name.
+    Never raises. Several live entries for one id (a resumed session beside
+    its old process's file) resolve to the most recently updated.
+
+    Only the five fields above are read; other keys in the files are
+    ignored and the ``*.key`` files beside them are never opened."""
+    if not session_id:
+        return None
+    if pid_alive is None:
+        from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
+    base = sessions_dir if sessions_dir is not None else _claude_sessions_dir()
+    best: tuple[float, str] | None = None
+    try:
+        files = sorted(base.glob("*.json"))
+    except OSError:
+        return None
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("sessionId") != session_id:
+                continue
+            if data.get("kind") != "interactive":
+                continue
+            name, pid = data.get("name"), data.get("pid")
+            if not isinstance(name, str) or not name.strip() or isinstance(pid, bool) or not isinstance(pid, int):
+                continue
+            if not pid_alive(pid):
+                continue
+            updated = data.get("updatedAt")
+            rank = float(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else 0.0
+        except (OSError, ValueError, TypeError):
+            continue
+        if best is None or rank >= best[0]:
+            best = (rank, name.strip())
+    return best[1] if best else None
+
+
 @dataclass
 class _DirectoryLease:
     """This subscription's own ``directory/<name>`` lease state, tracked
@@ -309,6 +366,10 @@ class SubscriptionSet:
     _lease: _DirectoryLease | None = field(default=None, repr=False, compare=False)
     _lease_name: str | None = field(default=None, repr=False, compare=False)
     _lease_store_factory: Callable[[], Any] | None = field(default=None, repr=False, compare=False)
+    #: True while the leased name came from :meth:`arm_session_name` (the
+    #: sessions registry) rather than an explicit ``tuple_subscribe``: only
+    #: an auto-armed name may be replaced by a later explicit subscribe.
+    _name_auto: bool = field(default=False, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
@@ -417,23 +478,66 @@ class SubscriptionSet:
         directory_ttl_s: float,
         directory_heartbeat_s: float,
         lease_poll_s: float,
+        auto: bool = False,
     ) -> None:
         """Arm *name*'s ``directory/<name>`` lease for this session. NEVER
         adds a mailbox entry: :attr:`leased_name` is bookkeeping only, read
         by :meth:`unsubscribe` and this method's own one-name-limit check,
-        never by :meth:`entries` (RDR-208 Phase 3, bead nexus-galkv.20)."""
+        never by :meth:`entries` (RDR-208 Phase 3, bead nexus-galkv.20).
+
+        *auto* marks a name taken from the sessions registry by
+        :meth:`arm_session_name` (nexus-u839f). An explicit call for the
+        same name makes it a choice; an explicit call for a different name
+        replaces an auto one (its row is released) and is refused only
+        against an explicit one."""
         if name == self.session_id:
             return  # already present from startup; not "a name"
         if self.leased_name is not None:
             if name == self.leased_name:
+                if not auto:
+                    self._name_auto = False
                 return  # idempotent re-arm of the same name
-            raise SchemaViolationError(
-                f"this session already leases {self.leased_name!r}; only one "
-                f"name is accepted, refusing {name!r}"
-            )
+            if not (self._name_auto and not auto):
+                raise SchemaViolationError(
+                    f"this session already leases {self.leased_name!r}; only one "
+                    f"name is accepted, refusing {name!r}"
+                )
+            self._stop_lease()  # replace the registry-derived name with the explicit one
+            self.leased_name = None
         self._start_lease(name, store_factory, directory_ttl_s, directory_heartbeat_s, lease_poll_s)
         self.leased_name = name
+        self._name_auto = auto
         self._bump()
+
+    def arm_session_name(
+        self,
+        name: str,
+        *,
+        store_factory: Callable[[], Any],
+        directory_ttl_s: float = DIRECTORY_TTL_S,
+        directory_heartbeat_s: float = DIRECTORY_HEARTBEAT_S,
+        lease_poll_s: float = _LEASE_POLL_S,
+    ) -> bool:
+        """Lease *name*, the one Claude Code already knows this session by
+        (:func:`resolve_session_name`), with no model step (nexus-u839f).
+        The lease is the ordinary one: :meth:`_start_lease`'s thread renews
+        it, and :meth:`shutdown` or a ``/clear`` handoff releases it.
+
+        True when armed. A quiet False, never a raise on the name, for a
+        name that is not a safe address name, this session's own id, or
+        when this set already leases a name (an explicit choice, or a
+        repeat call). An engine that is down at this moment is not
+        retried: the first arm is best-effort and the model's own
+        ``tuple_subscribe`` remains the fallback."""
+        if self.leased_name is not None or name == self.session_id:
+            return False
+        if not _SAFE_INSTANCE_NAME.fullmatch(name):
+            return False
+        self._arm_name_lease(
+            name, store_factory=store_factory, directory_ttl_s=directory_ttl_s,
+            directory_heartbeat_s=directory_heartbeat_s, lease_poll_s=lease_poll_s, auto=True,
+        )
+        return self.leased_name == name
 
     def unsubscribe(self, subspace: str) -> None:
         """Remove *subspace*. The session's own mailbox can never be
@@ -448,6 +552,7 @@ class SubscriptionSet:
         if self.leased_name and subspace == f"mailbox/{self.leased_name}":
             self._stop_lease()
             self.leased_name = None
+            self._name_auto = False
             self._bump()
             return
         if subspace in self._board:
@@ -595,7 +700,10 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
     re-armed its directory lease for the life of the new process and made
     the new name's subscribe refuse as a second leased name. The old
     name's row lapses at its TTL from the old process's exit, as a plain
-    exit leaves it. *store_factory* is accepted for the call shape
+    exit leaves it. (nexus-u839f: the server re-arms the CURRENT name itself,
+    from Claude Code's sessions registry, in ``_start_channel_waiter`` right
+    after this load; see :meth:`SubscriptionSet.arm_session_name`.)
+    *store_factory* is accepted for the call shape
     :func:`get_or_load` passes and is unused: nothing restored here holds
     a lease.
     """

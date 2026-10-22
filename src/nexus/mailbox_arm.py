@@ -45,8 +45,11 @@ Never emitted when it cannot succeed
 
 The instance-name mailbox
     The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
-    variable anywhere and it reaches no FILE this module could read either,
-    so this module reads NOTHING to guess it. The name exists only in the
+    variable anywhere, so this module reads NOTHING to guess it. (nexus-u839f:
+    Claude Code's ``<config>/sessions/<pid>.json`` does carry it, and the MCP
+    server now leases the name from there itself at start, in
+    ``nexus.mcp.subscriptions.resolve_session_name``; the instruction below
+    stays as the fallback and is idempotent when the names agree.) The name exists only in the
     model's own knowledge, from the ``ListAgents`` tool's "This session is
     <name>" line, and the rendered instruction says so: pass it to
     ``tuple_subscribe("mailbox/<name>")``, taken from a fresh
