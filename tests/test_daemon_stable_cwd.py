@@ -554,8 +554,8 @@ def test_heal_deleted_cwd_leaves_a_non_missing_getcwd_failure_alone(monkeypatch:
         raise PermissionError(13, "Permission denied")
 
     moved: list = []
-    monkeypatch.setattr(stable_cwd.os, "getcwd", _eacces)
-    monkeypatch.setattr(stable_cwd.os, "chdir", lambda p: moved.append(p))
+    setattr_in(monkeypatch, stable_cwd, "os.getcwd", _eacces)
+    setattr_in(monkeypatch, stable_cwd, "os.chdir", lambda p: moved.append(p))
     assert stable_cwd.heal_deleted_cwd() is False
     assert not moved
 
