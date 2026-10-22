@@ -187,6 +187,17 @@ key_uses="$(code_of "$GATE" | grep -n 'GATE_VOYAGE_KEY' | grep -vE '^[0-9]+:(GAT
   && ok "GATE_VOYAGE_KEY appears only in its assignment, the empty-key test and the one export" \
   || bad "GATE_VOYAGE_KEY is used elsewhere: $key_uses"
 
+# The engine boots from a private copy of the jar under the scratch dir, not the shared service/target path a sibling
+# leg rebuilds between this gate's two boots (nexus-i5mbq).
+copy_line="$(line_of "$GATE" '^[[:space:]]*cp "\$DG_JAR" "\$SCRATCH/engine\.jar"')"
+repoint_line="$(line_of "$GATE" '^[[:space:]]*DG_JAR="\$SCRATCH/engine\.jar"')"
+[[ -n "$copy_line" && -n "$repoint_line" && "$copy_line" -lt "$repoint_line" ]] \
+  && ok "the jar is copied under the scratch dir (line $copy_line) and DG_JAR repointed (line $repoint_line)" \
+  || bad "the gate does not boot from a private copy of the jar (copy line '$copy_line', repoint line '$repoint_line')"
+export_jar="$(code_of "$GATE" | grep -c 'NEXUS_SERVICE_JAR="\$DG_JAR"' || true)"
+[[ "$export_jar" -eq 1 ]] && ok "NEXUS_SERVICE_JAR is set from DG_JAR in exactly one place" \
+  || bad "NEXUS_SERVICE_JAR is set from DG_JAR $export_jar times"
+
 pass1_line="$(line_of "$GATE" '^dg_run_pass[[:space:]]+1[[:space:]]*$')"
 restart_line="$(line_of "$GATE" '^dg_restart_engine[[:space:]]*$')"
 pass2_line="$(line_of "$GATE" '^dg_run_pass[[:space:]]+2[[:space:]]*$')"
