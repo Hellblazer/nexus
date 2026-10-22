@@ -48,3 +48,5 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 
 ## Deferred to the next client release
+
+- `conexus/skills/mailbox/SKILL.md` (nexus-zl1jv): the sender's default `from` is the tuple-watch session marker, then `NX_T1_SESSION_ID`, then `NX_SESSION_ID`, so a host with no Claude Code session names itself with `NX_SESSION_ID`; the skill says so. Client-side code for the fallback ships with the wheel.

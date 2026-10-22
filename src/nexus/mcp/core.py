@@ -103,7 +103,9 @@ from nexus.mcp.operator_requests import (
 )
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
+    NO_SESSION_ID_MESSAGE,
     resolve_default_from,
+    resolve_env_session_id,
     resolve_send_address,
     validate_from_address,
 )
@@ -7945,14 +7947,17 @@ def _current_subscription_session_id() -> str:
     """The session id `tuple_subscribe`/`tuple_unsubscribe`/
     `tuple_subscriptions` scope the subscription set to.
 
-    Deliberately `NX_T1_SESSION_ID` alone, NOT `resolve_default_from`
-    (mailbox_send's own resolution, which reads the session marker first,
-    from `nexus.session_marker`): the subscription set already IS the
-    thing that owns this session's identity for T1 scoping (the same env
-    var the MCP lifespan's T1 mint sets) -- one lookup, not two disagreeing
-    ones.
+    Deliberately the environment tiers only (`NX_T1_SESSION_ID`, then
+    `NX_SESSION_ID`), NOT `resolve_default_from` (mailbox_send's own
+    resolution, which reads the session marker first, from
+    `nexus.session_marker`): the subscription set already IS the thing
+    that owns this session's identity for T1 scoping (the env var the MCP
+    lifespan's T1 mint sets) -- one lookup, not two disagreeing ones.
+    `NX_SESSION_ID` is the fallback for a host with no Claude Code session
+    (nexus-zl1jv); the lifespan's mint writes `NX_T1_SESSION_ID`, so it
+    wins whenever T1 came up.
     """
-    return _os.environ.get("NX_T1_SESSION_ID", "").strip()
+    return resolve_env_session_id()
 
 
 @mcp.tool(
@@ -8004,7 +8009,7 @@ def tuple_subscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(NO_SESSION_ID_MESSAGE)
         with _t2_ctx() as db:
             templates = (db.tuples.registry() or {}).get("templates", [])
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
@@ -8036,7 +8041,7 @@ def tuple_unsubscribe(
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(NO_SESSION_ID_MESSAGE)
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         subs.unsubscribe(subspace)
@@ -8065,7 +8070,7 @@ def tuple_subscriptions() -> list[dict]:
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
-            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+            raise ValueError(NO_SESSION_ID_MESSAGE)
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()

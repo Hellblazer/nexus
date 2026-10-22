@@ -586,6 +586,7 @@ class TestMailboxSend:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         dest = str(uuid.uuid4())
         result = mailbox_send(dest, body="x")

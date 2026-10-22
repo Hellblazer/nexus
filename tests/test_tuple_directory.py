@@ -188,5 +188,6 @@ class TestResolveDefaultFrom:
 
     def test_refuses_when_neither_marker_nor_env_is_present(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
-        with pytest.raises(DirectoryResolutionError, match="unresolvable"):
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with pytest.raises(DirectoryResolutionError, match="no resolvable session id"):
             resolve_default_from(state_dir=tmp_path, claude_pid=4242)
