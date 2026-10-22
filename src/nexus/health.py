@@ -4870,7 +4870,84 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
     )]
 
 
-def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+#: How many leaves ``nx doctor --verbose`` names before it says "and N more".
+_LEAF_LISTING_MAX = 20
+
+#: The authenticated route that names the leaves ``GET /v1/status`` only counts (nexus-i827c).
+_LEAF_LISTING_ROUTE = "GET /v1/admin/chunks-leaves"
+
+
+def _human_bytes(n: object) -> str:
+    """``1536`` as ``1.5 KiB``; a non-number as ``?``."""
+    if not isinstance(n, (int, float)) or isinstance(n, bool) or n < 0:
+        return "?"
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return "?"
+
+
+def _leaf_listing_lines() -> list[str]:
+    """The leaves of ``nexus.chunks`` that need attention, one indented line each, read from the engine's
+    operator-only ``GET /v1/admin/chunks-leaves`` (nexus-i827c); ``nx doctor --verbose`` appends them to the leaf
+    bloat row. Never raises: every way the read can fail is one line saying why, and none is an error.
+
+    * the engine predates the route (404): one line, naming the engine log as the place the names are;
+    * the credential is refused (401, 403): the route needs the operator (root) token, and the line says where to set it;
+    * anything else (unreachable, a body this client cannot read): the reason, in one line.
+    """
+    import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
+
+    log_hint = f"the leaf names are in the engine log ({_LEAF_BLOAT_LOG_EVENT})"
+    try:
+        from nexus.db.t2.http_token_store import HttpTokenStore, TokenAdminAuthError  # noqa: PLC0415 — deferred: only on --verbose
+    except Exception as exc:  # noqa: BLE001 — best-effort: --verbose must not crash `nx doctor`
+        return [f"      leaf listing unavailable: {type(exc).__name__}"]
+    try:
+        with HttpTokenStore() as store:
+            body = store.chunks_leaves()
+    except TokenAdminAuthError as exc:
+        status = exc.response.status_code
+        return [f"      leaf listing refused ({_LEAF_LISTING_ROUTE} answered {status}): it needs the operator (root) "
+                "token; set one with `nx config set service_token <root token>` or NX_SERVICE_TOKEN. "
+                f"Until then {log_hint}"]
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
+        return [f"      leaf listing unavailable: {type(exc).__name__}; {log_hint}"]
+    except Exception as exc:  # noqa: BLE001 — best-effort: --verbose must not crash `nx doctor`
+        _log.debug("doctor_chunks_leaf_listing_failed", error=str(exc))
+        return [f"      leaf listing unavailable: {type(exc).__name__}; {log_hint}"]
+    if body is None:
+        return [f"      this engine predates the leaf listing ({_LEAF_LISTING_ROUTE} answered 404); {log_hint}"]
+    rows = body.get("leaves")
+    if not isinstance(rows, list):
+        return [f"      leaf listing unreadable (no leaves list in the answer); {log_hint}"]
+    if not rows:
+        return ["      leaf listing: the engine names no leaf that needs attention (it may have recovered since "
+                "the status counts were read)"]
+    out = ["      leaves needing attention (from the engine, newest read; rows is what the overdue rule scales by):"]
+    for row in rows[:_LEAF_LISTING_MAX]:
+        if not isinstance(row, dict):
+            continue
+        problems = ",".join(str(p) for p in row.get("problems") or []) or "?"
+        rows_n = row.get("rows")
+        dead_n = row.get("dead_rows")
+        vacuumed = row.get("last_autovacuum") or "never"
+        state = row.get("overdue_state") or "?"
+        pci = f"{_human_bytes(row.get('pci_index_bytes'))} in {row.get('pci_index_count', '?')} pci_ index(es)"
+        out.append(
+            f"        {row.get('leaf', '?')}: {problems}; rows {rows_n if isinstance(rows_n, int) else '?'}, "
+            f"dead {dead_n if isinstance(dead_n, int) else '?'}, last autovacuum {vacuumed}, overdue {state}, {pci}"
+        )
+    if len(rows) > _LEAF_LISTING_MAX:
+        out.append(f"        and {len(rows) - _LEAF_LISTING_MAX} more")
+    return out
+
+
+def _check_chunks_leaf_bloat(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, verbose: bool = False,
+) -> list[HealthResult]:
     """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
 
     Reads the ``chunks_leaf_bloat`` object of ``GET /v1/status``, which the engine fills from a background read of the
@@ -4903,6 +4980,12 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
     Not applicable (ok, no warning) when the engine cannot be reached, does not report the object (an older engine, or
     one still starting) or reports no leaves with no failed read (a box with nothing yet to read). A present object
     that cannot be read warns, as the Per-collection indexes row does.
+
+    ``verbose`` (``nx doctor --verbose``, nexus-i827c): when the row warns on leaves, it also reads the engine's
+    authenticated ``GET /v1/admin/chunks-leaves`` and lists each leaf that needs attention with its rows, last
+    autovacuum, overdue state and ``pci_`` index bytes (:func:`_leaf_listing_lines`). Against an engine that predates
+    the route that is one line saying so, never an error; a credential the route refuses is one line naming the
+    operator token. The default sweep reads no admin route.
     """
     label = _LEAF_BLOAT_LABEL
     status: dict | None
@@ -4992,10 +5075,12 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
         if n_disabled:
             parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
         starved_after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
+        listing = "".join(f"\n{line}" for line in _leaf_listing_lines()) if verbose else ""
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "
-                    f"log ({_LEAF_BLOAT_LOG_EVENT})"),
+                    f"log ({_LEAF_BLOAT_LOG_EVENT}), or `nx doctor --verbose` lists them with the operator token"
+                    f"{listing}"),
             fix_suggestions=[
                 f"Read the engine log for {_LEAF_BLOAT_LOG_EVENT}: one WARN per leaf names it with its problem, dead "
                 "rows and live rows (the status route is unauthenticated, so it names no leaf)",
@@ -11309,6 +11394,8 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
 def run_health_checks(
     git_hooks_scope: str | Path | None = None,
     engine_status: object = _ENGINE_STATUS_UNSET,
+    *,
+    verbose: bool = False,
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -11321,6 +11408,9 @@ def run_health_checks(
     failed) when the caller already fetched it, so one ``nx doctor`` run makes
     one status request for the "Ownerless writes" row and the engine-activity
     block together. Left unset, the row fetches its own.
+
+    ``verbose``: ``nx doctor --verbose``. The "Chunks leaf bloat" row then names the leaves it counts, read from the
+    engine's operator-only admin route (nexus-i827c). Off, the sweep reads no admin route.
 
     Returns (results, is_local_mode).
     """
@@ -11460,7 +11550,7 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
-    results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
+    results.extend(_check_chunks_leaf_bloat(engine_status, verbose=verbose))  # nexus-dxsjc, nexus-i827c
     results.extend(_check_reranker(engine_status))  # nexus-yuh4a
     results.extend(_check_embedding_family())  # nexus-wypwq
     results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak

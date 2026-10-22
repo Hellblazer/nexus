@@ -277,6 +277,14 @@ public final class NexusService {
         chunksLeafBloat;
 
     /**
+     * nexus-i827c: the leaf bloat sweep's view and period, read by the authenticated {@code GET /v1/admin/chunks-leaves}.
+     * Bound late by {@link #chunksLeaves(java.util.function.Supplier, java.util.function.Supplier)} for the same reason
+     * as {@link #chunksLeafBloat}; null until bound, and the route answers 503 until then.
+     */
+    private volatile java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> chunksLeavesView;
+    private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
+
+    /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
      * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
      * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
@@ -620,6 +628,15 @@ public final class NexusService {
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
 
+        // /v1/admin/chunks-leaves — the leaves of nexus.chunks that need attention, NAMED (nexus-i827c). The
+        // unauthenticated /v1/status names none (Sam, 2026-10-19), so the names live here, behind the auth filter and
+        // an operator (root token) check in the handler itself. The sweep it reads is bound late, like status's.
+        var chunksLeavesCtx = server.createContext(dev.nexus.service.http.ChunksLeavesHandler.PATH,
+                new dev.nexus.service.http.ChunksLeavesHandler(
+                        () -> { var v = chunksLeavesView; return v == null ? null : v.get(); },
+                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); }));
+        chunksLeavesCtx.getFilters().addAll(authFilter);
+
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
         // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
         var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
@@ -954,6 +971,16 @@ public final class NexusService {
     public void chunksLeafBloat(
             java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat> supplier) {
         this.chunksLeafBloat = supplier;
+    }
+
+    /**
+     * Bind the source of {@code GET /v1/admin/chunks-leaves} (nexus-i827c). {@code Main} calls it once the leaf bloat
+     * sweep exists; {@code view} must answer from the sweep's cache, with no catalog query.
+     */
+    public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
+                             java.util.function.Supplier<Long> sweepSeconds) {
+        this.chunksLeavesView = view;
+        this.chunksLeavesSweepSeconds = sweepSeconds;
     }
 
     /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */

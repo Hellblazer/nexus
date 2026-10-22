@@ -2611,6 +2611,18 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     help="Lookback window in hours for --check-mcp-logs.",
 )
 @click.option(
+    "--verbose",
+    "verbose",
+    is_flag=True,
+    default=False,
+    help="Main sweep only: add the detail the sweep leaves out. The Chunks leaf bloat "
+         "row, when it warns, lists each chunks leaf that needs attention (rows, last "
+         "autovacuum, overdue state, pci_ index bytes), read from the engine's "
+         "operator-only GET /v1/admin/chunks-leaves; it needs the root service token "
+         "and says so when it has none, and against an engine that predates the route "
+         "it prints one line saying so (nexus-i827c). Ignored by the --check-* modes.",
+)
+@click.option(
     "--json",
     "json_out",
     is_flag=True,
@@ -2881,6 +2893,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
                check_mineru: bool,
                json_out: bool,
+               verbose: bool,
                trim_telemetry: bool, days: int,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
@@ -3256,7 +3269,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     engine_status = fetch_engine_status()
-    results, is_local = run_health_checks(git_hooks_scope=git_hooks_scope, engine_status=engine_status)
+    results, is_local = run_health_checks(
+        git_hooks_scope=git_hooks_scope, engine_status=engine_status, verbose=verbose,
+    )
     output, failed = format_health_for_cli(results, local_mode=is_local)
     if json_out:
         # nexus-0vycz: machine-parseable JSON on stdout only -- no human

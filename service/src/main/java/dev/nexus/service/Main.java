@@ -551,6 +551,8 @@ public final class Main {
         leafBloatSweep.start();
         service.chunksLeafBloat(() -> dev.nexus.service.http.StatusHandler.ChunksLeafBloat.of(
                 leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
+        // nexus-i827c: the same cache, named, on the operator-only GET /v1/admin/chunks-leaves.
+        service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds);
 
         log.info("event=service_ready port={}", service.getPort());
 

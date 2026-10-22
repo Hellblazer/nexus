@@ -476,8 +476,9 @@ class VectorHandlerQuarantineRestoreRouteTest {
     @Test
     void aDryRunOverAnEmptySelectionStillNamesEverySibling_andWritesNoAuditRowAndMovesNothing() throws Exception {
         // The Python client's sibling probe (nexus-wbfpw.58, chunk_quarantine.resolve_quarantine_siblings with
-        // probe_engine=True, run by nx t3 gc) relies on exactly this until nexus-wbfpw.64 moves sibling
-        // resolution into the expire and restore-rereferenced routes: a dry-run whose window selects no row
+        // probe_engine=True, run by nx t3 gc) relies on exactly this against an engine that predates
+        // nexus-wbfpw.64 (which put sibling resolution in the expire and restore-rereferenced routes; the probe is
+        // now only that old-engine fallback): a dry-run whose window selects no row
         // still answers quarantine_collections (found by the reaper's name AND by the origin_collection tag),
         // writes no gc_audit row, and moves nothing. Change this behaviour and that client stops finding the
         // siblings the engine's own expiry does not reach.

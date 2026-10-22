@@ -27,7 +27,8 @@ import java.util.Objects;
  * nexus-dxsjc (HNSW maintenance policy nexus-4lnn1, R4): the per-leaf bloat view of {@code nexus.chunks}. One read
  * says, for every ordinary leaf, how many live and dead tuples the statistics hold, when autovacuum last finished on
  * it, whether it still carries the four autovacuum storage parameters of {@code vectors-034} and whether
- * {@code autovacuum_enabled} was switched off.
+ * {@code autovacuum_enabled} was switched off; and, for the authenticated leaf listing (nexus-i827c), the size of every
+ * {@code pci_} index on it.
  *
  * <p><b>Leaves, never the parent.</b> The partitioned parent and the model partitions hold no tuples and autovacuum
  * never visits them, so their {@code pg_stat_user_tables} rows are empty; reading {@code relname = 'chunks'} reports
@@ -71,6 +72,19 @@ public final class LeafBloatCatalog {
     /** The statement bound of one read: the engine's sweep-statement bound. */
     public static final Duration DEFAULT_READ_BOUND = SweepBounds.STATEMENT_TIMEOUT;
 
+    /** The prefix of a per-collection index name ({@link PciCatalog#PREFIX}); the size read considers no other index. */
+    private static final String PCI_PREFIX = PciCatalog.PREFIX;
+
+    /**
+     * One {@code pci_} index on a leaf (nexus-i827c: read again, for the authenticated leaf listing; the aggregate
+     * view on {@code GET /v1/status} does not carry it).
+     *
+     * @param name  the index name
+     * @param valid {@code pg_index.indisvalid}
+     * @param bytes {@code pg_relation_size} of the index when the read ran
+     */
+    public record PciIndex(String name, boolean valid, long bytes) { }
+
     /**
      * One leaf of {@code nexus.chunks}.
      *
@@ -83,9 +97,30 @@ public final class LeafBloatCatalog {
      *                           the statistics began (a reset of the statistics sets it back to 0)
      * @param policySet          all four {@code vectors-034} autovacuum parameters are present
      * @param autovacuumEnabled  false only when {@code autovacuum_enabled} is set to a false spelling
+     * @param pciIndexes         its {@code pci_} indexes in name order; empty when it has none
      */
     public record Leaf(String name, long liveRows, long deadRows, long plannerRows, Instant lastAutovacuum,
-                       long vacuumCount, boolean policySet, boolean autovacuumEnabled) {
+                       long vacuumCount, boolean policySet, boolean autovacuumEnabled, List<PciIndex> pciIndexes) {
+
+        public Leaf {
+            pciIndexes = List.copyOf(pciIndexes);
+        }
+
+        /** A leaf with no {@code pci_} index, which is every leaf the aggregate view's tests build. */
+        public Leaf(String name, long liveRows, long deadRows, long plannerRows, Instant lastAutovacuum,
+                    long vacuumCount, boolean policySet, boolean autovacuumEnabled) {
+            this(name, liveRows, deadRows, plannerRows, lastAutovacuum, vacuumCount, policySet, autovacuumEnabled,
+                List.of());
+        }
+
+        /** Bytes of every {@code pci_} index on the leaf, valid or not (an invalid one still occupies its pages). */
+        public long pciIndexBytes() {
+            long total = 0;
+            for (PciIndex i : pciIndexes) {
+                total += Math.max(0L, i.bytes());
+            }
+            return total;
+        }
 
         /**
          * The row count the overdue line scales by: the larger of the statistics' {@code live + dead} and the planner's
@@ -168,7 +203,7 @@ public final class LeafBloatCatalog {
         }
     }
 
-    /** Read through {@code ctx}: three statements in the caller's transaction. */
+    /** Read through {@code ctx}: four statements in the caller's transaction. */
     Snapshot read(DSLContext ctx) {
         List<ChunksLeafAutovacuumCheck.LeafRel> rels = ChunksLeafAutovacuumCheck.leaves(ctx);
         if (rels.isEmpty()) {
@@ -210,11 +245,31 @@ public final class LeafBloatCatalog {
             estimates.put(row.value1(), est == null || est < 0 ? 0L : Math.round(est));
         }
 
+        // The pci_ indexes, keyed by the leaf they sit on (nexus-i827c). pg_relation_size reads the file's length, not
+        // its pages, so this is cheap beside the statistics read above.
+        Field<Long> indRelid = DSL.field(DSL.name("i", "indrelid")).cast(SQLDataType.BIGINT);
+        Field<String> indName = DSL.field(DSL.name("ix", "relname"), SQLDataType.VARCHAR);
+        Field<Boolean> indValid = DSL.field(DSL.name("i", "indisvalid"), SQLDataType.BOOLEAN);
+        Field<Long> indBytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+            DSL.field(DSL.name("ix", "oid")));
+        Map<Long, List<PciIndex>> indexes = new HashMap<>();
+        for (var row : ctx.select(indRelid, indName, indValid, indBytes)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_index")).as("i"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("ix"))
+                .on(DSL.field(DSL.name("ix", "oid")).eq(DSL.field(DSL.name("i", "indexrelid"))))
+                .where(DSL.left(indName, PCI_PREFIX.length()).eq(PCI_PREFIX))
+                .orderBy(indName)
+                .fetch()) {
+            indexes.computeIfAbsent(row.value1(), k -> new ArrayList<>())
+                .add(new PciIndex(row.value2(), Boolean.TRUE.equals(row.value3()), nz(row.value4())));
+        }
+
         List<Leaf> leaves = new ArrayList<>(rels.size());
         for (ChunksLeafAutovacuumCheck.LeafRel rel : rels) {
             long[] c = counts.getOrDefault(rel.oid(), new long[] {0, 0, 0});
             leaves.add(new Leaf(rel.name(), c[0], c[1], estimates.getOrDefault(rel.oid(), 0L),
-                vacuumed.get(rel.oid()), c[2], rel.policySet(), !rel.autovacuumDisabled()));
+                vacuumed.get(rel.oid()), c[2], rel.policySet(), !rel.autovacuumDisabled(),
+                indexes.getOrDefault(rel.oid(), List.of())));
         }
         leaves.sort(Comparator.comparing(Leaf::name));
         return new Snapshot(leaves);

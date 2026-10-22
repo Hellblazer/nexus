@@ -587,12 +587,14 @@ public class TenantKeyedStateGateTest {
                 + "once at construction from stateless lambdas");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
-            // CONFIG (13)
+            // CONFIG (15)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",
                 "ChunkReaper.Settings.floorExemptCollections",
                 "HttpUtil.gzipper",
                 "NexusService.chunksLeafBloat",
+                "NexusService.chunksLeavesSweepSeconds",
+                "NexusService.chunksLeavesView",
                 "NexusService.embedPosture",
                 "NexusService.perCollectionIndexes",
                 "OwnerlessWriteMode.envReader",
@@ -680,11 +682,13 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, TEST_HOOK);
             }
-            // RESULT (73)
+            // RESULT (75)
             for (String f : List.of(
                 "CatalogRepository.DocumentMove.expectedChashes",
                 "ChunksLeafAutovacuumCheck.LeafRel.options",
+                "LeafBloatCatalog.Leaf.pciIndexes",
                 "LeafBloatCatalog.Snapshot.leaves",
+                "PgVectorRepository.SiblingResolution.names",
                 "LeafBloatSweep.Status.leaves",
                 "CatalogRepository.AppendOutcome.sweep",
                 "CatalogRepository.DanglingEndpointException.missing",

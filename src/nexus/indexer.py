@@ -4017,6 +4017,7 @@ def _prune_collection_serverside(
         GC_AUDIT_MAX_CHASHES,
         GcFloor,
         GcFloorRefused,
+        SiblingResolution,
         expire_quarantine_across_serverside,
         quarantine_days,
         quarantine_orphans_bounded_serverside,
@@ -4055,12 +4056,19 @@ def _prune_collection_serverside(
     # moved), and the client's move leaves no ``quarantined_by`` tag for the
     # engine's own expiry to find, so a chunk moved under yesterday's name was
     # neither re-referenced nor expired by a pass that looked only under today's.
-    # Those two names are ALL this path uses: no engine probe runs here
-    # (``resolve_quarantine_siblings`` defaults ``probe_engine=False``), because
+    # Those two names are what this path starts from and what it keeps against an
+    # engine that predates nexus-wbfpw.64 (v0.1.162 and earlier): the dry-run probe
+    # (``resolve_quarantine_siblings`` ``probe_engine``) is never run here, because
     # this runs per collection on every ``nx index repo`` and the probe is an
-    # unindexed scan engine-side. A chunk stranded under a third name waits for
-    # ``nx t3 gc``, which probes. nexus-wbfpw.64 moves the resolution into the
-    # engine's expire and restore-rereferenced routes and removes that gap.
+    # unbounded scan engine-side, so against such an engine a chunk stranded under a
+    # third name waits for ``nx t3 gc``, which probes. nexus-wbfpw.64: the first
+    # restore page and the first expire page of a collection ask the engine for the
+    # origin's siblings (``resolve_siblings``, read under a 2 s bound), and an engine
+    # that answers (``quarantine_collections``) replaces the derived extras with
+    # them, so a sibling stranded under any name is restored and expired here too.
+    # ONE ``SiblingResolution`` is shared by the restore and the expiry below: the
+    # move between them writes only ``quarantine_name``, so the first answer holds
+    # for both and the engine is asked once per collection per run.
     # The extra sibling is best-effort: a failure there is logged and skipped,
     # never the move, the primary sibling or the rest of the pass. The move below
     # still goes to ``quarantine_name`` alone: that one is a destination, not a search.
@@ -4070,7 +4078,10 @@ def _prune_collection_serverside(
     # before anything is sent). The bounded call falls back to the unbounded one
     # per sibling inside the helper, as the single-name code did.
     siblings = resolve_quarantine_siblings(db, collection_name, primary=quarantine_name)
-    restored = restore_rereferenced_across_serverside(db, siblings, collection_name, best_effort=True)
+    sibling_resolution = SiblingResolution()
+    restored = restore_rereferenced_across_serverside(
+        db, siblings, collection_name, best_effort=True, resolution=sibling_resolution,
+    )
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
@@ -4173,7 +4184,7 @@ def _prune_collection_serverside(
     # next collection, so it ends this collection's siblings only). A 200 whose body does not parse, or is
     # not UTF-8, is neither: the client polls the ledger for it.
     expired = expire_quarantine_across_serverside(
-        db, siblings, collection_name, cutoff, best_effort=True,
+        db, siblings, collection_name, cutoff, best_effort=True, resolution=sibling_resolution,
     )
     if expired is None:
         _log.warning(

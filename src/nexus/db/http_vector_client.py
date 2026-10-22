@@ -4759,6 +4759,7 @@ class HttpVectorClient:
 
     def gc_restore_rereferenced_bounded(
         self, quarantine_collection: str, origin_collection: str, row_limit: int,
+        *, resolve_siblings: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/restore-rereferenced with ``row_limit`` (nexus-e8h5x),
         mirroring :meth:`gc_quarantine_orphans`'s identical additive routing
@@ -4776,15 +4777,22 @@ class HttpVectorClient:
         RDR-222 Phase 1: one call is one keyed request, resolved through the ledger on an ambiguous
         outcome exactly as :meth:`gc_quarantine_orphans_bounded` is (restore takes no sweep gate, so
         it never sees ``sweep_gate_busy``).
+
+        ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine which quarantine
+        collections may hold chunks of ``origin_collection``. An engine that has it adds
+        ``"quarantine_collections": [str]`` to the answer (or ``"sibling_resolution": "timed_out"``
+        when its read ran into its bound); an engine that predates it answers neither, which is how a
+        caller tells the two apart, never by version. The field is sent only when asked.
         """
+        body: dict = {
+            "quarantine_collection": quarantine_collection,
+            "origin_collection": origin_collection,
+            "row_limit": row_limit,
+        }
+        if resolve_siblings:
+            body["resolve_siblings"] = True
         return _keyed_sweep_post(
-            "/v1/vectors/gc/restore-rereferenced",
-            {
-                "quarantine_collection": quarantine_collection,
-                "origin_collection": origin_collection,
-                "row_limit": row_limit,
-            },
-            tenant=self._tenant, gate_busy=False,
+            "/v1/vectors/gc/restore-rereferenced", body, tenant=self._tenant, gate_busy=False,
         )
 
     def gc_expire_quarantine(
@@ -4817,7 +4825,7 @@ class HttpVectorClient:
     def gc_expire_quarantine_bounded(
         self, quarantine_collection: str, origin_collection: str, cutoff: str,
         floor_fraction: float, floor_min_chunks: int, force: bool, row_limit: int,
-        *, count_refused: bool = True,
+        *, count_refused: bool = True, resolve_siblings: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/expire-quarantine with ``row_limit`` (RDR-222 Amendment A1, nexus-1579m):
         the bounded form of :meth:`gc_expire_quarantine`, selected by the same additive per-route toggle
@@ -4839,21 +4847,25 @@ class HttpVectorClient:
         The engine takes the sweep gate for this form, so a 503 ``sweep_gate_busy`` waits ``Retry-After``
         and resends. The unbounded :meth:`gc_expire_quarantine` stays for hand use and as the capability
         fallback.
+
+        ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine for the origin's quarantine
+        siblings, answered as in :meth:`gc_restore_rereferenced_bounded` (``quarantine_collections`` or
+        ``sibling_resolution``); the page itself still expires only ``quarantine_collection``. Sent only
+        when asked.
         """
-        return _keyed_sweep_post(
-            "/v1/vectors/gc/expire-quarantine",
-            {
-                "quarantine_collection": quarantine_collection,
-                "origin_collection": origin_collection,
-                "cutoff": cutoff,
-                "floor_fraction": floor_fraction,
-                "floor_min_chunks": floor_min_chunks,
-                "force": force,
-                "row_limit": row_limit,
-                "count_refused": count_refused,
-            },
-            tenant=self._tenant, gate_busy=True,
-        )
+        body: dict = {
+            "quarantine_collection": quarantine_collection,
+            "origin_collection": origin_collection,
+            "cutoff": cutoff,
+            "floor_fraction": floor_fraction,
+            "floor_min_chunks": floor_min_chunks,
+            "force": force,
+            "row_limit": row_limit,
+            "count_refused": count_refused,
+        }
+        if resolve_siblings:
+            body["resolve_siblings"] = True
+        return _keyed_sweep_post("/v1/vectors/gc/expire-quarantine", body, tenant=self._tenant, gate_busy=True)
 
     def gc_quarantine_restore(
         self,

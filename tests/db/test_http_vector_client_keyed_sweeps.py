@@ -545,6 +545,36 @@ _PRE_CHANGE_BODIES = {
 }
 
 
+# ── nexus-wbfpw.64: resolve_siblings, additive on the restore and expire bounded forms ──
+
+_SIBLING_CALLS = {
+    "restore": lambda c: c.gc_restore_rereferenced_bounded("col__q", "col", 100, resolve_siblings=True),
+    "expire": lambda c: c.gc_expire_quarantine_bounded(
+        "col__q", "col", _QUARANTINED_AT, 1.0, 100, False, 100, resolve_siblings=True,
+    ),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_SIBLING_CALLS))
+def test_asking_for_the_siblings_adds_exactly_one_field_and_returns_the_engines_list(srv, client, clock, form):
+    path = _FORMS[form][0]
+    answer = {**_stored(form), "quarantine_collections": ["quarantine-col", "quarantine-code__old__m__v1"]}
+    srv.script(f"POST {path}", sv.ok(answer))
+    assert _SIBLING_CALLS[form](client) == answer
+    (post,) = _posts(srv, path)
+    assert json.loads(post["body"]) == {**_PRE_CHANGE_BODIES[form], "resolve_siblings": True}
+
+
+@pytest.mark.parametrize("form", sorted(_SIBLING_CALLS))
+def test_not_asking_sends_the_body_the_method_always_sent(srv, client, clock, form):
+    """The field is sent only when asked: the default call's bytes are the pre-nexus-wbfpw.64 bytes."""
+    path, call, _ = _FORMS[form]
+    srv.script(f"POST {path}", sv.ok(_stored(form)))
+    call(client)
+    (post,) = _posts(srv, path)
+    assert "resolve_siblings" not in json.loads(post["body"])
+
+
 @pytest.mark.parametrize("form", sorted(_FORMS))
 def test_an_engine_that_ignores_the_header_answers_exactly_as_before(srv, client, clock, form):
     """OLD engine: the header is ignored, nothing is echoed, the status route is 404. The success path

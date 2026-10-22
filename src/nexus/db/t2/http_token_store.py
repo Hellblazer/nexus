@@ -295,6 +295,38 @@ class HttpTokenStore:
         resp.raise_for_status()
         return resp.json()
 
+    def _get(self, path: str) -> httpx.Response:
+        """GET *path* with the same stale-endpoint recovery and 401/403 handling as :meth:`_post`; every other
+        status, 404 included, is returned for the caller to read (a read never calls the production write guard)."""
+        try:
+            resp = self._client.get(path)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
+            if not self._rebind_from_lease():
+                raise
+            resp = self._client.get(path)
+        if resp.status_code in (401, 403):
+            raise TokenAdminAuthError(
+                self._auth_error_lines(path, resp), request=resp.request, response=resp
+            )
+        return resp
+
+    def chunks_leaves(self) -> dict[str, Any] | None:
+        """The leaves of ``nexus.chunks`` that need attention, named: ``GET /v1/admin/chunks-leaves`` (nexus-i827c).
+
+        The route is operator-only (the root token; ``/v1/status`` carries counts and names no leaf), so a tenant
+        or mint credential raises :class:`TokenAdminAuthError` (403) and none at all a 401. ``None`` when the engine
+        predates the route (404): a missing route is an older engine, never an error. Any other failure raises
+        ``httpx.HTTPStatusError``. Returns the body: ``{"leaves_total", "needing_attention", "leaves": [{"leaf",
+        "problems", "rows", "dead_rows", "last_autovacuum", "overdue_state", "pci_index_bytes", ...}], ...}``."""
+        resp = self._get("/v1/admin/chunks-leaves")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ValueError(f"GET /v1/admin/chunks-leaves answered {type(body).__name__}, not an object")
+        return body
+
     def _auth_error_lines(self, path: str, resp: httpx.Response) -> list[str]:
         """nexus-xzeml: say which credential was refused and what to do,
         instead of httpx's bare "Client error '401 Unauthorized'"."""

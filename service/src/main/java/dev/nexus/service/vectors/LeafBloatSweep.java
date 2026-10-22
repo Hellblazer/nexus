@@ -122,6 +122,26 @@ public final class LeafBloatSweep {
             OverdueState state = state();
             return state == OverdueState.PINNED || state == OverdueState.STARVED;
         }
+
+        /**
+         * Why this leaf needs attention, in the order the log and the leaf listing give them: {@code pinned} or
+         * {@code starved} when {@link #persistent()}, {@code policy_unset} when it lacks any of the four vectors-034
+         * autovacuum settings, {@code autovacuum_disabled} when autovacuum was switched off on it. Empty for a leaf
+         * that needs none (a {@code waiting} leaf is overdue but is not one: a vacuum may be running).
+         */
+        public List<String> problems() {
+            var out = new ArrayList<String>(3);
+            if (persistent()) {
+                out.add(state().wire());
+            }
+            if (!leaf.policySet()) {
+                out.add("policy_unset");
+            }
+            if (!leaf.autovacuumEnabled()) {
+                out.add("autovacuum_disabled");
+            }
+            return List.copyOf(out);
+        }
     }
 
     /**
@@ -251,17 +271,7 @@ public final class LeafBloatSweep {
 
     /** The reasons a leaf warrants a warning, comma-joined; empty for a leaf that does not. */
     private static String problemKey(LeafStatus status) {
-        var out = new ArrayList<String>(3);
-        if (status.persistent()) {
-            out.add(status.state().wire());
-        }
-        if (!status.leaf().policySet()) {
-            out.add("policy_unset");
-        }
-        if (!status.leaf().autovacuumEnabled()) {
-            out.add("autovacuum_disabled");
-        }
-        return String.join(",", out);
+        return String.join(",", status.problems());
     }
 
     /** One WARN per leaf when its problem appears or changes, one INFO when it clears; silence in between. */

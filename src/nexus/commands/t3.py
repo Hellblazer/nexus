@@ -315,17 +315,21 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     it expires from (nexus-wbfpw.58): rows a client moved under an earlier name of the same origin, one
     the catalog row no longer derives (catalog-044-3 rewrote ``owner_id``), carry no ``quarantined_by`` tag
     for the engine's reaper to expire. So this is the one caller that asks the engine which siblings hold
-    the origin's chunks (``resolve_quarantine_siblings(..., probe_engine=True)``; ``nx index repo`` uses the
-    two derived names only, because the probe is an unindexed scan engine-side; nexus-wbfpw.64 moves the
-    resolution into the engine and retires the probe). Each sibling is expired and reported on its own
-    line, so one sibling's kept chunks and another's expiry are each stated as what they are, never summed."""
+    the origin's chunks, and it asks in the expiry route's own first page (``resolve_siblings``, nexus-wbfpw.64:
+    the engine reads them under a 2 s bound and answers ``quarantine_collections``). Against an engine that predates
+    that field (v0.1.162 and earlier) the first page answers neither key, and this verb falls back to the dry-run
+    ``quarantine-restore`` probe it used before (``resolve_quarantine_siblings(..., probe_engine=True)``); an engine
+    whose read timed out is not probed (the probe is the same scan, unbounded) and the verb says so. Each sibling is
+    expired and reported on its own line, so one sibling's kept chunks and another's expiry are each stated as what
+    they are, never summed."""
     import http.client  # noqa: PLC0415 — command-local import (http.client)
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
         BoundedDrainIncomplete,
+        SiblingResolution,
         expire_quarantine_serverside,
         quarantine_days,
-        resolve_quarantine_siblings,
+        siblings_after_first_page,
     )
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
 
@@ -339,27 +343,53 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
             err=True,
         )
         return
-    siblings = resolve_quarantine_siblings(t3_db, collection, primary=qname, probe_engine=True)
+    # The first sibling's first page asks the engine for the rest; until it answers the list is the one name,
+    # which is also where a first-sibling failure stops (the others were never looked up).
+    resolution = SiblingResolution()
+    siblings = [qname]
     done: list[tuple[str, int]] = []  # (sibling, expired) for every sibling whose expiry completed
-    for sibling in siblings:
+    index = 0
+    while index < len(siblings):
+        sibling = siblings[index]
+        first = index == 0
         try:
             # strict: this verb reports each sibling's own outcome, so a drain that stops short is an error here
             # (the indexer's prune runs the same loop non-strict and only warns). RDR-222 Amendment A1.
             expiry = expire_quarantine_serverside(
-                t3_db, sibling, collection, cutoff, strict=True,
+                t3_db, sibling, collection, cutoff, strict=True, resolution=resolution if first else None,
             )
         except (VectorServiceError, BoundedDrainIncomplete, OSError, http.client.HTTPException) as exc:
             earlier = (
                 " Already expired before it: " + ", ".join(f"{n} from {s}" for s, n in done) + "."
                 if done else ""
             )
+            if first and resolution.status != "unasked":
+                siblings = siblings_after_first_page(t3_db, collection, qname, resolution)  # names only: no probe here
+            if len(siblings) > 1:
+                order = f"Siblings are expired in this order: {', '.join(siblings)}; that one and any after it were not."
+            elif resolution.status == "resolved":
+                order = "The engine named no other sibling."
+            else:
+                order = "It is the first sibling, so the others were not looked up."
             click.echo(
                 f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
-                f" the client expiry of {sibling} FAILED: {_expiry_failure_detail(exc)}. Siblings are expired in this order: "
-                f"{', '.join(siblings)}; that one and any after it were not.{earlier} Re-run this verb to retry it.",
+                f" the client expiry of {sibling} FAILED: {_expiry_failure_detail(exc)}. {order}{earlier} "
+                "Re-run this verb to retry it.",
                 err=True,
             )
             raise click.exceptions.Exit(1) from exc
+        if first:
+            # The first page has answered: go on with what the engine named, or, against an engine that did not
+            # answer, with the derived names and the dry-run probe (nexus-wbfpw.64).
+            siblings = siblings_after_first_page(t3_db, collection, qname, resolution, probe_fallback=True)
+            if resolution.status == "timed_out":
+                click.echo(
+                    f"  The engine's lookup of {collection}'s quarantine siblings ran past its bound, so only "
+                    f"{', '.join(siblings)} are expired this run; a sibling stranded under another name waits "
+                    "for the next run.",
+                    err=True,
+                )
+        index += 1
         if expiry is None:  # cannot happen past the route check above; never read as "nothing to expire"
             click.echo(f"  Client expiry of {sibling} did NOT run: the T3 handle lost its expire route.", err=True)
             continue

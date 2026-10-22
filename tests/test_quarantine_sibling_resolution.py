@@ -7,17 +7,19 @@ The row is mutable: catalog-044-3 rewrote ``owner_id`` on repo collections after
 name derived today is not the name a chunk was moved under yesterday. A client-moved chunk carries no
 ``quarantined_by`` tag, so the engine's own expiry (vectors-026) skips it, and the client is the only expirer.
 
-Two callers, two reaches (nexus-wbfpw.58 round 2):
+Two callers (nexus-wbfpw.58 round 2), and since nexus-wbfpw.64 two kinds of engine:
 
-* ``nx index repo`` (``indexer._prune_collection_serverside``) runs on every index and uses the TWO derived
-  names only: the row-derived name and ``quarantine-<origin name>`` (the reaper's name). It sends no engine
-  probe, because the probe is an unindexed scan engine-side. A chunk stranded under a third name stays until
-  ``nx t3 gc`` runs.
-* ``nx t3 gc`` (``t3._expire_client_quarantine``) also asks the engine which siblings hold the origin's chunks
-  (``resolve_quarantine_siblings(..., probe_engine=True)``) and expires from each, reporting each on its own line.
+* An engine that resolves siblings in its own expire and restore-rereferenced routes (``resolve_siblings``, read
+  under a statement bound): ``nx index repo`` (``indexer._prune_collection_serverside``) and ``nx t3 gc``
+  (``t3._expire_client_quarantine``) both ask in the first page of a drain, share the answer, and reach a sibling
+  stranded under ANY name, one lookup per collection per run and no probe.
+* An engine that predates that (v0.1.162 and earlier) ignores the field and answers neither key. ``nx index repo``
+  then uses the TWO derived names only (the row-derived name and ``quarantine-<origin name>``, the reaper's), and a
+  chunk stranded under a third name stays until ``nx t3 gc`` runs. ``nx t3 gc`` falls back to the dry-run probe
+  (``resolve_quarantine_siblings(..., probe_engine=True)``), which the hot path never sends: it is an unbounded scan.
 
-nexus-wbfpw.64 moves the resolution into the engine's own expire and restore-rereferenced routes and retires
-the probe; these tests pin the interim.
+The real-engine tests run the first kind as they are and the second through ``_PredatesDb``, which drops the field
+on the way out exactly as an old engine's body parsing does.
 
 The real-engine tests build the shape (move under the pre-rewrite name, rewrite the row, run the pass) and
 assert on the sibling's contents. Both pre-rewrite owners are covered: one whose sibling name equals the
@@ -175,12 +177,47 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return paths
 
 
+class _PredatesDb:
+    """The real client against an engine that predates nexus-wbfpw.64 (v0.1.162 and earlier): its two bounded
+    routes never see ``resolve_siblings`` (an old engine's permissive body parsing drops it), so they answer
+    neither ``quarantine_collections`` nor ``sibling_resolution``. Everything else is the real handle."""
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
+        return self._db.gc_restore_rereferenced_bounded(quarantine, origin, row_limit)
+
+    def gc_expire_quarantine_bounded(self, *args, resolve_siblings=False, **kwargs):
+        return self._db.gc_expire_quarantine_bounded(*args, **kwargs)
+
+
+ENGINE_KINDS = ["resolves", "predates"]
+
+
+def _as_engine(db, kind: str):
+    return db if kind == "resolves" else _PredatesDb(db)
+
+
 def _gc(db, s: _Scenario) -> None:
     """``nx t3 gc``'s expiry step, as the verb calls it (row-derived name, probe on)."""
     from nexus.commands.t3 import _expire_client_quarantine
 
     _expire_client_quarantine(db, s.coll, s.derived_now, moved=0)
 
+
+def _mine(s: _Scenario) -> set[str]:
+    """This scenario's chunks still in the sibling it moved them into. A row-derived sibling name depends on the owner
+    and the model, not the collection, so two scenarios of one case share it and each must read only its own rows."""
+    return s.ids(s.moved_into) & set(s.orphans)
+
+
+# The three tests below run BOTH engine kinds inside one test body, on scenarios of their own in the one provisioned
+# tenant, instead of parametrizing over the kind: every parametrized real-engine test provisions another tenant, and
+# the storage-touch provisioned-tenant ceiling has no room left.
 
 @pytest.mark.parametrize(("case", "pre_owner", "index_reaches"), PRE_REWRITE_OWNERS)
 def test_index_repo_expiry_reaches_the_reaper_named_sibling_and_nx_t3_gc_reaches_the_rest(
@@ -189,81 +226,94 @@ def test_index_repo_expiry_reaches_the_reaper_named_sibling_and_nx_t3_gc_reaches
 ) -> None:
     from nexus.indexer import _prune_deleted_files
 
-    cat, db = engine
-    s = _Scenario(cat, db, monkeypatch, case, pre_owner)
+    cat, real = engine
+    for engine_kind in ENGINE_KINDS:
+        wire.clear()
+        s = _Scenario(cat, real, monkeypatch, f"{case}-{engine_kind}", pre_owner)
+        db = _as_engine(real, engine_kind)
 
-    _prune_deleted_files(s.coll, "docs__gcq-s3-unused", db, catalog=cat)
+        _prune_deleted_files(s.coll, "docs__gcq-s3-unused", db, catalog=cat)
 
-    assert PROBE_PATH not in wire, f"an index-path prune sent the engine probe: {wire}"
-    if index_reaches:
-        assert s.ids(s.moved_into) == set(), (
-            "the reaper-named sibling is one of the two names the index path uses; "
-            f"still in {s.moved_into}: {s.ids(s.moved_into)}"
-        )
-    else:
-        assert s.ids(s.moved_into) == set(s.orphans), (
-            "a sibling under a third name is NOT reached by the index path (no probe on the hot path, "
-            "nexus-wbfpw.64 retires the gap); it waits for nx t3 gc"
-        )
-        capsys.readouterr()
-        _gc(db, s)
-        assert s.ids(s.moved_into) == set(), "nx t3 gc asks the engine and reaches it"
-        out = capsys.readouterr().out
-        assert s.moved_into in out and f"{len(s.orphans)} expired" in out, out
-    assert s.ids(s.coll) == set(s.live), "expiry touches nothing the origin holds"
+        assert PROBE_PATH not in wire, f"an index-path prune sent the engine probe: {wire}"
+        if index_reaches or engine_kind == "resolves":
+            assert _mine(s) == set(), (
+                f"[{engine_kind}] the index path reaches this sibling "
+                f"({'by name' if index_reaches else 'through what the engine resolved'}); "
+                f"still in {s.moved_into}: {_mine(s)}"
+            )
+        else:
+            assert _mine(s) == set(s.orphans), (
+                f"[{engine_kind}] against an engine that predates nexus-wbfpw.64 a sibling under a third name is "
+                "NOT reached by the index path (no probe on the hot path); it waits for nx t3 gc"
+            )
+            capsys.readouterr()
+            _gc(db, s)
+            assert _mine(s) == set(), "nx t3 gc falls back to the probe and reaches it"
+            out = capsys.readouterr().out
+            assert s.moved_into in out and f"{len(s.orphans)} expired" in out, out
+            assert PROBE_PATH in wire, "the old-engine fallback is the dry-run probe"
+        assert s.ids(s.coll) == set(s.live), "expiry touches nothing the origin holds"
 
 
 @pytest.mark.parametrize(("case", "pre_owner", "index_reaches"), PRE_REWRITE_OWNERS)
-def test_index_repo_rereference_reaches_only_the_two_derived_names(
+def test_index_repo_rereference_reaches_every_sibling_the_engine_resolves_else_the_two_derived_names(
     engine, monkeypatch: pytest.MonkeyPatch, wire: list[str], capsys: pytest.CaptureFixture[str],
     case: str, pre_owner: str | None, index_reaches: bool,
 ) -> None:
     from nexus.indexer import _prune_deleted_files
 
-    cat, db = engine
-    s = _Scenario(cat, db, monkeypatch, f"rr-{case}", pre_owner)
-    healed, still_orphan = s.orphans[:2], s.orphans[2:]
-    s.reference(healed)
-    # Recent, so expiry cannot be what empties the sibling: only the re-reference restore can remove these two.
-    assert s.ids(s.moved_into) == set(s.orphans)
-    monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "3650")
+    cat, real = engine
+    for engine_kind in ENGINE_KINDS:
+        wire.clear()
+        s = _Scenario(cat, real, monkeypatch, f"rr-{case}-{engine_kind}", pre_owner)
+        db = _as_engine(real, engine_kind)
+        healed, still_orphan = s.orphans[:2], s.orphans[2:]
+        s.reference(healed)
+        # Recent, so expiry cannot be what empties the sibling: only the re-reference restore can remove these two.
+        assert _mine(s) == set(s.orphans)
+        monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "3650")
 
-    _prune_deleted_files(s.coll, "docs__gcq-s3-unused", db, catalog=cat)
+        _prune_deleted_files(s.coll, "docs__gcq-s3-unused", db, catalog=cat)
 
-    assert PROBE_PATH not in wire
-    if index_reaches:
-        assert s.ids(s.moved_into) == set(still_orphan), (
-            "a chunk the manifest references again must leave the reaper-named sibling; "
-            f"left in {s.moved_into}: {s.ids(s.moved_into)}"
-        )
-        assert set(healed) <= s.ids(s.coll)
-    else:
-        # Re-reference is indexer-only and uses the two names, so a third-name sibling keeps the healed chunks
-        # hidden; nx t3 gc has no re-reference and its expiry keeps what the manifest references again.
-        assert s.ids(s.moved_into) == set(s.orphans)
-        monkeypatch.delenv("NX_GC_QUARANTINE_DAYS")
-        capsys.readouterr()
-        _gc(db, s)
-        assert s.ids(s.moved_into) == set(healed), "gc expires the unreferenced two and keeps the healed two"
-        out = capsys.readouterr().out
-        assert "2 expired, 2 refused (kept: the manifest references them again" in out, out
+        assert PROBE_PATH not in wire
+        if index_reaches or engine_kind == "resolves":
+            assert _mine(s) == set(still_orphan), (
+                f"[{engine_kind}] a chunk the manifest references again must leave the sibling; "
+                f"left in {s.moved_into}: {_mine(s)}"
+            )
+            assert set(healed) <= s.ids(s.coll)
+        else:
+            # Against an engine that predates nexus-wbfpw.64 re-reference uses the two names, so a third-name
+            # sibling keeps the healed chunks hidden; nx t3 gc has no re-reference and its expiry keeps what the
+            # manifest references again.
+            assert _mine(s) == set(s.orphans)
+            monkeypatch.delenv("NX_GC_QUARANTINE_DAYS")
+            capsys.readouterr()
+            _gc(db, s)
+            assert _mine(s) == set(healed), "gc expires the unreferenced two and keeps the healed two"
+            out = capsys.readouterr().out
+            assert "2 expired, 2 refused (kept: the manifest references them again" in out, out
 
 
 @pytest.mark.parametrize(("case", "pre_owner", "index_reaches"), PRE_REWRITE_OWNERS)
 def test_nx_t3_gc_expiry_reaches_chunks_moved_under_the_pre_rewrite_name(
-    engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    engine, monkeypatch: pytest.MonkeyPatch, wire: list[str], capsys: pytest.CaptureFixture[str],
     case: str, pre_owner: str | None, index_reaches: bool,
 ) -> None:
     """Both call sites in ``nx t3 gc`` (the nothing-to-move run and the post-move run) hand
-    ``_expire_client_quarantine`` the row-derived name, which is what this passes."""
-    cat, db = engine
-    s = _Scenario(cat, db, monkeypatch, f"gc-{case}", pre_owner)
+    ``_expire_client_quarantine`` the row-derived name, which is what this passes. An engine that resolves siblings
+    answers them in the expiry's first page and the verb sends no probe; one that predates that is probed."""
+    cat, real = engine
+    for engine_kind in ENGINE_KINDS:
+        wire.clear()
+        s = _Scenario(cat, real, monkeypatch, f"gc-{case}-{engine_kind}", pre_owner)
 
-    _gc(db, s)
+        _gc(_as_engine(real, engine_kind), s)
 
-    assert s.ids(s.moved_into) == set()
-    out = capsys.readouterr().out
-    assert s.moved_into in out and f"{len(s.orphans)} expired" in out, out
+        assert _mine(s) == set()
+        out = capsys.readouterr().out
+        assert s.moved_into in out and f"{len(s.orphans)} expired" in out, out
+        assert (PROBE_PATH in wire) == (engine_kind == "predates"), (engine_kind, wire)
 
 
 def test_a_shared_sibling_never_loses_another_origins_tagged_rows(
@@ -508,7 +558,7 @@ def test_restore_runs_over_every_sibling_and_sums_the_counts() -> None:
     seen: list[str] = []
 
     class Db:
-        def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit):
+        def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
             seen.append(quarantine)
             return {"restored": 3, "remaining": 0}
 
@@ -537,7 +587,7 @@ class _IndexDb:
     def gc_quarantine_restore(self, *a, **kw):
         raise AssertionError("an index-path prune must not send the sibling probe")
 
-    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit):
+    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
         self._hit("restore", quarantine)
         return {"restored": 1, "remaining": 0}
 
@@ -547,7 +597,7 @@ class _IndexDb:
         return {"moved": 2, "sample": [], "remaining": 0}
 
     def gc_expire_quarantine_bounded(
-        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True, resolve_siblings=False,
     ):
         # RDR-222 Amendment A1: the real client's bounded, keyed expiry (what the indexer's prune drives).
         self._hit("expire", quarantine)
@@ -660,7 +710,7 @@ class _ScriptedExpiryDb:
         self.scripts, self.calls = scripts, []
 
     def gc_expire_quarantine_bounded(
-        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True, resolve_siblings=False,
     ):
         self.calls.append(quarantine)
         entry = self.scripts[quarantine].pop(0)
@@ -786,7 +836,7 @@ class _BoundedGcDb:
         raise AssertionError("the bounded method is present: the unbounded call must not be used")
 
     def gc_expire_quarantine_bounded(
-        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True, resolve_siblings=False,
     ):
         self.calls.append((quarantine, count_refused))
         entry = self.expire[quarantine].pop(0)
@@ -819,7 +869,7 @@ def test_nx_t3_gc_runs_on_a_handle_that_has_only_the_bounded_expiry_method(rewri
             return {"quarantine_collections": []}
 
         def gc_expire_quarantine_bounded(
-            self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+            self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True, resolve_siblings=False,
         ):
             self.calls.append(quarantine)
             return _page(3, more=False, refused=0)
@@ -890,3 +940,171 @@ def test_nx_t3_gc_names_the_key_note_of_a_first_page_error_too(rewritten_row, ca
     unsettled.add_note("request 44444444-4444-4444-8444-444444444444: outcome unknown (no ledger)")
     code, cap = _run_t3_expiry(_BoundedGcDb([], {ROW_NAME: [unsettled]}), capsys)
     assert code == 1 and "44444444-4444-4444-8444-444444444444" in cap.err
+
+
+# ── nexus-wbfpw.64: the engine answers the siblings in the first page of a drain ─────────────────────────────
+
+class TestSiblingResolutionRead:
+    """``SiblingResolution.read``: which answer means what, never inferred from a version."""
+
+    def test_a_list_is_resolved_and_keeps_only_names(self) -> None:
+        r = cq.SiblingResolution()
+        r.read({"restored": 0, "remaining": 0, "quarantine_collections": [REAPER_NAME, 7, THIRD]})
+        assert (r.status, r.names) == ("resolved", [REAPER_NAME, THIRD])
+
+    def test_an_empty_list_is_resolved_with_no_sibling(self) -> None:
+        r = cq.SiblingResolution()
+        r.read({"expired": 0, "quarantine_collections": []})
+        assert (r.status, r.names) == ("resolved", [])
+
+    def test_a_timed_out_lookup_is_not_an_empty_list(self) -> None:
+        r = cq.SiblingResolution()
+        r.read({"expired": 0, "sibling_resolution": "timed_out"})
+        assert (r.status, r.names) == ("timed_out", [])
+
+    @pytest.mark.parametrize("answer", [{"restored": 1, "remaining": 0}, {}, None, [], "x"])
+    def test_neither_key_is_an_engine_that_predates_the_field(self, answer) -> None:
+        r = cq.SiblingResolution()
+        r.read(answer)
+        assert (r.status, r.names) == ("predates", [])
+
+    def test_a_page_whose_answer_was_lost_is_unknown_and_is_asked_again(self) -> None:
+        r = cq.SiblingResolution()
+        r.read({"committed_unknown_counts": True})
+        assert r.status == "unknown" and r.wants_asking()
+        assert cq.SiblingResolution().wants_asking()
+        for settled in ("resolved", "timed_out", "predates"):
+            assert not cq.SiblingResolution(status=settled).wants_asking()
+
+
+class _ResolvingIndexDb(_IndexDb):
+    """An engine with nexus-wbfpw.64: the first restore (or expire) page that asks is answered with ``names``."""
+
+    def __init__(self, names, **kw) -> None:
+        super().__init__(**kw)
+        self.names, self.asked = names, []
+
+    def _answer(self, route, sibling, resolve_siblings, base):
+        if resolve_siblings:
+            self.asked.append((route, sibling))
+            if self.names == "timed_out":
+                return {**base, "sibling_resolution": "timed_out"}
+            return {**base, "quarantine_collections": list(self.names)}
+        return base
+
+    def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
+        base = super().gc_restore_rereferenced_bounded(quarantine, origin, row_limit)
+        return self._answer("restore", quarantine, resolve_siblings, base)
+
+    def gc_expire_quarantine_bounded(
+        self, quarantine, origin, cutoff, fraction, minimum, force, row_limit, *, count_refused=True,
+        resolve_siblings=False,
+    ):
+        base = super().gc_expire_quarantine_bounded(
+            quarantine, origin, cutoff, fraction, minimum, force, row_limit, count_refused=count_refused,
+        )
+        return self._answer("expire", quarantine, resolve_siblings, base)
+
+
+def test_the_index_path_asks_once_and_goes_on_with_the_siblings_the_engine_names(rewritten_row) -> None:
+    """The first restore page asks, the expiry reuses the answer, the reaper's name is not guessed (the engine did not
+    list it, so it is not registered), and the dry-run probe is never sent."""
+    db = _ResolvingIndexDb([THIRD])
+
+    assert _prune(db) is True
+
+    assert db.calls == [
+        ("restore", ROW_NAME), ("restore", THIRD),
+        ("move", ROW_NAME),
+        ("expire", ROW_NAME), ("expire", THIRD),
+    ]
+    assert db.asked == [("restore", ROW_NAME)], "one lookup per collection per run"
+
+
+def test_an_engine_that_lists_the_reaper_name_has_it_visited_once(rewritten_row) -> None:
+    db = _ResolvingIndexDb([REAPER_NAME, THIRD, ROW_NAME])
+
+    assert _prune(db) is True
+
+    assert db.calls == [
+        ("restore", ROW_NAME), ("restore", REAPER_NAME), ("restore", THIRD),
+        ("move", ROW_NAME),
+        ("expire", ROW_NAME), ("expire", REAPER_NAME), ("expire", THIRD),
+    ]
+
+
+def test_a_timed_out_lookup_keeps_the_derived_names_sends_no_probe_and_says_so(rewritten_row) -> None:
+    db = _ResolvingIndexDb("timed_out")
+
+    with patch.object(cq, "_log") as log:
+        assert _prune(db) is True
+
+    assert db.calls == [
+        ("restore", ROW_NAME), ("restore", REAPER_NAME),
+        ("move", ROW_NAME),
+        ("expire", ROW_NAME), ("expire", REAPER_NAME),
+    ]
+    assert db.asked == [("restore", ROW_NAME)]
+    assert [c.args[0] for c in log.warning.call_args_list] == ["quarantine_sibling_resolution_timed_out"]
+
+
+def test_an_extra_sibling_the_engine_names_is_best_effort_like_the_derived_extras(rewritten_row) -> None:
+    db = _ResolvingIndexDb([THIRD], fail=frozenset({("restore", THIRD), ("expire", THIRD)}))
+
+    with patch.object(cq, "_log") as log:
+        assert _prune(db) is True
+
+    assert ("move", ROW_NAME) in db.calls and ("expire", ROW_NAME) in db.calls
+    assert _failed_siblings(log) == {"quarantine_sibling_restore_failed": THIRD, "gc_expire_bounded_page_failed": THIRD}
+
+
+def test_a_first_page_that_fails_leaves_the_question_open_for_the_next_call(rewritten_row) -> None:
+    """A failing first sibling raises (it always did); nothing was learned, so the shared resolution still asks."""
+    res = cq.SiblingResolution()
+    db = _ResolvingIndexDb([THIRD], fail=frozenset({("restore", ROW_NAME)}))
+    with pytest.raises(VectorServiceError):
+        cq.restore_rereferenced_across_serverside(db, [ROW_NAME, REAPER_NAME], ORIGIN, best_effort=True, resolution=res)
+    assert res.status == "unasked" and res.names == [], "the page raised before it answered"
+
+
+def test_a_resolution_already_resolved_is_used_without_asking_again(rewritten_row) -> None:
+    res = cq.SiblingResolution(status="resolved", names=[THIRD])
+    db = _ResolvingIndexDb([REAPER_NAME])
+
+    assert cq.expire_quarantine_across_serverside(
+        db, [ROW_NAME, REAPER_NAME], ORIGIN, "2026-01-01T00:00:00Z", best_effort=True, resolution=res,
+    ) == (6, None)
+
+    assert db.calls == [("expire", ROW_NAME), ("expire", THIRD)]
+    assert db.asked == []
+
+
+class _ProbeDb:
+    """The probe answer, for ``siblings_after_first_page``."""
+
+    def __init__(self, names) -> None:
+        self.names, self.probes = names, 0
+
+    def gc_quarantine_restore(self, origin, **kwargs):
+        self.probes += 1
+        return {"quarantine_collections": self.names}
+
+
+@pytest.mark.parametrize(
+    ("status", "probe_fallback", "expect", "probes"),
+    [
+        ("resolved", True, [ROW_NAME, THIRD], 0),
+        ("resolved", False, [ROW_NAME, THIRD], 0),
+        ("predates", True, [ROW_NAME, REAPER_NAME, THIRD], 1),
+        ("unknown", True, [ROW_NAME, REAPER_NAME, THIRD], 1),
+        ("unasked", True, [ROW_NAME, REAPER_NAME, THIRD], 1),
+        ("predates", False, [ROW_NAME, REAPER_NAME], 0),
+        ("timed_out", True, [ROW_NAME, REAPER_NAME], 0),
+    ],
+)
+def test_the_siblings_after_the_first_page(rewritten_row, status, probe_fallback, expect, probes) -> None:
+    db = _ProbeDb([THIRD])
+    res = cq.SiblingResolution(status=status, names=[THIRD] if status == "resolved" else [])
+    with patch.object(cq, "_log"):
+        found = cq.siblings_after_first_page(db, ORIGIN, ROW_NAME, res, probe_fallback=probe_fallback)
+    assert found == expect and db.probes == probes

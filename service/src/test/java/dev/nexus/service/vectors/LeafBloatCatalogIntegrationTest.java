@@ -248,6 +248,32 @@ class LeafBloatCatalogIntegrationTest {
             + " fraction=" + l.deadFraction());
     }
 
+    /**
+     * nexus-i827c: a leaf's {@code pci_} indexes and their sizes are read, so the authenticated leaf listing can say
+     * how much index a leaf carries. A leaf with none reads as empty and 0 bytes; the leaf's own primary-key and
+     * chash indexes, which carry other names, are not counted.
+     */
+    @Test
+    void aLeafReportsItsPciIndexesAndTheirBytes_andItsOtherIndexesAreNotCounted() throws Exception {
+        String tenant = newTenant("pcibytes");
+        String collection = collectionName("pcibytes");
+        rows(tenant, collection, 50);
+        String leaf = leafName(tenant);
+        assertThat(leaf(leaf).pciIndexes()).as("no pci_ index yet").isEmpty();
+        assertThat(leaf(leaf).pciIndexBytes()).isZero();
+
+        String pci = PciCatalog.indexName(M384, tenant, collection);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, pci, "embedding_384", collection);
+        }
+
+        LeafBloatCatalog.Leaf l = leaf(leaf);
+        assertThat(l.pciIndexes()).extracting(LeafBloatCatalog.PciIndex::name).containsExactly(pci);
+        assertThat(l.pciIndexes().get(0).valid()).isTrue();
+        assertThat(l.pciIndexes().get(0).bytes()).as("an HNSW index over 50 rows occupies pages").isPositive();
+        assertThat(l.pciIndexBytes()).isEqualTo(l.pciIndexes().get(0).bytes());
+    }
+
     @Test
     void anEmptyLeaf_hasDeadFractionZero_notNaN() throws Exception {
         String tenant = newTenant("empty");

@@ -3910,7 +3910,13 @@ fraction, which autovacuum leaves alone, is not overdue. Rows is the larger of t
 estimate (`pg_class.reltuples`, the figure autovacuum scales by), so a leaf whose counters a crash or restore zeroed is judged on the estimate. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
 rows remain) or `starved` (overdue for `overdue_warn_after_seconds` with no vacuum finished), how many lack any of the four autovacuum
 settings, and how many have `autovacuum_enabled` off; a `waiting` leaf passes with a note. The warning says the leaf names are in the
-engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. It also warns when the
+engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. `nx doctor --verbose`
+(nexus-i827c) names them from the engine instead: when the row warns, it reads the operator-only `GET /v1/admin/chunks-leaves` and lists each
+leaf that is pinned or starved, lacks one of the four autovacuum settings or has autovacuum off, with its rows, dead rows, last autovacuum,
+overdue state and `pci_` index bytes (the first 20, then a count of the rest). The route needs the root token (a tenant or mint token is 403,
+no credential 401; the row says so and where to set one, `nx config set service_token <root token>` or `NX_SERVICE_TOKEN`); against an engine
+that predates it (404) the row prints one line saying so, never an error. The default sweep reads no admin route, and `--verbose` is ignored by
+the `--check-*` modes. It also warns when the
 engine's view has `expired`, and when its reads have failed since it started and none has succeeded (`ever_read`, `consecutive_failures`).
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.

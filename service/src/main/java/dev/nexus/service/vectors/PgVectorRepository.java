@@ -6136,9 +6136,68 @@ FROM scope s
      * the origin.
      */
     public List<String> resolveQuarantineSiblings(String tenant, String originCollection) {
+        return tenantScope.withTenant(tenant, ctx -> siblingNames(ctx, tenant, originCollection));
+    }
+
+    /**
+     * What a {@code resolve_siblings} request learned (nexus-wbfpw.64): the quarantine siblings in the order
+     * {@link #resolveQuarantineSiblings} gives them, or {@code timedOut} when the read ran into its statement bound
+     * and the list is unknown (never an empty list standing in for "none": that answer would let a client conclude
+     * nothing is stranded).
+     */
+    public record SiblingResolution(List<String> names, boolean timedOut) {
+        public SiblingResolution {
+            names = List.copyOf(names);
+        }
+    }
+
+    /**
+     * {@link #resolveQuarantineSiblings} under a statement bound of its own
+     * ({@link PgSession#DEFAULT_QUARANTINE_SIBLING_RESOLUTION_STATEMENT_TIMEOUT_MS}), for the expire-quarantine and
+     * restore-rereferenced routes, which run it on every request that asks (nexus-wbfpw.64). The bound is a
+     * separate statement ahead of the read in its own transaction, so it bounds the read and nothing after it; a
+     * bound that trips (SQLSTATE 57014) is reported as {@link SiblingResolution#timedOut()}, not thrown, because the
+     * page the request also asked for must still run.
+     *
+     * <p>No index backs the {@code origin_collection} tag, on purpose (nexus-wbfpw.64). The read walks the primary-key
+     * prefix {@code (tenant_id, collection)} of each quarantine collection and filters the tag on the heap, so its cost
+     * is those collections' own rows and never the rest of the tenant's chunks. Measured on a populated test database
+     * (100,000 non-quarantine rows beside the quarantine rows, nothing tagged for the origin, the worst case): 6.8 to
+     * 9.5 ms over 12,800 quarantine rows in 8 siblings (production measured 7.77 ms), 96 to 162 ms over 140,000 in 18.
+     * A candidate expression index on {@code (tenant_id, collection, (metadata->>'origin_collection'))} took the second
+     * to 52 ms, but it is maintained on every write to {@code nexus.chunks}, not only on quarantine rows, and the
+     * statement bound covers about 2 million quarantine rows, roughly 150 times production's.
+     */
+    public SiblingResolution resolveQuarantineSiblingsBounded(String tenant, String originCollection) {
+        return resolveQuarantineSiblingsBounded(tenant, originCollection,
+            PgSession.DEFAULT_QUARANTINE_SIBLING_RESOLUTION_STATEMENT_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public SiblingResolution resolveQuarantineSiblingsBounded(String tenant, String originCollection,
+                                                               int statementTimeoutMs) {
+        try {
+            List<String> names = tenantScope.withTenant(tenant, ctx -> {
+                PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs,
+                    PgSession.DEFAULT_QUARANTINE_SIBLING_RESOLUTION_LOCK_TIMEOUT_MS);
+                return siblingNames(ctx, tenant, originCollection);
+            });
+            return new SiblingResolution(names, false);
+        } catch (RuntimeException e) {
+            // 55P03 is a lock wait that ran out: a reader waiting behind an exclusive lock on the chunks table.
+            // It is the same "could not read inside the bound" as 57014 and is answered the same way.
+            String state = sqlState(e);
+            if (QUERY_CANCELED.equals(state) || LOCK_NOT_AVAILABLE.equals(state)) {
+                return new SiblingResolution(List.of(), true);
+            }
+            throw e;
+        }
+    }
+
+    private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection) {
         String reaperName = "quarantine-" + originCollection;
         Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
-        List<String> found = tenantScope.withTenant(tenant, ctx ->
+        List<String> found =
             ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                    .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))
@@ -6147,7 +6206,7 @@ FROM scope s
                           .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
                               .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
                               .and(originTag.eq(originCollection)))))))
-               .fetch(CATALOG_COLLECTIONS.NAME));
+               .fetch(CATALOG_COLLECTIONS.NAME);
         var ordered = new ArrayList<String>(found.size());
         if (found.contains(reaperName)) ordered.add(reaperName);
         found.stream().filter(n -> !n.equals(reaperName)).sorted().forEach(ordered::add);

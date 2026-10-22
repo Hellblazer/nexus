@@ -1721,6 +1721,15 @@ public final class VectorHandler implements HttpHandler {
      * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
      * {"restored": N, "remaining": R, "row_limit": L} — loop while
      * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
+     *
+     * <p>nexus-wbfpw.64 ([additive]): an optional {@code resolve_siblings: true}, on either form, also asks the engine
+     * which quarantine collections may hold chunks of {@code origin_collection} (the reaper's own name for it plus
+     * every quarantine collection holding a chunk tagged with it; {@link PgVectorRepository#resolveQuarantineSiblings}),
+     * read under a 2 s statement bound of its own. The response then adds {@code "quarantine_collections": [...]}, or
+     * {@code "sibling_resolution": "timed_out"} with no list when the bound tripped. The page still runs for the named
+     * {@code quarantine_collection} alone (a keyed page is one transaction with its ledger row, so it cannot span
+     * siblings); the client sends the route again for each other sibling named. An engine without the field answers
+     * neither key, which is how a client tells it apart from this one.
      */
     private void handleGcRestoreRereferenced(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1736,29 +1745,37 @@ public final class VectorHandler implements HttpHandler {
         // mirroring handleGcQuarantineOrphans's identical routing (nexus-a6mon).
         // Additive: a request without it is the unbounded form exactly as
         // before, so no released client changes behaviour.
+        boolean resolveSiblings = optBool(body, "resolve_siblings", false);   // nexus-wbfpw.64
         int rowLimit = resolveRowLimit(body);
         if (rowLimit > 0) {
             if (keyed != null) {
                 // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
                 final int limit = rowLimit;
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, RESTORE_ROUTE, raw);
+                final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
                     marker -> repo.restoreRereferencedBounded(
                         tenant, quarantineCollection, originCollection, limit, dim, marker),
-                    out -> boundedRestoreBody(out, limit));
+                    out -> withSiblings(boundedRestoreBody(out, limit), siblings));
                 return;
             }
+            // Read BEFORE the page, so a read that fails outright (a lost connection, not a bound) is a 5xx with
+            // nothing committed, never a 5xx hiding a page that already was.
+            final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
             var bounded = repo.restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit);
-            HttpUtil.send(ex, 200, json(boundedRestoreBody(bounded, rowLimit)));
+            HttpUtil.send(ex, 200, json(withSiblings(boundedRestoreBody(bounded, rowLimit), siblings)));
             return;
         }
         if (keyed != null) {
             refuseKey(ex, "idempotency_key_unsupported");
         }
 
+        final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
         long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
-        HttpUtil.send(ex, 200, json(Map.of("restored", restored)));
+        var unbounded = new java.util.LinkedHashMap<String, Object>();
+        unbounded.put("restored", restored);
+        HttpUtil.send(ex, 200, json(withSiblings(unbounded, siblings)));
     }
 
     /**
@@ -1789,6 +1806,10 @@ public final class VectorHandler implements HttpHandler {
      * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
      * {@code force}, and the floor counts only the untagged rows. The engine expires its own
      * rows (RDR-192, nexus-2x9xa).
+     *
+     * <p>nexus-wbfpw.64 ([additive]): an optional {@code resolve_siblings: true}, on either form, adds
+     * {@code "quarantine_collections"} (or {@code "sibling_resolution": "timed_out"}) to the response, exactly as on
+     * {@code restore-rereferenced}; the page itself still expires only the named {@code quarantine_collection}.
      */
     private void handleGcExpireQuarantine(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1803,6 +1824,7 @@ public final class VectorHandler implements HttpHandler {
         double floorFraction        = optDouble(body, "floor_fraction", 0.5);
         int floorMinChunks          = optInt(body, "floor_min_chunks", 50);
         boolean force                = optBool(body, "force", false);
+        boolean resolveSiblings      = optBool(body, "resolve_siblings", false);   // nexus-wbfpw.64
 
         // An optional `row_limit` selects the BOUNDED expire, as on restore-rereferenced: absent is the
         // unbounded form exactly as before, present must be a positive integer.
@@ -1812,25 +1834,56 @@ public final class VectorHandler implements HttpHandler {
             final boolean countRefused = optBool(body, "count_refused", true);
             if (keyed != null) {
                 final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, EXPIRE_ROUTE, raw);
+                final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
                 this.<PgVectorRepository.ExpireBoundedOutcome>runKeyed(ex, keyed, tenant, EXPIRE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_EXPIRE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
                         cutoff, floorFraction, floorMinChunks, force, limit, countRefused, dim, marker),
-                    out -> boundedExpireBody(out, limit));
+                    out -> withSiblings(boundedExpireBody(out, limit), siblings));
                 return;
             }
+            final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
             var bounded = repo.expireQuarantineBounded(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force, limit, countRefused);
-            HttpUtil.send(ex, 200, json(boundedExpireBody(bounded, limit)));
+            HttpUtil.send(ex, 200, json(withSiblings(boundedExpireBody(bounded, limit), siblings)));
             return;
         }
         if (keyed != null) {
             refuseKey(ex, "idempotency_key_unsupported");
         }
 
+        final Map<String, Object> siblings = siblingFields(repo, tenant, originCollection, resolveSiblings);
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
-        HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+        var unbounded = new java.util.LinkedHashMap<String, Object>();
+        unbounded.put("expired", outcome.expired());
+        unbounded.put("refused", outcome.refused());
+        HttpUtil.send(ex, 200, json(withSiblings(unbounded, siblings)));
+    }
+
+    /**
+     * nexus-wbfpw.64: the sibling fields of a {@code resolve_siblings} request, empty when the request did not ask
+     * (so a client that does not send the field sees the body it always saw). Asked: {@code quarantine_collections},
+     * the quarantine siblings that may hold chunks of the origin, in {@link PgVectorRepository#resolveQuarantineSiblings}'s
+     * order, or, when the read ran into its statement bound, {@code sibling_resolution: "timed_out"} and no list. A
+     * client reads the PRESENCE of {@code quarantine_collections} as "this engine resolves siblings"; an engine that
+     * predates the field answers neither key.
+     */
+    private static Map<String, Object> siblingFields(PgVectorRepository repo, String tenant, String origin,
+                                                     boolean asked) {
+        if (!asked) return Map.of();
+        var resolved = repo.resolveQuarantineSiblingsBounded(tenant, origin);
+        return resolved.timedOut()
+            ? Map.of("sibling_resolution", "timed_out")
+            : Map.of("quarantine_collections", resolved.names());
+    }
+
+    /** {@code body} with {@code siblings} appended, in a map that keeps the key order and tolerates null values. */
+    private static Map<String, Object> withSiblings(Map<String, Object> body, Map<String, Object> siblings) {
+        if (siblings.isEmpty()) return body;
+        var merged = new java.util.LinkedHashMap<String, Object>(body);
+        merged.putAll(siblings);
+        return merged;
     }
 
     /**
