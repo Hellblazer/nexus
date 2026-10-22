@@ -246,6 +246,12 @@ public final class NexusService {
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the ledger retention arm. */
     private final Runnable requestLedgerRetentionTask;
 
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the tuple sweep; null without a tuple repo. */
+    private final Runnable tupleSweepTask;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the T1 TTL sweep. */
+    private final Runnable t1SweepTask;
+
     /**
      * RDR-227 Step 2 (bead nexus-43ulx.23): the source of {@code GET /v1/status}'s {@code per_collection_indexes}
      * object. Bound late, by {@link #perCollectionIndexes(java.util.function.Supplier)}: the status route is
@@ -744,9 +750,13 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
+        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple
+        // sweep's sibling): with a six-hour first delay an engine process that lives less than six hours never
+        // expires T1 rows.
+        this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));
         this.sweepScheduler.scheduleAtFixedRate(
-            surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC))),
-            SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+            this.t1SweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+            TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
         );
 
         // RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): a SECOND scheduled task on
@@ -758,11 +768,20 @@ public final class NexusService {
         // tupleRepo mirrors /v1/tuples's own null-registry posture (the feature
         // was never loaded, not that it degraded).
         if (this.tupleRepo != null) {
+            this.tupleSweepTask = surviving("tuple_scheduled_sweep_failed",
+                () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC)));
+            // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, shakeout F5):
+            // with a six-hour first delay an engine process that lives less than six hours never sweeps. The
+            // cloud census showed expired rows days old (board/ci/nexus-develop ~2,100, directory/* from
+            // 2026-10-18); the ledger retention task below and the reaper start the same way, for the same reason.
             this.sweepScheduler.scheduleAtFixedRate(
-                surviving("tuple_scheduled_sweep_failed",
-                    () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC))),
-                SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+                this.tupleSweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+                TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
             );
+            log.info("event=tuple_sweep_scheduled initial_delay_seconds={} interval_seconds={}",
+                ChunkReaper.INITIAL_DELAY.toSeconds(), TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS));
+        } else {
+            this.tupleSweepTask = null;
         }
 
         // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler, every
@@ -988,6 +1007,16 @@ public final class NexusService {
     /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */
     dev.nexus.service.db.RequestLedger requestLedgerForTests() {
         return requestLedger;
+    }
+
+    /** The Runnable the scheduler runs for the tuple sweep, or null without a tuple repo. Package-private for the wiring test. */
+    Runnable tupleSweepTask() {
+        return tupleSweepTask;
+    }
+
+    /** The Runnable the scheduler runs for the T1 TTL sweep. Package-private for the wiring test. */
+    Runnable t1SweepTask() {
+        return t1SweepTask;
     }
 
     /** The Runnable the scheduler runs for ledger retention. Package-private for the wiring test. */
