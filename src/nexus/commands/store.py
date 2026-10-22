@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -627,12 +628,7 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         if db.get_by_id(col_name, doc_id) is None:
             # nexus-9ts7n: a delete stays in the one collection it names (reads span
             # the corpus's siblings, a delete does not), so say which sibling has it.
-            holder = next(
-                (s for s in t3_collection_names_for_read(collection, t3=db)[1:]
-                 if db.get_by_id(s, doc_id) is not None),
-                None,
-            )
-            hint = f"; it is in {holder}: pass --collection {holder}" if holder else ""
+            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id) is not None)
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}{hint}")
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
@@ -663,10 +659,32 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
             )
         click.echo(f"Deleted: {doc_id}  from  {col_name}")
     else:
-        _delete_by_title(db, col_name, title, yes)
+        _delete_by_title(
+            db, col_name, title, yes,
+            hint=lambda: _holder_hint(db, collection, col_name, lambda s: bool(db.find_ids_by_title(s, title))),
+        )
 
 
-def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> None:
+def _holder_hint(db: T3Database, collection: str, col_name: str, holds: Callable[[str], bool]) -> str:
+    """``; it is in S: pass --collection S`` for the first other collection a
+    read of *collection* would look in (``nx store get``'s scope) that *holds*
+    what a delete did not find in *col_name*, else empty (nexus-9ts7n,
+    nexus-jald5). Read-only and best effort: a delete never reaches into a
+    collection it was not given, and a probe that fails leaves the plain
+    not-found message."""
+    try:
+        others = [s for s in _store_scope(collection, db)[0] if s != col_name]
+        holder = next((s for s in others if holds(s)), None)
+    except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
+        _log.warning("store_delete_holder_hint_failed", collection=col_name, exc_info=False)
+        return ""
+    return f"; it is in {holder}: pass --collection {holder}" if holder else ""
+
+
+def _delete_by_title(
+    db: T3Database, col_name: str, title: str, yes: bool,
+    hint: Callable[[], str] = str,
+) -> None:
     """``--title`` names documents (nexus-sis0m.5).
 
     Catalog documents titled *title* are tombstoned with their own manifest
@@ -702,7 +720,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
             finally:
                 reader.close()
         if not n_docs and not row_ids:
-            raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+            raise click.ClickException(f"No entries with title {title!r} in {col_name}{hint()}")
         click.echo(
             f"Found {n_docs} document(s) and {len(row_ids)} chunk(s) titled "
             f"{title!r} in {col_name}."
@@ -712,7 +730,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
 
     reaped = docs.documents if docs else ()
     if not reaped and not row_ids and not (docs and docs.failures):
-        raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+        raise click.ClickException(f"No entries with title {title!r} in {col_name}{hint()}")
 
     # Chunks titled *title* that no reaped document named: the chunk-title
     # path, reap-before-delete, exactly as before.

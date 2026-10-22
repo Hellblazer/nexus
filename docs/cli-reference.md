@@ -2358,7 +2358,7 @@ Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` dig
 
 Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row via a chash-keyed, best-effort reap, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. **The reap now runs BEFORE the T3 chunk delete, not after (RDR-191 F10c, nexus-o8dil.5).** The engine's delete is anti-join-scoped: it refuses to remove a chunk that any live catalog manifest row still references, including the note's own not-yet-tombstoned row, so reaping first is what lets the ordinary single-owner delete succeed at all.
 
-For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything. When a live model sibling of the corpus holds the id, the error adds `it is in S: pass --collection S` (nexus-9ts7n); the delete itself never reaches into a sibling.
+For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything. When another collection that `nx store get` with the same `--collection` reads holds the id (a live model sibling, or for bare `knowledge` any knowledge collection), the error adds `it is in S: pass --collection S` (nexus-9ts7n); `--title` does the same for chunks with that title (nexus-jald5). The delete itself never reaches into another collection.
 
 When the chash's catalog lookup is ambiguous (more than one candidate catalog document shares it), the reap deliberately declines to tombstone anything: nothing is guessed (nexus-5axey). That is no longer a benign no-op: with no live-manifest-row retracted, the engine's anti-join then refuses the chunk delete, and the command exits non-zero instead of silently leaving a ghost catalog row behind:
 
@@ -3000,8 +3000,8 @@ catalog rows): the MCP `search`, `query`, `store_get`, `store_list` and
 which names the sibling it found the entry in, and `nx store list`, which pages
 the picked collection and names its siblings so you can list one by name
 (nexus-9ts7n). `nx store delete` and MCP `store_delete` stay in the one
-collection they resolve; when an `--id` is not there but a sibling holds it, the
-error names the `--collection` to pass. The engine's voyage-only-mode-flip after
+collection they resolve; when an `--id` or a `--title` is not there but a sibling
+holds it, the error names the `--collection` to pass. The engine's voyage-only-mode-flip after
 restart is tracked in nexus-ddmfg.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`

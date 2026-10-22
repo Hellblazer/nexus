@@ -632,6 +632,7 @@ nexus-2xu6t
 nexus-2xx
 nexus-2xx.1
 nexus-2xxl
+nexus-2y8yw
 nexus-2yajx
 nexus-2yshe
 nexus-2ze8
@@ -4393,6 +4394,7 @@ nexus-j9z30.8
 nexus-j9z30.9
 nexus-ja47l
 nexus-ja4pq
+nexus-jald5
 nexus-james
 nexus-jb4pp
 nexus-jblzc
@@ -4559,6 +4561,7 @@ nexus-k1uw5
 nexus-k1uw5.1
 nexus-k1vr5
 nexus-k1x4r
+nexus-k1x5v
 nexus-k29
 nexus-k3b4s
 nexus-k3u8

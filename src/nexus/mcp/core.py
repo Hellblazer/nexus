@@ -5737,8 +5737,9 @@ def store_get(
         description=(
             "Collection name or subject prefix. \"knowledge\" (default) means "
             "every live knowledge__* collection, the same scope as search/"
-            "query's corpus=\"knowledge\"; a subject or full collection name "
-            "narrows the lookup to that one collection."
+            "query's corpus=\"knowledge\"; a subject reads every live model "
+            "sibling of its corpus; a conformant four-segment name is that one "
+            "collection."
         ),
     )] = "knowledge",
 ) -> str:
@@ -5757,7 +5758,8 @@ def store_get(
       resolves to that note.
     - `collection="knowledge"` (default) looks in every knowledge__*
       collection, as `search` does; a title found in more than one names
-      those collections instead of guessing.
+      those collections instead of guessing, and passing one of them as
+      `collection=` reads that one.
     - A title matching more than one document returns the candidate ids
       instead of content; pass a content-hash to disambiguate.
     """
@@ -8107,6 +8109,10 @@ def tuple_subscriptions() -> list[dict]:
 def store_delete(doc_id: str, collection: str = "knowledge") -> str:
     """Delete a T3 knowledge entry by document ID.
 
+    Deletes from the one collection *collection* resolves to. When the id is
+    not there but a collection a read of *collection* looks in holds it, the
+    answer names the collection to pass.
+
     Args:
         doc_id: Document ID to delete (from store_list or store_put output)
         collection: Collection name or prefix (default: knowledge)
@@ -8140,7 +8146,18 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # DIFFERENT collection. A collection-scoped existence check first
         # closes that off before any catalog mutation happens.
         if t3.get_by_id(col_name, doc_id) is None:
-            return f"Not found: {doc_id!r} in {col_name}"
+            # nexus-jald5: the read tools look further than a delete does; say which
+            # collection of the read scope holds the id, as nx store delete does.
+            # Best effort: a failing probe leaves the plain answer.
+            try:
+                holder = next(
+                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id) is not None),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
+                holder = None
+            hint = f"; it is in {holder}: pass collection={holder!r}" if holder else ""
+            return f"Not found: {doc_id!r} in {col_name}{hint}"
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): cleanup now runs BEFORE
         # the T3 delete, not after. PgVectorRepository#delete's anti-join
