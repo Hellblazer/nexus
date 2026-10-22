@@ -1666,7 +1666,7 @@ def _reembed_collection(
                     m["embedding_model"] = target_model
             # nexus-sghyo: no client-computed embeddings — the command
             # guard (reembed_cmd) has already pinned target_model ==
-            # the name-encoded model for service-backed handles, so the
+            # the row's model for service-backed handles, so the
             # server re-embeds with the correct model. force_re_embed=True
             # bypasses the existence-partition skip so every chash is
             # genuinely recomputed, not treated as already-current.
@@ -1744,7 +1744,8 @@ def _reembed_source_model(db: object, name: str) -> str:
     "--to", "target_model", required=True,
     type=click.Choice(_REEMBED_SUPPORTED_MODELS),
     help="Target embedding model; in service mode it must be the model the "
-         "collection name encodes.",
+         "collection's catalog row records (the model its name encodes when "
+         "no row backs the name).",
 )
 @click.option("--dry-run/--no-dry-run", default=True,
               help="Default dry-run. Pass --no-dry-run to actually write.")
@@ -1789,7 +1790,8 @@ def reembed_cmd(
 
     # nexus-u37lw (critique Critical): in service mode, upsert_chunks_with_
     # embeddings forwards TEXT and the server re-embeds by the model the
-    # COLLECTION NAME encodes (EmbedderRouter routes by name segment) —
+    # collection's catalog row records (EmbedderRouter routes by the row, the
+    # name's model only when no row backs it; nexus-dxifx) —
     # client-computed vectors are discarded. A --to that differs from the
     # encoded model would therefore silently no-op with the OLD model while
     # stamping the NEW model into metadata (corrupting staleness checks)
@@ -1797,7 +1799,7 @@ def reembed_cmd(
     # the rename --cross-model flow.
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    if not dry_run and is_service_backed(db):
+    if is_service_backed(db):
         encoded = _reembed_source_model(db, name)
         if encoded != target_model:
             raise click.ClickException(

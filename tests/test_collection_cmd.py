@@ -1545,7 +1545,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
 
     result = _invoke(
         runner, fake_db,
-        ["re-embed", coll_name, "--to", "voyage-code-3"],
+        ["re-embed", coll_name, "--to", "voyage-context-3"],
     )
     assert result.exit_code == 0, result.output
     assert "dry-run" in result.output
@@ -1696,6 +1696,10 @@ def test_reembed_to_reads_the_source_model_from_the_catalog_row(runner, env_cred
     assert refused.exit_code != 0
     assert "'voyage-context-3'" in refused.output and "catalog row" in refused.output
     assert calls == [coll_name]  # the refused run wrote nothing
+
+    # the dry run runs the same check, so it does not promise a re-embed the real run refuses
+    dry = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-code-3"])
+    assert dry.exit_code != 0 and "catalog row" in dry.output
 
 
 @pytest.mark.t2_tenant

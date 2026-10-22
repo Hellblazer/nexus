@@ -321,7 +321,7 @@ def test_collection_reembed_dry_run_service_mode_real_client(
 
     with patch("nexus.commands.collection._t3", return_value=real_client):
         result = runner.invoke(
-            main, ["collection", "re-embed", coll, "--to", "voyage-code-3"],
+            main, ["collection", "re-embed", coll, "--to", "voyage-context-3"],
         )
     assert result.exit_code == 0, result.output
     assert "dry-run" in result.output
