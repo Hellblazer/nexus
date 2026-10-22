@@ -28,8 +28,9 @@ _PASS_LINE = {
     "lsg": "LOCAL-SERVICE GATE PASSED",
     "pkgup": "PACKAGE-UPGRADE CONVERGENCE MVV PASSED",
     "mvv": "FRESH-INSTALL MVV PASSED",
+    "dual": "DUAL-EMBEDDER GATE PASSED",
 }
-_GROUP = ("lsg", "pkgup", "mvv")
+_GROUP = ("lsg", "pkgup", "mvv", "dual")
 
 
 class _Battery:
@@ -51,6 +52,7 @@ class _Battery:
             ("tests/e2e/local-service-gate.sh", "lsg"),
             ("tests/e2e/fresh-install-mvv.sh", "mvv"),
             ("tests/e2e/migration-rehearsal/run.sh", "pkgup"),
+            ("tests/e2e/dual-embedder-gate.sh", "dual"),
         ):
             self._stub(rel, f'k={key}\n{self._leg_body()}')
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
@@ -102,7 +104,7 @@ def _row(out: str, leg: str) -> str:
 
 def test_a_clean_run_passes_and_runs_the_preflight_and_every_leg(battery: _Battery) -> None:
     """The control case for everything below: stub legs print their pass lines and the battery ends
-    PASSED. The battery is exactly the preflight plus the three legs."""
+    PASSED. The battery is exactly the preflight plus the four legs."""
     r = battery.run()
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert r.stdout.rstrip().splitlines()[-1] == "RELEASE BATTERY PASSED", r.stdout
@@ -121,7 +123,7 @@ def test_only_names_a_real_leg_and_skips_the_rest(battery: _Battery) -> None:
 
 def test_a_red_preflight_is_a_red_and_does_not_stop_the_legs(battery: _Battery) -> None:
     """The preflight reports every red and the battery carries on: its red ends the battery FAILED
-    while the three legs still ran. Mutation (abort the battery on a preflight red): the legs never
+    while the four legs still ran. Mutation (abort the battery on a preflight red): the legs never
     run."""
     battery.set_leg("preflight", "PREFLIGHT FAILED -- fix ALL of the above\n", 1)
     r = battery.run()
@@ -137,6 +139,22 @@ def test_a_red_leg_makes_the_battery_exit_nonzero(battery: _Battery) -> None:
     assert r.returncode == 1, (r.stdout, r.stderr)
     assert "RELEASE BATTERY FAILED: 1 red leg(s)" in r.stdout
     assert _row(r.stdout, "pkgup").startswith("FAILED")
+
+
+def test_a_red_dual_embedder_gate_fails_the_battery_and_a_green_one_is_required_to_pass(battery: _Battery) -> None:
+    """nexus-oc2bk (RDR-210 P5.2). The dual-embedder gate is a battery leg: a gate that fails (an absent
+    Voyage key included, which the gate reports as a failure and never a skip) makes the battery FAILED,
+    and ``--only dual`` runs it alone. Mutation (drop the leg from the battery): the first run never
+    runs it and the second names an unknown leg."""
+    battery.set_leg("dual", "dual-embedder gate: FAIL no Voyage API key\n", 1)
+    r = battery.run()
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "RELEASE BATTERY FAILED: 1 red leg(s)" in r.stdout
+    assert _row(r.stdout, "dual").startswith("FAILED") and "dual" in battery.ran_legs()
+    battery.set_leg("dual", _PASS_LINE["dual"] + "\n", 0)
+    r = battery.run("--only", "dual")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert _row(r.stdout, "dual").startswith("PASSED") and _row(r.stdout, "lsg").startswith("SKIPPED"), r.stdout
 
 
 def test_a_leg_that_exits_zero_without_its_verdict_line_is_missing_not_passed(battery: _Battery) -> None:
