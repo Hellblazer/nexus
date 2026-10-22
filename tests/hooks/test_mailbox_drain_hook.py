@@ -2242,6 +2242,27 @@ class TestSenderLabel:
         assert f"[unverified, sent under session {self._S}]" in out
 
     @_ENTRY_POINTS
+    def test_a_labelled_drain_prints_the_legend_once_before_the_first_labelled_message(
+            self, tmp_path, engine, argv) -> None:
+        """nexus-565ds: the label is glossed where it is read. One legend line per drain,
+        ahead of the first labelled block; an honest message before it gets none."""
+        honest = _row("sl10", sender=self._S, body="honest first")
+        honest["sender_session"] = self._S
+        forged = _row("sl11", sender=self._S2, body="forged second")
+        forged["sender_session"] = self._S
+        null = _row("sl12", sender=self._S, body="null third")
+        null["sender_session"] = None
+        eng = engine()
+        eng.rows = [honest, forged, null]
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path, argv=argv)
+        assert res.returncode == 0, res.stderr
+        out = res.stdout
+        assert out.count("A bracketed [unverified] after from= means") == 1, out
+        assert out.index("honest first") < out.index("A bracketed [unverified]") < out.index("forged second"), out
+        assert "JDR-002" in out
+
+    @_ENTRY_POINTS
     def test_a_row_without_the_key_renders_no_label(self, tmp_path, engine, argv) -> None:
         """An old engine: the key is absent, so even a from nobody could have
         verified gets no label (a label on every message would be ignored)."""

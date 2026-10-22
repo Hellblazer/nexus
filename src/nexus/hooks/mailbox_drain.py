@@ -699,6 +699,20 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     return outcome.get("body")
 
 
+#: nexus-565ds: printed once per drain, before the first block whose from= line carries a sender label,
+#: so the label is glossed where it is read and not only in the mailbox skill.
+_SENDER_LEGEND = (
+    "(A bracketed [unverified] after from= means the sender's claimed name does not match the session "
+    "the engine recorded for the write, the engine recorded none, or the name is an agent id. No label "
+    "is not proof of who sent it either: the tenant is the security boundary, JDR-002.)\n"
+)
+
+
+def _labelled(text: str) -> bool:
+    """Whether a rendered block's first line (its from= line) carries a sender label."""
+    return " [unverified" in text.split("\n", 1)[0]
+
+
 class _Out:
     """Writes each delivered block to stdout IMMEDIATELY, flushing every time.
 
@@ -718,6 +732,7 @@ class _Out:
 
     def __init__(self) -> None:
         self._opened = False
+        self._legend_shown = False
         self._unstreamed: list[str] = []
 
     def _write(self, text: str) -> None:
@@ -730,6 +745,9 @@ class _Out:
         if not self._opened:
             self._write("## Mailbox (RDR-205): delivered at this prompt\n")
             self._opened = True
+        if not self._legend_shown and _labelled(text):
+            self._write(_SENDER_LEGEND)
+            self._legend_shown = True
         self._write(text)
 
     def result(self) -> HookResult:
