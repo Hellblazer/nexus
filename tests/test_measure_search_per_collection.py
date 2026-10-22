@@ -232,3 +232,35 @@ def test_failed_collections_are_recorded_with_their_error_kind(monkeypatch):
     assert res["failed"] and res["isolated"] == [(cols[0], "statement_timeout")]
     assert any("statement_timeout" in line for line in lines)
     assert res["route_served"] == 2 and res["search_calls"] == 0
+
+
+# ── nexus-pq3wr: the --lexical mode ──────────────────────────────────────────
+
+
+def test_the_lexical_mode_times_the_field_against_the_hybrid_fallback(monkeypatch):
+    """With the field the lexical arms ride the route (no /hybrid-search call); without
+    it the engine echoes no lexical and the client runs the leg on /hybrid-search. Both
+    paths are recorded per round, with each arm's lexical_error_kind."""
+    engine, cols, make_client = _world(monkeypatch, route=True)
+    engine.serve_lexical = True
+    engine.lexical_errors = {cols[0]: ("statement_timeout", "the statement bound")}
+    out: list[str] = []
+    res = drv.measure_lexical(
+        rounds=2, warmup=0, ks=(), cols=cols, make_client=make_client, search=search_cross_corpus,
+        diag_type=SearchDiagnostics, emit=out.append, pause_s=0.0, sleep=lambda s: None,
+    )
+    runs = res["runs"]
+    assert {r["path"] for r in runs} == {"field", "nofield"} and len(runs) == 4
+    field = [r for r in runs if r["path"] == "field"]
+    nofield = [r for r in runs if r["path"] == "nofield"]
+    assert all(r["lexical_served"] for r in field) and not any(r["lexical_served"] for r in nofield)
+    # the one timed-out arm is retried on /hybrid-search; without the field every group's leg is
+    assert all(r["hybrid_calls"] >= 1 for r in field) and all(r["lexical_kinds"] == {"statement_timeout": 1} for r in field)
+    assert all(r["hybrid_calls"] > r_f["hybrid_calls"] for r, r_f in zip(nofield, field)) or all(
+        r["hybrid_calls"] >= 1 for r in nofield)
+    assert any("MEDIAN wall" in line for line in out) and any("WINDOW utc" in line for line in out)
+
+
+def test_the_lexical_mode_queries_are_marked_and_distinct():
+    qs = [drv.lexical_query(p) for p in ("field", "nofield")] + [drv.lexical_query("conc", k=3, i=i) for i in range(3)]
+    assert len(qs) == len(set(qs)) and all(drv.LEXICAL_MARKER in q for q in qs)
