@@ -148,7 +148,7 @@ def test_get_json_names_the_collection(t3):
     import json
 
     out = _nx("get", H_ODD, "--collection", "art", "--json")
-    assert json.loads(out.output)["collection"] == ODD
+    assert json.loads(out.stdout)["collection"] == ODD
 
 
 def test_a_fully_qualified_name_is_that_one_collection(t3):

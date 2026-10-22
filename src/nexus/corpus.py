@@ -1559,8 +1559,9 @@ def t3_collection_names_for_read(user_arg: str, *, t3: object | None = None) -> 
 
     try:
         rows = sibling_candidate_rows(t3)
-    except Exception:  # noqa: BLE001 — a listing that cannot be read leaves the one name the single-name resolver picked; a read must not fail on the sibling lookup
-        _log.warning("t3_collection_names_for_read_rows_unavailable", collection=primary, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a listing that cannot be read leaves the one name the single-name resolver picked; a read must not fail on the sibling lookup
+        # The cause, not a traceback: a CLI read prints the log to the terminal (nexus-9ts7n).
+        _log.warning("t3_collection_names_for_read_rows_unavailable", collection=primary, error=repr(exc))
         return [primary]
     mine = next((r for r in rows if r.get("name") == primary), None)
     if mine is None:
