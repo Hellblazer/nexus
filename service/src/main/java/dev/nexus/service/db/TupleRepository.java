@@ -841,6 +841,22 @@ public final class TupleRepository {
     private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
                                      Map<String, String> keys, Map<String, String> dims,
                                      String nonce, String body) {
+        return computeId(tenant, subspace, t, keys, dims, NONCE_FIELD, nonce, body);
+    }
+
+    /**
+     * The label {@code ackWithReply} digests in place of {@code "nonce"} (bead nexus-b747g).
+     * A reply's nonce is hex(request id), which any tenant caller can read through rd; under
+     * the shared label an {@code out} carrying that nonce computed the reply's id first and
+     * took it. {@link #digestField} length-prefixes every field, so a stream carrying this
+     * label never equals one carrying {@code "nonce"}, and no {@code out} can produce a
+     * reply id whatever nonce it sends.
+     */
+    private static final String REPLY_NONCE_LABEL = "reply-nonce";
+
+    private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
+                                     Map<String, String> keys, Map<String, String> dims,
+                                     String nonceLabel, String nonce, String body) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             digestField(md, tenant);
@@ -858,7 +874,7 @@ public final class TupleRepository {
                     // nothing further
                 }
                 case KEYS_NONCE -> {
-                    digestField(md, "nonce");
+                    digestField(md, nonceLabel);
                     digestField(md, nonce);
                 }
                 case KEYS_BODY -> {
@@ -1992,7 +2008,9 @@ public final class TupleRepository {
     /**
      * A reply to write in the same transaction that consumes the request. The nonce is
      * deliberately absent: the engine sets it to {@code hex(consumed row id)} and no
-     * caller, tool or flag may supply one (RDR-206, Sam's decision 2026-09-11).
+     * caller, tool or flag may supply one (RDR-206, Sam's decision 2026-09-11). It is
+     * digested under its own label, so an {@code out} carrying the same nonce gets a
+     * different id and cannot take the reply's (bead nexus-b747g).
      */
     public record ReplySpec(String subspace, Map<String, String> keys, Map<String, String> dims,
                             String body, Long ttlSeconds) {
@@ -2048,7 +2066,7 @@ public final class TupleRepository {
             TuplesRecord consumed = consumeClaim(ctx, tenant, claimId, claimant);
             String nonce = HexFormat.of().formatHex(consumed.getId());
             byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
-                    prepared.keys(), prepared.dims(), nonce, reply.body());
+                    prepared.keys(), prepared.dims(), REPLY_NONCE_LABEL, nonce, reply.body());
             return writeOut(ctx, tenant, prepared, reply.body(), id);
         });
         // Signal AFTER the commit, and only for the reply's subspace: a parked reader
