@@ -1830,6 +1830,9 @@
     -->
     <include file="db/changelog/tuples-008-sender-session.xml"/>
 
+    <!-- nexus-8oxsb: partial index for the bounded /v1/memory/list and its count. Index only; after tuples-008, before the grants. -->
+    <include file="db/changelog/memory-005-live-project-timestamp-index.xml"/>
+
     <!--
         Bead nexus-x907o: nexus.tuples.claimed_at, when the row's current claim started. ADD COLUMN
         only, no DATA EFFECT. After tuples-008-sender-session.xml (current tail), before the

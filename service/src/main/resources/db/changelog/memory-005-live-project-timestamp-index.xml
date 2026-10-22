@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-8oxsb: a partial index on nexus.memory (tenant_id, project, timestamp DESC, id DESC)
+    WHERE quarantined_at IS NULL, for the bounded /v1/memory/list read.
+
+    WHY. Since nexus-xn9ut a bounded list (MemoryRepository.listEntries with a limit) runs two
+    queries: the newest N live rows of a project, ORDER BY timestamp DESC, id DESC, and
+    countEntries, a count(*) of the same rows for the "N more" line. The list was never the cost:
+    the planner already walks idx_memory_tenant_timestamp with an incremental sort. The count
+    was, a sequential scan of the table on every bounded read. Measured on PG17.5 with the live
+    store's shape (5,857 rows, ~5.4 KB content, the nexus project 65% of rows), as a non-superuser
+    under FORCE RLS (critique T2 nexus/critique-nexus-8oxsb-e84984b1c):
+      - count:  6.1 ms -> 0.87 ms (generic plan 1.6 -> 0.78 ms), index-only scan
+      - list:   0.14 ms -> 0.06 ms
+    A few ms per namespace a hook renders. A full (non-partial) index of the same columns leaves
+    the count a seq scan, because quarantined_at is only in the heap; the predicate is what lets
+    the count stay in the index. Every live read path filters quarantined_at IS NULL
+    (MemoryRepository.NOT_QUARANTINED), so the index covers exactly the rows those reads return.
+
+    BUILD WINDOW (the memory-004 precedent): plain CREATE INDEX, not CONCURRENTLY, which a
+    Liquibase changeset's transaction does not allow. nexus.memory measured 5,854 rows / 71 MB on
+    the live store (RDR-207 § Context); the build holds a SHARE lock (reads continue, writes wait)
+    for the time it takes to index those rows.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="memory-005-1" author="nexus-8oxsb">
+        <comment>
+            Partial index on nexus.memory (tenant_id, project, timestamp DESC, id DESC) WHERE
+            quarantined_at IS NULL for the bounded list and its count. Additive: no row changes.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_memory_live_tenant_project_ts
+    ON nexus.memory (tenant_id, project, timestamp DESC, id DESC)
+    WHERE quarantined_at IS NULL;
+        </sql>
+        <rollback>
+            <sql>DROP INDEX IF EXISTS nexus.idx_memory_live_tenant_project_ts;</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

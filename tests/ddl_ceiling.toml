@@ -73,7 +73,10 @@ migration_wal_bytes_per_worker = 11038000
 # to a fresh migration; commit 20a78bfeb.
 # 2107 -> 2108 (2026-10-22): catalog-045-1 (nexus-gacz0, idx_catalog_documents_title_md5_live) adds one CREATE INDEX
 # to a fresh migration; commit 535ab304e.
-migration_ddl_per_worker = 2108
+# 2108 -> 2109 (2026-10-22): memory-005-1 (nexus-8oxsb, parked since 2026-10-21 and landed after catalog-045-1) adds
+# one CREATE INDEX to a fresh migration; its earlier substrate run on chas measured ddl: migration=4212 over 2 workers
+# on the tree that had 2106.
+migration_ddl_per_worker = 2109
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
