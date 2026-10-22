@@ -562,6 +562,42 @@ def _write_session_file(sessions_dir, pid, **fields) -> None:
     (sessions_dir / f"{pid}.json").write_text(json.dumps(body), encoding="utf-8")
 
 
+def _log_everything() -> None:
+    """The suite filters structlog at WARNING; the INFO/DEBUG lines these
+    tests pin are dropped before `capture_logs` sees them. The autouse
+    `_restore_structlog_after_test` undoes this."""
+    import logging
+
+    import structlog
+
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    """Poll *predicate* until true: the registry arm sends from the lease
+    thread, so a test observes the engine call a moment after the arm."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+#: Every key a real Claude Code registry entry carries (read as a key list from a
+#: live ``~/.claude/sessions/*.json`` on 2026-10-22, Claude Code 2.x; values are
+#: dummies). Some entries also carry bridgeSessionId, hostSessionId, jobId and
+#: parkedJobId. resolve_session_name must read this shape, not just the five
+#: fields it uses.
+_REAL_SHAPE_KEYS = {
+    "cwd": "/work/project", "entrypoint": "cli", "messagingSocketPath": "/tmp/peer.sock",
+    "nameSince": 1_700_000_000_000, "nameSource": "user", "peerFeatures": ["a", "b"],
+    "peerProtocol": 1, "pidDomain": "host", "procStart": "Thu Oct 22 10:00:00 2026",
+    "startedAt": 1_700_000_000_000, "status": "idle", "statusUpdatedAt": 1_700_000_001_000,
+    "tmux": "", "version": "2.1.0",
+}
+
+
 class TestResolveSessionName:
     """`resolve_session_name` reads Claude Code's own session registry
     (`<config>/sessions/<pid>.json`) for the name of the live interactive
@@ -592,9 +628,69 @@ class TestResolveSessionName:
         from nexus.mcp.subscriptions import resolve_session_name
 
         sid = str(uuid.uuid4())
-        _write_session_file(tmp_path, 31, sessionId=sid, name="old-name", updatedAt=5)
-        _write_session_file(tmp_path, 32, sessionId=sid, name="new-name", updatedAt=9)
+        # Both orders: the newer entry in the file that sorts first fails "last file
+        # wins", and in the file that sorts last fails "first file wins".
+        _write_session_file(tmp_path, 31, sessionId=sid, name="new-name", updatedAt=9)
+        _write_session_file(tmp_path, 32, sessionId=sid, name="old-name", updatedAt=5)
         assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(31, 32)) == "new-name"
+        sid2 = str(uuid.uuid4())
+        _write_session_file(tmp_path, 41, sessionId=sid2, name="old-name-2", updatedAt=5)
+        _write_session_file(tmp_path, 42, sessionId=sid2, name="new-name-2", updatedAt=9)
+        assert resolve_session_name(sid2, sessions_dir=tmp_path, pid_alive=self._alive(41, 42)) == "new-name-2"
+
+    def test_a_full_real_shape_entry_resolves(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 61, sessionId=sid, name="nexus_3dc", **_REAL_SHAPE_KEYS)
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(61)) == "nexus_3dc"
+
+    def test_a_pid_that_overflows_the_liveness_probe_is_a_miss_not_a_raise(self, tmp_path) -> None:
+        from nexus.daemon.service_registry import pid_alive as real_pid_alive
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 10**30, sessionId=sid, name="huge-pid")
+        # the real probe, not a fake: pid_alive(10**30) raises OverflowError
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=real_pid_alive) is None
+
+    def test_a_huge_updated_at_and_a_deeply_nested_file_are_skipped_not_raised(self, tmp_path) -> None:
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        sid = str(uuid.uuid4())
+        (tmp_path / "71.json").write_text(
+            '{"sessionId": "%s", "kind": "interactive", "name": "n", "pid": 71, "updatedAt": %s}' % (sid, "9" * 400),
+            encoding="utf-8",
+        )
+        (tmp_path / "72.json").write_text("[" * 200_000, encoding="utf-8")
+        assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(71, 72)) is None
+
+    def test_a_miss_on_an_existing_dir_logs_one_info_line_without_contents(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        _log_everything()
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path, 81, sessionId=str(uuid.uuid4()), name="SECRET-NAME-OF-ANOTHER")
+        _write_session_file(tmp_path, 82, sessionId=str(uuid.uuid4()), name="another")
+        with capture_logs() as logs:
+            assert resolve_session_name(sid, sessions_dir=tmp_path, pid_alive=self._alive(81, 82)) is None
+        [line] = [e for e in logs if e["event"] == "session_name_unresolved"]
+        assert line["log_level"] == "info"
+        assert line["session_id"] == sid and line["sessions_dir"] == str(tmp_path) and line["files_read"] == 2
+        assert "SECRET-NAME-OF-ANOTHER" not in repr(logs)
+
+    def test_a_missing_dir_and_log_miss_false_log_nothing(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.mcp.subscriptions import resolve_session_name
+
+        _log_everything()
+        with capture_logs() as logs:
+            assert resolve_session_name("s", sessions_dir=tmp_path / "absent", pid_alive=self._alive()) is None
+            assert resolve_session_name("s", sessions_dir=tmp_path, pid_alive=self._alive(), log_miss=False) is None
+        assert [e for e in logs if e["event"] == "session_name_unresolved"] == []
 
     def test_missing_dir_unreadable_and_malformed_files_are_quiet_misses(self, tmp_path) -> None:
         from nexus.mcp.subscriptions import resolve_session_name
@@ -634,6 +730,7 @@ class TestArmSessionName:
         try:
             assert s.arm_session_name("nexus_3dc", store_factory=lambda: _fake_store_factory(fake)) is True
             assert s.leased_name == "nexus_3dc"
+            assert _wait_for(lambda: len(fake.calls) == 1)
             [(subspace, keys, dims, _nonce, ttl)] = fake.calls
             assert (subspace, keys, dims) == ("directory/nexus_3dc", {"name": "nexus_3dc"}, {"session_id": "sess-auto"})
             assert ttl == int(DIRECTORY_TTL_S)
@@ -665,6 +762,7 @@ class TestArmSessionName:
         s = SubscriptionSet(session_id="sess-auto")
         s.arm_session_name("from-registry", store_factory=factory)
         try:
+            assert _wait_for(lambda: len(fake.calls) == 1)
             s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
             assert s.leased_name == "chosen"
             released = [c for c in fake.calls if c[0] == "directory/from-registry" and c[4] == 1]
@@ -675,17 +773,19 @@ class TestArmSessionName:
         finally:
             s.shutdown()
 
-    def test_an_explicit_subscribe_of_the_same_name_is_idempotent_and_makes_it_a_choice(self, tmp_path) -> None:
+    def test_an_explicit_subscribe_of_the_same_name_is_idempotent_and_leaves_it_auto(self, tmp_path) -> None:
         fake = _FakeTuples()
         factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
         s = SubscriptionSet(session_id="sess-auto")
         s.arm_session_name("same", store_factory=factory)
         try:
+            assert _wait_for(lambda: len(fake.calls) == 1)
             before = len(fake.calls)
             s.subscribe("mailbox/same", templates=[], store_factory=factory, state_dir=tmp_path)
             assert len(fake.calls) == before  # no second arm
-            with pytest.raises(SchemaViolationError):
-                s.subscribe("mailbox/other", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+            # still auto: a different explicit name replaces it rather than being refused
+            s.subscribe("mailbox/other", templates=[], store_factory=factory, state_dir=tmp_path)
+            assert s.leased_name == "other"
         finally:
             s.shutdown()
 
@@ -695,6 +795,7 @@ class TestArmSessionName:
         try:
             assert s.arm_session_name("n", store_factory=lambda: _fake_store_factory(fake)) is True
             assert s.arm_session_name("n", store_factory=_poison_store_factory()) is False
+            assert _wait_for(lambda: len(fake.calls) == 1)
             assert len(fake.calls) == 1
         finally:
             s.shutdown()
@@ -748,6 +849,7 @@ class TestWaiterStartArmsTheSessionName:
         core, sid, fake, started = server
         core._start_channel_waiter()
         assert len(started) == 1
+        assert _wait_for(lambda: len(fake.calls) == 1)
         assert [(c[0], c[2]) for c in fake.calls] == [("directory/nexus_3dc", {"session_id": sid})]
         assert core._subscriptions._CACHE[sid].leased_name == "nexus_3dc"  # noqa: SLF001
 
@@ -756,6 +858,8 @@ class TestWaiterStartArmsTheSessionName:
         core._start_channel_waiter()
         core._channel.register_active_waiter(started[0])
         core._start_channel_waiter()
+        assert _wait_for(lambda: len(fake.calls) == 1)
+        time.sleep(0.1)
         assert len(fake.calls) == 1
 
     def test_no_registry_entry_still_starts_the_waiter_and_writes_nothing(self, server, tmp_path, monkeypatch) -> None:
@@ -775,3 +879,275 @@ class TestWaiterStartArmsTheSessionName:
         core._start_channel_waiter()
         assert len(started) == 1
         assert fake.calls == []
+
+
+class TestArmDoesNoEngineWorkOnTheCallingThread:
+    """The registry arm can be called from the asyncio loop (server start,
+    the deferred-mint callback, the `/clear` handoff tick), and `store.out`
+    is a blocking HTTP call with a 30 s client timeout. The first send is
+    the lease thread's first tick, never the caller's."""
+
+    def test_the_store_is_never_touched_on_the_calling_thread(self) -> None:
+        import threading
+
+        main = threading.get_ident()
+        touched_on: list[int] = []
+
+        class _ThreadRecordingTuples(_FakeTuples):
+            def out(self, *a, **k):
+                touched_on.append(threading.get_ident())
+                return super().out(*a, **k)
+
+        fake = _ThreadRecordingTuples()
+
+        @contextmanager
+        def factory():
+            touched_on.append(threading.get_ident())
+            yield type("_Db", (), {"tuples": fake})()
+
+        s = SubscriptionSet(session_id="sess-loop")
+        try:
+            assert s.arm_session_name("loop-safe", store_factory=factory) is True
+            assert _wait_for(lambda: len(fake.calls) == 1)
+            assert len(touched_on) >= 2  # the factory and the out(), both on the lease thread
+            assert main not in touched_on, "the engine was touched on the calling (asyncio loop) thread"
+        finally:
+            s.shutdown()
+
+    def test_an_explicit_subscribe_still_arms_synchronously(self, tmp_path) -> None:
+        fake = _FakeTuples()
+        s = SubscriptionSet(session_id="sess-explicit")
+        try:
+            s.subscribe("mailbox/chosen", templates=[], store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
+            assert len(fake.calls) == 1, "tuple_subscribe's first arm stays synchronous"
+        finally:
+            s.shutdown()
+
+    def test_an_engine_down_at_the_first_tick_is_retried_by_the_thread(self) -> None:
+        fake = _FakeTuples()
+        attempts = []
+
+        class _Flaky(_FakeTuples):
+            def out(self, *a, **k):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise ConnectionError("engine down")
+                return super().out(*a, **k)
+
+        flaky = _Flaky()
+        s = SubscriptionSet(session_id="sess-retry")
+        try:
+            s.arm_session_name("retry-me", store_factory=lambda: _fake_store_factory(flaky), lease_poll_s=0.01)
+            assert _wait_for(lambda: len(flaky.calls) == 1), "the heartbeat re-sends after the engine comes back"
+        finally:
+            s.shutdown()
+        del fake
+
+
+def test_the_registry_is_not_re_read_before_the_interval() -> None:
+    # NAME_RESOLVE_INTERVAL_S at its real 60 s: many lease-loop polls, no registry read.
+    fake, reads = _FakeTuples(), []
+    s = SubscriptionSet(session_id="sess-cadence")
+    try:
+        s.arm_session_name(
+            "steady", store_factory=lambda: _fake_store_factory(fake),
+            resolve=lambda: reads.append(1) or "steady", lease_poll_s=0.01,
+        )
+        assert _wait_for(lambda: len(fake.calls) >= 1)
+        time.sleep(0.3)
+        assert reads == []
+    finally:
+        s.shutdown()
+
+
+class TestNameFollowsTheRegistry:
+    """The lease thread re-reads the registry (at most once per
+    NAME_RESOLVE_INTERVAL_S, patched to 0 here) so a `/rename`, or a name the
+    startup read missed, reaches the directory without the model."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_resolve(self, monkeypatch):
+        import nexus.mcp.subscriptions as m
+
+        monkeypatch.setattr(m, "NAME_RESOLVE_INTERVAL_S", 0.0)
+
+    class _Registry:
+        def __init__(self, name) -> None:
+            self.name = name
+            self.reads = 0
+
+        def __call__(self):
+            self.reads += 1
+            return self.name
+
+    def _arm(self, s, fake, registry, name):
+        return s.arm_session_name(
+            name, store_factory=lambda: _fake_store_factory(fake), resolve=registry, lease_poll_s=0.01,
+        )
+
+    def test_a_rename_releases_the_old_row_and_arms_the_new_one(self) -> None:
+        fake, registry = _FakeTuples(), self._Registry("first")
+        s = SubscriptionSet(session_id="sess-rn")
+        try:
+            assert self._arm(s, fake, registry, "first") is True
+            assert _wait_for(lambda: any(c[0] == "directory/first" for c in fake.calls))
+            registry.name = "second"
+            assert _wait_for(lambda: any(c[0] == "directory/second" and c[4] != 1 for c in fake.calls))
+            assert any(c[0] == "directory/first" and c[4] == 1 for c in fake.calls), "old row released, not left to its TTL"
+            assert s.leased_name == "second"
+        finally:
+            s.shutdown()
+        assert any(c[0] == "directory/second" and c[4] == 1 for c in fake.calls), "shutdown releases the CURRENT name"
+
+    def test_a_startup_miss_is_retried_and_arms_the_late_name(self) -> None:
+        fake, registry = _FakeTuples(), self._Registry(None)
+        s = SubscriptionSet(session_id="sess-late")
+        try:
+            assert self._arm(s, fake, registry, None) is False
+            assert s.leased_name is None and fake.calls == []
+            # a repeat auto-arm while tracking is a no-op, not a second thread
+            assert self._arm(s, fake, registry, None) is False
+            registry.name = "late-name"
+            assert _wait_for(lambda: s.leased_name == "late-name")
+            assert _wait_for(lambda: any(c[0] == "directory/late-name" for c in fake.calls))
+        finally:
+            s.shutdown()
+
+    def test_a_miss_or_an_unsafe_name_keeps_the_held_row(self) -> None:
+        fake, registry = _FakeTuples(), self._Registry("held")
+        s = SubscriptionSet(session_id="sess-keep")
+        try:
+            self._arm(s, fake, registry, "held")
+            assert _wait_for(lambda: len(fake.calls) >= 1)
+            for value in (None, "has space", "sess-keep"):
+                registry.name = value
+                reads = registry.reads
+                assert _wait_for(lambda: registry.reads >= reads + 2)
+            assert s.leased_name == "held"
+            assert not any(c[4] == 1 for c in fake.calls), "nothing was released"
+        finally:
+            s.shutdown()
+
+    def test_an_explicit_name_is_never_swapped(self, tmp_path) -> None:
+        fake, registry = _FakeTuples(), self._Registry("auto-name")
+        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
+        s = SubscriptionSet(session_id="sess-expl")
+        try:
+            self._arm(s, fake, registry, "auto-name")
+            assert _wait_for(lambda: len(fake.calls) >= 1)
+            s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
+            registry.name = "renamed-later"
+            reads = registry.reads
+            time.sleep(0.2)
+            assert registry.reads == reads, "no resolver runs once the name is a choice"
+            assert s.leased_name == "chosen"
+            assert not any(c[0] == "directory/renamed-later" for c in fake.calls)
+        finally:
+            s.shutdown()
+
+    def test_an_explicit_subscribe_of_the_same_name_keeps_following_the_registry(self, tmp_path) -> None:
+        # The SessionStart line asks every model to subscribe the name it already holds;
+        # that must not pin it, or a /rename is never followed (nexus-u839f).
+        fake, registry = _FakeTuples(), self._Registry("same")
+        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
+        s = SubscriptionSet(session_id="sess-same")
+        try:
+            self._arm(s, fake, registry, "same")
+            assert _wait_for(lambda: len(fake.calls) >= 1)
+            s.subscribe("mailbox/same", templates=[], store_factory=factory, state_dir=tmp_path)
+            registry.name = "renamed-later"
+            assert _wait_for(lambda: s.leased_name == "renamed-later")
+            assert any(c[0] == "directory/renamed-later" for c in fake.calls)
+        finally:
+            s.shutdown()
+
+    def test_a_store_that_cannot_open_during_the_swap_keeps_the_held_row_and_retries(self) -> None:
+        registry = self._Registry("old")
+        state = {"down": False}
+        fake = _FakeTuples()
+
+        @contextmanager
+        def factory():
+            if state["down"]:
+                raise ConnectionError("engine down")
+            yield type("_Db", (), {"tuples": fake})()
+
+        s = SubscriptionSet(session_id="sess-eng")
+        try:
+            s.arm_session_name("old", store_factory=factory, resolve=registry, lease_poll_s=0.01)
+            assert _wait_for(lambda: len(fake.calls) >= 1)
+            registry.name = "new"
+            state["down"] = True
+            reads = registry.reads
+            assert _wait_for(lambda: registry.reads >= reads + 2)
+            assert s.leased_name == "old"
+            state["down"] = False
+            assert _wait_for(lambda: s.leased_name == "new")
+            assert _wait_for(lambda: any(c[0] == "directory/new" for c in fake.calls))
+        finally:
+            s.shutdown()
+
+    def test_an_engine_write_failure_during_the_swap_is_re_sent_by_the_heartbeat(self) -> None:
+        registry = self._Registry("old")
+        state = {"fail": False}
+
+        class _Tuples(_FakeTuples):
+            def out(self, *a, **k):
+                if state["fail"]:
+                    raise ConnectionError("engine down")
+                return super().out(*a, **k)
+
+        fake = _Tuples()
+        s = SubscriptionSet(session_id="sess-eng2")
+        try:
+            self._arm(s, fake, registry, "old")
+            assert _wait_for(lambda: len(fake.calls) >= 1)
+            registry.name = "new"
+            state["fail"] = True
+            assert _wait_for(lambda: s.leased_name == "new")
+            state["fail"] = False
+            assert _wait_for(lambda: any(c[0] == "directory/new" and c[4] != 1 for c in fake.calls)), (
+                "the new row is armed by the next 5 s heartbeat once the engine answers"
+            )
+        finally:
+            s.shutdown()
+
+
+class TestResolverLogsAMissOncePerRun:
+    def test_session_name_unresolved_is_not_repeated_by_the_sixty_second_re_read(self, tmp_path, monkeypatch) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.mcp import core as _core
+
+        _log_everything()
+        sid = str(uuid.uuid4())
+        _write_session_file(tmp_path / "sessions", 91, sessionId=str(uuid.uuid4()), name="other")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        resolve = _core._session_name_resolver(sid)
+        with capture_logs() as logs:
+            assert resolve() is None
+            assert resolve() is None
+            assert resolve() is None
+        assert [e["event"] for e in logs].count("session_name_unresolved") == 1
+        # found, then lost again: that miss is news and logs once more
+        entry = tmp_path / "sessions" / "92.json"
+        _write_session_file(tmp_path / "sessions", 92, sessionId=sid, name="back")
+        import nexus.daemon.service_registry as _sr
+
+        monkeypatch.setattr(_sr, "pid_alive", lambda _p: True)
+        with capture_logs() as logs:
+            assert resolve() == "back"
+            entry.unlink()
+            assert resolve() is None
+            assert resolve() is None
+        assert [e["event"] for e in logs].count("session_name_unresolved") == 1
+
+    def test_an_unsafe_registry_name_is_a_debug_line_and_no_arm(self) -> None:
+        from structlog.testing import capture_logs
+
+        _log_everything()
+        s = SubscriptionSet(session_id="sess-unsafe")
+        with capture_logs() as logs:
+            assert s.arm_session_name("has space", store_factory=_poison_store_factory()) is False
+        [line] = [e for e in logs if e["event"] == "session_name_unsafe"]
+        assert line["log_level"] == "debug" and line["session_id"] == "sess-unsafe"

@@ -1090,19 +1090,39 @@ def _waiter_session_id() -> str:
         return ""
 
 
+def _session_name_resolver(session_id: str) -> Callable[[], str | None]:
+    """A resolver for :meth:`SubscriptionSet.arm_session_name` that reads
+    Claude Code's session registry for *session_id* and logs a miss once per
+    run of misses (INFO ``session_name_unresolved``), not on every 60 s
+    re-read."""
+    missed = False
+
+    def _resolve() -> str | None:
+        nonlocal missed
+        name = _subscriptions.resolve_session_name(session_id, log_miss=not missed)
+        missed = name is None
+        return name
+
+    return _resolve
+
+
 def _arm_session_name(subs: Any) -> None:
     """Lease this session's `directory/<name>` row from the name Claude Code
     already knows (nexus-u839f), so `mailbox_send(to=<name>)` resolves after a
     restart or `--resume` without the model calling `tuple_subscribe`. Called
     from :func:`_start_channel_waiter`, which runs at server start, after a
-    deferred T1 mint and after a `/clear` handoff for the new id; the lease
-    is the set's ordinary one, renewed by its existing thread. Best-effort:
-    no name, an unreadable registry or an engine error is logged and
-    swallowed, and an explicit `tuple_subscribe` still works (and replaces
-    an auto-armed name)."""
+    deferred T1 mint and after a `/clear` handoff for the new id, on the
+    asyncio loop: the registry read is local file I/O, and the engine write
+    is the lease thread's first tick, never this call's. The lease thread
+    re-reads the registry every 60 s and swaps the row on a `/rename`, or
+    arms one a startup miss did not find. Best-effort: no name or an
+    unreadable registry is a logged miss (`session_name_unresolved`), and an
+    explicit `tuple_subscribe` still works (and replaces an auto-armed
+    name)."""
     try:
-        name = _subscriptions.resolve_session_name(subs.session_id)
-        if name and subs.arm_session_name(name, store_factory=_t2_ctx):
+        resolve = _session_name_resolver(subs.session_id)
+        name = resolve()
+        if subs.arm_session_name(name, store_factory=_t2_ctx, resolve=resolve):
             _log.info("session_name_armed", name=name, session_id=subs.session_id)
     except Exception as e:  # noqa: BLE001 — best-effort convenience; never blocks the waiter
         _log.warning("session_name_arm_failed", session_id=getattr(subs, "session_id", ""), error=str(e))

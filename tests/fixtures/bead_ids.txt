@@ -4826,6 +4826,7 @@ nexus-lcogi.1
 nexus-ld3aa
 nexus-ldab2
 nexus-lde88
+nexus-ldh33
 nexus-ldnp
 nexus-ldt0j
 nexus-ldztl
@@ -7172,6 +7173,7 @@ nexus-vlo2b
 nexus-vlzz0
 nexus-vm3og
 nexus-vm3t
+nexus-vmidh
 nexus-vn48
 nexus-vnpt
 nexus-vnz3d

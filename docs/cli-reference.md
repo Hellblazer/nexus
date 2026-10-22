@@ -5078,10 +5078,14 @@ Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints eac
 Mailbox push delivery has no CLI verb (RDR-211 nexus-rplay.14 deleted the
 prior CLI ping-then-pull watcher outright): a session's own nexus MCP
 server pushes its own mailbox over the Claude Code channel automatically,
-from startup, with no subscribe call needed. `tuple_subscribe("mailbox/<name>")`
-leases a NAME in the directory above, via the same MCP tool, so a peer can
-reach this session by name -- it is not a second delivered mailbox (RDR-208
-Phase 3, bead nexus-galkv.20). See
+from startup, with no subscribe call needed. The server also leases the
+session's NAME in the directory above by itself, from Claude Code's session
+registry, at start and after `/clear`, and re-reads it about once a minute
+(nexus-u839f), so a peer can reach this session by name with no model step.
+`tuple_subscribe("mailbox/<name>")` does the same lease explicitly: call it
+after a `/rename` you do not want to wait a minute for, or when peers cannot
+reach you by name. It is not a second delivered mailbox (RDR-208 Phase 3, bead
+nexus-galkv.20). See
 [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ## nx service

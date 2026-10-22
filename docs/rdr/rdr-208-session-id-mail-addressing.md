@@ -121,6 +121,9 @@ review showed it patches the identity this RDR demotes.
 - The watcher resolves the session id from its environment, and a hook from its
   input payload. No environment variable or hook input carries the
   `ListAgents` name; only the model, reading `ListAgents`, can supply it.
+  (Corrected 2026-10-22, nexus-u839f: Claude Code's session registry,
+  `~/.claude/sessions/<pid>.json`, does carry the name, and the MCP server now
+  reads it; see Revision History.)
 - Local mode runs one engine per machine. Sessions on different machines share
   an engine only when both point at the same managed `service_url`.
 
@@ -461,7 +464,10 @@ engine tag (T2 `nexus/plan-rdr-208-implementation-2026-09-14`).
 
 ### New Dependencies
 
-None.
+None at the time of writing. (Amended 2026-10-22, nexus-u839f: the client now
+reads Claude Code's undocumented session registry,
+`~/.claude/sessions/*.json`, to arm the name. A format change there degrades
+to the model arming the name; see `docs/tuple-space.md` § The directory lease.)
 
 ## Test Plan
 
@@ -605,3 +611,4 @@ behavior, the fork rule, and the TTL and heartbeat values.
 - 2026-09-18: The Fork section records a defect in the accepted design, fixed in 9c730421f: a fork fired no hook, so the parent's waiter pushed the parent's mail into the fork. A session handoff now moves the channel waiter, and a fork counts as one. The directory-lease infrastructure row follows RDR-211's deletion of the CLI watcher.
 - 2026-09-24: Phase 3 (transition) landed after the 7-day retention window. Client half (nexus-galkv.20): the drain hook and `tuple_subscribe` stop treating an instance-name mailbox as delivered; a subscribed name only arms its directory lease. Shipped in conexus 7.60.0 (R3). Engine half (nexus-galkv.24): the mailbox template refuses `address_kind: instance`, and rows already stored with it stay readable, claimable and ackable. Shipped in engine-service-v0.1.131, paired with conexus 7.61.0 (R4) and deployed armed at the client tag. Close record T2 `nexus/rdr-208-phase3-close-2026-09-24`.
 - 2026-10-22: `from_address` no longer takes any session-id shape: `mailbox_send` refuses a session id that is not the sender's own (nexus-2mv7y). The trust rule, that `from` is a claim and the tenant is the boundary, is JDR-002.
+- 2026-10-22: The name is now armed from Claude Code's session registry, not only by the model (nexus-u839f). The MCP server reads the live interactive entry of `~/.claude/sessions/*.json` whose `sessionId` is its own, leases `directory/<name>` when its channel waiter starts (server start, a deferred T1 mint, a `/clear` handoff for the new id), and re-reads it about once a minute on the lease thread, so a `/rename` is followed. An explicit `tuple_subscribe` replaces an auto-armed name and an explicit name is never replaced. The Technical Environment fact that only the model can supply the name and the "New Dependencies: None" claim are corrected in place; the design, the status and the rest of this document stand.

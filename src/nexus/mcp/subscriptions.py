@@ -100,6 +100,11 @@ DIRECTORY_HEARTBEAT_S: float = 60.0
 #: under test.
 _LEASE_POLL_S: float = 5.0
 
+#: How often the lease thread re-reads Claude Code's session registry for a
+#: renamed (or, after a startup miss, newly visible) session name
+#: (nexus-u839f). At most once per interval, from the lease thread itself.
+NAME_RESOLVE_INTERVAL_S: float = 60.0
+
 
 # ── The session's own name, from Claude Code's session registry (nexus-u839f) ─
 
@@ -116,6 +121,7 @@ def resolve_session_name(
     *,
     sessions_dir: Path | None = None,
     pid_alive: Callable[[int], bool] | None = None,
+    log_miss: bool = True,
 ) -> str | None:
     """The name Claude Code shows for the live interactive session whose id
     is *session_id*, read from ``<config>/sessions/<pid>.json`` (fields
@@ -123,21 +129,32 @@ def resolve_session_name(
     miss: no directory, an unreadable or malformed file, no matching entry,
     a non-interactive entry (a ``claude -p`` child), a dead pid, or no name.
     Never raises. Several live entries for one id (a resumed session beside
-    its old process's file) resolve to the most recently updated.
+    its old process's file) resolve to the most recently updated, whichever
+    file name sorts first.
 
     Only the five fields above are read; other keys in the files are
-    ignored and the ``*.key`` files beside them are never opened."""
+    ignored and the ``*.key`` files beside them are never opened.
+
+    This reads Claude Code's undocumented session registry, so a format
+    change shows up here as a miss on a directory that exists. With
+    *log_miss* that case logs one INFO ``session_name_unresolved`` line
+    (session id, directory, count of ``*.json`` files read; never their
+    contents). A missing directory logs nothing: the registry is simply
+    absent (another harness). The lease thread passes ``log_miss=False``
+    after its first miss so the 60 s re-resolve does not repeat the line."""
     if not session_id:
         return None
     if pid_alive is None:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
     base = sessions_dir if sessions_dir is not None else _claude_sessions_dir()
     best: tuple[float, str] | None = None
+    read = 0
     try:
         files = sorted(base.glob("*.json"))
     except OSError:
-        return None
+        files = []
     for path in files:
+        read += 1
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or data.get("sessionId") != session_id:
@@ -151,11 +168,28 @@ def resolve_session_name(
                 continue
             updated = data.get("updatedAt")
             rank = float(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else 0.0
-        except (OSError, ValueError, TypeError):
+        # RecursionError: json.loads on a deeply nested file; OverflowError:
+        # pid_alive(10**30) and float(10**400). A resolver that raised would
+        # cost the caller its whole arm, so every per-file failure is a skip.
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             continue
         if best is None or rank >= best[0]:
             best = (rank, name.strip())
-    return best[1] if best else None
+    if best is None:
+        if log_miss and _dir_exists(base):
+            _log.info(
+                "session_name_unresolved",
+                session_id=session_id, sessions_dir=str(base), files_read=read,
+            )
+        return None
+    return best[1]
+
+
+def _dir_exists(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 @dataclass
@@ -256,12 +290,15 @@ def _release_directory_entry(
 def _lease_loop(
     stop: threading.Event,
     store_factory: Callable[[], Any],
-    name: str,
+    name: str | None,
     session_id: str,
-    lease: _DirectoryLease,
+    lease: _DirectoryLease | None,
     ttl_s: float,
     heartbeat_s: float,
     poll_s: float,
+    *,
+    immediate: bool = False,
+    retarget: Callable[[threading.Event, str | None, _DirectoryLease | None], tuple[str | None, _DirectoryLease | None]] | None = None,
 ) -> None:
     """Background re-send loop for one leased name's directory
     lease. *store_factory* is called on every tick (never held across
@@ -271,16 +308,36 @@ def _lease_loop(
     closed when that block exits and must never be reused from this
     thread afterward. Stops promptly on *stop*; a heartbeat failure is
     logged and the loop continues (matches :func:`_directory_heartbeat`'s
-    own never-raise contract)."""
-    while not stop.wait(poll_s):
-        try:
-            with store_factory() as db:
-                _directory_heartbeat(
-                    db.tuples, name, session_id, lease,
-                    t=time.time(), pid=os.getpid(), ttl_s=ttl_s, heartbeat_s=heartbeat_s,
-                )
-        except Exception as e:  # noqa: BLE001 — background thread boundary; must never die silently OR crash the process
-            _log.warning("subscriptions_lease_tick_failed", name=name, error=str(e))
+    own never-raise contract).
+
+    *immediate* runs the first tick without waiting *poll_s*: the
+    registry-derived arm (nexus-u839f) leaves its first send to this
+    thread so the asyncio loop that started it never waits on the engine.
+
+    *retarget* (also the registry arm only) is called at most once per
+    :data:`NAME_RESOLVE_INTERVAL_S` and returns the (name, lease) to use
+    from then on; it is how a rename, or a name the startup read missed,
+    reaches this thread without a second one. *name* and *lease* are None
+    while no name has been found yet: the loop then only retargets."""
+    wait_s = 0.0 if immediate else poll_s
+    next_resolve = time.monotonic() + NAME_RESOLVE_INTERVAL_S
+    while not stop.wait(wait_s):
+        wait_s = poll_s
+        if name is not None and lease is not None:
+            try:
+                with store_factory() as db:
+                    _directory_heartbeat(
+                        db.tuples, name, session_id, lease,
+                        t=time.time(), pid=os.getpid(), ttl_s=ttl_s, heartbeat_s=heartbeat_s,
+                    )
+            except Exception as e:  # noqa: BLE001 — background thread boundary; must never die silently OR crash the process
+                _log.warning("subscriptions_lease_tick_failed", name=name, error=str(e))
+        if retarget is not None and time.monotonic() >= next_resolve:
+            next_resolve = time.monotonic() + NAME_RESOLVE_INTERVAL_S
+            try:
+                name, lease = retarget(stop, name, lease)
+            except Exception as e:  # noqa: BLE001 — background thread boundary, as above
+                _log.warning("subscriptions_name_retarget_failed", name=name, error=str(e))
 
 
 # ── The subscription set (RDR-211 Technical Design "Subscriptions") ────────
@@ -370,6 +427,13 @@ class SubscriptionSet:
     #: sessions registry) rather than an explicit ``tuple_subscribe``: only
     #: an auto-armed name may be replaced by a later explicit subscribe.
     _name_auto: bool = field(default=False, repr=False, compare=False)
+    #: Re-reads the registry for this session's name while the leased name
+    #: is auto-armed, or while auto-arming has not found one yet. None for
+    #: an explicit name and for no lease at all. The lease thread calls it
+    #: (:meth:`_retarget_session_name`); an explicit choice clears it.
+    _name_resolver: Callable[[], str | None] | None = field(default=None, repr=False, compare=False)
+    #: Guards the lease fields the lease thread swaps on a rename.
+    _lease_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
@@ -479,6 +543,7 @@ class SubscriptionSet:
         directory_heartbeat_s: float,
         lease_poll_s: float,
         auto: bool = False,
+        resolve: Callable[[], str | None] | None = None,
     ) -> None:
         """Arm *name*'s ``directory/<name>`` lease for this session. NEVER
         adds a mailbox entry: :attr:`leased_name` is bookkeeping only, read
@@ -487,16 +552,18 @@ class SubscriptionSet:
 
         *auto* marks a name taken from the sessions registry by
         :meth:`arm_session_name` (nexus-u839f). An explicit call for the
-        same name makes it a choice; an explicit call for a different name
-        replaces an auto one (its row is released) and is refused only
-        against an explicit one."""
+        same name is a no-op that leaves it auto, so the registry re-read
+        still follows a ``/rename`` (the SessionStart line asks every model
+        to subscribe the name it already holds); an explicit call for a
+        different name replaces an auto one (its row is released) and is refused only
+        against an explicit one. With *auto*, the first send is left to the
+        lease thread and *resolve* (if given) is what that thread re-reads
+        the name with."""
         if name == self.session_id:
             return  # already present from startup; not "a name"
         if self.leased_name is not None:
             if name == self.leased_name:
-                if not auto:
-                    self._name_auto = False
-                return  # idempotent re-arm of the same name
+                return  # idempotent re-arm of the same name; an auto name stays auto
             if not (self._name_auto and not auto):
                 raise SchemaViolationError(
                     f"this session already leases {self.leased_name!r}; only one "
@@ -504,16 +571,20 @@ class SubscriptionSet:
                 )
             self._stop_lease()  # replace the registry-derived name with the explicit one
             self.leased_name = None
-        self._start_lease(name, store_factory, directory_ttl_s, directory_heartbeat_s, lease_poll_s)
+        self._start_lease(
+            name, store_factory, directory_ttl_s, directory_heartbeat_s, lease_poll_s,
+            first_send_in_thread=auto, resolve=resolve if auto else None,
+        )
         self.leased_name = name
         self._name_auto = auto
         self._bump()
 
     def arm_session_name(
         self,
-        name: str,
+        name: str | None,
         *,
         store_factory: Callable[[], Any],
+        resolve: Callable[[], str | None] | None = None,
         directory_ttl_s: float = DIRECTORY_TTL_S,
         directory_heartbeat_s: float = DIRECTORY_HEARTBEAT_S,
         lease_poll_s: float = _LEASE_POLL_S,
@@ -523,21 +594,40 @@ class SubscriptionSet:
         The lease is the ordinary one: :meth:`_start_lease`'s thread renews
         it, and :meth:`shutdown` or a ``/clear`` handoff releases it.
 
-        True when armed. A quiet False, never a raise on the name, for a
-        name that is not a safe address name, this session's own id, or
-        when this set already leases a name (an explicit choice, or a
-        repeat call). An engine that is down at this moment is not
-        retried: the first arm is best-effort and the model's own
-        ``tuple_subscribe`` remains the fallback."""
-        if self.leased_name is not None or name == self.session_id:
+        Nothing here touches the engine: the caller may be the asyncio loop
+        (server start, the deferred-mint callback, the ``/clear`` handoff),
+        so the first send is the lease thread's first tick, a moment after
+        this returns, and a down engine is that thread's ordinary 5 s retry
+        rather than a stall. *resolve*, when given, is called by that thread
+        at most once per :data:`NAME_RESOLVE_INTERVAL_S` and swaps the row
+        when the name has changed (``/rename``, or a registry update that
+        lagged a ``/clear``); *name* may then be None, and the thread
+        starts without a lease and only looks for a name (a startup miss is
+        retried). An explicit name is never touched.
+
+        True when a lease for *name* is scheduled. A quiet False, never a
+        raise on the name, for a name that is not a safe address name, this
+        session's own id, or when this set already leases a name (an
+        explicit choice, or a repeat call) or already tracks one."""
+        if self.leased_name is not None or self._name_resolver is not None:
             return False
-        if not _SAFE_INSTANCE_NAME.fullmatch(name):
+        usable = name if name and name != self.session_id else None
+        if usable is not None and not _SAFE_INSTANCE_NAME.fullmatch(usable):
+            _log.debug("session_name_unsafe", session_id=self.session_id, name=usable)
+            usable = None
+        if usable is None:
+            if resolve is not None:
+                self._start_lease(
+                    None, store_factory, directory_ttl_s, directory_heartbeat_s, lease_poll_s,
+                    first_send_in_thread=True, resolve=resolve,
+                )
             return False
         self._arm_name_lease(
-            name, store_factory=store_factory, directory_ttl_s=directory_ttl_s,
-            directory_heartbeat_s=directory_heartbeat_s, lease_poll_s=lease_poll_s, auto=True,
+            usable, store_factory=store_factory, directory_ttl_s=directory_ttl_s,
+            directory_heartbeat_s=directory_heartbeat_s, lease_poll_s=lease_poll_s,
+            auto=True, resolve=resolve,
         )
-        return self.leased_name == name
+        return self.leased_name == usable
 
     def unsubscribe(self, subspace: str) -> None:
         """Remove *subspace*. The session's own mailbox can never be
@@ -588,46 +678,118 @@ class SubscriptionSet:
 
     def _start_lease(
         self,
-        name: str,
+        name: str | None,
         store_factory: Callable[[], Any],
         ttl_s: float,
         heartbeat_s: float,
         poll_s: float,
+        *,
+        first_send_in_thread: bool = False,
+        resolve: Callable[[], str | None] | None = None,
     ) -> None:
+        """Start the one lease thread. An explicit ``tuple_subscribe`` sends
+        the first arm HERE, synchronously, so a caller observing right after
+        it sees the directory entry. The registry-derived arm
+        (*first_send_in_thread*) never does: its callers can be the asyncio
+        loop, and ``store.out`` is a blocking HTTP call, so the thread's
+        first tick sends instead. *name* None (registry arm, nothing found
+        yet) starts the thread with no lease; it only runs *resolve*."""
         self._stop_lease()
-        lease = _DirectoryLease()
-        # Synchronous first arm: a caller observing right after subscribe()
-        # (or right after a resume-load restarts this same lease) must see
-        # the directory entry without racing the background thread's first
-        # tick.
-        with store_factory() as db:
-            _directory_heartbeat(
-                db.tuples, name, self.session_id, lease,
-                t=time.time(), pid=os.getpid(), ttl_s=ttl_s, heartbeat_s=heartbeat_s,
-            )
+        lease = _DirectoryLease() if name is not None else None
+        if name is not None and not first_send_in_thread:
+            with store_factory() as db:
+                _directory_heartbeat(
+                    db.tuples, name, self.session_id, lease,
+                    t=time.time(), pid=os.getpid(), ttl_s=ttl_s, heartbeat_s=heartbeat_s,
+                )
         stop = threading.Event()
+
+        def _retarget(stop_: threading.Event, cur: str | None, cur_lease: _DirectoryLease | None):
+            return self._retarget_session_name(
+                stop_, cur, cur_lease, resolve, store_factory, ttl_s, heartbeat_s,
+            )
+
         thread = threading.Thread(
             target=_lease_loop,
             args=(stop, store_factory, name, self.session_id, lease, ttl_s, heartbeat_s, poll_s),
-            name=f"rdr211-directory-lease-{name}",
+            kwargs={"immediate": first_send_in_thread, "retarget": _retarget if resolve is not None else None},
+            name=f"rdr211-directory-lease-{name or 'pending'}",
             daemon=True,
         )
-        self._lease_stop, self._lease_thread = stop, thread
-        self._lease, self._lease_name, self._lease_store_factory = lease, name, store_factory
+        with self._lease_lock:
+            self._lease_stop, self._lease_thread = stop, thread
+            self._lease, self._lease_name, self._lease_store_factory = lease, name, store_factory
+            self._name_resolver = resolve
         thread.start()
+
+    def _retarget_session_name(
+        self,
+        stop: threading.Event,
+        name: str | None,
+        lease: _DirectoryLease | None,
+        resolve: Callable[[], str | None] | None,
+        store_factory: Callable[[], Any],
+        ttl_s: float,
+        heartbeat_s: float,
+    ) -> tuple[str | None, _DirectoryLease | None]:
+        """Runs on the lease thread, at most once per
+        :data:`NAME_RESOLVE_INTERVAL_S`. Re-read the registry; when it names
+        a different safe name than the one held, release the old row and
+        arm the new one. A miss, an unsafe name, or no change keeps what is
+        held: a registry file caught mid-rewrite must not flap the row.
+        Never touches an explicit name (the resolver is gone then)."""
+        if resolve is None or stop.is_set() or self._name_resolver is not resolve:
+            return name, lease
+        found = resolve()
+        if found is None or found == name or found == self.session_id:
+            return name, lease
+        if not _SAFE_INSTANCE_NAME.fullmatch(found):
+            _log.debug("session_name_unsafe", session_id=self.session_id, name=found)
+            return name, lease
+        new_lease = _DirectoryLease()
+        try:
+            with store_factory() as db:
+                if name is not None and lease is not None:
+                    _release_directory_entry(db.tuples, name, self.session_id, lease)
+                _directory_heartbeat(
+                    db.tuples, found, self.session_id, new_lease,
+                    t=time.time(), pid=os.getpid(), ttl_s=ttl_s, heartbeat_s=heartbeat_s,
+                )
+        except Exception as e:  # noqa: BLE001 — engine/store failure: keep what is held, try again next interval
+            _log.warning("session_name_rename_failed", old=name, new=found, error=str(e))
+            return name, lease
+        with self._lease_lock:
+            committed = not stop.is_set() and self._name_resolver is resolve
+            if committed:
+                self._lease, self._lease_name, self.leased_name = new_lease, found, found
+                self._name_auto = True
+        if not committed:
+            # stopped (or made explicit) while the engine calls were in
+            # flight: the new row is nobody's, release it now.
+            try:
+                with store_factory() as db:
+                    _release_directory_entry(db.tuples, found, self.session_id, new_lease)
+            except Exception as e:  # noqa: BLE001 — best-effort; the row lapses by TTL
+                _log.warning("subscriptions_directory_release_failed", name=found, error=str(e))
+            return name, lease
+        _log.info("session_name_rearmed", old=name, new=found, session_id=self.session_id)
+        self._bump()
+        return found, new_lease
 
     def _stop_lease(self) -> None:
         """Stop the heartbeat thread, wait for an in-flight tick so it
         cannot re-send after the release, then release the row. Idempotent:
         a second call finds no lease and writes nothing."""
         stop, thread = self._lease_stop, self._lease_thread
-        lease, name, factory = self._lease, self._lease_name, self._lease_store_factory
-        self._lease_thread = self._lease_stop = None
-        self._lease = self._lease_name = self._lease_store_factory = None
         if stop is not None:
             stop.set()
-        if thread is not None and thread.is_alive():
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=_LEASE_POLL_S + 5.0)
+        with self._lease_lock:
+            lease, name, factory = self._lease, self._lease_name, self._lease_store_factory
+            self._lease_thread = self._lease_stop = None
+            self._lease = self._lease_name = self._lease_store_factory = None
+            self._name_resolver = None
         if lease is None or name is None or factory is None:
             return
         try:

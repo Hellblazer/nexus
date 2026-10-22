@@ -47,3 +47,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 
 ## Deferred to the next client release
+
+- `conexus/skills/mailbox/SKILL.md` (nexus-u839f): the session's name is armed automatically from Claude Code's session registry (server start, after `/clear`, re-read about once a minute); `tuple_subscribe` is the explicit form, for after a `/rename` or when peers cannot reach you by name. Needs the client release that carries the arm.
+- `conexus/skills/peer-messaging/SKILL.md` (nexus-u839f): a peer holds its name because its MCP server arms it from the registry; `tuple_subscribe` is the explicit form. Needs the client release that carries the arm.
