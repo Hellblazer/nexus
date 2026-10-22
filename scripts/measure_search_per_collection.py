@@ -623,6 +623,11 @@ def _live_world() -> tuple[list[str], Callable[[bool], Any], Callable[..., list]
     def make_client(route: bool) -> HttpVectorClient:
         client = HttpVectorClient()
         client.supports_per_collection_search = route  # type: ignore[misc]
+        # nexus-pq3wr: an unconfirmed client sends its route request under the
+        # process-wide single-flight probe lock, so K fresh clients in K threads ran
+        # one at a time. The process singleton is confirmed at construction from the
+        # cloud version probe (_seed_from_probe); do the same here.
+        client._per_collection_confirmed = route
         return client
 
     probe = make_client(True)
