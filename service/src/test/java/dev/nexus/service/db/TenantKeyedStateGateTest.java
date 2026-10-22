@@ -560,6 +560,7 @@ public class TenantKeyedStateGateTest {
                 + "dies when that request ends");
             notKeyed.put("TenantCreationBusyException.tenant", "payload of an exception thrown to one caller");
             notKeyed.put("UnregisteredCollectionException.tenant", "payload of an exception thrown to one caller");
+            notKeyed.put("CollectionSupersededException.tenant", "payload of an exception thrown to one caller (nexus-mp8ys)");
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");
