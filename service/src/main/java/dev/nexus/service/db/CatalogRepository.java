@@ -9331,14 +9331,16 @@ public final class CatalogRepository {
      * The collection-keyed tables that are deliberately NOT in {@link #COLLECTION_SCOPED_TABLES} (the
      * schema-parity gate's {@code _DOCUMENTED_EXCLUSIONS}), with their cross-model disposition: {@code
      * chunk_orphaned_at} goes with the source's chunks through the chunk foreign key's cascade,
-     * {@code pdf_pipeline} is a transient queue, {@code chash_remap} a permanent ledger (nexus-4nll0).
-     * The two job tables the RDR adds ({@code reembed_jobs}, {@code reembed_job_moves}, LEAVE) join this
-     * map with their changeset in Phase 6 Step 2.
+     * {@code pdf_pipeline} is a transient queue, {@code chash_remap} a permanent ledger (nexus-4nll0), and
+     * {@code reembed_jobs} (nexus-f98bg, Phase 6 Step 2) the job's own record of its source and target, kept
+     * after the source is deleted. {@code reembed_job_moves}, the RDR's second job table, is not here: it
+     * has no collection-named column, and {@code CrossModelDispositionParityTest} requires one.
      */
     static final Map<String, CrossModelDisposition> CROSS_MODEL_DISPOSITIONS_OUTSIDE_REGISTRY = Map.of(
         "chunk_orphaned_at", CrossModelDisposition.LEAVE,
         "pdf_pipeline",      CrossModelDisposition.LEAVE,
-        "chash_remap",       CrossModelDisposition.LEAVE);
+        "chash_remap",       CrossModelDisposition.LEAVE,
+        "reembed_jobs",      CrossModelDisposition.LEAVE);
 
     /**
      * The rename transaction refused to merge a populated retired target.

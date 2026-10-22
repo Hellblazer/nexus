@@ -1830,9 +1830,6 @@
     -->
     <include file="db/changelog/tuples-008-sender-session.xml"/>
 
-    <!-- nexus-8oxsb: partial index for the bounded /v1/memory/list and its count. Index only; after tuples-008, before the grants. -->
-    <include file="db/changelog/memory-005-live-project-timestamp-index.xml"/>
-
     <!--
         Bead nexus-x907o: nexus.tuples.claimed_at, when the row's current claim started. ADD COLUMN
         only, no DATA EFFECT. After tuples-008-sender-session.xml (current tail), before the
@@ -1846,6 +1843,15 @@
         (current tail), before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/catalog-045-title-md5-index.xml"/>
+
+    <!-- nexus-8oxsb: partial index for the bounded /v1/memory/list and its count. Index only; after catalog-045, before the grants. -->
+    <include file="db/changelog/memory-005-live-project-timestamp-index.xml"/>
+
+    <!--
+        RDR-210 P6.2 (nexus-f98bg): nexus.reembed_jobs and nexus.reembed_job_moves, the cross-model re-embed
+        job record and its per-document moves. DDL only, no row DML. After memory-005, before the grants.
+    -->
+    <include file="db/changelog/vectors-037-reembed-jobs.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

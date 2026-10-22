@@ -3796,6 +3796,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.pdf_pages",
     "nexus.pdf_pipeline",
     "nexus.plans",
+    # nexus.reembed_jobs, nexus.reembed_job_moves: RDR-210 P6.2 (nexus-f98bg,
+    # vectors-037-reembed-jobs.xml), the cross-model re-embed job record and its
+    # per-document moves; ENABLE + FORCE + tenant_isolation on both.
+    "nexus.reembed_job_moves",
+    "nexus.reembed_jobs",
     "nexus.relevance_log",
     # nexus.request_ledger: RDR-222 Phase 1 (nexus-yye8l.1, vectors-033-
     # request-ledger.xml), the per-request idempotency ledger for mutating

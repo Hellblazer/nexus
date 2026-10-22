@@ -1102,6 +1102,8 @@ _ALL_TENANT_TABLES = [
     "nexus.pdf_pipeline",
     "nexus.plans",
     "nexus.relevance_log",
+    "nexus.reembed_job_moves",  # RDR-210 P6.2 (nexus-f98bg, vectors-037; mirrors health._RLS_TENANT_TABLES)
+    "nexus.reembed_jobs",  # RDR-210 P6.2 (nexus-f98bg, vectors-037; mirrors health._RLS_TENANT_TABLES)
     "nexus.request_ledger",  # RDR-222 Phase 1 (nexus-yye8l.1, vectors-033; mirrors health._RLS_TENANT_TABLES)
     "nexus.retention_markers",
     "nexus.routing_events",  # nexus-gjv9b PART 2 (mirrors health._RLS_TENANT_TABLES)
