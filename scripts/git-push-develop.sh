@@ -466,8 +466,9 @@ fi
 # (tolerance 0). When the pushed range changes a test module and the tip is the
 # checkout's HEAD, scripts/tenant_delta.py counts the tests that mint a tenant
 # at the tip and at the remote branch and prints the difference as
-# PUSH_TENANT_HINT lines on stderr. A hint, never a refusal: any failure of the
-# count is ignored. NX_PUSH_TENANT_CHECK=0 skips it.
+# PUSH_TENANT_HINT lines on stderr. A hint, never a refusal: the count has a 30 s
+# budget, and a count that fails or runs out prints one "not counted" line and the
+# push goes on. NX_PUSH_TENANT_CHECK=0 skips it.
 _tenant_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # The changed names are captured first, not piped to `grep -q`: under pipefail a
 # grep that exits on its first match SIGPIPEs git diff and reads as no match.
@@ -476,10 +477,11 @@ if [[ "${NX_PUSH_TENANT_CHECK:-1}" != "0" && -n "$_tenant_root" && -f "$_tenant_
    && [[ "$tip" == "$(git rev-parse -q --verify HEAD 2>/dev/null || true)" ]] \
    && [[ "$_tenant_changed" == *.py* ]] \
    && command -v uv >/dev/null 2>&1; then
-  if _tenant_out="$(cd "$_tenant_root" && uv run --no-sync --quiet python scripts/tenant_delta.py \
-        --base "refs/remotes/$remote/$branch" --quiet-if-zero 2>/dev/null)" && [[ -n "$_tenant_out" ]]; then
+  _tenant_out="$(cd "$_tenant_root" && uv run --no-sync --quiet python scripts/tenant_delta.py \
+        --base "refs/remotes/$remote/$branch" --quiet-if-zero --budget-s 30 2>&1 || true)"
+  if [[ -n "$_tenant_out" ]]; then
     while IFS= read -r _tenant_line; do
-      echo "PUSH_TENANT_HINT $_tenant_line" >&2
+      echo "PUSH_TENANT_HINT ${_tenant_line:0:400}" >&2
     done <<<"$_tenant_out"
   fi
 fi

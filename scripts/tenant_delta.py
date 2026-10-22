@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -44,20 +45,24 @@ def changed_test_modules(repo: Path, base: str) -> list[str]:
     )
 
 
-def census(root: Path, modules: list[str]) -> dict[str, int]:
-    """Tenant-minting tests per module, collected under *root* (only modules that exist there)."""
+def census(root: Path, modules: list[str], *, deadline: float) -> dict[str, int]:
+    """Tenant-minting tests per module, collected under *root* (only modules that exist there),
+    finishing before *deadline* (a time.monotonic() value) or raising."""
     present = [m for m in modules if (root / m).is_file()]
     if not present:
         return {}
     with tempfile.TemporaryDirectory(prefix="tenant-census-") as tmp:
         out = Path(tmp) / "census.json"
         env = dict(os.environ, TENANT_CENSUS_OUT=str(out), NX_TEST_T2_SUBSTRATE="none", NX_NO_TELEMETRY="1",
-                   PYTHONPATH=os.pathsep.join([str(root), str(PLUGIN_DIR)]))
+                   PYTHONPATH=os.pathsep.join([str(root), str(root / "scripts"), str(PLUGIN_DIR)]))
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            raise RuntimeError("out of time budget")
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
              "-p", "_tenant_census_plugin", "--rootdir", str(root), "-c", str(root / "pyproject.toml"),
              *present],
-            cwd=root, env=env, capture_output=True, text=True, timeout=180,
+            cwd=root, env=env, capture_output=True, text=True, timeout=remaining,
         )
         # rc 0 or 5 (nothing collected) is a census; anything else means a module failed to
         # collect, which would read as zero tenant tests, so the count is refused instead.
@@ -67,12 +72,13 @@ def census(root: Path, modules: list[str]) -> dict[str, int]:
         return json.loads(out.read_text(encoding="utf-8"))
 
 
-def base_census(repo: Path, base: str, modules: list[str]) -> dict[str, int]:
-    """The same count at *base*: its tests/ and pyproject.toml, unpacked from git archive."""
+def base_census(repo: Path, base: str, modules: list[str], *, deadline: float) -> dict[str, int]:
+    """The same count at *base*: its tests/, scripts/ and pyproject.toml, unpacked from git archive."""
     with tempfile.TemporaryDirectory(prefix="tenant-base-") as tmp:
         root = Path(tmp)
+        present = _git(repo, "ls-tree", "--name-only", base, "--", "tests", "scripts", "pyproject.toml").split()
         archive = subprocess.run(
-            ["git", "-C", str(repo), "archive", "--format=tar", base, "tests", "pyproject.toml"],
+            ["git", "-C", str(repo), "archive", "--format=tar", base, *present],
             check=True, capture_output=True,
         ).stdout
         tar_path = root / "base.tar"
@@ -80,7 +86,7 @@ def base_census(repo: Path, base: str, modules: list[str]) -> dict[str, int]:
         with tarfile.open(tar_path) as tar:
             tar.extractall(root, filter="data")
         tar_path.unlink()
-        return census(root, modules)
+        return census(root, modules, deadline=deadline)
 
 
 def _say(text: str, *, err: bool = False) -> None:
@@ -99,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default="origin/develop", help="compare against the merge base with this ref")
     parser.add_argument("--quiet-if-zero", action="store_true", help="print nothing when the delta is zero")
     parser.add_argument("--strict", action="store_true", help="exit 1 when the branch adds tenant tests")
+    parser.add_argument("--budget-s", type=float, default=120.0,
+                        help="total seconds for both counts; over it, nothing is counted (exit 2)")
     parser.add_argument("--repo", type=Path, default=REPO, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
@@ -110,10 +118,15 @@ def main(argv: list[str] | None = None) -> int:
             _say("tenant delta: no test module changed")
         return 0
     try:
-        head = census(repo, modules)
-        base = base_census(repo, merge_base, modules)
+        deadline = time.monotonic() + args.budget_s
+        head = census(repo, modules, deadline=deadline)
+        base = base_census(repo, merge_base, modules, deadline=deadline)
+    except subprocess.TimeoutExpired:
+        _say(f"tenant delta: not counted, over the {args.budget_s:g} s budget "
+             f"({len(modules)} changed test module(s)); run scripts/tenant_delta.py by hand", err=True)
+        return 2
     except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
-        _say(f"tenant delta: could not count ({exc})", err=True)
+        _say(f"tenant delta: could not count ({str(exc)[:300]})", err=True)
         return 2
     rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules]
     delta = sum(h - b for _m, b, h in rows)

@@ -119,3 +119,25 @@ def test_a_module_that_fails_to_collect_is_refused_not_counted_as_zero(repo: Pat
     proc = _run(repo)
     assert proc.returncode == 2
     assert "could not count" in proc.stderr
+
+
+def test_a_count_over_its_budget_is_refused_and_says_so(repo: Path) -> None:
+    _commit(repo, {"tests/test_b.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
+            "head")
+    proc = _run(repo, "--budget-s", "0.5")
+    assert proc.returncode == 2
+    assert "not counted" in proc.stderr or "could not count" in proc.stderr
+
+
+def test_a_deselected_test_is_not_counted(repo: Path) -> None:
+    """The census runs after -m deselection: a test the default selection drops is not counted."""
+    _commit(repo, {
+        "pyproject.toml": _PYPROJECT.replace(
+            'markers = ["t2_tenant: mints a tenant"]',
+            'markers = ["t2_tenant: mints a tenant", "integration: e2e"]\naddopts = "-m \'not integration\'"'),
+        "tests/test_b.py": "import pytest\n\n@pytest.mark.integration\n@pytest.mark.t2_tenant\n"
+                           "def test_e2e():\n    pass\n",
+    }, "head")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stderr
+    assert "tests/test_b.py" not in proc.stdout

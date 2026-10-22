@@ -5,9 +5,15 @@ each module that will mint a test tenant, and write ``{module: count}`` to ``$TE
 A test mints one under the default substrate (``optin``, nexus-j23ni) when it carries the
 ``t2_tenant`` marker (module ``pytestmark`` included), or its fixture closure holds
 ``t2_tenant`` or ``t2_service_env`` (an alias for it under ``optin``; tests/conftest.py).
-Measured 2026-10-22 against CI's runtime count (tests/storage_touch_ceiling.toml's
-python_unit): 5042 at collection against 4940 at run time; the difference is tests that skip
-at run time, which a delta between two collections cancels.
+Measured 2026-10-22 against one CI run's reports: 5042 at collection against 4940 at run
+time, differing in 39 of 348 modules; the rest is inferred to be tests that skip at run time,
+which a delta between two collections cancels.
+
+The count runs last among the collection hooks, after ``-m`` deselection, so the
+integration/slow/lint tests the default selection drops are not counted (CI's python_unit
+shards drop them too). Not seen: a fixture other than the two named that requests the tenant
+at run time with ``request.getfixturevalue("t2_tenant")`` (on 2026-10-22 only a test double in
+tests/test_storage_touch_guard.py does).
 """
 from __future__ import annotations
 
@@ -15,9 +21,12 @@ import collections
 import json
 import os
 
+import pytest
+
 _TENANT_FIXTURES = ("t2_tenant", "t2_service_env")
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(session, config, items) -> None:
     counts: collections.Counter[str] = collections.Counter()
     for item in items:

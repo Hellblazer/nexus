@@ -221,14 +221,15 @@ class TestTenantHint:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert not (work / "tenant-stub-ran").exists()
 
-    def test_a_failing_count_is_ignored_and_the_push_goes_through(self, repos) -> None:
+    def test_a_failing_count_is_reported_and_the_push_goes_through(self, repos) -> None:
         origin, work = repos
         self._arm(work, rc=2)
         sha = self._touch_test(work)
         proc = _run(work, *_git("rev-list", "origin/develop..HEAD", cwd=work).split())
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert _remote_tip(origin) == sha
-        assert "PUSH_TENANT_HINT" not in proc.stderr
+        assert "PUSH_TENANT_HINT" in proc.stderr, "a count that fails must say so, not fall silent"
+        assert "--budget-s 30" in (work / "tenant-stub-ran").read_text()
 
 
 class TestDetachedSource:
