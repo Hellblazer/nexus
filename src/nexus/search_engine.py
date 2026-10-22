@@ -945,6 +945,11 @@ def _rerank_candidate_cap(
 #: sent as several requests and merged client-side.
 _PER_COLLECTION_MAX_COLLECTIONS = 256
 
+#: ``lexical_error_kind`` values (nexus-xd2rc) for which a collection's lexical
+#: arm is run again on ``/hybrid-search``: the route's statement bound or its
+#: fan-out budget stopped it, neither of which bounds that route.
+_LEXICAL_ARM_RETRY_KINDS: frozenset[str] = frozenset({"statement_timeout", "fanout_budget_exhausted"})
+
 #: ``error_kind`` values that mean "this collection's vector width does not
 #: match the query embedder's": the nexus-9tsdf stale-orphan class, handled
 #: by the dimension-mismatch path below.
@@ -1901,6 +1906,10 @@ def search_cross_corpus(
                     emb_by_col[name][r["id"]] = row_embeddings[i]
         stats = {e["collection"]: e for e in envelope["per_collection"]}
         served_lexical = lexical and envelope.get("lexical") is True
+        #: Collections whose lexical leg runs on /hybrid-search here: all of them
+        #: against an engine that did not serve it, else those whose lexical arm
+        #: ran out of time (below).
+        hybrid_cols: list[str] = group if lexical and not served_lexical else []
         if served_lexical:
             lex_failed = {
                 c: e["lexical_error"] or e["lexical_error_kind"]
@@ -1908,6 +1917,16 @@ def search_cross_corpus(
                 if (e["lexical_error"] is not None or e["lexical_error_kind"] is not None)
                 and e["error"] is None and e["error_kind"] is None
             }
+            # An arm the statement bound or the fan-out budget stopped (it shares
+            # the arm gate and the budget with every vector arm) is run again on
+            # /hybrid-search, outside them, as the leg ran before the route
+            # served it. Any other lexical failure refuses.
+            hybrid_cols = [
+                c for c in group
+                if stats.get(c, {}).get("lexical_error_kind") in _LEXICAL_ARM_RETRY_KINDS
+                and c in lex_failed
+            ]
+            lex_failed = {c: v for c, v in lex_failed.items() if c not in hybrid_cols}
             if lex_failed:
                 raise LexicalLegUnavailableError(
                     f"the lexical leg failed for {sorted(lex_failed)}: "
@@ -1957,13 +1976,13 @@ def search_cross_corpus(
                 "embeddings": emb_by_col[col],
             })
 
-        if lexical and not served_lexical:
-            desired = _desired_candidate_count(group, n_results, deep=True)
-            if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
-                n_batches = min(len(group), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
-                lex_batches = _chunked_collections(group, n_batches)
+        if hybrid_cols:
+            desired = _desired_candidate_count(hybrid_cols, n_results, deep=True)
+            if desired > QUOTAS.MAX_QUERY_RESULTS and len(hybrid_cols) > 1:
+                n_batches = min(len(hybrid_cols), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
+                lex_batches = _chunked_collections(hybrid_cols, n_batches)
             else:
-                lex_batches = [group]
+                lex_batches = [hybrid_cols]
 
             def _lex_batch(cols: list[str]) -> tuple[list[str], list[dict]]:
                 per_k = min(_desired_candidate_count(cols, n_results, deep=True),
@@ -1994,7 +2013,7 @@ def search_cross_corpus(
                     part["results"].append(_to_result(r, col))
             for col, part in live.items():
                 part["kept"] = len(part["results"])
-                part["lexical_ids"] = {
+                part["lexical_ids"] = part["lexical_ids"] | {
                     x.id for x in part["results"] if x.id in lexical_by_col[col]
                 }
         return parts

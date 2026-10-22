@@ -1186,10 +1186,28 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
-        engine.lexical_errors[cols[1]] = ("statement_timeout", "lexical statement timed out")
-        with pytest.raises(LexicalLegUnavailableError, match="lexical statement timed out"):
+        engine.lexical_errors[cols[1]] = (None, "lexical arm failed")
+        with pytest.raises(LexicalLegUnavailableError, match="lexical arm failed"):
             _search(engine, cols, lexical=True)
         assert _HYBRID not in engine.paths()
+
+    @pytest.mark.parametrize("kind", ["statement_timeout", "fanout_budget_exhausted"])
+    def test_a_lexical_arm_the_route_ran_out_of_time_for_runs_on_hybrid_search(self, monkeypatch, kind):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.lexical_errors[cols[1]] = (kind, "ran out of time")
+        engine.lexical_rows = [
+            {"id": "served", "content": "t", "distance": 0.9, "collection": cols[0]},
+            {"id": "retried", "content": "t", "distance": 0.9, "collection": cols[1]},
+        ]
+        results = _search(engine, cols, n=10, threshold_override=0.5, lexical=True)
+
+        hybrid = [b for p, b in engine.calls if p == _HYBRID]
+        assert [b["collections"] for b in hybrid] == [[cols[1]]]
+        ids = {r.id for r in results}
+        # threshold-exempt either way: the route served one, /hybrid-search the other
+        assert {"served", "retried"} <= ids
 
     def test_a_lexical_arm_of_a_failed_collection_is_that_collections_failure_only(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
