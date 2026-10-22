@@ -579,7 +579,6 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 1
 #       throughout this file.
 #   (d) tests/test_service_mode_cli_real_client.py::
 #       {test_collection_reembed_dry_run_service_mode_real_client,
-#       test_collection_reembed_cross_model_rejected_service_mode,
 #       test_collection_reembed_same_model_requests_server_side_re_
 #       embed} -- the pre-existing module-level `_KNOWLEDGE`/`_CODE`
 #       constants (predating this burn-down, used broadly throughout
@@ -692,7 +691,10 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 1
 # was deleted with db/reconcile's _is_same_model_passthrough and its tests.
 # 66 -> 65 (nexus-50uw6, RDR-210 P4.1): the pin that held the single-name read
 # resolver to one sibling was replaced by tests that spell no per-type token.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 65
+# 65 -> 64 (nexus-cnxjk, RDR-210 P6.3): test_collection_reembed_cross_model_rejected_service_mode was
+# deleted; in local mode a cross-model --to is a re-embed job, and the refusal outside it is pinned in
+# tests/test_reembed_verb.py.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 64
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

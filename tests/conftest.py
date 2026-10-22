@@ -3873,7 +3873,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # would touch shared pre-existing test infrastructure far outside
     # the three flagged tests' scope.
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
     #
     # Reason class "mode-self-test" (nexus-0y4c6 fix round, 2026-09-10,
