@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import glob
 import hashlib
 import os
 import re
@@ -1441,7 +1442,69 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
     if not any(_MAX_LOCKS_DIRECTIVE.match(l) for l in lines):
         lines.append(f"max_locks_per_transaction = {managed_max_locks}")
     lines.append(end)
-    conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _replace_conf(conf_path, "\n".join(lines) + "\n")
+
+
+#: Age past which a staged conf file is taken to be a killed writer's (nexus-bt46b).
+_STALE_STAGING_S: float = 600.0
+
+#: Windows: ``os.replace`` needs delete access to the conf, so a handle another
+#: process holds without delete sharing (an indexer, antivirus) fails it with a
+#: sharing violation for a moment. Bounded retries before giving up.
+_REPLACE_RETRIES: int = 5
+_REPLACE_RETRY_SLEEP_S: float = 0.1
+
+
+def _replace_retrying(src: str, dst: Path) -> None:
+    """``os.replace``, retried briefly on a Windows sharing violation."""
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_SLEEP_S)
+
+
+def _replace_conf(conf_path: Path, text: str) -> None:
+    """Write *text* to *conf_path* whole or not at all (nexus-bt46b).
+
+    Staged in a uniquely named file beside the conf and swapped in with
+    ``os.replace``, so a crash, a full disk, a concurrent reader or a second
+    writer never meets a truncated conf, which PostgreSQL would start on with
+    its defaults; two writers each publish a whole file and the last one wins.
+    A symlinked conf is written through to its target, as a plain write would
+    be. The staged file takes the conf's mode, and its owner when run as root.
+    A conf this process may not write is refused as a plain write would be: a
+    rename would replace a file its owner made read-only.
+    """
+    target = Path(os.path.realpath(conf_path))
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(f"{target} is not writable")
+    prefix = f".{target.name}."
+    # A staged file a killed writer left behind; a live writer's is seconds old.
+    cutoff = time.time() - _STALE_STAGING_S
+    for stale in target.parent.glob(f"{glob.escape(prefix)}*"):
+        with contextlib.suppress(OSError):
+            if stale.is_file() and stale.stat().st_mtime < cutoff:
+                stale.unlink()
+    fd, staged = tempfile.mkstemp(dir=target.parent, prefix=prefix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if target.exists():
+            shutil.copymode(target, staged)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                st = os.stat(target)
+                os.chown(staged, st.st_uid, st.st_gid)
+        _replace_retrying(staged, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(staged)
+        raise
 
 
 def apply_managed_conf_before_start(pgdata: Path, port: int) -> bool:

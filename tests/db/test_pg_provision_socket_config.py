@@ -177,3 +177,98 @@ def test_the_cold_start_rewrite_is_best_effort(tmp_path: Path, caplog) -> None:
     finally:
         conf.chmod(0o600)
     assert conf.read_text() == "shared_buffers = 128MB\n"
+
+
+# ── atomic rewrite (nexus-bt46b) ──────────────────────────────────────────────
+
+
+def test_a_rewrite_that_fails_part_way_leaves_the_previous_conf_whole(tmp_path: Path, monkeypatch) -> None:
+    """The bead's case: the new text is half written (here: the flush to disk
+    fails after the write). The live conf is unchanged and nothing is left."""
+    import os
+
+    import pytest
+
+    conf = tmp_path / "postgresql.conf"
+    original = "shared_buffers = 128MB\n# a comment\n"
+    conf.write_text(original)
+
+    def _disk_full(fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    from tests._module_seam import setattr_in
+
+    setattr_in(monkeypatch, "nexus.db.pg_provision", "os.fsync", _disk_full)
+    with pytest.raises(OSError):
+        _configure_cluster(tmp_path, 55432)
+    monkeypatch.undo()
+    assert conf.read_text() == original, "a failed rewrite truncated or changed the live conf"
+    assert [p.name for p in tmp_path.iterdir()] == ["postgresql.conf"], "the staged file was left behind"
+
+
+def test_two_rewrites_stage_to_different_files(tmp_path: Path, monkeypatch) -> None:
+    """Concurrent writers must not share a staging file (one would truncate the
+    other's): each rewrite stages to its own name."""
+    import os
+
+    staged: list[str] = []
+    real_replace = os.replace
+
+    def _record(src, dst):
+        staged.append(os.path.basename(src))
+        return real_replace(src, dst)
+
+    from tests._module_seam import setattr_in
+
+    setattr_in(monkeypatch, "nexus.db.pg_provision", "os.replace", _record)
+    _configure_cluster(tmp_path, 55432)
+    _configure_cluster(tmp_path, 55433)
+    assert len(staged) == 2 and staged[0] != staged[1]
+
+
+def test_a_symlinked_conf_is_written_through_to_its_target(tmp_path: Path) -> None:
+    import sys
+
+    import pytest
+
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges on Windows")
+    real = tmp_path / "real.conf"
+    real.write_text("shared_buffers = 128MB\n")
+    pgdata = tmp_path / "pgdata"
+    pgdata.mkdir()
+    (pgdata / "postgresql.conf").symlink_to(real)
+    _configure_cluster(pgdata, 55432)
+    assert (pgdata / "postgresql.conf").is_symlink()
+    assert "# nexus-managed: BEGIN" in real.read_text().splitlines()
+
+
+def test_the_rewrite_keeps_the_confs_mode_and_leaves_no_staging_file(tmp_path: Path) -> None:
+    import os
+    import stat
+    import sys
+
+    conf = tmp_path / "postgresql.conf"
+    conf.write_text("shared_buffers = 128MB\n")
+    if sys.platform != "win32":
+        conf.chmod(0o640)
+    _configure_cluster(tmp_path, 55432)
+    assert "# nexus-managed: BEGIN" in _conf_lines(tmp_path)
+    assert [p.name for p in tmp_path.iterdir()] == ["postgresql.conf"]
+    if sys.platform != "win32":
+        assert stat.S_IMODE(os.stat(conf).st_mode) == 0o640
+
+
+def test_a_killed_writers_staged_file_is_swept_and_a_fresh_one_kept(tmp_path: Path) -> None:
+    import os
+    import time
+
+    stale = tmp_path / ".postgresql.conf.deadbeef"
+    stale.write_text("half")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    fresh = tmp_path / ".postgresql.conf.inflight"
+    fresh.write_text("another writer's")
+    _configure_cluster(tmp_path, 55432)
+    assert not stale.exists()
+    assert fresh.exists(), "a staged file young enough to be a live writer's was removed"
