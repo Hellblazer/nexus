@@ -101,10 +101,17 @@ def test_the_hint_the_doctor_call_and_all_agree(label, rows, jobs, live, alld, o
     hint = rj.off_profile_hint(lambda: reader, jobs_reader=lambda: jobs)
     # The doctor's call (it passes the rows and profile it already read).
     doctor = rj.off_profile_collections(reader, rows=reader.list_collections(), profile=PROFILE, jobs=lambda: jobs)
-    # ``--all``: the stale and held rows it plans plus the re-entries that put a document back in play.
+    # ``--all`` lists the stale and held rows plus every re-entry. The doctor and the hint
+    # take all of it EXCEPT a cutover re-entry (a purged kept_tombstoned source: only the
+    # delete is left, nothing is stranded), the one deliberate difference; RDR-210 lists it
+    # for --all only (:856, :1810) and the S-R2-5 rule counts a source "holding a live document".
     found = rj.candidates(rows, PROFILE, jobs, lambda n: counts_live.get(n, 0), lambda n: counts_all.get(n, 0))
-    all_view = found.stale + [r for r, _ in found.held] + [x.source_row for x in found.reentries if x.kind == "running"]
-    assert _names(doctor) == _names(all_view), label
+    listed = found.stale + [r for r, _ in found.held] + [x.source_row for x in found.reentries]
+    cutover = [x.source_row for x in found.reentries if x.kind == "cutover"]
+    assert _names(doctor) == sorted(set(_names(listed)) - set(_names(cutover))), label
+    if "purged" in label:
+        assert _names(cutover) == ["docs__s"], "--all still lists the purged source as a cutover re-entry"
+        assert "docs__s" not in _names(doctor), "the doctor and the hint do not"
     assert ("docs__s" in _names(doctor)) is off, label
     assert (hint == rj.REEMBED_HINT) is bool(doctor), label
 
@@ -132,3 +139,28 @@ def test_an_unreadable_job_table_leaves_the_superseded_rows_out_and_keeps_the_st
 
 def test_no_profile_is_no_drift():
     assert rj.off_profile_collections(_Reader([_row("docs__a")]), profile={}) == []
+
+
+def test_a_held_stale_row_counts_once_a_superseded_row_forces_the_job_read():
+    """A stale row a running job holds stays off-profile: --all reports it as held, and the
+    doctor and the hint keep it (code review: dropping the held rows passed every other test)."""
+    rows = [_row("docs__h"), _source(), _target()]
+    jobs = [_job("docs__h", state="running"), _job("docs__s", disposition=KT)]
+    got = rj.off_profile_rows(rows, PROFILE, lambda: jobs, lambda n: 0, lambda n: 3)
+    assert _names(got) == ["docs__h"]
+    found = rj.candidates(rows, PROFILE, jobs, lambda n: 0, lambda n: 3)
+    assert [r["name"] for r, _ in found.held] == ["docs__h"]
+    reader = _Reader(rows, live={"docs__s": 0}, all_={"docs__s": 3})
+    assert _names(rj.off_profile_collections(reader, rows=rows, profile=PROFILE, jobs=lambda: jobs)) == ["docs__h"]
+
+
+def test_unreadable_doc_counts_leave_the_superseded_rows_out_and_keep_the_stale_ones():
+    rows = [_source(), _target(), _row("docs__a")]
+    jobs = [_job("docs__s", disposition=KT)]
+
+    def boom(name):
+        raise RuntimeError("engine down")
+
+    got = rj.off_profile_rows(rows, PROFILE, lambda: jobs, boom, boom)
+    assert _names(got) == ["docs__a"]
+
