@@ -243,6 +243,7 @@ def test_the_lexical_mode_times_the_field_against_the_hybrid_fallback(monkeypatc
     paths are recorded per round, with each arm's lexical_error_kind."""
     engine, cols, make_client = _world(monkeypatch, route=True)
     engine.serve_lexical = True
+    monkeypatch.delenv(hvc.ROUTE_LEXICAL_ENV, raising=False)  # the mode opts itself in (nexus-n51v1)
     engine.lexical_errors = {cols[0]: ("statement_timeout", "the statement bound")}
     out: list[str] = []
     res = drv.measure_lexical(

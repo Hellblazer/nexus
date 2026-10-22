@@ -26,6 +26,7 @@ from nexus.db.http_vector_client import (
     PerCollectionEnvelopeError,
     VectorServiceError,
     per_collection_route_enabled,
+    route_lexical_enabled,
 )
 from nexus.errors import (
     SearchEmbeddingProfileMismatchError,
@@ -1859,8 +1860,11 @@ def search_cross_corpus(
                 **rerank_cap_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
-                # nexus-xd2rc: the lexical arms ride the same request; absent keeps it byte-identical.
-                **({"lexical": True} if lexical else {}),
+                # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.
+                # nexus-n51v1: only on opt-in. One lexical arm per collection costs the engine about 280 ms
+                # each, so the field made a --lexical search 1.74x slower than the batched /hybrid-search
+                # leg the code below runs when the engine served no lexical.
+                **({"lexical": True} if lexical and route_lexical_enabled() else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(

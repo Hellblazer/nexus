@@ -488,6 +488,16 @@ def _lexical_search_once(
     }
 
 
+def _opt_in_route_lexical() -> None:
+    """The lexical mode measures the route's ``lexical`` field, which the client sends only on
+    ``NX_SEARCH_ROUTE_LEXICAL`` (nexus-n51v1); the ``nofield`` path drops it again."""
+    import os  # noqa: PLC0415
+
+    from nexus.db.http_vector_client import ROUTE_LEXICAL_ENV  # noqa: PLC0415
+
+    os.environ[ROUTE_LEXICAL_ENV] = "1"
+
+
 def measure_lexical(
     *,
     rounds: int,
@@ -504,6 +514,7 @@ def measure_lexical(
     """nexus-pq3wr: interleaved field / no-field rounds of a default ``--lexical``
     search, then K concurrent searches with the field. Sequential runs with *pause_s*
     between them."""
+    _opt_in_route_lexical()
     runs: list[dict] = []
 
     def _go(path: str, round_no: int) -> None:

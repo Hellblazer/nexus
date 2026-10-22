@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`--lexical` search runs its lexical leg on `/hybrid-search` again; the per-collection route's `lexical` field is sent only with `NX_SEARCH_ROUTE_LEXICAL=1`** (nexus-n51v1). With 7.84.0 and engine-service-v0.1.163, the field made the engine run one lexical statement per collection, about 280 ms each, and a `--lexical` search over 118 collections took a median of 11.99 s, against 6.90 s for the batched `/hybrid-search` leg (nexus-pq3wr, measured live 2026-10-22). A search without `--lexical` is unchanged. `NX_SEARCH_ROUTE_LEXICAL` (`1`, `true`, `on`, `yes`) keeps the route's lexical arms available for measurement.
 - **The engine's RDR-225 lock preflight counts the lock table Postgres guarantees (every backend slot), not `max_connections` alone** (nexus-xzit5, rides the engine tag after engine-service-v0.1.163). At the default `max_locks_per_transaction` of 64 the walk is refused above about 48 tenants instead of 39, and at the managed 128 above about 99 instead of 81.
 
 ## [7.84.0] - 2026-10-22

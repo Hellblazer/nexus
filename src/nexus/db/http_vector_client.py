@@ -3119,6 +3119,21 @@ def per_collection_route_enabled() -> bool:
     }
 
 
+#: nexus-n51v1: opt-in for the route's ``lexical`` field (nexus-xd2rc).
+ROUTE_LEXICAL_ENV = "NX_SEARCH_ROUTE_LEXICAL"
+
+
+def route_lexical_enabled() -> bool:
+    """True only when ``NX_SEARCH_ROUTE_LEXICAL`` is ``1``/``true``/``on``/``yes``.
+
+    Off by default (nexus-n51v1): with the field the engine runs one lexical arm per
+    collection, about 280 ms each, and a default ``--lexical`` search over 118
+    collections took 11.99 s against 6.90 s for the batched ``/hybrid-search`` leg
+    (engine-service-v0.1.163, 2026-10-22). Read on every search.
+    """
+    return os.environ.get(ROUTE_LEXICAL_ENV, "").strip().lower() in {"1", "true", "on", "yes"}
+
+
 #: The first engine release that serves ``/v1/vectors/search-per-collection``
 #: (engine-service-v0.1.147, 40ebdafce). A cloud client whose version probe
 #: read a release at or above it marks the route confirmed at construction,
