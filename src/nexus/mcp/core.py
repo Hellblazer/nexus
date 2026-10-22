@@ -3061,6 +3061,9 @@ def _search_render(
         #: a degrade is surfaced, never only logged).
         rerank_note: str | None = None
         cached = _page_cache_get(cache_key, need)
+        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+        #: handed to the boosts so the calibration reads the same rows.
+        model_of_out: list = []
         if cached is not None:
             results, diag, rerank_note = cached
         else:
@@ -3096,6 +3099,7 @@ def _search_render(
                 # nexus-ann50: measured without server rerank only; a reranked
                 # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
                 per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
+                model_of_out=model_of_out,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3109,6 +3113,7 @@ def _search_render(
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
                 window=boost_window,
+                model_of=model_of_out[-1] if model_of_out else None,
             )
             if lexical_rerank:
                 # Same consumption as the CLI's: scored rows lead in server
@@ -5163,6 +5168,9 @@ def query(
         # nexus-uro6c: capture threshold-filter diagnostics to surface a
         # threshold drop on a zero-hit (same rationale as the search tool).
         qdiag: list = []
+        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+        #: handed to the boosts so the calibration reads the same rows.
+        model_of_out: list = []
         results = search_cross_corpus(
             question, target, n_results=fetch_n, t3=t3, where=where_dict,
             catalog=_get_catalog(),
@@ -5170,6 +5178,7 @@ def query(
             taxonomy=_search_taxonomy(),
             telemetry=_search_telemetry_sink(),
             diagnostics_out=qdiag,
+            model_of_out=model_of_out,
             content_chars=_MCP_CONTENT_CHARS,
             # nexus-tnwm2: query groups by document and orders by
             # hybrid_score; it never reads _topic_label or _cluster_label.
@@ -5190,6 +5199,7 @@ def query(
             hybrid=cfg.get("search", {}).get("hybrid_default", False),
             tuning=get_tuning_config(),
             catalog=_get_catalog(),
+            model_of=model_of_out[-1] if model_of_out else None,
         )
         if not results:
             if structured:

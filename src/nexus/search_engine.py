@@ -1211,6 +1211,7 @@ def search_cross_corpus(
     deep_candidates: bool = False,
     content_chars: int | None = None,
     per_collection_k_cap: int | None = None,
+    model_of_out: "list[Callable[[str], str | None]] | None" = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1275,6 +1276,12 @@ def search_cross_corpus(
     instance summarising per-collection raw/dropped counts and threshold
     context. Used by the CLI to emit the silent-zero stderr note; the
     engine never emits stderr itself.
+
+    *model_of_out* (nexus-ml9vu), when provided as an empty list, receives the
+    row-preferred ``name -> model`` function this call built for grouping and
+    the thresholds. The caller hands it to :func:`apply_ranking_boosts`
+    (``model_of=``), so the calibration reads the same rows the retrieval did,
+    with no second row read per search.
 
     *deep_candidates* (nexus-abdp2): size every batch with the deep
     per-collection floor, ``max(5, n_results * mult)``. A caller that
@@ -1467,6 +1474,8 @@ def search_cross_corpus(
     # (the name's token only when no row backs it), once for this search. Grouping
     # and the per-family thresholds below share it.
     model_of = _collection_model_resolver(t3, collections)
+    if model_of_out is not None:
+        model_of_out.append(model_of)
 
     def _threshold_for(col: str) -> float | None:
         """The distance threshold applied to *col*: ``None`` when thresholds
@@ -2369,6 +2378,7 @@ def apply_ranking_boosts(
     tuning: TuningConfig | None = None,
     catalog: Any | None = None,
     window: int | None = None,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Apply the CLI's post-retrieval ranking boosts — hybrid scoring
     (RDR-frecency) then bibliographic quality boost (RDR-055 E2) — and
@@ -2416,6 +2426,12 @@ def apply_ranking_boosts(
     and a deeper pool only extends the tail. A pool of *window* rows or fewer
     is the whole window: the same scores as ``window=None``.
 
+    *model_of* (nexus-ml9vu) is the row-preferred ``name -> embedding model``
+    function the retrieval already built (:func:`search_cross_corpus`'s
+    ``model_of_out``), so each collection's calibration factor follows its
+    catalog row's model, as grouping and the thresholds do, rather than the
+    model its NAME implies. Omitted, the factors come from the name alone.
+
     Does NOT apply, by design, to result rows that never carry the
     metadata these boosts read:
 
@@ -2446,6 +2462,7 @@ def apply_ranking_boosts(
         "frecency_weight": _tuning.frecency_weight,
         "file_size_threshold": _tuning.file_size_threshold,
         "catalog": catalog,
+        "model_of": model_of,
     }
     if window is None:
         return apply_quality_boost(apply_hybrid_scoring(results, **scoring_kwargs))
@@ -2455,7 +2472,7 @@ def apply_ranking_boosts(
     # shallower one, and the order today's page is cut in when the boosts do
     # not reorder it. The collection/id tiebreak makes the cut, and every score
     # tie below, a function of the rows and not of the order they arrived in.
-    by_distance = order_by_calibrated_distance(results)
+    by_distance = order_by_calibrated_distance(results, model_of=model_of)
     head, tail = by_distance[:window], by_distance[window:]
     head = apply_quality_boost(apply_hybrid_scoring(head, **scoring_kwargs))
     if tail:
