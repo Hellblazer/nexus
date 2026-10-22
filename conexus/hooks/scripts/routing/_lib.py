@@ -550,6 +550,10 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
 #: hardcoded, not imported, because this script has no ``nexus`` import.
 _DEFAULT_TENANT = "default"
 
+#: The ``session_id`` of the payload :func:`run_hook` read; one hook process
+#: handles one payload, so :func:`log_routing_event` defaults to it.
+_payload_session_id: str = ""
+
 #: Mirrors ``nexus.dropped_writes.NAMED_DROP_CAUSES`` verbatim (nexus-gjv9b
 #: review fold-in round 5, code-review non-blocking item 1) -- the FULL
 #: shared cause vocabulary every drop-meter producer and reader (this
@@ -741,6 +745,10 @@ def log_routing_event(
     rather than a JSONL fallback (the routing hooks' own timeout budget has no room for a
     filesystem retry story). The JSONL append and rotation
     machinery was deleted at PART 3 (2026-09-05).
+
+    An empty ``session_id`` falls back to the session of the payload
+    :func:`run_hook` read (nexus-m4lej: two guards' seven call sites never
+    passed it, so every routing_events row carried an empty session).
     """
     try:
         record: dict = {
@@ -748,6 +756,7 @@ def log_routing_event(
             "rule": rule,
             "outcome": outcome,
         }
+        session_id = session_id or _payload_session_id
         if session_id:
             record["session_id"] = session_id
         if tool_name:
@@ -798,6 +807,8 @@ def run_hook(
         raw = ""
 
     payload = parse_stdin(raw)
+    global _payload_session_id
+    _payload_session_id = str(payload.get("session_id") or "")
 
     try:
         body(payload)
