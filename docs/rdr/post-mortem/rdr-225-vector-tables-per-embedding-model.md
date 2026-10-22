@@ -1,6 +1,6 @@
 # RDR-225 Post-Mortem: One Vector Table per Embedding Model, with Tenant Isolation
 
-**Closed** 2026-10-22 · **Accepted** 2026-10-05 · **Epic** nexus-3wh8d (all children closed; .3 and .4 cancelled with protocol steps 3 and 4) · **Shipped** engine-service-v0.1.150 (cutover, 2026-10-07), v0.1.151 (`ef_search` floor 600), v0.1.162 (retired tables dropped, 2026-10-21); conexus 7.83.1 pins v0.1.162
+**Closed** 2026-10-22 · **Accepted** 2026-10-05 · **Epic** nexus-3wh8d (implementation children closed; .3 and .4 cancelled with protocol steps 3 and 4; four test-gap follow-ups .34 to .37 open at P3, plus nexus-vxmcl for local installs) · **Shipped** engine-service-v0.1.150 (cutover, 2026-10-07), v0.1.151 (`ef_search` floor 600), v0.1.162 (retired tables dropped, 2026-10-21); conexus 7.83.1 pins v0.1.162
 
 ## What the RDR set out to do
 
@@ -22,9 +22,15 @@ old tenant-only layout (the evaluation protocol's step 3).
 
 Implemented and live in the cloud since 2026-10-07. The walk ran on a
 production fork first and in the cloud in 7 min 53 s with exact row counts.
-Each search plan touches one (model, tenant) leaf (156 of 156 checks). The old
+Each search plan touches one (model, tenant) leaf, pinned per search family on the shipped layout by `ReadPathLeafPruningIntegrationTest` (nexus-3wh8d.15). The old
 tables were kept for 14 days and dropped in v0.1.162. Local installs get the
 layout through the client release that pins that engine.
+
+The layout's effect on the motivating symptom was never measured: protocol
+step 3 also carried the 1.10 latency margin, and nothing replaced it, so there
+is no latency comparison and no measurement of the wasted walk share (Gap 2)
+or of buffer eviction (Gap 3) after deploy. The slow filtered searches that
+started this work were addressed by RDR-227's per-collection indexes.
 
 ## Implementation vs plan
 
@@ -54,8 +60,9 @@ layout through the client release that pins that engine.
    for the production miss, which was not tested on production (T2
    `nexus_rdr/225-recall-per-leaf-analysis`). The fix was an engine default
    floor of 600 (v0.1.151, nexus-3wh8d.31), after which all twelve read 1.00.
-   The epic's acceptance still names step 3's rule; Sam accepted the cloud-gate
-   recall in its place at this close. The four test gaps that validation left
+   The epic's acceptance still names step 3's rule. Sam ran this close on
+   2026-10-22 after being told that closing accepts the cloud-gate recall in
+   its place; the acceptance is recorded on the epic. The four test gaps that validation left
    open each have a bead (nexus-3wh8d.34, .35, .36, .37).
    *Drift class: unvalidated assumption.*
 
@@ -76,10 +83,12 @@ layout through the client release that pins that engine.
    *Drift class: deferred critical constraint.*
 
 4. **The lock table bounds tenants per migration.** A walk that creates
-   leaves for many tenants in one transaction holds about 27 relation locks
-   per leaf to the commit. With four models and two parents a tenant is about
-   216 locks, so the default lock table (`max_locks_per_transaction` 64 x 100
-   connections) covers about 29 tenants. Found while measuring tenant creation
+   leaves for many tenants in one transaction holds relation locks per leaf to
+   the commit: about 27 measured on 2026-10-06, 30.6 in the cloud walk (979
+   locks for 32 leaves). With four models and two parents a tenant is about
+   245 locks, so the default lock table (`max_locks_per_transaction` 64 x 100
+   connections) covers about 26 tenants. The local walk has no lock-capacity
+   check and was never run populated at 768 dimensions (nexus-vxmcl). Found while measuring tenant creation
    (TS1), not in the design.
    *Drift class: missing failure mode.*
 
