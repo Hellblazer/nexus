@@ -3918,8 +3918,8 @@ and managed mode alike, over HTTP only; it is not the local-only tuples-bloat ro
 **Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
 body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
 whether search is reranked; `reranker_available` is the engine's answer on whether the reranker's model files are present, read live
-from the files on every response. It reports files on disk, not that a rerank would succeed: files that are present but cannot be
-loaded, and the Voyage reranker, read true. The row warns when it is false, naming the reranker, and says to run
+from the files on every response. Files a load already failed on read false until either is replaced (nexus-vk1l1); files never
+tried, and the Voyage reranker, read true, so true is not a promise that a rerank would succeed. The row warns when it is false, naming the reranker, and says to run
 `nx init --service`; the value is a bare boolean and carries no path. A value that is not a boolean warns. Not
 applicable (green) when the engine cannot be reached or an older engine does not report the key, which is "cannot tell", never "available".
 It works in local and managed mode alike, over HTTP only.

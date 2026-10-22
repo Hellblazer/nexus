@@ -85,4 +85,4 @@ def test_the_default_sweep_makes_one_status_request_and_prints_the_row(monkeypat
     result = CliRunner().invoke(main, ["doctor"])
     assert calls["n"] == 1, result.output
     assert _LABEL in result.output
-    assert "model files are absent" in result.output
+    assert "model files are absent, or the last load of these files failed" in result.output

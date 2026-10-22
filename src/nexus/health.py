@@ -4726,8 +4726,9 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
 
     ``GET /v1/status`` names the CHOSEN reranker in ``reranker`` even when its model files are absent and every rerank
     degrades, so the name does not say whether search is reranked. ``reranker_available`` is the engine's answer on
-    whether the reranker's model files are present, read live from the files on every response. It reports files on
-    disk, not that a rerank would succeed (present-but-unloadable files read true, and so does the Voyage reranker).
+    whether the reranker's model files are present, read live from the files on every response. Files a load already
+    failed on read false until either is replaced (nexus-vk1l1); files never tried, and the Voyage reranker, read true,
+    so true is not a promise that a rerank would succeed.
     The value is a bare boolean; the engine puts no path in it.
 
     * warn: ``reranker_available`` is false (searches are served without rerank, with a degraded-rerank field).
@@ -4764,12 +4765,14 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
     name = name if isinstance(name, str) and name else None
     if available:
         return [HealthResult(label=label, ok=True, detail=f"{name or 'the reranker'}: model files are present")]
-    which = f"the reranker ({name}): model files are absent" if name else "no reranker is configured"
+    which = (f"the reranker ({name}): model files are absent, or the last load of these files failed"
+             if name else "no reranker is configured")
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=f"{which}, so searches are served without rerank",
-        fix_suggestions=["Run `nx init --service` to provision the cross-encoder model files; the engine reads this "
-                         "row's value from those files"],
+        fix_suggestions=["If the files are absent, run `nx init --service` to provision them. If a load failed, the "
+                         "engine log's cross_encoder_reranker_init_failed event names the cause; for bad files, "
+                         "`nx init --service` again. Every rerank retries the load"],
     )]
 
 
