@@ -226,9 +226,22 @@ class TestTupleInAckNack:
         assert msg == f"Acked claim {claim['claim_id']}"
         assert "reply" not in msg.lower()
 
-    def test_ack_with_reply_writes_reply_in_one_transaction(self, t2_service_env) -> None:
+    def test_ack_with_reply_writes_reply_in_one_transaction(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
         """RDR-206: ``tuple_ack(reply=...)`` consumes the request
-        and writes the reply together, and the tool reports the reply id."""
+        and writes the reply together, and the tool reports the reply id.
+
+        nexus-g2ckl end to end, in the same test so the tenant count stays
+        flat: the reply's dims omit ``from``, so the tool fills this session's
+        own id; the engine stamps the acker's session; the label predicate the
+        drain hook and the channel use gives no label."""
+        import os
+
+        from nexus.tuple_sender import sender_label
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        session_id = os.environ["NX_T1_SESSION_ID"]
         req_addr = _uniq("req")
         reply_addr = _uniq("reply")
         tuple_out(
@@ -244,7 +257,7 @@ class TestTupleInAckNack:
             reply={
                 "subspace": f"mailbox/{reply_addr}",
                 "keys": {"to": reply_addr},
-                "dims": {"from": claimant},
+                "dims": {"kind": "ack"},
                 "body": "the answer",
             },
         )
@@ -257,6 +270,9 @@ class TestTupleInAckNack:
         reply_rows = tuple_rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)  # n=2: n=1 would hide a duplicate
         assert len(reply_rows) == 1
         assert reply_rows[0]["body"] == "the answer"
+        assert reply_rows[0]["dims"]["from"] == session_id
+        assert reply_rows[0]["sender_session"] == session_id
+        assert sender_label(reply_rows[0]["dims"]["from"], reply_rows[0]["sender_session"]) is None
 
     def test_ack_reply_to_keys_only_subspace_leaves_request_claimed(self, t2_service_env) -> None:
         """RDR-206: a reply target that resolves to a ``keys``-only

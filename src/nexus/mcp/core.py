@@ -7715,6 +7715,26 @@ def tuple_in(
 _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
 
 
+def _default_reply_from(reply: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A mailbox reply whose dims omit ``from`` is sent as this session
+    (nexus-g2ckl): the same id ``mailbox_send`` defaults to, which is also the
+    session the engine stamps the reply with, so a genuine reply reads
+    unlabelled. Returns a copy; any other reply, or no resolvable session,
+    passes through untouched and the engine judges it as before."""
+    if not isinstance(reply, dict) or not str(reply.get("subspace", "")).startswith("mailbox/"):
+        return reply
+    dims = reply.get("dims")
+    if dims is not None and not isinstance(dims, dict):
+        return reply
+    if dims and dims.get("from"):
+        return reply
+    try:
+        own = resolve_default_from()
+    except DirectoryResolutionError:
+        return reply
+    return {**reply, "dims": {**(dims or {}), "from": own}}
+
+
 def _reply_spec_from_tool_arg(reply: dict[str, Any] | None) -> ReplySpec | None:
     """Turn ``tuple_ack``'s ``reply`` object into a :class:`ReplySpec`.
 
@@ -7758,9 +7778,10 @@ def tuple_ack(
         description=(
             "Optional reply object written atomically with the ack, e.g. "
             "{\"subspace\": \"mailbox/<addr>\", \"keys\": {\"to\": \"<addr>\"}, "
-            "\"dims\": {\"from\": \"<me>\"}, \"body\": \"...\"}. Fields: subspace "
+            "\"dims\": {\"kind\": \"ack\"}, \"body\": \"...\"}. Fields: subspace "
             "and keys (required), dims/body/ttl_seconds (optional). No nonce — "
-            "the engine sets it to the request's tuple id."
+            "the engine sets it to the request's tuple id. A mailbox reply with no "
+            "dims.from is sent as this session's own id."
         ),
     )] = None,
 ) -> str:
@@ -7780,7 +7801,7 @@ def tuple_ack(
     not the content itself.
     """
     try:
-        spec = _reply_spec_from_tool_arg(reply)
+        spec = _reply_spec_from_tool_arg(_default_reply_from(reply))
         reply_id = _t2_index_write(
             lambda db: db.tuples.ack(claim_id, claimant, reply=spec), op="tuple_ack",
         )

@@ -712,8 +712,8 @@ public final class TupleHandler implements HttpHandler {
         m.put("announced_at", t.announcedAt());
         m.put("announce_count", t.announceCount());
         // nexus-fetre (F3 step 2): the server-resolved session that first wrote the row, null
-        // when the writer presented no minted session, the row is an ack reply (until nexus-g2ckl),
-        // or the row predates the column. A claim,
+        // when the writer (or, for an ack reply, the acker; nexus-g2ckl) presented no minted
+        // session, or the row predates the column. A claim,
         // not authentication: JDR-002.
         m.put("sender_session", t.senderSession());
         return m;

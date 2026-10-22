@@ -174,6 +174,32 @@ class TupleSenderSessionHttpTest {
                 .isEqualTo(acker);
     }
 
+    /** nexus-g2ckl: an ack without a session header writes its reply unstamped and is
+     *  not refused, as out is. */
+    @Test
+    void ackWithReplyWithNoSessionHeader_stampsNull_andIsNotRefused() throws Exception {
+        String inbox = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        String outbox = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        assertThat(send(TENANT_TOKEN, null, "/v1/tuples/out", mailboxOut(inbox, "n-1")).statusCode())
+                .isEqualTo(200);
+        var claim = send(TENANT_TOKEN, null, "/v1/tuples/inp", Map.of(
+                "subspace", "mailbox/" + inbox, "keys_pattern", Map.of("to", inbox), "claimant", "w",
+                "lease_s", 60));
+        assertThat(claim.statusCode()).as(claim.body()).isEqualTo(200);
+        String claimId = MAPPER.readTree(claim.body()).get("claim_id").asText();
+        Map<String, Object> reply = new LinkedHashMap<>();
+        reply.put("subspace", "mailbox/" + outbox);
+        reply.put("keys", Map.of("to", outbox));
+        reply.put("dims", Map.of("from", "someone"));
+        reply.put("body", "answer");
+        var ack = send(TENANT_TOKEN, null, "/v1/tuples/ack",
+                Map.of("claim_id", claimId, "claimant", "w", "reply", reply));
+        assertThat(ack.statusCode()).as(ack.body()).isEqualTo(200);
+        JsonNode row = rdOnly(TENANT_TOKEN, "mailbox/" + outbox, outbox);
+        assertThat(row.has("sender_session")).isTrue();
+        assertThat(row.get("sender_session").isNull()).isTrue();
+    }
+
     @Test
     void outWithNoSessionHeader_stampsNull_andIsNotRefused() throws Exception {
         String to = "http-" + UUID.randomUUID().toString().substring(0, 8);
