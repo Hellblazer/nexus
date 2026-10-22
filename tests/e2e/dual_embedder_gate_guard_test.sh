@@ -21,6 +21,15 @@
 #      and a final tally refuses unless each ran once per pass. Static, in the style
 #      of local_service_gate_guard_test.sh, with positive controls proving the
 #      detectors fire on a script that does have a skip path.
+#   3. The checks themselves fail when a family is missing (nexus-clvut). The
+#      gate's check functions are cut out of the script and run against a canned
+#      engine (lib/dual_gate_fake_engine.py, port 0) and a canned client: the
+#      version check refuses an engine that is not dual or lacks a family, the
+#      per-collection search refuses a missing chunk or an empty expectation, the
+#      combined search refuses a missing hit from either family and prints the
+#      client's stderr, the restart check refuses an unchanged start time, the
+#      tally refuses a count other than the pass count, and a 429 is retried with
+#      the engine's Retry-After (or a growing wait), then explained.
 #
 # Run with: bash tests/e2e/dual_embedder_gate_guard_test.sh
 set -u -o pipefail
@@ -29,7 +38,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 GATE="$REPO_ROOT/tests/e2e/dual-embedder-gate.sh"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/dual_embedder_gate_guard_test.XXXXXX")"
-trap 'rm -rf "$WORKDIR"' EXIT
+ENGINE_PID=""
+trap '[[ -n "$ENGINE_PID" ]] && { kill "$ENGINE_PID" 2>/dev/null; wait "$ENGINE_PID" 2>/dev/null; }; rm -rf "$WORKDIR"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
@@ -193,13 +203,26 @@ fi
 [[ "$(code_of "$GATE" | grep -cE 'DUAL-EMBEDDER GATE PASSED')" -eq 1 ]] \
   && ok "the success banner is printed in exactly one place" || bad "the success banner appears more than once"
 
-# The pass body must run all three searches; the tally must demand each ran once per pass.
-pass_body="$(sed -n '/^dg_run_pass()[[:space:]]*{/,/^}/p' "$GATE")"
+# The pass body must run all three searches; the tally must demand each ran once per pass. Both are
+# read through code_of, so a call that is commented out does not count as run.
+PASS_NEEDLES=('dg_search_one "\$DG_BGE_COLL"' 'dg_search_one "\$DG_VOY_COLL"' 'dg_combined_search' 'dg_require_restart')
+pass_body_of() { code_of "$1" | sed -n '/^dg_run_pass()[[:space:]]*{/,/^}/p'; }
+missing_pass_needles() {  # <script>: prints each search the pass body does not run
+  local body needle
+  body="$(pass_body_of "$1")"
+  for needle in "${PASS_NEEDLES[@]}"; do
+    [[ "$(grep -cE -- "$needle" <<<"$body")" -gt 0 ]] || printf '%s\n' "$needle"
+  done
+}
+pass_body="$(pass_body_of "$GATE")"
 [[ -n "$pass_body" ]] || fail_loud_and_exit "dg_run_pass() body anchor matched nothing; this test needs updating"
-for needle in 'dg_search_one "\$DG_BGE_COLL"' 'dg_search_one "\$DG_VOY_COLL"' 'dg_combined_search'; do
-  grep -qE -- "$needle" <<<"$pass_body" && ok "dg_run_pass runs: $needle" || bad "dg_run_pass does not run: $needle"
-done
-tally_body="$(sed -n '/^dg_require_tally()[[:space:]]*{/,/^}/p' "$GATE")"
+[[ -z "$(missing_pass_needles "$GATE")" ]] && ok "dg_run_pass runs the bge search, the Voyage search, the combined search and the restart check" \
+  || bad "dg_run_pass does not run: $(missing_pass_needles "$GATE")"
+sed 's/^\([[:space:]]*\)dg_combined_search "\$pass"/\1# dg_combined_search "$pass"/' "$GATE" > "$WORKDIR/commented-search.sh"
+[[ "$(missing_pass_needles "$WORKDIR/commented-search.sh")" == dg_combined_search ]] \
+  && ok "a commented-out combined search reads as not run (positive control)" \
+  || bad "the pass-body check counts a commented-out call as run"
+tally_body="$(code_of "$GATE" | sed -n '/^dg_require_tally()[[:space:]]*{/,/^}/p')"
 [[ -n "$tally_body" ]] || fail_loud_and_exit "dg_require_tally() body anchor matched nothing; this test needs updating"
 for counter in DG_BGE_SEARCHES DG_VOY_SEARCHES DG_COMBINED_BGE_HITS DG_COMBINED_VOY_HITS; do
   grep -qE -- "$counter" <<<"$tally_body" && ok "the tally demands $counter == the pass count" \
@@ -208,6 +231,169 @@ done
 grep -qE 'exit[[:space:]]+1' <<<"$tally_body" && ok "a short tally exits 1" || bad "a short tally does not exit non-zero"
 grep -qE '^DG_PASSES=2[[:space:]]*$' "$GATE" && ok "DG_PASSES is pinned at 2 (before and after the restart)" \
   || bad "DG_PASSES=2 not found"
+
+# ── Behaviour: the checks fail when a family is missing (nexus-clvut) ────────
+echo "Test 5: the gate's checks against a canned engine"
+FNS="$WORKDIR/gate_checks.sh"
+sed -n '/^# ── Counted, fail-loud checks/,/^# dg_set_embed_choice MODEL/p' "$GATE" > "$FNS"
+for fn in dg_request dg_check dg_version_check dg_search_one dg_combined_search dg_require_restart dg_require_tally; do
+  grep -qE "^$fn\(\)" "$FNS" || fail_loud_and_exit "the extracted check block has no $fn(); its sed anchors need updating"
+done
+# A lost end anchor would run sed to the end of the file and source the gate's main flow.
+[[ "$(grep -cE '^(dg_seed_voyage_collection|dg_run_pass [12]|dg_require_tally)[[:space:]]*$' "$FNS")" -eq 0 ]] \
+  || fail_loud_and_exit "the extracted check block reaches the gate's main flow; its end anchor needs updating"
+# The model names come from the gate's own collection names, so this file spells neither.
+BGE_MODEL="$(sed -n 's/^DG_BGE_COLL="knowledge__gate-dual__\(.*\)__v1"$/\1/p' "$FNS")"
+VOY_MODEL="$(sed -n 's/^DG_VOY_COLL="knowledge__gate-dual__\(.*\)__v1"$/\1/p' "$FNS")"
+[[ -n "$BGE_MODEL" && -n "$VOY_MODEL" ]] || fail_loud_and_exit "the collection-name anchors matched nothing; this test needs updating"
+
+SCEN="$WORKDIR/scenario"
+REQS="$WORKDIR/requests.log"
+mkdir -p "$SCEN" "$WORKDIR/fn-shims"
+: > "$REQS"
+python3 "$HERE/lib/dual_gate_fake_engine.py" "$SCEN" "$WORKDIR/engine.port" "$REQS" &
+ENGINE_PID=$!
+for _ in $(seq 1 100); do [[ -s "$WORKDIR/engine.port" ]] && break; sleep 0.1; done
+[[ -s "$WORKDIR/engine.port" ]] || fail_loud_and_exit "the canned engine never wrote its port"
+ENGINE_PORT="$(cat "$WORKDIR/engine.port")"
+# The combined search runs the client as `uv run nx search ...`; this uv prints the canned result.
+cat > "$WORKDIR/fn-shims/uv" <<'SHIM'
+#!/bin/sh
+echo "canned client stderr: model group dropped" >&2
+cat "$SCEN/combined.json"
+exit "$(cat "$SCEN/combined.rc")"
+SHIM
+# Every retry wait is recorded, not slept, so the waits are pinned and the test stays fast.
+cat > "$WORKDIR/fn-shims/sleep" <<'SHIM'
+#!/bin/sh
+printf '%s ' "$*" >> "$SLEEPS"
+SHIM
+chmod +x "$WORKDIR/fn-shims/uv" "$WORKDIR/fn-shims/sleep"
+SLEEPS="$WORKDIR/sleeps.log"
+
+# fn_run <shell>: source the gate's checks into a fresh bash and run <shell> there; sets OUT and RC.
+fn_run() {
+  rm -rf "$WORKDIR/fn-scratch"
+  mkdir -p "$WORKDIR/fn-scratch"
+  : > "$SLEEPS"
+  OUT="$(SCRATCH="$WORKDIR/fn-scratch" SCEN="$SCEN" SLEEPS="$SLEEPS" E2E_PYTHON=python3 \
+        NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 \
+        PATH="$WORKDIR/fn-shims:$PATH" bash -c '
+    set -euo pipefail
+    source "$1"
+    DG_UID=4242
+    DG_BASE="http://127.0.0.1:$2"
+    DG_AUTH=(-H "Authorization: Bearer canned")
+    DG_BUILD_REF=ref-under-test
+    eval "$3"' _ "$FNS" "$ENGINE_PORT" "$1" 2>&1)"
+  RC=$?
+}
+expect_pass() { [[ $RC -eq 0 ]] && ok "$1" || bad "$1: rc $RC: $OUT"; }
+expect_fail() {  # <label> <text the failure must carry, on a line that is not a passed check>
+  if [[ $RC -ne 0 && -n "$(grep -F -- "$2" <<<"$OUT" | grep -vF '] ok (' || true)" ]]; then ok "$1"
+  else bad "$1: rc $RC, wanted a failure naming '$2': $OUT"; fi
+}
+canned() { printf '%s\n' "$2" > "$SCEN/$1.json"; }
+version_body() {  # <mode> <models as a JSON list> <build_ref>
+  canned GET_version "{\"embedding_mode\": \"$1\", \"embedding_models\": $2, \"build_ref\": \"$3\", \"process_start_time\": \"t1\"}"
+}
+canned GET_health '{"status": "ok", "db": "up"}'
+
+version_body dual "[\"$BGE_MODEL\", \"$VOY_MODEL\"]" ref-under-test
+fn_run 'dg_version_check; echo "passed=$DG_PASSED"'
+expect_pass "version check passes a dual engine serving both families"
+[[ "$OUT" == *"passed=4"* ]] && ok "each passed check is counted (4 for the version check)" || bad "passed-check counter: $OUT"
+version_body onnx-local "[\"$BGE_MODEL\", \"$VOY_MODEL\"]" ref-under-test
+fn_run dg_version_check
+expect_fail "version check refuses an engine that is not dual" "embedding_mode==dual"
+version_body dual "[\"$BGE_MODEL\"]" ref-under-test
+fn_run dg_version_check
+expect_fail "version check refuses an engine missing the Voyage family" "embedding_models carry"
+version_body dual "[\"$VOY_MODEL\"]" ref-under-test
+fn_run dg_version_check
+expect_fail "version check refuses an engine missing the bge family" "embedding_models carry"
+version_body dual "[\"$BGE_MODEL\", \"$VOY_MODEL\"]" ref-of-the-pinned-release
+fn_run dg_version_check
+expect_fail "version check refuses an engine that is not the jar under test" "build_ref==ref-under-test"
+fn_run 'DG_BUILD_REF=""; dg_version_check'
+expect_fail "with a native binary, version check refuses a served build_ref (a stray jar)" "build_ref ABSENT"
+canned GET_version "{\"embedding_mode\": \"dual\", \"embedding_models\": [\"$BGE_MODEL\", \"$VOY_MODEL\"], \"process_start_time\": \"t1\"}"
+fn_run 'DG_BUILD_REF=""; dg_version_check'
+expect_pass "with a native binary, version check passes an engine that stamps no build_ref"
+
+canned POST_v1_vectors_search '[{"id": "aa"}, {"id": "bb"}, {"id": "cc"}]'
+fn_run 'DG_BGE_CHASHES=" aa bb"; dg_search_one "$DG_BGE_COLL"'
+expect_pass "per-collection search passes when every written chunk comes back"
+fn_run 'DG_VOY_CHASHES=" aa dd"; dg_search_one "$DG_VOY_COLL"'
+expect_fail "per-collection search refuses a missing chunk" "returns every chunk written to it"
+searches_before="$(grep -c 'vectors/search' "$REQS")"
+fn_run 'DG_VOY_CHASHES=""; dg_search_one "$DG_VOY_COLL"'
+expect_fail "per-collection search refuses an empty expectation" "an empty expectation passes against anything"
+[[ "$(grep -c 'vectors/search' "$REQS")" -eq "$searches_before" ]] \
+  && ok "an empty expectation fails before any search is sent" || bad "an empty expectation still sent a search"
+
+combined() {  # <bge hit pass> <voyage hit pass> <client rc> [collection of the voy hit's model]
+  printf '[{"collection": "knowledge__gate-dual__%s__v1", "content": "dual embedder gate probe 4242 bge pass %s"}, {"collection": "knowledge__gate-dual__%s__v1", "content": "dual embedder gate probe 4242 voy pass %s"}]\n' \
+    "$BGE_MODEL" "$1" "${4:-$VOY_MODEL}" "$2" > "$SCEN/combined.json"
+  printf '%s\n' "$3" > "$SCEN/combined.rc"
+}
+combined 1 1 0
+fn_run 'dg_combined_search 1; echo "hits $DG_COMBINED_BGE_HITS/$DG_COMBINED_VOY_HITS"'
+expect_pass "combined search passes with a hit from each family"
+[[ "$OUT" == *"hits 1/1"* ]] && ok "combined search counts one hit per family" || bad "combined search hit counters: $OUT"
+combined 1 0 0
+fn_run 'dg_combined_search 1'
+expect_fail "combined search refuses a missing Voyage hit" "a hit from the Voyage collection"
+[[ "$OUT" == *"canned client stderr: model group dropped"* ]] && ok "a missing hit prints the client's stderr" \
+  || bad "a missing hit does not print the client's stderr: $OUT"
+combined 0 1 0
+fn_run 'dg_combined_search 1'
+expect_fail "combined search refuses a missing bge hit" "a hit from the bge collection"
+combined 1 1 0 "$BGE_MODEL"
+fn_run 'dg_combined_search 1'
+expect_fail "combined search refuses the Voyage text coming back from the bge collection" "a hit from the Voyage collection"
+
+fn_run 'DG_START_TIME_1=t1 DG_THIS_START=t2; dg_require_restart'
+expect_pass "the restart check passes when process_start_time moved"
+fn_run 'DG_START_TIME_1=t1 DG_THIS_START=t1; dg_require_restart'
+expect_fail "the restart check refuses an unchanged process_start_time" "the engine did not restart"
+combined 1 1 3
+fn_run 'dg_combined_search 1'
+expect_fail "combined search refuses a client that exits non-zero" "exited non-zero"
+
+fn_run 'DG_BGE_SEARCHES=2 DG_VOY_SEARCHES=2 DG_COMBINED_BGE_HITS=2 DG_COMBINED_VOY_HITS=2; dg_require_tally'
+expect_pass "the tally passes when each search ran once per pass"
+fn_run 'DG_BGE_SEARCHES=2 DG_VOY_SEARCHES=1 DG_COMBINED_BGE_HITS=2 DG_COMBINED_VOY_HITS=2; dg_require_tally'
+expect_fail "the tally refuses a search that ran short" "TALLY SHORT: DG_VOY_SEARCHES=1"
+fn_run 'DG_BGE_SEARCHES=2 DG_VOY_SEARCHES=2 DG_COMBINED_BGE_HITS=2 DG_COMBINED_VOY_HITS=3; dg_require_tally'
+expect_fail "the tally refuses a count above the pass count" "TALLY SHORT: DG_COMBINED_VOY_HITS=3"
+
+printf '429\n' > "$SCEN/GET_health.code"
+health_before="$(grep -c 'GET /health' "$REQS")"
+fn_run 'dg_request GET /health; dg_expect_200 "GET /health"'
+expect_fail "a 429 that never clears fails" "429 after 5 tries"
+[[ "$OUT" == *"tier 1 needs a payment method"* ]] && ok "the 429 failure explains Voyage's usage tiers" \
+  || bad "the 429 failure does not explain the limit: $OUT"
+[[ "$(( $(grep -c 'GET /health' "$REQS") - health_before ))" -eq 5 ]] \
+  && ok "a 429 is retried to five tries in all" || bad "a 429 was sent $(( $(grep -c 'GET /health' "$REQS") - health_before )) times, not 5"
+[[ "$(cat "$SLEEPS")" == "3 6 9 12 " ]] && ok "with no Retry-After the waits grow (3 6 9 12 s)" \
+  || bad "waits without Retry-After: '$(cat "$SLEEPS")'"
+printf '7\n' > "$SCEN/GET_health.retry_after"
+fn_run 'dg_request GET /health; dg_expect_200 "GET /health"'
+[[ "$(cat "$SLEEPS")" == "7 7 7 7 " ]] && ok "each wait is the engine's Retry-After" \
+  || bad "waits with Retry-After 7: '$(cat "$SLEEPS")'"
+printf '600\n' > "$SCEN/GET_health.retry_after"
+fn_run 'dg_request GET /health; dg_expect_200 "GET /health"'
+[[ "$(cat "$SLEEPS")" == "60 60 60 60 " ]] && ok "a long Retry-After is capped at 60 s" \
+  || bad "waits with Retry-After 600: '$(cat "$SLEEPS")'"
+rm -f "$SCEN/GET_health.retry_after"
+printf '503\n' > "$SCEN/GET_health.code"
+health_before="$(grep -c 'GET /health' "$REQS")"
+fn_run 'dg_request GET /health; dg_expect_200 "GET /health"'
+expect_fail "a 503 that never clears fails" "CHECK FAILED: GET /health (code=503)"
+[[ "$(( $(grep -c 'GET /health' "$REQS") - health_before ))" -eq 5 ]] \
+  && ok "a 503 is retried to five tries in all" || bad "a 503 was sent $(( $(grep -c 'GET /health' "$REQS") - health_before )) times, not 5"
+rm -f "$SCEN/GET_health.code"
 
 echo
 echo "dual_embedder_gate_guard_test.sh: $PASS passed, $FAIL failed"

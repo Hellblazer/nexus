@@ -274,6 +274,9 @@ DG_UID="$$"
 
 dg_fail() {
   echo "[dual-gate] CHECK FAILED: $1 (code=${DG_CODE:-n/a})" >&2
+  if [ "${DG_CODE:-}" = "429" ]; then
+    echo "[dual-gate]   429 after $DG_REQUEST_TRIES tries. The body above says whose limit it was; the engine answers 429 when Voyage rate-limits the key. Voyage's published rate limits are for usage tier 1 and up, and tier 1 needs a payment method on the account (docs.voyageai.com/docs/rate-limits). Wait and run again, or use a key from an account with a payment method." >&2
+  fi
   if [ -f "$DG_DIR/resp.json" ]; then echo "[dual-gate]   body: $(cat "$DG_DIR/resp.json")" >&2; fi
   if [ -s "$DG_DIR/curl.err" ]; then echo "[dual-gate]   curl: $(cat "$DG_DIR/curl.err" 2>/dev/null)" >&2; fi
   local elog
@@ -286,8 +289,25 @@ dg_fail() {
 }
 
 # dg_request METHOD PATH [JSON_BODY]: body to $DG_DIR/resp.json, status to DG_CODE ("000" when
-# the connection failed). 429 and 5xx from the Voyage-bound routes get two more tries, because
-# the gate talks to a real remote API; a dead key or a refused model keeps failing and fails.
+# the connection failed). 429 and 5xx from the Voyage-bound routes are retried up to
+# DG_REQUEST_TRIES tries in all, because the gate talks to a real remote API; a dead key or a
+# refused model keeps failing and fails. Each wait is the response's Retry-After in seconds (the
+# engine sets it on a rate-limited answer), at most DG_RETRY_AFTER_MAX_S, or else
+# DG_RETRY_SLEEP_S times the try number.
+DG_REQUEST_TRIES=5
+DG_RETRY_SLEEP_S=3
+DG_RETRY_AFTER_MAX_S=60
+dg_retry_wait() {  # <try>: seconds to wait before the next try
+  local ra
+  ra="$(awk 'tolower($1) == "retry-after:" { gsub(/[^0-9]/, "", $2); print $2 }' "$DG_DIR/headers" 2>/dev/null | tail -n 1)"
+  if [ -n "$ra" ]; then
+    [ "$ra" -le "$DG_RETRY_AFTER_MAX_S" ] || ra="$DG_RETRY_AFTER_MAX_S"
+    printf '%s' "$ra"
+  else
+    printf '%s' "$((DG_RETRY_SLEEP_S * $1))"
+  fi
+}
+
 dg_request() {
   local method="$1" path="$2" body="${3:-}" try=1
   if [ "$#" -ge 3 ] && [ -z "$body" ]; then
@@ -295,7 +315,7 @@ dg_request() {
     rm -f "$DG_DIR/resp.json"
     dg_fail "$method $path: the request body is empty (its builder produced no output)"
   fi
-  local args=(-sS -o "$DG_DIR/resp.json" -w '%{http_code}' -X "$method" "${DG_AUTH[@]}")
+  local args=(-sS -o "$DG_DIR/resp.json" -D "$DG_DIR/headers" -w '%{http_code}' -X "$method" "${DG_AUTH[@]}")
   if [ -n "$body" ]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
@@ -304,10 +324,10 @@ dg_request() {
     [ -n "$DG_CODE" ] || DG_CODE="000"
     case "$DG_CODE" in
       429 | 502 | 503 | 504)
-        if [ "$try" -lt 3 ]; then
-          echo "[dual-gate] $method $path -> $DG_CODE, retrying ($try/3)"
+        if [ "$try" -lt "$DG_REQUEST_TRIES" ]; then
+          echo "[dual-gate] $method $path -> $DG_CODE, retrying ($try/$DG_REQUEST_TRIES)"
+          sleep "$(dg_retry_wait "$try")"
           try=$((try + 1))
-          sleep 3
           continue
         fi
         ;;
@@ -316,17 +336,25 @@ dg_request() {
   done
 }
 
-# dg_check DESC EXPR: EXPR is a python expression over `d`, the JSON in $DG_DIR/resp.json. Every
+# dg_holds EXPR: EXPR is a python expression over `d`, the JSON in $DG_DIR/resp.json. Every
 # value spliced into EXPR is script-controlled and shell-safe (alphanumerics, dashes, dots).
-dg_check() {
-  local desc="$1" expr="$2"
+dg_holds() {
   "$E2E_PYTHON" -c "
 import json, sys
 d = json.load(open('$DG_DIR/resp.json'))
-sys.exit(0 if bool($expr) else 1)
-" || dg_fail "$desc"
+sys.exit(0 if bool($1) else 1)
+"
+}
+
+dg_ok() {
   DG_PASSED=$((DG_PASSED + 1))
-  echo "[dual-gate] ok ($DG_PASSED): $desc"
+  echo "[dual-gate] ok ($DG_PASSED): $1"
+}
+
+# dg_check DESC EXPR: fail the gate unless EXPR holds.
+dg_check() {
+  dg_holds "$2" || dg_fail "$1"
+  dg_ok "$1"
 }
 
 dg_expect_200() { [ "$DG_CODE" = "200" ] || dg_fail "$1"; }
@@ -425,12 +453,30 @@ dg_combined_search() {
     echo "[dual-gate]   client stderr: $(cat "$DG_DIR/combined.err")" >&2
     dg_fail "nx search over both collections exited non-zero"
   fi
-  dg_check "ONE search over both collections returns a hit from the bge collection (pass $pass)" \
+  dg_combined_hit "ONE search over both collections returns a hit from the bge collection (pass $pass)" \
     "any(r.get('collection')=='$DG_BGE_COLL' and 'dual embedder gate probe $DG_UID bge pass $pass' in (r.get('content') or '') for r in d)"
   DG_COMBINED_BGE_HITS=$((DG_COMBINED_BGE_HITS + 1))
-  dg_check "...and a hit from the Voyage collection (pass $pass)" \
+  dg_combined_hit "...and a hit from the Voyage collection (pass $pass)" \
     "any(r.get('collection')=='$DG_VOY_COLL' and 'dual embedder gate probe $DG_UID voy pass $pass' in (r.get('content') or '') for r in d)"
   DG_COMBINED_VOY_HITS=$((DG_COMBINED_VOY_HITS + 1))
+}
+
+# dg_combined_hit DESC EXPR: dg_check for the combined search. A missing hit prints the client's
+# stderr first: the client logs a model group it dropped there, and the JSON on stdout says nothing.
+dg_combined_hit() {
+  if ! dg_holds "$2"; then
+    DG_CODE="n/a"
+    echo "[dual-gate]   client stderr: $(cat "$DG_DIR/combined.err")" >&2
+    dg_fail "$1"
+  fi
+  dg_ok "$1"
+}
+
+# dg_require_restart: pass 2's engine has a different process_start_time from pass 1's.
+dg_require_restart() {
+  [ "$DG_THIS_START" != "$DG_START_TIME_1" ] \
+    || dg_fail "process_start_time is unchanged across the restart ($DG_THIS_START): the engine did not restart"
+  echo "[dual-gate] ok: process_start_time moved ($DG_START_TIME_1 -> $DG_THIS_START)"
 }
 
 dg_run_pass() {
@@ -440,9 +486,7 @@ dg_run_pass() {
   if [ "$pass" -eq 1 ]; then
     DG_START_TIME_1="$DG_THIS_START"
   else
-    [ "$DG_THIS_START" != "$DG_START_TIME_1" ] \
-      || dg_fail "process_start_time is unchanged across the restart ($DG_THIS_START): the engine did not restart"
-    echo "[dual-gate] ok: process_start_time moved ($DG_START_TIME_1 -> $DG_THIS_START)"
+    dg_require_restart
   fi
   dg_write_chunk bge "$pass"
   dg_write_chunk voy "$pass"
