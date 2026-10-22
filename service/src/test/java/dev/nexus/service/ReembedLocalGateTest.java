@@ -22,8 +22,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
@@ -239,10 +237,10 @@ class ReembedLocalGateTest {
     private static final String BASE = "/v1/vectors/reembed";
 
     private HttpResponse<String> call(NexusService s, String method, String path, String body) throws Exception {
-        var builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + s.getPort() + BASE + path))
+        var builder = TestHttp.request("http://127.0.0.1:" + s.getPort() + BASE + path)
             .header("Authorization", "Bearer " + GATE_TOKEN).header("Content-Type", "application/json");
         builder = "GET".equals(method) ? builder.GET() : builder.POST(HttpRequest.BodyPublishers.ofString(body));
-        return HttpClient.newHttpClient().send(builder.build(), HttpResponse.BodyHandlers.ofString());
+        return TestHttp.client().send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private void seedGateToken() throws Exception {
@@ -298,8 +296,7 @@ class ReembedLocalGateTest {
         var missingJob = call(s, "POST", "/jobs/" + UUID.randomUUID() + "/abort", "");
         assertThat(missingJob.statusCode()).isEqualTo(404);
 
-        var other = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
-                URI.create("http://127.0.0.1:" + s.getPort() + "/v1/vectors/stats"))
+        var other = TestHttp.client().send(TestHttp.request("http://127.0.0.1:" + s.getPort() + "/v1/vectors/stats")
             .header("Authorization", "Bearer " + GATE_TOKEN).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertThat(other.body()).as("/v1/vectors/stats is still the vectors handler's").doesNotContain("re-embed");
     }

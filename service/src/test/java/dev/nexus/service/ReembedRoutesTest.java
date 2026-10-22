@@ -25,7 +25,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -171,7 +170,7 @@ class ReembedRoutesTest {
             new EmbedderRouter(new Fake(MINI, 384), "document"), null, null, null, null, null,
             name -> name.equals("NX_ENGINE_LOCAL") ? "1" : null, () -> false, executor, null);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
     }
 
     @AfterAll
@@ -237,14 +236,14 @@ class ReembedRoutesTest {
     // ── http helpers ─────────────────────────────────────────────────────────
 
     private HttpResponse<String> post(Tn t, String path, String body) throws Exception {
-        return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + service.getPort() + BASE + path))
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + BASE + path)
             .header("Authorization", "Bearer " + t.token())
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> get(Tn t, String path) throws Exception {
-        return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + service.getPort() + BASE + path))
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + BASE + path)
             .header("Authorization", "Bearer " + t.token()).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
@@ -753,13 +752,11 @@ class ReembedRoutesTest {
             new Probe("/jobs/" + jobId + "/abort", ""));
 
         for (Probe p : probes) {
-            var none = http.send(HttpRequest.newBuilder(
-                    URI.create("http://127.0.0.1:" + service.getPort() + BASE + p.path()))
+            var none = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + BASE + p.path())
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(p.body())).build(), HttpResponse.BodyHandlers.ofString());
             assertThat(none.statusCode()).as("no token: " + p.path()).isEqualTo(401);
-            var bad = http.send(HttpRequest.newBuilder(
-                    URI.create("http://127.0.0.1:" + service.getPort() + BASE + p.path()))
+            var bad = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + BASE + p.path())
                 .header("Authorization", "Bearer not-a-token-" + t.token())
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(p.body())).build(), HttpResponse.BodyHandlers.ofString());

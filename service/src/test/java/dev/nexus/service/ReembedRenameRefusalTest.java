@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -82,12 +81,11 @@ class ReembedRenameRefusalTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
         jobs = new ReembedJobRepository(new TenantScope(svcDs));
         // The tenant's first request runs the once-per-process ghost sweep, which deletes registered-but-empty
         // collections: burn it before any collection below is registered (see CatalogHandlerRenameTest).
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
@@ -111,8 +109,7 @@ class ReembedRenameRefusalTest {
     }
 
     private HttpResponse<String> post(String path, String json) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .header("Content-Type", "application/json")
