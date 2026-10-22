@@ -1723,6 +1723,21 @@ def _reembed_collection(
     return processed, skipped
 
 
+def _reembed_source_model(db: object, name: str) -> str:
+    """The model the engine will embed *name* with: the catalog row's
+    ``embedding_model`` when a row backs the name (RDR-210 Technical Design 10;
+    the engine routes by the row, never by a name segment), else the model the
+    name encodes. The row read goes through the client's own resolver, so it
+    never crosses tenants (nexus-dxifx)."""
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    model = resolve_row_preferred(
+        name, "embedding_model", embedding_model_for_collection,
+        row_resolver=getattr(db, "_resolve_collection_row", None),
+    )
+    return model if model else embedding_model_for_collection(name)
+
+
 @collection.command("re-embed")
 @click.argument("name")
 @click.option(
@@ -1783,12 +1798,13 @@ def reembed_cmd(
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not dry_run and is_service_backed(db):
-        encoded = embedding_model_for_collection(name)
+        encoded = _reembed_source_model(db, name)
         if encoded != target_model:
             raise click.ClickException(
                 f"service mode re-embeds server-side using the model the "
-                f"collection NAME encodes — or, for legacy 2-segment names, "
-                f"the prefix-inferred model ({encoded!r}); --to {target_model!r} "
+                f"collection's catalog row records — or, when no row backs the "
+                f"name, the model its name encodes ({encoded!r}); "
+                f"--to {target_model!r} "
                 f"cannot take effect on {name!r}. Cross-model moves "
                 f"re-index from source into a {target_model}-named "
                 f"collection (nx index repo / nx index pdf — the RDR-162 "

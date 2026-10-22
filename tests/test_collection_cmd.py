@@ -1540,6 +1540,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
     # returns; route get_collection to the real Ephemeral collection so
     # count()/get() paging behaves like production.
     fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = None  # no catalog row: the name's model decides (nexus-dxifx)
     fake_db.get_collection.side_effect = client.get_collection
 
     result = _invoke(
@@ -1587,6 +1588,7 @@ def test_reembed_no_dry_run_writes_via_server(
 
     # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
     fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = None  # no catalog row: the name's model decides (nexus-dxifx)
     fake_db.get_collection.side_effect = client.get_collection
 
     upsert_calls: list[dict] = []
@@ -1644,6 +1646,7 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
         ],
     )
     fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = None  # no catalog row: the name's model decides (nexus-dxifx)
     fake_db.get_collection.side_effect = client.get_collection
     upsert_calls: list[dict] = []
 
@@ -1668,6 +1671,34 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
 
 
 @pytest.mark.t2_tenant
+def test_reembed_to_reads_the_source_model_from_the_catalog_row(runner, env_creds, cloud_mode) -> None:
+    """nexus-dxifx: the engine embeds by the catalog row's model, so the --to
+    guard compares against the row, not the name. A legacy 2-segment name whose
+    prefix infers one model but whose row records another used to be refused for
+    the row's own model and accepted for the name's."""
+    import uuid
+
+    coll_name = f"code__rem{uuid.uuid4().hex[:10]}"
+    client = make_vector_test_client()
+    col = client.get_or_create_collection(coll_name)
+    col.add(ids=["c1"], documents=["doc one"], metadatas=[{"content_hash": "h1"}])
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = {"embedding_model": "voyage-context-3"}
+    fake_db.get_collection.side_effect = client.get_collection
+    calls: list[str] = []
+    fake_db.upsert_chunks.side_effect = lambda collection, *a, **k: calls.append(collection)
+
+    ok = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-context-3", "--no-dry-run", "--yes"])
+    assert ok.exit_code == 0, ok.output
+    assert calls == [coll_name]
+
+    refused = _invoke(runner, fake_db, ["re-embed", coll_name, "--to", "voyage-code-3", "--no-dry-run", "--yes"])
+    assert refused.exit_code != 0
+    assert "'voyage-context-3'" in refused.output and "catalog row" in refused.output
+    assert calls == [coll_name]  # the refused run wrote nothing
+
+
+@pytest.mark.t2_tenant
 def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, cloud_mode) -> None:
     """nexus-tysei: every chunk in an upsert is embedded before the request
     answers, and the edge gives upsert-chunks 55 s, so a 300-row page goes
@@ -1684,6 +1715,7 @@ def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, 
     col.add(ids=ids, documents=[f"text {i}" for i in range(n)],
             metadatas=[{"content_hash": f"h{i}"} for i in range(n)])
     fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = None  # no catalog row: the name's model decides (nexus-dxifx)
     fake_db.get_collection.side_effect = client.get_collection
     sizes: list[int] = []
     seen: list[str] = []
@@ -1728,6 +1760,7 @@ def test_reembed_skips_empty_documents(
 
     # nexus-c9xr2 FIXED: see test_reembed_dry_run_reports_count.
     fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db._resolve_collection_row.return_value = None  # no catalog row: the name's model decides (nexus-dxifx)
     fake_db.get_collection.side_effect = client.get_collection
 
     fake_embed_result = MagicMock()
