@@ -145,6 +145,35 @@ class TupleSenderSessionHttpTest {
         assertThat(out.statusCode()).as(out.body()).isEqualTo(401);
     }
 
+    /** nexus-g2ckl: an ack's reply carries the ACKER's minted session, read from the
+     *  request's token, not the requester's and never a body field. */
+    @Test
+    void ackWithReplyUnderAMintedSession_stampsTheReplyWithTheAckersSession() throws Exception {
+        String requester = "sess-" + UUID.randomUUID();
+        String acker = "sess-" + UUID.randomUUID();
+        String inbox = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        String outbox = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        var out = send(TENANT_TOKEN, mintSession(requester), "/v1/tuples/out", mailboxOut(inbox, "n-1"));
+        assertThat(out.statusCode()).as(out.body()).isEqualTo(200);
+        String ackerToken = mintSession(acker);
+        var claim = send(TENANT_TOKEN, ackerToken, "/v1/tuples/inp", Map.of(
+                "subspace", "mailbox/" + inbox, "keys_pattern", Map.of("to", inbox), "claimant", "w",
+                "lease_s", 60));
+        assertThat(claim.statusCode()).as(claim.body()).isEqualTo(200);
+        String claimId = MAPPER.readTree(claim.body()).get("claim_id").asText();
+        Map<String, Object> reply = new LinkedHashMap<>();
+        reply.put("subspace", "mailbox/" + outbox);
+        reply.put("keys", Map.of("to", outbox));
+        reply.put("dims", Map.of("from", "someone"));
+        reply.put("body", "answer");
+        reply.put("sender_session", "forged");
+        var ack = send(TENANT_TOKEN, ackerToken, "/v1/tuples/ack",
+                Map.of("claim_id", claimId, "claimant", "w", "reply", reply));
+        assertThat(ack.statusCode()).as(ack.body()).isEqualTo(200);
+        assertThat(rdOnly(TENANT_TOKEN, "mailbox/" + outbox, outbox).get("sender_session").asText())
+                .isEqualTo(acker);
+    }
+
     @Test
     void outWithNoSessionHeader_stampsNull_andIsNotRefused() throws Exception {
         String to = "http-" + UUID.randomUUID().toString().substring(0, 8);

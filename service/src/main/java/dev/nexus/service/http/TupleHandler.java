@@ -401,7 +401,10 @@ public final class TupleHandler implements HttpHandler {
         String claimId = requireString(body, "claim_id");
         String claimant = requireString(body, "claimant");
         TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
-        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply);
+        // nexus-g2ckl: a reply is stamped with the acker's minted session, as out stamps
+        // its rows; never read from the body.
+        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply, senderSession);
         HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
                 + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
                 + "}");

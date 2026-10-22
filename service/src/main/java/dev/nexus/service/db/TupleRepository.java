@@ -2089,6 +2089,16 @@ public final class TupleRepository {
      * it is refused rather than documented.
      */
     public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
+        return ackWithReply(tenant, claimId, claimant, reply, null);
+    }
+
+    /**
+     * {@link #ackWithReply(String, String, String, ReplySpec)} stamping the reply row's
+     * {@code sender_session} with the acker's server-resolved minted session, or null
+     * (bead nexus-g2ckl), on INSERT only, exactly as {@code out} stamps its rows.
+     */
+    public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply,
+                               String senderSession) {
         checkClaimIdentifiers(claimId, claimant);
         if (reply == null) {
             ack(tenant, claimId, claimant);
@@ -2109,7 +2119,7 @@ public final class TupleRepository {
             String nonce = HexFormat.of().formatHex(consumed.getId());
             byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                     prepared.keys(), prepared.dims(), NonceLabel.REPLY, nonce, reply.body());
-            return writeOut(ctx, tenant, prepared, reply.body(), id);
+            return writeOut(ctx, tenant, prepared, reply.body(), id, senderSession);
         });
         // Signal AFTER the commit, and only for the reply's subspace: a parked reader
         // there must not be woken by a transaction that rolled back.

@@ -189,7 +189,7 @@ class TupleSenderSessionTest {
     }
 
     @Test
-    void ackWithReply_replyRowIsNotStamped_thisBeadLeftItAlone() {
+    void ackWithReply_stampsTheReplyWithTheAckersSession_andNullWithoutOne() {
         String asker = addr("asker");
         String answerer = addr("answerer");
         repo.out(TENANT, "mailbox/" + answerer, Map.of("to", answerer), Map.of("from", "asker"),
@@ -197,8 +197,20 @@ class TupleSenderSessionTest {
         String claimId = repo.inp(TENANT, "mailbox/" + answerer, Map.of("to", answerer), "w", 60)
                 .orElseThrow().claimId();
         repo.ackWithReply(TENANT, claimId, "w", new TupleRepository.ReplySpec(
-                "mailbox/" + asker, Map.of("to", asker), Map.of("from", "answerer"), "ans", null));
+                "mailbox/" + asker, Map.of("to", asker), Map.of("from", "answerer"), "ans", null),
+                "session-B");
         assertThat(onlyRow("mailbox/" + asker, Map.of("to", asker)).senderSession())
-                .as("nexus-g2ckl stamps replies; until then the column stays null").isNull();
+                .as("nexus-g2ckl: the reply carries the acker's session, not the requester's")
+                .isEqualTo("session-B");
+
+        String asker2 = addr("asker");
+        repo.out(TENANT, "mailbox/" + answerer, Map.of("to", answerer), Map.of("from", "asker"),
+                "req2", "n-" + UUID.randomUUID(), null, "session-A");
+        String claimId2 = repo.inp(TENANT, "mailbox/" + answerer, Map.of("to", answerer), "w", 60)
+                .orElseThrow().claimId();
+        repo.ackWithReply(TENANT, claimId2, "w", new TupleRepository.ReplySpec(
+                "mailbox/" + asker2, Map.of("to", asker2), Map.of("from", "answerer"), "ans", null));
+        assertThat(onlyRow("mailbox/" + asker2, Map.of("to", asker2)).senderSession())
+                .as("the four-argument ackWithReply stamps null").isNull();
     }
 }
