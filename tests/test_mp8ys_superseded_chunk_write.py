@@ -144,11 +144,17 @@ def test_upsert_chunks_post_keeps_the_generic_error_for_another_409(_vector_post
     assert not isinstance(caught.value, SupersededCollectionWriteError)
 
 
-def test_the_vector_retry_wrapper_sends_it_exactly_once(_vector_post_env) -> None:
+def test_the_vector_retry_wrapper_sends_it_exactly_once(_vector_post_env, monkeypatch) -> None:
+    import nexus.retry as retry_mod  # noqa: PLC0415 — test-local import
     from nexus.retry import _vector_with_retry  # noqa: PLC0415 — test-local import
 
+    from tests._module_seam import setattr_in  # noqa: PLC0415 — test-local import
+
     sends = MagicMock(side_effect=_http_error(409, _engine_body()))
-    with patch("nexus.db.http_vector_client._request", sends), patch("time.sleep") as slept:
+    slept = MagicMock()
+    # Local to nexus.retry: a process-wide time.sleep patch reaches every module (test_module_seam lint).
+    setattr_in(monkeypatch, retry_mod, "time.sleep", slept)
+    with patch("nexus.db.http_vector_client._request", sends):
         with pytest.raises(SupersededCollectionWriteError):
             _vector_with_retry(_post, "/v1/vectors/upsert-chunks", {}, retry_on_timeout=False)
     assert sends.call_count == 1
