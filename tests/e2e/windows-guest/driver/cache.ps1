@@ -141,10 +141,12 @@ function Save-Keys($mine, $before) {
         # so a seed reading keys.txt without the lock sees the old file or the new one, never a torn write. The
         # .NET calls throw on failure, so a failed write leaves keys.txt as it was and fails the harvest loudly.
         [System.IO.File]::WriteAllLines("$keys.tmp", [string[]]@($merged | Sort-Object -Unique), (New-Object System.Text.UTF8Encoding $true))
+        # Windows PowerShell 5.1 (.NET Framework) throws "path is not of a legal form" for a $null backup name, so the swap
+        # names one and removes it (2026-10-22: the warm run's harvest wrote its payloads but never keys.txt).
         # A seed's unlocked read can hold keys.txt open without delete-share for a moment; retry the swap briefly.
         for ($j = 0; ; $j++) {
             try {
-                if (Test-Path -LiteralPath $keys) { [System.IO.File]::Replace("$keys.tmp", $keys, $null) } else { [System.IO.File]::Move("$keys.tmp", $keys) }
+                if (Test-Path -LiteralPath $keys) { [System.IO.File]::Replace("$keys.tmp", $keys, "$keys.bak"); [System.IO.File]::Delete("$keys.bak") } else { [System.IO.File]::Move("$keys.tmp", $keys) }
                 break
             } catch { if ($j -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
         }

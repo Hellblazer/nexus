@@ -1328,6 +1328,8 @@ def test_keys_txt_is_written_only_under_an_exclusive_lock_that_re_reads_and_merg
     held = fn[fn.index("try {\n        $added"):fn.index("} finally { $lock.Dispose() }")]
     assert held.index("Get-Content $keys") < held.index("$merged = ") < held.index("::WriteAllLines(") < held.index("::Replace(")
     assert re.search(r"catch \{ if \(\$j -ge \d+\) \{ throw \}; Start-Sleep", held)
+    # File.Replace with a $null backup name throws on Windows PowerShell 5.1 (the 2026-10-22 harvest never wrote keys.txt)
+    assert not re.search(r"::Replace\([^)]*\$null", held) and '::Replace("$keys.tmp", $keys, "$keys.bak")' in held
     # the merge keeps another harvest's line for every kind this run did not touch, and this run's line for the rest
     for line in (
         "$added = @($mine | Where-Object { $before -notcontains $_ })",
