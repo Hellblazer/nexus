@@ -283,13 +283,15 @@ class TaxonomyCentroidHandlerTest {
         // first upsert, same request shape, to the then-live name, succeeded.
         String coll = "knowledge__centroidsup";
         String successor = "knowledge__centroidsup2";
-        upsert(coll, 1L, 1.0f, 0.0f, "before", 1);
+        // Topic ids no other test in this class uses: the class shares one database, and a centroid left under
+        // the retired name would otherwise show up in another test's cross-collection listing.
+        upsert(coll, 9001L, 1.0f, 0.0f, "before", 1);
         new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(svcDs))
             .supersedeCollection(TENANT, coll, successor, "");
 
         var rec = new java.util.LinkedHashMap<String, Object>();
         rec.put("collection", coll);
-        rec.put("topic_id", 2L);
+        rec.put("topic_id", 9002L);
         rec.put("embedding", unit(0.0f, 1.0f));
         rec.put("label", "after");
         rec.put("doc_count", 1);
