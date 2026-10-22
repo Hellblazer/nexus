@@ -3219,6 +3219,48 @@ public final class CatalogRepository {
     }
 
     /**
+     * Every live document whose {@code title} equals {@code title} exactly (byte for byte),
+     * optionally narrowed to the descendants of an owner tumbler prefix and to one
+     * {@code content_type} (bead nexus-gacz0). The exact-title lookup the full-text
+     * {@link #searchDocuments} cannot be: that matches tokens, so a title made of common
+     * words drags in every document sharing them and the caller has to page the lot to filter
+     * client-side.
+     *
+     * <p>Unbounded by design, like the other {@code documentsBy*} filters with no explicit
+     * limit: the contract is "every" match, and an exact title under one owner is a handful of
+     * rows. Ordered by tumbler as text, the order {@link #searchDocuments} states, so a caller
+     * switching from one to the other sees the same sequence.
+     *
+     * <p>No index backs {@code title}: the scan is the tenant's live rows (RLS), cut to the
+     * owner's range first when {@code ownerPrefix} is given (a C-collation prefix {@code LIKE}
+     * on the {@code (tenant_id, tumbler)} key, as {@link #documentsByOwner}). A title index was
+     * not added: a btree on free text risks the row-size limit, and the owner-scoped caller this
+     * serves is already narrow. The owner prefix is LIKE-escaped, so a {@code %} or {@code _}
+     * in it matches itself.
+     */
+    public List<Map<String, Object>> documentsByTitle(
+            String tenant, String title, String ownerPrefix, String contentType) {
+        if (title == null || title.isEmpty()) return List.of();
+        Condition ownerCond = (ownerPrefix == null || ownerPrefix.isBlank())
+            ? DSL.noCondition()
+            : CATALOG_DOCUMENTS.TUMBLER.like(escapeLike(ownerPrefix) + ".%", '\\');
+        Condition typeCond = (contentType == null || contentType.isBlank())
+            ? DSL.noCondition()
+            : CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType);
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TITLE.eq(title).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                   .and(ownerCond).and(typeCond))
+               .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .fetch().map(r -> docRowFromRecord(r.intoMap()))
+        );
+    }
+
+    private static String escapeLike(String s) {
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    }
+
+    /**
      * Documents by owner tumbler prefix AND file_path (exact). GH #1350 Fix B.
      *
      * <p>The combined predicate is the correct behaviour for

@@ -935,13 +935,25 @@ def _enrich_apply(
                 target_tumblers.append(e.tumbler)
                 break
 
-    # Last-resort FTS title search across the whole catalog
+    # Last-resort title lookup across the whole catalog
     # (legacy path; only fires when the caller passed neither
     # source_paths nor a title that matches inside the collection).
+    # EXACT title: this used to take the first hit of a full-text search,
+    # which matches tokens, so "Attention Is All You Need" could enrich
+    # "Attention Is All You Need, Revisited" (nexus-gacz0). One target, as
+    # before: the first exact match in tumbler order, the others named in
+    # the log when there are several.
     if not target_tumblers:
-        entries = reader.find(title, content_type="paper")
+        entries = reader.find_by_title_exact(title, content_type="paper")
         if entries:
             target_tumblers.append(entries[0].tumbler)
+            if len(entries) > 1:
+                _log.warning(
+                    "catalog_enrich_hook_title_ambiguous",
+                    title=title,
+                    chose=str(entries[0].tumbler),
+                    others=[str(e.tumbler) for e in entries[1:]],
+                )
 
     if not target_tumblers:
         _log.debug(

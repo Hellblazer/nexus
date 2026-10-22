@@ -48,3 +48,21 @@ def test_ghost_ranked_past_the_first_page_is_reconciled(t2_service_env):
     assert tumbler == ghost
     same_title = [e for e in reader.find_all(_TITLE, content_type="knowledge") if e.title == _TITLE]
     assert len(same_title) == 1, same_title
+
+    # nexus-gacz0, folded in here so it costs no extra tenant: the engine's exact-title
+    # route answers what the full-text paging above had to filter. A client of our own
+    # (the shared reader hides its transport) asks the route directly, so this is the
+    # route and not the fallback, then through find_by_title_exact with and without the
+    # owner scope; an unrelated owner finds nothing.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local import
+
+    cat = HttpCatalogClient(tenant=t2_service_env)
+    try:
+        raw = cat._get("/by_title", title=_TITLE, content_type="knowledge")
+        assert [d["tumbler"] for d in raw["documents"]] == [ghost] and raw["count"] == 1
+        assert [str(e.tumbler) for e in cat.find_by_title_exact(_TITLE, content_type="knowledge")] == [ghost]
+        assert [str(e.tumbler) for e in cat.find_by_title_exact(_TITLE, owner=owner)] == [ghost]
+        assert cat.find_by_title_exact(_TITLE, owner="9999") == []
+        assert getattr(cat, "_by_title_backoff", None) is None, "the route must not have fallen back"
+    finally:
+        cat.close()
