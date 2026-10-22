@@ -281,17 +281,6 @@ def test_search_last_page_still_returns_rows_and_zero_still_says_zero(cat) -> No
     assert zero[0]["note"].startswith("0 matches")
 
 
-def test_search_query_param_description_states_the_scope() -> None:
-    from nexus.mcp.catalog import mcp as catalog_mcp
-    import asyncio
-
-    tools = asyncio.run(catalog_mcp.list_tools())
-    tool = next(t for t in tools if t.name == "search")
-    desc = tool.inputSchema["properties"]["query"]["description"]
-    assert "title" in desc and "metadata" in desc
-    assert "mcp__plugin_conexus_nexus__search" in desc
-
-
 @pytest.mark.parametrize("field,register_val,search_kwarg", [
     ("author", "Fagin", "author"),
     ("corpus", "ml", "corpus"),

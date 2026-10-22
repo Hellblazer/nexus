@@ -40,13 +40,19 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4926
+provisioned_tests = 4939
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
 # row of that run reads the session engine, so the test needs its tenant (t2_tenant). CI 39698506258 (a0d079992)
 # counted 4926 with that one test and nothing else new; the DDL-per-run ratchet is untouched.
-measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992)"
+# 4926 -> 4939 (nexus-fzteh, nexus-5fpkh, nexus-o9gt2, nexus-jz3kh, nexus-r88er, nexus-wvz8i, 2026-10-22): CI 39713947919
+# (da8c08fdc) counted 4940, +14 over 39703344810: tests/test_mcp_tuple_tools.py 46->52 (six F7/F9/F10/F11 tests that
+# drive the real engine's refusals, the 409 and a real read cursor), tests/test_catalog_mcp.py 47->53 (five F12
+# catalog_search tests over real catalog rows, plus a query-description test moved to the tenant-free
+# tests/test_catalog_search_description.py in this commit), tests/test_rdr_084_plan_grow.py 5->7 (two F14 tests that
+# read the saved plan id back from the real plan store). 13 need their tenant; the DDL-per-run ratchet is untouched.
+measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
 # substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
