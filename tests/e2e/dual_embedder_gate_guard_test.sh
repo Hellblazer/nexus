@@ -93,7 +93,7 @@ assert_refused_before_anything() {  # <label>
 
 assert_got_past_the_key_check() {  # <label>
   local label="$1"
-  grep -q 'nx init' "$LOG" && ok "$label: reached the engine bring-up (nx init was called)" \
+  grep -q -- '--service' "$LOG" && ok "$label: reached the engine bring-up (the init call ran)" \
     || bad "$label: never got past the key check: $OUT"
   [[ "$OUT" != *"no Voyage API key"* ]] && ok "$label: no missing-key message" \
     || bad "$label: refused for a missing key although one was supplied: $OUT"
