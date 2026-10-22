@@ -5165,6 +5165,7 @@ nexus-n3qu.3
 nexus-n3qu.4
 nexus-n3qu.5
 nexus-n41p
+nexus-n51v1
 nexus-n66kv
 nexus-n6eaj
 nexus-n6mh0
@@ -7584,6 +7585,7 @@ nexus-x2g1z
 nexus-x2g1z.1
 nexus-x2k4b
 nexus-x2x6v
+nexus-x37zt
 nexus-x3gig
 nexus-x3gig.1
 nexus-x3m8e
@@ -7606,6 +7608,7 @@ nexus-x6kdz
 nexus-x6kdz.1
 nexus-x6pr
 nexus-x6pr.1
+nexus-x6qc7
 nexus-x6s5k
 nexus-x70wg
 nexus-x75kg
