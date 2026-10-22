@@ -211,7 +211,7 @@ class TestSuccessfulExtraction:
         """Long documents never touch argv — the content rides the prompt (which
         the isolated runner feeds via stdin), so a 14-page paper cannot trip
         macOS ARG_MAX (errno 7)."""
-        from nexus.aspect_extractor import extract_aspects
+        from nexus.aspect_extractor import _EXTRACTOR_CONTENT_CHAR_BUDGET, extract_aspects
 
         captured: list[str] = []
 
@@ -220,7 +220,9 @@ class TestSuccessfulExtraction:
             return _make_completed(_ok_stdout())
 
         monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
-        big_content = "X" * 200_000  # 200 KB — would have tripped E2BIG on argv
+        # The largest content a prompt carries (nexus-95qz4 bounds it); 150 KB is
+        # past Linux's 128 KiB per-argument limit, so as an argv token it would E2BIG.
+        big_content = "X" * _EXTRACTOR_CONTENT_CHAR_BUDGET
         extract_aspects(
             content=big_content,
             source_path="/big.pdf",
@@ -228,7 +230,7 @@ class TestSuccessfulExtraction:
         )
         # The big content is carried by the prompt (→ stdin in the runner),
         # never as an argv token.
-        assert len(captured[0]) >= 200_000
+        assert len(captured[0]) >= _EXTRACTOR_CONTENT_CHAR_BUDGET
 
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         """The Claude CLI sometimes wraps JSON in a ```json ... ```
@@ -2098,7 +2100,9 @@ class TestContentBound:
         assert head in prompt
         assert "TAIL-SENTINEL" not in prompt
         assert f"truncated to the first {cap} of {len(content)} characters" in prompt
+        assert "Leave a field null when its evidence would come after this point" in prompt
         assert len(prompt) < cap + 20_000
+        assert record.extras["input_truncated"] == {"kept_chars": cap, "total_chars": len(content)}
 
     def test_a_document_within_the_budget_reaches_the_prompt_whole(self, monkeypatch) -> None:
         from nexus import aspect_extractor as mod
@@ -2111,11 +2115,12 @@ class TestContentBound:
             return _make_completed(_ok_stdout())
 
         monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
-        mod.extract_aspects(content, "/short.pdf", "knowledge__delos")
+        record = mod.extract_aspects(content, "/short.pdf", "knowledge__delos")
 
         [prompt] = prompts
         assert "TAIL-SENTINEL" in prompt
         assert "truncated to the first" not in prompt
+        assert "input_truncated" not in record.extras
 
     def test_a_batch_over_the_budget_is_split_and_each_call_fits(self, monkeypatch) -> None:
         from nexus import aspect_extractor as mod
@@ -2163,3 +2168,5 @@ class TestContentBound:
         assert not any("TAIL-SENTINEL" in p for p in prompts)
         assert any("source_path: /huge.pdf\n" in p and "truncated to the first" in p for p in prompts)
         assert [r.problem_formulation for r in records] == ["P /small.pdf", "P /huge.pdf"]
+        assert "input_truncated" not in records[0].extras
+        assert records[1].extras["input_truncated"] == {"kept_chars": cap, "total_chars": len(items[1][2])}
