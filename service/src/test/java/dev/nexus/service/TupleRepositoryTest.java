@@ -342,6 +342,67 @@ class TupleRepositoryTest {
         assertThat(id2).isEqualTo(id1);
     }
 
+    /**
+     * A consumed row has had its body cleared, but its dims are NOT cleared on ack: a write whose
+     * dims differ from the stored ones is still a different write and still refused, while the
+     * same-dims retry (the test above) passes.
+     */
+    @Test
+    void out_sameNonceDifferentDimsAfterTheRowWasAcked_stillConflicts() {
+        String to = "fzteh-acked-dims-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s", "kind", "note"),
+                "payload", "n-acked-dims", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-fzteh", 60);
+        assertThat(claimed).isPresent();
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-fzteh");
+
+        assertThatThrownBy(() -> repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "s", "kind", "alert"), "payload", "n-acked-dims", null))
+                .isInstanceOf(dev.nexus.service.db.NonceReuseConflictException.class);
+    }
+
+    /**
+     * The guard is the upsert's own {@code WHERE}, so two writers racing one nonce with different
+     * bodies cannot both pass it: exactly one is refused, and the one row carries the winner's body.
+     * Repeated over fresh nonces because a single race can order itself harmlessly.
+     */
+    @Test
+    void out_twoWritersRaceOneNonceWithDifferentBodies_exactlyOneConflict_oneRowWithTheWinnersBody() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 20; round++) {
+                String topic = "fzteh-race-" + UUID.randomUUID();
+                Map<String, String> keys = Map.of("topic", topic);
+                CyclicBarrier start = new CyclicBarrier(2);
+                List<Future<String>> writers = new ArrayList<>();
+                for (String body : List.of("body-a", "body-b")) {
+                    writers.add(pool.submit(() -> {
+                        start.await(10, TimeUnit.SECONDS);
+                        try {
+                            repo.out(TENANT_A, "board/" + topic, keys, Map.of("from", "s"), body, "n-race", null);
+                            return body;
+                        } catch (dev.nexus.service.db.NonceReuseConflictException e) {
+                            return null;
+                        }
+                    }));
+                }
+                List<String> winners = new ArrayList<>();
+                for (Future<String> f : writers) {
+                    String won = f.get(30, TimeUnit.SECONDS);
+                    if (won != null) {
+                        winners.add(won);
+                    }
+                }
+                assertThat(winners).as("round %d: exactly one writer passes the guard", round).hasSize(1);
+                var rows = repo.rdp(TENANT_A, "board/" + topic, keys, 10, null);
+                assertThat(rows).hasSize(1);
+                assertThat(rows.get(0).body()).isEqualTo(winners.get(0));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     /** A keys-only template keeps its refire semantics: a changed dim on the same keys is not refused. */
     @Test
     void out_keysOnlyTemplateRefire_isNotRefused() {

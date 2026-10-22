@@ -47,7 +47,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its twelve RDR-205-family typed errors (``TupleException`` and its
+  each of its thirteen RDR-205-family typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -149,11 +149,11 @@ _PARK_TIMEOUT_MARGIN_S: float = 5.0
 _ROUTE_PREFIX: str = "/v1/tuples"
 
 
-# ── Typed errors (mirrors dev.nexus.service.db.TupleException's twelve subtypes) ──
+# ── Typed errors (mirrors dev.nexus.service.db.TupleException's thirteen subtypes) ──
 
 
 class TupleError(RuntimeError):
-    """Base of the twelve RDR-205-family typed tuple-space client errors.
+    """Base of the thirteen RDR-205-family typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -226,8 +226,9 @@ class NonceReuseConflictError(TupleError):
     nonce is a caller bug or a collision and is refused instead of being
     dropped silently. 409: retrying the same request cannot succeed --
     mint a fresh nonce for a new message, or resend the original body.
-    Never raised for a row already consumed (a late retry of the write
-    that row came from)."""
+    Never raised for a retry of a row already consumed whose dims match
+    (a late retry of the write that row came from; the ack clears the
+    body, not the dims)."""
 
     code = "NonceReuseConflict"
 
@@ -402,7 +403,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the twelve typed :class:`TupleError`
+    """Re-raise *exc* as one of the thirteen typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 
@@ -495,6 +496,13 @@ def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
 
 
 _TUPLE_ID_HEX = re.compile(r"[0-9a-fA-F]{64}")
+#: The shape the engine's ``OffsetDateTime.parse`` accepts for a cursor ``created_at``:
+#: date, ``T``, time (seconds optional, as Java's own rendering drops a zero seconds),
+#: and a REQUIRED offset (``Z`` or ``+hh:mm``). Python's ``fromisoformat`` alone also
+#: takes a naive time, a date alone and a space separator, which the engine refuses.
+_CURSOR_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:[Zz]|[+-]\d{2}:\d{2})"
+)
 
 
 def _check_read_cursor(created_at: str, cursor_id: str) -> None:
@@ -511,11 +519,14 @@ def _check_read_cursor(created_at: str, cursor_id: str) -> None:
             "'id' of a row from a prior read, paired with that row's 'created_at' as since_created_at"
         )
     try:
-        datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+        if not _CURSOR_TIMESTAMP.fullmatch(created_at):
+            raise ValueError(created_at)
+        datetime.fromisoformat(created_at.replace("Z", "+00:00").replace("z", "+00:00"))
+    except (ValueError, TypeError):
         raise SchemaViolationError(
-            f"field 'since_created_at': {created_at!r} is not a timestamp; it must be the "
-            "'created_at' of a row from a prior read, paired with that row's 'id' as since_id"
+            f"field 'since_created_at': {created_at!r} is not a timestamp with a UTC offset "
+            "(e.g. 2026-10-21T00:00:00Z); it must be the 'created_at' of a row from a prior read, "
+            "paired with that row's 'id' as since_id"
         ) from None
 
 
@@ -911,7 +922,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the twelve recognised codes, so ``_raise_typed`` finds no class for
+        of the thirteen recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
@@ -959,7 +970,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Against an engine predating ``/release`` the unknown route answers
         404 with ``{"error": "unknown tuples op: /release"}`` (the route
         switch's default branch) -- the body's ``error`` field is not one
-        of the twelve recognised codes, so ``_raise_typed`` finds no class
+        of the thirteen recognised codes, so ``_raise_typed`` finds no class
         for it and re-raises the bare ``httpx.HTTPStatusError``, loud by
         design, exactly as :meth:`renew` behaves against the same old
         engine: a silent no-op here would let a caller believe a claim was

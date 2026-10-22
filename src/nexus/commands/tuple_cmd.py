@@ -336,10 +336,10 @@ def tuple_in_cmd(
         raise SystemExit(1)
     row, claim_id = result
     if json_out:
-        click.echo(json.dumps({"tuple": _row_dict(row), "claim_id": claim_id}))
+        click.echo(json.dumps({"tuple": _row_dict(row, fresh_claim=True), "claim_id": claim_id}))
     else:
         click.echo(f"claim_id={claim_id}")
-        _print_row(row)
+        _print_row(row, fresh_claim=True)
 
 
 @tuple_group.command(name="ack")
@@ -629,11 +629,14 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
 # ── rendering helpers ────────────────────────────────────────────────────────
 
 
-def _row_dict(row: Any) -> dict[str, Any]:
+def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
+    # fresh_claim: the row `in` just claimed. The engine set its lease a moment ago, so it
+    # is "claimed"; relabelling it against this box's clock could call it "lapsed".
     return {
         "id": row.id, "subspace": row.subspace, "template": row.template,
         "keys": row.keys, "dims": row.dims, "body": row.body,
-        "claim_state": row.effective_claim_state(), "claimant": row.claimant,
+        "claim_state": row.claim_state if fresh_claim else row.effective_claim_state(),
+        "claimant": row.claimant,
         "lease_until": row.lease_until, "attempts": row.attempts,
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
@@ -649,14 +652,14 @@ def _census_dict(c: Any) -> dict[str, Any]:
     }
 
 
-def _print_row(row: Any) -> None:
+def _print_row(row: Any, *, fresh_claim: bool = False) -> None:
     click.echo(f"  id: {row.id}")
     click.echo(f"  subspace: {row.subspace}")
     click.echo(f"  template: {row.template}")
     click.echo(f"  keys: {row.keys}")
     click.echo(f"  dims: {row.dims}")
     click.echo(f"  body: {row.body}")
-    click.echo(f"  claim_state: {row.effective_claim_state()}")
+    click.echo(f"  claim_state: {row.claim_state if fresh_claim else row.effective_claim_state()}")
     click.echo(f"  created_at: {row.created_at}")
 
 

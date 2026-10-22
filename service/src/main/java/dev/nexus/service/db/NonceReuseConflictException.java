@@ -15,9 +15,10 @@ package dev.nexus.service.db;
  * for a new message, or resend the original body). The RDR-222 request ledger refuses
  * an Idempotency-Key reused with a different body the same way.
  *
- * <p>Never raised for a row that was already consumed: an acked row has had its body
- * cleared, so a late retry of the write that row came from is the same write, not a
- * different one.
+ * <p>Not raised for a retry of a row that was already consumed whose dims match: an acked
+ * row has had its body cleared (its dims are not cleared), so a late retry of the write that
+ * row came from is the same write, not a different one. A consumed row still refuses
+ * different dims.
  */
 public final class NonceReuseConflictException extends TupleException {
 

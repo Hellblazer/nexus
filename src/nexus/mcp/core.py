@@ -7494,7 +7494,11 @@ def plan_delete(
 # ``tuple_rdp``/``tuple_inp`` tools.
 
 
-def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
+def _tuple_row_to_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
+    """*fresh_claim*: the row ``tuple_in`` just claimed. The engine set its lease a
+    moment ago, so it is ``claimed`` by definition; relabelling it against this box's
+    clock would call a brand-new claim ``lapsed`` whenever the client runs ahead of
+    the engine by more than the lease."""
     return {
         "id": row.id,
         "subspace": row.subspace,
@@ -7505,7 +7509,7 @@ def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
         # nexus-5fpkh: a claim whose lease has passed reads "lapsed", computed here at
         # read time; the engine's lazy reclaim and the stored state are untouched, and
         # claimant / lease_until stay so the stale holder is still visible.
-        "claim_state": row.effective_claim_state(),
+        "claim_state": row.claim_state if fresh_claim else row.effective_claim_state(),
         "claimant": row.claimant,
         "lease_until": row.lease_until,
         "attempts": row.attempts,
@@ -7631,8 +7635,9 @@ def tuple_rd(
 
     Returns a list of matching tuples, including dead-lettered rows
     (dead-lettering is a claim state, not an exclusion). `claim_state` is
-    null (unclaimed), `claimed`, `lapsed` (a claim whose lease has passed;
-    the claimant and `lease_until` are the stale holder's) or `dead`.
+    null (unclaimed), `claimed`, `lapsed` (a claim whose `lease_until` is
+    before this client's clock; the claimant and `lease_until` are the
+    stale holder's) or `dead`.
     `since_created_at` and `since_id` come from a returned row, together.
     """
     try:
@@ -7695,7 +7700,7 @@ def tuple_in(
         if result is None:
             return None
         row, claim_id = result
-        return {"tuple": _tuple_row_to_dict(row), "claim_id": claim_id}
+        return {"tuple": _tuple_row_to_dict(row, fresh_claim=True), "claim_id": claim_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return {"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")}
 
@@ -7911,7 +7916,10 @@ def tuple_list(
     """List concrete tuple subspaces that currently exist, each with its row census.
 
     Use `tuple_registry` instead to see the template definitions rather
-    than live subspaces. Returns one census row per subspace, paged: a
+    than live subspaces. Returns one census row per subspace
+    (`subspace, total, available, claimed, lapsed, dead, consumed,
+    expired_unpurged, oldest_created_at, newest_created_at`; `lapsed` is
+    the part of `claimed` whose lease has passed on the engine's clock), paged: a
     truncated page appends a `_pagination` entry with `next_cursor` -- the
     catalog tools' own convention for a `list[dict]`-shaped paged result --
     pass that back as `after` to continue. Bounded to 100 by default
@@ -7947,7 +7955,8 @@ def tuple_stats(
     `{subspace, total, available, claimed, lapsed, dead, consumed,
     expired_unpurged, oldest_created_at, newest_created_at}`. `total`
     counts rows not yet consumed; consumed rows are counted only in
-    `consumed`. `lapsed` is the part of `claimed` whose lease has passed.
+    `consumed`. `lapsed` is the part of `claimed` whose lease has passed
+    on the engine's clock.
     """
     try:
         with _t2_ctx() as db:
@@ -8083,7 +8092,9 @@ def tuple_subscribe(
     per wait, one notification per wait naming the count, the first and
     last tuple id and the `tuple_rd` call that reads them. Older posts
     are read with `tuple_rd`, never pushed. Mail sent to the mailbox
-    before the subscribe is delivered too, until claimed or expired.
+    before the subscribe is delivered too, until it is claimed or
+    expires, each row announced at most 5 times (`max_announces`, 150 s
+    apart).
 
     Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
     lease so `mailbox_send` resolves that name to this session. It is NOT
@@ -8154,7 +8165,8 @@ def tuple_subscriptions() -> list[dict]:
     Phase 3). There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board). A board entry carries `since`,
-    the subscribe time push delivery starts from.
+    the time of the subscribe call; push delivery starts 30 seconds
+    before it (a clock-skew margin).
     """
     try:
         session_id = _current_subscription_session_id()

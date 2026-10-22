@@ -1224,6 +1224,12 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
+    # The user-level git-integrity hook writes ``git-integrity/<session_id>/*``
+    # on every tool call of the live Claude session that is RUNNING this
+    # pytest, so the directory changes during any run launched from such a
+    # session with no test involved. Per-session scratch for that hook; no
+    # test reads it.
+    "git-integrity/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/

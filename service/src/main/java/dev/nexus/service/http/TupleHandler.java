@@ -76,7 +76,7 @@ import java.util.Optional;
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
- *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, lapsed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
  *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
  *                                        refused_claimant, per_claimant: {claimant: slots}}
  *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
@@ -101,7 +101,7 @@ import java.util.Optional;
  * uses at every other bytea-identity boundary); {@code keys}/{@code dims}
  * are plain JSON objects of string values.
  *
- * <p>Errors: the twelve RDR-205/RDR-211-family typed errors ({@link TupleException} and its
+ * <p>Errors: the thirteen RDR-205/RDR-211-family typed errors ({@link TupleException} and its
  * subtypes) are caught ahead of the generic ladder and rendered as {@code
  * {"error": "<code>", "detail": "<message>"}} at each exception's own
  * {@link TupleException#httpStatus()} — {@code ParkCapExceeded} additionally

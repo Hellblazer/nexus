@@ -905,7 +905,7 @@ class TestTypedErrorMapping:
         assert exc_info.value.__cause__ is exc
 
     def test_unrecognised_error_code_falls_through_unchanged(self) -> None:
-        exc = _status_error(404, "SomeFutureCode", "not one of the twelve")
+        exc = _status_error(404, "SomeFutureCode", "not one of the thirteen")
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             _raise_typed(exc)
         assert exc_info.value is exc

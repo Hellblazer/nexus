@@ -12,16 +12,20 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from nexus.db.t2.http_tuple_store import (
     NonceReuseConflictError,
     SchemaViolationError,
     _body_to_census,
+    _raise_typed,
     _since_payload,
 )
 from nexus.db.t2.records import TupleRow
 from nexus.mcp import channel
+from nexus.commands import tuple_cmd
+from nexus.mcp import core as mcp_core
 from nexus.mcp.core import _tuple_row_to_dict, mcp, tuple_rd
 
 _TEMPLATES = Path(__file__).resolve().parent.parent / "service/src/main/resources/tuples/templates"
@@ -80,6 +84,22 @@ class TestLapsedClaimState:
         assert d["claimant"] == "old-holder"
         assert d["lease_until"] == "2020-01-01T00:00:00Z"
 
+    def test_the_row_tuple_in_just_claimed_is_never_relabelled_lapsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A client clock ahead of the engine's by more than the lease would otherwise call a
+        # brand-new claim lapsed. The lease below is already past on THIS box's clock.
+        row = _row("claimed", "2020-01-01T00:00:00Z")
+        monkeypatch.setattr(mcp_core, "_t2_index_write", lambda fn, op: (row, "claim-1"))
+        out = mcp_core.tuple_in("queue/q", {"name": "q"}, "me", 60)
+        assert out["claim_id"] == "claim-1"
+        assert out["tuple"]["claim_state"] == "claimed"
+        # ...while a later read of the same row (tuple_rd) still reports the lapse.
+        assert _tuple_row_to_dict(row)["claim_state"] == "lapsed"
+
+    def test_the_cli_in_claim_is_never_relabelled_lapsed_but_a_read_is(self) -> None:
+        row = _row("claimed", "2020-01-01T00:00:00Z")
+        assert tuple_cmd._row_dict(row, fresh_claim=True)["claim_state"] == "claimed"
+        assert tuple_cmd._row_dict(row)["claim_state"] == "lapsed"
+
     def test_census_parses_lapsed_and_defaults_to_zero_from_an_older_engine(self) -> None:
         base = {"subspace": "s", "total": 3, "available": 1, "claimed": 2, "dead": 0, "consumed": 0}
         assert _body_to_census({**base, "lapsed": 1}).lapsed == 1
@@ -112,6 +132,20 @@ class TestReadCursor:
         }
         assert _since_payload(("2026-10-21T00:00:00+00:00", "")) == {"created_at": "2026-10-21T00:00:00+00:00"}
 
+    @pytest.mark.parametrize(
+        "bad", ["2026-10-21", "2026-10-21T00:00:00", "2026-10-21T00:00", "2026-10-21 00:00:00+00:00", "20261021T000000Z"],
+    )
+    def test_a_created_at_without_a_utc_offset_or_not_iso_is_refused_as_the_engine_would(self, bad: str) -> None:
+        # Python's fromisoformat takes every one of these; OffsetDateTime.parse refuses them.
+        with pytest.raises(SchemaViolationError, match="since_created_at.*UTC offset"):
+            _since_payload((bad, self.GOOD_ID))
+
+    @pytest.mark.parametrize(
+        "good", ["2026-10-21T00:00Z", "2026-10-21T00:00:00Z", "2026-10-21T00:00:00.123456789Z", "2026-10-21T00:00:00-07:00"],
+    )
+    def test_a_created_at_with_an_offset_passes_including_javas_zero_seconds_form(self, good: str) -> None:
+        assert _since_payload((good, self.GOOD_ID))["created_at"] == good
+
     @pytest.mark.parametrize(("created_at", "row_id"), [("2026-10-21T00:00:00Z", ""), ("", "ab" * 32)])
     def test_tuple_rd_refuses_half_a_cursor(self, created_at: str, row_id: str) -> None:
         out = tuple_rd("mailbox/x", since_created_at=created_at, since_id=row_id)
@@ -127,6 +161,16 @@ class TestReadCursor:
 
 
 # ── F9: the conflict maps to its own class ───────────────────────────────────
+
+
+def test_a_409_nonce_reuse_conflict_body_routes_to_its_own_class() -> None:
+    request = httpx.Request("POST", "http://x.test/v1/tuples/out")
+    response = httpx.Response(
+        409, json={"error": "NonceReuseConflict", "detail": "tuple id abc already exists"}, request=request,
+    )
+    exc = httpx.HTTPStatusError("HTTP 409", request=request, response=response)
+    with pytest.raises(NonceReuseConflictError, match="already exists"):
+        _raise_typed(exc)
 
 
 def test_nonce_reuse_conflict_has_its_own_client_class() -> None:
@@ -168,3 +212,14 @@ def test_tuple_subscribe_description_states_the_real_start_position_and_batch_bo
     assert f"at most {channel.DEFAULT_BOARD_WAIT_ROWS} per wait" in desc
     assert "starts at now" not in desc
     assert "before the subscribe is delivered" in desc, "a mailbox delivers earlier mail; the doc must not say otherwise"
+    assert f"announced at most {channel.DEFAULT_MAX_ANNOUNCES} times" in desc, (
+        "mail sent before the subscribe is not delivered forever: the announce cap bounds it"
+    )
+
+
+def test_tuple_subscriptions_description_gives_since_as_the_subscribe_call_not_the_delivery_start() -> None:
+    desc = _description("tuple_subscriptions")
+    assert "the time of the subscribe call" in desc
+    assert f"{int(channel.DEFAULT_BOARD_START_SKEW_S)} seconds" in desc
+    assert "before it" in desc
+    assert "the subscribe time push delivery starts from" not in desc

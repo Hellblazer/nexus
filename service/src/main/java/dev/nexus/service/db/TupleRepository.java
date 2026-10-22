@@ -707,16 +707,19 @@ public final class TupleRepository {
                 // body, so a changed body (or dims) under a used nonce landed on the
                 // existing row and was dropped without a word. The DO UPDATE now applies
                 // only when the stored row matches this write (null and empty body are the
-                // same write), or when the row is already consumed -- an acked row has had
-                // its body cleared, and a late retry of the write it came from is not a
-                // different write. Zero rows affected can only mean the guard failed, so it
-                // is a conflict; the guard sits in the same statement as the upsert, so two
-                // racing writers cannot both pass a separate read-then-write check.
+                // same write). A consumed row has had its body cleared by the ack, so its
+                // body is no longer comparable and a late retry of the write it came from
+                // passes on the dims alone; the dims are NOT cleared on ack, so a consumed
+                // row still refuses a write whose dims differ. Zero rows affected can only
+                // mean the guard failed, so it is a conflict; the guard sits in the same
+                // statement as the upsert, so two racing writers cannot both pass a
+                // separate read-then-write check.
                 Field<String> storedBody = DSL.coalesce(TUPLES.BODY, "");
                 Field<JSONB> storedDims = DSL.coalesce(TUPLES.DIMS, DSL.val(EMPTY_DIMS));
-                Condition sameWrite = storedBody.eq(DSL.val(body == null ? "" : body))
-                        .and(storedDims.eq(DSL.val(p.dimsJsonb() == null ? EMPTY_DIMS : p.dimsJsonb())));
-                if (refire.where(TUPLES.CONSUMED_AT.isNotNull().or(sameWrite)).execute() == 0) {
+                Condition sameBody = storedBody.eq(DSL.val(body == null ? "" : body));
+                Condition sameDims = storedDims.eq(DSL.val(p.dimsJsonb() == null ? EMPTY_DIMS : p.dimsJsonb()));
+                Condition sameWrite = sameDims.and(TUPLES.CONSUMED_AT.isNotNull().or(sameBody));
+                if (refire.where(sameWrite).execute() == 0) {
                     throw new NonceReuseConflictException(HexFormat.of().formatHex(id), p.subspace());
                 }
             } else {
@@ -2641,7 +2644,7 @@ public final class TupleRepository {
     // ── subspace_list / subspace_stats ──────────────────────────────────────
 
     /**
-     * {@code subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}}.
+     * {@code subspace_stats(subspace) -> {total, available, claimed, lapsed, dead, consumed, expired_unpurged}}.
      *
      * <p>RDR-205 follow-on (nexus-mvfm9): resolves the subspace against the
      * registry FIRST — before this fix an unknown subspace silently answered
