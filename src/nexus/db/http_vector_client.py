@@ -36,7 +36,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
@@ -3219,6 +3219,50 @@ class HttpVectorClient:
             if row.get("name") == collection:
                 return row if "content_type" in row else None
         return None
+
+    def _resolve_collection_rows(
+        self, collections: "Iterable[str]",
+    ) -> "dict[str, dict | None]":
+        """The catalog row of each distinct name in *collections*, ``None`` for
+        a name no row backs: :meth:`_resolve_collection_row` for a batch, and
+        CACHE-ONLY for the process-default tenant.
+
+        nexus-noayy (search reads each collection's model from its row, and a
+        search must not add a request to learn it). Three cases:
+
+        - an injected ``_row_resolver``: asked once per name, as
+          :meth:`_resolve_collection_row` does;
+        - the process-default tenant: a read of what the shared ``mcp_infra``
+          collections cache already holds (``refresh=False``), never a fetch.
+          The caller that picked the collections listed them through that cache
+          (``get_collection_names``, or ``prime_collections_cache`` from the
+          listing it already made), so the rows are there; a caller that never
+          listed gets no rows and the name derivation answers, as before this
+          read existed;
+        - any OTHER tenant, which has no shared cache: ONE
+          :meth:`list_collections` for the whole batch, where
+          :meth:`_resolve_collection_row` would list once per name.
+
+        A resolver that raises is "no row" for that name.
+        """
+        names = list(dict.fromkeys(collections))
+        if self._row_resolver is None and self._tenant != _process_default_tenant():
+            listing = {row.get("name"): row for row in self.list_collections(routing=True)}
+            return {
+                n: row if (row := listing.get(n)) is not None and "content_type" in row else None
+                for n in names
+            }
+        if self._row_resolver is None:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            return {n: get_collection_row(n, refresh=False) for n in names}
+        rows: dict[str, dict | None] = {}
+        for n in names:
+            try:
+                rows[n] = self._row_resolver(n)
+            except Exception:  # noqa: BLE001 — a handled outcome (None), as resolve_row_preferred treats a raising row resolver; the caller falls back to the name
+                _log.warning("http_vector_client_row_resolver_failed", collection=n, exc_info=True)
+                rows[n] = None
+        return rows
 
     # ── Seam B write path ────────────────────────────────────────────────────
 

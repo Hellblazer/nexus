@@ -244,6 +244,7 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
 def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
     from nexus.search_engine import (  # noqa: PLC0415 — deferred import
+        _collection_model_resolver,
         _engine_is_dual,
         _threshold_for_collection_model,
         _voyage_thresholds_active,
@@ -254,10 +255,14 @@ def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     # filters nothing and the probe must not judge by a threshold search would
     # not apply. Past the gate, a local-model (bge, MiniLM) collection has no
     # Voyage-calibrated threshold, and neither has a model-less legacy name on
-    # a dual engine (nexus-ndr0t).
+    # a dual engine (nexus-ndr0t). The family is the catalog row's, as in search
+    # (nexus-noayy).
     if not _voyage_thresholds_active(t3):
         return None
-    return _threshold_for_collection_model(col, load_config(), dual=_engine_is_dual(t3))
+    return _threshold_for_collection_model(
+        col, load_config(), dual=_engine_is_dual(t3),
+        model_of=_collection_model_resolver(t3, [col]),
+    )
 
 
 def _neighbour_probe(
