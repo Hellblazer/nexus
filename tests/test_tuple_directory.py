@@ -266,6 +266,11 @@ class TestCheckFromAddressIsOwn:
     def test_no_own_id_resolvable_lets_a_session_id_pass(self, tmp_path) -> None:
         assert check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242) == self.OTHER
 
+    def test_no_own_id_pass_through_is_canonical(self, tmp_path) -> None:
+        assert check_from_address_is_own(
+            self.OTHER.upper(), state_dir=tmp_path, claude_pid=4242,
+        ) == self.OTHER
+
     def test_a_non_uuid_env_value_is_refused_not_treated_as_no_session(self, tmp_path, monkeypatch) -> None:
         """Fail closed: with no marker, an unusable env id must not read as
         the Desktop case, where any session id passes."""

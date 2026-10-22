@@ -197,7 +197,9 @@ def _own_session_ids(state_dir: Path | None, claude_pid: int | None) -> list[str
     (JDR-001), and both are this session's. ``NX_SESSION_ID`` counts only
     when ``NX_T1_SESSION_ID`` is unset, as everywhere else: a ``claude -p``
     child carries its parent's id there and must not send as the parent. A
-    non-UUID environment value raises, as it does on the default path."""
+    non-UUID environment value raises even beside a valid marker, which is
+    stricter than the default path (that one returns the marker first):
+    fail closed when a ``from_address`` is being checked."""
     from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
     from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
     from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
@@ -221,7 +223,7 @@ def check_from_address_is_own(
     way. A session id must equal one of this server's own ids, compared as
     UUIDs so case and hyphenation do not matter, and the own id's spelling
     is returned. With no own id resolvable there is nothing to compare and
-    it passes: the account-plugin server Claude Desktop and Cowork start,
+    it passes, in canonical spelling so a reply's `to` matches: the account-plugin server Claude Desktop and Cowork start,
     and a Claude Code server whose T1 has not published its id yet. The
     tenant is still the only authenticated identity (JDR-002): this stops a
     confused model, not a hostile caller.
@@ -231,7 +233,7 @@ def check_from_address_is_own(
         return value
     own = _own_session_ids(state_dir, claude_pid)
     if not own:
-        return value
+        return str(uuid.UUID(value))
     wanted = uuid.UUID(value)
     for o in own:
         if uuid.UUID(o) == wanted:
