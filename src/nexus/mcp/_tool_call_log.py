@@ -27,7 +27,9 @@ INFO line per distinct key-set per process. The remembered set is bounded
 Every event carries ``pid``, because ``mcp.log`` is shared by many nx-mcp
 processes. A probe finds pid N from ``mcp_server_starting``, checks
 ``mcp_sdk_patch_applied patch=tool_call_log pid=N`` (the hook is live in that
-process), then greps ``mcp_tool_call pid=N``. The listed keys are capped
+process), then greps ``mcp_tool_call pid=N`` after that start line's timestamp
+(pids are reused across a long ``mcp.log``, so bound the match by the
+``mcp_server_starting`` time). The listed keys are capped
 (``_MAX_KEYS`` keys, each cut to ``_MAX_KEY_LEN`` characters, with
 ``meta_keys_truncated`` set when anything was cut) so a hostile client cannot
 grow a line.
@@ -54,7 +56,10 @@ _MAX_KEYS = 32
 _MAX_KEY_LEN = 128
 
 #: Key-sets already logged at INFO in this process. Module state: one process
-#: serves one MCP server. Tests clear it with ``_reset_state``.
+#: serves one MCP server. Tests clear it with ``_reset_state``. No lock: the
+#: wrapper is an async request handler and ``_emit`` has no ``await``, so it
+#: runs to completion on the event-loop thread and the check-then-add below
+#: cannot interleave. Calling ``_emit`` off that thread would need a lock.
 _seen_keysets: set[tuple[tuple[str, ...], bool]] = set()
 _limit_noted = False
 
