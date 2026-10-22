@@ -923,8 +923,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # re-home with ZERO re-embedding, so the vectors would stay in the old
     # model space while the name claims the new one (silent staleness/
     # search corruption, no Voyage call ever fires). Cross-model moves are
-    # the RDR-162 migration pipeline's job (remap_collection_references +
-    # vector ETL), not rename's.
+    # the RDR-210 re-embed job's concern (a per-document move into the model
+    # sibling), not rename's.
     old_model = embedding_model_for_collection(old)
     new_model = embedding_model_for_collection(new)
     if old_model != new_model and not force_prefix_change:

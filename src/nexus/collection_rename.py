@@ -76,7 +76,7 @@ def rename_collection_data_plane(
     #     ("nx catalog restore the trashed document(s) first"); say so instead
     #     (nexus-dkymw: the verb nexus-xavu7 found missing now exists).
     #   - new PRESENT or TOMBSTONED -> refuse. This rename path has no
-    #     cross_model escape valve (unlike remap_collection_references), so
+    #     cross_model escape valve, so
     #     claiming a tombstoned name would silently land live/fresh data on
     #     top of dead rows sharing the same collection name.
     # No-op for any t3_db that is not literally an HttpVectorClient (T3Database
@@ -168,101 +168,4 @@ def rename_collection_data_plane(
     counts["search_telemetry"] = renamed.get("search_telemetry", 0)
     counts["hook_failures"] = renamed.get("hook_failures", 0)
     counts["catalog_docs"] = renamed.get("catalog_documents", 0)
-    return counts
-
-
-def remap_collection_references(
-    source: str,
-    target: str,
-    *,
-    catalog: Any | None = None,
-    on_warn: Callable[[str], None] | None = None,
-) -> dict[str, int]:
-    """Re-point every T2 + catalog collection reference ``source -> target``.
-
-    RDR-162 P2 cross-model migrate: after the stored-text re-embed has copied a
-    legacy collection's chunks into a model-remapped TARGET (e.g. a minilm-384
-    source re-embedded into its ``bge-base-en-v15-768`` target via
-    :func:`nexus.migration.vector_etl.cross_model_target_name`) AND the target is
-    verified-populated, the catalog/topic ``source_collection`` /
-    ``physical_collection`` references still name the dead source. This re-points
-    them to the live target.
-
-    Distinct from :func:`rename_collection_data_plane`: that is a MOVE (it also
-    renames the T3 collection and refuses a pre-existing target). The cross-model
-    migrate is COPY-not-move (RDR-155 RF-5): the source Chroma collection is
-    never mutated (so a failed migrate is re-runnable from the untouched source)
-    and the TARGET legitimately already exists (the ETL just populated it). So
-    this runs ONLY the two reference cascades — the T2 atomic cascade and the
-    fail-open catalog cascade — and never touches T3, and never guards on target
-    existence.
-
-    Ordering invariant (the CALLER must honour): this is the one mutation of the
-    cross-model migrate; invoke it only AFTER the target leg verifies populated
-    (mirror RDR-144 reindex-first / delete-after-verify), so a mid-migrate
-    failure never leaves dangling references.
-
-    T2 cascade failure raises ``ClickException`` (orphaned references are not
-    fail-open). Catalog cascade failure warns and continues (the catalog is a
-    derived view, repairable via ``nx catalog rebuild``). Returns a per-table
-    counts dict.
-    """
-    if on_warn is None:
-        on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
-
-    counts = {
-        "tax_topics": 0,
-        "tax_assignments": 0,
-        "tax_meta": 0,
-        "chash": 0,
-        "aspects": 0,
-        "aspect_queue": 0,
-        "highlights": 0,
-        "search_telemetry": 0,
-        "hook_failures": 0,
-        "catalog_docs": 0,
-    }
-
-    # ── T2 reference cascade (raises on failure) ─────────────────────────────
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-
-    try:
-        cascade = t2_index_write(
-            lambda t2db: t2db.rename_collection_cascade(old=source, new=target)
-        )
-        for key in (
-            "tax_topics", "tax_assignments", "tax_meta", "chash",
-            "aspects", "aspect_queue", "highlights", "search_telemetry",
-            "hook_failures",
-        ):
-            counts[key] = cascade.get(key, 0)
-    except Exception as exc:
-        raise click.ClickException(
-            f"T2 reference cascade failed remapping {source!r} -> {target!r}; "
-            f"references are unchanged. Fix the error and retry:\n  {exc}"
-        ) from exc
-
-    # ── Catalog reference cascade (fail-open) ────────────────────────────────
-    try:
-        if catalog is None:
-            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-            catalog = make_catalog_writer()
-        # nexus-gaou3: this IS the legitimate cross-model repoint (target already
-        # populated by the ETL). The Java endpoint 409s a rename onto an existing
-        # target UNLESS cross_model=True, so signal it. Unconditional since
-        # nexus-i711w — the local catalog writer (which lacked the kwarg) is gone.
-        counts["catalog_docs"] = catalog.rename_collection(
-            source, target, cross_model=True
-        )
-    except Exception as exc:  # noqa: BLE001 — catalog cascade is best-effort after T2 remap; surfaced via on_warn
-        # The catalog is a derived view (see docstring): a cascade miss here —
-        # e.g. a 404 when the legacy source was never registered as a catalog
-        # collection — is non-fatal and repairable. State the remedy so this
-        # does not read as a data-loss failure (nexus-i6p73).
-        on_warn(
-            f"warn: T2 reference remap succeeded but catalog cascade failed: {exc}\n"
-            f"       (non-fatal: the catalog is a derived view; run "
-            f"`nx catalog rebuild` to reconcile.)"
-        )
-
     return counts

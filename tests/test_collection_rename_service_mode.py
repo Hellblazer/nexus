@@ -17,10 +17,7 @@ from unittest.mock import MagicMock
 import click
 import pytest
 
-from nexus.collection_rename import (
-    remap_collection_references,
-    rename_collection_data_plane,
-)
+from nexus.collection_rename import rename_collection_data_plane
 from nexus.db.storage_mode import StorageBackend
 
 
@@ -159,39 +156,3 @@ def test_service_mode_still_guards_target_collision() -> None:
         )
     assert "already exists" in str(ei.value).lower()
     client.rename_collection_cascade.assert_not_called()
-
-
-# ── remap_collection_references (RDR-162 cross-model repoint, nexus-gaou3) ──────
-
-def _patch_t2_cascade(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the T2 atomic cascade so remap_collection_references reaches the
-    catalog leg without a real T2 database."""
-    monkeypatch.setattr(
-        "nexus.mcp_infra.t2_index_write",
-        lambda fn: {},
-    )
-
-
-def test_remap_service_mode_passes_cross_model_true(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # nexus-gaou3: in service mode the catalog repoint MUST signal cross_model=True
-    # so the Java endpoint takes the RDR-162 COPY branch instead of 409ing the
-    # (legitimately pre-existing) target.
-    _patch_t2_cascade(monkeypatch)
-    catalog = MagicMock()
-    catalog.rename_collection = MagicMock(return_value=7)
-
-    counts = remap_collection_references("code__old", "code__new", catalog=catalog)
-
-    catalog.rename_collection.assert_called_once_with(
-        "code__old", "code__new", cross_model=True
-    )
-    assert counts["catalog_docs"] == 7
-
-
-# test_remap_sqlite_mode_omits_cross_model_kwarg RETIRED (nexus-i711w terminal
-# deletion): the sqlite seam it pinned is gone — collection_rename.py now
-# threads cross_model=True unconditionally (the local catalog writer that
-# lacked the kwarg is deleted). The surviving contract is pinned by
-# test_remap_service_mode_passes_cross_model_true above.
