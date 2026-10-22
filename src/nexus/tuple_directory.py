@@ -175,6 +175,65 @@ def validate_from_address(value: str) -> str:
     )
 
 
+
+def from_address_not_own_message(value: str, own_ids: list[str]) -> str:
+    """Refusal for a session-shaped ``from_address`` that is not one of the
+    calling server's own session ids (F3 step 1, nexus-2mv7y, JDR-002).
+    Pinned by an equality test."""
+    own = ", ".join(i[:64] for i in own_ids)
+    return (
+        f"from_address {value[:64]!r} is a session id but not this server's own "
+        f"({own}): a session id names who sent the message, so only the "
+        "sending session's own id is accepted. Omit from_address to send as this "
+        "session; an agent id still passes"
+    )
+
+
+def _own_session_ids(state_dir: Path | None, claude_pid: int | None) -> list[str]:
+    """Every id this server may send as: the tuple-watch session marker,
+    ``NX_T1_SESSION_ID`` and ``NX_SESSION_ID``, in that order, UUID-shaped
+    ones only, without duplicates. More than one can be live across a
+    ``/clear`` handoff (JDR-001), and all of them are this session's."""
+    from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+
+    sd = state_dir if state_dir is not None else _nx_config.nexus_config_dir()
+    pid = claude_pid if claude_pid is not None else find_immediate_claude_pid()
+    candidates = [
+        (_read_session_marker(sd, pid) if pid else None) or "",
+        os.environ.get("NX_T1_SESSION_ID", "").strip(),
+        os.environ.get("NX_SESSION_ID", "").strip(),
+    ]
+    own: list[str] = []
+    for c in candidates:
+        if c and looks_like_session_id(c) and c not in own:
+            own.append(c)
+    return own
+
+
+def check_from_address_is_own(
+    value: str, *, state_dir: Path | None = None, claude_pid: int | None = None,
+) -> str:
+    """``mailbox_send``'s ``from_address`` check (F3 step 1, nexus-2mv7y).
+
+    The shape check of :func:`validate_from_address` runs first. An agent
+    id passes: a subagent shares its parent's server and names itself that
+    way. A session id must be one of this server's own ids; with none
+    resolvable (the account-plugin server Claude Desktop and Cowork start)
+    there is nothing to compare, and it passes, because the mailbox skill
+    tells exactly those callers to pass their own session id. The tenant
+    is still the only authenticated identity (JDR-002): this stops a
+    confused model, not a hostile caller.
+    """
+    validate_from_address(value)
+    if looks_like_agent_id(value):
+        return value
+    own = _own_session_ids(state_dir, claude_pid)
+    if not own or value in own:
+        return value
+    raise DirectoryResolutionError(from_address_not_own_message(value, own))
+
 #: The refusal text for an unresolvable session id INSIDE Claude Code
 #: (nexus-zl1jv). There the session id exists but T1 has not published it
 #: yet: the startup mint was deferred (the storage service was down), or

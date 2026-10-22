@@ -104,11 +104,11 @@ from nexus.mcp.operator_requests import (
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
     DirectoryResolutionError,
+    check_from_address_is_own,
     no_session_id_message,
     resolve_default_from,
     resolve_env_session_id,
     resolve_send_address,
-    validate_from_address,
 )
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
 # set (tuple_subscribe/tuple_unsubscribe/tuple_subscriptions below) and the
@@ -7990,8 +7990,8 @@ def mailbox_send(
     )] = None,
     from_address: Annotated[str | None, Field(
         description=(
-            "Optional sender override -- a session id or an agent id. "
-            "Defaults to this MCP server's own current session."
+            "Optional sender override -- this session's own id, or an agent "
+            "id. Defaults to this MCP server's own current session."
         ),
     )] = None,
 ) -> dict:
@@ -8008,14 +8008,15 @@ def mailbox_send(
     A name resolves through `directory/<name>`'s live rows: no live
     holder is refused, naming the name; more than one distinct holding
     session is refused, naming every holder -- resend to one of those
-    session ids directly instead. `from_address`, when given, must itself
-    be a session id or an agent id. With no `from_address`, the sender
+    session ids directly instead. `from_address`, when given, must be an
+    agent id or this server's own session id (any other session id is
+    refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
     when that cannot be resolved. Either refusal writes nothing.
     """
     try:
         from_id = (
-            validate_from_address(from_address) if from_address
+            check_from_address_is_own(from_address) if from_address
             else resolve_default_from()
         )
 

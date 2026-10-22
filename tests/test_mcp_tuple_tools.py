@@ -707,12 +707,12 @@ class TestMailboxSend:
         assert len(rows) == 1
         assert rows[0]["dims"]["from"] == agent_id
 
-    def test_session_id_from_address_overrides_the_session_marker(
+    def test_another_sessions_id_as_from_address_is_refused_and_writes_nothing(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
-        """A live, correctly-read session marker is armed here too, so this
-        proves from_address WINS over it -- not merely that from_address
-        works when nothing else is set."""
+        """F3 step 1 (nexus-2mv7y, JDR-002): this used to pin that a foreign
+        session id WINS over the live marker, which let a model send as any
+        session. Under a live marker it is now refused before any write."""
         import nexus.session as session_mod
         from nexus.session_marker import write_session_marker
 
@@ -721,15 +721,28 @@ class TestMailboxSend:
         marker_id = str(uuid.uuid4())
         write_session_marker(tmp_path, 4242, marker_id)
 
-        override_id = str(uuid.uuid4())
         dest = str(uuid.uuid4())
-        result = mailbox_send(dest, body="x", from_address=override_id)
-        assert "error" not in result
-        assert result["from"] == override_id
-        assert result["from"] != marker_id
+        result = mailbox_send(dest, body="x", from_address=str(uuid.uuid4()))
+        assert "error" in result
+        assert "not this server's own" in result["error"]
+        assert tuple_stats(f"mailbox/{dest}")["total"] == 0
 
+    def test_own_session_id_as_from_address_lands_with_that_from(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        from nexus.session_marker import write_session_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
+        marker_id = str(uuid.uuid4())
+        write_session_marker(tmp_path, 4242, marker_id)
+
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="x", from_address=marker_id)
+        assert "error" not in result
         rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
-        assert rows[0]["dims"]["from"] == override_id
+        assert rows[0]["dims"]["from"] == marker_id
 
     def test_invalid_from_address_shape_is_refused_and_writes_nothing(
         self, t2_service_env, monkeypatch,

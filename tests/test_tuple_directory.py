@@ -25,7 +25,9 @@ from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.session_marker import write_session_marker
 from nexus.tuple_directory import (
     DirectoryResolutionError,
+    check_from_address_is_own,
     classify_directory_holders,
+    from_address_not_own_message,
     list_directory_entries,
     resolve_default_from,
     resolve_send_address,
@@ -191,3 +193,65 @@ class TestResolveDefaultFrom:
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with pytest.raises(DirectoryResolutionError, match="no resolvable session id"):
             resolve_default_from(state_dir=tmp_path, claude_pid=4242)
+
+
+class TestCheckFromAddressIsOwn:
+    """F3 step 1 (nexus-2mv7y, JDR-002): a session-shaped `from_address`
+    must be one of the calling server's own session ids. Agent ids pass,
+    and with no own id at all (Claude Desktop, Cowork) nothing is compared."""
+
+    MARKER = "1d4e8a2c-7b3f-4c9e-a6d1-2f8b5e0c9a71"
+    T1 = "5a9c3e1f-2d7b-4e6a-8c0d-9b1f4a7e3c52"
+    ENV = "9e2b6d4a-1c8f-4a3e-b7d0-6f5c2a9e1b84"
+    OTHER = "3c7f1a9e-5b2d-4e8c-a1f6-0d9b7e3a5c28"
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+    def test_own_marker_id_passes(self, tmp_path) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        assert check_from_address_is_own(self.MARKER, state_dir=tmp_path, claude_pid=4242) == self.MARKER
+
+    def test_own_t1_session_id_passes_beside_a_marker(self, tmp_path, monkeypatch) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        monkeypatch.setenv("NX_T1_SESSION_ID", self.T1)
+        assert check_from_address_is_own(self.T1, state_dir=tmp_path, claude_pid=4242) == self.T1
+
+    def test_own_nx_session_id_passes(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_SESSION_ID", self.ENV)
+        assert check_from_address_is_own(self.ENV, state_dir=tmp_path, claude_pid=4242) == self.ENV
+
+    def test_a_different_session_id_is_refused_with_the_pinned_text(self, tmp_path, monkeypatch) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        monkeypatch.setenv("NX_T1_SESSION_ID", self.T1)
+        with pytest.raises(DirectoryResolutionError) as exc:
+            check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242)
+        assert str(exc.value) == from_address_not_own_message(self.OTHER, [self.MARKER, self.T1])
+
+    def test_the_refusal_text(self) -> None:
+        assert from_address_not_own_message(self.OTHER, [self.MARKER]) == (
+            f"from_address {self.OTHER!r} is a session id but not this server's own "
+            f"({self.MARKER}): a session id names who sent the message, so only the "
+            "sending session's own id is accepted. Omit from_address to send as this "
+            "session; an agent id still passes"
+        )
+
+    def test_an_agent_id_passes_regardless(self, tmp_path) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        agent = "a0123456789abcdef"
+        assert check_from_address_is_own(agent, state_dir=tmp_path, claude_pid=4242) == agent
+
+    def test_no_own_id_resolvable_lets_a_session_id_pass(self, tmp_path) -> None:
+        assert check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242) == self.OTHER
+
+    def test_a_non_uuid_env_value_is_not_an_own_id(self, tmp_path, monkeypatch) -> None:
+        write_session_marker(tmp_path, 4242, self.MARKER)
+        monkeypatch.setenv("NX_SESSION_ID", "not-a-uuid")
+        with pytest.raises(DirectoryResolutionError):
+            check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242)
+
+    def test_the_shape_check_still_runs_first(self, tmp_path) -> None:
+        with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
+            check_from_address_is_own("not-a-valid-shape", state_dir=tmp_path, claude_pid=4242)
