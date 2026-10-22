@@ -2337,10 +2337,10 @@ A note whose text is too large for the collection's embedding model's token wind
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
-| `-n` / `--limit NUM` | Maximum entries to show (default: 200) |
-| `--offset N` | Skip this many entries (for pagination) |
-| `--docs` | Show unique documents instead of individual chunks |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`, every live `knowledge__*` collection: lists them with their sizes, as MCP `store_list` does; name one to page its entries) |
+| `-n` / `--limit NUM` | Maximum entries to show (default: 200); applies once a collection is named |
+| `--offset N` | Skip this many entries (for pagination); applies once a collection is named |
+| `--docs` | Show unique documents instead of individual chunks; applies once a collection is named |
 | `--reapable` | List the chunks the engine's reapable predicate selects in `--collection` (RDR-192 Step 10, nexus-wbfpw.19); see below |
 
 **`list --reapable`.** Read-only: it lists the chunks `nx t3 gc` would quarantine now, from the engine route `POST /v1/vectors/reapable` with the engine's default 30 day grace (a lock-free snapshot, so it is advisory: it can differ from what a later `gc` moves). It requires an explicit `--collection` (omitting it is a usage error, so an audit never silently targets the default `knowledge` collection), and it cannot be combined with `--docs` or `--offset`; `--limit` bounds the rows shown and a notice says when more exist. Each row prints the chunk's `chash`, `ownerless_since`, the age in days since that instant, `last_written_at`, `created_at`, `title` and `catalog_doc_id` (`-` when the chunk's metadata names none). `ownerless_since` is the grace clock the engine uses: the later of `last_written_at` and when the chunk last lost an owner (`nexus.chunk_orphaned_at`), so the age answers "how long has this chunk been ownerless" and is at least the 30 day grace for every listed chunk. An engine older than the field omits it, and the age then falls back to time since the last write (which can overstate how long the chunk has been ownerless). `created_at` is write-once and never the grace clock, so no age is derived from it. A name that no T3 collection or catalog registration carries is refused ("no collection named ..."), as `nx t3 gc` refuses it, instead of printing `0 reapable chunks`. When nothing is reapable in a known collection it prints `0 reapable chunks in <collection>` and exits 0. Needs an engine that carries the route (the same engine tag as `nx t3 gc` above); an older engine gets an error saying so.
@@ -2386,7 +2386,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`, every live `knowledge__*` collection, the scope `search` uses; a shorthand also reads every live model sibling) |
 | `--json` | Output as JSON |
 
 **`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name when no conformant counterpart exists; nexus-sis0m.5)

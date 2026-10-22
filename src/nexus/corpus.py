@@ -1522,6 +1522,29 @@ def t3_collection_name(
     return promoted
 
 
+def store_read_scope(
+    collection: str, *, t3: object | None, knowledge_collections: Callable[[], list[str]],
+) -> list[str]:
+    """The collections a store READ of *collection* looks in, on every surface.
+
+    Bare ``knowledge`` means every live ``knowledge__*`` collection, the scope
+    ``search`` and ``query`` give ``corpus="knowledge"`` (nexus-mgqs8, Sam's
+    ruling 2026-09-13: one meaning), so a note ``search`` found is found again
+    with the same literal; it falls back to the corpus resolver when none is
+    listed. Anything else is :func:`t3_collection_names_for_read`: a shorthand
+    reads every live model sibling, a conformant name is that one collection.
+    *knowledge_collections* lists the live knowledge collections from the
+    caller's own source: the MCP server's collections cache through
+    :func:`resolve_corpus`, the ``nx store`` verb's own listing. The MCP store
+    tools and the ``nx store`` verbs both read through here (nexus-2y8yw).
+    """
+    if collection.strip() == "knowledge":
+        fanned = knowledge_collections()
+        if fanned:
+            return fanned
+    return t3_collection_names_for_read(collection, t3=t3)
+
+
 def t3_collection_names_for_read(user_arg: str, *, t3: object | None = None) -> list[str]:
     """Resolve a --collection argument to every live model sibling to READ.
 

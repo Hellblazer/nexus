@@ -37,6 +37,7 @@ from nexus.corpus import (
     index_model_for_collection,
     is_conformant_collection_name,
     resolve_corpus,
+    store_read_scope,
     split_candidate_collection_name,
     t3_collection_name,
     t3_collection_names_for_read,
@@ -5899,11 +5900,11 @@ def _read_scope(t3, collection: str) -> list[str]:
     placeholder is one member of that scope and stays reachable by its full
     name. Anything else resolves to its one collection, as before.
     """
-    if collection.strip() == "knowledge":
-        fanned = resolve_corpus("knowledge", _get_collection_names())
-        if fanned:
-            return fanned
-    return t3_collection_names_for_read(collection, t3=t3)
+    # The rule lives in corpus.store_read_scope, shared with the nx store verbs
+    # (nexus-2y8yw); the name source is looked up here at call time.
+    return store_read_scope(
+        collection, t3=t3, knowledge_collections=lambda: resolve_corpus("knowledge", _get_collection_names()),
+    )
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
