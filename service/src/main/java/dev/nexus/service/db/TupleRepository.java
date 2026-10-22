@@ -411,6 +411,11 @@ public final class TupleRepository {
      * announce-mode rows -- a row nothing has ever announced simply carries {@code
      * announcedAt=null, announceCount=0}, the column defaults. See {@link WaitSpec
      * .Announce} for the mechanism that stamps them.
+     *
+     * <p>{@code senderSession} (bead nexus-fetre, F3 step 2): the session id the engine
+     * resolved from a minted session token when the row was first written, or {@code
+     * null} when the writer presented none (or the row predates the column). Written on
+     * INSERT only; never overwritten by a refire.
      */
     public record TupleRow(
             byte[] id, String subspace, String template,
@@ -419,7 +424,8 @@ public final class TupleRepository {
             OffsetDateTime leaseUntil, int attempts,
             OffsetDateTime consumedAt, String consumedBy,
             OffsetDateTime expiresAt, OffsetDateTime createdAt,
-            OffsetDateTime announcedAt, int announceCount) {
+            OffsetDateTime announcedAt, int announceCount,
+            String senderSession) {
     }
 
     public record ClaimedTuple(TupleRow tuple, String claimId) {
@@ -627,6 +633,19 @@ public final class TupleRepository {
      * usual.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
+        return writeOut(ctx, tenant, p, body, id, null);
+    }
+
+    /**
+     * {@code senderSession} (bead nexus-fetre) is set in the INSERT values, and by the
+     * lock template's reset of an EXPIRED row, which is a new write with a fresh
+     * created_at. It is absent from every other {@code DO UPDATE} (keys refire, a live
+     * lock's refire, keys+nonce sameWrite) and from the nonce {@code sameWrite}
+     * comparison, so the first writer's stamp stands and a retry from another session
+     * neither overwrites it nor turns an identical retry into a conflict.
+     */
+    private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
+                            String senderSession) {
         Long maxLiveRows = p.template().maxLiveRows();
         if (maxLiveRows != null) {
             // nexus-rplay.17 (code-review-expert finding 4): every other query in
@@ -661,11 +680,11 @@ public final class TupleRepository {
         var insertStep = ctx.insertInto(TUPLES,
                         TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                         TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
-                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT, TUPLES.SENDER_SESSION)
                 .values(DSL.val(id), DSL.val(tenant), DSL.val(p.subspace()), DSL.val(p.template().name()),
                         DSL.val(p.keysJsonb()), dimsField, DSL.val(body),
                         DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
-                        DSL.currentOffsetDateTime())
+                        DSL.currentOffsetDateTime(), DSL.val(senderSession, TUPLES.SENDER_SESSION))
                 .onConflict(TUPLES.ID)
                 .doUpdate();
         if (p.template().lock()) {
@@ -695,6 +714,11 @@ public final class TupleRepository {
                     .set(TUPLES.LEASE_UNTIL,
                             DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
                                     .otherwise(TUPLES.LEASE_UNTIL))
+                    // nexus-fetre: the reset is a new write (fresh created_at), so its
+                    // stamp is the resetting writer's; a live lock keeps the first one.
+                    .set(TUPLES.SENDER_SESSION,
+                            DSL.when(expired, DSL.val(senderSession, TUPLES.SENDER_SESSION))
+                                    .otherwise(TUPLES.SENDER_SESSION))
                     .execute();
         } else {
             // A refire touches expires_at ONLY -- never body, claim state or
@@ -733,10 +757,22 @@ public final class TupleRepository {
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
+        return out(tenant, subspace, keys, dims, body, nonce, ttlSecondsOrNull, null);
+    }
+
+    /**
+     * {@link #out(String, String, Map, Map, String, String, Long)} stamping {@code
+     * senderSession} (bead nexus-fetre) on the row it INSERTs. The caller passes the
+     * server-resolved minted session id, or null; a refire never overwrites it.
+     * It is not an input to {@code computeId}.
+     */
+    public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
+                       String body, String nonce, Long ttlSecondsOrNull, String senderSession) {
         PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
-        byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
+        byte[] result = tenantScope.withTenant(tenant,
+                ctx -> writeOut(ctx, tenant, prepared, body, id, senderSession));
         // Signal AFTER the transaction lambda returns (the commit) -- never from inside it.
         waitRegistry.signalAll(tenant, subspace);
         return result;
@@ -831,7 +867,7 @@ public final class TupleRepository {
      * reply id whatever nonce it sends.
      */
     private enum NonceLabel {
-        OUT("nonce"),
+        OUT(NONCE_FIELD),
         REPLY("reply-nonce");
 
         private final String wire;
@@ -1922,7 +1958,7 @@ public final class TupleRepository {
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
                         null, null, expiresAtForClaim, row.getCreatedAt(),
-                        row.getAnnouncedAt(), row.getAnnounceCount());
+                        row.getAnnouncedAt(), row.getAnnounceCount(), row.getSenderSession());
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -2982,7 +3018,7 @@ public final class TupleRepository {
                 r.getLeaseUntil(), r.getAttempts(),
                 r.getConsumedAt(), r.getConsumedBy(),
                 r.getExpiresAt(), r.getCreatedAt(),
-                announcedAt, announceCount);
+                announcedAt, announceCount, r.getSenderSession());
     }
 
     private static JSONB toJsonb(Map<String, String> map) {

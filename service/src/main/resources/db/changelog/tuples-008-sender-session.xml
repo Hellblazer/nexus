@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-fetre (F3 step 2, engine half; design of record T2
+    nexus/f3-sender-identity-analysis-2026-10-21 section 3 Option B, non-strict,
+    and docs/rdr/joint/JDR-002-tuple-sender-claims.md).
+
+    nexus.tuples.sender_session TEXT NULL: the session id the ENGINE resolved from
+    a minted X-Nexus-T1-Session token on the /v1/tuples/out request, or NULL when
+    the request carried none. It is written on INSERT only: a refire, a retry or a
+    lock reset never touches it, so the first writer's stamp stands. It is a
+    server-written fact, never read from a request body, and nothing is refused for
+    lacking it (non-strict).
+
+    NULL is the true prior state of every existing row: no row predating this
+    column was written under a recorded session, so NULL is not a stand-in for a
+    lost value and there is no backfill.
+
+    ADD COLUMN only (no UPDATE, no ALTER ... TYPE ... USING), so there is no DATA
+    EFFECT line, matching tuples-006-announce-columns.xml:
+    scripts/data_effect_lint.py's own scope excludes ADD COLUMN. DDL is unaffected
+    by FORCE ROW LEVEL SECURITY on nexus.tuples (RLS gates row data, not schema
+    changes), so no toggle is needed.
+
+    Placed after vectors-036-drop-retired-225.xml (current tail) and before the
+    grants-nexus-svc.xml runAlways block, matching the established late-append
+    convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="tuples-008-1" author="nexus-fetre">
+        <comment>Adds nexus.tuples.sender_session TEXT NULL -- an additive column only (ADD COLUMN, no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row. Stamped by TupleRepository.out on INSERT only, from the server-resolved minted session (RequestContext), never from a request body.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD COLUMN sender_session TEXT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS sender_session;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

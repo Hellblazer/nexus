@@ -236,7 +236,11 @@ public final class TupleHandler implements HttpHandler {
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
 
-        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds);
+        // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
+        // ONLY from the minted session AuthFilter resolved, never from the request body (a
+        // "sender_session" body field is not read), and its absence is not a refusal.
+        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
     }
 
@@ -704,6 +708,10 @@ public final class TupleHandler implements HttpHandler {
         // announce_count=0, the column defaults.
         m.put("announced_at", t.announcedAt());
         m.put("announce_count", t.announceCount());
+        // nexus-fetre (F3 step 2): the server-resolved session that first wrote the row, null
+        // when the writer presented no minted session (or the row predates the column). A claim,
+        // not authentication: JDR-002.
+        m.put("sender_session", t.senderSession());
         return m;
     }
 
