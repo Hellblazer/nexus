@@ -712,6 +712,8 @@ def _record_dropped_routing_event(
                 record["outcome"] = str(event["outcome"])[:64]
             if event.get("escape_reason"):
                 record["escape_reason"] = str(event["escape_reason"])[:300]
+            if event.get("session_id"):
+                record["session_id"] = str(event["session_id"])[:128]
         line = json.dumps(record, separators=(",", ":")) + "\n"
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:

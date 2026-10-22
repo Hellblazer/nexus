@@ -118,3 +118,51 @@ def test_explicit_session_id_wins_over_payload(engine):
     )
     assert proc.returncode == 0, proc.stderr
     assert [b["session_id"] for b in bodies] == ["explicit", SESSION], bodies
+
+
+def test_subagent_git_write_escape_row_carries_session(engine, tmp_path):
+    """The escape site logs before any verdict; it shares the default."""
+    bodies, env = engine
+    repo = tmp_path / "shared"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    proc = subprocess.run(
+        [sys.executable, str(ROUTING / "subagent_git_write_requires_orchestrator.py")],
+        input=json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m x  # routing-allow: m4lej escape case"},
+            "agent_id": "aworker-x-6f59dab8bbb14864", "agent_type": "worker-x",
+            "cwd": str(repo), "session_id": SESSION,
+        }),
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert [(b["outcome"], b["session_id"]) for b in bodies] == [("escape", SESSION)], bodies
+
+
+def test_dropped_event_keeps_session(tmp_path):
+    """An engine that refuses the connection meters the drop with the session."""
+    probe = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+    port = probe.server_address[1]
+    probe.server_close()
+    drops = tmp_path / "dropped_writes.jsonl"
+    env = os.environ.copy()
+    env.update({
+        "NX_HOOK_PYTHON": sys.executable,
+        "NEXUS_CONFIG_DIR": str(tmp_path / "isolated-nexus-config"),
+        "NX_ROUTING_LOG_PATH": str(tmp_path / "routing_log.jsonl"),
+        "NX_DROPPED_WRITES_LOG_PATH": str(drops),
+        "NX_SERVICE_HOST": "127.0.0.1",
+        "NX_SERVICE_PORT": str(port),
+        "NX_SERVICE_TOKEN": "test-token",
+    })
+    env.pop("NX_SERVICE_URL", None)
+    out = _run(
+        "credential_print_guard.py",
+        {"tool_name": "Bash", "tool_input": {"command": "cat /proc/1234/environ"},
+         "session_id": SESSION},
+        env,
+    )
+    assert out["permissionDecision"] == "deny"
+    records = [json.loads(ln) for ln in drops.read_text().splitlines() if ln.strip()]
+    assert [(r["outcome"], r["session_id"]) for r in records] == [("deny", SESSION)], records
