@@ -2547,6 +2547,7 @@ nexus-bsg
 nexus-bsg.1
 nexus-bsjro
 nexus-bsm0p
+nexus-bt46b
 nexus-bt8w8
 nexus-bti
 nexus-btrw
