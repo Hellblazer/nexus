@@ -77,10 +77,32 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * bounded by the same "collections this process has actually touched" argument —
  * at real-world scale (hundreds of collections per tenant, low hundreds of
  * tenants per process) the whole cache remains a few megabytes at most.
+ *
+ * <p><b>One engine per database</b> (nexus-hkh1y). The cache is evicted only in the JVM that made
+ * the change, so it is correct only while one engine serves a database. That holds today: production
+ * runs exactly one engine JVM for every tenant, on one host behind one edge, and a redeploy stops the
+ * old engine before the new one starts (RDR-007's single-host design, per conexus, 2026-10-22); a
+ * rehearsal fork runs its own engine against its own database. Replicas or a blue/green overlap on
+ * one database would leave the other JVM serving a stale row (a renamed-away name still writable
+ * there) and need a TTL or shared invalidation (LISTEN/NOTIFY) first.
  */
 public final class CollectionRegistry {
 
     private static final Map<String, CollectionRow> KNOWN = new ConcurrentHashMap<>();
+
+    /**
+     * nexus-hkh1y: a {@link #require} miss reads the row and then caches it, and an evict can land
+     * between the two (a supersede or rename commits and evicts while the read is in flight). Caching
+     * that read would put back the live row the evict just removed, with no TTL to age it out. Every
+     * evict bumps {@link #evictions} under {@link #FILL_LOCK}; a miss notes the count before its read
+     * and caches only if it is unchanged, under the same lock, so a read that started before an evict
+     * never re-caches. Taken on misses and evicts only, never on a cache hit.
+     */
+    private static final Object FILL_LOCK = new Object();
+    private static long evictions;
+
+    /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
+    static volatile Runnable afterMissReadForTests;
 
     private CollectionRegistry() {}
 
@@ -140,7 +162,10 @@ public final class CollectionRegistry {
      * errors rather than writing orphaned rows.
      */
     public static void evict(String tenant, String collection) {
-        KNOWN.remove(key(tenant, collection));
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.remove(key(tenant, collection));
+        }
     }
 
     /**
@@ -166,19 +191,25 @@ public final class CollectionRegistry {
     public static int evictTenant(String tenant) {
         String prefix = tenant + '|';
         int[] removed = {0};
-        KNOWN.keySet().removeIf(k -> {
-            boolean mine = k.startsWith(prefix);
-            if (mine) {
-                removed[0]++;
-            }
-            return mine;
-        });
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.keySet().removeIf(k -> {
+                boolean mine = k.startsWith(prefix);
+                if (mine) {
+                    removed[0]++;
+                }
+                return mine;
+            });
+        }
         return removed[0];
     }
 
     /** Test-only: clears all cached entries. */
     static void clearForTests() {
-        KNOWN.clear();
+        synchronized (FILL_LOCK) {
+            evictions++;
+            KNOWN.clear();
+        }
     }
 
     /**
@@ -208,6 +239,10 @@ public final class CollectionRegistry {
         Optional<CollectionRow> hit = cached(tenant, collection);
         if (hit.isPresent()) {
             return hit.get();
+        }
+        long evictionsBeforeRead;
+        synchronized (FILL_LOCK) {
+            evictionsBeforeRead = evictions;
         }
         Record7<String, String, String, Integer, String, Integer, String> r = ctx.select(
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -239,7 +274,15 @@ public final class CollectionRegistry {
                 + r.value3() + "' has no nexus.embedding_models row to fall back to");
         }
         CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5(), r.value7());
-        markKnown(tenant, collection, row);
+        Runnable seam = afterMissReadForTests;
+        if (seam != null) {
+            seam.run();
+        }
+        synchronized (FILL_LOCK) {
+            if (evictions == evictionsBeforeRead) {
+                markKnown(tenant, collection, row);
+            }
+        }
         return row;
     }
 

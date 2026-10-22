@@ -394,6 +394,44 @@ class CollectionRegistryTest {
     }
 
     @Test
+    void aMissThatReadsBeforeASupersedeCommits_doesNotRecacheTheLiveRow() {
+        // nexus-hkh1y: a require() miss reads the live row, then a supersede commits and evicts
+        // before the miss caches it. Without the eviction count the miss would put the live row
+        // back, with no TTL to age it out, and every later write to the retired name would pass.
+        String name = "code__cr-race__voyage-code-3__v1";
+        String target = "code__cr-race-target__voyage-code-3__v2";
+        seedRegisteredWithAttributes(name, "code", "cr-race", "voyage-code-3", 1024, "live");
+        CollectionRegistry.afterMissReadForTests = () -> catalogRepo.supersedeCollection(TENANT, name, target, "");
+        CollectionRow readBeforeTheSupersede;
+        try {
+            readBeforeTheSupersede = tenantScope.withTenant(TENANT,
+                ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        } finally {
+            CollectionRegistry.afterMissReadForTests = null;
+        }
+        assertThat(readBeforeTheSupersede.isSuperseded()).as("the read itself ran before the supersede").isFalse();
+        assertThat(CollectionRegistry.cached(TENANT, name))
+            .as("a fill that raced an evict is dropped, not cached")
+            .isEmpty();
+        assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
+            .isInstanceOf(CollectionSupersededException.class)
+            .hasMessageContaining(target);
+    }
+
+    @Test
+    void aMissWithNoEvictInFlight_stillCaches() {
+        String name = "code__cr-race-control__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-race-control", "voyage-code-3", 1024, "live");
+        CollectionRegistry.afterMissReadForTests = () -> { };
+        try {
+            tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        } finally {
+            CollectionRegistry.afterMissReadForTests = null;
+        }
+        assertThat(CollectionRegistry.cached(TENANT, name)).as("an undisturbed miss caches as before").isPresent();
+    }
+
+    @Test
     void supersedeCollection_evictsTheCachedRow_andTheFreshReadCarriesTheSuccessor() {
         // nexus-mp8ys: this test used to pin supersede's DELIBERATE non-invalidation (the cached
         // row held no superseded_by, so it could not go stale). CollectionRow now carries
