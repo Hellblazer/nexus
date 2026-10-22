@@ -202,7 +202,45 @@ def test_search_returns_match(cat) -> None:
 
 
 def test_search_no_results(cat) -> None:
-    assert catalog_search(query="nonexistent") == []
+    """Zero rows is an explicit line, not an empty list (nexus-r88er F12).
+
+    An empty list renders as nothing at all, so a topical query on this
+    title/metadata tool read as a broken tool. The note names the tool's
+    scope and points at the nexus server's content tools by full MCP name.
+    """
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    rows = catalog_search(query="tuple space mailbox")
+    assert len(rows) == 1 and set(rows[0]) == {"note"}
+    note = rows[0]["note"]
+    assert note.startswith("0 matches")
+    assert "titles and metadata" in note
+    assert "mcp__plugin_conexus_nexus__search" in note
+    assert "mcp__plugin_conexus_nexus__query" in note
+
+
+def test_search_no_results_on_a_filter_is_also_explicit(cat) -> None:
+    catalog_register(title="alpha", owner="1.1", content_type="prose")
+    rows = catalog_search(content_type="code")
+    assert len(rows) == 1 and rows[0]["note"].startswith("0 matches")
+
+
+def test_search_nonempty_result_carries_no_note(cat) -> None:
+    catalog_register(title="authentication module", owner="1.1", content_type="code")
+    rows = catalog_search("authentication")
+    assert len(rows) == 1
+    assert rows[0]["title"] == "authentication module"
+    assert all("note" not in r for r in rows)
+
+
+def test_search_query_param_description_states_the_scope() -> None:
+    from nexus.mcp.catalog import mcp as catalog_mcp
+    import asyncio
+
+    tools = asyncio.run(catalog_mcp.list_tools())
+    tool = next(t for t in tools if t.name == "search")
+    desc = tool.inputSchema["properties"]["query"]["description"]
+    assert "title" in desc and "metadata" in desc
+    assert "mcp__plugin_conexus_nexus__search" in desc
 
 
 @pytest.mark.parametrize("field,register_val,search_kwarg", [

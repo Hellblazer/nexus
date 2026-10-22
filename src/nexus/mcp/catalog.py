@@ -136,6 +136,21 @@ def _file_path_candidates(cat, wanted: str) -> list:
     )
 
 
+_QUERY_DESC = (
+    "Free-text query, full-text matched against document titles and "
+    "metadata only, never document content. A topical phrase that appears "
+    "only in document text matches nothing here; for content search use "
+    "the nexus server's mcp__plugin_conexus_nexus__search or "
+    "mcp__plugin_conexus_nexus__query."
+)
+_ZERO_MATCH_NOTE = (
+    "0 matches. This tool matches titles and metadata, not document "
+    "content; content search is the nexus server's "
+    "mcp__plugin_conexus_nexus__search and "
+    "mcp__plugin_conexus_nexus__query tools."
+)
+
+
 # Note: core server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
 # mcp__plugin_conexus_nexus__search).
@@ -146,7 +161,7 @@ def _file_path_candidates(cat, wanted: str) -> list:
     structured_output=False,
 )
 def catalog_search(
-    query: Annotated[str, Field(description="Free-text query, matched by full-text search.")] = "",
+    query: Annotated[str, Field(description=_QUERY_DESC)] = "",
     content_type: Annotated[str, Field(description="Exact content_type filter (e.g. \"code\", \"paper\", \"rdr\").")] = "",
     author: Annotated[str, Field(description="Author substring filter, case-insensitive.")] = "",
     corpus: Annotated[str, Field(description="Exact corpus filter.")] = "",
@@ -222,6 +237,11 @@ def catalog_search(
         else:
             return [{"error": "query or at least one filter required"}]
         entries = matches[offset:offset + limit + 1]
+        if not entries:
+            # An empty list renders as nothing, which reads as a broken tool
+            # (nexus-r88er F12); say what this tool matches and where
+            # content search lives.
+            return [{"note": _ZERO_MATCH_NOTE}]
         has_more = len(entries) > limit
         result = [e.to_dict() for e in entries[:limit]]
         if has_more:

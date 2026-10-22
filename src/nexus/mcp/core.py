@@ -12506,6 +12506,12 @@ async def nx_answer(
     # config-driven; 30-day default. Best-effort — a save failure never
     # affects the user's answer, and the T1 cache upsert is a separate
     # best-effort step inside the same guard.
+    #
+    # nexus-wvz8i F14: the save below is synchronous, so the saved row's id is
+    # in hand before the envelope is built. _saved_grown_plan_id carries it to
+    # the return; it stays 0 (the envelope's "no library row" sentinel) when
+    # nothing was saved (ttl 0, a save failure, a library-matched run).
+    _saved_grown_plan_id = 0
     if best.plan_id == 0:
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
@@ -12575,6 +12581,8 @@ async def nx_answer(
                         _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
                     return gid
                 grown_id = _t2_index_write(_do_grow)
+                if isinstance(grown_id, int) and grown_id > 0:
+                    _saved_grown_plan_id = grown_id
                 _log.info(
                     "plan_grow_saved",
                     plan_id=grown_id,
@@ -12633,7 +12641,7 @@ async def nx_answer(
 
     return _result(
         final_text,
-        plan_id=best.plan_id,
+        plan_id=best.plan_id or _saved_grown_plan_id,
         step_count=len(result.steps),
         chunks=envelope_chunks if structured else None,
         step_records=_result_step_records,
