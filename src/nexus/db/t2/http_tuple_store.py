@@ -669,8 +669,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         credential failed. A tuple write must not fail for a stale session, so a
         401 to a request that carried the header (read off ``exc.request``) is
         retried ONCE without it, before the mixin's data-token re-mint path sees
-        the 401. If that retry succeeds the session token was the culprit: it is
-        remembered by hash and not sent again until ``NX_T1_SESSION`` changes. A
+        the 401. If that retry succeeds under the same data token, the session
+        token was the culprit: it is remembered by hash and not sent again until ``NX_T1_SESSION`` changes. A
         401 that survives the drop is the data token's and goes down that path
         unchanged, with no memo."""
         try:
@@ -684,6 +684,13 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 result = super()._request_once(method, path, **kwargs)
             finally:
                 _drop_session_header.reset(reset)
+            # The retry proves the session token was the culprit only if it went
+            # out under the same data token as the failed request: a concurrent
+            # re-mint between the two would make a live session token look
+            # rejected. A changed bearer sets no memo (conservative; the header
+            # is simply sent again next call).
+            if exc.request.headers.get("Authorization") != f"Bearer {self._token}":
+                return result
             with self._rejected_session_lock:
                 first = self._rejected_session_hash != rejected
                 self._rejected_session_hash = rejected

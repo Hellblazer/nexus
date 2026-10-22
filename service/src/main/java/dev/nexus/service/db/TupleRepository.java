@@ -414,7 +414,8 @@ public final class TupleRepository {
      *
      * <p>{@code senderSession} (bead nexus-fetre, F3 step 2): the session id the engine
      * resolved from a minted session token when the row was first written, or {@code
-     * null} when the writer presented none (or the row predates the column). Written on
+     * null} when the writer presented none, the row is an ack reply (until nexus-g2ckl), or the
+     * row predates the column. Written on
      * INSERT only; never overwritten by a refire.
      */
     public record TupleRow(

@@ -355,6 +355,29 @@ class TestStaleTokenMemo:
         assert store._rejected_session_hash == digest  # type: ignore[attr-defined]
         assert TOKEN not in repr(vars(store))
 
+    def test_a_data_token_rotated_between_attempts_sets_no_memo(self, monkeypatch) -> None:
+        """A concurrent re-mint between the headered 401 and the headerless retry
+        makes the retry succeed on the new bearer. That proves nothing about the
+        session token, so it must not be remembered as rejected."""
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        holder: list[HttpTupleStore] = []
+        seen: list[bool] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(HEADER in request.headers)
+            if HEADER in request.headers:
+                holder[0]._token = "rotated-data-token"  # a sibling's re-mint lands now
+                return httpx.Response(401, json={"error": "unauthorized"})
+            return _ok(request)
+
+        store = _store(handler)
+        holder.append(store)
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, "b", nonce="n")
+        assert seen == [True, False]
+        assert store._rejected_session_hash is None  # type: ignore[attr-defined]
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, "b", nonce="n2")
+        assert seen[2] is True, "the live session token is sent again"
+
     def test_a_401_that_is_not_the_sessions_sets_no_memo(self, monkeypatch) -> None:
         """The headerless retry also fails (the data token is bad): the session
         token is not the culprit, so it is not memoised."""
