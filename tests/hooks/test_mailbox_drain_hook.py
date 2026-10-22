@@ -2049,8 +2049,8 @@ def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_other
     src = Path(_nexus_module_file("nexus").parent)
 
     assert {_PLUGIN_SCRIPT, scripts / "_interpreter.py", scripts / "_endpoint_resolve.py",
-            scripts / "_tuple_size_limits.py"} <= plugin
-    for mod in ("_locking.py", "hooks/mailbox_drain.py",
+            scripts / "_tuple_size_limits.py", scripts / "_tuple_sender.py"} <= plugin
+    for mod in ("_locking.py", "hooks/mailbox_drain.py", "tuple_sender.py",
                 "_hook_runtime/entry.py", "_hook_runtime/_io.py", "__init__.py",
                 "hooks/__init__.py"):
         assert src / mod in wheel, mod
@@ -2180,3 +2180,85 @@ def test_a_budget_spent_before_the_first_claim_says_so(tmp_path, kind) -> None:
     assert "drain budget" in verdict["skips"][0]
     assert f"mailbox/{SESSION_ID}" in verdict["skips"][0]
 
+
+
+class TestSenderLabel:
+    """Bead nexus-ggmg7 (F3 step 2c, JDR-002): a message whose claimed ``from``
+    does not match the ``sender_session`` the engine stamped is rendered
+    ``unverified``, in the wheel verb AND the plugin script that actually ships.
+
+    The rows are raw JSON, as the hook reads them: ``sender_session`` present
+    means the engine sent the stamp (null is a real answer), absent means an
+    engine that predates it, and an absent key never gets a label.
+    """
+
+    _S = "3f2a9c1e-5b7d-4e8a-9c21-0a1b2c3d4e5f"
+    _S2 = "9d8c7b6a-1111-4222-8333-444455556666"
+    _AGENT = "a0123456789abcdef"
+
+    def _drain(self, tmp_path, engine, argv, row) -> str:
+        eng = engine()
+        eng.rows = [row]
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path, argv=argv)
+        assert res.returncode == 0, res.stderr
+        assert "unverified" not in res.stderr
+        return res.stdout
+
+    @_ENTRY_POINTS
+    def test_a_matching_from_and_stamp_renders_no_label(self, tmp_path, engine, argv) -> None:
+        row = _row("sl01", sender=self._S, body="honest")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "honest" in out and "unverified" not in out
+
+    @_ENTRY_POINTS
+    def test_a_matching_uuid_in_another_case_renders_no_label(self, tmp_path, engine, argv) -> None:
+        row = _row("sl02", sender=self._S.upper(), body="shouty")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "shouty" in out and "unverified" not in out
+
+    @_ENTRY_POINTS
+    def test_a_forged_from_renders_unverified(self, tmp_path, engine, argv) -> None:
+        row = _row("sl03", sender=self._S2, body="forged")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "forged" in out
+        assert f"from={self._S2} [unverified]" in out
+
+    @_ENTRY_POINTS
+    def test_a_null_stamp_renders_unverified(self, tmp_path, engine, argv) -> None:
+        row = _row("sl04", sender=self._S, body="no minted session")
+        row["sender_session"] = None
+        out = self._drain(tmp_path, engine, argv, row)
+        assert f"from={self._S} [unverified]" in out
+
+    @_ENTRY_POINTS
+    def test_an_agent_id_from_names_the_session_it_was_sent_under(self, tmp_path, engine, argv) -> None:
+        row = _row("sl05", sender=self._AGENT, body="from a subagent")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert f"[unverified, sent under session {self._S}]" in out
+
+    @_ENTRY_POINTS
+    def test_a_row_without_the_key_renders_no_label(self, tmp_path, engine, argv) -> None:
+        """An old engine: the key is absent, so even a from nobody could have
+        verified gets no label (a label on every message would be ignored)."""
+        row = _row("sl06", sender=self._S2, body="old engine")
+        assert "sender_session" not in row
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "old engine" in out and "unverified" not in out
+
+    @_ENTRY_POINTS
+    def test_a_dead_lettered_row_carries_the_label_too(self, tmp_path, engine, argv) -> None:
+        row = _row("sl07", sender=self._S2, body="poison", claim_state="dead")
+        row["sender_session"] = self._S
+        out = self._drain(tmp_path, engine, argv, row)
+        assert f"from={self._S2} [unverified]" in out
+
+    @_ENTRY_POINTS
+    def test_a_dead_lettered_row_without_the_key_carries_none(self, tmp_path, engine, argv) -> None:
+        row = _row("sl08", sender=self._S2, body="poison", claim_state="dead")
+        out = self._drain(tmp_path, engine, argv, row)
+        assert "UNDELIVERABLE" in out and "unverified" not in out

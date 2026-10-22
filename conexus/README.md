@@ -104,6 +104,7 @@ conexus/
 │       │                              # generation python that can import nexus)
 │       ├── _endpoint_resolve.py       # Shared helper: stdlib endpoint precedence
 │       ├── _tuple_size_limits.py      # Shared helper: stdlib tuple size caps
+│       ├── _tuple_sender.py           # Shared helper: stdlib `unverified` sender label (mirror of nexus.tuple_sender)
 │       ├── _hook_logging.py           # Shared helper: configure logging before nexus imports
 │       └── nx_hook_shim.py            # Runs `nx-hook <verb>` so an older CLI cannot block a session
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)

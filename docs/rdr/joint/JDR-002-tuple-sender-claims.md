@@ -76,3 +76,23 @@ mail addressing and the directory).
   (T2 `nexus/f3-sender-identity-analysis-2026-10-21`). Nothing had recorded
   that `from` is unverified; RDR-205 assumed cooperating processes without
   saying so.
+- 2026-10-22: F3 step 2 built (nexus-fetre, nexus-ztwp4, nexus-ggmg7). The
+  engine stamps `sender_session` on a tuple at INSERT only, from the minted
+  session token's session id, never from the request body, and never refuses a
+  write for lack of one (a lock's reset of an expired row keeps the first
+  stamp, so the stamp names the writer of the stored body and dims). The
+  client sends the token as `X-Nexus-T1-Session`; a token the engine does not
+  know is 401 and the client drops it and retries, so the write lands
+  unstamped. The drain hook (both copies) and the channel push label a message
+  `unverified` when its `from` does not match its `sender_session` (UUIDs
+  compared case-insensitively), when the stamp is null, or when `from` is an
+  agent id (rendered with the session it was sent under, since subagents share
+  the parent's token); a row from an engine that sent no `sender_session` key
+  gets no label. Null means any of: no live minted session at write time
+  (including a stale token the client dropped), a reply row until nexus-g2ckl,
+  a row that predates the column, or a tuple written by a hook over raw HTTP
+  (no header). NO LABEL IS NOT VERIFICATION: any data-token holder can mint a
+  session token for any session id (the session endpoint takes `session_id`
+  from the request body), so a match shows only that the writer presented the
+  claimed session's token. The tenant stays the security boundary. Scope gap:
+  `tuple_in`, `tuple_rd` and `nx tuple` print the raw stamp and no label.

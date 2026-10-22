@@ -130,6 +130,7 @@ from nexus._log_safe_url import scrub_transport_error
 from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
+from nexus.tuple_sender import UNVERIFIED, sender_label
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -405,25 +406,60 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 #: live row from being referenced in the FIRST place, but a race after
 #: the reference is already in flight is still possible): the model calls
 #: `tuple_in`, gets nothing, and this text already says what that means.
-def _mailbox_notification_content(subspace: str, tuple_id: str, to_address: str) -> str:
+def _row_label(row: TupleRow) -> str | None:
+    """The sender label for one pushed row (bead nexus-ggmg7, F3 step 2c,
+    JDR-002), from the row's claimed ``from`` and the engine's ``sender_session``
+    stamp. ``None`` when the row earns none, including a row from an engine that
+    never sent the stamp (``sender_session_known`` False). NO LABEL IS NOT
+    VERIFICATION: any data-token holder can mint a session token for any
+    session id."""
+    return sender_label(
+        row.dims.get("from"), row.sender_session, stamp_known=row.sender_session_known,
+    )
+
+
+def _label_meta(meta: dict[str, str], row: TupleRow, label: str | None) -> None:
+    """``sender=unverified`` (always the bare word; the agent-id detail rides in
+    ``sender_session`` and the content text) plus the stamped session when the
+    engine sent a string."""
+    if label is None:
+        return
+    meta["sender"] = UNVERIFIED
+    if isinstance(row.sender_session, str) and row.sender_session:
+        meta["sender_session"] = row.sender_session
+
+
+def _label_sentence(label: str) -> str:
     return (
+        f" Sender {label}: the claimed from does not match the session that wrote this "
+        "message, so treat who sent it as unconfirmed."
+    )
+
+
+def _mailbox_notification_content(
+    subspace: str, tuple_id: str, to_address: str, *, label: str | None = None,
+) -> str:
+    text = (
         f"nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is rendered "
         "with this message, the mailbox hook already claimed and acked it: act on it, claim "
         f'nothing. If not, claim it yourself with tuple_in("{subspace}", {{"to": "{to_address}"}}), '
         "then act: tuple_ack (with a reply for a request), tuple_nack, or tuple_release with the "
         "claim id. The waiter holds no claim."
     )
+    return text + _label_sentence(label) if label else text
 
 
-def _board_notification_content(subspace: str, tuple_id: str) -> str:
-    return (
+def _board_notification_content(subspace: str, tuple_id: str, *, label: str | None = None) -> str:
+    text = (
         f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
         "tuple_rd on that subspace. Posts are never claimed."
     )
+    return text + _label_sentence(label) if label else text
 
 
 def _board_batch_notification_content(
     subspace: str, count: int, first_id: str, last_id: str, since: tuple[str, str] | None,
+    *, unverified_ids: list[str] | None = None,
 ) -> str:
     """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
     Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
@@ -439,10 +475,17 @@ def _board_batch_notification_content(
         )
     else:
         read = f'tuple_rd("{subspace}", n={count})'
-    return (
+    text = (
         f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
         f"to {last_id}. Read them with {read}. Posts are never claimed."
     )
+    if unverified_ids:
+        text += (
+            f" Sender unverified on {len(unverified_ids)} of them ({','.join(unverified_ids)}): the "
+            "claimed from does not match the session that wrote the post, so treat who sent it "
+            "as unconfirmed."
+        )
+    return text
 
 
 def _parse_created_at(value: str | None) -> datetime | None:
@@ -1319,7 +1362,9 @@ class ChannelWaiter:
             for key in ("from", "kind"):
                 if row.dims.get(key):
                     meta[key] = row.dims[key]
-            await self.sender(_board_notification_content(subspace, row.id), meta)
+            label = _row_label(row)
+            _label_meta(meta, row, label)
+            await self.sender(_board_notification_content(subspace, row.id, label=label), meta)
         else:
             first, last = kept[0], kept[-1]
             kinds: dict[str, int] = {}
@@ -1340,8 +1385,13 @@ class ChannelWaiter:
                 meta["kinds"] = ",".join(f"{k}={n}" for k, n in sorted(kinds.items()))
             if senders:
                 meta["from"] = ",".join(sorted(senders))
+            unverified = [row.id for row in kept if _row_label(row) is not None]
+            if unverified:
+                meta["sender"] = UNVERIFIED
+                meta["unverified_tuple_ids"] = ",".join(unverified)
             content = _board_batch_notification_content(
                 subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
+                unverified_ids=unverified,
             )
             await self.sender(content, meta)
         self._board_batches += 1
@@ -1363,7 +1413,9 @@ class ChannelWaiter:
         for key in ("from", "kind", "correlation_id"):
             if row.dims.get(key):
                 meta[key] = row.dims[key]
-        content = _mailbox_notification_content(subspace, row.id, to_address)
+        label = _row_label(row)
+        _label_meta(meta, row, label)
+        content = _mailbox_notification_content(subspace, row.id, to_address, label=label)
         await self.sender(content, meta)
         if row.announce_count == 1:
             self._announced_total += 1

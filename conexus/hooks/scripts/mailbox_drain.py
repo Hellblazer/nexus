@@ -98,6 +98,7 @@ _interpreter.reexec_if_needed()
 
 import _endpoint_resolve as _ep  # noqa: E402
 import _tuple_size_limits as _sz  # noqa: E402
+from _tuple_sender import sender_label  # noqa: E402
 
 #: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
 #: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
@@ -734,6 +735,20 @@ def _dims_of(row: dict[str, Any]) -> dict[str, Any]:
     return dims if isinstance(dims, dict) else {}
 
 
+def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
+    """`` [unverified]`` (or ``[unverified, sent under session <S>]``) after the
+    ``from=`` field, or "" when the row earns no label (bead nexus-ggmg7, F3
+    step 2c, JDR-002). ``from`` is a claim the writer typed; ``sender_session``
+    is the session the engine stamped. The decision is
+    :func:`sender_label`; this hook only reads the raw JSON, where an absent
+    key (an engine that predates the stamp) is different from a null one.
+    NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
+    token for any session id."""
+    label = sender_label(dims.get("from"), row.get("sender_session"),
+                         stamp_known="sender_session" in row)
+    return f" [{label}]" if label else ""
+
+
 def _render_live(address: str, row: dict[str, Any]) -> str:
     dims = _dims_of(row)
     sender = dims.get("from", "?")
@@ -742,7 +757,7 @@ def _render_live(address: str, row: dict[str, Any]) -> str:
     body = row.get("body")
     body_text = body if body else "(no body)"
     return (
-        f"- from={sender} kind={kind} correlation_id={corr} "
+        f"- from={sender}{_sender_tag(row, dims)} kind={kind} correlation_id={corr} "
         f"address=mailbox/{address} tuple_id={row.get('id', '?')}\n"
         f"  {body_text}"
     )
@@ -752,7 +767,7 @@ def _render_dead(address: str, row: dict[str, Any]) -> str:
     dims = _dims_of(row)
     return (
         f"- UNDELIVERABLE at mailbox/{address} tuple_id={row.get('id', '?')} "
-        f"from={dims.get('from', '?')} attempts={row.get('attempts', '?')}: this row is "
+        f"from={dims.get('from', '?')}{_sender_tag(row, dims)} attempts={row.get('attempts', '?')}: this row is "
         f"dead-lettered and can never be claimed, so nothing will deliver it. "
         f"Reported once. Purge it with `nx tuple stats mailbox/{address}` and the "
         f"engine's sweep, or ask the sender to resend."
