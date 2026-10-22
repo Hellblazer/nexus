@@ -89,7 +89,10 @@ class EngineSingletonLockSettingsTest {
             assertThat(lock).endsWith(BackendReaper.bootNonce(pool) + EngineSingletonLock.NAME_SUFFIX);
             assertThat((pool + "/reaper").getBytes(StandardCharsets.UTF_8).length).as("the reaper's name too")
                 .isLessThanOrEqualTo(63);
+            // Postgres rewrites non-ASCII bytes in application_name; the name must survive the round trip verbatim.
+            assertThat(lock).as("printable ASCII only").matches("[\\x20-\\x7E]+");
         }
+        assertThat(BackendReaper.newApplicationName("0.1.163-\u00e9")).contains("/0.1.163-_/");
         assertThat(BackendReaper.newApplicationName(longest)).as("the longest allowed release is kept whole")
             .contains("/" + longest + "/");
         assertThat(BackendReaper.MAX_RELEASE_BYTES).isEqualTo(25);

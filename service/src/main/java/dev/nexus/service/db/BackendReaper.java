@@ -75,11 +75,14 @@ public final class BackendReaper {
     static final int MAX_RELEASE_BYTES = MAX_POOL_NAME_BYTES - APPLICATION_NAME_PREFIX.length() - 1 - NONCE_HEX_CHARS;
 
     /**
-     * {@code nexus-service/<release>/<8 hex>} -- unique per process boot. The release part is cut to
-     * {@link #MAX_RELEASE_BYTES} bytes, never the nonce.
+     * {@code nexus-service/<release>/<8 hex>} -- unique per process boot. The release part is printable ASCII
+     * (anything else becomes {@code _}) cut to {@link #MAX_RELEASE_BYTES} bytes, never the nonce.
      */
     public static String newApplicationName(String releaseVersion) {
         String release = (releaseVersion == null || releaseVersion.isBlank()) ? "dev" : releaseVersion.trim();
+        // Postgres rewrites non-printable-ASCII bytes in application_name, so a name carrying them would never
+        // equal the string compared against pg_stat_activity (the reaper's and the singleton lock's own match).
+        release = release.replaceAll("[^\\x20-\\x7E]", "_");
         release = truncateUtf8(release, MAX_RELEASE_BYTES);
         byte[] nonce = new byte[4];
         ThreadLocalRandom.current().nextBytes(nonce);
