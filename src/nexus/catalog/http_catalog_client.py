@@ -3183,15 +3183,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         )
         return False
 
-    def list_collections(self, lifecycle_state: str | None = None) -> list[dict]:
+    def list_collections(
+        self, lifecycle_state: str | None = None, content_type: str | None = None,
+    ) -> list[dict]:
         """Registry rows via ``GET /v1/catalog/collections/list``.
 
         ``lifecycle_state`` (nexus-bc7ps) is the route's exact-match filter:
         ``None`` is every state (inventory, doctor, gc), ``"live"`` is the
         routing view in which a ``quarantine-<name>`` row never appears. An
         unknown value is a 400 from the engine, never a silently empty list.
+
+        ``content_type`` (nexus-dxifx, RDR-210 Phase 4 Step 1) is the route's
+        other exact-match filter (``CatalogHandler.handleCollectionList`` has
+        taken it since RDR-204 Phase 2); ``None`` sends no filter. The route has
+        no ``owner_id`` filter, so a caller that wants one corpus's rows keeps
+        those whose ``owner_id`` matches.
         """
-        result = self._get("/collections/list", lifecycle_state=lifecycle_state)
+        result = self._get(
+            "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
+        )
         return [
             _coerce_legacy_grandfathered(c)
             for c in (result.get("collections", []) if result else [])

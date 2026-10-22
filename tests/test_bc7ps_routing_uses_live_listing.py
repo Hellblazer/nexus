@@ -178,6 +178,40 @@ def test_catalog_list_collections_threads_the_filter(monkeypatch):
     ]
 
 
+def test_catalog_list_collections_threads_the_content_type_filter(monkeypatch):
+    """nexus-dxifx (RDR-210 Phase 4 Step 1): the route's ``content_type`` filter
+    is reachable from the client, alone or with a lifecycle state, and absent
+    when not given (a caller that passes neither sends the pre-change request)."""
+    seen: list[tuple[str, dict]] = []
+
+    def fake_get(self, path: str, **params: Any) -> Any:
+        seen.append((path, {k: v for k, v in params.items() if v}))
+        ct, state = params.get("content_type"), params.get("lifecycle_state")
+        rows = [
+            r for r in _ROWS
+            if "lifecycle_state" in r
+            and (ct is None or r.get("content_type") == ct)
+            and (state is None or r["lifecycle_state"] == state)
+        ]
+        return {"collections": rows}
+
+    monkeypatch.setattr(HttpCatalogClient, "_get", fake_get)
+    cat = HttpCatalogClient(base_url="http://127.0.0.1:1", tenant="t", _token="x")
+    assert [r["name"] for r in cat.list_collections(content_type="code")] == [
+        "code__own__bge-base-en-v15-768__v1",
+        "quarantine-code__own__bge-base-en-v15-768__v1",
+    ]
+    assert [r["name"] for r in cat.list_collections("live", content_type="code")] == [
+        "code__own__bge-base-en-v15-768__v1",
+    ]
+    assert cat.list_collections("live", content_type="docs") == []
+    assert seen == [
+        ("/collections/list", {"content_type": "code"}),
+        ("/collections/list", {"lifecycle_state": "live", "content_type": "code"}),
+        ("/collections/list", {"lifecycle_state": "live", "content_type": "docs"}),
+    ]
+
+
 # ── the fan-out projection over a complete cache ───────────────────────────
 
 def test_get_live_collection_names_hides_non_live_rows_but_keeps_the_cache_complete():

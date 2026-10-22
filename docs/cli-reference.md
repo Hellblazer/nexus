@@ -2991,19 +2991,17 @@ through it entirely (not just unwritable) until you reindex — so switch
 before you have a corpus you care about, or budget time to reindex it
 into the new voyage collection.
 
-**Caveat — reads stop checking bge once a voyage sibling exists.** The
-"finds the existing bge/minilm collection" read behavior above holds only
-*until* the first keyed write creates the voyage collection. From that
-point on, reads resolve directly to the voyage collection and never fall
-back to check bge again — even though the bge collection is still there
-and may still hold data nothing has migrated. `nx search`/`nx store list`
-resolve to ONE physical collection per corpus, so this is not a
-multi-collection merge; anything left in the old bge collection after a
-keyed write is effectively invisible to reads until you reindex it into
-the voyage collection. This is the same underlying gap tracked as a
-follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
-restart) — that bead's scope now explicitly includes this stale/orphaned
-bge-data-after-a-keyed-write case, not just the engine-restart case.
+**Caveat — `nx store` verbs stop checking bge once a voyage sibling exists.**
+The "finds the existing bge/minilm collection" read behavior above holds only
+*until* the first keyed write creates the voyage collection. The MCP
+`search`, `query`, `store_get`, `store_list` and `store_get_many` tools now read
+every live sibling of a shorthand name such as `art` or `knowledge__art`
+(found by the collections' catalog rows, nexus-50uw6), and `nx search --corpus`
+already matched both. `nx store list`, `nx store get` and `nx store delete`
+still resolve ONE physical collection per corpus, the voyage one, so anything
+left in the old bge collection is invisible to them until you reindex it
+(merging their listings is nexus-u378j). The engine's voyage-only-mode-flip
+after restart is tracked in nexus-ddmfg.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
 already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision

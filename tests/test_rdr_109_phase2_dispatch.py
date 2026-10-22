@@ -24,6 +24,7 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     model_version_for_collection_name,
     t3_collection_name,
+    t3_collection_names_for_read,
 )
 from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS, local_model_token
 from tests.conftest import make_vector_test_client
@@ -255,40 +256,99 @@ def test_read_path_still_finds_bge_when_key_present(monkeypatch) -> None:
     )
 
 
-def test_read_path_prefers_voyage_over_bge_once_voyage_sibling_exists(monkeypatch) -> None:
-    """nexus-o5x2c round 4 (substantive-critic Significant): PINS THE
-    ACTUAL behavior, which is honestly narrower than
-    ``test_read_path_still_finds_bge_when_key_present``'s docstring
-    might suggest in isolation. The "key present -> read finds bge" row
-    holds ONLY UNTIL a voyage sibling collection exists for the same
-    corpus. Once ANY keyed write has created the voyage collection
-    (even with the bge collection still present and still holding
-    data), ``t3_collection_name``'s FIRST candidate check
-    (``t3.collection_exists(promoted)``, where ``promoted`` is already
-    the voyage name for a voyage-configured local install) short-
-    circuits to the voyage collection immediately — the bge fallback
-    probes below it are UNREACHABLE code for this state, by
-    construction, not a bug to fix here.
-
-    ``t3_collection_name`` returns ONE physical collection name; genuinely
-    searching BOTH bge and voyage collections for one logical corpus is a
-    multi-collection concern (RDR-156 / nexus-3l6gz's multi-model corpus
-    grouping), out of scope for this single-name resolver. Tracked as an
-    explicit caveat on nexus-ddmfg (the pre-existing follow-up for the
-    engine's voyage-only-mode-flip), not silently left undocumented —
-    see docs/cli-reference.md "Local mode with Voyage" for the caveat."""
+def _voyage_local(monkeypatch) -> None:
+    """A keyed local install whose profile is Voyage (the dual-engine case)."""
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
     monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
     monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-    t3 = _FakeT3ForCollectionName({
-        "knowledge__art__bge-base-en-v15-768__v1",
-        "knowledge__art__voyage-context-3__v1",
-    })
-    assert (
-        t3_collection_name("art", t3=t3)  # for_write=False (default)
-        == "knowledge__art__voyage-context-3__v1"
-    )
+
+
+class _RowT3(_FakeT3ForCollectionName):
+    """A T3 stand-in whose listing carries catalog rows, so the read resolver can
+    find siblings by ``(content_type, owner_id)`` and never by name."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        super().__init__({r["name"] for r in rows})
+        self._rows = rows
+
+    def list_collections(self) -> list[dict]:
+        return [dict(r) for r in self._rows]
+
+
+def _row(name: str, owner: str, model: str, **extra) -> dict:
+    return {
+        "name": name, "content_type": "knowledge", "owner_id": owner,
+        "embedding_model": model, "lifecycle_state": "live", **extra,
+    }
+
+
+_BGE_ART = "knowledge__art__bge-base-en-v15-768__v1"
+
+
+def test_read_resolver_spans_both_siblings_once_voyage_sibling_exists(monkeypatch) -> None:
+    """RDR-210 Phase 4 Step 1 (nexus-50uw6): the single-name READ resolver returns
+    every live model sibling of the corpus, found by catalog row. This replaces
+    the pin that held it to ONE name (the Voyage one, once it existed). The
+    single-name WRITE resolver is unchanged: it still returns the one name a
+    write mints under, and a read of a name that is already the answer for the
+    sibling it picks still resolves exactly as before."""
+    _voyage_local(monkeypatch)
+    voyage = t3_collection_name("art")  # the promoted Voyage name, spelled by the resolver
+    t3 = _RowT3([
+        _row(_BGE_ART, "art", "bge-base-en-v15-768"),
+        _row(voyage, "art", voyage.split("__")[2]),
+    ])
+    assert t3_collection_names_for_read("art", t3=t3) == [voyage, _BGE_ART]
+    # Write resolution is unchanged: one name, the Voyage one.
+    assert t3_collection_name("art", t3=t3, for_write=True) == voyage
+    assert t3_collection_name("art", t3=t3) == voyage
+
+
+def test_read_resolver_finds_a_sibling_whose_name_is_not_four_segment(monkeypatch) -> None:
+    """The sibling is found by its ROW. Registered under a name that is not the
+    four-segment shape, a name match cannot find it; only the
+    ``(content_type, owner_id)`` tuple can."""
+    _voyage_local(monkeypatch)
+    odd = "art-notes-in-the-second-family"
+    t3 = _RowT3([
+        _row(_BGE_ART, "art", "bge-base-en-v15-768"),
+        _row(odd, "art", "voyage-model-b"),
+    ])
+    assert t3_collection_names_for_read("art", t3=t3) == [_BGE_ART, odd]
+
+
+def test_read_resolver_leaves_out_other_owners_and_non_live_rows(monkeypatch) -> None:
+    _voyage_local(monkeypatch)
+    t3 = _RowT3([
+        _row(_BGE_ART, "art", "bge-base-en-v15-768"),
+        _row("knowledge__other__bge-base-en-v15-768__v1", "other", "bge-base-en-v15-768"),
+        _row("quarantine-art-copy", "art", "voyage-model-b", lifecycle_state="quarantine"),
+        _row("art-renamed-away", "art", "voyage-model-b", superseded_by="art-renamed-to"),
+        {**_row("art-other-type", "art", "voyage-model-b"), "content_type": "docs"},
+    ])
+    assert t3_collection_names_for_read("art", t3=t3) == [_BGE_ART]
+
+
+def test_read_resolver_keeps_an_explicit_four_segment_name_alone(monkeypatch) -> None:
+    """A fully-qualified conformant name is an exact choice and passes through, as
+    it always has; only the shorthand forms stand for the whole corpus."""
+    _voyage_local(monkeypatch)
+    voyage = t3_collection_name("art")
+    t3 = _RowT3([
+        _row(_BGE_ART, "art", "bge-base-en-v15-768"),
+        _row(voyage, "art", voyage.split("__")[2]),
+    ])
+    assert t3_collection_names_for_read(_BGE_ART, t3=t3) == [_BGE_ART]
+
+
+def test_read_resolver_without_a_row_or_a_handle_returns_the_one_name(monkeypatch) -> None:
+    _voyage_local(monkeypatch)
+    # No handle: nothing to find siblings in.
+    assert t3_collection_names_for_read("art") == [t3_collection_name("art")]
+    # A name no row backs: the one name the single-name resolver picked.
+    t3 = _FakeT3ForCollectionName({_BGE_ART})
+    assert t3_collection_names_for_read("art", t3=t3) == [_BGE_ART]
 
 
 def test_write_path_raises_when_nothing_to_grandfather_keyless_voyage(

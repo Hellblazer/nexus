@@ -40,6 +40,7 @@ from nexus.corpus import (
     resolve_corpus,
     split_candidate_collection_name,
     t3_collection_name,
+    t3_collection_names_for_read,
 )
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
@@ -3795,27 +3796,30 @@ def _resolve_corpus_target(
             continue
         # *part* is a user-typed --corpus TOKEN: see _names_a_collection above.
         if _names_a_collection(part):
-            name = t3_collection_name(part, t3=t3)
-            # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
-            # navigation, never a human choice): a registered non-live
-            # collection named explicitly is excluded exactly like a fan-out
-            # member. A name with no cached row is unregistered, not non-live.
+            # nexus-50uw6 (RDR-210 Phase 4 Step 1): a shorthand name stands for
+            # every live model sibling of the corpus, found by catalog row.
+            # A fully-qualified name is still exactly that one collection.
             from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
-            # refresh=False: _get_collection_names() above already warmed
-            # this cache; a second fetch here would be a second round trip.
-            row = get_collection_row(name, refresh=False)
-            if row is not None and not is_live_collection_row(row):
-                _log.info(
-                    "corpus_explicit_non_live_excluded",
-                    collection=name,
-                    lifecycle_state=row.get("lifecycle_state"),
-                    corpus_part=part,
-                )
-                if excluded_out is not None:
-                    excluded_out.append(name)
-                continue
-            target.append(name)
+            for name in t3_collection_names_for_read(part, t3=t3):
+                # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
+                # navigation, never a human choice): a registered non-live
+                # collection named explicitly is excluded exactly like a fan-out
+                # member. A name with no cached row is unregistered, not non-live.
+                # refresh=False: _get_collection_names() above already warmed
+                # this cache; a second fetch here would be a second round trip.
+                row = get_collection_row(name, refresh=False)
+                if row is not None and not is_live_collection_row(row):
+                    _log.info(
+                        "corpus_explicit_non_live_excluded",
+                        collection=name,
+                        lifecycle_state=row.get("lifecycle_state"),
+                        corpus_part=part,
+                    )
+                    if excluded_out is not None:
+                        excluded_out.append(name)
+                    continue
+                target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
             counts = counts_up_front if counts_up_front is not None else _get_fanout_counts()
@@ -5951,7 +5955,7 @@ def _read_scope(t3, collection: str) -> list[str]:
         fanned = resolve_corpus("knowledge", _get_collection_names())
         if fanned:
             return fanned
-    return [t3_collection_name(collection, t3=t3)]
+    return t3_collection_names_for_read(collection, t3=t3)
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -6469,7 +6473,10 @@ def store_list(
         # nexus-mgqs8: the bare name spans every knowledge collection, so it
         # lists the subjects rather than paging one collection's entries.
         scope = _read_scope(t3, collection)
-        if len(scope) > 1:
+        # Only the bare name lists subjects. A named collection pages its own entries
+        # even when it has live siblings (nexus-50uw6): the picked name leads the scope,
+        # and the siblings are named below the header, so naming any one of them pages it.
+        if len(scope) > 1 and collection.strip() == "knowledge":
             # The sizes are printed, so keep the 60 s freshness they always had; only the
             # fan-out floor tolerates the 15 minute counts window.
             counts = _get_collection_counts(max_age=_PRINTED_COUNTS_MAX_AGE)
@@ -6506,6 +6513,10 @@ def store_list(
         lines: list[str] = [
             f"{col_name}  (showing {offset + 1}-{offset + len(page)}; {total} stored)"
         ]
+        if len(scope) > 1:
+            lines.append(
+                f"  also in this corpus: {', '.join(scope[1:])} (pass one as collection= to page it)"
+            )
         from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip

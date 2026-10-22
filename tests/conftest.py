@@ -3961,7 +3961,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # nexus-03wze fix round (review fold): test_rdr_109_phase2_
     # dispatch.py's file-level exclusion reclassified per-test.
     #
-    # Reason class "mode-self-test": each of these 8 pins LOCAL mode
+    # Reason class "mode-self-test": each of these 7 pins LOCAL mode
     # explicitly (monkeypatching is_local_mode/local_embed_model_choice/
     # get_credential directly) and asserts the REAL nexus-35ok4/GH-#1461
     # local-install-can-use-Voyage write/read chokepoint dispatch --
@@ -3977,7 +3977,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_rdr_109_phase2_dispatch.py::test_effective_local_voyage_without_key_fails_loud",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_targets_voyage_not_bge_when_key_present",
     "tests/test_rdr_109_phase2_dispatch.py::test_read_path_still_finds_bge_when_key_present",
-    "tests/test_rdr_109_phase2_dispatch.py::test_read_path_prefers_voyage_over_bge_once_voyage_sibling_exists",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_raises_when_nothing_to_grandfather_keyless_voyage",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_no_t3_probe_raises_keyless_voyage_config",
     "tests/test_rdr_109_phase2_dispatch.py::test_write_path_mints_voyage_when_key_present_and_nothing_preexisting",

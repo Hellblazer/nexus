@@ -1522,6 +1522,67 @@ def t3_collection_name(
     return promoted
 
 
+def t3_collection_names_for_read(user_arg: str, *, t3: object | None = None) -> list[str]:
+    """Resolve a --collection argument to every live model sibling to READ.
+
+    RDR-210 Phase 4 Step 1 (nexus-50uw6). :func:`t3_collection_name` returns ONE
+    name, and once a Voyage sibling exists it returns that sibling, so a read of
+    ``art`` never saw the bge collection holding the rest of the corpus. This
+    resolver starts from the name that function picks (read-shaped, so it never
+    raises on a missing key) and returns every live collection sharing that
+    collection's catalog row tuple ``(content_type, owner_id)``, the picked name
+    first and the rest in name order. Siblings are found by ROW: a sibling
+    registered under a name that is not the four-segment shape is found, and a
+    name is never split, rendered or prefix-matched here.
+
+    Left as :func:`t3_collection_name` leaves them: a fully-qualified conformant
+    name (an exact choice), a call with no *t3* (nothing to scan), and a picked
+    name no row backs (the answer is that one name). Write resolution
+    (``for_write=True``) stays on :func:`t3_collection_name`: a write mints under
+    one name.
+
+    The rows come from the shared collections cache
+    (:func:`nexus.db.http_vector_client.sibling_candidate_rows`), so a lookup adds
+    no request; a sibling another process registered inside the cache window is
+    seen once the window passes, as for the bare content-type fan-out. A row
+    that is not live (quarantine, dormant, disputed) or that names a successor
+    (``superseded_by``) is left out.
+
+    On a single-family engine a read that names the sibling it does not serve
+    raises the named error although the served one answered; this resolver is
+    why that release waits for the Phase 3 client (see the RDR's Phase 4 Step 1).
+    """
+    primary = t3_collection_name(user_arg, t3=t3)
+    if t3 is None or is_conformant_collection_name(user_arg):
+        return [primary]
+    from nexus.db.http_vector_client import sibling_candidate_rows  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+
+    try:
+        rows = sibling_candidate_rows(t3)
+    except Exception:  # noqa: BLE001 — a listing that cannot be read leaves the one name the single-name resolver picked; a read must not fail on the sibling lookup
+        _log.warning("t3_collection_names_for_read_rows_unavailable", collection=primary, exc_info=True)
+        return [primary]
+    mine = next((r for r in rows if r.get("name") == primary), None)
+    if mine is None:
+        # The single-name resolver found the pick on a fresh listing, so a cache without
+        # its row is stale (a sibling another process just minted): refresh once and look again.
+        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        invalidate_collections_cache()
+        try:
+            rows = sibling_candidate_rows(t3)
+        except Exception:  # noqa: BLE001 — as above: the one name stands
+            return [primary]
+        mine = next((r for r in rows if r.get("name") == primary), None)
+        if mine is None:
+            return [primary]
+    tuple_ = (mine.get("content_type"), mine.get("owner_id"))
+    siblings = sorted(
+        r["name"] for r in rows
+        if (r.get("content_type"), r.get("owner_id")) == tuple_ and r.get("name") != primary
+    )
+    return [primary, *siblings]
+
+
 def collection_type_and_owner(name: str) -> tuple[str, str]:
     """The (content_type, owner_id) a collection *name* implies: the one
     derivation, shared by :func:`collection_registration_kwargs` and by

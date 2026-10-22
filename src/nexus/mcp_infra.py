@@ -987,7 +987,12 @@ def _collections_cache_tuple_from_rows(
         # second cache. Absent when no catalog row backs this name.
         new_rows[row["name"]] = {
             key: row[key]
-            for key in ("content_type", "owner_id", "embedding_model", "lifecycle_state")
+            for key in (
+                "content_type", "owner_id", "embedding_model", "lifecycle_state",
+                # nexus-50uw6: a renamed or re-embedded source keeps lifecycle 'live' and
+                # names its successor here; the sibling resolver must not read it twice.
+                "superseded_by",
+            )
             if key in row
         }
     return new_names, new_counts, new_rows, _now()
@@ -1348,6 +1353,29 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     if not row or "content_type" not in row:
         return None
     return row
+
+
+def get_cached_collection_rows() -> list[dict]:
+    """Every cached collection row, each carrying its ``name``: the same
+    ``_COLLECTIONS_CACHE_TTL``-windowed listing :func:`get_collection_row`
+    reads, never a second fetch beyond the refresh that function makes.
+
+    nexus-50uw6 (RDR-210 Phase 4 Step 1): the single-name read resolver finds a
+    corpus's live model siblings by scanning these rows for one
+    ``(content_type, owner_id)`` tuple, so a sibling lookup costs no request of
+    its own. A listing that cannot be fetched gives no rows (the resolver then
+    answers with the one name it picked), as :func:`get_collection_row` gives
+    ``None``.
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+    try:
+        _refresh_collections_cache_if_stale()
+    except (ServiceNotReadyError, VectorServiceError):
+        return []
+    with _collections_cache_lock:
+        rows = dict(_collections_cache[2])
+    return [{"name": n, **r} for n, r in rows.items() if "content_type" in r]
 
 
 def note_collection_written(name: str) -> None:

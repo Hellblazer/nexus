@@ -3036,6 +3036,28 @@ def live_collection_rows(t3: Any, *, routing: bool = False) -> list[dict]:
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
 
 
+def sibling_candidate_rows(t3: Any) -> list[dict]:
+    """The live catalog rows a sibling lookup scans (nexus-50uw6, RDR-210
+    Phase 4 Step 1), each carrying its ``name``; ``[]`` when *t3* offers no
+    listing to scan.
+
+    The single-name read resolver finds a corpus's model siblings by the row
+    tuple ``(content_type, owner_id)``, never by a name, so it needs rows and
+    must not add a request to a read to get them. A real client answers from
+    :meth:`HttpVectorClient._sibling_candidate_rows` (the shared collections cache
+    for the process-default tenant); any other handle with a ``list_collections()``
+    (a test double) gets the client-side live filter, as :func:`live_collection_rows`.
+    """
+    if isinstance(t3, HttpVectorClient):
+        return t3._sibling_candidate_rows()
+    if callable(getattr(t3, "list_collections", None)):
+        return [
+            row for row in live_collection_rows(t3)
+            if isinstance(row, dict) and "content_type" in row
+        ]
+    return []
+
+
 #: How long a route-absent answer from ``/v1/vectors/search-per-collection``
 #: is trusted before the route is probed again (nexus-tu8wp.2): a 404, the
 #: edge refusing the path (403 or an edge-generated response), 405 and 501.
@@ -3270,6 +3292,25 @@ class HttpVectorClient:
                 _log.warning("http_vector_client_row_resolver_failed", collection=n, exc_info=True)
                 rows[n] = None
         return rows
+
+    def _sibling_candidate_rows(self) -> list[dict]:
+        """The live rows :func:`sibling_candidate_rows` scans for this handle.
+
+        Same three cases as :meth:`_resolve_collection_rows`: an injected
+        ``_row_resolver`` is per-name and cannot be enumerated (no rows, so the
+        caller keeps its one name); the process-default tenant reads the shared
+        collections cache (:func:`nexus.mcp_infra.get_cached_collection_rows`,
+        no request of its own); any OTHER tenant has no shared cache, so it asks
+        for one routing listing.
+        """
+        if self._row_resolver is not None:
+            return []
+        if self._tenant == _process_default_tenant():
+            from nexus.mcp_infra import get_cached_collection_rows  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            return [row for row in get_cached_collection_rows() if is_live_collection_row(row)]
+        return [
+            row for row in self.list_live_collections(routing=True) if "content_type" in row
+        ]
 
     # ── Seam B write path ────────────────────────────────────────────────────
 
