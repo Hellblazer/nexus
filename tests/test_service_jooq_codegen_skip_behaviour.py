@@ -28,6 +28,7 @@ turn the safety net into a pass over nothing.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import re
 import shutil
@@ -68,10 +69,11 @@ def _sha256(path: Path) -> str:
 
 #: nexus-9st84: Maven Central answered a transient 404 for this pinned, existing artifact once in
 #: thirty develop runs (CI 39720885850), and one bare urlopen errored the whole module at setup. The
-#: download now tries each host up to three times with a short wait; the pinned sha256 still decides.
+#: download now tries each host up to three times, waiting 10 then 20 s between rounds; the pinned
+#: sha256 still decides. A body cut short (IncompleteRead) is retried like a refused connection.
 _CENTRAL_HOSTS = ("https://repo.maven.apache.org/maven2", "https://repo1.maven.org/maven2")
 _FETCH_ATTEMPTS = 3
-_FETCH_WAIT_S = 2.0
+_FETCH_WAIT_S = 10.0
 _urlopen = urllib.request.urlopen  # module-local seam: a test replaces this, never urllib's own
 
 
@@ -84,12 +86,15 @@ def _download(rel: str, dest: Path, *, wait=time.sleep) -> None:
             try:
                 with _urlopen(f"{host}/{rel}", timeout=60) as r:
                     data = r.read()
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (OSError, http.client.HTTPException) as exc:  # URLError/HTTPError, timeouts, cut-short bodies
                 errors.append(f"{host} attempt {attempt + 1}: {exc}")
                 continue
             part = dest.with_suffix(f".part.{os.getpid()}")
-            part.write_bytes(data)
-            part.replace(dest)
+            try:
+                part.write_bytes(data)
+                part.replace(dest)
+            finally:
+                part.unlink(missing_ok=True)
             return
         if attempt + 1 < _FETCH_ATTEMPTS:
             wait(_FETCH_WAIT_S * (attempt + 1))
@@ -140,12 +145,12 @@ def _http_404(url: str) -> urllib.error.HTTPError:
 
 
 def test_a_transient_central_failure_is_retried_and_the_jar_lands(tmp_path, monkeypatch) -> None:
-    """nexus-9st84: a 404 from one host, then a refused connection from the other, then the bytes."""
+    """nexus-9st84: a 404 from one host, then a body cut short from the other, then the bytes."""
     seen: list[str] = []
     waits: list[float] = []
     monkeypatch.setattr(
         sys.modules[__name__], "_urlopen",
-        _scripted_urlopen([_http_404("a"), urllib.error.URLError("refused"), b"jar-bytes"], seen),
+        _scripted_urlopen([_http_404("a"), http.client.IncompleteRead(b"half"), b"jar-bytes"], seen),
     )
     dest = tmp_path / "ant.jar"
     _download("org/apache/ant/ant/1.10.12/ant-1.10.12.jar", dest, wait=waits.append)
