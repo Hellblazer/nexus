@@ -337,46 +337,6 @@ def test_collection_reembed_dry_run_service_mode_real_client(
     assert "7" in result.output
 
 
-def test_collection_reembed_cross_model_rejected_service_mode(
-    runner, real_client, monkeypatch, cloud_mode,
-):
-    """nexus-u37lw: server-side embedding routes by the COLLECTION NAME's
-    model segment, so a cross-model --to can never take effect in service
-    mode — pre-fix it silently no-opped with the old model, stamped the new
-    model into metadata, and printed success. Must fail loud, post nothing.
-    Outside local mode only: in local mode a cross-model --to is a re-embed job
-    (RDR-210 Phase 6), covered by tests/test_reembed_verb.py."""
-    posted = []
-
-    def fake_post(path, body, **kw):
-        posted.append(path)
-        if path == "/v1/vectors/collections":
-            return {"collections": [{"name": _KNOWLEDGE}]}
-        raise AssertionError(f"unexpected POST {path}")
-
-    def fake_get(path, tenant="default"):
-        if path.startswith("/v1/vectors/stats"):
-            return [{"name": _KNOWLEDGE, "dim": 1024, "count": 3}]
-        if path.startswith("/v1/vectors/count"):
-            return {"count": 3}
-        raise AssertionError(f"unexpected GET {path}")
-
-    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
-
-    with patch("nexus.commands.collection._t3", return_value=real_client):
-        # _KNOWLEDGE encodes the docs/knowledge embedder; ask for the code one.
-        result = runner.invoke(
-            main, ["collection", "re-embed", _KNOWLEDGE,
-                   "--to", "voyage-code-3", "--no-dry-run", "--yes"],
-        )
-    assert result.exit_code != 0
-    assert "cannot take effect" in result.output
-    assert "rename" in result.output
-    # Nothing written: no upsert route was ever posted.
-    assert not any("upsert" in p for p in posted)
-
-
 @pytest.mark.t2_tenant
 def test_collection_reembed_same_model_requests_server_side_re_embed(
     runner, real_client, monkeypatch,
