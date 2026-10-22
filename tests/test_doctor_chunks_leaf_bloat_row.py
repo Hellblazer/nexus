@@ -398,6 +398,14 @@ def test_any_other_failure_is_one_line_with_the_error_type_only(store, error) ->
     assert str(error) not in r.detail, "the message may carry an endpoint or credential; only the type is printed"
 
 
+def test_a_leaf_whose_pci_sizes_could_not_be_read_prints_unknown_bytes_never_zero(store) -> None:
+    # The engine answers pci_index_bytes null when a lock on a pci_ index cost the size read (nexus-i827c).
+    store.outcome = {"leaves": [_leaf("chunks_m0a90d9bc_t_aaaa", ["pinned"], pci_index_bytes=None)]}
+    r = _verbose_row(_golden("overdue_pinned"))
+    assert "? in 1 pci_ index(es)" in r.detail
+    assert "0 B in 1 pci_ index(es)" not in r.detail
+
+
 def test_an_empty_listing_says_the_engine_names_no_leaf(store) -> None:
     store.outcome = {"leaves_total": 3, "needing_attention": 0, "leaves": []}
     r = _verbose_row(_golden("overdue_pinned"))

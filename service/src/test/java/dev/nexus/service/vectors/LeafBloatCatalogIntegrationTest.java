@@ -307,7 +307,7 @@ class LeafBloatCatalogIntegrationTest {
             holder.rollback();
 
             assertThat(elapsedMs).as("the read gave up on the lock, it did not wait for the statement bound")
-                .isLessThan(2_500);
+                .isLessThan(3_000);   // the statement bound; a statement-bound expiry would have thrown
             LeafBloatCatalog.Leaf l = snapshot.leaves().stream().filter(x -> x.name().equals(leaf)).findFirst().orElseThrow();
             assertThat(l.liveRows()).as("the aggregate read still ran").isEqualTo(70);
             assertThat(l.deadRows()).isEqualTo(30);

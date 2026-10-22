@@ -342,6 +342,9 @@ public final class LeafBloatCatalog {
                             sizes.put(row.value1(), row.value2());
                         }
                     }
+                    // Roll back to the savepoint even on success: the sizes are already read, and only a
+                    // rollback reverts the SET LOCAL lock_timeout (a release keeps it until the transaction ends).
+                    conn.rollback(savepoint);
                     conn.releaseSavepoint(savepoint);
                 } catch (RuntimeException e) {
                     conn.rollback(savepoint);
