@@ -2829,7 +2829,7 @@ class StorageServiceSupervisor:
             _log.info("storage_service_starting_pg", port=self._pg_port)
             from nexus.db.pg_provision import StartInterruptedError  # noqa: PLC0415 — deferred import — bound before the try so the except clause below can always name it
             try:
-                from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                from nexus.db.pg_provision import apply_managed_conf_before_start, discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
                 pg_data_str = self._creds.get("PG_DATA", "")
                 if not pg_data_str:
@@ -2839,6 +2839,12 @@ class StorageServiceSupervisor:
                     )
                 pgdata = Path(pg_data_str)
                 bins = discover_pg_binaries()
+                # The managed postgresql.conf block is rewritten before every cold
+                # start, as provision does, so a setting added to it reaches an
+                # existing install at its next PostgreSQL start (nexus-o26hs:
+                # max_locks_per_transaction for the RDR-225 walk). Best effort: a
+                # conf it cannot write is logged and the start goes on.
+                apply_managed_conf_before_start(pgdata, self._pg_port)
                 # Windows only: let a stop request end the start's wait
                 # (nexus-f9bgu.17). POSIX keeps its single blocking call.
                 stop = self._stop_requested

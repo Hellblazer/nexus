@@ -4106,6 +4106,36 @@ class TestSupervisorSelfManagesPgAtBoot:
         assert pgdata == config_dir / "postgres", "starts nx's own PG_DATA"
         assert port == 15439, "starts nx's own provisioned port"
 
+    @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX mode bits; root ignores them")
+    def test_an_unwritable_conf_does_not_stop_the_cold_start(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-o26hs: the managed block is rewritten before a cold start, best
+        effort. A postgresql.conf that cannot be written is logged and the
+        cluster is still started, as it was before the rewrite existed."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        import nexus.db.pg_provision as pgp
+
+        pgdata = config_dir / "postgres"
+        pgdata.mkdir(parents=True)
+        conf = pgdata / "postgresql.conf"
+        conf.write_text("shared_buffers = 128MB\n", encoding="utf-8")
+        conf.chmod(0o400)
+        sup = _make_supervisor(config_dir, clock, pg_port=15439)
+        sup._creds["PG_DATA"] = str(pgdata)
+        started: list[Path] = []
+        monkeypatch.setattr(pgp, "discover_pg_binaries", lambda: "FAKE_BINS")
+        monkeypatch.setattr(pgp, "_start_cluster", lambda bins, d, port: started.append(Path(d)))
+        accepting = iter([False, True])
+        monkeypatch.setattr(ssd_mod, "_port_accepting", lambda host, port, **kw: next(accepting))
+        monkeypatch.setattr(sup, "_backfill_provision_grants", lambda: None)
+        try:
+            sup._ensure_pg_running()
+        finally:
+            conf.chmod(0o600)
+        assert started == [pgdata], "the cluster was started despite the unwritable conf"
+        assert conf.read_text(encoding="utf-8") == "shared_buffers = 128MB\n"
+
 
 # ---------------------------------------------------------------------------
 # RDR-175 Minimum Viable Validation: single supervisor, no double-spawn
